@@ -41,9 +41,9 @@ library(
 )
 if (device != null) {
   preferences {
-    input "logEnable", "bool", title: "Enable Logging", required: false, defaultValue: true
-    input "debugLogEnable", "bool", title: "Enable debug logging", required: false, defaultValue: true
-    input "descriptionTextEnable", "bool", title: "Enable descriptionText logging", required: false, defaultValue: false
+    input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
+    input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: false
   }
 }
 
@@ -156,14 +156,14 @@ String prettyJson(Map jsonInput) {
 }
 
 String nowFormatted() {
-  if(location.timeZone) return new Date().format("yyyy-MMM-dd h:mm:ss a", location.timeZone)
-  else                  return new Date().format("yyyy MMM dd EEE h:mm:ss a")
+  if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
+  else                  return new Date().format('yyyy MMM dd EEE h:mm:ss a')
 }
 
 @CompileStatic
 String runEveryCustomMinutes(Integer minutes) {
-  String currentSecond = new Date().format("ss")
-  String currentMinute = new Date().format("mm")
+  String currentSecond = new Date().format('ss')
+  String currentMinute = new Date().format('mm')
   return "${currentSecond} ${currentMinute}/${minutes} * * * ?"
 }
 
