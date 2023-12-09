@@ -73,9 +73,9 @@ String getCloudUri() {
   return "${getApiServerUrl()}/${hubUID}/apps/${app.id}/latest?access_token=${state.accessToken}"
 }
 
-void uninstalled() { logInfo("${app.name} uninstalled") }
-void updated() { initialize() }
-void initialize() {
+void initialize() { configure() }
+
+void configure() {
   if (state.accessToken == null) { createAccessToken() }
   latestUrl()
 }
