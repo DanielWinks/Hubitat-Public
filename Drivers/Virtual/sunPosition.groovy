@@ -55,16 +55,18 @@ metadata {
   }
 }
 
+void initialize() { configure() }
+
 void configure() {
   unschedule()
   refresh()
-  if(autoUpdate) {
+  if(settings.autoUpdate) {
     schedule(runEveryCustomMinutes(updateInterval as Integer), 'refresh')
   }
 }
 
 void refresh() {
-  Map position = getPosition(settings.latitude, settings.longitude)
+  Map position = getPosition(new BigDecimal(settings.latitude), new BigDecimal(settings.longitude))
   sendEvent(name: 'altitude', value: position.altitude.setScale(1, BigDecimal.ROUND_HALF_UP))
   sendEvent(name: 'azimuth', value: position.azimuth.setScale(1, BigDecimal.ROUND_HALF_UP))
   sendEvent(name: 'lastCalculated', value: nowFormatted())
