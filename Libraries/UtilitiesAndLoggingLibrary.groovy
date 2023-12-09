@@ -21,16 +21,16 @@
  *  SOFTWARE.
  */
 
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.app.exception.UnknownDeviceTypeException
+import com.hubitat.app.InstalledAppWrapper
+import com.hubitat.app.ParentDeviceWrapper
+import com.hubitat.hub.domain.Event
 import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
 import groovy.transform.Field
 import hubitat.scheduling.AsyncResponse
-import com.hubitat.app.DeviceWrapper
-import com.hubitat.app.ChildDeviceWrapper
-import com.hubitat.app.ParentDeviceWrapper
-import com.hubitat.app.InstalledAppWrapper
-import com.hubitat.hub.domain.Event
-import com.hubitat.app.exception.UnknownDeviceTypeException
 
 library(
   name: 'UtilitiesAndLogging',
@@ -64,20 +64,17 @@ void installed() {
   try {
     initialize()
   } catch(e) {
-    logWarn('No initialize() method defined...')
+    logWarn("No initialize() method defined or initialize() resulted in error: ${e}")
   }
 
-  if (settings.logEnable) {
-    runIn(1800, 'logsOff')
-  }
-  if (settings.debugLogEnable) {
-    runIn(1800, 'debugLogsOff')
-  }
+  if (settings.logEnable) { runIn(1800, 'logsOff') }
+  if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
 }
 
 void uninstalled() {
   logDebug('Uninstalled...')
   unschedule()
+  deleteChildDevices()
 }
 
 void updated() {
@@ -85,7 +82,7 @@ void updated() {
   try {
     configure()
   } catch(e) {
-    logWarn('No configure() method defined...')
+    logWarn("No configure() method defined or configure() resulted in error: ${e}")
   }
 }
 
