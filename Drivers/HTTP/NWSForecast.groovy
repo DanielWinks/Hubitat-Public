@@ -94,11 +94,11 @@ metadata {
   }
 }
 
-void updated(){ initialize() }
+void initialize() {
+  configure()
+}
 
-void uninstalled() { unschedule() }
-
-void initialize(){
+void configure() {
   unschedule()
   clearStates()
   getUri()
