@@ -59,13 +59,33 @@ void deleteChildDevices() {
   }
 }
 
-void installed(){
-  initialize()
+void installed() {
+  logDebug('Installed...')
+  try {
+    initialize()
+  } catch(e) {
+    logWarn('No initialize() method defined...')
+  }
+
   if (settings.logEnable) {
     runIn(1800, 'logsOff')
   }
   if (settings.debugLogEnable) {
     runIn(1800, 'debugLogsOff')
+  }
+}
+
+void uninstalled() {
+  logDebug('Uninstalled...')
+  unschedule()
+}
+
+void updated() {
+  logDebug('Updated...')
+  try {
+    configure()
+  } catch(e) {
+    logWarn('No configure() method defined...')
   }
 }
 
