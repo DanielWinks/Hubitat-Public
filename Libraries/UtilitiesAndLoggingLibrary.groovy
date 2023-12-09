@@ -71,43 +71,43 @@ void installed(){
 
 void logException(message) {
   if (settings.logEnable) {
-    if(device) log.exception "${device.label ?: device.name }: $message"
-    if(app) log.exception "${app.label ?: app.name }: $message"
+    if(device) log.exception "${device.label ?: device.name }: ${message}"
+    if(app) log.exception "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logError(message) {
   if (settings.logEnable) {
-    if(device) log.error "${device.label ?: device.name }: $message"
-    if(app) log.error "${app.label ?: app.name }: $message"
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logWarn(message) {
   if (settings.logEnable) {
-    if(device) log.warn "${device.label ?: device.name }: $message"
-    if(app) log.warn "${app.label ?: app.name }: $message"
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logInfo(message) {
   if (settings.logEnable) {
-    if(device) log.info "${device.label ?: device.name }: $message"
-    if(app) log.info "${app.label ?: app.name }: $message"
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logDebug(message) {
   if (settings.logEnable && settings.debugLogEnable) {
-    if(device) log.debug "${device.label ?: device.name }: $message"
-    if(app) log.debug "${app.label ?: app.name }: $message"
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logTrace(message) {
   if (settings.logEnable && settings.debugLogEnable) {
-    if(device) log.trace "${device.label ?: device.name }: $message"
-    if(app) log.trace "${app.label ?: app.name }: $message"
+    if(device) log.trace "${device.label ?: device.name }: ${message}"
+    if(app) log.trace "${app.label ?: app.name }: ${message}"
   }
 }
 
