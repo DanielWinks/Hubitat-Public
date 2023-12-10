@@ -21,19 +21,15 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
+library(
+  name: 'ChildDeviceLibrary',
+  namespace: 'dwinks',
+  author: 'Daniel Winks',
+  description: 'Child Device Library',
+  importUrl: ''
+)
 
-metadata {
-  definition(name: 'Generic Component Smart Garage Door Control', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
-    capability 'GarageDoorControl' //door - ENUM ['unknown', 'open', 'closing', 'closed', 'opening']
-    capability 'ContactSensor' //contact - ENUM ['closed', 'open']
-    command 'clearState'
-  }
-}
-
-void updated() { logInfo('Updated...') }
-void initialize() { logInfo('Installed...') }
-void open() { parent?.componentOpen(this.device) }
-void close() { parent?.componentClose(this.device) }
-void setState(String stateName, String stateValue) { state[stateName] = stateValue }
-void clearState() { state.clear() }
+void initialize() {}
+void configure() {}
+void childParse(List<Map> events) { events.each {Map event -> sendEvent(event) }}
+void childParse(Map event) { sendEvent(event) }

@@ -21,7 +21,7 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLogging
+#include dwinks.UtilitiesAndLoggingLibrary
 
 @Field static final String baseUrl = 'https://api.weather.gov'
 

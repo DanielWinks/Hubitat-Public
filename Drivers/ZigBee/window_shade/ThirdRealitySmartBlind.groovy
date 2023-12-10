@@ -23,7 +23,7 @@
 
 import hubitat.zigbee.zcl.DataType
 
-#include dwinks.UtilitiesAndLogging
+#include dwinks.UtilitiesAndLoggingLibraryLibrary
 
 metadata {
   definition(name: 'ThirdReality Smart Blind', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '') {
