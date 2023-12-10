@@ -21,7 +21,7 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLogging
+#include dwinks.UtilitiesAndLoggingLibrary
 
 import hubitat.helper.NetworkUtils
 import hubitat.helper.NetworkUtils.PingData

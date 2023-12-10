@@ -1,4 +1,4 @@
-#include dwinks.UtilitiesAndLogging
+#include dwinks.UtilitiesAndLoggingLibrary
 #include dwinks.ChildDeviceLibrary
 
 metadata {

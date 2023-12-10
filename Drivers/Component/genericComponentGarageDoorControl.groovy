@@ -21,7 +21,7 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLogging
+#include dwinks.UtilitiesAndLoggingLibrary
 
 metadata {
   definition(name: 'Generic Component Smart Garage Door Control', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
