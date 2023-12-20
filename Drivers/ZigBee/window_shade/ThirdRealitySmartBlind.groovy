@@ -23,7 +23,7 @@
 
 import hubitat.zigbee.zcl.DataType
 
-#include dwinks.UtilitiesAndLoggingLibraryLibrary
+#include dwinks.UtilitiesAndLoggingLibrary
 
 metadata {
   definition(name: 'ThirdReality Smart Blind', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '') {
@@ -42,8 +42,6 @@ preferences {
   section {
     input name: 'updateInterval', title: 'Refresh update interval', type: 'enum', required: true, defaultValue: 6,
       options: [1:'1 hour', 2:'2 hours', 3:'3 hours', 6:'6 hours', 8:'8 hours', 12:'12 hours']
-    // input 'updateInterval', 'enum', title: 'Refresh Update Interval', required: true, defaultValue: '3Hours', options: ['15Minutes', '30Minutes', '1Hour', '3Hours']
-
   }
 }
 
