@@ -33,7 +33,7 @@ import groovy.transform.Field
 import hubitat.scheduling.AsyncResponse
 
 library(
-  name: 'UtilitiesAndLoggingLibraryLibrary',
+  name: 'UtilitiesAndLoggingLibrary',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Utility and Logging Library',
