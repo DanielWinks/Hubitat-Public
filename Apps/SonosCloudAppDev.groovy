@@ -124,9 +124,9 @@ Map authorizePage() {
 
   dynamicPage(title: 'Sonos Developer Authorization', nextPage: 'mainPage') {
     section {
-      paragraph ('You will need to create an account on the <a href=\'https://developer.sonos.com/\' target=\'_blank\'>Sonos Developer site</a>, ' +
-          'and then create a new <i>Control Integration</i>. Provide a display name, description and key name ' +
-          'and set the redirect URI to <u>https://cloud.hubitat.com/oauth/stateredirect</u> then save the integration. ' +
+      paragraph ('You need an account on the <a href=\'https://developer.sonos.com/\' target=\'_blank\'>Sonos Developer site</a>, ' +
+          'create a new <b>Control Integration</b>. Provide an Integration name, description and key name ' +
+          'and set the redirect URI to <u>https://cloud.hubitat.com/oauth/stateredirect</u> and save the Integration. ' +
           'Enter the provided Key and Secret values below then select the account authorization button.')
 
       input (name: 'clientKey', type: 'text', title: 'Client Key', description: '', required: true, defaultValue: '', submitOnChange: true)
