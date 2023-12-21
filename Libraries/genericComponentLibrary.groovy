@@ -56,8 +56,8 @@ void parse(String message) {
   }
 }
 
-
 void parse(Map message) {
+  logDebug(message)
   if (message.name == 'energyDuration') {
     logDebug('energyDuration')
     if (!state.energyTime) { state.energyTime = now() }
@@ -71,6 +71,8 @@ void parse(Map message) {
       state.energyDuration = enDurHours + ' Hours'
     }
     sendEvent(name:'energyDuration', value:enDurDays, unit: 'days')
+    sendEvent(name:message.name, value:message.value)
+  } else {
     sendEvent(name:message.name, value:message.value)
   }
 }
