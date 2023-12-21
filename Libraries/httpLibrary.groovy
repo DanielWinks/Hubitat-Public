@@ -32,14 +32,17 @@ library(
 @Field static final String UPTIME_STATE = '/sensor/uptime'
 @Field static final String RESTART_ESP = '/button/restart/press'
 @Field static final String WEBHOOK_URL_STATE = '/text/webhook_url'
+@Field static final String POSTHOOK_URL_STATE = '/text/posthook_url'
 @Field static final String DNI_STATE = '/text/device_dni'
 
 
 String updateWebhookUrlCommandTopic(String value) { return "${WEBHOOK_URL_STATE}/set?value=${value}" }
+String updatePosthookUrlCommandTopic(String value) { return "${POSTHOOK_URL_STATE}/set?value=${value}" }
 String updateDeviceDNICommandTopic(String value) { return "${DNI_STATE}/set?value=${value}" }
 
 void sendCallbackParams() {
   sendCommandAsync(updateWebhookUrlCommandTopic(device.getDataValue('hub_webhook_url')), null, null)
+  sendCommandAsync(updatePosthookUrlCommandTopic(device.getDataValue('hub_posthook_url')), null, null)
   sendCommandAsync(updateDeviceDNICommandTopic(device.getDeviceNetworkId()), null, null)
 }
 
