@@ -32,7 +32,8 @@ metadata {
   }
 }
 
-
+void initialize() {}
+void configure() {}
 void groupPlayers() { parent?.componentGroupPlayers(this.device) }
 void joinPlayersToCoordinator() { parent?.componentJoinPlayersToCoordinator(this.device) }
 void removePlayersFromCoordinator() { parent?.componentRemovePlayersFromCoordinator(this.device) }
