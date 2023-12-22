@@ -38,5 +38,9 @@ jobs:
           filename: 'SonosCloudController.zip'
           directory: 'Bundles/SonosCloudController'
 
+      - name: Move Bundle to parent directory
+        run: |
+          mv Bundles/SonosCloudController/SonosCloudController.zip Bundles/SonosCloudController.zip
+
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
