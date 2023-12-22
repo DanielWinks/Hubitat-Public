@@ -6,15 +6,13 @@ metadata {
   capability 'AudioNotification'
   capability 'MusicPlayer'
   capability 'SpeechSynthesis'
-  capability 'PushableButton'
   capability 'Refresh'
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'Off', 'Repeat One', 'Repeat All' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['On', 'Off']]]
   command 'setShuffle', [[ name: 'Shuffle Mode', type: 'ENUM', constraints: ['On', 'Off']]]
   command 'ungroupPlayer'
-  command 'subscribe'
-  command 'clearStates'
+
   command 'getFavorites'
   command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
 
@@ -50,9 +48,9 @@ void setRepeatMode(String mode) {
       logDebug modes
       break
   }
-  logDebug("Device: ${device}")
+  logDebug("Device: ${this.device}")
   Map playModes = ['playModes': modes ]
-  parent?.setPlayModes(device, playModes)
+  parent?.setPlayModes(this.device, playModes)
 }
 
 void repeatOne() { setRepeatMode('Repeat One') }
@@ -73,9 +71,9 @@ void setCrossfade(String mode) {
       logDebug modes
       break
   }
-  logDebug("Device: ${device}")
+  logDebug("Device: ${this.device}")
   Map playModes = ['playModes': modes ]
-  parent?.setPlayModes(device, playModes)
+  parent?.setPlayModes(this.device, playModes)
 }
 
 void enableCrossfade() { setCrossfade('On') }
@@ -95,12 +93,12 @@ void setShuffle(String mode) {
       logDebug modes
       break
   }
-  logDebug("Device: ${device}")
+  logDebug("Device: ${this.device}")
   Map playModes = ['playModes': modes ]
-  parent?.setPlayModes(device, playModes)
+  parent?.setPlayModes(this.device, playModes)
 }
 
-void ungroupPlayer() { parent?.ungroupPlayer(device) }
+void ungroupPlayer() { parent?.componentUngroupPlayer(this.device) }
 
 void playText(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
@@ -112,27 +110,27 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { devicePlayTrack
 void playTrackAndResume(String uri, BigDecimal volume = null) { devicePlayTrack(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  parent?.componentPlayText(device, text, volume, voice)
+  parent?.componentPlayText(this.device, text, volume, voice)
 }
 
 void devicePlayTrack(String uri, BigDecimal volume = null) {
-  parent?.componentPlayTrack(device, uri, volume)
+  parent?.componentPlayTrack(this.device, uri, volume)
 }
 
-void mute(){ parent?.componentMutePlayer(device, true) }
-void unmute(){ parent?.componentMutePlayer(device, false) }
-void setLevel(BigDecimal level) { parent?.componentSetLevel(device, level) }
-void play() { parent?.componentPlay(device) }
-void stop() { parent?.componentStop(device) }
-void pause() { parent?.componentStop(device) }
-void nextTrack() { parent?.componentNextTrack(device) }
-void previousTrack() { parent?.componentPreviousTrack(device) }
-void refresh() { parent?.componentRefresh(device) }
+void mute(){ parent?.componentMutePlayer(this.device, true) }
+void unmute(){ parent?.componentMutePlayer(this.device, false) }
+void setLevel(BigDecimal level) { parent?.componentSetLevel(this.device, level) }
+void play() { parent?.componentPlay(this.device) }
+void stop() { parent?.componentStop(this.device) }
+void pause() { parent?.componentStop(this.device) }
+void nextTrack() { parent?.componentNextTrack(this.device) }
+void previousTrack() { parent?.componentPreviousTrack(this.device) }
+void refresh() { parent?.componentRefresh(this.device) }
 
 void getFavorites() {
-  Map favorites = parent?.getFavorites(device)
+  Map favorites = parent?.getFavorites(this.device)
 }
 
 void loadFavorite(String favoriteId) {
-  parent?.loadFavorite(device, favoriteId)
+  parent?.loadFavorite(this.device, favoriteId)
 }
