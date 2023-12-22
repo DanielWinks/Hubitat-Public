@@ -54,26 +54,13 @@ metadata {
 
 void setRepeatMode(String mode) {
   logDebug("Setting repeat mode to ${mode}")
-  Map modes = [
+  Map playModes = [
     'repeat': false,
     'repeatOne': false
   ]
-  switch (mode) {
-    case 'Off':
-      logDebug modes
-      break
-    case 'Repeat One':
-      modes.repeatOne = true
-      logDebug modes
-      break
-    case 'Repeat All':
-      modes.repeat = true
-      logDebug modes
-      break
-  }
-  logDebug("Device: ${this.device}")
-  Map playModes = ['playModes': modes ]
-  parent?.componentSetPlayModes(this.device, playModes)
+  if(mode = 'Repeat One') { playModes.repeatOne = true }
+  if(mode = 'Repeat All') { playModes.repeat = true }
+  parent?.componentSetPlayModes(this.device, ['playModes': playModes ])
 }
 
 void repeatOne() { setRepeatMode('Repeat One') }
@@ -82,21 +69,8 @@ void repeatNone() { setRepeatMode('Off') }
 
 void setCrossfade(String mode) {
   logDebug("Setting crossfade mode to ${mode}")
-  Map modes = [
-    'crossfade': false
-  ]
-  switch (mode) {
-    case 'Off':
-      logDebug modes
-      break
-    case 'On':
-      modes.crossfade = true
-      logDebug modes
-      break
-  }
-  logDebug("Device: ${this.device}")
-  Map playModes = ['playModes': modes ]
-  parent?.componentSetPlayModes(this.device, playModes)
+  Map playModes = mode == 'On' ? [ 'crossfade': true ] : [ 'crossfade': false ]
+  parent?.componentSetPlayModes(this.device, ['playModes': playModes ])
 }
 
 void enableCrossfade() { setCrossfade('On') }
