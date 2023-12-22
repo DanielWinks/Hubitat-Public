@@ -152,6 +152,7 @@ Map oauthCallback() {
 }
 
 Map oauthSuccess() {
+  refreshPlayersAndGroups()
   return render (
     contentType: 'text/html',
     data: """
@@ -410,6 +411,7 @@ void configure() {
 // =============================================================================
 
 void createGroupDevices() {
+  if(!state.userGroups) {return}
   logDebug('Creating group devices...')
   state.userGroups.each{ it ->
     String dni = "${app.id}-SonosGroupDevice-${it.key}"
@@ -433,6 +435,7 @@ void createGroupDevices() {
 }
 
 void createPlayerDevices() {
+  if(!state.players) {return}
   List<Map> devicesToCreate = state.players.values().findAll { it -> it.id in playerDevices } ?: []
   logDebug(devicesToCreate)
   for (Map player in devicesToCreate) {
