@@ -1,6 +1,5 @@
 dwinks
 Sonos Cloud Controller
-library dwinks.ChildDeviceLibrary.groovy
 library dwinks.UtilitiesAndLoggingLibrary.groovy
 driver dwinks.SonosCloudGroup.groovy
 driver dwinks.SonosCloudPlayer.groovy
