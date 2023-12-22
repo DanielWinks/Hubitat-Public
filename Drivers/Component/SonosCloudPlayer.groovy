@@ -51,7 +51,8 @@ metadata {
   attribute 'Fav', 'string'
   }
 }
-
+void initialize() {}
+void configure() {}
 void setRepeatMode(String mode) {
   logDebug("Setting repeat mode to ${mode}")
   Map playModes = [
