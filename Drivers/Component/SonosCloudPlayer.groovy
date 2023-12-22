@@ -2,7 +2,7 @@
 #include dwinks.ChildDeviceLibrary
 
 metadata {
-  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks') {
+  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks', importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudPlayer.groovy') {
   capability 'AudioNotification'
   capability 'MusicPlayer'
   capability 'SpeechSynthesis'
