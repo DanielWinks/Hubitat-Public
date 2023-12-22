@@ -37,7 +37,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Utility and Logging Library',
-  importUrl: ''
+  importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/UtilitiesAndLoggingLibrary.groovy'
 )
 if (device != null) {
   preferences {
