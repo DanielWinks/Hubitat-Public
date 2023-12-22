@@ -22,7 +22,6 @@
  */
 
 #include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.ChildDeviceLibrary
 
 metadata {
   definition(name: 'Sonos Cloud Group', namespace: 'dwinks', author: 'Daniel Winks', component: true, importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudGroup.groovy') {
