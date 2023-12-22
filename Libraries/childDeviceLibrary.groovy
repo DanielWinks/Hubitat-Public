@@ -26,7 +26,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Child Device Library',
-  importUrl: ''
+  importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/childDeviceLibrary.groovy'
 )
 
 void initialize() {}
