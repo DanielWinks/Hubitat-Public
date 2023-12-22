@@ -6,7 +6,6 @@ metadata {
   capability 'AudioNotification'
   capability 'MusicPlayer'
   capability 'SpeechSynthesis'
-  capability 'Refresh'
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'Off', 'Repeat One', 'Repeat All' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['On', 'Off']]]
@@ -50,7 +49,7 @@ void setRepeatMode(String mode) {
   }
   logDebug("Device: ${this.device}")
   Map playModes = ['playModes': modes ]
-  parent?.setPlayModes(this.device, playModes)
+  parent?.componentSetPlayModes(this.device, playModes)
 }
 
 void repeatOne() { setRepeatMode('Repeat One') }
@@ -73,7 +72,7 @@ void setCrossfade(String mode) {
   }
   logDebug("Device: ${this.device}")
   Map playModes = ['playModes': modes ]
-  parent?.setPlayModes(this.device, playModes)
+  parent?.componentSetPlayModes(this.device, playModes)
 }
 
 void enableCrossfade() { setCrossfade('On') }
@@ -95,7 +94,7 @@ void setShuffle(String mode) {
   }
   logDebug("Device: ${this.device}")
   Map playModes = ['playModes': modes ]
-  parent?.setPlayModes(this.device, playModes)
+  parent?.componentSetPlayModes(this.device, playModes)
 }
 
 void ungroupPlayer() { parent?.componentUngroupPlayer(this.device) }
@@ -128,9 +127,9 @@ void previousTrack() { parent?.componentPreviousTrack(this.device) }
 void refresh() { parent?.componentRefresh(this.device) }
 
 void getFavorites() {
-  Map favorites = parent?.getFavorites(this.device)
+  Map favorites = parent?.componentGetFavorites(this.device)
 }
 
 void loadFavorite(String favoriteId) {
-  parent?.loadFavorite(this.device, favoriteId)
+  parent?.componentLoadFavorite(this.device, favoriteId)
 }
