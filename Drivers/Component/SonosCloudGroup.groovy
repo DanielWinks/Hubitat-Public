@@ -26,17 +26,12 @@
 
 metadata {
   definition(name: 'Sonos Cloud Group', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
-    // capability 'Switch'
-    // command 'clearState'
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
     command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
   }
 }
-
-void on() { groupPlayers() }
-void off() { ungroupPlayers() }
 
 void groupPlayers() { parent?.componentGroupPlayers(this.device) }
 void joinPlayersToCoordinator() { parent?.componentJoinPlayersToCoordinator(this.device) }
