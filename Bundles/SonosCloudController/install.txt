@@ -1,0 +1,7 @@
+dwinks
+Sonos Cloud Controller
+library dwinks.ChildDeviceLibrary.groovy
+library dwinks.UtilitiesAndLoggingLibrary.groovy
+driver dwinks.SonosCloudGroup.groovy
+driver dwinks.SonosCloudPlayer.groovy
+app dwinks.SonosCloudController.groovy 4ea1898b-0004-4f9b-9863-5c63f5268a89 41c47050-13c4-4b70-9172-758069485c2e
