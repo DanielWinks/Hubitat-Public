@@ -615,6 +615,20 @@ void componentStop(DeviceWrapper device) {
   postJsonAsync("${apiPrefix}/groups/${groupId}/playback/pause")
 }
 
+void componentPreviousTrack(DeviceWrapper device) {
+  logDebug('componentPreviousTrack()')
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/skipToPreviousTrack")
+}
+
+void componentNextTrack(DeviceWrapper device) {
+  logDebug('componentNextTrack()')
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/skipToNextTrack")
+}
+
 void componentGetFavorites(DeviceWrapper device) {
   logDebug 'Getting favorites...'
   String householdId = device.getDataValue('householdId')
