@@ -404,8 +404,10 @@ void configure() {
   schedule('0 0 0,6,12,18 * * ?', 'refreshToken')
   try { refreshPlayersAndGroups() }
   catch (Exception e) { logError("refreshPlayersAndGroups() Failed: ${e}")}
-  createPlayerDevices()
-  createGroupDevices()
+  try { createPlayerDevices() }
+  catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
+  try { createGroupDevices() }
+  catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
 }
 
 // =============================================================================
