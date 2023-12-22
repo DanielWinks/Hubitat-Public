@@ -58,8 +58,8 @@ void setRepeatMode(String mode) {
     'repeat': false,
     'repeatOne': false
   ]
-  if(mode = 'Repeat One') { playModes.repeatOne = true }
-  if(mode = 'Repeat All') { playModes.repeat = true }
+  if(mode == 'Repeat One') { playModes.repeatOne = true }
+  if(mode == 'Repeat All') { playModes.repeat = true }
   parent?.componentSetPlayModes(this.device, ['playModes': playModes ])
 }
 void repeatOne() { setRepeatMode('Repeat One') }
