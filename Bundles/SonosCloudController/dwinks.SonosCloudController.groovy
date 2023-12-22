@@ -226,7 +226,7 @@ void parseAuthorizationToken(Map data) {
 Map mainPage() {
   boolean configured = settings.clientKey != null && settings.clientSecret != null
   boolean authenticated = state.authToken != null
-
+  refreshPlayersAndGroups()
   dynamicPage(title: 'Sonos Cloud Controller') {
     tryCreateAccessToken()
     if(!state.accessToken) {
@@ -544,7 +544,10 @@ void getPlayersAndGroupsAsync(String householdId, Map data = null) {
 void getPlayersAndGroupsCallback(AsyncResponse response, Map data = null) {
   logDebug("getPlayersAndGroupsCallback Data: ${data}")
   if(response.hasError()) {
-    logError("getPlayers error: ${response.getErrorData()}")
+    Map errorData = response.getErrorData()
+    if(errorData?.fault?.faultstring != "Invalid Access Token") {
+      logError("getPlayers error: ${response.getErrorData()}")
+    }
     return
   }
 
