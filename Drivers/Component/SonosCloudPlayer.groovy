@@ -62,7 +62,6 @@ void setRepeatMode(String mode) {
   if(mode = 'Repeat All') { playModes.repeat = true }
   parent?.componentSetPlayModes(this.device, ['playModes': playModes ])
 }
-
 void repeatOne() { setRepeatMode('Repeat One') }
 void repeatAll() { setRepeatMode('Repeat All') }
 void repeatNone() { setRepeatMode('Off') }
@@ -72,29 +71,14 @@ void setCrossfade(String mode) {
   Map playModes = mode == 'On' ? [ 'crossfade': true ] : [ 'crossfade': false ]
   parent?.componentSetPlayModes(this.device, ['playModes': playModes ])
 }
-
 void enableCrossfade() { setCrossfade('On') }
 void disableCrossfade() { setCrossfade('Off') }
 
 void setShuffle(String mode) {
   logDebug("Setting shuffle mode to ${mode}")
-  Map modes = [
-    'shuffle': false
-  ]
-  switch (mode) {
-    case 'Off':
-      logDebug modes
-      break
-    case 'On':
-      modes.shuffle = true
-      logDebug modes
-      break
-  }
-  logDebug("Device: ${this.device}")
-  Map playModes = ['playModes': modes ]
-  parent?.componentSetPlayModes(this.device, playModes)
+  Map playModes = mode = 'On' ? [ 'shuffle': true ] : [ 'shuffle': false ]
+  parent?.componentSetPlayModes(this.device, ['playModes': playModes ])
 }
-
 void shuffleOn() { setShuffle('On') }
 void shuffleOff() { setShuffle('Off') }
 
