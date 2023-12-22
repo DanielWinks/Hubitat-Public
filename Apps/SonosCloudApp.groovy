@@ -399,9 +399,11 @@ void initialize() {
 
 void configure() {
   logInfo("${app.name} updated")
-  refreshToken()
+  try { refreshToken()}
+  catch (Exception e) { logError("Could not refresh token: ${e}") }
   schedule('0 0 0,6,12,18 * * ?', 'refreshToken')
-  refreshPlayersAndGroups()
+  try { refreshPlayersAndGroups() }
+  catch (Exception e) { logError("refreshPlayersAndGroups() Failed: ${e}")}
   createPlayerDevices()
   createGroupDevices()
 }
