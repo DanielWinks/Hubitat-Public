@@ -25,13 +25,14 @@
 #include dwinks.ChildDeviceLibrary
 
 metadata {
-  definition(name: 'Sonos Cloud Group', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
+  definition(name: 'Sonos Cloud Group', namespace: 'dwinks', author: 'Daniel Winks', component: true, importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudGroup.groovy') {
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
     command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
   }
 }
+
 
 void groupPlayers() { parent?.componentGroupPlayers(this.device) }
 void joinPlayersToCoordinator() { parent?.componentJoinPlayersToCoordinator(this.device) }
