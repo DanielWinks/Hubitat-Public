@@ -10,6 +10,8 @@ metadata {
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'Off', 'Repeat One', 'Repeat All' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['On', 'Off']]]
   command 'setShuffle', [[ name: 'Shuffle Mode', type: 'ENUM', constraints: ['On', 'Off']]]
+  command 'shuffleOn'
+  command 'shuffleOff'
   command 'ungroupPlayer'
 
   command 'getFavorites'
@@ -96,6 +98,9 @@ void setShuffle(String mode) {
   Map playModes = ['playModes': modes ]
   parent?.componentSetPlayModes(this.device, playModes)
 }
+
+void shuffleOn() { setShuffle('On') }
+void shuffleOff() { setShuffle('Off') }
 
 void ungroupPlayer() { parent?.componentUngroupPlayer(this.device) }
 
