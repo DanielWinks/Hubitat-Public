@@ -268,16 +268,17 @@ Map mainPage() {
 // Player and Group Pages
 // =============================================================================
 
+@Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
 Map playerPage() {
   app.removeSetting('playerDevices')
   refreshPlayersAndGroups()
-  Map playerSelectionOptions = state.players.collectEntries {id, player ->  [(id): player.name]  }
   logDebug(getObjectClassName(getCurrentPlayerDevices()))
   app.updateSetting('playerDevices', [type: 'enum', value: getCurrentPlayerDevices()])
   dynamicPage(name: 'playerPage', title: 'Sonos Player Virtual Devices', nextPage: 'mainPage') {
     section {
       paragraph ('Select Sonos players that you want to create Hubitat devices for control.<br>To remove a player later simply remove the created device.')
-      paragraph ("Select virtual players to create (${state.players.size()} players found)")
+      paragraph ('If no players are listed, or players are missing, wait a few seconds and refresh the page.')
+      paragraph ("Select virtual players to create (${playerSelectionOptions.size()} players found)")
       input (name: 'playerDevices', title: '', type: 'enum', options: playerSelectionOptions, multiple: true)
       }
   }
@@ -550,15 +551,14 @@ void getPlayersAndGroupsCallback(AsyncResponse response, Map data = null) {
   Map<String, List<Map>> result = response.getJson()
   logDebug("getPlayers result: ${prettyJson(result)}")
   Map household = [householdId: data.householdId]
-  result.players.collectEntries { p -> [(p.id): p + household] }
-  result.groups.collectEntries { g -> [(g.id): g + household] }
 
   state.players = result.players.collectEntries { p -> [(p.id): p + household] }
-  logDebug("Players: ${prettyJson(state.players)}")
   state.groups = result.groups.collectEntries { g -> [(g.id): g + household] }
   if(data.containsKey(joinPlayers)) { joinPlayers(data.coordinatorId, data.playerIds) }
   if(data.containsKey(removePlayers)) { removePlayers(data.coordinatorId) }
   if(data.containsKey(ungroupPlayer)) { ungroupPlayer(data.playerId) }
+
+  playerSelectionOptions = state.players.collectEntries {id, player ->  [(id): player.name]  }
 }
 
 String getGroupForPlayer(String playerId) {
