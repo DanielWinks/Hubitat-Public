@@ -31,9 +31,10 @@ definition(
   description: 'Sonos speaker integration with cloud functionality, such as non-interrupting announcements',
   iconUrl: '',
   iconX2Url: '',
-  installOnOpen: true,
+  installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: true
+  singleThreaded: true,
+  importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosCloudApp.groovy'
 )
 
 preferences {
