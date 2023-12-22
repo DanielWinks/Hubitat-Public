@@ -23,7 +23,6 @@
 
 #include dwinks.UtilitiesAndLoggingLibrary
 
-
 definition(
   name: 'Sonos Cloud Controller',
   namespace: 'dwinks',
@@ -44,6 +43,16 @@ preferences {
   page(name: 'groupPage')
 }
 
+@Field static final String apiPrefix = 'https://api.ws.sonos.com/control/api/v1'
+@Field static final String authApiPrefix = 'https://api.sonos.com/login/v3/oauth'
+@Field static final String xWwwFormUrlencodedUtf8 = 'application/x-www-form-urlencoded;charset=utf-8'
+
+String getHubitatStateRedirect() { return URLEncoder.encode('https://cloud.hubitat.com/oauth/stateredirect') }
+
+// =============================================================================
+// OAuth
+// =============================================================================
+
 mappings {
   path('/oauth/initialize') {
   action: [ GET: 'oauthInitialize' ]
@@ -56,19 +65,161 @@ mappings {
   }
 }
 
-@Field static final String apiPrefix = 'https://api.ws.sonos.com/control/api/v1'
-@Field static final String authApiPrefix = 'https://api.sonos.com/login/v3/oauth'
-@Field static final String xWwwFormUrlencodedUtf8 = 'application/x-www-form-urlencoded;charset=utf-8'
-
-String getHubitatStateRedirect() { return URLEncoder.encode('https://cloud.hubitat.com/oauth/stateredirect') }
-
 String getAuthorizationB64() {
   if (settings.clientKey == null || settings.clientSecret == null) {
-    logError('Unable to authenticate as client key and secret must be set')
+    logError('Client key or Secret not set')
     return
   }
   return "${settings.clientKey}:${settings.clientSecret}".bytes.encodeBase64()
 }
+
+Map authorizePage() {
+  boolean configured = settings.clientKey != null && settings.clientSecret != null
+  boolean authenticated = state.authToken != null
+
+  dynamicPage(title: 'Sonos Developer Authorization', nextPage: 'mainPage') {
+    section {
+      paragraph ('You need an account on the <a href=\'https://developer.sonos.com/\' target=\'_blank\'>Sonos Developer site</a>, ' +
+          'create a new <b>Control Integration</b>. Provide an Integration name, description and key name ' +
+          'and set the redirect URI to <u>https://cloud.hubitat.com/oauth/stateredirect</u> and save the Integration. ' +
+          'Enter the provided Key and Secret values below then select the account authorization button.')
+
+      input (name: 'clientKey', type: 'text', title: 'Client Key', description: '', required: true, defaultValue: '', submitOnChange: true)
+      input (name: 'clientSecret', type: 'password', title: 'Client Secret', description: '', required: true, defaultValue: '', submitOnChange: true)
+    }
+  if (configured) {
+    section {
+      href (
+        url: oauthInitialize(),
+        title: 'Sonos Account Authorization',
+        style: 'external',
+        description: authenticated ? 'Your Sonos account is connected, select to re-authenticate' : '<b>Select to authenticate to your Sonos account</b>'
+        )
+      }
+    }
+  }
+}
+
+String oauthInitialize() {
+  tryCreateAccessToken()
+  state.oauthState = URLEncoder.encode("${getHubUID()}/apps/${app.id}/callback?access_token=${state.accessToken}")
+  logDebug "oauthState: ${state.oauthState}"
+  String link = "${authApiPrefix}?client_id=${settings.clientKey}&response_type=code&state=${state.oauthState}&scope=playback-control-all&redirect_uri=${getHubitatStateRedirect()}"
+  logInfo "oauth link: ${link}"
+  return link
+}
+
+Map oauthCallback() {
+  state.remove('authToken')
+  state.remove('refreshToken')
+  state.remove('authTokenExpires')
+  state.remove('scope')
+  state.remove('oauthReqStart')
+
+  logInfo "oauthCallback: ${params}"
+  if (URLEncoder.encode(params.state) != state.oauthState) {
+    logError 'Aborted due to security problem: OAuth state does not match expected value'
+    return oauthFailure()
+  }
+
+  if (params.code == null) {
+    logError 'Aborted: OAuth one-time use authorization code not received'
+    return oauthFailure()
+  }
+
+  try {
+    logInfo 'Requesting access token'
+    httpPost([
+      uri: "${authApiPrefix}/access?grant_type=authorization_code&code=${params.code}&redirect_uri=${getHubitatStateRedirect()}",
+      headers: [
+        authorization: "Basic ${getAuthorizationB64()}",
+        'Content-Type': "${xWwwFormUrlencodedUtf8}"
+      ]
+    ]) {resp ->
+          logDebug 'Token request response: ' + resp.data
+          if (resp && resp.data && resp.success) {
+            logInfo 'Received access token'
+            parseAuthorizationToken(resp.data)
+          } else {
+            logError 'OAuth error: ' + resp.data
+          }
+      }
+  } catch (e) {
+    logException "OAuth error: ${e}", e
+  }
+  return state.authToken == null ? oauthFailure() : oauthSuccess()
+}
+
+Map oauthSuccess() {
+  return render (
+    contentType: 'text/html',
+    data: """
+      <h2 style='color:green;'>Success!</h2 >
+      <p>Your Sonos Account is now connected to Hubitat</p>
+      <p>Close this window to continue setup.</p>
+      """
+    )
+}
+
+Map oauthFailure() {
+  return render (
+    contentType: 'text/html',
+    data: """
+      <h2 style='color:red;'>Failed!</h2>
+      <p>The connection could not be established!</p>
+      <p>Close this window to try again.</p>
+      """
+    )
+}
+
+void refreshToken() {
+  logInfo('Refreshing access token')
+
+  if (state.refreshToken == null) {
+    logError('Unable to authenticate as refresh token is not set, please re-authorize app via Sonos oAuth')
+    return
+  }
+
+  Map params = [
+    uri: "${authApiPrefix}/access?grant_type=refresh_token&refresh_token=${state.refreshToken}",
+    headers: [authorization: "Basic ${getAuthorizationB64()}"],
+    requestContentType: 'application/json',
+    contentType: 'application/json'
+    ]
+  sendCommandAsync(params, "refreshTokenCallback")
+}
+
+void refreshTokenCallback(AsyncResponse response, Map data = null) {
+  if (!response.hasError()) {
+    logInfo('Received access token')
+    logDebug("Token refresh response: ${response.getJson()}")
+    state.refreshAttemptCounter = 0
+    parseAuthorizationToken(response.getJson())
+  } else {
+    logError("OAuth error: ${response.getErrorData()}.")
+    if(state.refreshAttemptCounter < 10) {
+      logWarn('Scheduling another refresh attempt in 60 seconds.')
+      runIn(60, 'refreshToken')
+      state.refreshAttemptCounter++
+    } else if (state.refreshAttemptCounter >= 10) {
+      logError('Max OAuth token refresh attempts reached. Unable to refresh token within 10 attempts.')
+    }
+  }
+}
+
+void parseAuthorizationToken(Map data) {
+  logDebug('Parsing tokens...')
+  logDebug(data.inspect())
+  state.authToken = data.access_token
+  logDebug("authToken: ${state.authToken}")
+  state.refreshToken = data.refresh_token
+  state.authTokenExpires = now() + (data.expires_in * 1000)
+  state.scope = data.scope
+}
+
+// =============================================================================
+// Main Page
+// =============================================================================
 
 Map mainPage() {
   boolean configured = settings.clientKey != null && settings.clientSecret != null
@@ -102,45 +253,18 @@ Map mainPage() {
         )
       }
     }
-    // section() {
-    //   input 'sonosLocal', 'capability.musicPlayer', title: 'Sonos Players To Watch For Updates', required: false, multiple: true
-    // }
 
     section {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-      // input 'testButton', 'button', title: 'Test'
     }
   }
 }
 
-Map authorizePage() {
-  boolean configured = settings.clientKey != null && settings.clientSecret != null
-  boolean authenticated = state.authToken != null
-
-  dynamicPage(title: 'Sonos Developer Authorization', nextPage: 'mainPage') {
-    section {
-      paragraph ('You need an account on the <a href=\'https://developer.sonos.com/\' target=\'_blank\'>Sonos Developer site</a>, ' +
-          'create a new <b>Control Integration</b>. Provide an Integration name, description and key name ' +
-          'and set the redirect URI to <u>https://cloud.hubitat.com/oauth/stateredirect</u> and save the Integration. ' +
-          'Enter the provided Key and Secret values below then select the account authorization button.')
-
-      input (name: 'clientKey', type: 'text', title: 'Client Key', description: '', required: true, defaultValue: '', submitOnChange: true)
-      input (name: 'clientSecret', type: 'password', title: 'Client Secret', description: '', required: true, defaultValue: '', submitOnChange: true)
-    }
-  if (configured) {
-    section {
-      href (
-        url: oauthInitialize(),
-        title: 'Sonos Account Authorization',
-        style: 'external',
-        description: authenticated ? 'Your Sonos account is connected, select to re-authenticate' : '<b>Select to authenticate to your Sonos account</b>'
-        )
-      }
-    }
-  }
-}
+// =============================================================================
+// Player and Group Pages
+// =============================================================================
 
 Map playerPage() {
   app.removeSetting('playerDevices')
@@ -224,14 +348,6 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }
 }
 
-void testButton() {
-  // refreshPlayersAndGroups()
-  createGroupDevices()
-  // createPlayerDevices()
-  // refreshToken()
-  // getAllMusicPlayers()
-}
-
 void saveGroup() {
   state.userGroups[app.getSetting('newGroupName')] = [coordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
   app.removeSetting('newGroupName')
@@ -270,135 +386,27 @@ void tryCreateAccessToken() {
   }
 }
 
+// =============================================================================
+// Intilize() and Configure()
+// =============================================================================
+
 void initialize() {
   tryCreateAccessToken()
   configure()
 }
+
 void configure() {
-  logInfo "${app.name} configuration updated"
+  logInfo("${app.name} updated")
   refreshToken()
   schedule('0 0 0,6,12,18 * * ?', 'refreshToken')
   refreshPlayersAndGroups()
   createPlayerDevices()
   createGroupDevices()
-
-  updatePlayerDevices()
-  updateGroupDevices()
 }
 
-void updatePlayerDevices() {
-
-}
-void updateGroupDevices() {}
-
-
-String oauthInitialize() {
-  tryCreateAccessToken()
-  state.oauthState = URLEncoder.encode("${getHubUID()}/apps/${app.id}/callback?access_token=${state.accessToken}")
-  logDebug "oauthState: ${state.oauthState}"
-  String link = "${authApiPrefix}?client_id=${settings.clientKey}&response_type=code&state=${state.oauthState}&scope=playback-control-all&redirect_uri=${getHubitatStateRedirect()}"
-  logInfo "oauth link: ${link}"
-  return link
-}
-
-Map oauthCallback() {
-  state.remove('authToken')
-  state.remove('refreshToken')
-  state.remove('authTokenExpires')
-  state.remove('scope')
-  state.remove('oauthReqStart')
-
-  logInfo "oauthCallback: ${params}"
-  if (URLEncoder.encode(params.state) != state.oauthState) {
-    logError 'Aborted due to security problem: OAuth state does not match expected value'
-    return oauthFailure()
-  }
-
-  if (params.code == null) {
-    logError 'Aborted: OAuth one-time use authorization code not received'
-    return oauthFailure()
-  }
-
-  try {
-    logInfo 'Requesting access token'
-    httpPost([
-      uri: "${authApiPrefix}/access?grant_type=authorization_code&code=${params.code}&redirect_uri=${getHubitatStateRedirect()}",
-      headers: [
-        authorization: "Basic ${getAuthorizationB64()}",
-        'Content-Type': "${xWwwFormUrlencodedUtf8}"
-      ]
-    ]) {resp ->
-          logDebug 'Token request response: ' + resp.data
-          if (resp && resp.data && resp.success) {
-            logInfo 'Received access token'
-            parseAuthorizationToken(resp.data)
-          } else {
-            logError 'OAuth error: ' + resp.data
-          }
-      }
-  } catch (e) {
-    logException "OAuth error: ${e}", e
-  }
-  return state.authToken == null ? oauthFailure() : oauthSuccess()
-}
-
-
-Map oauthSuccess() {
-  return render (
-    contentType: 'text/html',
-    data: """
-      <h2 style='color:green;'>Success!</h2 >
-      <p>Your Sonos Account is now connected to Hubitat</p>
-      <p>Close this window to continue setup.</p>
-      """
-    )
-}
-
-Map oauthFailure() {
-  return render (
-    contentType: 'text/html',
-    data: """
-      <h2 style='color:red;'>Failed!</h2>
-      <p>The connection could not be established!</p>
-      <p>Close this window to try again.</p>
-      """
-    )
-}
-
-void refreshToken() {
-  logInfo('Refreshing access token')
-
-  if (state.refreshToken == null) {
-    logError('Unable to authenticate as refresh token is not set, please re-authorize app via Sonos oAuth')
-    return
-  }
-
-  Map params = [
-    uri: "${authApiPrefix}/access?grant_type=refresh_token&refresh_token=${state.refreshToken}",
-    headers: [authorization: "Basic ${getAuthorizationB64()}"],
-    requestContentType: 'application/json',
-    contentType: 'application/json'
-    ]
-  sendCommandAsync(params, "refreshTokenCallback")
-}
-
-void refreshTokenCallback(AsyncResponse response, Map data = null) {
-  if (!response.hasError()) {
-    logInfo('Received access token')
-    logDebug("Token refresh response: ${response.getJson()}")
-    state.refreshAttemptCounter = 0
-    parseAuthorizationToken(response.getJson())
-  } else {
-    logError("OAuth error: ${response.getErrorData()}.")
-    if(state.refreshAttemptCounter < 10) {
-      logWarn('Scheduling another refresh attempt in 60 seconds.')
-      runIn(60, 'refreshToken')
-      state.refreshAttemptCounter++
-    } else if (state.refreshAttemptCounter >= 10) {
-      logError('Max OAuth token refresh attempts reached. Unable to refresh token within 10 attempts.')
-    }
-  }
-}
+// =============================================================================
+// Group and Player Device Creation
+// =============================================================================
 
 void createGroupDevices() {
   logDebug('Creating group devices...')
@@ -458,6 +466,10 @@ void removeOrphans() {
   }
 }
 
+// =============================================================================
+// Get all music players WIP FOR FOLLOWING "REAL" SONOS PLAYERS
+// =============================================================================
+
 void getAllMusicPlayers() {
   Map params = [
     uri:"http://127.0.0.1:8080/device/listJson?capability=capability.musicPlayer",
@@ -474,224 +486,14 @@ void showMusic(AsyncResponse response, Map data = null) {
   logDebug(response.getData())
 }
 
+// =============================================================================
+// Helper methods
+// =============================================================================
+
 List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
   List<String> playerIds = [device.getDataValue('coordinatorId')]
   playerIds.addAll(device.getDataValue('playerIds').split(','))
   return playerIds
-}
-
-void componentRefreshUpdate(Map data) {
-  List<String> playerIds = data.playerIds
-  String dni = data.dni
-  List<List<String>> allPlayersInGroups = state.groups.collect{ it -> it.playerIds }
-  String onOff = allPlayersInGroups.any{ it -> it.containsAll(playerIds)} ? 'on' : 'off'
-  getChildDevice(data.dni).childParse([name:'switch', value:onOff])
-}
-
-void componentPlayText(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
-  String playerId = device.getDataValue('id')
-  logDebug "${device} play text ${text} (volume ${volume ?: 'not set'})"
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
-  Map tts = textToSpeech(text, voice)
-  data.streamUrl = tts.uri
-  if (volume) data.volume = (int)volume
-  postJsonAsync("${apiPrefix}/players/${playerId}/audioClip", data)
-}
-
-void componentPlayTrack(DeviceWrapper device, String uri, BigDecimal volume = null) {
-  String playerId = device.getDataValue('id')
-  logDebug "${device} play track ${uri} (volume ${volume ?: 'not set'})"
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
-  if (uri?.toUpperCase() != 'CHIME') {
-      data['streamUrl'] = uri
-  }
-  if (volume) {
-      data['volume'] = (int)volume
-  }
-  postJsonAsync("${apiPrefix}/players/${playerId}/audioClip", data)
-}
-
-void componentMutePlayer(DeviceWrapper device, Boolean muted) {
-  logDebug 'Muting...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String groupId = getGroupForPlayer(playerId)
-
-  String sonosEndpoint = "/groups/${groupId}/groupVolume/mute"
-
-  Map data = [:]
-  data.muted = muted
-  postJsonAsync("${apiPrefix}${sonosEndpoint}", data)
-}
-
-void componentSetLevel(DeviceWrapper device, BigDecimal level) {
-  logDebug 'Setting volue to ${level}...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String groupId = getGroupForPlayer(playerId)
-
-  String sonosEndpoint = "/groups/${groupId}/groupVolume"
-
-  Map data = [:]
-  data.volume = level as int
-  postJsonAsync("${apiPrefix}${sonosEndpoint}", data)
-}
-
-void componentPlay(DeviceWrapper device) {
-  logDebug 'Playing...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String groupId = getGroupForPlayer(playerId)
-
-  String sonosEndpoint = "/groups/${groupId}/playback/play"
-
-  Map data = [:]
-  postJsonAsync("${apiPrefix}${sonosEndpoint}", data)
-}
-
-void componentStop(DeviceWrapper device) {
-  logDebug 'Stopping...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String groupId = getGroupForPlayer(playerId)
-
-  String sonosEndpoint = "/groups/${groupId}/playback/pause"
-
-  Map data = [:]
-  postJsonAsync("${apiPrefix}${sonosEndpoint}", data)
-}
-
-void componentRefresh(DeviceWrapper device) {
-  logDebug "${device} refresh"
-  refreshPlayersAndGroups()
-  List<String> playerIds = getAllPlayersForGroupDevice(device)
-  runIn(5, 'componentRefreshUpdate', [data: [playerIds:playerIds, dni:device.deviceNetworkId]])
-}
-
-void getFavorites(DeviceWrapper device) {
-  logDebug 'Getting favorites...'
-  String householdId = device.getDataValue('householdId')
-  Map params = [uri: "${apiPrefix}/households/${householdId}/favorites", headers: [authorization: 'Bearer ' + state.authToken, contentType: 'application/json']]
-  sendQueryAsync(params, "getFavoritesCallback", [dni:device.getDeviceNetworkId()])
-}
-
-void getFavoritesCallback(AsyncResponse response, Map data = null) {
-  ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  if (response.hasError()) {
-    logError("getHouseholds error: ${response.getErrorData()}")
-    return
-  }
-  List respData = response.getJson().items
-  Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
-  logDebug("formatted response: ${prettyJson(formatted)}")
-  formatted.each(){it ->
-    child.sendEvent(
-      name: "Favorite #${it.key} ${it.value.name}",
-      value: "<img src=\"${it.value.imageUrl}\" width=\"200\" height=\"200\" >",
-      isStateChange: false
-    )
-  }
-}
-
-void loadFavorite(DeviceWrapper device, String favoriteId) {
-  logDebug 'Loading favorites...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String groupId = getGroupForPlayer(playerId)
-
-  Map data = [:]
-  data.action = "REPLACE"
-  data.favoriteId = favoriteId
-  data.playOnCompletion = true
-  data.playModes = ['repeat': false,'repeatOne': true]
-
-  postJsonAsync("${apiPrefix}/groups/${groupId}/favorites", data)
-}
-
-void setRepeatMode(Map playModes) {
-  if (playModes == null) {
-    playModes = [:]
-  }
-}
-
-
-
-void setPlayModes(DeviceWrapper device, Map playModes) {
-  logDebug 'Setting Play Modes...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String group = getGroupForPlayer(playerId)
-  postJsonAsync("${apiPrefix}/groups/${group}/playback/playMode", playModes)
-}
-
-void componentUngroupPlayer(DeviceWrapper device) {
-  logDebug('Removing player from group...')
-  String playerId = device.getDataValue('id')
-  getPlayersAndGroups([ungroupPlayer: true, playerId: playerId])
-}
-
-void ungroupPlayer(String playerId) {
-  logDebug("Ungroup Player: ${playerId}")
-  Map currentGroup = (state.groups.find{ it -> it.value.playerIds.contains(playerId)}).value
-  logDebug(prettyJson(currentGroup))
-  String coordinatorIdGroup = currentGroup.id.replace(':','%3A')
-  List playerIds = currentGroup.playerIds - playerId
-  Map data = ['playerIds': playerIds]
-  logDebug(prettyJson(data))
-  logDebug("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers")
-  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
-}
-
-void componentUngroupPlayers(DeviceWrapper device) {
-  logDebug('Removing players from group...')
-  String householdId = device.getDataValue('householdId')
-  List coordinatorId = [device.getDataValue('coordinatorId')]
-  List playerIds = device.getDataValue('playerIds').split(',')
-  List allPlayersIds = coordinatorId + playerIds
-  allPlayersIds.each(){ playerId ->
-    Map data = ['playerIds': [playerId]]
-    postJsonAsync("${apiPrefix}/households/${householdId}/groups/createGroup", data)
-  }
-}
-
-void componentGroupPlayers(DeviceWrapper device) {
-  logDebug('Adding players to group...')
-  String householdId = device.getDataValue('householdId')
-  List coordinatorId = [device.getDataValue('coordinatorId')]
-  List playerIds = device.getDataValue('playerIds').split(',')
-  logDebug("PlayerIds: ${playerIds}")
-  Map data = ['playerIds': coordinatorId + playerIds]
-  logDebug("Group Players Data: ${data}")
-  postJsonAsync("${apiPrefix}/households/${householdId}/groups/createGroup", data)
-}
-
-void componentJoinPlayersToCoordinator(DeviceWrapper device) {
-  logDebug('Joining players to coordinator...')
-  String coordinatorId = device.getDataValue('coordinatorId')
-  String playerIds = device.getDataValue('playerIds')
-  getPlayersAndGroups([joinPlayers: true, coordinatorId: coordinatorId, playerIds: playerIds])
-}
-
-void componentRemovePlayersFromCoordinator(DeviceWrapper device) {
-  logDebug('Removing players from coordinator...')
-  String coordinatorId = device.getDataValue('coordinatorId')
-  String playerIds = device.getDataValue('playerIds')
-  getPlayersAndGroups([removePlayers: true, coordinatorId: coordinatorId, playerIds: playerIds])
-}
-
-void joinPlayers(String coordinatorId, String playerIdsJoined) {
-  logDebug("PlayerIds=: ${playerIdsJoined}")
-  String coordinatorIdGroup = ((state.groups.find{ it -> it.value.coordinatorId  == coordinatorId}).key).replace(':','%3A')
-  List playerIds = playerIdsJoined.split(',') as List
-  playerIds.add(coordinatorId)
-  Map data = ['playerIds': playerIds]
-  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
-}
-
-void removePlayers(String coordinatorId) {
-  String coordinatorIdGroup = ((state.groups.find{ it -> it.value.coordinatorId  == coordinatorId}).key).replace(':','%3A')
-  Map data = ['playerIds': [coordinatorId]]
-  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
 }
 
 void getHouseholds() {
@@ -760,15 +562,172 @@ String getGroupForPlayer(String playerId) {
   return gId
 }
 
-void parseAuthorizationToken(Map data) {
-  logDebug('Parsing tokens...')
-  logDebug(data.inspect())
-  state.authToken = data.access_token
-  logDebug("authToken: ${state.authToken}")
-  state.refreshToken = data.refresh_token
-  state.authTokenExpires = now() + (data.expires_in * 1000)
-  state.scope = data.scope
+// =============================================================================
+// Component Methods for Child Devices
+// =============================================================================
+
+void componentPlayText(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
+  String playerId = device.getDataValue('id')
+  logDebug "${device} play text ${text} (volume ${volume ?: 'not set'})"
+  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
+  Map tts = textToSpeech(text, voice)
+  data.streamUrl = tts.uri
+  if (volume) data.volume = (int)volume
+  postJsonAsync("${apiPrefix}/players/${playerId}/audioClip", data)
 }
+
+void componentPlayTrack(DeviceWrapper device, String uri, BigDecimal volume = null) {
+  String playerId = device.getDataValue('id')
+  logDebug("${device} play track ${uri} (volume ${volume ?: 'not set'})")
+  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
+  if (uri?.toUpperCase() != 'CHIME') { data['streamUrl'] = uri }
+  if (volume) { data['volume'] = (int)volume }
+  postJsonAsync("${apiPrefix}/players/${playerId}/audioClip", data)
+}
+
+void componentMutePlayer(DeviceWrapper device, Boolean muted) {
+  logDebug('Muting...')
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  Map data = [muted:muted]
+  postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/mute", data)
+}
+
+void componentSetLevel(DeviceWrapper device, BigDecimal level) {
+  logDebug("Setting volue to ${level}...")
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  Map data = [volume:level as int]
+  postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume", data)
+}
+
+void componentPlay(DeviceWrapper device) {
+  logDebug('componentPlay()')
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/play")
+}
+
+void componentStop(DeviceWrapper device) {
+  logDebug('componentStop()')
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/pause")
+}
+
+void componentGetFavorites(DeviceWrapper device) {
+  logDebug 'Getting favorites...'
+  String householdId = device.getDataValue('householdId')
+  Map params = [uri: "${apiPrefix}/households/${householdId}/favorites", headers: [authorization: 'Bearer ' + state.authToken, contentType: 'application/json']]
+  sendQueryAsync(params, "getFavoritesCallback", [dni:device.getDeviceNetworkId()])
+}
+
+void getFavoritesCallback(AsyncResponse response, Map data = null) {
+  ChildDeviceWrapper child = app.getChildDevice(data.dni)
+  if (response.hasError()) {
+    logError("getHouseholds error: ${response.getErrorData()}")
+    return
+  }
+  List respData = response.getJson().items
+  Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
+  logDebug("formatted response: ${prettyJson(formatted)}")
+  formatted.each(){it ->
+    child.sendEvent(
+      name: "Favorite #${it.key} ${it.value.name}",
+      value: "<img src=\"${it.value.imageUrl}\" width=\"200\" height=\"200\" >",
+      isStateChange: false
+    )
+  }
+}
+
+void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
+  logDebug('Loading favorites...')
+  String groupId = getGroupForPlayer(device.getDataValue('id'))
+  Map data = [
+    action:"REPLACE",
+    favoriteId:favoriteId,
+    playOnCompletion:true,
+    playModes:['repeat': false,'repeatOne': true],
+  ]
+  postJsonAsync("${apiPrefix}/groups/${groupId}/favorites", data)
+}
+
+void componentSetPlayModes(DeviceWrapper device, Map playModes) {
+  logDebug 'Setting Play Modes...'
+  String playerId = device.getDataValue('id')
+  logDebug "DNI: ${playerId}"
+  String group = getGroupForPlayer(playerId)
+  postJsonAsync("${apiPrefix}/groups/${group}/playback/playMode", playModes)
+}
+
+void componentUngroupPlayer(DeviceWrapper device) {
+  logDebug('Removing player from group...')
+  String playerId = device.getDataValue('id')
+  getPlayersAndGroups([ungroupPlayer: true, playerId: playerId])
+}
+
+void ungroupPlayer(String playerId) {
+  logDebug("Ungroup Player: ${playerId}")
+  Map currentGroup = (state.groups.find{ it -> it.value.playerIds.contains(playerId)}).value
+  String coordinatorIdGroup = currentGroup.id.replace(':','%3A')
+  List playerIds = currentGroup.playerIds - playerId
+  Map data = ['playerIds': playerIds]
+  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
+}
+
+void componentUngroupPlayers(DeviceWrapper device) {
+  logDebug('Removing players from group...')
+  String householdId = device.getDataValue('householdId')
+  List coordinatorId = [device.getDataValue('coordinatorId')]
+  List playerIds = device.getDataValue('playerIds').split(',')
+  List allPlayersIds = coordinatorId + playerIds
+  allPlayersIds.each(){ playerId ->
+    Map data = ['playerIds': [playerId]]
+    postJsonAsync("${apiPrefix}/households/${householdId}/groups/createGroup", data)
+  }
+}
+
+void componentGroupPlayers(DeviceWrapper device) {
+  logDebug('Adding players to group...')
+  String householdId = device.getDataValue('householdId')
+  List coordinatorId = [device.getDataValue('coordinatorId')]
+  List playerIds = device.getDataValue('playerIds').split(',')
+  Map data = ['playerIds': coordinatorId + playerIds]
+  postJsonAsync("${apiPrefix}/households/${householdId}/groups/createGroup", data)
+}
+
+void componentJoinPlayersToCoordinator(DeviceWrapper device) {
+  logDebug('Joining players to coordinator...')
+  String coordinatorId = device.getDataValue('coordinatorId')
+  String playerIds = device.getDataValue('playerIds')
+  getPlayersAndGroups([joinPlayers: true, coordinatorId: coordinatorId, playerIds: playerIds])
+}
+
+void componentRemovePlayersFromCoordinator(DeviceWrapper device) {
+  logDebug('Removing players from coordinator...')
+  String coordinatorId = device.getDataValue('coordinatorId')
+  String playerIds = device.getDataValue('playerIds')
+  getPlayersAndGroups([removePlayers: true, coordinatorId: coordinatorId, playerIds: playerIds])
+}
+
+void joinPlayers(String coordinatorId, String playerIdsJoined) {
+  logDebug("PlayerIds=: ${playerIdsJoined}")
+  String coordinatorIdGroup = ((state.groups.find{ it -> it.value.coordinatorId  == coordinatorId}).key).replace(':','%3A')
+  List playerIds = playerIdsJoined.split(',') as List
+  playerIds.add(coordinatorId)
+  Map data = ['playerIds': playerIds]
+  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
+}
+
+void removePlayers(String coordinatorId) {
+  String coordinatorIdGroup = ((state.groups.find{ it -> it.value.coordinatorId  == coordinatorId}).key).replace(':','%3A')
+  Map data = ['playerIds': [coordinatorId]]
+  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
+}
+
+// =============================================================================
+// Get and Post Helpers
+// =============================================================================
 
 void postJsonAsync(String uri, Map data = [:]) {
   if (state.authToken == null) {
@@ -780,13 +739,24 @@ void postJsonAsync(String uri, Map data = [:]) {
   }
   logDebug "post ${uri}: ${prettyJson(data)}"
   asynchttpPost(
-    'postResponse', [
+    'postJsonAsyncCallback', [
       uri: uri,
       headers: [authorization: 'Bearer ' + state.authToken],
       contentType: 'application/json',
       body: JsonOutput.toJson(data)
     ]
   )
+}
+
+void postJsonAsyncCallback(AsyncResponse response, Map data) {
+  if (response.status != 200) {
+    logError("post request returned HTTP status ${response.status}")
+  }
+  if (response.hasError()) {
+    logError("post request error: ${response.getErrorMessage()}")
+  } else {
+    logDebug("postJsonAsyncCallback: ${response.data}")
+  }
 }
 
 void sendCommandAsync(Map params, String callbackMethod, Map data = null) {
@@ -810,16 +780,5 @@ void sendQueryAsync(Map params, String callback, Map data = null) {
   } catch (Exception e) {
     logDebug("Call failed: ${e.message}")
     return null
-  }
-}
-
-void postResponse(AsyncResponse response, Map data) {
-  if (response.status != 200) {
-    logError("post request returned HTTP status ${response.status}")
-  }
-  if (response.hasError()) {
-    logError("post request error: ${response.getErrorMessage()}")
-  } else {
-    logDebug("postResponse: ${response.data}")
   }
 }
