@@ -152,6 +152,7 @@ Map oauthCallback() {
 }
 
 Map oauthSuccess() {
+  refreshPlayersAndGroups()
   return render (
     contentType: 'text/html',
     data: """
@@ -398,11 +399,15 @@ void initialize() {
 
 void configure() {
   logInfo("${app.name} updated")
-  refreshToken()
+  try { refreshToken()}
+  catch (Exception e) { logError("Could not refresh token: ${e}") }
   schedule('0 0 0,6,12,18 * * ?', 'refreshToken')
-  refreshPlayersAndGroups()
-  createPlayerDevices()
-  createGroupDevices()
+  try { refreshPlayersAndGroups() }
+  catch (Exception e) { logError("refreshPlayersAndGroups() Failed: ${e}")}
+  try { createPlayerDevices() }
+  catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
+  try { createGroupDevices() }
+  catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
 }
 
 // =============================================================================
@@ -410,6 +415,7 @@ void configure() {
 // =============================================================================
 
 void createGroupDevices() {
+  if(!state.userGroups) {return}
   logDebug('Creating group devices...')
   state.userGroups.each{ it ->
     String dni = "${app.id}-SonosGroupDevice-${it.key}"
@@ -433,6 +439,7 @@ void createGroupDevices() {
 }
 
 void createPlayerDevices() {
+  if(!state.players) {return}
   List<Map> devicesToCreate = state.players.values().findAll { it -> it.id in playerDevices } ?: []
   logDebug(devicesToCreate)
   for (Map player in devicesToCreate) {
