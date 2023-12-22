@@ -25,19 +25,23 @@
 #include dwinks.ChildDeviceLibrary
 
 metadata {
-  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
-    capability 'Switch'
+  definition(name: 'Sonos Cloud Group', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
+    // capability 'Switch'
     // command 'clearState'
     command 'groupPlayers'
+    command 'joinPlayersToCoordinator'
+    command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
   }
 }
 
-void updated() { logInfo('Updated...') }
-void initialize() { logInfo('Installed...') }
 void on() { groupPlayers() }
-void groupPlayers() { parent?.componentGroupPlayers(this.device) }
 void off() { ungroupPlayers() }
+
+void groupPlayers() { parent?.componentGroupPlayers(this.device) }
+void joinPlayersToCoordinator() { parent?.componentJoinPlayersToCoordinator(this.device) }
+void removePlayersFromCoordinator() { parent?.componentRemovePlayersFromCoordinator(this.device) }
 void ungroupPlayers() { parent?.componentUngroupPlayers(this.device) }
+
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
 void clearState() { state.clear() }
