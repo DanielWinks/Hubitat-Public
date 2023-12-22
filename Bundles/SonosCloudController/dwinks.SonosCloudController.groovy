@@ -544,8 +544,8 @@ void getPlayersAndGroupsAsync(String householdId, Map data = null) {
 void getPlayersAndGroupsCallback(AsyncResponse response, Map data = null) {
   logDebug("getPlayersAndGroupsCallback Data: ${data}")
   if(response.hasError()) {
-    Map errorData = response.getErrorData()
-    if(errorData?.fault?.faultstring != "Invalid Access Token") {
+    String errorData = response.getErrorData()
+    if(!errorData.contains("Invalid Access Token")) { //Expected as we're closing app before async returns?
       logError("getPlayers error: ${response.getErrorData()}")
     }
     return
