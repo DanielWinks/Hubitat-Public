@@ -1,3 +1,4 @@
 
 .hubitat/metadata.json
 .vscode/settings.json
+*.DS_Store
