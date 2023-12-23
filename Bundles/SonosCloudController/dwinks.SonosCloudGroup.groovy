@@ -25,6 +25,8 @@
 
 metadata {
   definition(name: 'Sonos Cloud Group', namespace: 'dwinks', author: 'Daniel Winks', component: true, importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudGroup.groovy') {
+    capability "Actuator"
+    
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
     command 'removePlayersFromCoordinator'
