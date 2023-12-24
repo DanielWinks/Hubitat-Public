@@ -52,7 +52,7 @@ Map mainPage() {
     refreshInterval: 0
   ) {
     section('<h2>Devices</h2>') {
-      input 'presenceSensor', 'capability.presenceSensor', title: 'Presence Sensor', required: true, multiple: false
+      input 'presenceSensors', 'capability.presenceSensor', title: 'Presence Sensor', required: true, multiple: true
       input 'disableModes', 'mode', title: 'Disable "to away" presence changes in Mode(s)', multiple: true
     }
 
@@ -87,7 +87,7 @@ mappings {
 
 Map arriveWebhook() {
   unschedule()
-  presenceSensor.arrived()
+  presenceSensor.each{ p -> p.arrived() }
   return render(contentType: "text/html", data: "<p>Arrived!</p>", status: 200)
 }
 
@@ -101,7 +101,7 @@ Map departWebhook() {
 }
 
 void depart() {
-  presenceSensor.departed()
+  presenceSensor.each{ p -> p.departed() }
 }
 
 String getLocalUriArrive() { return getFullLocalApiServerUrl() + "/arrive?access_token=${state.accessToken}" }
