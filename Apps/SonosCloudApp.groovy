@@ -104,7 +104,8 @@ Map authorizePage() {
 String oauthInitialize() {
   tryCreateAccessToken()
   state.oauthState = URLEncoder.encode("${getHubUID()}/apps/${app.id}/callback?access_token=${state.accessToken}")
-  logDebug "oauthState: ${state.oauthState}"
+  logDebug("CallBack URL: ${URLEncoder.encode("https://cloud.hubitat.com/apps/${app.id}/callback?access_token=${state.accessToken}")}}")
+  logDebug "oauthState: ${getApiServerUrl()}/${hubUID}/apps/${app.id}/events?access_token=${state.accessToken}"
   String link = "${authApiPrefix}?client_id=${settings.clientKey}&response_type=code&state=${state.oauthState}&scope=playback-control-all&redirect_uri=${getHubitatStateRedirect()}"
   logInfo "oauth link: ${link}"
   return link
@@ -226,7 +227,7 @@ void parseAuthorizationToken(Map data) {
 Map mainPage() {
   boolean configured = settings.clientKey != null && settings.clientSecret != null
   boolean authenticated = state.authToken != null
-  refreshPlayersAndGroups()
+  // refreshPlayersAndGroups()
   dynamicPage(title: 'Sonos Cloud Controller') {
     tryCreateAccessToken()
     if(!state.accessToken) {
@@ -260,6 +261,7 @@ Map mainPage() {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
+      input 'testButton', 'button', title: 'Test'
     }
   }
 }
@@ -351,6 +353,18 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }
 }
 
+// =============================================================================
+// TESTING
+// =============================================================================
+
+void testButton() {
+  logDebug(getCommand('Browse'))
+}
+
+// =============================================================================
+// TESTING
+// =============================================================================
+
 void saveGroup() {
   state.userGroups[app.getSetting('newGroupName')] = [coordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
   app.removeSetting('newGroupName')
@@ -375,18 +389,6 @@ void cancelGroupEdit() {
   app.removeSetting('newGroupPlayers')
   app.removeSetting('newGroupCoordinator')
   app.removeSetting('editDeleteGroup')
-}
-
-void tryCreateAccessToken() {
-  if (state.accessToken == null) {
-    try {
-      logDebug('Creating Access Token...')
-      createAccessToken()
-      logDebug("accessToken: ${state.accessToken}")
-    } catch(e) {
-      logError('OAuth is not enabled for app. Please enable.')
-    }
-  }
 }
 
 // =============================================================================
@@ -807,3 +809,9 @@ void sendQueryAsync(Map params, String callback, Map data = null) {
     return null
   }
 }
+
+
+// =============================================================================
+// Local Control
+// =============================================================================
+
