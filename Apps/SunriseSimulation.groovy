@@ -1,6 +1,6 @@
-#include dwinks.UtilitiesAndLogging
-#include dwinks.SunPosition
+#include dwinks.UtilitiesAndLoggingLibrary
 import com.hubitat.hub.domain.Event
+import hubitat.helper.RMUtils
 
 definition(
   name: 'Sunrise Simulation',
@@ -13,13 +13,15 @@ definition(
   iconX3Url: ''
 )
 
-preferences {
-  page(
-    name: 'mainPage', title: 'Sunrise Simulation'
-  )
-}
+preferences {page(name: 'mainPage', title: 'Sunrise Simulation')}
+mappings {path("/sunriseStart") {action: [GET: "sunriseStartWebhook"]}}
+
+String getLocalUri() { return getFullLocalApiServerUrl() + "/sunriseStart?access_token=${state.accessToken}" }
+String getCloudUri() { return "${getApiServerUrl()}/${hubUID}/apps/${app.id}/sunriseStart?access_token=${state.accessToken}" }
 
 Map mainPage() {
+
+  List rules = RMUtils.getRuleList('5.0')
   dynamicPage(
     name: 'mainPage',
     title: '<h1>Sunrise Simulation</h1>',
@@ -27,27 +29,30 @@ Map mainPage() {
     uninstall: true,
     refreshInterval: 0
   ) {
+    tryCreateAccessToken()
+    if(!state.accessToken) {
+      section ("<h2 style='color:red;'>OAuth is not enabled for app!! Please enable in Apps code.</h2>"){      }
+    }
     section('<h2>Devices</h2>') {
+      input (name: 'birdsongRule', title: 'Rule to run to start morning birdsong', type: 'enum', options: rules, required: true, multiple: false)
+      input (name: 'annoucementsRule', title: 'Rule to run to start morning announcements', type: 'enum', options: rules, required: true, multiple: false)
+      input 'startSwitches', 'capability.switch', title: 'Start Sunrise with switches', required: false, multiple: true
+
       // input "ctBulbs", "capability.colorTemperature", title: "Color Temp capable bulbs", required: false, multiple: true
       input 'rgbwBulbs', 'capability.colorControl', title: 'RGB capable bulbs', required: false, multiple: true
-      input 'windowCovers', 'capability.windowShade', title: "Window Shades to Open at 'Open Window Covers Mode' Start", required: false, multiple: true
-      input 'windowCoversLowSun', 'capability.windowShade', title: "Window Shades to Close When 'Sun Is Low'", required: false, multiple: true
-      input 'windowCoversSunset', 'capability.windowShade', title: 'Window Shades to Close At Sunset', required: false, multiple: true
       input 'disableSwitches', 'capability.switch', title: 'Disable Sunrise with switches', required: false, multiple: true
       input 'snoozeSwitches', 'capability.switch', title: 'Snooze Sunrise with switches', required: false, multiple: true
       input 'requiredPresence', 'capability.presenceSensor', title: 'Required presence for Sunrise', required: false, multiple: true
-      input 'birdsongSwitch', 'capability.switch', title: 'Switch to turn on to start morning birdsong', required: false, multiple: false
-      input 'annoucementSwitch', 'capability.switch', title: 'Switch to turn on to start morning annoucements', required: false, multiple: false
     }
 
-    section('<h2>Mode Settings</h2>') {
-      input 'sunriseStartMode', 'mode', title: "<b>'Begin Sunrise' Mode (Sunrise Starts with mode change)</b>", multiple: false, required: true
-      input 'openShadesMode', 'mode', title: "<b>'Open Window Covers' Mode (Covers open with mode change)</b>", multiple: false, required: true
+    section('<h2>Sunrise Settings</h2>') {
       input 'sunriseDuration', 'number', title: 'Duration of minutes to brighten lights', range: '10..60', required: true, defaultValue: 30
       input 'snoozeDuration', 'number', title: 'Duration of minutes to snooze', range: '10..60', required: true, defaultValue: 30
-      input 'updateInterval', 'enum', title: 'Sun Position Update Interval', required: true, defaultValue: '1 Minute', options: ['1 Minute', '5 Minutes', '10 Minutes', '15 Minutes', '30 Minutes']
-      input 'lowSunPosition', 'number', title: "Altitude at which to close 'Sun Is Low' shades", range: '-20..75', required: true, defaultValue: 40
-      input 'sunsetPosition', 'number', title: "Altitude at which to close 'Sunset' shades", range: '-20..75', required: true, defaultValue: 6
+    }
+
+    section("Webhooks") {
+      paragraph("<ul><li><strong>Local</strong>: <a href='${getLocalUri()}' target='_blank' rel='noopener noreferrer'>${getLocalUri()}</a></li></ul>")
+      paragraph("<ul><li><strong>Cloud</strong>: <a href='${getCloudUri()}' target='_blank' rel='noopener noreferrer'>${getCloudUri()}</a></li></ul>")
     }
 
     section('Logging') {
@@ -64,21 +69,19 @@ Map mainPage() {
   }
 }
 
-void updated() {
+void configure() {
   unsubscribe()
   initialize()
 }
 
 void initialize() {
   unschedule()
-  clearStates()
+  clearAllStates()
   calculateStageDurations()
-  sunPositionInitialization()
-  refreshSunPosition()
   subscribe(location, "mode.${settings.sunriseStartMode}", sunriseStartModeEvent)
-  subscribe(location, "mode.${settings.openShadesMode}", openShadesModeEvent)
-  subscribe(disableSwitches, 'switch', disableEvent)
-  subscribe(snoozeSwitches, 'switch', snoozeSwitchEvent)
+  subscribe(disableSwitches, 'switch', 'disableEvent')
+  subscribe(startSwitches, 'switch', 'sunriseStartSwitchEvent')
+  subscribe(snoozeSwitches, 'switch', 'snoozeSwitchEvent')
 }
 
 boolean sunriseDisabled() {
@@ -115,12 +118,17 @@ void appButtonHandler(btn) {
 
 void test() {
   logDebug 'Testing...'
-  refreshSunPosition()
+  RMUtils.sendAction([birdsongRule], 'runRuleAct', app.label, '5.0')
 }
 
-void sunriseStartModeEvent(Event event) {
-  logDebug "Received mode event: ${event.value}"
+Map sunriseStartWebhook() {
   sunriseStart()
+  return render(contentType: "text/html", data: "<p>Arrived!</p>", status: 200)
+}
+
+void sunriseStartSwitchEvent(Event event) {
+  logDebug "Received event: ${event.value}"
+  if ("${event.value}" == 'on') {sunriseStart()}
 }
 
 void snoozeSwitchEvent(Event event) {
@@ -134,11 +142,6 @@ void snoozeSwitchEvent(Event event) {
   if ("${event.value}" == 'off') {
     sunriseStart()
   }
-}
-
-void openShadesModeEvent(Event event) {
-  logDebug "Received shades mode event: ${event.value}"
-  openWindowCovers()
 }
 
 void snoozeOnHandler() {
@@ -157,7 +160,7 @@ void disableEvent(Event event) {
 
 void abortSunrise() {
   unschedule()
-  clearStates()
+  clearAllStates()
   turnOffAllBulbs()
 }
 
@@ -266,56 +269,10 @@ void brightenRGBWBulbs() {
   }
 }
 
-void openWindowCovers() {
-  // Skip opening shades if disabled switches are on
-  if (sunriseDisabled()) {
-    logInfo 'Skipping opening shades because disabled switch is on'
-    return
-  }
-
-  logDebug 'Opening all window coverings...'
-  settings.windowCovers?.each { wc -> wc.open() }
-  state.lowSunBlindsClosedToday = false
-  state.sunsetBlindsClosedToday = false
-}
-
-void checkShadesToClose() {
-  if (state.sunAltitudeDecreasing) {
-    if (state.lowSunBlindsClosedToday == false && state.sunAltitude < (settings.lowSunPosition as int)) {
-      logDebug "Closing 'Low Sun' Window Shades"
-      settings.windowCoversLowSun?.each { wc -> wc.close() }
-      state.lowSunBlindsClosedToday = true
-    }
-    if (state.sunsetBlindsClosedToday == false && state.sunAltitude < (settings.sunsetPosition as int)) {
-      logDebug "Closing 'Sunset' Window Shades"
-      settings.windowCoversSunset?.each { wc -> wc.close() }
-      state.sunsetBlindsClosedToday = true
-    }
-  }
-}
-
 void scheduleBirdsongStart() {
   logDebug "Scheduling birdsong to start in ${state.birdsongStart} seconds..."
   runIn(state.birdsongStart as int, 'birdsongStart')
 }
 
-void birdsongStart() { settings.birdsongSwitch?.on() }
-void annoucementsStart() { settings.annoucementSwitch?.on() }
-
-////////// Sun Calculations //////////
-void sunPositionInitialization() {
-  String updateIntervalCmd = (settings?.updateInterval ?: '1 Minutes').replace(' ', '')
-  "runEvery${updateIntervalCmd}"(refreshSunPosition)
-}
-
-void refreshSunPosition() {
-  Map<String, BigDecimal> coords = getPosition(location.latitude, location.longitude)
-  state.lastSunAltitude = state.sunAltitude ?: coords.altitude
-  state.lastSunAzimuth = state.sunAzimuth ?: coords.azimuth
-  state.sunAltitude = coords.altitude
-  state.sunAzimuth = coords.azimuth
-  state.sunAltitudeIncreasing = state.sunAltitude > state.lastSunAltitude
-  state.sunAltitudeDecreasing = state.sunAltitude < state.lastSunAltitude
-  state.sunPosistionLastUpdated = new Date().format('yyyy-MM-dd h:mm', location.timeZone)
-  checkShadesToClose()
-}
+void birdsongStart() { RMUtils.sendAction([birdsongRule], 'runRuleAct', app.label, '5.0') }
+void annoucementsStart() { RMUtils.sendAction([annoucementsRule], 'runRuleAct', app.label, '5.0') }
