@@ -176,6 +176,10 @@ Integer convertHexToInt(hex) { Integer.parseInt(hex,16) }
 String convertHexToIP(hex) {
 	[convertHexToInt(hex[0..1]),convertHexToInt(hex[2..3]),convertHexToInt(hex[4..5]),convertHexToInt(hex[6..7])].join(".")
 }
+String convertIPToHex(String ipAddress) {
+  List parts = ipAddress.tokenize('.')
+  return String.format("%X%X%X%X", parts[0], parts[1], parts[2], parts[3])
+}
 
 void tryCreateAccessToken() {
   if (state.accessToken == null) {
