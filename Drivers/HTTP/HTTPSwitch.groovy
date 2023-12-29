@@ -51,9 +51,7 @@ metadata {
 String turnOnRelayCommandTopic() { return "${RELAY_STATE}/turn_on" }
 String turnOffRelayCommandTopic() { return "${RELAY_STATE}/turn_off" }
 
-void refresh() {
-  sendQueryAsync(RELAY_STATE, 'switchStateCallback', [switch:RELAY])
-}
+void refresh() { sendQueryAsync(RELAY_STATE, 'switchStateCallback', [switch:RELAY]) }
 
 void switchStateCallback(AsyncResponse response, Map data = null){
   logDebug("response.status = ${response.status}")
@@ -67,10 +65,11 @@ void switchStateCallback(AsyncResponse response, Map data = null){
   sendEvent(name:'switch', value:val, descriptionText:"Relay is now ${val}", isStateChange:true)
 }
 
-void on() {
-  sendCommandAsync(turnOnRelayCommandTopic(), null, null)
-}
+void on() { sendCommandAsync(turnOnRelayCommandTopic(), null, null) }
+void off() { sendCommandAsync(turnOffRelayCommandTopic(), null, null) }
 
-void off() {
-  sendCommandAsync(turnOffRelayCommandTopic(), null, null)
+void parse(message) {
+  Map parsedMessage = parseLanMessage(message)
+  Map jsonBody = parseJson(parsedMessage.body)
+  if(jsonBody?.switch != null) { sendEvent(name:'switch', value:jsonBody?.switch, descriptionText:"Relay is now ${jsonBody?.switch}", isStateChange:true) }
 }
