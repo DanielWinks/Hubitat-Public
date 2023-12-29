@@ -40,8 +40,8 @@ metadata {
 
 preferences {
   section {
-    input name: 'updateInterval', title: 'Refresh update interval', type: 'enum', required: true, defaultValue: 6,
-      options: [1:'1 hour', 2:'2 hours', 3:'3 hours', 6:'6 hours', 8:'8 hours', 12:'12 hours']
+    input name: 'updateInterval', title: 'Refresh update interval', type: 'enum', required: true, defaultValue: 21600,
+      options: [3600:'1 hour', 7200:'2 hours', 10800:'3 hours', 21600:'6 hours', 28800:'8 hours', 43200:'12 hours']
   }
 }
 
@@ -197,7 +197,6 @@ void configure() {
 }
 
 void scheduleRefresh() {
-  Date scheduledRefresh = new Date(now() + (settings.updateInterval as Integer) * 60 * 60 * 1000)
-  logDebug("Scheduling refresh for ${scheduledRefresh}")
-  schedule(scheduledRefresh, 'refresh', [overwrite:true])
+  unschedule()
+  runIn(settings.updateInterval as Integer, 'refresh', [overwrite:true])
 }
