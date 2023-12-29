@@ -165,3 +165,26 @@ void componentOn(DeviceWrapper device) {
   if (dni == "${getACRelay3DNI()}") { sendCommandAsync(turnOnACRelay3CommandTopic(), null, null) }
   if (dni == "${getUSBRelayDNI()}") { sendCommandAsync(turnOnUSBRelayCommandTopic(), null, null) }
 }
+
+void parse(message) {
+  Map parsedMessage = parseLanMessage(message)
+  Map jsonBody = parseJson(parsedMessage.body)
+  logDebug(prettyJson(jsonBody))
+
+  String childState = jsonBody.state.toLowerCase()
+
+  if(jsonBody.switch == RELAY1) { getChildDevice("${getACRelay1DNI()}").parse(childState) }
+  if(jsonBody.switch == RELAY2) { getChildDevice("${getACRelay2DNI()}").parse(childState) }
+  if(jsonBody.switch == RELAY3) { getChildDevice("${getACRelay3DNI()}").parse(childState) }
+  if(jsonBody.switch == USBRELAY) { getChildDevice("${getUSBRelayDNI()}").parse(childState) }
+  if(
+    getChildDevice("${getACRelay1DNI()}")?.currentState("switch")?.value == 'on' &&
+    getChildDevice("${getACRelay2DNI()}")?.currentState("switch")?.value == 'on' &&
+    getChildDevice("${getACRelay3DNI()}")?.currentState("switch")?.value == 'on' &&
+    getChildDevice("${getUSBRelayDNI()}")?.currentState("switch")?.value == 'on'
+    ) {
+    sendEvent(name:'switch', value:'on', descriptionText:'All relays are now on', isStateChange:true)
+  } else {
+    sendEvent(name:'switch', value:'off', descriptionText:'All relays are now off', isStateChange:true)
+  }
+}
