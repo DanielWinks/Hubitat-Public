@@ -95,8 +95,9 @@ metadata {
 // =============================================================================
 // Initialize and Configure
 // =============================================================================
-void initialize() {}
+void initialize() { subscribeToEvents() }
 void configure() {
+  subscribeToEvents()
   createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)
   createRemoveShuffleChildDevice(createShuffleChildDevice)
   createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
@@ -194,10 +195,13 @@ void componentRefresh(DeviceWrapper child) {
   switch(command) {
     case 'CrossFade':
       getCrossfadeControlChild().sendEvent(name:'switch', value: this.device.currentState('currentCrossfadeMode').value )
+    break
     case 'Shuffle':
       getShuffleControlChild().sendEvent(name:'switch', value: this.device.currentState('currentShuffleMode').value )
+    break
     case 'RepeatOne':
       getRepeatOneControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatOneMode').value)
+    break
     case 'RepeatAll':
       getRepeatAllControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatAllMode').value )
     break
@@ -327,14 +331,14 @@ void parse(raw) {
   // logDebug("Subscription Id: ${sId}")
   // logDebug("Service Type: ${serviceType}")
   if(serviceType == 'AVTransport') {
-    processAVTransportMessages(message)
     device.updateDataValue('sid1', sId)
+    processAVTransportMessages(message)
   } else if(serviceType == 'RenderingControl') {
-    processRenderingControlMessages(message)
     device.updateDataValue('sid2', sId)
+    processRenderingControlMessages(message)
   } else if(serviceType == 'ZoneGroupTopology') {
-    processZoneGroupTopologyMessages(message)
     device.updateDataValue('sid3', sId)
+    processZoneGroupTopologyMessages(message)
   }
 }
 
@@ -351,27 +355,33 @@ void processAVTransportMessages(Map message) {
   sendEvent(name:'transportStatus', value: status)
 
   String currentPlayMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentPlayMode']['@val']
+  logDebug("Current Play Mode Message: ${currentPlayMode}")
   switch(currentPlayMode) {
     case 'NORMAL':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'off')
+    break
     case 'REPEAT_ALL':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'on')
       sendEvent(name:'currentShuffleMode', value: 'off')
+    break
     case 'REPEAT_ONE':
       sendEvent(name:'currentRepeatOneMode', value: 'on')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'off')
+    break
     case 'SHUFFLE_NOREPEAT':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'on')
+    break
     case 'SHUFFLE':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'on')
       sendEvent(name:'currentShuffleMode', value: 'on')
+    break
     case 'SHUFFLE_REPEAT_ONE':
       sendEvent(name:'currentRepeatOneMode', value: 'on')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
@@ -464,7 +474,7 @@ void processRenderingControlMessages(Map message) {
   String mute = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
     String muted = mute == '1' ? 'muted' : 'unmuted'
-    String previousMutedState = this.device.currentState('mute').value
+    String previousMutedState = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
     if(muted == 'unmuted' && previousMutedState == 'muted') {
       logDebug("Restoring volume after unmute event to level: ${state.restoreLevelAfterUnmute}")
       setLevel(state.restoreLevelAfterUnmute as Integer)
