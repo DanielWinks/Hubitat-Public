@@ -449,24 +449,24 @@ void createPlayerDevices() {
     String oldDni = "${app.id}-${player.id}"
     String dni = "${player.id}".tokenize('_')[1][0..-6] // Get MAC address from RINCON_XXXX names
     DeviceWrapper device = getChildDevice(dni)
-    if (device == null) {
+    DeviceWrapper oldDevice = getChildDevice(oldDni)
+    if (device == null && oldDevice == null) {
       try {
         logInfo "Creating child audio notification device for ${player.name}"
-
         device = addChildDevice('dwinks', 'Sonos Cloud Player', dni, [name: 'Sonos Cloud Player', label: "Sonos Cloud - ${player.name}"])
       } catch (UnknownDeviceTypeException e) {
         logException 'Sonos Cloud Player driver not found (needs installing?)', e
       }
-    } else if(device.getDeviceNetworkId() == oldDni) {
+    }
+    if(oldDevice) {
       //Migrate any devices using old DNI scheme
-      String newDni = dni.tokenize('_')[1][0..-6]
-      if(dni != newDni) {  }
-      device.setDeviceNetworkId(newDni)
-      logDebug("Changing device DNI from ${dni} to ${newDni} to enable local control events.")
+      oldDevice.setDeviceNetworkId(dni)
+      logDebug("Changing device DNI from ${oldDni} to ${dni} to enable local control events.")
+      device = oldDevice
     }
 
     player.each { key, value -> if(key != 'zoneInfo') { device.updateDataValue(key, value as String) }}
-    player.each { key, value -> logDebug("K:V ${key}:${value}")}
+    // player.each { key, value -> logDebug("K:V ${key}:${value}")}
     String ip = ((player.websocketUrl.replace('wss://','')).tokenize(':')[0])+':1400'
     player.each { device.updateDataValue('deviceIp', ip)}
     getPlayerDeviceDescription(ip)
@@ -476,13 +476,12 @@ void createPlayerDevices() {
 
 void getPlayerDeviceDescription(String ipAddress) {
   Map params = [
-    uri: 'http://192.168.1.36:1400/xml/device_description.xml'
+    uri: "http://${ipAddress}/xml/device_description.xml"
   ]
   asynchttpGet('getPlayerDeviceDescriptionCallback', params)
 }
 
 void getPlayerDeviceDescriptionCallback(AsyncResponse response, Map data = null) {
-  logDebug("response.status = ${response.status}")
   if(response.hasError()) {
     logDebug("${response.getErrorData()}")
     return
@@ -516,26 +515,6 @@ void removeOrphans() {
       app.deleteChildDevice(dni)
     }
   }
-}
-
-// =============================================================================
-// Get all music players WIP FOR FOLLOWING "REAL" SONOS PLAYERS
-// =============================================================================
-
-void getAllMusicPlayers() {
-  Map params = [
-    uri:"http://127.0.0.1:8080/device/listJson?capability=capability.musicPlayer",
-    requestContentType: 'application/json',
-    contentType: 'application/json',
-    textParser: true
-  ]
-  logDebug(prettyJson(params))
-  asynchttpGet('showMusic', params, null)
-}
-
-void showMusic(AsyncResponse response, Map data = null) {
-  logDebug(response.getStatus())
-  logDebug(response.getData())
 }
 
 // =============================================================================
