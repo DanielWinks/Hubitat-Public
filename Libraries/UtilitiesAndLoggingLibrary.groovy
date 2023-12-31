@@ -32,6 +32,8 @@ import groovy.transform.CompileStatic
 import groovy.transform.Field
 import hubitat.scheduling.AsyncResponse
 import hubitat.device.HubResponse
+import groovy.util.slurpersupport.GPathResult
+import groovy.xml.XmlUtil
 
 library(
   name: 'UtilitiesAndLoggingLibrary',
@@ -178,7 +180,7 @@ String convertHexToIP(hex) {
 }
 String convertIPToHex(String ipAddress) {
   List parts = ipAddress.tokenize('.')
-  return String.format("%X%X%X%X", parts[0], parts[1], parts[2], parts[3])
+  return String.format("%X%X%X%X", parts[0] as Integer, parts[1] as Integer, parts[2] as Integer, parts[3] as Integer)
 }
 
 void tryCreateAccessToken() {
