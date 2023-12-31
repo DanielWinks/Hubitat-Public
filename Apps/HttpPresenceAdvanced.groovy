@@ -24,7 +24,7 @@
 #include dwinks.UtilitiesAndLoggingLibrary
 
 definition(
-  name: 'HTTP Presence Helper',
+  name: 'HTTP Presence Advanced',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'HTTP',
@@ -52,12 +52,52 @@ Map mainPage() {
     refreshInterval: 0
   ) {
     section('<h2>Devices</h2>') {
-      input 'presenceSensors', 'capability.presenceSensor', title: 'Presence Sensor', required: true, multiple: true
+      input 'presenceSensors', 'capability.presenceSensor', title: 'Presence Sensor', required: true, multiple: false
       input 'disableModes', 'mode', title: 'Disable "to away" presence changes in Mode(s)', multiple: true
     }
 
     section('<h2>Leave delay</h2>') {
       input 'leaveDelay', 'number', title: 'Delay "leave" changes by X seconds', required: true, defaultValue: 0
+      input 'justArrivedTime', 'enum', title: 'Time to consider "Just Arrived"', required: true, defaultValue: 1, options:
+      [
+        1:'1 Minute',
+        2:'2 Minutes',
+        3:'3 Minutes',
+        4:'4 Minutes',
+        5:'5 Minutes',
+        10:'10 Minutes'
+      ]
+      input 'justDepartedTime', 'enum', title: 'Time to consider "Just Departed"', required: true, defaultValue: 1, options:
+      [
+        1:'1 Minute',
+        2:'2 Minutes',
+        3:'3 Minutes',
+        4:'4 Minutes',
+        5:'5 Minutes',
+        10:'10 Minutes'
+      ]
+      input 'ExtendedPresentTime', 'enum', title: 'Time to consider "Extended Present"', required: true, defaultValue: 30, options:
+      [
+        15:'15 Minutes',
+        20:'20 Minutes',
+        30:'30 Minutes',
+        45:'45 Minutes',
+        60:'60 Minutes',
+        90:'90 Minutes',
+        120:'120 Minutes',
+        240:'240 Minutes'
+      ]
+      input 'ExtendedAwayTime', 'enum', title: 'Time to consider "Extended Away"', required: true, defaultValue: 30, options:
+      [
+        15:'15 Minutes',
+        20:'20 Minutes',
+        30:'30 Minutes',
+        45:'45 Minutes',
+        60:'60 Minutes',
+        90:'90 Minutes',
+        120:'120 Minutes',
+        240:'240 Minutes'
+      ]
     }
 
     section("Webhooks") {

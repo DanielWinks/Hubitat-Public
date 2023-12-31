@@ -77,3 +77,13 @@ void sensorCallback(AsyncResponse response, Map data = null){
   if(data.sensor == conductivityState()) { sendEvent(name:'soilConductivity', value:parseJson(response.getData()).value.toInteger()) }
   if(data.sensor == temperatureState()) { sendEvent(name:'temperature', value:celsiusToFahrenheit(parseJson(response.getData()).value.toInteger())) }
 }
+
+void parse(message) {
+  Map parsedMessage = parseLanMessage(message)
+  Map jsonBody = parseJson(parsedMessage.body)
+  logDebug(prettyJson(jsonBody))
+  if(jsonBody?.illuminance != null) { sendEvent(name:'illuminance', value:jsonBody?.illuminance, descriptionText:"Illuminance is now ${val}", isStateChange:true) }
+  if(jsonBody?.soilMoisture != null) { sendEvent(name:'soilMoisture', value:jsonBody?.soilMoisture, descriptionText:"Soil moisture is now ${val}", isStateChange:true) }
+  if(jsonBody?.soilConductivity != null) { sendEvent(name:'soilConductivity', value:jsonBody?.soilConductivity, descriptionText:"Soil conductivity is now ${val}", isStateChange:true) }
+  if(jsonBody?.temperature != null) { sendEvent(name:'temperature', value:jsonBody?.temperature, descriptionText:"Temperature is now ${val}", isStateChange:true) }
+}

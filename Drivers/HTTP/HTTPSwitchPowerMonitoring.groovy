@@ -36,9 +36,10 @@ metadata {
     command 'restartESP'
     command 'initialize'
 
-    attribute '5MinEnergy', 'NUMBER'
-    attribute '15MinEnergy', 'NUMBER'
-    attribute '1HrEnergy', 'NUMBER'
+    attribute 'energy5Min', 'NUMBER'
+    attribute 'energy15Min', 'NUMBER'
+    attribute 'energy1Hr', 'NUMBER'
+    attribute 'energyDaily', 'NUMBER'
 
     attribute 'status', 'ENUM', ['online', 'offline']
     attribute 'uptime', 'NUMBER'
@@ -53,7 +54,6 @@ metadata {
 }
 
 @Field static final String RELAY = 'relay'
-@Field static final String RELAY_STATE = '/switch/relay'
 @Field static final String RELAY_STATE = '/switch/relay'
 
 String turnOnRelayCommandTopic() { return "${RELAY_STATE}/turn_on" }
@@ -81,4 +81,15 @@ void on() {
 
 void off() {
   sendCommandAsync(turnOffRelayCommandTopic(), null, null)
+}
+
+void parse(message) {
+  Map parsedMessage = parseLanMessage(message)
+  Map jsonBody = parseJson(parsedMessage.body)
+  logDebug(prettyJson(jsonBody))
+  if(jsonBody?.switch != null) { sendEvent(name:'switch', value:jsonBody?.switch, descriptionText:"Relay is now ${jsonBody?.switch}", isStateChange:true) }
+  if(jsonBody?.energy5Min != null) { sendEvent(name:'energy5Min', value:jsonBody?.energy5Min, descriptionText:"energy5Min is now ${val}", isStateChange:true) }
+  if(jsonBody?.energy15Min != null) { sendEvent(name:'energy15Min', value:jsonBody?.energy15Min, descriptionText:"energy15Min is now ${val}", isStateChange:true) }
+  if(jsonBody?.energy1Hr != null) { sendEvent(name:'energy1Hr', value:jsonBody?.energy1Hr, descriptionText:"energy1Hr is now ${val}", isStateChange:true) }
+  if(jsonBody?.energyDaily != null) { sendEvent(name:'energyDaily', value:jsonBody?.energyDaily, descriptionText:"energyDaily is now ${val}", isStateChange:true) }
 }
