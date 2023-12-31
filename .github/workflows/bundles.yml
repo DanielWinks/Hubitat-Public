@@ -28,6 +28,7 @@ jobs:
         run: |
           cp Apps/SonosCloudApp.groovy Bundles/SonosCloudController/dwinks.SonosCloudController.groovy
           cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosCloudController/dwinks.UtilitiesAndLoggingLibrary.groovy
+          cp Libraries/SonosMusicAPILibrary.groovy Bundles/SonosCloudController/dwinks.SonosMusicAPILibrary.groovy
           cp Drivers/Component/SonosCloudGroup.groovy Bundles/SonosCloudController/dwinks.SonosCloudGroup.groovy
           cp Drivers/Component/SonosCloudPlayer.groovy Bundles/SonosCloudController/dwinks.SonosCloudPlayer.groovy
 
