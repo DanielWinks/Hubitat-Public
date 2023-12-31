@@ -83,6 +83,7 @@ metadata {
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
+      input 'createMuteChildDevice', 'bool', title: 'Create child device for mute control?', required: false, defaultValue: false
     }
   }
 }
@@ -102,6 +103,7 @@ void configure() {
   createRemoveShuffleChildDevice(createShuffleChildDevice)
   createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
   createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)
+  createRemoveMuteChildDevice(createMuteChildDevice)
 }
 
 // =============================================================================
@@ -194,16 +196,20 @@ void componentRefresh(DeviceWrapper child) {
   String command = child.getDataValue('command')
   switch(command) {
     case 'CrossFade':
-      getCrossfadeControlChild().sendEvent(name:'switch', value: this.device.currentState('currentCrossfadeMode').value )
+      getCrossfadeControlChild().sendEvent(name:'switch', value: this.device.currentState('currentCrossfadeMode')?.value )
     break
     case 'Shuffle':
-      getShuffleControlChild().sendEvent(name:'switch', value: this.device.currentState('currentShuffleMode').value )
+      getShuffleControlChild().sendEvent(name:'switch', value: this.device.currentState('currentShuffleMode')?.value )
     break
     case 'RepeatOne':
-      getRepeatOneControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatOneMode').value)
+      getRepeatOneControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatOneMode')?.value)
     break
     case 'RepeatAll':
-      getRepeatAllControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatAllMode').value )
+      getRepeatAllControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatAllMode')?.value )
+    break
+    case 'Mute':
+      String muteValue = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
+      getMuteControlChild().sendEvent(name:'switch', value: muteValue )
     break
   }
 }
@@ -213,10 +219,13 @@ void componentOn(DeviceWrapper child) {
   switch(command) {
     case 'CrossFade':
       enableCrossfade()
+    break
     case 'Shuffle':
       shuffleOn()
+    break
     case 'RepeatOne':
       repeatOne()
+    break
     case 'RepeatAll':
       repeatAll()
     break
@@ -229,10 +238,13 @@ void componentOff(DeviceWrapper child) {
   switch(command) {
     case 'CrossFade':
       disableCrossfade()
+    break
     case 'Shuffle':
       shuffleOff()
+    break
     case 'RepeatOne':
       repeatNone()
+    break
     case 'RepeatAll':
       repeatNone()
     break
@@ -307,6 +319,23 @@ void createRemoveRepeatAllChildDevice(Boolean create) {
           label: "Sonos RepeatAll Control - ${this.getDataValue('roomName')}"]
       )
       child.updateDataValue('command', 'RepeatAll')
+    } catch (UnknownDeviceTypeException e) {
+      logException('createGroupDevices', e)
+    }
+  } else if (!create && child){ deleteChildDevice(dni) }
+}
+
+void createRemoveMuteChildDevice(Boolean create) {
+  String dni = getMuteControlChildDNI()
+  ChildDeviceWrapper child = getMuteControlChild()
+  if(!child && create) {
+    try {
+      logDebug("Creating Mute Control device")
+      child = addChildDevice('hubitat', 'Generic Component Switch', dni,
+        [ name: 'Sonos Mute Control',
+          label: "Sonos Mute Control - ${this.getDataValue('roomName')}"]
+      )
+      child.updateDataValue('command', 'Mute')
     } catch (UnknownDeviceTypeException e) {
       logException('createGroupDevices', e)
     }
@@ -561,7 +590,9 @@ String getCrossfadeControlChildDNI() { return "${device.getDeviceNetworkId()}-Cr
 String getShuffleControlChildDNI() { return "${device.getDeviceNetworkId()}-ShuffleControl" }
 String getRepeatOneControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatOneControl" }
 String getRepeatAllControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatAllControl" }
+String getMuteControlChildDNI() { return "${device.getDeviceNetworkId()}-MuteControl" }
 ChildDeviceWrapper getCrossfadeControlChild() { return getChildDevice(getCrossfadeControlChildDNI()) }
 ChildDeviceWrapper getShuffleControlChild() { return getChildDevice(getShuffleControlChildDNI()) }
 ChildDeviceWrapper getRepeatOneControlChild() { return getChildDevice(getRepeatOneControlChildDNI()) }
 ChildDeviceWrapper getRepeatAllControlChild() { return getChildDevice(getRepeatAllControlChildDNI()) }
+ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlChildDNI()) }
