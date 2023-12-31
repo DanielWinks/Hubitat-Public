@@ -358,7 +358,7 @@ void appButtonHandler(String buttonName) {
 // =============================================================================
 
 void testButton() {
-  logDebug(getCommand('Browse'))
+  createPlayerDevices()
 }
 
 // =============================================================================
@@ -414,7 +414,7 @@ void configure() {
 }
 
 // =============================================================================
-// Group and Player Device Creation
+// Create Group and Player Devices
 // =============================================================================
 
 void createGroupDevices() {
@@ -446,20 +446,61 @@ void createPlayerDevices() {
   List<Map> devicesToCreate = state.players.values().findAll { it -> it.id in playerDevices } ?: []
   logDebug(devicesToCreate)
   for (Map player in devicesToCreate) {
-    String dni = "${app.id}-${player.id}"
-    logDebug("DNI: ${dni}")
+    String oldDni = "${app.id}-${player.id}"
+    String dni = "${player.id}".tokenize('_')[1][0..-6] // Get MAC address from RINCON_XXXX names
     DeviceWrapper device = getChildDevice(dni)
     if (device == null) {
       try {
         logInfo "Creating child audio notification device for ${player.name}"
+
         device = addChildDevice('dwinks', 'Sonos Cloud Player', dni, [name: 'Sonos Cloud Player', label: "Sonos Cloud - ${player.name}"])
       } catch (UnknownDeviceTypeException e) {
         logException 'Sonos Cloud Player driver not found (needs installing?)', e
       }
+    } else if(device.getDeviceNetworkId() == oldDni) {
+      //Migrate any devices using old DNI scheme
+      String newDni = dni.tokenize('_')[1][0..-6]
+      if(dni != newDni) {  }
+      device.setDeviceNetworkId(newDni)
+      logDebug("Changing device DNI from ${dni} to ${newDni} to enable local control events.")
     }
+
     player.each { key, value -> if(key != 'zoneInfo') { device.updateDataValue(key, value as String) }}
+    player.each { key, value -> logDebug("K:V ${key}:${value}")}
+    String ip = ((player.websocketUrl.replace('wss://','')).tokenize(':')[0])+':1400'
+    player.each { device.updateDataValue('deviceIp', ip)}
+    getPlayerDeviceDescription(ip)
   }
   removeOrphans()
+}
+
+void getPlayerDeviceDescription(String ipAddress) {
+  Map params = [
+    uri: 'http://192.168.1.36:1400/xml/device_description.xml'
+  ]
+  asynchttpGet('getPlayerDeviceDescriptionCallback', params)
+}
+
+void getPlayerDeviceDescriptionCallback(AsyncResponse response, Map data = null) {
+  logDebug("response.status = ${response.status}")
+  if(response.hasError()) {
+    logDebug("${response.getErrorData()}")
+    return
+  }
+  GPathResult xmlData = response.getXml()
+  String modelName = xmlData['device']['modelName'].text()
+  String swGen = xmlData['device']['swGen'].text()
+  String roomName = xmlData['device']['roomName'].text()
+  String dni = xmlData['device']['MACAddress'].text().replace(':','')
+
+  DeviceWrapper device = getChildDevice(dni)
+  if (device != null) {
+    logDebug("Setting device data: ${modelName} ${swGen} ${roomName}")
+    device.updateDataValue('modelName', modelName)
+    device.updateDataValue('swGen', swGen)
+    device.updateDataValue('roomName', roomName)
+  }
+  // logDebug("Response: ${().getName()}")
 }
 
 void removeOrphans() {
