@@ -586,6 +586,15 @@ void getPlayersAndGroupsCallback(AsyncResponse response, Map data = null) {
   playerSelectionOptions = state.players.collectEntries {id, player ->  [(id): player.name]  }
 }
 
+// String getGroupForPlayer(String playerId) {
+//   logDebug "Getting groupId for player: ${playerId}..."
+//   Map groups = state.groups
+//   groups = groups.findAll { id, group -> group.playerIds }
+//   Map options = groups.collectEntries { groupId, group -> [(groupId): group.playerIds]}
+//   String gId = options.collectEntries { k, v -> [k, v.findAll { it.contains(playerId) }] }.findAll { k, v -> v.size() > 0 }.keySet()[0]
+//   return gId
+// }
+
 String getGroupForPlayer(String playerId) {
   logDebug "Getting groupId for player: ${playerId}..."
   Map groups = state.groups
@@ -628,66 +637,64 @@ void componentMutePlayer(DeviceWrapper device, Boolean muted) {
 void componentMuteGroup(DeviceWrapper device, Boolean muted) {
   logDebug('Muting...')
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
+  String groupId = device.currentState('groupId').value
   Map data = [muted:muted]
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/mute", data)
 }
 
 void componentSetGroupLevel(DeviceWrapper device, BigDecimal level) {
   logDebug("Setting volue to ${level}...")
-  String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  Map data = [volume:level as int]
+  String groupId = device.currentState('groupId').value
+  Map data = [volume:level as Integer]
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume", data)
 }
 
 void componentSetGroupRelativeLevel(DeviceWrapper device, BigDecimal level) {
-  logDebug("Setting relative group volue to ${level}...")
-  String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  Map data = [volumeDelta:level as int]
+  logDebug("Setting relative group volume to ${level}...")
+  String groupId = device.currentState('groupId').value
+  Map data = [volumeDelta:level as Integer]
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/relative", data)
 }
 
 void componentSetPlayerLevel(DeviceWrapper device, BigDecimal level) {
   logDebug("Setting volue to ${level}...")
   String playerId = device.getDataValue('id')
-  Map data = [volume:level as int]
+  Map data = [volume:level as Integer]
   postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume", data)
 }
 
 void componentSetPlayerRelativeLevel(DeviceWrapper device, BigDecimal level) {
-  logDebug("Setting volue to ${level}...")
+  logDebug("Setting player relative volume to ${level}...")
   String playerId = device.getDataValue('id')
-  Map data = [volumeDelta:level as int]
+  Map data = [volumeDelta:level as Integer]
   postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume/relative", data)
 }
 
 void componentPlay(DeviceWrapper device) {
   logDebug('componentPlay()')
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
+  String groupId = device.currentState('groupId').value
   postJsonAsync("${apiPrefix}/groups/${groupId}/playback/play")
 }
 
 void componentStop(DeviceWrapper device) {
   logDebug('componentStop()')
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
+  String groupId = device.currentState('groupId').value
   postJsonAsync("${apiPrefix}/groups/${groupId}/playback/pause")
 }
 
 void componentPreviousTrack(DeviceWrapper device) {
   logDebug('componentPreviousTrack()')
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
+  String groupId = device.currentState('groupId').value
   postJsonAsync("${apiPrefix}/groups/${groupId}/playback/skipToPreviousTrack")
 }
 
 void componentNextTrack(DeviceWrapper device) {
   logDebug('componentNextTrack()')
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
+  String groupId = device.currentState('groupId').value
   postJsonAsync("${apiPrefix}/groups/${groupId}/playback/skipToNextTrack")
 }
 
@@ -718,7 +725,7 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
 
 void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
   logDebug('Loading favorites...')
-  String groupId = getGroupForPlayer(device.getDataValue('id'))
+  String groupId = device.currentState('groupId').value
   Map data = [
     action:"REPLACE",
     favoriteId:favoriteId,
@@ -730,9 +737,7 @@ void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
 
 void componentSetPlayModes(DeviceWrapper device, Map playModes) {
   logDebug 'Setting Play Modes...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String group = getGroupForPlayer(playerId)
+  String groupId = device.currentState('groupId').value
   postJsonAsync("${apiPrefix}/groups/${group}/playback/playMode", playModes)
 }
 
