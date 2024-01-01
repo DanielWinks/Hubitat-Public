@@ -621,17 +621,31 @@ void componentPlayTrack(DeviceWrapper device, String uri, BigDecimal volume = nu
 void componentMutePlayer(DeviceWrapper device, Boolean muted) {
   logDebug('Muting...')
   String playerId = device.getDataValue('id')
+  Map data = [muted:muted]
+  postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume/mute", data)
+}
+
+void componentMuteGroup(DeviceWrapper device, Boolean muted) {
+  logDebug('Muting...')
+  String playerId = device.getDataValue('id')
   String groupId = getGroupForPlayer(playerId)
   Map data = [muted:muted]
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/mute", data)
 }
 
-void componentSetLevel(DeviceWrapper device, BigDecimal level) {
+void componentSetGroupLevel(DeviceWrapper device, BigDecimal level) {
   logDebug("Setting volue to ${level}...")
   String playerId = device.getDataValue('id')
   String groupId = getGroupForPlayer(playerId)
   Map data = [volume:level as int]
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume", data)
+}
+
+void componentSetPlayerLevel(DeviceWrapper device, BigDecimal level) {
+  logDebug("Setting volue to ${level}...")
+  String playerId = device.getDataValue('id')
+  Map data = [volume:level as int]
+  postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume", data)
 }
 
 void componentPlay(DeviceWrapper device) {
