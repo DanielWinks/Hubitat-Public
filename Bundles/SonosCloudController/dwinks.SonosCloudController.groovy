@@ -261,7 +261,7 @@ Map mainPage() {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-      input 'testButton', 'button', title: 'Test'
+      input 'updateDevicesButton', 'button', title: 'Update Devices to Latest SID schema'
     }
   }
 }
@@ -347,7 +347,7 @@ void refreshPlayersAndGroups() {
 }
 
 void appButtonHandler(String buttonName) {
-  if(buttonName == 'testButton') { testButton() }
+  if(buttonName == 'updateDevicesButton') { createPlayerDevices() }
   if(buttonName == 'saveGroup') { saveGroup() }
   if(buttonName == 'deleteGroup') { deleteGroup() }
   if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }

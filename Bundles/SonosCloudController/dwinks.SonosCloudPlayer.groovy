@@ -431,7 +431,7 @@ void processAVTransportMessages(Map message) {
     sendEvent(name:'currentTrackDuration', value: currentTrackDuration)
 
     String currentTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
-    GPathResult currentTrackMetaDataXML = parseXML(currentTrackMetaData)
+    GPathResult currentTrackMetaDataXML
     if(currentTrackMetaData) {currentTrackMetaDataXML = parseXML(currentTrackMetaData)}
     if(currentTrackMetaDataXML) {
       sendEvent(name:'currentArtistName', value: currentTrackMetaDataXML['item']['creator'])
