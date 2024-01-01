@@ -190,6 +190,7 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
 void mute(){ parent?.componentMutePlayer(this.device, true) }
 void unmute(){ parent?.componentMutePlayer(this.device, false) }
 void setLevel(BigDecimal level) { parent?.componentSetPlayerLevel(this.device, level) }
+void setVolume(BigDecimal level) { setLevel(level) }
 
 void muteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, true) }
