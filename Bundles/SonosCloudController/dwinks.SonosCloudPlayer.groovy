@@ -494,7 +494,7 @@ void processAVTransportMessages(Map message) {
         metaData: metaData,
         trackMetaData: trackMetaData
       ]
-      sendEvent(name: trackData, value: trackData)
+      sendEvent(name: 'trackData', value: trackData)
     }
   }
   // event.'**'.findAll{it.name() == 'TransportState'}.each{it -> logDebug("Val= ${it.'@val'}")}
