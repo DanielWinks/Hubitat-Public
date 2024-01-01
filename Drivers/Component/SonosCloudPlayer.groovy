@@ -44,6 +44,8 @@ metadata {
 
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume', type: 'NUMBER']]
+  command 'groupVolumeUp'
+  command 'groupVolumeDown'
   command 'muteGroup'
   command 'unmuteGroup'
 
@@ -94,7 +96,7 @@ metadata {
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
-      input 'createMuteChildDevice', 'bool', title: 'Create child device for mute control?', required: false, defaultValue: false
+      input 'createMuteChildDevice', 'bool', title: 'Create child device for <b>player</b> mute control?', required: false, defaultValue: false
     }
   }
 }
@@ -194,19 +196,11 @@ void setGroupMute(String mode) {
   if(mode == 'on') { parent?.componentMuteGroup(this.device, true) }
   else { parent?.componentMuteGroup(this.device, false) }
 }
+void groupVolumeUp() { parent?.componentSetGroupRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+void groupVolumeDown() { parent?.componentSetGroupRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
 
-
-void volumeDown() {
-  Integer level = this.device.currentState('level').value as Integer
-  BigDecimal newLevel = Math.min((level - (volumeAdjustAmount as Integer)), 100)
-  parent?.componentSetPlayerLevel(this.device, newLevel)
-}
-void volumeUp() {
-  Integer level = this.device.currentState('level').value as Integer
-  BigDecimal newLevel = Math.max((level + (volumeAdjustAmount as Integer)), 100)
-  parent?.componentSetPlayerLevel(this.device, level + (volumeAdjustAmount as Integer))
-
-}
+void volumeUp() { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+void volumeDown() { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
 
 void play() { parent?.componentPlay(this.device) }
 void stop() { parent?.componentStop(this.device) }
@@ -414,6 +408,11 @@ void parse(raw) {
 void processAVTransportMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
 
+  String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
+
+  Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
+  logDebug("Is AirPlay ${isAirPlay}")
+
   String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val']
   status = status.toLowerCase().replace('_playback','')
   sendEvent(name:'status', value: status)
@@ -426,31 +425,49 @@ void processAVTransportMessages(Map message) {
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'off')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
     break
     case 'REPEAT_ALL':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'on')
       sendEvent(name:'currentShuffleMode', value: 'off')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
     break
     case 'REPEAT_ONE':
       sendEvent(name:'currentRepeatOneMode', value: 'on')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'off')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
     break
     case 'SHUFFLE_NOREPEAT':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'on')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
     break
     case 'SHUFFLE':
       sendEvent(name:'currentRepeatOneMode', value: 'off')
       sendEvent(name:'currentRepeatAllMode', value: 'on')
       sendEvent(name:'currentShuffleMode', value: 'on')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'on') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
     break
     case 'SHUFFLE_REPEAT_ONE':
       sendEvent(name:'currentRepeatOneMode', value: 'on')
       sendEvent(name:'currentRepeatAllMode', value: 'off')
       sendEvent(name:'currentShuffleMode', value: 'on')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
     break
   }
 
@@ -458,9 +475,7 @@ void processAVTransportMessages(Map message) {
   String currentCrossfadeMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentCrossfadeMode']['@val']
   currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
   sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
-  if(createCrossfadeChildDevice) {
-    getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode)
-  }
+  if(createCrossfadeChildDevice) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
 
   if(!disableArtistAlbumTrackEvents) {
     String currentTrackDuration = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackDuration']['@val']
@@ -493,7 +508,7 @@ void processAVTransportMessages(Map message) {
       String level = this.device.currentState('level').value
       String mute = this.device.currentState('mute').value
       String uri = propertyset['property']['LastChange']['Event']['InstanceID']['AVTransportURI']['@val']
-      String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
+
       // String transportUri = uri ?? Seems to be the same on the built-in driver
       String enqueuedUri = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURI']['@val']
       String metaData = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURIMetaData']['@val']
