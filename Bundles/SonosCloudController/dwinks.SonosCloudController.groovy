@@ -608,6 +608,16 @@ String getGroupForPlayer(String playerId) {
 // Component Methods for Child Devices
 // =============================================================================
 
+void sendEventsToSiblingDevice(String dni, List<Map> events) {
+  ChildDeviceWrapper child = getChildDevice(dni)
+  if(child) { events.each{ child.sendEvent(it) }}
+}
+
+void sendEventToSiblingDevice(String dni, Map event) {
+  ChildDeviceWrapper child = getChildDevice(dni)
+  if(child) { child.sendEvent(event) }
+}
+
 void componentPlayText(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   String playerId = device.getDataValue('id')
   logDebug "${device} play text ${text} (volume ${volume ?: 'not set'})"
