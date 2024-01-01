@@ -283,7 +283,7 @@ Map Queue = [
 ]
 
 void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni) {
-  logDebug("Subcribing to ${eventSubURL} ${host} ${timeout}")
+  logDebug("Subcribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
   String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
   if (host && eventSubURL && timeout > 0 && dni) {
     sendHubCommand(new hubitat.device.HubAction([
@@ -301,8 +301,8 @@ void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, Strin
   }
 }
 
-void sonosEventRenew(String eventSubURL, String host, String timeout, String dni, String subscriptionId) {
-  logDebug("Subcribing to ${eventSubURL} ${host} ${timeout}")
+void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dni, String subscriptionId) {
+  logDebug("Resubcribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
   String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
   if (host && eventSubURL && subscriptionId && dni) {
     sendHubCommand(new hubitat.device.HubAction([
@@ -311,7 +311,8 @@ void sonosEventRenew(String eventSubURL, String host, String timeout, String dni
       headers: [
         HOST: host,
         CALLBACK: "<http://${callback}>",
-        SID: "uuid:${subscriptionId}"
+        SID: "uuid:${subscriptionId}",
+        TIMEOUT: "Second-${timeout}"
       ]
     ], dni))
   } else {
@@ -320,7 +321,7 @@ void sonosEventRenew(String eventSubURL, String host, String timeout, String dni
 }
 
 void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String subscriptionId) {
-  logDebug("Subcribing to ${eventSubURL} ${host} ${timeout}")
+  logDebug("Unsubscribing from ${eventSubURL} for ${host} for subId of ${subscriptionId} using DNI of ${dni}")
   if (host && eventSubURL && subscriptionId && dni) {
     sendHubCommand(new hubitat.device.HubAction([
       method: 'UNSUBSCRIBE',
