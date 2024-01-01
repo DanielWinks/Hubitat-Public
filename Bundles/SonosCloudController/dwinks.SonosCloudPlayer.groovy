@@ -81,6 +81,7 @@ metadata {
   attribute 'groupCoordinatorName', 'string'
   attribute 'groupCoordinatorId', 'string'
   attribute 'groupId', 'string'
+  attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberIds', 'JSON_OBJECT'
@@ -409,6 +410,8 @@ void parse(raw) {
 // =============================================================================
 
 void processAVTransportMessages(Map message) {
+  List<String> groupMemberDNIs = getGroupMemberDNIs()
+
   GPathResult propertyset = parseSonosMessageXML(message)
 
   String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
@@ -491,6 +494,18 @@ void processAVTransportMessages(Map message) {
       sendEvent(name:'currentArtistName', value: currentTrackMetaDataXML['item']['creator'])
       sendEvent(name:'currentAlbumName',  value: currentTrackMetaDataXML['item']['title'])
       sendEvent(name:'currentTrackName',  value: currentTrackMetaDataXML['item']['album'])
+
+      if(this.device.currentState('isGroupCoordinator')?.value == 'on') {
+        List<Map> events = [
+          [name:'currentTrackDuration', value: currentTrackDuration],
+          [name:'currentArtistName', value: currentTrackMetaDataXML['item']['creator']],
+          [name:'currentAlbumName',  value: currentTrackMetaDataXML['item']['title']],
+          [name:'currentTrackName',  value: currentTrackMetaDataXML['item']['album']]
+        ]
+
+        groupMemberDNIs.each{dni-> parent?.sendEventsToSiblingDevice(dni, events) }
+        // logDebug("Group Member Ids: ${groupMemberDNIs}")//TODO ITERATE AND SEND EVENTS
+      }
     }
 
     String nextTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['NextTrackMetaData']['@val']
@@ -500,6 +515,17 @@ void processAVTransportMessages(Map message) {
       sendEvent(name:'nextArtistName', value: nextTrackMetaDataXML['item']['creator'])
       sendEvent(name:'nextAlbumName',  value: nextTrackMetaDataXML['item']['title'])
       sendEvent(name:'nextTrackName',  value: nextTrackMetaDataXML['item']['album'])
+
+      if(this.device.currentState('isGroupCoordinator')?.value == 'on') {
+        List<Map> events = [
+          [name:'nextArtistName', value: nextTrackMetaDataXML['item']['creator']],
+          [name:'nextAlbumName',  value: nextTrackMetaDataXML['item']['title']],
+          [name:'nextTrackName',  value: nextTrackMetaDataXML['item']['album']]
+        ]
+
+        groupMemberDNIs.each{dni-> parent?.sendEventsToSiblingDevice(dni, events) }
+        // logDebug("Group Member Ids: ${groupMemberDNIs}")//TODO ITERATE AND SEND EVENTS
+      }
     }
 
     if(!disableTrackDataEvents && currentTrackMetaDataXML) {
@@ -687,4 +713,12 @@ void clearCurrentNextArtistAlbumTrackData() {
 
 void clearTrackDataEvent() {
   device.deleteCurrentState('trackData')
+}
+
+List<String> getGroupMemberDNIs() {
+  List groupMemberDNIs = []
+  List groupMemberRincons = (this.device.currentState('groupMemberIds')?.value.replace('[','').replace(']','')).tokenize(',')
+  groupMemberRincons.remove(this.device.getDataValue('id'))
+  groupMemberRincons.each{it -> groupMemberDNIs.add("${it}".tokenize('_')[1][0..-6])}
+  return groupMemberDNIs
 }
