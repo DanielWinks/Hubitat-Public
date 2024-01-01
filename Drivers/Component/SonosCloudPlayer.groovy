@@ -80,8 +80,10 @@ metadata {
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
   attribute 'groupCoordinatorId', 'string'
+  attribute 'groupId', 'string'
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
+  attribute 'groupMemberIds', 'JSON_OBJECT'
   attribute 'Fav', 'string'
   }
 
@@ -190,7 +192,8 @@ void setLevel(BigDecimal level) { parent?.componentSetPlayerLevel(this.device, l
 
 void muteGroup(){ parent?.componentMuteGroup(this.device, true) }
 void unmuteGroup(){ parent?.componentMuteGroup(this.device, false) }
-void setGroupLevel(BigDecimal level) { parent?.componentSetGroupLevel(this.device, level) }
+void setGroupVolume(BigDecimal level) { parent?.componentSetGroupLevel(this.device, level) }
+void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
 void setGroupMute(String mode) {
   logDebug("Setting group mute to ${mode}")
   if(mode == 'on') { parent?.componentMuteGroup(this.device, true) }
@@ -583,15 +586,23 @@ void processZoneGroupTopologyMessages(Map message) {
   // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
   String currentGroupCoordinatorName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
   String currentGroupCoordinatorId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
+  String currentGroupId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
+  String currentId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
   Integer currentGroupMemberCount = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
+  List currentGroupMemberIds = []
+  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberIds.add(it['@UUID']) }
+  logDebug("Current Group Member IDs: ${currentGroupMemberIds}")
   String groupName = propertyset['property']['ZoneGroupName'].text()
   // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
   // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
   logDebug("Current group name: ${currentGroupName} Current coordinator: ${currentGroupCoordinator} Current group member count: ${currentGroupMemberCount}")
   sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)
   sendEvent(name: 'groupCoordinatorId', value: currentGroupCoordinatorId)
+  sendEvent(name: 'groupId', value: currentGroupId)
   sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
+  sendEvent(name: 'isGroupCoordinator', value: currentGroupCoordinatorId == device.getDataValue('id')  ? 'on' : 'off')
   sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
+  sendEvent(name: 'groupMemberIds' , value: currentGroupMemberIds)
   sendEvent(name: 'groupName', value: groupName)
 
   // logDebug(getObjectClassName(group))
