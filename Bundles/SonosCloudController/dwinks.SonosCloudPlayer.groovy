@@ -33,6 +33,7 @@ metadata {
   capability 'SpeechSynthesis'
   capability 'Configuration'
   capability 'Initialize'
+  capability 'Refresh'
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -199,6 +200,8 @@ void getFavorites() {
 void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
 }
+
+void refresh() {subscribeToEvents()}
 
 // =============================================================================
 // Child device methods
