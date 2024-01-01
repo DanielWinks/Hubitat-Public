@@ -191,7 +191,7 @@ void stop() { parent?.componentStop(this.device) }
 void pause() { parent?.componentStop(this.device) }
 void nextTrack() { parent?.componentNextTrack(this.device) }
 void previousTrack() { parent?.componentPreviousTrack(this.device) }
-void refresh() { parent?.componentRefresh(this.device) }
+void refresh() {subscribeToEvents()}
 
 void getFavorites() {
   Map favorites = parent?.componentGetFavorites(this.device)
@@ -201,7 +201,7 @@ void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
 }
 
-void refresh() {subscribeToEvents()}
+
 
 // =============================================================================
 // Child device methods
