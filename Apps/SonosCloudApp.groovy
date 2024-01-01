@@ -641,11 +641,26 @@ void componentSetGroupLevel(DeviceWrapper device, BigDecimal level) {
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume", data)
 }
 
+void componentSetGroupRelativeLevel(DeviceWrapper device, BigDecimal level) {
+  logDebug("Setting relative group volue to ${level}...")
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayer(playerId)
+  Map data = [volumeDelta:level as int]
+  postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/relative", data)
+}
+
 void componentSetPlayerLevel(DeviceWrapper device, BigDecimal level) {
   logDebug("Setting volue to ${level}...")
   String playerId = device.getDataValue('id')
   Map data = [volume:level as int]
   postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume", data)
+}
+
+void componentSetPlayerRelativeLevel(DeviceWrapper device, BigDecimal level) {
+  logDebug("Setting volue to ${level}...")
+  String playerId = device.getDataValue('id')
+  Map data = [volumeDelta:level as int]
+  postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume/relative", data)
 }
 
 void componentPlay(DeviceWrapper device) {
