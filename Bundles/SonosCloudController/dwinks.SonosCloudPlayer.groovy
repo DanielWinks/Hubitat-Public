@@ -96,8 +96,9 @@ metadata {
 // =============================================================================
 // Initialize and Configure
 // =============================================================================
-void initialize() { subscribeToEvents() }
+void initialize() { configure() }
 void configure() {
+  updateDniIfNeeded()
   subscribeToEvents()
   createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)
   createRemoveShuffleChildDevice(createShuffleChildDevice)
@@ -106,6 +107,16 @@ void configure() {
   createRemoveMuteChildDevice(createMuteChildDevice)
 }
 
+void updateDniIfNeeded() {
+  InstalledAppWrapper parentApp = getParent()
+  String oldDni = "${parentApp.getId()}-${device.getDataValue('id')}"
+  String dni = "${device.getDataValue('id')}".tokenize('_')[1][0..-6]
+  logDebug("OldDNI -> newDNI ${oldDni} -> ${dni}")
+  if(device.getDeviceNetworkId() == oldDni) {
+    device.setDeviceNetworkId(dni)
+    logDebug("Set DNI to use new schema...")
+  }
+}
 // =============================================================================
 // Device Methods
 // =============================================================================
