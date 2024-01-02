@@ -397,18 +397,13 @@ void createRemoveMuteChildDevice(Boolean create) {
 // =============================================================================
 
 void parse(raw) {
-  logDebug('Parse!')
   Map message = parseLanMessage(raw)
-  // logDebug("${message.headers}")
   processHeaders(message.headers)
-  // logDebug(message)
   state.remove('currentTrackMetaData')
 
   if(message.body == null) {return}
   String sId = message.headers["SID"]
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
-  // logDebug("Subscription Id: ${sId}")
-  // logDebug("Service Type: ${serviceType}")
   if(serviceType == 'AVTransport') {
     device.updateDataValue('sid1', sId)
     processAVTransportMessages(message)
@@ -619,7 +614,7 @@ void processRenderingControlMessages(Map message) {
 }
 
 void processZoneGroupTopologyMessages(Map message) {
-  logDebug("ZoneGroupTopology: ${message}")
+  // logDebug("ZoneGroupTopology: ${message}")
   GPathResult propertyset = parseSonosMessageXML(message)
 
   String rincon = device.getDataValue('id')
