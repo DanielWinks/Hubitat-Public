@@ -691,6 +691,7 @@ void resubscribeToEvents() {
   sonosEventRenew('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid1'))
   sonosEventRenew('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid2'))
   sonosEventRenew('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid3'))
+  runIn(RESUB_INTERVAL-100, 'resubscribeToEvents')
 }
 
 // =============================================================================
@@ -728,8 +729,15 @@ void clearTrackDataEvent() {
 
 List<String> getGroupMemberDNIs() {
   List groupMemberDNIs = []
-  List groupMemberRincons = (this.device.currentState('groupMemberIds')?.value.replace('[','').replace(']','')).tokenize(',')
-  groupMemberRincons.remove(this.device.getDataValue('id'))
-  groupMemberRincons.each{it -> groupMemberDNIs.add("${it}".tokenize('_')[1][0..-6])}
-  return groupMemberDNIs
+  String groupMemberIds = this.device.currentState('groupMemberIds')?.value
+  groupMemberIds = groupMemberIds != null ?  groupMemberIds.replace('[','').replace(']','') : ""
+  logDebug("Getting group member DNIs... ${groupMemberIds}")
+  if(groupMemberIds.contains(',')) {
+    List groupMemberRincons = groupMemberIds.tokenize(',')
+    groupMemberRincons.remove(this.device.getDataValue('id'))
+    groupMemberRincons.each{it -> groupMemberDNIs.add("${it}".tokenize('_')[1][0..-6])}
+    return groupMemberDNIs
+  } else {
+    return []
+  }
 }
