@@ -25,7 +25,7 @@
 #include dwinks.SMAPILibrary
 
 metadata {
-  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks', importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudPlayer.groovy') {
+  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks', importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudPlayer.groovy', singleThreaded: true) {
   capability 'AudioNotification'
   capability "AudioVolume" //mute - ENUM ["unmuted", "muted"] volume - NUMBER, unit:%  //commands: volumeDown() volumeUp()
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
@@ -59,6 +59,7 @@ metadata {
   command 'repeatAll'
   command 'repeatNone'
   command 'subscribeToEvents'
+  // command 'resubscribeToEvents'
 
   attribute 'currentRepeatOneMode', 'enum', [ 'on', 'off' ]
   attribute 'currentRepeatAllMode', 'enum', [ 'on', 'off' ]
@@ -68,6 +69,7 @@ metadata {
   attribute 'currentArtistName', 'string'
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
+  attribute 'currentTrackNumber', 'number'
   attribute 'nextArtistName', 'string'
   attribute 'nextAlbumName', 'string'
   attribute 'nextTrackName', 'string'
@@ -79,12 +81,12 @@ metadata {
 
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
-  attribute 'groupCoordinatorId', 'string'
-  attribute 'groupId', 'string'
+  // attribute 'groupCoordinatorId', 'string'
+  // attribute 'groupId', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
-  attribute 'groupMemberIds', 'JSON_OBJECT'
+  attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'Fav', 'string'
   }
 
@@ -299,8 +301,92 @@ void componentOff(DeviceWrapper child) {
       repeatNone()
     break
   }
+}
 
+void setPlayMode(String playMode){
+  switch(playMode) {
+    case 'NORMAL':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'off')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
+    break
+    case 'REPEAT_ALL':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'on')
+      sendEvent(name:'currentShuffleMode', value: 'off')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
+    break
+    case 'REPEAT_ONE':
+      sendEvent(name:'currentRepeatOneMode', value: 'on')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'off')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
+    break
+    case 'SHUFFLE_NOREPEAT':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'on')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
+    break
+    case 'SHUFFLE':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'on')
+      sendEvent(name:'currentShuffleMode', value: 'on')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'on') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
+    break
+    case 'SHUFFLE_REPEAT_ONE':
+      sendEvent(name:'currentRepeatOneMode', value: 'on')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'on')
+      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
+      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
+      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
+    break
   }
+}
+
+void setCrossfadeMode(String currentCrossfadeMode) {
+  sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
+  if(createCrossfadeChildDevice) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
+}
+
+void setCurrentTrackDuration(String currentTrackDuration){
+  if(disableArtistAlbumTrackEvents) {return}
+  sendEvent(name:'currentTrackDuration', value: currentTrackDuration)
+}
+
+void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumName, String currentTrackName, Integer currentTrackNumber) {
+  if(disableArtistAlbumTrackEvents) {return}
+  sendEvent(name:'currentArtistName', value: currentArtistName)
+  sendEvent(name:'currentAlbumName',  value: currentAlbumName)
+  sendEvent(name:'currentTrackName',  value: currentTrackName)
+  sendEvent(name:'currentTrackNumber',  value: currentTrackNumber)
+}
+
+void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
+  if(disableArtistAlbumTrackEvents) {return}
+  sendEvent(name:'nextArtistName', value: nextArtistName)
+  sendEvent(name:'nextAlbumName',  value: nextAlbumName)
+  sendEvent(name:'nextTrackName',  value: nextTrackName)
+}
+
+void setTrackDataEvents(Map trackData) {
+  if(disableTrackDataEvents) {return}
+  trackData['level'] = this.device.currentState('level').value
+  trackData['mute'] = this.device.currentState('mute').value
+  sendEvent(name: 'trackData', value: trackData)
+}
 
 // =============================================================================
 // Create Child Devices
@@ -398,21 +484,31 @@ void createRemoveMuteChildDevice(Boolean create) {
 
 void parse(raw) {
   Map message = parseLanMessage(raw)
-  processHeaders(message.headers)
-  state.remove('currentTrackMetaData')
-
+  // logDebug("Message: ${message}")
+  // logDebug("Recieved headers: ${message.headers}")
+  if(message.headers.containsKey('HTTP/1.1 412 Precondition Failed')) {
+    logDebug("Expired subscriptions detected, resubscribing to all...")
+    logDebug("412: ${message}")
+    device.removeDataValue('sid1')
+    device.removeDataValue('sid2')
+    device.removeDataValue('sid3')
+    runIn(5, 'subscribeToEvents', [overwrite: true])
+  }
   if(message.body == null) {return}
   String sId = message.headers["SID"]
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
+  logDebug("Received message for ${serviceType}")
   if(serviceType == 'AVTransport') {
-    device.updateDataValue('sid1', sId)
+    this.device.updateDataValue('sid1', sId)
     processAVTransportMessages(message)
   } else if(serviceType == 'RenderingControl') {
-    device.updateDataValue('sid2', sId)
+    this.device.updateDataValue('sid2', sId)
     processRenderingControlMessages(message)
   } else if(serviceType == 'ZoneGroupTopology') {
-    device.updateDataValue('sid3', sId)
+    this.device.updateDataValue('sid3', sId)
     processZoneGroupTopologyMessages(message)
+  } else {
+    logDebug("Could not determine service type for message: ${message}")
   }
 }
 
@@ -420,163 +516,7 @@ void parse(raw) {
 // Parse Helper Methods
 // =============================================================================
 
-void processAVTransportMessages(Map message) {
-  List<String> groupMemberDNIs = getGroupMemberDNIs()
-
-  GPathResult propertyset = parseSonosMessageXML(message)
-
-  String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
-
-  Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
-  logDebug("Is AirPlay ${isAirPlay}")
-
-  String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val']
-  status = status.toLowerCase().replace('_playback','')
-  sendEvent(name:'status', value: status)
-  sendEvent(name:'transportStatus', value: status)
-
-  String currentPlayMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentPlayMode']['@val']
-  logDebug("Current Play Mode Message: ${currentPlayMode}")
-  switch(currentPlayMode) {
-    case 'NORMAL':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'off')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
-    break
-    case 'REPEAT_ALL':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'on')
-      sendEvent(name:'currentShuffleMode', value: 'off')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
-    break
-    case 'REPEAT_ONE':
-      sendEvent(name:'currentRepeatOneMode', value: 'on')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'off')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
-    break
-    case 'SHUFFLE_NOREPEAT':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'on')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
-    break
-    case 'SHUFFLE':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'on')
-      sendEvent(name:'currentShuffleMode', value: 'on')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'on') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
-    break
-    case 'SHUFFLE_REPEAT_ONE':
-      sendEvent(name:'currentRepeatOneMode', value: 'on')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'on')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
-    break
-  }
-
-
-  String currentCrossfadeMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentCrossfadeMode']['@val']
-  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
-  sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
-  if(createCrossfadeChildDevice) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
-
-  if(!disableArtistAlbumTrackEvents) {
-    String currentTrackDuration = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackDuration']['@val']
-    sendEvent(name:'currentTrackDuration', value: currentTrackDuration)
-
-    String currentTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
-    GPathResult currentTrackMetaDataXML
-    if(currentTrackMetaData) {currentTrackMetaDataXML = parseXML(currentTrackMetaData)}
-    if(currentTrackMetaDataXML) {
-      sendEvent(name:'currentArtistName', value: currentTrackMetaDataXML['item']['creator'])
-      sendEvent(name:'currentAlbumName',  value: currentTrackMetaDataXML['item']['title'])
-      sendEvent(name:'currentTrackName',  value: currentTrackMetaDataXML['item']['album'])
-
-      if(this.device.currentState('isGroupCoordinator')?.value == 'on') {
-        List<Map> events = [
-          [name:'currentTrackDuration', value: currentTrackDuration],
-          [name:'currentArtistName', value: currentTrackMetaDataXML['item']['creator']],
-          [name:'currentAlbumName',  value: currentTrackMetaDataXML['item']['title']],
-          [name:'currentTrackName',  value: currentTrackMetaDataXML['item']['album']]
-        ]
-
-        groupMemberDNIs.each{dni-> parent?.sendEventsToSiblingDevice(dni, events) }
-        // logDebug("Group Member Ids: ${groupMemberDNIs}")//TODO ITERATE AND SEND EVENTS
-      }
-    }
-
-    String nextTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['NextTrackMetaData']['@val']
-    GPathResult nextTrackMetaDataXML
-    if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
-    if(nextTrackMetaDataXML) {
-      sendEvent(name:'nextArtistName', value: nextTrackMetaDataXML['item']['creator'])
-      sendEvent(name:'nextAlbumName',  value: nextTrackMetaDataXML['item']['title'])
-      sendEvent(name:'nextTrackName',  value: nextTrackMetaDataXML['item']['album'])
-
-      if(this.device.currentState('isGroupCoordinator')?.value == 'on') {
-        List<Map> events = [
-          [name:'nextArtistName', value: nextTrackMetaDataXML['item']['creator']],
-          [name:'nextAlbumName',  value: nextTrackMetaDataXML['item']['title']],
-          [name:'nextTrackName',  value: nextTrackMetaDataXML['item']['album']]
-        ]
-
-        groupMemberDNIs.each{dni-> parent?.sendEventsToSiblingDevice(dni, events) }
-        // logDebug("Group Member Ids: ${groupMemberDNIs}")//TODO ITERATE AND SEND EVENTS
-      }
-    }
-
-    if(!disableTrackDataEvents && currentTrackMetaDataXML) {
-      String name = currentTrackMetaDataXML['item']['title']
-      String artist = currentTrackMetaDataXML['item']['creator']
-      String album = currentTrackMetaDataXML['item']['title']
-      String trackNumber = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrack']['@val']
-      // String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val'].toLowerCase()
-      String level = this.device.currentState('level').value
-      String mute = this.device.currentState('mute').value
-      String uri = propertyset['property']['LastChange']['Event']['InstanceID']['AVTransportURI']['@val']
-
-      // String transportUri = uri ?? Seems to be the same on the built-in driver
-      String enqueuedUri = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURI']['@val']
-      String metaData = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURIMetaData']['@val']
-      String trackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
-
-      Map trackData = [
-        audioSource: "Sonos Q",
-        station: null,
-        name: name,
-        artist: artist,
-        album: album,
-        trackNumber: trackNumber,
-        status: status,
-        level: level,
-        mute: mute,
-        uri: uri,
-        trackUri: trackUri,
-        transportUri: uri,
-        enqueuedUri: enqueuedUri,
-        metaData: metaData,
-        trackMetaData: trackMetaData
-      ]
-      sendEvent(name: 'trackData', value: trackData)
-    }
-  }
-  // event.'**'.findAll{it.name() == 'TransportState'}.each{it -> logDebug("Val= ${it.'@val'}")}
-}
-
+void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
 void processRenderingControlMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
 
@@ -584,11 +524,7 @@ void processRenderingControlMessages(Map message) {
   if(volume) {
     sendEvent(name:'level', value: volume as Integer)
     sendEvent(name:'volume', value: volume as Integer)
-
-    if(volume && (volume as Integer) > 0) {
-      logDebug("Setting volume: ${volume}")
-      state.restoreLevelAfterUnmute = volume
-    }
+    if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
   }
 
   String mute = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
@@ -605,55 +541,13 @@ void processRenderingControlMessages(Map message) {
   String bass = propertyset['property']['LastChange']['Event']['InstanceID']['Bass']['@val']
   if(bass) { sendEvent(name:'bass', value: bass as Integer) }
 
-
   String treble = propertyset['property']['LastChange']['Event']['InstanceID']['Treble']['@val']
   if(treble) { sendEvent(name:'treble', value: treble as Integer) }
 
   String loudness = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { sendEvent(name:'loudness', value: loudness == 1 ? 'on' : 'off') }
 }
-
-void processZoneGroupTopologyMessages(Map message) {
-  // logDebug("ZoneGroupTopology: ${message}")
-  GPathResult propertyset = parseSonosMessageXML(message)
-
-  String rincon = device.getDataValue('id')
-  logDebug("RINCON: ${rincon}")
-  // def group = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().each(){logDebug(it.name())}
-  // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
-  String currentGroupCoordinatorName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
-  String currentGroupCoordinatorId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
-  String currentGroupId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
-  String currentId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
-  Integer currentGroupMemberCount = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
-  List currentGroupMemberIds = []
-  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberIds.add(it['@UUID']) }
-  logDebug("Current Group Member IDs: ${currentGroupMemberIds}")
-  String groupName = propertyset['property']['ZoneGroupName'].text()
-  // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
-  // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
-  logDebug("Current group name: ${currentGroupName} Current coordinator: ${currentGroupCoordinator} Current group member count: ${currentGroupMemberCount}")
-  sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)
-  sendEvent(name: 'groupCoordinatorId', value: currentGroupCoordinatorId)
-  sendEvent(name: 'groupId', value: currentGroupId)
-  sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
-  sendEvent(name: 'isGroupCoordinator', value: currentGroupCoordinatorId == device.getDataValue('id')  ? 'on' : 'off')
-  sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
-  sendEvent(name: 'groupMemberIds' , value: currentGroupMemberIds)
-  sendEvent(name: 'groupName', value: groupName)
-
-  // logDebug(getObjectClassName(group))
-}
-
-void processHeaders(Map headers) {
-  logDebug(headers['X-SONOS-SERVICETYPE'])
-}
-
-GPathResult parseSonosMessageXML(Map message) {
-  String body = message.body.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
-  GPathResult propertyset = parseXML(body)
-  return propertyset
-}
+void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
 
 // =============================================================================
 // Subscriptions and Resubscriptions
@@ -662,7 +556,6 @@ GPathResult parseSonosMessageXML(Map message) {
 void subscribeToEvents() {
   String host = device.getDataValue('deviceIp')
   String dni = device.getDeviceNetworkId()
-  logDebug("DNI ${dni}")
 
   if(device.getDataValue('sid1')) { sonosEventUnsubscribe('/MediaRenderer/AVTransport/Event', host, dni, device.getDataValue('sid1')) }
   if(device.getDataValue('sid2')) { sonosEventUnsubscribe('/MediaRenderer/RenderingControl/Event', host, dni, device.getDataValue('sid2')) }
@@ -710,8 +603,13 @@ ChildDeviceWrapper getRepeatAllControlChild() { return getChildDevice(getRepeatA
 ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlChildDNI()) }
 
 // =============================================================================
-//
+// Misc helpers
 // =============================================================================
+
+void clearCurrentPlayingStates() {
+  clearCurrentNextArtistAlbumTrackData()
+  clearTrackDataEvent()
+}
 
 void clearCurrentNextArtistAlbumTrackData() {
   device.deleteCurrentState('currentTrackDuration')
@@ -729,11 +627,10 @@ void clearTrackDataEvent() {
 
 List<String> getGroupMemberDNIs() {
   List groupMemberDNIs = []
-  String groupMemberIds = this.device.currentState('groupMemberIds')?.value
-  groupMemberIds = groupMemberIds != null ?  groupMemberIds.replace('[','').replace(']','') : ""
-  logDebug("Getting group member DNIs... ${groupMemberIds}")
-  if(groupMemberIds.contains(',')) {
-    List groupMemberRincons = groupMemberIds.tokenize(',')
+  String groupIds = this.device.getDataValue('groupIds')
+  logDebug("Getting group member DNIs... ${groupIds}")
+  if(groupIds.contains(',')) {
+    List<String> groupMemberRincons = groupIds.tokenize(',')
     groupMemberRincons.remove(this.device.getDataValue('id'))
     groupMemberRincons.each{it -> groupMemberDNIs.add("${it}".tokenize('_')[1][0..-6])}
     return groupMemberDNIs
