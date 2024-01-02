@@ -283,7 +283,7 @@ Map Queue = [
 ]
 
 void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni) {
-  logDebug("Subcribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
+  logDebug("Subscribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
   String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
   if (host && eventSubURL && timeout > 0 && dni) {
     sendHubCommand(new hubitat.device.HubAction([
@@ -302,16 +302,14 @@ void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, Strin
 }
 
 void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dni, String subscriptionId) {
-  logDebug("Resubcribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
-  String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
+  logDebug("Resubscribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
   if (host && eventSubURL && subscriptionId && dni) {
     sendHubCommand(new hubitat.device.HubAction([
       method: 'SUBSCRIBE',
       path: eventSubURL,
       headers: [
         HOST: host,
-        CALLBACK: "<http://${callback}>",
-        SID: "uuid:${subscriptionId}",
+        SID: "${subscriptionId}",
         TIMEOUT: "Second-${timeout}"
       ]
     ], dni))
@@ -328,10 +326,16 @@ void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String s
       path: eventSubURL,
       headers: [
         HOST: host,
-        SID: "uuid:${subscriptionId}"
+        SID: "${subscriptionId}"
       ]
     ], dni))
   } else {
     throw new IllegalArgumentException('Must provide host, eventSubURL, subscriptionId, and dni')
   }
+}
+
+GPathResult parseSonosMessageXML(Map message) {
+  String body = message.body.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
+  GPathResult propertyset = parseXML(body)
+  return propertyset
 }
