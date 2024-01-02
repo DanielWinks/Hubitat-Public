@@ -191,17 +191,32 @@ void mute(){ parent?.componentMutePlayer(this.device, true) }
 void unmute(){ parent?.componentMutePlayer(this.device, false) }
 void setLevel(BigDecimal level) { parent?.componentSetPlayerLevel(this.device, level) }
 
-void muteGroup(){ parent?.componentMuteGroup(this.device, true) }
-void unmuteGroup(){ parent?.componentMuteGroup(this.device, false) }
-void setGroupVolume(BigDecimal level) { parent?.componentSetGroupLevel(this.device, level) }
+void muteGroup(){
+  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, true) }
+  else { parent?.componentMutePlayer(this.device, true) }
+}
+void unmuteGroup(){
+  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, false) }
+  else { parent?.componentMutePlayer(this.device, false) }
+}
+void setGroupVolume(BigDecimal level) {
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevel(this.device, level) }
+  else { parent?.componentSetPlayerLevel(this.device, level)  }
+}
 void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
 void setGroupMute(String mode) {
   logDebug("Setting group mute to ${mode}")
-  if(mode == 'on') { parent?.componentMuteGroup(this.device, true) }
-  else { parent?.componentMuteGroup(this.device, false) }
+  if(mode == 'on') { muteGroup() }
+  else { unmuteGroup() }
 }
-void groupVolumeUp() { parent?.componentSetGroupRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
-void groupVolumeDown() { parent?.componentSetGroupRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
+void groupVolumeUp() {
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+  else { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+}
+void groupVolumeDown() {
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
+  else { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
+}
 
 void volumeUp() { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
 void volumeDown() { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
