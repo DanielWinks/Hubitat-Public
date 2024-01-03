@@ -924,7 +924,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
         }
       }
       if(!favFound) {
-        groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: '')}
+        groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
       }
     }
 
@@ -996,8 +996,8 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
   groupIds.each{groupedDevices.add(getChildDevice(it))}
 
-  groupedDevices.each{dev -> dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}
-  groupedDevices.each{dev -> dev.updateDataValue('groupIds', groupedRincons.join(','))}
+  groupedDevices.each{dev -> if(currentGroupCoordinatorId) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
+  groupedDevices.each{dev -> if(groupedRincons && groupedRincons.size() > 0) {dev.updateDataValue('groupIds', groupedRincons.join(','))}}
 
   String groupId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
   groupedDevices.each{dev -> dev.updateDataValue('groupId', groupId)}
