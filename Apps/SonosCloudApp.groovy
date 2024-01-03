@@ -718,21 +718,25 @@ void componentGetFavorites(DeviceWrapper device) {
 void getFavoritesCallback(AsyncResponse response, Map data = null) {
   ChildDeviceWrapper child = app.getChildDevice(data.dni)
   if (response.hasError()) {
-    logError("getHouseholds error: ${response.getErrorData()}")
+    logError("getFavorites error: ${response.getErrorData()}")
     return
   }
   List respData = response.getJson().items
-
-  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it.resource.id.objectId)}?sid=${it.resource.id.serviceId}", [name:it.name, imageUrl:it.imageUrl ]] }
+  logDebug("Response returned from getFavorites API: ${response.getJson()}")
+  if(respData.size() == 0) {
+    logDebug("Response returned from getFavorites API: ${response.getJson()}")
+    return
+  }
+  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it?.resource?.id?.objectId)}?sid=${it?.resource?.id?.serviceId}", [name:it?.name, imageUrl:it?.imageUrl ]] }
   state.favs = favs
-  // logDebug("formatted response: ${prettyJson(favs)}")
+  logDebug("formatted response: ${prettyJson(favs)}")
 
-  Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
-  // logDebug("formatted response: ${prettyJson(formatted)}")
+  Map formatted = respData.collectEntries() { [it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
+  logDebug("formatted response: ${prettyJson(formatted)}")
   formatted.each(){it ->
     child.sendEvent(
-      name: "Favorite #${it.key} ${it.value.name}",
-      value: "<img src=\"${it.value.imageUrl}\" width=\"200\" height=\"200\" >",
+      name: "Favorite #${it?.key} ${it?.value?.name}",
+      value: "<img src=\"${it?.value?.imageUrl}\" width=\"200\" height=\"200\" >",
       isStateChange: false
     )
   }
@@ -752,12 +756,15 @@ void appGetFavorites() {
 
 void appGetFavoritesCallback(AsyncResponse response, Map data = null) {
   if (response.hasError()) {
-    logError("getHouseholds error: ${response.getErrorData()}")
+    logError("appGetFavorites error: ${response.getErrorData()}")
     return
   }
   List respData = response.getJson().items
-
-  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it.resource.id.objectId).toLowerCase()}", [name:it.name, imageUrl:it.imageUrl, id: it.id ]] }
+  if(respData.size() == 0) {
+    logDebug("Response returned from getFavorites API: ${response.getJson()}")
+    return
+  }
+  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}", [name:it?.name, imageUrl:it?.imageUrl, id: it?.id ]] }
   state.favs = favs
   // logDebug("formatted response: ${prettyJson(favs)}")
 }
@@ -902,21 +909,23 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String foundFavId = null
     String foundFavImageUrl = null
     String foundFavName = null
-    state.favs.keySet().each{key ->
-      if(enqueuedUri.contains(key)) {
-        favFound = true
-        foundFavId = state.favs[key].id
-        foundFavImageUrl = state.favs[key].imageUrl
-        foundFavName = state.favs[key].name
-        groupedDevices.each{dev -> dev.sendEvent(
-          name: 'currentFavorite',
-          value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-          )
+    if(state.favs != null) {
+      state.favs.keySet().each{key ->
+        if(enqueuedUri.contains(key)) {
+          favFound = true
+          foundFavId = state.favs[key].id
+          foundFavImageUrl = state.favs[key].imageUrl
+          foundFavName = state.favs[key].name
+          groupedDevices.each{dev -> dev.sendEvent(
+            name: 'currentFavorite',
+            value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+            )
+          }
         }
       }
-    }
-    if(!favFound) {
-      groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: '')}
+      if(!favFound) {
+        groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: '')}
+      }
     }
 
     Map trackData = [
