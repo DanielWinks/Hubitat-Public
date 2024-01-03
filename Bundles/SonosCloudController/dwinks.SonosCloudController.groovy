@@ -936,9 +936,9 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     ]
     groupedDevices.each{dev -> dev.setTrackDataEvents(trackData)}
   } else {
-    String currentArtistName = null
-    String currentAlbumName = null
-    String currentTrackName = null
+    String currentArtistName = ""
+    String currentAlbumName = ""
+    String currentTrackName = ""
     String trackNumber = 0
     groupedDevices.each{dev -> dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber)}
     groupedDevices.each{dev -> dev.setTrackDataEvents([:])}
@@ -948,14 +948,14 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   GPathResult nextTrackMetaDataXML
   if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
   if(nextTrackMetaDataXML) {
-    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : null
-    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : null
-    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : null
+    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : ""
+    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : ""
+    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : ""
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   } else {
-    String nextArtistName = null
-    String nextAlbumName = null
-    String nextTrackName = null
+    String nextArtistName = ""
+    String nextAlbumName = ""
+    String nextTrackName = ""
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   }
 }
