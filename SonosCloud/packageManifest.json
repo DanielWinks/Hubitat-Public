@@ -1,7 +1,7 @@
 {
   "packageName": "Sonos Cloud Controller",
   "author": "Daniel Winks",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minimumHEVersion": "2.3.4",
   "dateReleased": "2024-01-03",
   "bundles": [
