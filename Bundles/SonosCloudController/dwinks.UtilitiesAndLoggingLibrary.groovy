@@ -170,6 +170,14 @@ String runEveryCustomMinutes(Integer minutes) {
   return "${currentSecond} ${currentMinute}/${minutes} * * * ?"
 }
 
+@CompileStatic
+String runEveryCustomHours(Integer hours) {
+  String currentSecond = new Date().format('ss')
+  String currentMinute = new Date().format('mm')
+  String currentHour = new Date().format('H')
+  return "${currentSecond} ${currentMinute} ${currentHour}/${hours} * * ?"
+}
+
 double nowDays() {
   return (now() / 86400000)
 }

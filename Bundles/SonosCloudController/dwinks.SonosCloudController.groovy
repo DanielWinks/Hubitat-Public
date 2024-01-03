@@ -412,8 +412,7 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
-  runIn(30, 'appGetFavorites')
-  runEvery3Hours('appGetFavorites')
+  runIn(3, 'appGetFavorites', [overwrite: true])
 }
 
 // =============================================================================
@@ -713,6 +712,7 @@ void componentGetFavorites(DeviceWrapper device) {
   String householdId = device.getDataValue('householdId')
   Map params = [uri: "${apiPrefix}/households/${householdId}/favorites", headers: [authorization: 'Bearer ' + state.authToken, contentType: 'application/json']]
   sendQueryAsync(params, "getFavoritesCallback", [dni:device.getDeviceNetworkId()])
+  appGetFavorites()
 }
 
 void getFavoritesCallback(AsyncResponse response, Map data = null) {
@@ -725,10 +725,10 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
 
   Map favs = respData.collectEntries() { ["${URLEncoder.encode(it.resource.id.objectId)}?sid=${it.resource.id.serviceId}", [name:it.name, imageUrl:it.imageUrl ]] }
   state.favs = favs
-  logDebug("formatted response: ${prettyJson(favs)}")
+  // logDebug("formatted response: ${prettyJson(favs)}")
 
   Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
-  logDebug("formatted response: ${prettyJson(formatted)}")
+  // logDebug("formatted response: ${prettyJson(formatted)}")
   formatted.each(){it ->
     child.sendEvent(
       name: "Favorite #${it.key} ${it.value.name}",
@@ -739,11 +739,15 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
 }
 
 void appGetFavorites() {
+  logDebug("Getting (app) favorites...")
+  unschedule('appGetFavorites')
+
   String householdId = state.households[0]
   Map params = [
     uri: "${apiPrefix}/households/${householdId}/favorites",
     headers: [authorization: 'Bearer ' + state.authToken, contentType: 'application/json']]
   sendQueryAsync(params, "appGetFavoritesCallback")
+  runIn(60*60*3, 'appGetFavorites', [overwrite: true])
 }
 
 void appGetFavoritesCallback(AsyncResponse response, Map data = null) {
@@ -755,7 +759,7 @@ void appGetFavoritesCallback(AsyncResponse response, Map data = null) {
 
   Map favs = respData.collectEntries() { ["${URLEncoder.encode(it.resource.id.objectId).toLowerCase()}", [name:it.name, imageUrl:it.imageUrl, id: it.id ]] }
   state.favs = favs
-  logDebug("formatted response: ${prettyJson(favs)}")
+  // logDebug("formatted response: ${prettyJson(favs)}")
 }
 
 void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
@@ -898,15 +902,12 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String foundFavId = null
     String foundFavImageUrl = null
     String foundFavName = null
-    logDebug("Enq ${enqueuedUri}")
     state.favs.keySet().each{key ->
-      logDebug("Key: ${key}")
       if(enqueuedUri.contains(key)) {
         favFound = true
         foundFavId = state.favs[key].id
         foundFavImageUrl = state.favs[key].imageUrl
         foundFavName = state.favs[key].name
-        logDebug("Found: ${state.favs[key]}")
         groupedDevices.each{dev -> dev.sendEvent(
           name: 'currentFavorite',
           value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
