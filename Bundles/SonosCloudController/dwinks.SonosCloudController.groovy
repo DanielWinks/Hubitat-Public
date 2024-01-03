@@ -22,6 +22,7 @@
 */
 
 #include dwinks.UtilitiesAndLoggingLibrary
+#include dwinks.SMAPILibrary
 
 definition(
   name: 'Sonos Cloud Controller',
@@ -605,23 +606,13 @@ String getGroupForPlayer(String playerId) {
 }
 
 String getGroupForPlayerDevice(DeviceWrapper device) {
-  logDebug("Got groupId for player: ${device.currentState('groupId')?.value}")
-  return device.currentState('groupId')?.value
+  logDebug("Got groupId for player: ${device.getDataValue('groupId')}")
+  return device.getDataValue('groupId')
 }
 
 // =============================================================================
 // Component Methods for Child Devices
 // =============================================================================
-
-void sendEventsToSiblingDevice(String dni, List<Map> events) {
-  ChildDeviceWrapper child = getChildDevice(dni)
-  if(child) { events.each{ child.sendEvent(it) }}
-}
-
-void sendEventToSiblingDevice(String dni, Map event) {
-  ChildDeviceWrapper child = getChildDevice(dni)
-  if(child) { child.sendEvent(event) }
-}
 
 void componentPlayText(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   String playerId = device.getDataValue('id')
@@ -819,6 +810,149 @@ void removePlayers(String coordinatorId) {
   String coordinatorIdGroup = ((state.groups.find{ it -> it.value.coordinatorId  == coordinatorId}).key).replace(':','%3A')
   Map data = ['playerIds': [coordinatorId]]
   postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
+}
+
+// =============================================================================
+// Component Methods for Child Events
+// =============================================================================
+
+void processAVTransportMessages(DeviceWrapper cd, Map message) {
+  Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
+  if(!isGroupCoordinator) { return }
+
+  GPathResult propertyset = parseSonosMessageXML(message)
+
+  List<DeviceWrapper> groupedDevices = []
+  List<String> groupIds = []
+  List<String> groupedRincons = (cd.getDataValue('groupIds')).tokenize(',')
+  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupIds.each{groupedDevices.add(getChildDevice(it))}
+
+  String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
+  Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
+
+  String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val']
+  status = status.toLowerCase().replace('_playback','')
+
+  groupedDevices.each{dev ->
+    dev.sendEvent(name:'status', value: status)
+    dev.sendEvent(name:'transportStatus', value: status)
+  }
+
+  String currentPlayMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentPlayMode']['@val']
+  groupedDevices.each{dev -> dev.setPlayMode(currentPlayMode)}
+
+  String currentCrossfadeMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentCrossfadeMode']['@val']
+  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
+  groupedDevices.each{dev -> dev.setCrossfadeMode(currentCrossfadeMode)}
+
+  String currentTrackDuration = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackDuration']['@val']
+  groupedDevices.each{dev -> dev.setCurrentTrackDuration(currentTrackDuration)}
+
+  String currentTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
+  GPathResult currentTrackMetaDataXML
+  if(currentTrackMetaData) {currentTrackMetaDataXML = parseXML(currentTrackMetaData)}
+  if(currentTrackMetaDataXML) {
+    String currentArtistName = status != "stopped" ? currentTrackMetaDataXML['item']['creator'] : null
+    String currentAlbumName = status != "stopped" ? currentTrackMetaDataXML['item']['title'] : null
+    String currentTrackName = status != "stopped" ? currentTrackMetaDataXML['item']['album'] : null
+    String trackNumber = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrack']['@val']
+    groupedDevices.each{dev -> dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)}
+
+    String uri = propertyset['property']['LastChange']['Event']['InstanceID']['AVTransportURI']['@val']
+    // String transportUri = uri ?? Seems to be the same on the built-in driver
+    String enqueuedUri = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURI']['@val']
+    String metaData = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURIMetaData']['@val']
+    String trackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
+
+    Map trackData = [
+      audioSource: "Sonos Q",
+      station: null,
+      name: currentAlbumName,
+      artist: currentArtistName,
+      album: currentAlbumName,
+      trackNumber: trackNumber,
+      status: status,
+      uri: uri,
+      trackUri: trackUri,
+      transportUri: uri,
+      enqueuedUri: enqueuedUri,
+      metaData: metaData,
+      trackMetaData: trackMetaData
+    ]
+    groupedDevices.each{dev -> dev.setTrackDataEvents(trackData)}
+
+  }
+
+  String nextTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['NextTrackMetaData']['@val']
+  GPathResult nextTrackMetaDataXML
+  if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
+  if(nextTrackMetaDataXML) {
+    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : null
+    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : null
+    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : null
+    groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
+  }
+}
+
+void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+  String rincon = cd.getDataValue('id')
+  String currentGroupCoordinatorId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
+  Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
+  Boolean previouslyWasGroupCoordinator = cd.getDataValue('isGroupCoordinator') == 'true'
+  if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
+    logDebug("Just removed from group!")
+    cd.subscribeToEvents()
+  }
+  if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
+    logDebug("Just added to group!")
+  }
+  cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+  if(!isGroupCoordinator) {return}
+
+  List<DeviceWrapper> groupedDevices = []
+  List<String> groupIds = []
+  List<String> groupedRincons = []
+  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID']) }
+  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupIds.each{groupedDevices.add(getChildDevice(it))}
+
+  groupedDevices.each{dev -> dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}
+  groupedDevices.each{dev -> dev.updateDataValue('groupIds', groupedRincons.join(','))}
+
+  String groupId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
+  groupedDevices.each{dev -> dev.updateDataValue('groupId', groupId)}
+
+  String currentGroupCoordinatorName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  Integer currentGroupMemberCount = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
+
+  List currentGroupMemberNames = []
+  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberNames.add(it['@ZoneName']) }
+  logDebug("Current Group Member IDs: ${currentGroupMemberNames}")
+
+  String groupName = propertyset['property']['ZoneGroupName'].text()
+  logDebug("Current group name: ${groupName} Current coordinator: ${currentGroupCoordinatorName} Current group member count: ${currentGroupMemberCount}")
+
+  groupedDevices.each{dev -> dev.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)}
+  groupedDevices.each{dev -> dev.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')}
+  groupedDevices.each{dev -> dev.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')}
+  groupedDevices.each{dev -> dev.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)}
+  groupedDevices.each{dev -> dev.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)}
+  groupedDevices.each{dev -> dev.sendEvent(name: 'groupName', value: groupName)}
+
+  List<Map> events = [
+    [name:'currentCrossfadeMode', value: cd.currentState('currentCrossfadeMode')?.value],
+    [name:'currentRepeatAllMode', value: cd.currentState('currentRepeatAllMode')?.value],
+    [name:'currentRepeatOneMode',  value: cd.currentState('currentRepeatOneMode')?.value],
+    [name:'currentShuffleMode',  value: cd.currentState('currentShuffleMode')?.value],
+    [name:'currentTrackDuration', value: cd.currentState('currentTrackDuration')?.value],
+    [name:'currentTrackName',  value: cd.currentState('currentTrackName')?.value],
+    [name:'nextAlbumName',  value: cd.currentState('nextAlbumName')?.value],
+    [name:'nextArtistName', value: cd.currentState('nextArtistName')?.value],
+    [name:'nextTrackName',  value: cd.currentState('nextTrackName')?.value]
+  ]
+  groupedDevices.each{dev -> if(dev.getDataValue('isGroupCoordinator') == 'false') { events.each{dev.sendEvent(it)}}}
 }
 
 // =============================================================================
