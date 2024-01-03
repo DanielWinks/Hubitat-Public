@@ -6,7 +6,7 @@
       "name": "Sonos Cloud Controller",
       "category": "Integrations",
       "tags": ["Speakers", "Multimedia", "LAN"],
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/SonosCloudController.json",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/SonosCloud/packageManifest.json",
       "description": "Advanced app and driver for Sonos speakers. Allows non-interrupting TTS, grouping control, and more."
     }
   ]
