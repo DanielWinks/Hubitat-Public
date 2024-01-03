@@ -262,7 +262,7 @@ Map mainPage() {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-      input 'testButton', 'button', title: 'Test'
+      // input 'testButton', 'button', title: 'Test'
     }
   }
 }
