@@ -136,24 +136,12 @@ void scheduleValidation() {
   runIn(60, 'validatePosition')
 }
 
-void validateLevel() {
-  logDebug('Validating level...')
-  Integer desiredLevel = state.desiredLevel
-  Integer currentLevel = device.currentValue('level')
-  if (desiredLevel != currentLevel) {
-    setLevel(desiredLevel)
-  } else {
-    logDebug('Desired level matches current level. Success!')
-    state.clear()
-  }
-}
-
 void validatePosition() {
   logDebug 'Validating position...'
-  Integer desiredPosition = state.desiredPosition ?: device.currentValue('position')
+  Integer desiredPosition = state.desiredPosition
   Integer currentPosition = device.currentValue('position')
-  if (desiredPosition != currentPosition) {
-    setPosition(desiredPosition)
+  if (desiredPosition && desiredPosition != currentPosition) {
+    setPosition(new BigDecimal(desiredPosition))
   } else {
     logDebug 'Desired position matches current position. Success!'
     state.clear()
@@ -164,7 +152,6 @@ void stopPositionChange() {
   runIn(10, 'refresh')
   state.clear()
   unschedule('validatePosition')
-  unschedule('validateLevel')
   zigbee.command(CLUSTER_WINDOW_COVERING, COMMAND_PAUSE)
 }
 
