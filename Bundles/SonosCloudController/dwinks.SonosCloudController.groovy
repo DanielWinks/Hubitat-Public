@@ -262,7 +262,7 @@ Map mainPage() {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-      // input 'testButton', 'button', title: 'Test'
+      input 'testButton', 'button', title: 'Test'
     }
   }
 }
@@ -359,7 +359,7 @@ void appButtonHandler(String buttonName) {
 // =============================================================================
 
 void testButton() {
-  createPlayerDevices()
+  appGetFavorites()
 }
 
 // =============================================================================
@@ -412,6 +412,8 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  runIn(30, 'appGetFavorites')
+  runEvery3Hours('appGetFavorites')
 }
 
 // =============================================================================
@@ -531,7 +533,9 @@ List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
 void getHouseholds() {
   if(!state.householdsLastUpdated) { state.householdsLastUpdated = now() }
   if(now() - state.householdsLastUpdated < 1000 * 60 * 2) { return } //Only update every 2 minutes
-  Map params = [uri: "${apiPrefix}/households",headers: [authorization: "Bearer ${state.authToken}"]]
+  Map params = [
+    uri: "${apiPrefix}/households",
+    headers: [ authorization: 'Bearer ' + state.authToken, contentType: 'application/json' ]]
   sendQueryAsync(params, "getHouseholdsCallback")
   state.householdsLastUpdated = now()
 }
@@ -718,6 +722,11 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
     return
   }
   List respData = response.getJson().items
+
+  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it.resource.id.objectId)}?sid=${it.resource.id.serviceId}", [name:it.name, imageUrl:it.imageUrl ]] }
+  state.favs = favs
+  logDebug("formatted response: ${prettyJson(favs)}")
+
   Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
   logDebug("formatted response: ${prettyJson(formatted)}")
   formatted.each(){it ->
@@ -727,6 +736,26 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
       isStateChange: false
     )
   }
+}
+
+void appGetFavorites() {
+  String householdId = state.households[0]
+  Map params = [
+    uri: "${apiPrefix}/households/${householdId}/favorites",
+    headers: [authorization: 'Bearer ' + state.authToken, contentType: 'application/json']]
+  sendQueryAsync(params, "appGetFavoritesCallback")
+}
+
+void appGetFavoritesCallback(AsyncResponse response, Map data = null) {
+  if (response.hasError()) {
+    logError("getHouseholds error: ${response.getErrorData()}")
+    return
+  }
+  List respData = response.getJson().items
+
+  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it.resource.id.objectId).toLowerCase()}", [name:it.name, imageUrl:it.imageUrl, id: it.id ]] }
+  state.favs = favs
+  logDebug("formatted response: ${prettyJson(favs)}")
 }
 
 void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
@@ -865,6 +894,30 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String metaData = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURIMetaData']['@val']
     String trackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
 
+    Boolean favFound = false
+    String foundFavId = null
+    String foundFavImageUrl = null
+    String foundFavName = null
+    logDebug("Enq ${enqueuedUri}")
+    state.favs.keySet().each{key ->
+      logDebug("Key: ${key}")
+      if(enqueuedUri.contains(key)) {
+        favFound = true
+        foundFavId = state.favs[key].id
+        foundFavImageUrl = state.favs[key].imageUrl
+        foundFavName = state.favs[key].name
+        logDebug("Found: ${state.favs[key]}")
+        groupedDevices.each{dev -> dev.sendEvent(
+          name: 'currentFavorite',
+          value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+          )
+        }
+      }
+    }
+    if(!favFound) {
+      groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: '')}
+    }
+
     Map trackData = [
       audioSource: "Sonos Q",
       station: null,
@@ -881,7 +934,13 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       trackMetaData: trackMetaData
     ]
     groupedDevices.each{dev -> dev.setTrackDataEvents(trackData)}
-
+  } else {
+    String currentArtistName = null
+    String currentAlbumName = null
+    String currentTrackName = null
+    String trackNumber = 0
+    groupedDevices.each{dev -> dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber)}
+    groupedDevices.each{dev -> dev.setTrackDataEvents([:])}
   }
 
   String nextTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['NextTrackMetaData']['@val']
@@ -891,6 +950,11 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : null
     String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : null
     String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : null
+    groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
+  } else {
+    String nextArtistName = null
+    String nextAlbumName = null
+    String nextTrackName = null
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   }
 }
@@ -915,6 +979,10 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   List<String> groupIds = []
   List<String> groupedRincons = []
   propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID']) }
+  if(groupedRincons.size() == 0) {
+    logDebug("No grouped rincons found!")
+    return
+  }
   groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
   groupIds.each{groupedDevices.add(getChildDevice(it))}
 
@@ -1017,4 +1085,50 @@ void sendQueryAsync(Map params, String callback, Map data = null) {
 // =============================================================================
 // Local Control
 // =============================================================================
+
+// void componentSetPlayerLevelLocal(DeviceWrapper device, BigDecimal level) {
+//   String uri = device.getDataValue('deviceIp') + RenderingControl.controlURL
+//   String urn = RenderingControl.serviceType
+//   String body = getSetVolumeControlXML(level)
+//   postJsonAsync()
+// }
+void localControlCallback(AsyncResponse response, Map data) {
+  if (response.status != 200) {
+    logError("post request returned HTTP status ${response.status}")
+  }
+  if (response.hasError()) {
+    logError("post request error: ${response.getErrorMessage()}")
+  } else {
+    logDebug("localControlCallback: ${response.getXml()}")
+  }
+}
+
+void componentSetPlayerLevelLocal(DeviceWrapper device, BigDecimal level) {
+  String uri = "http://${device.getDataValue('deviceIp')}${RenderingControl.controlURL}"
+  String soapAction = RenderingControl.serviceType + '#SetVolume'
+  String body = getSetVolumeControlXML("${level}")
+  Map params = [
+      uri: uri,
+      headers: [SOAPAction: soapAction],
+      contentType: 'text/xml',
+      body: body
+    ]
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
+  String uri = "http://${device.getDataValue('deviceIp')}${RenderingControl.controlURL}"
+  String soapAction = RenderingControl.serviceType + '#SetMute'
+  String body = getSetMuteControlXML("${desiredMute}")
+  Map params = [
+      uri: uri,
+      headers: [SOAPAction: soapAction],
+      contentType: 'text/xml',
+      body: body
+    ]
+  asynchttpPost('localControlCallback', params)
+}
+
+
+
 
