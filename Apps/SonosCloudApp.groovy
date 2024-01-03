@@ -34,7 +34,7 @@ definition(
   iconX2Url: '',
   installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: true,
+  singleThreaded: false,
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosCloudApp.groovy'
 )
 
@@ -939,7 +939,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String currentArtistName = ""
     String currentAlbumName = ""
     String currentTrackName = ""
-    String trackNumber = 0
+    Integer trackNumber = 0
     groupedDevices.each{dev -> dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber)}
     groupedDevices.each{dev -> dev.setTrackDataEvents([:])}
   }
