@@ -1084,6 +1084,7 @@ void sendQueryAsync(Map params, String callback, Map data = null) {
     refreshToken()
   }
   try {
+    logDebug("sendQueryAsync params for callback ${callback}: ${params}")
     asynchttpGet(callback, params, data)
   } catch (Exception e) {
     logDebug("Call failed: ${e.message}")
