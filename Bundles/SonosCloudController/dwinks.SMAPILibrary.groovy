@@ -235,7 +235,7 @@ Map ContentDirectory = [
   ]
 ]
 
-Map RenderingControl = [
+@Field private final Map RenderingControl = [
   service: 'RenderingControl',
   serviceType: 'urn:schemas-upnp-org:service:RenderingControl:1',
   controlURL: '/MediaRenderer/RenderingControl/Control',
@@ -303,7 +303,7 @@ void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, Strin
 
 void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dni, String subscriptionId) {
   logDebug("Resubscribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
-  if (host && eventSubURL && subscriptionId && dni) {
+  if (eventSubURL && host && timeout && dni && subscriptionId) {
     sendHubCommand(new hubitat.device.HubAction([
       method: 'SUBSCRIBE',
       path: eventSubURL,
@@ -314,7 +314,7 @@ void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dn
       ]
     ], dni))
   } else {
-    throw new IllegalArgumentException('Must provide host, eventSubURL, subscriptionId, and dni')
+    throw new IllegalArgumentException('Must provide eventSubURL, host, timeout, dni, and subscriptionId')
   }
 }
 
@@ -338,4 +338,36 @@ GPathResult parseSonosMessageXML(Map message) {
   String body = message.body.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
   GPathResult propertyset = parseXML(body)
   return propertyset
+}
+
+String getSetVolumeControlXML(String level) {
+  String action = 'SetVolume'
+  String arg = 'DesiredVolume'
+  return(
+  '<?xml version="1.0"?>'+
+  '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'+
+    '<s:Body>'+
+      "<u:${action} xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"+
+        '<InstanceID>0</InstanceID>'+
+        '<Channel>Master</Channel>'+
+        "<${arg}>${level}</${arg}>"+
+      "</u:${action}>"+
+    '</s:Body>'+
+  '</s:Envelope>')
+}
+
+String getSetMuteControlXML(String desiredMute) {
+  String action = 'SetMute'
+  String arg = 'DesiredMute'
+  return(
+  '<?xml version="1.0"?>'+
+  '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'+
+    '<s:Body>'+
+      "<u:${action} xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"+
+        '<InstanceID>0</InstanceID>'+
+        '<Channel>Master</Channel>'+
+        "<${arg}>${desiredMute}</${arg}>"+
+      "</u:${action}>"+
+    '</s:Body>'+
+  '</s:Envelope>')
 }

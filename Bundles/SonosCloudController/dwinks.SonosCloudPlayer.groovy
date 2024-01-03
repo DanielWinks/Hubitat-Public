@@ -69,6 +69,7 @@ metadata {
   attribute 'currentArtistName', 'string'
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
+  attribute 'currentFavorite', 'string'
   attribute 'currentTrackNumber', 'number'
   attribute 'nextArtistName', 'string'
   attribute 'nextAlbumName', 'string'
@@ -189,22 +190,22 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
   parent?.componentPlayTrack(this.device, uri, volume)
 }
 
-void mute(){ parent?.componentMutePlayer(this.device, true) }
-void unmute(){ parent?.componentMutePlayer(this.device, false) }
-void setLevel(BigDecimal level) { parent?.componentSetPlayerLevel(this.device, level) }
+void mute(){ parent?.componentMutePlayerLocal(this.device, true) }
+void unmute(){ parent?.componentMutePlayerLocal(this.device, false) }
+void setLevel(BigDecimal level) { parent?.componentSetPlayerLevelLocal(this.device, level) }
 void setVolume(BigDecimal level) { setLevel(level) }
 
 void muteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, true) }
-  else { parent?.componentMutePlayer(this.device, true) }
+  else { parent?.componentMutePlayerLocal(this.device, true) }
 }
 void unmuteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, false) }
-  else { parent?.componentMutePlayer(this.device, false) }
+  else { parent?.componentMutePlayerLocal(this.device, false) }
 }
 void setGroupVolume(BigDecimal level) {
   if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevel(this.device, level) }
-  else { parent?.componentSetPlayerLevel(this.device, level)  }
+  else { parent?.componentSetPlayerLevelLocal(this.device, level)  }
 }
 void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
 void setGroupMute(String mode) {
@@ -492,7 +493,8 @@ void parse(raw) {
     device.removeDataValue('sid1')
     device.removeDataValue('sid2')
     device.removeDataValue('sid3')
-    runIn(5, 'subscribeToEvents', [overwrite: true])
+    device.removeDataValue('sid4')
+    runIn(30, 'subscribeToEvents', [overwrite: true])
   }
   if(message.body == null) {return}
   String sId = message.headers["SID"]
@@ -507,6 +509,9 @@ void parse(raw) {
   } else if(serviceType == 'ZoneGroupTopology') {
     this.device.updateDataValue('sid3', sId)
     processZoneGroupTopologyMessages(message)
+  } else if(serviceType == 'GroupRenderingControl') {
+    this.device.updateDataValue('sid4', sId)
+    // processGroupRenderingControlMessages(message)
   } else {
     logDebug("Could not determine service type for message: ${message}")
   }
@@ -560,11 +565,13 @@ void subscribeToEvents() {
   if(device.getDataValue('sid1')) { sonosEventUnsubscribe('/MediaRenderer/AVTransport/Event', host, dni, device.getDataValue('sid1')) }
   if(device.getDataValue('sid2')) { sonosEventUnsubscribe('/MediaRenderer/RenderingControl/Event', host, dni, device.getDataValue('sid2')) }
   if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
+  if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
 
 // sonosEventSubscribe(String eventSubURL, String host, String timeout, String dni)
   sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni)
   sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni)
   sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni)
+  sonosEventSubscribe('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni)
 
   // sonosEventSubscribe('/MediaRenderer/Queue/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/MediaServer/ContentDirectory/Event', host, RESUB_INTERVAL, dni)
@@ -584,6 +591,7 @@ void resubscribeToEvents() {
   sonosEventRenew('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid1'))
   sonosEventRenew('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid2'))
   sonosEventRenew('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid3'))
+  sonosEventRenew('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid4'))
   runIn(RESUB_INTERVAL-100, 'resubscribeToEvents')
 }
 
@@ -606,23 +614,13 @@ ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlC
 // Misc helpers
 // =============================================================================
 
-void clearCurrentPlayingStates() {
-  clearCurrentNextArtistAlbumTrackData()
-  clearTrackDataEvent()
-}
-
 void clearCurrentNextArtistAlbumTrackData() {
-  device.deleteCurrentState('currentTrackDuration')
-  device.deleteCurrentState('currentArtistName')
-  device.deleteCurrentState('currentAlbumName')
-  device.deleteCurrentState('currentTrackName')
-  device.deleteCurrentState('nextArtistName')
-  device.deleteCurrentState('nextAlbumName')
-  device.deleteCurrentState('nextTrackName')
+  setCurrentArtistAlbumTrack(null, null, null, 0)
+  setNextArtistAlbumTrack(null, null, null)
 }
 
 void clearTrackDataEvent() {
-  device.deleteCurrentState('trackData')
+  setTrackDataEvents([:])
 }
 
 List<String> getGroupMemberDNIs() {
