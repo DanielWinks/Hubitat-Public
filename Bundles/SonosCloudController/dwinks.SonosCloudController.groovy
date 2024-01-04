@@ -722,17 +722,22 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
     return
   }
   List respData = response.getJson().items
-  logDebug("Response returned from getFavorites API: ${response.getJson()}")
+  // logDebug("Response returned from getFavorites API: ${prettyJson(response.getJson())}")
   if(respData.size() == 0) {
-    logDebug("Response returned from getFavorites API: ${response.getJson()}")
+    // logDebug("Response returned from getFavorites API: ${prettyJson(response.getJson())}")
     return
   }
-  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it?.resource?.id?.objectId)}?sid=${it?.resource?.id?.serviceId}", [name:it?.name, imageUrl:it?.imageUrl ]] }
+  Map favs = [:]
+  respData.each{
+    if(it?.resource?.id?.objectId != null) {
+      favs["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}"] = [name:it?.name, imageUrl:it?.imageUrl]
+    }
+  }
   state.favs = favs
-  logDebug("formatted response: ${prettyJson(favs)}")
+  // logDebug("formatted response: ${prettyJson(favs)}")
 
   Map formatted = respData.collectEntries() { [it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
-  logDebug("formatted response: ${prettyJson(formatted)}")
+  // logDebug("formatted response: ${prettyJson(formatted)}")
   formatted.each(){it ->
     child.sendEvent(
       name: "Favorite #${it?.key} ${it?.value?.name}",
@@ -761,22 +766,39 @@ void appGetFavoritesCallback(AsyncResponse response, Map data = null) {
   }
   List respData = response.getJson().items
   if(respData.size() == 0) {
-    logDebug("Response returned from getFavorites API: ${response.getJson()}")
+    // logDebug("Response returned from getFavorites API: ${response.getJson()}")
     return
   }
-  Map favs = respData.collectEntries() { ["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}", [name:it?.name, imageUrl:it?.imageUrl, id: it?.id ]] }
+  Map favs = [:]
+  respData.each{
+    if(it?.resource?.id?.objectId != null) {
+      // logDebug("ObjectId: ${it?.resource?.id?.objectId}")
+      favs["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}"] = [name:it?.name, imageUrl:it?.imageUrl]
+    }
+  }
   state.favs = favs
   // logDebug("formatted response: ${prettyJson(favs)}")
 }
 
 void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
   logDebug('Loading favorites...')
+  String action = "REPLACE"
+  Boolean playOnCompletion = true
+  Boolean repeat = false
+  Boolean repeatOne = true
+  Boolean shuffle = false
+  Boolean crossfade = true
+  componentLoadFavoriteFull(device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
+
+void componentLoadFavoriteFull(DeviceWrapper device, String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
+  logDebug('Loading favorites full options...')
   String groupId = getGroupForPlayerDevice(device)
   Map data = [
-    action:"REPLACE",
+    action:action,
     favoriteId:favoriteId,
-    playOnCompletion:true,
-    playModes:['repeat': false,'repeatOne': true],
+    playOnCompletion:playOnCompletion,
+    playModes:['repeat': repeat,'repeatOne': repeatOne, 'shuffle': shuffle, 'crossfade': crossfade],
   ]
   postJsonAsync("${apiPrefix}/groups/${groupId}/favorites", data)
 }
@@ -911,6 +933,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String foundFavName = null
     if(state.favs != null) {
       state.favs.keySet().each{key ->
+        logDebug("URI: ${enqueuedUri} <=> Key: ${key}")
         if(enqueuedUri.contains(key)) {
           favFound = true
           foundFavId = state.favs[key].id

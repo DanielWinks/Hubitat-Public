@@ -50,6 +50,14 @@ metadata {
   command 'unmuteGroup'
 
   command 'getFavorites'
+  command 'loadFavoriteFull', [
+    [ name: 'favoriteId', type: 'STRING'],
+    [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
+    [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
+    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+    [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
+  ]
   command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
 
   command 'enableCrossfade'
@@ -238,6 +246,16 @@ void getFavorites() {
 
 void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
+}
+
+void loadFavoriteFull(String favoriteId, String autoPlay, String queueMode, String repeatMode, String shuffleMode, String crossfadeMode) {
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = autoPlay == 'true'
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'on'
+  Boolean crossfade = crossfadeMode == 'on'
+  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
 }
 
 
