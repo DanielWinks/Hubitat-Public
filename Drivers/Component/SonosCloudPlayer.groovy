@@ -248,6 +248,16 @@ void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
 }
 
+void loadFavoriteFull(String favoriteId) {
+  String action = "REPLACE"
+  Boolean playOnCompletion = true
+  Boolean repeat = true
+  Boolean repeatOne = false
+  Boolean shuffle = false
+  Boolean crossfade = true
+  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
+
 void loadFavoriteFull(String favoriteId, String repeatMode) {
   String action = "REPLACE"
   Boolean playOnCompletion = true
