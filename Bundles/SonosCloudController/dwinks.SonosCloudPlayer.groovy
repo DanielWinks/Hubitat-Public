@@ -248,7 +248,17 @@ void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
 }
 
-void loadFavoriteFull(String favoriteId, String autoPlay, String queueMode, String repeatMode, String shuffleMode, String crossfadeMode) {
+// void loadFavoriteFull(String favoriteId, String repeatMode) {
+//   String action = queueMode.toUpperCase()
+//   Boolean playOnCompletion = autoPlay == 'true'
+//   Boolean repeat = repeatMode == 'repeat all'
+//   Boolean repeatOne = repeatMode == 'repeat one'
+//   Boolean shuffle = shuffleMode == 'on'
+//   Boolean crossfade = crossfadeMode == 'on'
+
+// }
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
   String action = queueMode.toUpperCase()
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'repeat all'
