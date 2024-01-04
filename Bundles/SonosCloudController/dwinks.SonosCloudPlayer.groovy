@@ -248,15 +248,45 @@ void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
 }
 
-// void loadFavoriteFull(String favoriteId, String repeatMode) {
-//   String action = queueMode.toUpperCase()
-//   Boolean playOnCompletion = autoPlay == 'true'
-//   Boolean repeat = repeatMode == 'repeat all'
-//   Boolean repeatOne = repeatMode == 'repeat one'
-//   Boolean shuffle = shuffleMode == 'on'
-//   Boolean crossfade = crossfadeMode == 'on'
+void loadFavoriteFull(String favoriteId, String repeatMode) {
+  String action = "REPLACE"
+  Boolean playOnCompletion = true
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = false
+  Boolean crossfade = true
+  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
 
-// }
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = true
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = false
+  Boolean crossfade = true
+  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = true
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'on'
+  Boolean crossfade = true
+  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = autoPlay == 'true'
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'on'
+  Boolean crossfade = true
+  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
   String action = queueMode.toUpperCase()
