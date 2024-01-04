@@ -52,10 +52,10 @@ metadata {
   command 'getFavorites'
   command 'loadFavoriteFull', [
     [ name: 'favoriteId', type: 'STRING'],
-    [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
-    [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
     [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+    [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
     [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+    [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
     [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
   ]
   command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
