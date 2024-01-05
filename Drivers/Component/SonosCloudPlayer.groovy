@@ -25,7 +25,7 @@
 #include dwinks.SMAPILibrary
 
 metadata {
-  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks', importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudPlayer.groovy', singleThreaded: false) {
+  definition(name: 'Sonos Cloud Player', namespace: 'dwinks', author: 'Daniel Winks', importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosCloudPlayer.groovy') {
   capability 'AudioNotification'
   capability "AudioVolume" //mute - ENUM ["unmuted", "muted"] volume - NUMBER, unit:%  //commands: volumeDown() volumeUp()
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
@@ -33,7 +33,6 @@ metadata {
   capability 'SpeechSynthesis'
   capability 'Configuration'
   capability 'Initialize'
-  capability 'Refresh'
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -42,22 +41,7 @@ metadata {
   command 'shuffleOff'
   command 'ungroupPlayer'
 
-  command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
-  command 'setGroupVolume', [[name: 'Group Volume', type: 'NUMBER']]
-  command 'groupVolumeUp'
-  command 'groupVolumeDown'
-  command 'muteGroup'
-  command 'unmuteGroup'
-
   command 'getFavorites'
-  command 'loadFavoriteFull', [
-    [ name: 'favoriteId', type: 'STRING'],
-    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
-    [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
-    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
-    [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
-    [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
-  ]
   command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
 
   command 'enableCrossfade'
@@ -67,7 +51,6 @@ metadata {
   command 'repeatAll'
   command 'repeatNone'
   command 'subscribeToEvents'
-  // command 'resubscribeToEvents'
 
   attribute 'currentRepeatOneMode', 'enum', [ 'on', 'off' ]
   attribute 'currentRepeatAllMode', 'enum', [ 'on', 'off' ]
@@ -77,8 +60,6 @@ metadata {
   attribute 'currentArtistName', 'string'
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
-  attribute 'currentFavorite', 'string'
-  attribute 'currentTrackNumber', 'number'
   attribute 'nextArtistName', 'string'
   attribute 'nextAlbumName', 'string'
   attribute 'nextTrackName', 'string'
@@ -88,14 +69,7 @@ metadata {
   attribute 'bass', 'number'
   attribute 'loudness', 'enum', [ 'on', 'off' ]
 
-  attribute 'groupName', 'string'
-  attribute 'groupCoordinatorName', 'string'
-  // attribute 'groupCoordinatorId', 'string'
-  // attribute 'groupId', 'string'
-  attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
-  attribute 'isGrouped', 'enum', [ 'on', 'off' ]
-  attribute 'groupMemberCount', 'number'
-  attribute 'groupMemberNames', 'JSON_OBJECT'
+
   attribute 'Fav', 'string'
   }
 
@@ -105,12 +79,10 @@ metadata {
       input name: 'volumeAdjustAmount', title: 'Volume up/down Adjust default:(+/- 5%)', type: 'enum', required: false, defaultValue: 5,
       options: [1:'+/- 1%', 2:'+/- 2%', 3:'+/- 3%', 4:'+/- 4%', 5:'+/- 5%', 10:'+/- 10%', 20:'+/- 20%']
       input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
-      input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Restore prior volume to "AirPlay" group after unmute', required: false, defaultValue: true
       input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
-      input 'createMuteChildDevice', 'bool', title: 'Create child device for <b>player</b> mute control?', required: false, defaultValue: false
     }
   }
 }
@@ -118,34 +90,19 @@ metadata {
 // =============================================================================
 // Constants
 // =============================================================================
-@Field private final Integer RESUB_INTERVAL = 7200
+@Field static final Integer RESUB_INTERVAL = 600
 
 // =============================================================================
 // Initialize and Configure
 // =============================================================================
-void initialize() { configure() }
+void initialize() {}
 void configure() {
-  updateDniIfNeeded()
-  subscribeToEvents()
   createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)
   createRemoveShuffleChildDevice(createShuffleChildDevice)
   createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
   createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)
-  createRemoveMuteChildDevice(createMuteChildDevice)
-  if(disableTrackDataEvents) { clearTrackDataEvent() }
-  if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
 }
 
-void updateDniIfNeeded() {
-  InstalledAppWrapper parentApp = getParent()
-  String oldDni = "${parentApp.getId()}-${device.getDataValue('id')}"
-  String dni = "${device.getDataValue('id')}".tokenize('_')[1][0..-6]
-  logDebug("OldDNI -> newDNI ${oldDni} -> ${dni}")
-  if(device.getDeviceNetworkId() == oldDni) {
-    device.setDeviceNetworkId(dni)
-    logDebug("Set DNI to use new schema...")
-  }
-}
 // =============================================================================
 // Device Methods
 // =============================================================================
@@ -179,7 +136,7 @@ void setShuffle(String mode) {
 void shuffleOn() { setShuffle('on') }
 void shuffleOff() { setShuffle('off') }
 
-void ungroupPlayer() { parent?.componentUngroupPlayer(this.device) }
+void ungroupPlayer() { parent?.componentUngroupPlayerLocal(this.device) }
 
 void playText(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
@@ -204,40 +161,40 @@ void setLevel(BigDecimal level) { parent?.componentSetPlayerLevelLocal(this.devi
 void setVolume(BigDecimal level) { setLevel(level) }
 
 void muteGroup(){
-  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, true) }
+  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, true) }
   else { parent?.componentMutePlayerLocal(this.device, true) }
 }
 void unmuteGroup(){
-  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroup(this.device, false) }
+  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, false) }
   else { parent?.componentMutePlayerLocal(this.device, false) }
 }
 void setGroupVolume(BigDecimal level) {
-  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevel(this.device, level) }
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevelLocal(this.device, level) }
   else { parent?.componentSetPlayerLevelLocal(this.device, level)  }
 }
 void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
 void setGroupMute(String mode) {
   logDebug("Setting group mute to ${mode}")
-  if(mode == 'on') { muteGroup() }
+  if(mode == 'muted') { muteGroup() }
   else { unmuteGroup() }
 }
 void groupVolumeUp() {
-  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevelLocal(this.device, (volumeAdjustAmount as Integer)) }
   else { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
 }
 void groupVolumeDown() {
-  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevelLocal(this.device, -(volumeAdjustAmount as Integer)) }
   else { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
 }
 
 void volumeUp() { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
 void volumeDown() { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
 
-void play() { parent?.componentPlay(this.device) }
-void stop() { parent?.componentStop(this.device) }
-void pause() { parent?.componentStop(this.device) }
-void nextTrack() { parent?.componentNextTrack(this.device) }
-void previousTrack() { parent?.componentPreviousTrack(this.device) }
+void play() { parent?.componentPlayLocal(this.device) }
+void stop() { parent?.componentStopLocal(this.device) }
+void pause() { parent?.componentPauseLocal(this.device) }
+void nextTrack() { parent?.componentNextTrackLocal(this.device) }
+void previousTrack() { parent?.componentPreviousTrackLocal(this.device) }
 void refresh() {subscribeToEvents()}
 
 void getFavorites() {
@@ -248,68 +205,6 @@ void loadFavorite(String favoriteId) {
   parent?.componentLoadFavorite(this.device, favoriteId)
 }
 
-void loadFavoriteFull(String favoriteId) {
-  String action = "REPLACE"
-  Boolean playOnCompletion = true
-  Boolean repeat = true
-  Boolean repeatOne = false
-  Boolean shuffle = false
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-}
-
-void loadFavoriteFull(String favoriteId, String repeatMode) {
-  String action = "REPLACE"
-  Boolean playOnCompletion = true
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = false
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-}
-
-void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = true
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = false
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-}
-
-void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = true
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-}
-
-void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-}
-
-void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
-  Boolean crossfade = crossfadeMode == 'on'
-  parent?.componentLoadFavoriteFull(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-}
-
-
-
 // =============================================================================
 // Child device methods
 // =============================================================================
@@ -317,20 +212,13 @@ void componentRefresh(DeviceWrapper child) {
   String command = child.getDataValue('command')
   switch(command) {
     case 'CrossFade':
-      getCrossfadeControlChild().sendEvent(name:'switch', value: this.device.currentState('currentCrossfadeMode')?.value )
-    break
+      getCrossfadeControlChild().sendEvent(name:'switch', value: this.device.currentState('currentCrossfadeMode').value )
     case 'Shuffle':
-      getShuffleControlChild().sendEvent(name:'switch', value: this.device.currentState('currentShuffleMode')?.value )
-    break
+      getShuffleControlChild().sendEvent(name:'switch', value: this.device.currentState('currentShuffleMode').value )
     case 'RepeatOne':
-      getRepeatOneControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatOneMode')?.value)
-    break
+      getRepeatOneControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatOneMode').value)
     case 'RepeatAll':
-      getRepeatAllControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatAllMode')?.value )
-    break
-    case 'Mute':
-      String muteValue = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
-      getMuteControlChild().sendEvent(name:'switch', value: muteValue )
+      getRepeatAllControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatAllMode').value )
     break
   }
 }
@@ -340,13 +228,10 @@ void componentOn(DeviceWrapper child) {
   switch(command) {
     case 'CrossFade':
       enableCrossfade()
-    break
     case 'Shuffle':
       shuffleOn()
-    break
     case 'RepeatOne':
       repeatOne()
-    break
     case 'RepeatAll':
       repeatAll()
     break
@@ -359,103 +244,16 @@ void componentOff(DeviceWrapper child) {
   switch(command) {
     case 'CrossFade':
       disableCrossfade()
-    break
     case 'Shuffle':
       shuffleOff()
-    break
     case 'RepeatOne':
       repeatNone()
-    break
     case 'RepeatAll':
       repeatNone()
     break
   }
-}
 
-void setPlayMode(String playMode){
-  switch(playMode) {
-    case 'NORMAL':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'off')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
-    break
-    case 'REPEAT_ALL':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'on')
-      sendEvent(name:'currentShuffleMode', value: 'off')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
-    break
-    case 'REPEAT_ONE':
-      sendEvent(name:'currentRepeatOneMode', value: 'on')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'off')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'off') }
-    break
-    case 'SHUFFLE_NOREPEAT':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'on')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
-    break
-    case 'SHUFFLE':
-      sendEvent(name:'currentRepeatOneMode', value: 'off')
-      sendEvent(name:'currentRepeatAllMode', value: 'on')
-      sendEvent(name:'currentShuffleMode', value: 'on')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'on') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
-    break
-    case 'SHUFFLE_REPEAT_ONE':
-      sendEvent(name:'currentRepeatOneMode', value: 'on')
-      sendEvent(name:'currentRepeatAllMode', value: 'off')
-      sendEvent(name:'currentShuffleMode', value: 'on')
-      if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: 'on') }
-      if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: 'off') }
-      if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: 'on') }
-    break
   }
-}
-
-void setCrossfadeMode(String currentCrossfadeMode) {
-  sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
-  if(createCrossfadeChildDevice) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
-}
-
-void setCurrentTrackDuration(String currentTrackDuration){
-  if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'currentTrackDuration', value: currentTrackDuration)
-}
-
-void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumName, String currentTrackName, Integer currentTrackNumber) {
-  if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'currentArtistName', value: currentArtistName)
-  sendEvent(name:'currentAlbumName',  value: currentAlbumName)
-  sendEvent(name:'currentTrackName',  value: currentTrackName)
-  sendEvent(name:'currentTrackNumber',  value: currentTrackNumber)
-}
-
-void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
-  if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'nextArtistName', value: nextArtistName)
-  sendEvent(name:'nextAlbumName',  value: nextAlbumName)
-  sendEvent(name:'nextTrackName',  value: nextTrackName)
-}
-
-void setTrackDataEvents(Map trackData) {
-  if(disableTrackDataEvents) {return}
-  trackData['level'] = this.device.currentState('level').value
-  trackData['mute'] = this.device.currentState('mute').value
-  sendEvent(name: 'trackData', value: trackData)
-}
 
 // =============================================================================
 // Create Child Devices
@@ -530,58 +328,32 @@ void createRemoveRepeatAllChildDevice(Boolean create) {
   } else if (!create && child){ deleteChildDevice(dni) }
 }
 
-void createRemoveMuteChildDevice(Boolean create) {
-  String dni = getMuteControlChildDNI()
-  ChildDeviceWrapper child = getMuteControlChild()
-  if(!child && create) {
-    try {
-      logDebug("Creating Mute Control device")
-      child = addChildDevice('hubitat', 'Generic Component Switch', dni,
-        [ name: 'Sonos Mute Control',
-          label: "Sonos Mute Control - ${this.getDataValue('roomName')}"]
-      )
-      child.updateDataValue('command', 'Mute')
-    } catch (UnknownDeviceTypeException e) {
-      logException('createGroupDevices', e)
-    }
-  } else if (!create && child){ deleteChildDevice(dni) }
-}
-
 // =============================================================================
 // Parse
 // =============================================================================
 
 void parse(raw) {
+  logDebug('Parse!')
   Map message = parseLanMessage(raw)
-  // logDebug("Message: ${message}")
-  // logDebug("Recieved headers: ${message.headers}")
-  if(message.headers.containsKey('HTTP/1.1 412 Precondition Failed')) {
-    logDebug("Expired subscriptions detected, resubscribing to all...")
-    logDebug("412: ${message}")
-    device.removeDataValue('sid1')
-    device.removeDataValue('sid2')
-    device.removeDataValue('sid3')
-    device.removeDataValue('sid4')
-    runIn(30, 'subscribeToEvents', [overwrite: true])
-  }
+  // logDebug("${message.headers}")
+  processHeaders(message.headers)
+  // logDebug(message)
+  state.remove('currentTrackMetaData')
+
   if(message.body == null) {return}
   String sId = message.headers["SID"]
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
-  logDebug("Received message for ${serviceType}")
+  // logDebug("Subscription Id: ${sId}")
+  // logDebug("Service Type: ${serviceType}")
   if(serviceType == 'AVTransport') {
-    this.device.updateDataValue('sid1', sId)
     processAVTransportMessages(message)
+    device.updateDataValue('sid1', sId)
   } else if(serviceType == 'RenderingControl') {
-    this.device.updateDataValue('sid2', sId)
     processRenderingControlMessages(message)
+    device.updateDataValue('sid2', sId)
   } else if(serviceType == 'ZoneGroupTopology') {
-    this.device.updateDataValue('sid3', sId)
     processZoneGroupTopologyMessages(message)
-  } else if(serviceType == 'GroupRenderingControl') {
-    this.device.updateDataValue('sid4', sId)
-    // processGroupRenderingControlMessages(message)
-  } else {
-    logDebug("Could not determine service type for message: ${message}")
+    device.updateDataValue('sid3', sId)
   }
 }
 
@@ -589,7 +361,111 @@ void parse(raw) {
 // Parse Helper Methods
 // =============================================================================
 
-void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
+void processAVTransportMessages(Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+
+  String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val']
+  status = status.toLowerCase().replace('_playback','')
+  sendEvent(name:'status', value: status)
+  sendEvent(name:'transportStatus', value: status)
+
+  String currentPlayMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentPlayMode']['@val']
+  switch(currentPlayMode) {
+    case 'NORMAL':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'off')
+    case 'REPEAT_ALL':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'on')
+      sendEvent(name:'currentShuffleMode', value: 'off')
+    case 'REPEAT_ONE':
+      sendEvent(name:'currentRepeatOneMode', value: 'on')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'off')
+    case 'SHUFFLE_NOREPEAT':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'on')
+    case 'SHUFFLE':
+      sendEvent(name:'currentRepeatOneMode', value: 'off')
+      sendEvent(name:'currentRepeatAllMode', value: 'on')
+      sendEvent(name:'currentShuffleMode', value: 'on')
+    case 'SHUFFLE_REPEAT_ONE':
+      sendEvent(name:'currentRepeatOneMode', value: 'on')
+      sendEvent(name:'currentRepeatAllMode', value: 'off')
+      sendEvent(name:'currentShuffleMode', value: 'on')
+    break
+  }
+
+
+  String currentCrossfadeMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentCrossfadeMode']['@val']
+  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
+  sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
+  if(createCrossfadeChildDevice) {
+    getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode)
+  }
+
+  if(!disableArtistAlbumTrackEvents) {
+    String currentTrackDuration = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackDuration']['@val']
+    sendEvent(name:'currentTrackDuration', value: currentTrackDuration)
+
+    String currentTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
+    GPathResult currentTrackMetaDataXML = parseXML(currentTrackMetaData)
+    if(currentTrackMetaData) {currentTrackMetaDataXML = parseXML(currentTrackMetaData)}
+    if(currentTrackMetaDataXML) {
+      sendEvent(name:'currentArtistName', value: currentTrackMetaDataXML['item']['creator'])
+      sendEvent(name:'currentAlbumName',  value: currentTrackMetaDataXML['item']['title'])
+      sendEvent(name:'currentTrackName',  value: currentTrackMetaDataXML['item']['album'])
+    }
+
+    String nextTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['NextTrackMetaData']['@val']
+    GPathResult nextTrackMetaDataXML
+    if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
+    if(nextTrackMetaDataXML) {
+      sendEvent(name:'nextArtistName', value: nextTrackMetaDataXML['item']['creator'])
+      sendEvent(name:'nextAlbumName',  value: nextTrackMetaDataXML['item']['title'])
+      sendEvent(name:'nextTrackName',  value: nextTrackMetaDataXML['item']['album'])
+    }
+
+    if(!disableTrackDataEvents && currentTrackMetaDataXML) {
+      String name = currentTrackMetaDataXML['item']['title']
+      String artist = currentTrackMetaDataXML['item']['creator']
+      String album = currentTrackMetaDataXML['item']['title']
+      String trackNumber = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrack']['@val']
+      // String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val'].toLowerCase()
+      String level = this.device.currentState('level').value
+      String mute = this.device.currentState('mute').value
+      String uri = propertyset['property']['LastChange']['Event']['InstanceID']['AVTransportURI']['@val']
+      String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
+      // String transportUri = uri ?? Seems to be the same on the built-in driver
+      String enqueuedUri = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURI']['@val']
+      String metaData = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURIMetaData']['@val']
+      String trackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
+
+      Map trackData = [
+        audioSource: "Sonos Q",
+        station: null,
+        name: name,
+        artist: artist,
+        album: album,
+        trackNumber: trackNumber,
+        status: status,
+        level: level,
+        mute: mute,
+        uri: uri,
+        trackUri: trackUri,
+        transportUri: uri,
+        enqueuedUri: enqueuedUri,
+        metaData: metaData,
+        trackMetaData: trackMetaData
+      ]
+      sendEvent(name: trackData, value: trackData)
+    }
+  }
+  // event.'**'.findAll{it.name() == 'TransportState'}.each{it -> logDebug("Val= ${it.'@val'}")}
+}
+
 void processRenderingControlMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
 
@@ -597,14 +473,18 @@ void processRenderingControlMessages(Map message) {
   if(volume) {
     sendEvent(name:'level', value: volume as Integer)
     sendEvent(name:'volume', value: volume as Integer)
-    if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
+
+    if(volume && (volume as Integer) > 0) {
+      logDebug("Setting volume: ${volume}")
+      state.restoreLevelAfterUnmute = volume
+    }
   }
 
   String mute = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
     String muted = mute == '1' ? 'muted' : 'unmuted'
-    String previousMutedState = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
-    if(muted == 'unmuted' && previousMutedState == 'muted' && enableAirPlayUnmuteVolumeFix) {
+    String previousMutedState = this.device.currentState('mute').value
+    if(muted == 'unmuted' && previousMutedState == 'muted') {
       logDebug("Restoring volume after unmute event to level: ${state.restoreLevelAfterUnmute}")
       setLevel(state.restoreLevelAfterUnmute as Integer)
     }
@@ -614,13 +494,39 @@ void processRenderingControlMessages(Map message) {
   String bass = propertyset['property']['LastChange']['Event']['InstanceID']['Bass']['@val']
   if(bass) { sendEvent(name:'bass', value: bass as Integer) }
 
+
   String treble = propertyset['property']['LastChange']['Event']['InstanceID']['Treble']['@val']
   if(treble) { sendEvent(name:'treble', value: treble as Integer) }
 
   String loudness = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { sendEvent(name:'loudness', value: loudness == 1 ? 'on' : 'off') }
 }
-void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
+
+void processZoneGroupTopologyMessages(Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+
+  String rincon = device.getDataValue('id')
+  logDebug("RINCON: ${rincon}")
+  // def group = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().each(){logDebug(it.name())}
+  String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  // String currentGroupName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().findAll{it['@Coordinator'] == rincon}.children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  logDebug(group)
+
+
+  // logDebug(getObjectClassName(group))
+}
+
+void processHeaders(Map headers) {
+  logDebug(headers['X-SONOS-SERVICETYPE'])
+}
+
+GPathResult parseSonosMessageXML(Map message) {
+  String body = message.body.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
+  GPathResult propertyset = parseXML(body)
+  return propertyset
+}
 
 // =============================================================================
 // Subscriptions and Resubscriptions
@@ -629,17 +535,12 @@ void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTop
 void subscribeToEvents() {
   String host = device.getDataValue('deviceIp')
   String dni = device.getDeviceNetworkId()
-
-  if(device.getDataValue('sid1')) { sonosEventUnsubscribe('/MediaRenderer/AVTransport/Event', host, dni, device.getDataValue('sid1')) }
-  if(device.getDataValue('sid2')) { sonosEventUnsubscribe('/MediaRenderer/RenderingControl/Event', host, dni, device.getDataValue('sid2')) }
-  if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
-  if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
+  logDebug("DNI ${dni}")
 
 // sonosEventSubscribe(String eventSubURL, String host, String timeout, String dni)
   sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni)
   sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni)
   sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni)
-  sonosEventSubscribe('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni)
 
   // sonosEventSubscribe('/MediaRenderer/Queue/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/MediaServer/ContentDirectory/Event', host, RESUB_INTERVAL, dni)
@@ -659,8 +560,6 @@ void resubscribeToEvents() {
   sonosEventRenew('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid1'))
   sonosEventRenew('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid2'))
   sonosEventRenew('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid3'))
-  sonosEventRenew('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid4'))
-  runIn(RESUB_INTERVAL-100, 'resubscribeToEvents')
 }
 
 // =============================================================================
@@ -671,36 +570,7 @@ String getCrossfadeControlChildDNI() { return "${device.getDeviceNetworkId()}-Cr
 String getShuffleControlChildDNI() { return "${device.getDeviceNetworkId()}-ShuffleControl" }
 String getRepeatOneControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatOneControl" }
 String getRepeatAllControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatAllControl" }
-String getMuteControlChildDNI() { return "${device.getDeviceNetworkId()}-MuteControl" }
 ChildDeviceWrapper getCrossfadeControlChild() { return getChildDevice(getCrossfadeControlChildDNI()) }
 ChildDeviceWrapper getShuffleControlChild() { return getChildDevice(getShuffleControlChildDNI()) }
 ChildDeviceWrapper getRepeatOneControlChild() { return getChildDevice(getRepeatOneControlChildDNI()) }
 ChildDeviceWrapper getRepeatAllControlChild() { return getChildDevice(getRepeatAllControlChildDNI()) }
-ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlChildDNI()) }
-
-// =============================================================================
-// Misc helpers
-// =============================================================================
-
-void clearCurrentNextArtistAlbumTrackData() {
-  setCurrentArtistAlbumTrack(null, null, null, 0)
-  setNextArtistAlbumTrack(null, null, null)
-}
-
-void clearTrackDataEvent() {
-  setTrackDataEvents([:])
-}
-
-List<String> getGroupMemberDNIs() {
-  List groupMemberDNIs = []
-  String groupIds = this.device.getDataValue('groupIds')
-  logDebug("Getting group member DNIs... ${groupIds}")
-  if(groupIds.contains(',')) {
-    List<String> groupMemberRincons = groupIds.tokenize(',')
-    groupMemberRincons.remove(this.device.getDataValue('id'))
-    groupMemberRincons.each{it -> groupMemberDNIs.add("${it}".tokenize('_')[1][0..-6])}
-    return groupMemberDNIs
-  } else {
-    return []
-  }
-}
