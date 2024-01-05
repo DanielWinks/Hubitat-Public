@@ -41,12 +41,19 @@ preferences {
   page(name: 'mainPage', install: true, uninstall: true)
   page(name: 'authorizePage')
   page(name: 'playerPage')
+  page(name: 'localPlayerPage')
+  page(name: 'localPlayerSelectionPage')
   page(name: 'groupPage')
 }
 
 @Field static final String apiPrefix = 'https://api.ws.sonos.com/control/api/v1'
 @Field static final String authApiPrefix = 'https://api.sonos.com/login/v3/oauth'
 @Field static final String xWwwFormUrlencodedUtf8 = 'application/x-www-form-urlencoded;charset=utf-8'
+
+@CompileStatic
+String getLocalApiPrefix(String ipAddress) {
+  return "https://${ipAddress}/api/v1"
+}
 
 String getHubitatStateRedirect() { return URLEncoder.encode('https://cloud.hubitat.com/oauth/stateredirect') }
 
@@ -225,45 +232,98 @@ void parseAuthorizationToken(Map data) {
 // =============================================================================
 
 Map mainPage() {
+  state.remove("discoveryRunning")
   boolean configured = settings.clientKey != null && settings.clientSecret != null
   boolean authenticated = state.authToken != null
-  // refreshPlayersAndGroups()
-  dynamicPage(title: 'Sonos Cloud Controller') {
-    tryCreateAccessToken()
-    if(!state.accessToken) {
-      section ("<h2 style='color:red;'>OAuth is not enabled for app!! Please enable in Apps Code.</h2>"){      }
-    }
-    section {
-      label title: 'Sonos Cloud Controller',
-      required: false
-      paragraph 'This application provides an interface to Sonos Cloud based functions including announcements and grouping.'
-      href (
-        page: 'authorizePage',
-        title: 'Sonos Account Authorization',
-        description: configured && authenticated ? 'Your Sonos account is connected' : 'Select to setup credentials and authenticate to Sonos'
-      )
-
-      if (configured && authenticated) {
-        href (
-          page: 'playerPage',
-          title: 'Sonos Virtual Player Devices',
-          description: 'Select to create Sonos player devices'
-        )
-        href (
-          page: 'groupPage',
-          title: 'Sonos Virtual Group Devices',
-          description: 'Select to create/delete Sonos group devices'
-        )
+  dynamicPage(title: 'Sonos Advanced Controller') {
+    if(cloudEnable) {
+      tryCreateAccessToken()
+      if(!state.accessToken) {
+        section ("<h2 style='color:red;'>OAuth is not enabled for app!! Please enable in Apps Code.</h2>"){      }
       }
     }
 
     section {
+      label title: 'Sonos Advanced Controller',
+      required: false
+      paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
+      if(cloudEnable) {
+        href (
+          page: 'authorizePage',
+          title: 'Sonos Account Authorization',
+          description: configured && authenticated ? 'Your Sonos account is connected' : 'Select to setup credentials and authenticate to Sonos'
+        )
+      }
+      href (
+        page: 'localPlayerPage',
+        title: 'Sonos Virtual Player Devices',
+        description: 'Select to create Sonos player devices using local discovery'
+      )
+      href (
+        page: 'groupPage',
+        title: 'Sonos Virtual Group Devices',
+        description: 'Select to create/delete Sonos group devices'
+      )
+    }
+
+    section {
+      input 'cloudEnable', 'bool', title: 'Enable Cloud API Functionality', required: false, defaultValue: false
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-      input 'testButton', 'button', title: 'Test'
+      input 'applySettingsButton', 'button', title: 'Apply Settings'
     }
   }
+}
+
+// =============================================================================
+// Local Discovery Helpers
+// =============================================================================
+
+void ssdpDiscover() {
+  logDebug("Starting SSDP Discovery...")
+	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
+	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
+}
+
+void subscribeToSsdpEvents() {
+	subscribe(location, 'ssdpTerm.upnp:rootdevice', 'ssdpEventHandler')
+	subscribe(location, 'sdpTerm.ssdp:all', 'ssdpEventHandler')
+}
+
+void ssdpEventHandler(Event event) {
+	Map parsedEvent = parseLanMessage(event.description)
+
+  String ipAddress = convertHexToIP(parsedEvent.networkAddress)
+	String ipPort = convertHexToInt(parsedEvent.deviceAddress)
+
+  Map playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
+  GPathResult deviceDescription = getDeviceDescriptionLocalSync("${ipAddress}")
+
+  String modelName = deviceDescription['device']['modelName']
+	String ssdpPath = parsedEvent.ssdpPath
+	String mac = parsedEvent.mac
+  String playerName = playerInfo?.device?.name
+  String playerDni = parsedEvent.mac
+  String swGen = playerInfo?.device?.swGen
+  String websocketUrl = playerInfo?.device?.websocketUrl
+  String householdId = playerInfo?.householdId
+  String playerId = playerInfo?.playerId
+  String groupId = playerInfo?.groupId
+  List<String> deviceCapabilities = playerInfo?.device?.capabilities
+
+  discoveredSonoses.put("${mac}", [
+    name: playerInfo?.device?.name,
+    id: parsedEvent.mac,
+    swGen: playerInfo?.device?.swGen,
+    capabilities: playerInfo?.device?.capabilities,
+    modelName: deviceDescription['device']['modelName'],
+    householdId: playerInfo?.householdId,
+    websocketUrl: playerInfo?.device?.websocketUrl,
+    deviceIp: "${ipAddress}:1400"
+  ])
+  state.playerPageRefresh = true
+  logDebug("Should refresh now...")
 }
 
 // =============================================================================
@@ -271,20 +331,67 @@ Map mainPage() {
 // =============================================================================
 
 @Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
-Map playerPage() {
-  app.removeSetting('playerDevices')
-  refreshPlayersAndGroups()
-  logDebug(getObjectClassName(getCurrentPlayerDevices()))
-  app.updateSetting('playerDevices', [type: 'enum', value: getCurrentPlayerDevices()])
-  dynamicPage(name: 'playerPage', title: 'Sonos Player Virtual Devices', nextPage: 'mainPage') {
-    section {
-      paragraph ('Select Sonos players that you want to create Hubitat devices for control.<br>To remove a player later simply remove the created device.')
-      paragraph ('If no players are listed, or players are missing, wait a few seconds and refresh the page.')
-      paragraph ("Select virtual players to create (${playerSelectionOptions.size()} players found)")
-      input (name: 'playerDevices', title: '', type: 'enum', options: playerSelectionOptions, multiple: true)
-      }
+@Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
+
+Map localPlayerPage() {
+  if(!state.discoveryRunning) {
+    subscribeToSsdpEvents()
+    ssdpDiscover()
+    state.discoveryRunning = true
+  }
+  String foundDevices = ''
+  discoveredSonoses.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos.value?.name}" }
+
+  dynamicPage(
+		name: "localPlayerPage",
+		title: "Discovery Started!",
+		nextPage: 'localPlayerSelectionPage',
+    refreshInterval: 3,
+		install: false,
+		uninstall: false
+  ) {
+    section("Please wait while we discover your Sonos. Discovery can take five minutes or more, so sit back and relax! Click Next once discovered.") {
+      paragraph ("Found Devices (${discoveredSonoses.size()}): ${foundDevices}")
+    }
   }
 }
+
+Map localPlayerSelectionPage() {
+  state.remove("discoveryRunning")
+  unsubscribe()
+  Map selectionOptions = discoveredSonoses.collectEntries{id, player -> [(id): player.name]}
+  dynamicPage(
+		name: "localPlayerSelectionPage",
+		title: "Select Sonos Devices",
+		nextPage: 'mainPage',
+		install: true,
+		uninstall: true
+  ) {
+    section("Select your device(s) below.") {
+      input (name: 'playerDevices', title: "Select Sonos (${discoveredSonoses.size()} found)", type: 'enum', options: selectionOptions, multiple: true)
+      href (
+        page: 'localPlayerPage',
+        title: 'Continue Search',
+        description: 'Click to show'
+      )
+    }
+  }
+}
+
+// Map playerPage() {
+//   app.removeSetting('playerDevices')
+//   refreshPlayersAndGroups()
+//   logDebug(getObjectClassName(getCurrentPlayerDevices()))
+//   app.updateSetting('playerDevices', [type: 'enum', value: getCurrentPlayerDevices()])
+//   dynamicPage(name: 'playerPage', title: 'Sonos Player Virtual Devices', nextPage: 'mainPage') {
+//     section {
+//       paragraph ('Select Sonos players that you want to create Hubitat devices for control.<br>To remove a player later simply remove the created device.')
+//       paragraph ('If no players are listed, or players are missing, wait a few seconds and refresh the page.')
+//       paragraph ("Select virtual players to create (${playerSelectionOptions.size()} players found)")
+//       input (name: 'playerDevices', title: '', type: 'enum', options: playerSelectionOptions, multiple: true)
+//       }
+//   }
+// }
 
 List<String> getCurrentPlayerDevices() {
   List<ChildDeviceWrapper> childDevices = app.getChildDevices()
@@ -294,9 +401,11 @@ List<String> getCurrentPlayerDevices() {
 }
 
 Map groupPage() {
-  refreshPlayersAndGroups()
+  // refreshPlayersAndGroups()
   if(!state.userGroups) { state.userGroups = [:] }
-  Map coordinatorSelectionOptions = state.players.collectEntries { id, player -> [(id): player.name] }
+  List<ChildDeviceWrapper> children = app.getChildDevices()
+
+  // Map coordinatorSelectionOptions = state.players.collectEntries { id, player -> [(id): player.name] }
   Map playerSelectionOptions = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator }
 
   String edg = app.getSetting('editDeleteGroup')
@@ -346,24 +455,17 @@ void refreshPlayersAndGroups() {
   getPlayersAndGroups()
 }
 
+// =============================================================================
+// Button Handlers
+// =============================================================================
 void appButtonHandler(String buttonName) {
-  if(buttonName == 'testButton') { testButton() }
+  if(buttonName == 'applySettingsButton') { applySettingsButton() }
   if(buttonName == 'saveGroup') { saveGroup() }
   if(buttonName == 'deleteGroup') { deleteGroup() }
   if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }
 }
 
-// =============================================================================
-// TESTING
-// =============================================================================
-
-void testButton() {
-  createPlayerDevices()
-}
-
-// =============================================================================
-// TESTING
-// =============================================================================
+void applySettingsButton() { configure() }
 
 void saveGroup() {
   state.userGroups[app.getSetting('newGroupName')] = [coordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
@@ -402,15 +504,21 @@ void initialize() {
 
 void configure() {
   logInfo("${app.name} updated")
-  try { refreshToken()}
-  catch (Exception e) { logError("Could not refresh token: ${e}") }
-  schedule('0 0 0,6,12,18 * * ?', 'refreshToken')
-  try { refreshPlayersAndGroups() }
-  catch (Exception e) { logError("refreshPlayersAndGroups() Failed: ${e}")}
-  try { createPlayerDevices() }
-  catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
-  try { createGroupDevices() }
-  catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  unsubscribe()
+  if(cloudEnable) {
+    try { refreshToken()}
+    catch (Exception e) { logError("Could not refresh token: ${e}") }
+    schedule('0 0 0,6,12,18 * * ?', 'refreshToken')
+  }
+
+
+  // try { refreshPlayersAndGroups() }
+  // catch (Exception e) { logError("refreshPlayersAndGroups() Failed: ${e}")}
+  // try { createPlayerDevices() }
+  // catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
+  // try { createGroupDevices() }
+  // catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  // runIn(3, 'appGetFavorites', [overwrite: true])
 }
 
 // =============================================================================
@@ -607,13 +715,65 @@ void getPlayersAndGroupsCallback(AsyncResponse response, Map data = null) {
   playerSelectionOptions = state.players.collectEntries {id, player ->  [(id): player.name]  }
 }
 
-String getGroupForPlayer(String playerId) {
-  logDebug "Getting groupId for player: ${playerId}..."
-  Map groups = state.groups
-  groups = groups.findAll { id, group -> group.playerIds }
-  Map options = groups.collectEntries { groupId, group -> [(groupId): group.playerIds]}
-  String gId = options.collectEntries { k, v -> [k, v.findAll { it.contains(playerId) }] }.findAll { k, v -> v.size() > 0 }.keySet()[0]
-  return gId
+Map getPlayerInfoLocalSync(String ipAddress) {
+  if(!ipAddress.contains(':')) { ipAddress = "${ipAddress}:1443"}
+  Map params = [
+  uri:  "${getLocalApiPrefix(ipAddress)}/players/local/info",
+  headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+  requestContentType: 'application/json',
+  contentType: 'application/json',
+  ignoreSSLIssues: true
+  ]
+  httpGet(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      return resp.data
+    } else {
+      logError(resp.data)
+    }
+  }
+}
+
+GPathResult getDeviceDescriptionLocalSync(String ipAddress) {
+  if(!ipAddress.contains(':')) { ipAddress = "${ipAddress}:1400"}
+  Map params = [
+  uri:  "http://${ipAddress}/xml/device_description.xml",,
+  requestContentType: 'application/xml',
+  contentType: 'application/xml'
+  ]
+  httpGet(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      return resp.data
+    } else {
+      logError(resp.data)
+    }
+  }
+}
+
+void getPlayerInfoLocal(String ipAddress) {
+  Map params = [
+  uri:  "${getLocalApiPrefix(ipAddress)}/players/local/info",
+  headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+  requestContentType: 'application/json',
+  contentType: 'application/json'
+  ]
+  sendCommandAsync(params, 'getPlayerInfoLocalCallback')
+}
+
+void getPlayerInfoLocalCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'getPlayerInfoLocalCallback')) { return }
+  Map respJson = response.getJson()
+  String playerName = respJson?.device?.name
+  String playerDni = (respJson?.device?.serialNumber.replace('-','').tokenize(':'))[0]
+  String swGen = respJson?.device?.swGen
+  String websocketUrl = respJson?.device?.websocketUrl
+  String householdId = respJson?.householdId
+  String playerId = respJson?.playerId
+  String groupId = respJson?.groupId
+}
+
+String getGroupForPlayerDevice(DeviceWrapper device) {
+  logDebug("Got groupId for player: ${device.getDataValue('groupId')}")
+  return device.getDataValue('groupId')
 }
 
 // =============================================================================
@@ -642,50 +802,35 @@ void componentPlayTrack(DeviceWrapper device, String uri, BigDecimal volume = nu
 void componentMutePlayer(DeviceWrapper device, Boolean muted) {
   logDebug('Muting...')
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
+  Map data = [muted:muted]
+  postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume/mute", data)
+}
+
+void componentMuteGroup(DeviceWrapper device, Boolean muted) {
+  logDebug('Muting...')
+  String playerId = device.getDataValue('id')
+  String groupId = getGroupForPlayerDeviceLocal(device)
   Map data = [muted:muted]
   postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/mute", data)
 }
 
-void componentSetLevel(DeviceWrapper device, BigDecimal level) {
-  logDebug("Setting volue to ${level}...")
-  String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  Map data = [volume:level as int]
-  postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume", data)
+void componentSetGroupRelativeLevel(DeviceWrapper device, BigDecimal level) {
+  logDebug("Setting relative group volume to ${level}...")
+  String groupId = getGroupForPlayerDeviceLocal(device)
+  Map data = [volumeDelta:level as Integer]
+  postJsonAsync("${apiPrefix}/groups/${groupId}/groupVolume/relative", data)
 }
 
-void componentPlay(DeviceWrapper device) {
-  logDebug('componentPlay()')
+void componentSetPlayerRelativeLevel(DeviceWrapper device, BigDecimal level) {
+  logDebug("Setting player relative volume to ${level}...")
   String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/play")
-}
-
-void componentStop(DeviceWrapper device) {
-  logDebug('componentStop()')
-  String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/pause")
-}
-
-void componentPreviousTrack(DeviceWrapper device) {
-  logDebug('componentPreviousTrack()')
-  String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/skipToPreviousTrack")
-}
-
-void componentNextTrack(DeviceWrapper device) {
-  logDebug('componentNextTrack()')
-  String playerId = device.getDataValue('id')
-  String groupId = getGroupForPlayer(playerId)
-  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/skipToNextTrack")
+  Map data = [volumeDelta:level as Integer]
+  postJsonAsync("${apiPrefix}/players/${playerId}/playerVolume/relative", data)
 }
 
 void componentGetFavorites(DeviceWrapper device) {
-  logDebug 'Getting favorites...'
-  String householdId = device.getDataValue('householdId')
+  logDebug('Getting favorites...')
+  String householdId = getHouseholdForPlayerDeviceLocal(device)
   Map params = [uri: "${apiPrefix}/households/${householdId}/favorites", headers: [authorization: 'Bearer ' + state.authToken, contentType: 'application/json']]
   sendQueryAsync(params, "getFavoritesCallback", [dni:device.getDeviceNetworkId()])
 }
@@ -710,7 +855,18 @@ void getFavoritesCallback(AsyncResponse response, Map data = null) {
 
 void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
   logDebug('Loading favorites...')
-  String groupId = getGroupForPlayer(device.getDataValue('id'))
+  String action = "REPLACE"
+  Boolean playOnCompletion = true
+  Boolean repeat = false
+  Boolean repeatOne = true
+  Boolean shuffle = false
+  Boolean crossfade = true
+  componentLoadFavoriteFull(device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+}
+
+void componentLoadFavoriteFull(DeviceWrapper device, String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
+  logDebug('Loading favorites full options...')
+  String groupId = getGroupForPlayerDeviceLocal(device)
   Map data = [
     action:"REPLACE",
     favoriteId:favoriteId,
@@ -722,10 +878,8 @@ void componentLoadFavorite(DeviceWrapper device, String favoriteId) {
 
 void componentSetPlayModes(DeviceWrapper device, Map playModes) {
   logDebug 'Setting Play Modes...'
-  String playerId = device.getDataValue('id')
-  logDebug "DNI: ${playerId}"
-  String group = getGroupForPlayer(playerId)
-  postJsonAsync("${apiPrefix}/groups/${group}/playback/playMode", playModes)
+  String groupId = getGroupForPlayerDeviceLocal(device)
+  postJsonAsync("${apiPrefix}/groups/${groupId}/playback/playMode", playModes)
 }
 
 void componentUngroupPlayer(DeviceWrapper device) {
@@ -734,30 +888,9 @@ void componentUngroupPlayer(DeviceWrapper device) {
   getPlayersAndGroups([ungroupPlayer: true, playerId: playerId])
 }
 
-void ungroupPlayer(String playerId) {
-  logDebug("Ungroup Player: ${playerId}")
-  Map currentGroup = (state.groups.find{ it -> it.value.playerIds.contains(playerId)}).value
-  String coordinatorIdGroup = currentGroup.id.replace(':','%3A')
-  List playerIds = currentGroup.playerIds - playerId
-  Map data = ['playerIds': playerIds]
-  postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
-}
-
-void componentUngroupPlayers(DeviceWrapper device) {
-  logDebug('Removing players from group...')
-  String householdId = device.getDataValue('householdId')
-  List coordinatorId = [device.getDataValue('coordinatorId')]
-  List playerIds = device.getDataValue('playerIds').split(',')
-  List allPlayersIds = coordinatorId + playerIds
-  allPlayersIds.each(){ playerId ->
-    Map data = ['playerIds': [playerId]]
-    postJsonAsync("${apiPrefix}/households/${householdId}/groups/createGroup", data)
-  }
-}
-
 void componentGroupPlayers(DeviceWrapper device) {
   logDebug('Adding players to group...')
-  String householdId = device.getDataValue('householdId')
+  String householdId = getHouseholdForPlayerDeviceLocal(device)
   List coordinatorId = [device.getDataValue('coordinatorId')]
   List playerIds = device.getDataValue('playerIds').split(',')
   Map data = ['playerIds': coordinatorId + playerIds]
@@ -791,6 +924,194 @@ void removePlayers(String coordinatorId) {
   String coordinatorIdGroup = ((state.groups.find{ it -> it.value.coordinatorId  == coordinatorId}).key).replace(':','%3A')
   Map data = ['playerIds': [coordinatorId]]
   postJsonAsync("${apiPrefix}/groups/${coordinatorIdGroup}/groups/setGroupMembers", data)
+}
+
+// =============================================================================
+// Component Methods for Child Events
+// =============================================================================
+
+void processAVTransportMessages(DeviceWrapper cd, Map message) {
+  Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
+  if(!isGroupCoordinator) { return }
+
+  GPathResult propertyset = parseSonosMessageXML(message)
+
+  List<DeviceWrapper> groupedDevices = []
+  List<String> groupIds = []
+  List<String> groupedRincons = (cd.getDataValue('groupIds')).tokenize(',')
+  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupIds.each{groupedDevices.add(getChildDevice(it))}
+
+  String trackUri = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackURI']['@val']
+  Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
+
+  String status = propertyset['property']['LastChange']['Event']['InstanceID']['TransportState']['@val']
+  status = status.toLowerCase().replace('_playback','')
+
+  groupedDevices.each{dev ->
+    if(dev) {
+      dev.sendEvent(name:'status', value: status)
+      dev.sendEvent(name:'transportStatus', value: status)
+    }
+  }
+
+  String currentPlayMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentPlayMode']['@val']
+  groupedDevices.each{dev -> if(dev) { dev.setPlayMode(currentPlayMode)}}
+
+  String currentCrossfadeMode = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentCrossfadeMode']['@val']
+  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
+  groupedDevices.each{dev -> if(dev) {dev.setCrossfadeMode(currentCrossfadeMode)}}
+
+  String currentTrackDuration = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackDuration']['@val']
+  groupedDevices.each{dev -> if(dev) {dev.setCurrentTrackDuration(currentTrackDuration)}}
+
+  String currentTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
+  GPathResult currentTrackMetaDataXML
+  if(currentTrackMetaData) {currentTrackMetaDataXML = parseXML(currentTrackMetaData)}
+  if(currentTrackMetaDataXML) {
+    String currentArtistName = status != "stopped" ? currentTrackMetaDataXML['item']['creator'] : null
+    String currentAlbumName = status != "stopped" ? currentTrackMetaDataXML['item']['title'] : null
+    String currentTrackName = status != "stopped" ? currentTrackMetaDataXML['item']['album'] : null
+    String trackNumber = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrack']['@val']
+    groupedDevices.each{dev -> if(dev) { dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)}}
+
+    String uri = propertyset['property']['LastChange']['Event']['InstanceID']['AVTransportURI']['@val']
+    // String transportUri = uri ?? Seems to be the same on the built-in driver
+    String enqueuedUri = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURI']['@val']
+    String metaData = propertyset['property']['LastChange']['Event']['InstanceID']['EnqueuedTransportURIMetaData']['@val']
+    String trackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['CurrentTrackMetaData']['@val']
+
+    Boolean favFound = false
+    String foundFavId = null
+    String foundFavImageUrl = null
+    String foundFavName = null
+    if(state.favs != null) {
+      state.favs.keySet().each{key ->
+        // logDebug("URI: ${enqueuedUri} <=> Key: ${key}")
+        if(enqueuedUri.contains(key)) {
+          favFound = true
+          foundFavId = state.favs[key].id
+          foundFavImageUrl = state.favs[key].imageUrl
+          foundFavName = state.favs[key].name
+          groupedDevices.each{dev -> if(dev) { dev.sendEvent(
+            name: 'currentFavorite',
+            value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+            )}
+          }
+        }
+      }
+      if(!favFound) {
+        groupedDevices.each{dev -> if(dev) { dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}}
+      }
+    }
+
+    Map trackData = [
+      audioSource: "Sonos Q",
+      station: null,
+      name: currentAlbumName,
+      artist: currentArtistName,
+      album: currentAlbumName,
+      trackNumber: trackNumber,
+      status: status,
+      uri: uri,
+      trackUri: trackUri,
+      transportUri: uri,
+      enqueuedUri: enqueuedUri,
+      metaData: metaData,
+      trackMetaData: trackMetaData
+    ]
+    groupedDevices.each{dev -> if(dev) {dev.setTrackDataEvents(trackData)}}
+  } else {
+    String currentArtistName = ""
+    String currentAlbumName = ""
+    String currentTrackName = ""
+    Integer trackNumber = 0
+    groupedDevices.each{dev -> if(dev) {
+      dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber)
+      dev.setTrackDataEvents([:])
+      }
+    }
+  }
+
+  String nextTrackMetaData = propertyset['property']['LastChange']['Event']['InstanceID']['NextTrackMetaData']['@val']
+  GPathResult nextTrackMetaDataXML
+  if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
+  if(nextTrackMetaDataXML) {
+    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : ""
+    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : ""
+    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : ""
+    groupedDevices.each{dev -> if(dev) {dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}}
+  } else {
+    String nextArtistName = ""
+    String nextAlbumName = ""
+    String nextTrackName = ""
+    groupedDevices.each{dev -> if(dev) {dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}}
+  }
+}
+
+void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+  String rincon = cd.getDataValue('id')
+  String currentGroupCoordinatorId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
+  Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
+  Boolean previouslyWasGroupCoordinator = cd.getDataValue('isGroupCoordinator') == 'true'
+  if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
+    logDebug("Just removed from group!")
+    cd.subscribeToEvents()
+  }
+  if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
+    logDebug("Just added to group!")
+  }
+  cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+  if(!isGroupCoordinator) {return}
+
+  List<DeviceWrapper> groupedDevices = []
+  List<String> groupIds = []
+  List<String> groupedRincons = []
+  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID']) }
+  if(groupedRincons.size() == 0) {
+    logDebug("No grouped rincons found!")
+    return
+  }
+  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupIds.each{groupedDevices.add(getChildDevice(it))}
+
+  groupedDevices.each{dev -> if(currentGroupCoordinatorId && dev) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
+  groupedDevices.each{dev -> if(groupedRincons && dev && groupedRincons.size() > 0) {dev.updateDataValue('groupIds', groupedRincons.join(','))}}
+
+  String groupId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
+  String currentGroupCoordinatorName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  Integer currentGroupMemberCount = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
+
+  List currentGroupMemberNames = []
+  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberNames.add(it['@ZoneName']) }
+  String groupName = propertyset['property']['ZoneGroupName'].text()
+
+  groupedDevices.each{dev ->
+    if(dev) {
+      dev.updateDataValue('groupId', groupId)
+      dev.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)
+      dev.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
+      dev.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
+      dev.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
+      dev.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)
+      dev.sendEvent(name: 'groupName', value: groupName)
+    }
+  }
+
+
+  List<Map> events = [
+    [name:'currentCrossfadeMode', value: cd.currentState('currentCrossfadeMode')?.value],
+    [name:'currentRepeatAllMode', value: cd.currentState('currentRepeatAllMode')?.value],
+    [name:'currentRepeatOneMode',  value: cd.currentState('currentRepeatOneMode')?.value],
+    [name:'currentShuffleMode',  value: cd.currentState('currentShuffleMode')?.value],
+    [name:'currentTrackDuration', value: cd.currentState('currentTrackDuration')?.value],
+    [name:'currentTrackName',  value: cd.currentState('currentTrackName')?.value],
+    [name:'nextAlbumName',  value: cd.currentState('nextAlbumName')?.value],
+    [name:'nextArtistName', value: cd.currentState('nextArtistName')?.value],
+    [name:'nextTrackName',  value: cd.currentState('nextTrackName')?.value]
+  ]
+  groupedDevices.each{dev -> if(dev && dev.getDataValue('isGroupCoordinator') == 'false') { events.each{dev.sendEvent(it)}}}
 }
 
 // =============================================================================
@@ -839,15 +1160,45 @@ void sendCommandAsync(Map params, String callbackMethod, Map data = null) {
   }
 }
 
-void sendQueryAsync(Map params, String callback, Map data = null) {
+void sendLocalCommandAsync(Map args) {
+  if(args.endpoint == null) { return }
+  String callbackMethod = args.callbackMethod ?: 'localControlCallback'
+  Map params = args.params ?: [:]
+
+  params.uri = args.params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
+  params.contentType = args.params.contentType ?: 'application/json'
+  params.requestContentType = args.params.requestContentType ?: 'application/json'
+  params.ignoreSSLIssues = args.params.ignoreSSLIssues ?: true
+  if(params.headers == null) {
+    params.headers = ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
+  } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
+    params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
+  }
+  sendCommandAsync(params, callbackMethod, args.data)
+}
+
+void sendQueryAsync(Map params, String callbackMethod, Map data = null) {
   if (now() >= state.authTokenExpires - 600) {
     refreshToken()
   }
   try {
-    asynchttpGet(callback, params, data)
+    logDebug("sendQueryAsync params for callback ${callbackMethod}: ${params}")
+    asynchttpGet(callbackMethod, params, data)
   } catch (Exception e) {
     logDebug("Call failed: ${e.message}")
     return null
+  }
+}
+
+Boolean responseIsValid(AsyncResponse response, String requestName = null) {
+  if (response.status != 200) {
+    logError("${requestName} request returned HTTP status ${response.status}")
+  }
+  if (response.hasError()) {
+    logError("${requestName} request error: ${response.getErrorMessage()}")
+    return false
+  } else {
+    return true
   }
 }
 
@@ -856,3 +1207,164 @@ void sendQueryAsync(Map params, String callback, Map data = null) {
 // Local Control
 // =============================================================================
 
+void localControlCallback(AsyncResponse response, Map data) {
+  if (response.status != 200) {
+    logError("post request returned HTTP status ${response.status}")
+  }
+  if (response.hasError()) {
+    logError("post request error: ${response.getErrorMessage()}")
+  }
+}
+
+void getDeviceStateAsync(DeviceWrapper device, String callbackMethod = 'localControlCallback', Map service, String action, Map data = null, Map controlValues = null) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, service, action, controlValues)
+  asynchttpPost(callbackMethod, params, data)
+}
+
+void componentSetPlayerLevelLocal(DeviceWrapper device, BigDecimal level) {
+  String ip = device.getDataValue('deviceIp')
+  Map controlValues = [DesiredVolume: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentMuteGroupLocal(DeviceWrapper device, Boolean desiredMute) {
+  String ip = device.getDataValue('deviceIp')
+  Map controlValues = [DesiredMute: desiredMute]
+  Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetGroupRelativeLevelLocal(DeviceWrapper device, BigDecimal adjustment) {
+  String ip = device.getDataValue('deviceIp')
+  Map controlValues = [Adjustment: adjustment]
+  Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
+  getZoneGroupAttributesAsync(device, 'componentSetGroupLevelLocalCallback', [level:level, rincon:device.getDataValue('id')])
+}
+
+void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'componentSetGroupLevelLocalCallback')) { return }
+  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
+  List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
+  groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
+}
+
+void getZoneGroupAttributesAsync(DeviceWrapper device, String callbackMethod = 'getGetGetZoneGroupAttributesAsync', Map data = null) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  asynchttpPost(callbackMethod, params, data)
+}
+
+void getGetGetZoneGroupAttributesAsync(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'getGetGetZoneGroupAttributesAsync')) { return }
+
+}
+
+void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
+  String ip = device.getDataValue('deviceIp')
+  Map controlValues = [DesiredMute: desiredMute]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetMute', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentPlayLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, AVTransport, 'Play')
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentPauseLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, AVTransport, 'Pause')
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentStopLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, AVTransport, 'Stop')
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentNextTrackLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, AVTransport, 'Next')
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentPreviousTrackLocal(DeviceWrapper device) {
+  getDeviceStateAsync()
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, AVTransport, 'Previous')
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentPreviousTrackLocalCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'componentPreviousTrackLocalCallback')) { return }
+  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
+  Boolean has = xml['Body']['GetMediaInfoResponse']['NextURI'].text()
+  GPathResult currentZoneGroup = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
+  groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
+}
+
+String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  String groupId
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  httpPost(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      GPathResult xml = resp.data
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text()
+    } else {
+      logError(resp.data)
+    }
+  }
+  return groupId
+}
+
+String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  String groupId
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  httpPost(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      GPathResult xml = resp.data
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentMuseHouseholdId'].text()
+    } else {
+      logError(resp.data)
+    }
+  }
+  return groupId
+}
+
+void componentUngroupPlayerLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('deviceIp')
+  Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentUngroupPlayersLocal(DeviceWrapper device) {
+  String coordinatorId = device.getDataValue('coordinatorId')
+  ChildDeviceWrapper cd = app.getChildDevices().find{ cd -> cd.getDataValue('id') == coordinatorId }
+  getZoneGroupAttributesAsync(cd, 'componentUngroupPlayersLocalCallback', [householdId:device.getDataValue('householdId'),  rincon:device.getDataValue('coordinatorId')])
+}
+
+void componentUngroupPlayersLocalCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'componentUngroupPlayersLocalCallback')) { return }
+  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
+  List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
+
+  String endpoint = "/households/${data.householdId}/groups/createGroup"
+  logDebug(groupedDevices)
+  groupedDevices.each{ cd ->
+    if(cd) {
+      Map params = [body: [playerIds: [cd.getDataValue('id')]]]
+      String ip = "${cd.getDataValue('deviceIp').tokenize(':')[0]}:1443"
+      sendLocalCommandAsync(endpoint: endpoint, params: params, ipAddress: ip)
+    }
+  }
+}

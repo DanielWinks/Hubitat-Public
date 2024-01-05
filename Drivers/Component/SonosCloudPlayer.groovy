@@ -136,7 +136,7 @@ void setShuffle(String mode) {
 void shuffleOn() { setShuffle('on') }
 void shuffleOff() { setShuffle('off') }
 
-void ungroupPlayer() { parent?.componentUngroupPlayer(this.device) }
+void ungroupPlayer() { parent?.componentUngroupPlayerLocal(this.device) }
 
 void playText(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
@@ -155,28 +155,47 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
   parent?.componentPlayTrack(this.device, uri, volume)
 }
 
-void mute(){ parent?.componentMutePlayer(this.device, true) }
-void unmute(){ parent?.componentMutePlayer(this.device, false) }
-void setLevel(BigDecimal level) { parent?.componentSetLevel(this.device, level) }
+void mute(){ parent?.componentMutePlayerLocal(this.device, true) }
+void unmute(){ parent?.componentMutePlayerLocal(this.device, false) }
+void setLevel(BigDecimal level) { parent?.componentSetPlayerLevelLocal(this.device, level) }
+void setVolume(BigDecimal level) { setLevel(level) }
 
-void volumeDown() {
-  Integer level = this.device.currentState('level').value as Integer
-  BigDecimal newLevel = Math.min((level - (volumeAdjustAmount as Integer)), 100)
-  parent?.componentSetLevel(this.device, newLevel)
+void muteGroup(){
+  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, true) }
+  else { parent?.componentMutePlayerLocal(this.device, true) }
 }
-void volumeUp() {
-  Integer level = this.device.currentState('level').value as Integer
-  BigDecimal newLevel = Math.max((level + (volumeAdjustAmount as Integer)), 100)
-  parent?.componentSetLevel(this.device, level + (volumeAdjustAmount as Integer))
-
+void unmuteGroup(){
+  if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, false) }
+  else { parent?.componentMutePlayerLocal(this.device, false) }
+}
+void setGroupVolume(BigDecimal level) {
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevelLocal(this.device, level) }
+  else { parent?.componentSetPlayerLevelLocal(this.device, level)  }
+}
+void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
+void setGroupMute(String mode) {
+  logDebug("Setting group mute to ${mode}")
+  if(mode == 'muted') { muteGroup() }
+  else { unmuteGroup() }
+}
+void groupVolumeUp() {
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevelLocal(this.device, (volumeAdjustAmount as Integer)) }
+  else { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+}
+void groupVolumeDown() {
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupRelativeLevelLocal(this.device, -(volumeAdjustAmount as Integer)) }
+  else { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
 }
 
-void play() { parent?.componentPlay(this.device) }
-void stop() { parent?.componentStop(this.device) }
-void pause() { parent?.componentStop(this.device) }
-void nextTrack() { parent?.componentNextTrack(this.device) }
-void previousTrack() { parent?.componentPreviousTrack(this.device) }
-void refresh() { parent?.componentRefresh(this.device) }
+void volumeUp() { parent?.componentSetPlayerRelativeLevel(this.device, (volumeAdjustAmount as Integer)) }
+void volumeDown() { parent?.componentSetPlayerRelativeLevel(this.device, -(volumeAdjustAmount as Integer)) }
+
+void play() { parent?.componentPlayLocal(this.device) }
+void stop() { parent?.componentStopLocal(this.device) }
+void pause() { parent?.componentPauseLocal(this.device) }
+void nextTrack() { parent?.componentNextTrackLocal(this.device) }
+void previousTrack() { parent?.componentPreviousTrackLocal(this.device) }
+void refresh() {subscribeToEvents()}
 
 void getFavorites() {
   Map favorites = parent?.componentGetFavorites(this.device)
