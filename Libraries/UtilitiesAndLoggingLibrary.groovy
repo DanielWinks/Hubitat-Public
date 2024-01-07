@@ -168,6 +168,12 @@ String nowFormatted() {
 }
 
 @CompileStatic
+String runEveryCustomSeconds(Integer minutes) {
+  String currentSecond = new Date().format('ss')
+  return "${currentSecond} /${minutes} * * * ?"
+}
+
+@CompileStatic
 String runEveryCustomMinutes(Integer minutes) {
   String currentSecond = new Date().format('ss')
   String currentMinute = new Date().format('mm')

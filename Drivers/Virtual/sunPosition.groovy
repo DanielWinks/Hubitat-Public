@@ -60,7 +60,7 @@ void configure() {
   unschedule()
   refresh()
   if(settings.autoUpdate) {
-    schedule(runEveryCustomMinutes(updateInterval as Integer), 'refresh')
+    schedule(runEveryCustomSeconds(updateInterval as Integer), 'refresh')
   }
 }
 
