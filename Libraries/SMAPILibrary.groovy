@@ -381,20 +381,6 @@ GPathResult parseSonosMessageXML(Map message) {
   return propertyset
 }
 
-List<DeviceWrapper> getGroupedPlayerDevicesFromGetZoneGroupAttributes(GPathResult xml, String rincon) {
-  List<DeviceWrapper> groupedDevices = []
-  List<String> groupIds = []
-  List<String> groupedRincons = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text().tokenize(',')
-  if(groupedRincons.size() == 0) {
-    logDebug("No grouped rincons found!")
-    return
-  }
-  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
-  groupIds.each{groupedDevices.add(getChildDevice(it))}
-  return groupedDevices
-}
-
-
 @CompileStatic
 String getBaseControlXML(Map service, String action, Map controlValues = null) {
   String preArgs = (
