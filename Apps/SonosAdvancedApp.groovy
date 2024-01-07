@@ -483,6 +483,58 @@ String getGroupForPlayerDevice(DeviceWrapper device) {
   return device.getDataValue('groupId')
 }
 
+void getZoneGroupAttributesAsync(DeviceWrapper device, String callbackMethod = 'getZoneGroupAttributesAsyncCallback', Map data = null) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  asynchttpPost(callbackMethod, params, data)
+}
+
+void getZoneGroupAttributesAsyncCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'getZoneGroupAttributesAsyncCallback')) { return }
+}
+
+List<DeviceWrapper> getGroupedPlayerDevicesFromGetZoneGroupAttributes(GPathResult xml, String rincon) {
+  List<DeviceWrapper> groupedDevices = []
+  List<String> groupIds = []
+  List<String> groupedRincons = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text().tokenize(',')
+  if(groupedRincons.size() == 0) {
+    logDebug("No grouped rincons found!")
+    return
+  }
+  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupIds.each{groupedDevices.add(getChildDevice(it))}
+  return groupedDevices
+}
+
+String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('localUpnpHost')
+  String groupId
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  httpPost(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      GPathResult xml = resp.data
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text()
+    }
+    else { logError(resp.data) }
+  }
+  return groupId
+}
+
+String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
+  logDebug(device)
+  String ip = device.getDataValue('localUpnpHost')
+  String groupId
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  httpPost(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      GPathResult xml = resp.data
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentMuseHouseholdId'].text()
+    }
+    else { logError(resp.data) }
+  }
+  return groupId
+}
+
 // =============================================================================
 // Component Methods for Child Events
 // =============================================================================
@@ -608,8 +660,10 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
 
 void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
+  GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
+
   String rincon = cd.getDataValue('id')
-  String currentGroupCoordinatorId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
+  String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
   Boolean previouslyWasGroupCoordinator = cd.getDataValue('isGroupCoordinator') == 'true'
   if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
@@ -621,12 +675,11 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   }
   cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
   if(!isGroupCoordinator) {return}
-  GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
 
   List<DeviceWrapper> groupedDevices = []
   List<String> groupIds = []
   List<String> groupedRincons = []
-  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID'].toString()) }
+  zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID'].toString()) }
   if(groupedRincons.size() == 0) {
     logDebug("No grouped rincons found!")
     return
@@ -637,12 +690,12 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   groupedDevices.each{dev -> if(currentGroupCoordinatorId && dev) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
   groupedDevices.each{dev -> if(groupedRincons && dev && groupedRincons.size() > 0) {dev.updateDataValue('groupIds', groupedRincons.join(','))}}
 
-  String groupId = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
-  String currentGroupCoordinatorName = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
-  Integer currentGroupMemberCount = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
+  String groupId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
+  String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
+  Integer currentGroupMemberCount = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
 
   List currentGroupMemberNames = []
-  propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups'].children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberNames.add(it['@ZoneName']) }
+  zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberNames.add(it['@ZoneName']) }
   String groupName = propertyset['property']['ZoneGroupName'].text()
 
   groupedDevices.each{dev ->
@@ -682,41 +735,10 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
 // =============================================================================
 // Get and Post Helpers
 // =============================================================================
-
-void postJsonAsync(String uri, Map data = [:]) {
-  if (state.authToken == null) {
-    logError 'Authorization token not set, please connect the sonos account'
-    return
-  }
-  if (now() >= state.authTokenExpires - 600) { refreshToken() }
-  logDebug("post ${uri}: ${prettyJson(data)}")
-  asynchttpPost(
-    'postJsonAsyncCallback', [
-      uri: uri,
-      headers: [authorization: 'Bearer ' + state.authToken],
-      contentType: 'application/json',
-      body: JsonOutput.toJson(data)
-    ]
-  )
-}
-
-void postJsonAsyncCallback(AsyncResponse response, Map data) {
-  if (response.status != 200) { logError("post request returned HTTP status ${response.status}") }
-  if (response.hasError()) { logError("post request error: ${response.getErrorMessage()}")}
-  // else { logDebug("postJsonAsyncCallback: ${response.data}") }
-}
-
-void sendCommandAsync(Map params, String callbackMethod, Map data = null) {
-  logDebug(prettyJson(params))
-  try{ asynchttpPost(callbackMethod, params, data) }
-  catch(Exception e){ if(e.message.toString() != 'OK') { logError(e.message) } }
-}
-
 void sendLocalCommandAsync(Map args) {
   if(args?.endpoint == null && args?.params?.uri == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
   Map params = args.params ?: [:]
-
   params.uri = args.params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
   params.contentType = args.params.contentType ?: 'application/json'
   params.requestContentType = args.params.requestContentType ?: 'application/json'
@@ -733,7 +755,6 @@ void sendLocalQueryAsync(Map args) {
   if(args?.endpoint == null && args?.params?.uri == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
   Map params = args.params ?: [:]
-
   params.uri = args.params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
   params.contentType = args.params.contentType ?: 'application/json'
   params.requestContentType = args.params.requestContentType ?: 'application/json'
@@ -750,7 +771,6 @@ void sendLocalJsonAsync(Map args) {
   if(args?.endpoint == null && args?.params?.uri == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
   Map params = args.params ?: [:]
-
   params.uri = args.params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
   params.contentType = args.params.contentType ?: 'application/json'
   params.requestContentType = args.params.requestContentType ?: 'application/json'
@@ -761,18 +781,25 @@ void sendLocalJsonAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  asynchttpPost('postJsonAsyncCallback', params)
+  asynchttpPost('localControlCallback', params)
 }
 
-void sendQueryAsync(Map params, String callbackMethod, Map data = null) {
+void sendQueryAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
   if (now() >= state.authTokenExpires - 600) { refreshToken() }
-  try {
-    logDebug("sendQueryAsync params for callback ${callbackMethod}: ${params}")
-    asynchttpGet(callbackMethod, params, data)
-  } catch (Exception e) {
-    logDebug("Call failed: ${e.message}")
-    return null
-  }
+  try { asynchttpGet(callbackMethod, params, data)}
+  catch (Exception e) {logDebug("Call failed: ${e.message}")}
+}
+
+void sendCommandAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
+  logDebug(prettyJson(params))
+  try{ asynchttpPost(callbackMethod, params, data) }
+  catch(Exception e){ if(e.message.toString() != 'OK') { logError(e.message) } }
+}
+
+void localControlCallback(AsyncResponse response, Map data) {
+  if (response.status != 200) {logError("post request returned HTTP status ${response.status}")}
+  if (response.hasError()) {logError("post request error: ${response.getErrorMessage()}")}
+  logDebug("localControlCallback: ${response.getData()}")
 }
 
 Boolean responseIsValid(AsyncResponse response, String requestName = null) {
@@ -816,16 +843,6 @@ void componentPlayTrackLocal(DeviceWrapper device, String streamUrl, BigDecimal 
   String uri = "${localApiUrl}${endpoint}"
   Map params = [uri: uri]
   sendLocalJsonAsync(params: params, data: data)
-}
-
-void localControlCallback(AsyncResponse response, Map data) {
-  if (response.status != 200) {
-    logError("post request returned HTTP status ${response.status}")
-  }
-  if (response.hasError()) {
-    logError("post request error: ${response.getErrorMessage()}")
-  }
-  logDebug("localControlCallback: ${response.getData()}")
 }
 
 void getDeviceStateAsync(DeviceWrapper device, String callbackMethod = 'localControlCallback', Map service, String action, Map data = null, Map controlValues = null) {
@@ -873,17 +890,6 @@ void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
   groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
 }
 
-void getZoneGroupAttributesAsync(DeviceWrapper device, String callbackMethod = 'getGetGetZoneGroupAttributesAsync', Map data = null) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
-  asynchttpPost(callbackMethod, params, data)
-}
-
-void getGetGetZoneGroupAttributesAsync(AsyncResponse response, Map data) {
-  if(!responseIsValid(response, 'getGetGetZoneGroupAttributesAsync')) { return }
-
-}
-
 void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
   String ip = device.getDataValue('localUpnpHost')
   Map controlValues = [DesiredMute: desiredMute]
@@ -892,73 +898,33 @@ void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
 }
 
 void componentPlayLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHostForCoordinatorId(coordinatorId)
   Map params = getSoapActionParams(ip, AVTransport, 'Play')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentPauseLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHostForCoordinatorId(coordinatorId)
   Map params = getSoapActionParams(ip, AVTransport, 'Pause')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentStopLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHostForCoordinatorId(coordinatorId)
   Map params = getSoapActionParams(ip, AVTransport, 'Stop')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentNextTrackLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHostForCoordinatorId(coordinatorId)
   Map params = getSoapActionParams(ip, AVTransport, 'Next')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentPreviousTrackLocal(DeviceWrapper device) {
-  getDeviceStateAsync()
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHostForCoordinatorId(coordinatorId)
   Map params = getSoapActionParams(ip, AVTransport, 'Previous')
   asynchttpPost('localControlCallback', params)
-}
-
-void componentPreviousTrackLocalCallback(AsyncResponse response, Map data) {
-  if(!responseIsValid(response, 'componentPreviousTrackLocalCallback')) { return }
-  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
-  Boolean has = xml['Body']['GetMediaInfoResponse']['NextURI'].text()
-  GPathResult currentZoneGroup = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
-  groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
-}
-
-String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
-  String groupId
-  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
-  httpPost(params) { resp ->
-    if (resp && resp.data && resp.success) {
-      GPathResult xml = resp.data
-      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text()
-    } else {
-      logError(resp.data)
-    }
-  }
-  return groupId
-}
-
-String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
-  logDebug(device)
-  String ip = device.getDataValue('localUpnpHost')
-  String groupId
-  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
-  httpPost(params) { resp ->
-    if (resp && resp.data && resp.success) {
-      GPathResult xml = resp.data
-      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentMuseHouseholdId'].text()
-    } else {
-      logError(resp.data)
-    }
-  }
-  return groupId
 }
 
 void componentUngroupPlayerLocal(DeviceWrapper device) {
@@ -1135,6 +1101,11 @@ String getLocalApiUrlForPlayer(DeviceWrapper device) {
 String getLocalApiUrlForCoordinatorId(String coordinatorId) {
   String localApiUrl = app.getChildDevices().find{ cd -> cd.getDataValue('id') == coordinatorId }.getDataValue('localApiUrl')
   return localApiUrl
+}
+
+String getLocalUpnpHostForCoordinatorId(String coordinatorId) {
+  String localUpnpHost = app.getChildDevices().find{ cd -> cd.getDataValue('id') == coordinatorId }.getDataValue('localUpnpHost')
+  return localUpnpHost
 }
 
 String getCoordinatorGroupId(String coordinatorId) {
