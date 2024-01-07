@@ -22,6 +22,7 @@
 */
 
 #include dwinks.UtilitiesAndLoggingLibrary
+#include dwinks.SMAPILibrary
 
 definition(
   name: 'Sonos Cloud Controller',
@@ -378,34 +379,17 @@ Map localPlayerSelectionPage() {
   }
 }
 
-// Map playerPage() {
-//   app.removeSetting('playerDevices')
-//   refreshPlayersAndGroups()
-//   logDebug(getObjectClassName(getCurrentPlayerDevices()))
-//   app.updateSetting('playerDevices', [type: 'enum', value: getCurrentPlayerDevices()])
-//   dynamicPage(name: 'playerPage', title: 'Sonos Player Virtual Devices', nextPage: 'mainPage') {
-//     section {
-//       paragraph ('Select Sonos players that you want to create Hubitat devices for control.<br>To remove a player later simply remove the created device.')
-//       paragraph ('If no players are listed, or players are missing, wait a few seconds and refresh the page.')
-//       paragraph ("Select virtual players to create (${playerSelectionOptions.size()} players found)")
-//       input (name: 'playerDevices', title: '', type: 'enum', options: playerSelectionOptions, multiple: true)
-//       }
-//   }
-// }
+List<ChildDeviceWrapper> getCurrentPlayerDevices() {
+  return app.getChildDevices().findAll{ child -> child.getDataValue('id')}
+}
 
-List<String> getCurrentPlayerDevices() {
-  List<ChildDeviceWrapper> childDevices = app.getChildDevices()
-  List<String> pds = []
-  childDevices.each() {cd -> pds.add("${cd.getDataValue('id')}")}
-  return pds
+List<ChildDeviceWrapper> getCurrentGroupDevices() {
+  return app.getChildDevices().findAll{ child -> child.getDataValue('id') == null}
 }
 
 Map groupPage() {
-  // refreshPlayersAndGroups()
   if(!state.userGroups) { state.userGroups = [:] }
-  List<ChildDeviceWrapper> children = app.getChildDevices()
-
-  // Map coordinatorSelectionOptions = state.players.collectEntries { id, player -> [(id): player.name] }
+  Map coordinatorSelectionOptions = getCurrentPlayerDevices().collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('name')] }
   Map playerSelectionOptions = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator }
 
   String edg = app.getSetting('editDeleteGroup')
@@ -534,14 +518,15 @@ void createGroupDevices() {
     if (device == null) {
       try {
         logDebug("Creating group device for ${it.key}")
-        device = addChildDevice('dwinks', 'Sonos Cloud Group', dni, [name: 'Sonos Group', label: "Sonos Group: ${it.key}"])
+        device = addChildDevice('dwinks', 'Sonos Advanced Group', dni, [name: 'Sonos Group', label: "Sonos Group: ${it.key}"])
       } catch (UnknownDeviceTypeException e) {
         logException('createGroupDevices', e)
       }
     }
     String coordinatorId = it.value.coordinatorId as String
     String playerIds =  it.value.playerIds.join(',')
-    String householdId = state.players["${it.value.coordinatorId}"].householdId as String
+    ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == coordinatorId}
+    String householdId = coordDev.getDataValue('householdId')
     device.updateDataValue('coordinatorId', coordinatorId)
     device.updateDataValue('playerIds', playerIds)
     device.updateDataValue('householdId', householdId)
