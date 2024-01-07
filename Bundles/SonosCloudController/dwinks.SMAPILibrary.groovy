@@ -29,9 +29,12 @@ library(
   importUrl: ''
 )
 
-Map AlarmClock1 = [:]
+// =============================================================================
+// Services
+// =============================================================================
+@Field private final Map AlarmClock1 = [:]
 
-Map AVTransport = [
+@Field private final Map AVTransport = [
   service: 'AVTransport',
   serviceType: 'urn:schemas-upnp-org:service:AVTransport:1',
   serviceId: 'urn:upnp-org:serviceId:AVTransport',
@@ -216,7 +219,7 @@ Map AVTransport = [
   ]
 ]
 
-Map ContentDirectory = [
+@Field private final Map ContentDirectory = [
   service: 'ContentDirectory',
   serviceType: 'urn:schemas-upnp-org:service:ContentDirectory:1',
   serviceId: 'urn:upnp-org:serviceId:ContentDirectory',
@@ -243,12 +246,12 @@ Map ContentDirectory = [
   actions: [
     GetVolume: [arguments: [InstanceID: 0, Channel: "Master"]],
     GetMute: [arguments: [InstanceID: 0, Channel: "Master"]],
-    SetVolume: [arguments: [InstanceID: 0, Channel: "Master", DesiredVolume: 50]],
+    SetVolume: [arguments: [InstanceID: 0, Channel: "Master", DesiredVolume: 0]],
     SetMute: [arguments: [InstanceID: 0, Channel: "Master", DesiredMute: true]],
   ]
 ]
 
-Map GroupRenderingControl = [
+@Field private final Map GroupRenderingControl = [
   service: 'GroupRenderingControl',
   serviceType: 'urn:schemas-upnp-org:service:GroupRenderingControl:1',
   controlURL: '/MediaRenderer/GroupRenderingControl/Control',
@@ -256,31 +259,47 @@ Map GroupRenderingControl = [
   actions: [
       GetGroupVolume: [arguments: [InstanceID: 0]],
       GetGroupMute: [arguments: [InstanceID: 0]],
-      SetGroupVolume: [arguments: [InstanceID: 0, DesiredVolume: 50]],
+      SetGroupVolume: [arguments: [InstanceID: 0, DesiredVolume: 0]],
       SetGroupMute: [arguments: [InstanceID: 0, DesiredMute: true]],
+      SetRelativeGroupVolume: [arguments: [InstanceID: 0, Adjustment: 0]] //For whatever reason this doesn't adjust volume properly...
   ]
 ]
 
-Map ZoneGroupTopology = [
+@Field private final Map ZoneGroupTopology = [
   service: 'ZoneGroupTopology',
   serviceType: 'urn:schemas-upnp-org:service:ZoneGroupTopology:1',
   controlURL: '/ZoneGroupTopology/Control',
   eventSubURL: '/ZoneGroupTopology/Event',
   actions: [
-      GetZoneGroupState: [],
-      GetZoneGroupAttributes: []
+      GetZoneGroupState: [:],
+      GetZoneGroupAttributes: [:]
   ]
 ]
 
-
-
-Map Queue = [
+@Field private final Map Queue = [
   service: 'Queue',
   serviceType: 'urn:schemas-sonos-com:service:Queue:1',
   controlURL: '/MediaRenderer/Queue/Control',
   eventSubURL: '/MediaRenderer/Queue/Event',
   actions: [ ]
 ]
+
+@Field private final Map GroupManagement = [
+  service: 'GroupManagement',
+  serviceType: 'urn:schemas-upnp-org:service:GroupManagement:1',
+  controlURL: '/GroupManagement/Control',
+  eventSubURL: '/GroupManagement/Event',
+  actions: [
+    AddMember: [arguments: [MemberID: '', BootSeq: 0]],
+    RemoveMember: [arguments: [MemberID: '']],
+    ReportTrackBufferingResult: [arguments: [MemberID: '', ResultCode: 0]],
+    SetSourceAreaIds: [arguments: [DesiredSourceAreaIds: '']]
+  ]
+]
+
+// =============================================================================
+// Subscription methods
+// =============================================================================
 
 void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni) {
   logDebug("Subscribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
@@ -334,40 +353,64 @@ void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String s
   }
 }
 
+// =============================================================================
+// Helpers
+// =============================================================================
+
+@CompileStatic
+String unescapeXML(String toUnescape) {
+  return toUnescape.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
+}
+
+@CompileStatic
+String escapeXML(String toEscape) {
+  return toEscape.replace('"', '&quot;').replace("'", '&apos;').replace('<', '&lt;').replace('>','&gt;').replace('&','&amp;')
+}
+
+@CompileStatic
 GPathResult parseSonosMessageXML(Map message) {
-  String body = message.body.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
-  GPathResult propertyset = parseXML(body)
+  String body = (message.body as String).replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
+  GPathResult propertyset = new XmlSlurper().parseText(body)
   return propertyset
 }
 
-String getSetVolumeControlXML(String level) {
-  String action = 'SetVolume'
-  String arg = 'DesiredVolume'
-  return(
-  '<?xml version="1.0"?>'+
-  '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'+
-    '<s:Body>'+
-      "<u:${action} xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"+
-        '<InstanceID>0</InstanceID>'+
-        '<Channel>Master</Channel>'+
-        "<${arg}>${level}</${arg}>"+
-      "</u:${action}>"+
-    '</s:Body>'+
-  '</s:Envelope>')
+List<DeviceWrapper> getGroupedPlayerDevicesFromGetZoneGroupAttributes(GPathResult xml, String rincon) {
+  List<DeviceWrapper> groupedDevices = []
+  List<String> groupIds = []
+  List<String> groupedRincons = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text().tokenize(',')
+  if(groupedRincons.size() == 0) {
+    logDebug("No grouped rincons found!")
+    return
+  }
+  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupIds.each{groupedDevices.add(getChildDevice(it))}
+  return groupedDevices
 }
 
-String getSetMuteControlXML(String desiredMute) {
-  String action = 'SetMute'
-  String arg = 'DesiredMute'
-  return(
-  '<?xml version="1.0"?>'+
-  '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'+
-    '<s:Body>'+
-      "<u:${action} xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\">"+
-        '<InstanceID>0</InstanceID>'+
-        '<Channel>Master</Channel>'+
-        "<${arg}>${desiredMute}</${arg}>"+
-      "</u:${action}>"+
-    '</s:Body>'+
-  '</s:Envelope>')
+
+@CompileStatic
+String getBaseControlXML(Map service, String action, Map controlValues = null) {
+  String preArgs = (
+  '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'+
+      "<u:${action} xmlns:u=\"${service.serviceType}\">")
+  Map actionArgs = service.actions[action] as Map
+  Map args = actionArgs.arguments as Map // Get action argument default values
+  if(controlValues) { controlValues.each{ cv -> args[cv.key] = cv.value } } // Merge in any supplied values
+  String xmlArgs = ""
+  args?.each{ arg -> xmlArgs = xmlArgs + "<${arg.key}>${arg.value}</${arg.key}>" }
+  String postArgs = "</u:${action}></s:Body></s:Envelope>"
+  return preArgs + xmlArgs + postArgs
+}
+
+@CompileStatic
+Map getSoapActionParams(String deviceIp, Map service, String action, Map controlValues = null) {
+  String body = getBaseControlXML(service, action, controlValues)
+  String uri = "http://${deviceIp}${service.controlURL}"
+  String soapAction = "${service.serviceType}#${action}"
+  return [
+      uri: uri,
+      headers: [SOAPAction: soapAction],
+      contentType: 'text/xml',
+      body: body
+    ]
 }
