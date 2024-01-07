@@ -248,6 +248,13 @@ library(
     GetMute: [arguments: [InstanceID: 0, Channel: "Master"]],
     SetVolume: [arguments: [InstanceID: 0, Channel: "Master", DesiredVolume: 0]],
     SetMute: [arguments: [InstanceID: 0, Channel: "Master", DesiredMute: true]],
+    SetRelativeVolume: [arguments: [InstanceID: 0, Channel: "Master", Adjustment: 0]],
+    GetBass: [arguments: [InstanceID: 0]],
+    GetTreble: [arguments: [InstanceID: 0]],
+    SetBass: [arguments: [InstanceID: 0, DesiredBass: 0]],
+    SetTreble: [arguments: [InstanceID: 0, DesiredTreble: 0]],
+    GetLoudness: [arguments: [InstanceID: 0, Channel: "Master"]],
+    SetLoudness: [arguments: [InstanceID: 0, Channel: "Master", DesiredLoudness: true]]
   ]
 ]
 
