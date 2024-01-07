@@ -25,32 +25,23 @@
 
 metadata {
   definition(
-    name: 'Sonos Advanced Group',
+    name: 'Sonos Advanced Snapshot',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
-    importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy'
+    importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy'
   ) {
     capability 'Actuator'
     capability 'Switch'
 
-    command 'groupPlayers'
-    command 'joinPlayersToCoordinator'
-    command 'removePlayersFromCoordinator'
-    command 'ungroupPlayers'
-
-    attribute 'coordinatorActive', 'string'
-    attribute 'followers', 'string'
+    attribute 'avTransportURI', 'string'
+    attribute 'avTransportURIMetaData', 'string'
   }
 }
 
 void initialize() {}
 void configure() {}
-void groupPlayers() { parent?.componentGroupPlayersLocal(this.device) }
-void joinPlayersToCoordinator() { parent?.componentJoinPlayersToCoordinatorLocal(this.device) }
-void removePlayersFromCoordinator() { parent?.componentRemovePlayersFromCoordinatorLocal(this.device) }
-void ungroupPlayers() { parent?.componentUngroupPlayersLocal(this.device) }
+
 void on() { joinPlayersToCoordinator() }
 void off() { removePlayersFromCoordinator() }
-void setState(String stateName, String stateValue) { state[stateName] = stateValue }
-void clearState() { state.clear() }
+

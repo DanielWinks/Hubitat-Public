@@ -29,7 +29,7 @@ metadata {
     name: 'Sonos Advanced Player',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvancedPlayer.groovy'
+    importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
 
   capability 'AudioNotification'
@@ -81,6 +81,7 @@ metadata {
   attribute 'currentShuffleMode' , 'enum', [ 'on', 'off' ]
   attribute 'currentTrackDuration', 'string'
   attribute 'currentArtistName', 'string'
+  attribute 'albumArtURI', 'string'
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
   attribute 'currentFavorite', 'string'
@@ -90,14 +91,17 @@ metadata {
   attribute 'nextTrackName', 'string'
   attribute 'queueTrackTotal', 'string'
   attribute 'queueTrackPosition', 'string'
+
   attribute 'treble', 'number'
   attribute 'bass', 'number'
   attribute 'loudness', 'enum', [ 'on', 'off' ]
+  command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
+  command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
+  command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
+
 
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
-  // attribute 'groupCoordinatorId', 'string'
-  // attribute 'groupId', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
@@ -183,22 +187,26 @@ void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(
 void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
-void playTrack(String uri, BigDecimal volume = null) { devicePlayTrack(uri, volume) }
-void playTrackAndRestore(String uri, BigDecimal volume = null) { devicePlayTrack(uri, volume) }
-void playTrackAndResume(String uri, BigDecimal volume = null) { devicePlayTrack(uri, volume) }
+void setTrack(String uri) { playTrack(uri) }
+void playTrack(String uri, BigDecimal volume = null) { parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
+void playTrackAndRestore(String uri, BigDecimal volume = null) { componentPlayAudioClipLocal(uri, volume) }
+void playTrackAndResume(String uri, BigDecimal volume = null) { componentPlayAudioClipLocal(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   parent?.componentPlayTextLocal(this.device, text, volume, voice)
 }
 
 void devicePlayTrack(String uri, BigDecimal volume = null) {
-  parent?.componentPlayTrackLocal(this.device, uri, volume)
+  parent?.componentLoadStreamUrlLocal(this.device, uri, volume)
 }
 
 void mute(){ parent?.componentMutePlayerLocal(this.device, true) }
 void unmute(){ parent?.componentMutePlayerLocal(this.device, false) }
 void setLevel(BigDecimal level) { parent?.componentSetPlayerLevelLocal(this.device, level) }
 void setVolume(BigDecimal level) { setLevel(level) }
+void setTreble(BigDecimal level) { parent?.componentSetTreble(this.device, level)}
+void setBass(BigDecimal level) { parent?.componentSetBass(this.device, level)}
+void setLoudness(String mode) { parent?.componentSetLoudness(this.device, mode)}
 
 void muteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, true) }
@@ -548,10 +556,8 @@ void createRemoveMuteChildDevice(Boolean create) {
 // Parse
 // =============================================================================
 
-void parse(raw) {
-  Map message = parseLanMessage(raw)
-  // logDebug("Message: ${message}")
-  // logDebug("Recieved headers: ${message.headers}")
+void parse(String raw) {
+  LinkedHashMap message = parseLanMessage(raw)
   if(message.headers.containsKey('HTTP/1.1 412 Precondition Failed')) {
     logDebug("Expired subscriptions detected, resubscribing to all...")
     logDebug("412: ${message}")
@@ -587,17 +593,19 @@ void parse(raw) {
 // =============================================================================
 
 void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
+void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
 void processRenderingControlMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
+  GPathResult instanceId = propertyset['property']['LastChange']['Event']['InstanceID']
 
-  String volume = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Volume' && it['@channel'] == 'Master'}['@val']
+  String volume = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'Master'}['@val']
   if(volume) {
     sendEvent(name:'level', value: volume as Integer)
     sendEvent(name:'volume', value: volume as Integer)
     if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
   }
 
-  String mute = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
+  String mute = instanceId.children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
     String muted = mute == '1' ? 'muted' : 'unmuted'
     String previousMutedState = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
@@ -608,16 +616,15 @@ void processRenderingControlMessages(Map message) {
     sendEvent(name:'mute', value: muted)
   }
 
-  String bass = propertyset['property']['LastChange']['Event']['InstanceID']['Bass']['@val']
+  String bass = instanceId['Bass']['@val']
   if(bass) { sendEvent(name:'bass', value: bass as Integer) }
 
-  String treble = propertyset['property']['LastChange']['Event']['InstanceID']['Treble']['@val']
+  String treble = instanceId['Treble']['@val']
   if(treble) { sendEvent(name:'treble', value: treble as Integer) }
 
-  String loudness = propertyset['property']['LastChange']['Event']['InstanceID'].children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
+  String loudness = instanceId.children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { sendEvent(name:'loudness', value: loudness == 1 ? 'on' : 'off') }
 }
-void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
 
 // =============================================================================
 // Subscriptions and Resubscriptions
@@ -632,7 +639,6 @@ void subscribeToEvents() {
   if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
   if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
 
-// sonosEventSubscribe(String eventSubURL, String host, String timeout, String dni)
   sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni)
   sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni)
   sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni)

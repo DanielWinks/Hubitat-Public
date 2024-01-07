@@ -366,7 +366,7 @@ void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String s
 
 @CompileStatic
 String unescapeXML(String toUnescape) {
-  return toUnescape.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
+  return toUnescape.replace('&amp;','&').replace('&amp;','&').replace('&amp;','&').replace('&amp;','&').replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>')
 }
 
 @CompileStatic

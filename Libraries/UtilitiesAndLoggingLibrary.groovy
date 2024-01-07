@@ -131,6 +131,10 @@ void logTrace(message) {
   }
 }
 
+void logClass(obj) {
+  logDebug("Object Class Name: ${getObjectClassName(obj)}")
+}
+
 void logsOff() {
   if (device) {
     logWarn("Logging disabled for ${device}")
