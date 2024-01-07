@@ -230,11 +230,11 @@ void groupVolumeDown() {
 void volumeUp() { parent?.componentSetPlayerRelativeLevelLocal(this.device, (volumeAdjustAmount as Integer)) }
 void volumeDown() { parent?.componentSetPlayerRelativeLevelLocal(this.device, -(volumeAdjustAmount as Integer)) }
 
-void play() { parent?.componentPlay(this.device) }
-void stop() { parent?.componentStop(this.device) }
-void pause() { parent?.componentStop(this.device) }
-void nextTrack() { parent?.componentNextTrack(this.device) }
-void previousTrack() { parent?.componentPreviousTrack(this.device) }
+void play() { parent?.componentPlayLocal(this.device) }
+void stop() { parent?.componentStopLocal(this.device) }
+void pause() { parent?.componentPauseLocal(this.device) }
+void nextTrack() { parent?.componentNextTrackLocal(this.device) }
+void previousTrack() { parent?.componentPreviousTrackLocal(this.device) }
 void refresh() {subscribeToEvents()}
 
 void getFavorites() {
