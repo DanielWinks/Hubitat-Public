@@ -248,6 +248,13 @@ library(
     GetMute: [arguments: [InstanceID: 0, Channel: "Master"]],
     SetVolume: [arguments: [InstanceID: 0, Channel: "Master", DesiredVolume: 0]],
     SetMute: [arguments: [InstanceID: 0, Channel: "Master", DesiredMute: true]],
+    SetRelativeVolume: [arguments: [InstanceID: 0, Channel: "Master", Adjustment: 0]],
+    GetBass: [arguments: [InstanceID: 0]],
+    GetTreble: [arguments: [InstanceID: 0]],
+    SetBass: [arguments: [InstanceID: 0, DesiredBass: 0]],
+    SetTreble: [arguments: [InstanceID: 0, DesiredTreble: 0]],
+    GetLoudness: [arguments: [InstanceID: 0, Channel: "Master"]],
+    SetLoudness: [arguments: [InstanceID: 0, Channel: "Master", DesiredLoudness: true]]
   ]
 ]
 
@@ -373,20 +380,6 @@ GPathResult parseSonosMessageXML(Map message) {
   GPathResult propertyset = new XmlSlurper().parseText(body)
   return propertyset
 }
-
-List<DeviceWrapper> getGroupedPlayerDevicesFromGetZoneGroupAttributes(GPathResult xml, String rincon) {
-  List<DeviceWrapper> groupedDevices = []
-  List<String> groupIds = []
-  List<String> groupedRincons = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text().tokenize(',')
-  if(groupedRincons.size() == 0) {
-    logDebug("No grouped rincons found!")
-    return
-  }
-  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
-  groupIds.each{groupedDevices.add(getChildDevice(it))}
-  return groupedDevices
-}
-
 
 @CompileStatic
 String getBaseControlXML(Map service, String action, Map controlValues = null) {
