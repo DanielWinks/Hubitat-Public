@@ -131,6 +131,10 @@ void logTrace(message) {
   }
 }
 
+void logClass(obj) {
+  logDebug("Object Class Name: ${getObjectClassName(obj)}")
+}
+
 void logsOff() {
   if (device) {
     logWarn("Logging disabled for ${device}")
@@ -161,6 +165,12 @@ String prettyJson(Map jsonInput) {
 String nowFormatted() {
   if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
   else                  return new Date().format('yyyy MMM dd EEE h:mm:ss a')
+}
+
+@CompileStatic
+String runEveryCustomSeconds(Integer minutes) {
+  String currentSecond = new Date().format('ss')
+  return "${currentSecond} /${minutes} * * * ?"
 }
 
 @CompileStatic
