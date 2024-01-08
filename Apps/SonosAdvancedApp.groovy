@@ -1119,15 +1119,15 @@ void componentUngroupPlayersLocal(DeviceWrapper device) {
 // /////////////////////////////////////////////////////////////////////////////
 void componentLoadFavoriteFullLocal(DeviceWrapper device, String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
   logDebug('Loading favorites full options...')
-  String groupId = device.getDataValue('groupId')
   Map data = [
     action:action,
     favoriteId:favoriteId,
     playOnCompletion:playOnCompletion,
     playModes:['repeat': repeat,'repeatOne': repeatOne, 'shuffle': shuffle, 'crossfade': crossfade],
   ]
-
-  String localApiUrl = "${device.getDataValue('localApiUrl')}"
+  String groupId = getGroupForPlayerDeviceLocal(device)
+  ChildDeviceWrapper coordinator = getDeviceFromRincon(groupId.tokenize(':')[0])
+  String localApiUrl = "${coordinator.getDataValue('localApiUrl')}"
   String endpoint = "groups/${groupId}/favorites"
   String uri = "${localApiUrl}${endpoint}"
   Map params = [uri: uri]
