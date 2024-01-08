@@ -659,7 +659,6 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
 
 
     String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
-    logDebug(avTransportURIMetaDataString)
     if(avTransportURIMetaDataString) {
       GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeMetaData(avTransportURIMetaDataString))
 
@@ -842,7 +841,7 @@ void sendQueryAsync(Map params, String callbackMethod = 'localControlCallback', 
 }
 
 void sendCommandAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
-  logDebug(prettyJson(params))
+  logDebug("sendCommandAsync params: ${prettyJson(params)}")
   try{ asynchttpPost(callbackMethod, params, data) }
   catch(Exception e){ if(e.message.toString() != 'OK') { logError(e.message) } }
 }
@@ -869,7 +868,7 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
 
 void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   String playerId = device.getDataValue('id')
-  logDebug "${device} play text ${text} (volume ${volume ?: 'not set'})"
+  logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
   Map tts = textToSpeech(text, voice)
   data.streamUrl = tts.uri

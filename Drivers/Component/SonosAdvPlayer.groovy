@@ -462,6 +462,10 @@ void setTrackDataEvents(Map trackData) {
   sendEvent(name: 'trackData', value: trackData)
 }
 
+void componentUpdateBatteryStatus() {
+  parent?.componentUpdateBatteryStatus()
+}
+
 // =============================================================================
 // Create Child Devices
 // =============================================================================
@@ -570,20 +574,23 @@ void parse(String raw) {
   if(message.body == null) {return}
   String sId = message.headers["SID"]
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
-  logDebug("Received message for ${serviceType}")
-  if(serviceType == 'AVTransport') {
+  if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
     this.device.updateDataValue('sid1', sId)
     processAVTransportMessages(message)
-  } else if(serviceType == 'RenderingControl') {
+  }
+  else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
     this.device.updateDataValue('sid2', sId)
     processRenderingControlMessages(message)
-  } else if(serviceType == 'ZoneGroupTopology') {
+  }
+  else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
     this.device.updateDataValue('sid3', sId)
     processZoneGroupTopologyMessages(message)
-  } else if(serviceType == 'GroupRenderingControl') {
+  }
+  else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
     this.device.updateDataValue('sid4', sId)
     // processGroupRenderingControlMessages(message)
-  } else {
+  }
+  else {
     logDebug("Could not determine service type for message: ${message}")
   }
 }
@@ -639,10 +646,10 @@ void subscribeToEvents() {
   if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
   if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
 
-  sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni)
-  sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni)
-  sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni)
-  sonosEventSubscribe('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni)
+  sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, '/avt')
+  sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, '/mrc')
+  sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, '/zgt')
+  sonosEventSubscribe('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, '/mgrc')
 
   // sonosEventSubscribe('/MediaRenderer/Queue/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/MediaServer/ContentDirectory/Event', host, RESUB_INTERVAL, dni)
