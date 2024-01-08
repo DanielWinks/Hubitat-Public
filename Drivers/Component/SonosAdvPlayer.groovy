@@ -435,6 +435,10 @@ void setCurrentTrackDuration(String currentTrackDuration){
 
 void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumName, String currentTrackName, Integer currentTrackNumber) {
   if(disableArtistAlbumTrackEvents) {return}
+  currentArtistName = currentArtistName ?: "Not Available"
+  currentAlbumName = currentAlbumName ?: "Not Available"
+  currentTrackNumber = currentTrackNumber ?: 0
+
   sendEvent(name:'currentArtistName', value: currentArtistName)
   sendEvent(name:'currentAlbumName',  value: currentAlbumName)
   sendEvent(name:'currentTrackName',  value: currentTrackName)
@@ -443,6 +447,9 @@ void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumNam
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
   if(disableArtistAlbumTrackEvents) {return}
+  nextArtistName = nextArtistName ?: "Not Available"
+  nextAlbumName = nextAlbumName ?: "Not Available"
+  nextTrackName = nextTrackName ?: "Not Available"
   sendEvent(name:'nextArtistName', value: nextArtistName)
   sendEvent(name:'nextAlbumName',  value: nextAlbumName)
   sendEvent(name:'nextTrackName',  value: nextTrackName)
@@ -703,8 +710,8 @@ ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatterySta
 // =============================================================================
 
 void clearCurrentNextArtistAlbumTrackData() {
-  setCurrentArtistAlbumTrack(null, null, null, 0)
-  setNextArtistAlbumTrack(null, null, null)
+  setCurrentArtistAlbumTrack("Not Available", "Not Available", "Not Available", 0)
+  setNextArtistAlbumTrack("Not Available", "Not Available", "Not Available")
 }
 
 void clearTrackDataEvent() {

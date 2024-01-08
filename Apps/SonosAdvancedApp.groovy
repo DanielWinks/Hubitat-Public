@@ -627,13 +627,13 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
     String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-
-    String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : null
-    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
-    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
+    albumArtURI = albumArtURI.startsWith('/') ? "${dev.getDataValue('localUpnpUrl')}${albumArtURI}" : albumArtURI
+    String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : "Not Available"
+    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : "Not Available"
+    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : "Not Available"
 
     groupedDevices.each{dev ->
-      dev.sendEvent(name:'albumArtURI', value: "<img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
+      dev.sendEvent(name:'albumArtURI', value: "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
     }
 
@@ -689,9 +689,9 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       groupedDevices.each{dev -> if(dev) {dev.setTrackDataEvents(trackData)}}
     }
   } else {
-    currentArtistName = ''
-    currentAlbumName = ''
-    currentTrackName = ''
+    currentArtistName = "Not Available"
+    currentAlbumName = "Not Available"
+    currentTrackName = "Not Available"
     trackNumber = 0
     groupedDevices.each{dev ->
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
@@ -703,14 +703,14 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   GPathResult nextTrackMetaDataXML
   if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
   if(nextTrackMetaDataXML) {
-    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : ""
-    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : ""
-    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : ""
+    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : "Not Available"
+    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : "Not Available"
+    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : "Not Available"
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   } else {
-    String nextArtistName = ""
-    String nextAlbumName = ""
-    String nextTrackName = ""
+    String nextArtistName = "Not Available"
+    String nextAlbumName = "Not Available"
+    String nextTrackName = "Not Available"
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   }
 }
@@ -734,7 +734,9 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   if(!isGroupCoordinator) {return}
 
   List<String> groupedRincons = []
-  zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID'].toString()) }
+  GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
+
+  currentGroupMembers.each{ groupedRincons.add(it['@UUID'].toString()) }
   if(groupedRincons.size() == 0) {
     logDebug("No grouped rincons found!")
     return
@@ -746,10 +748,13 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
 
   String groupId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
   String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
-  Integer currentGroupMemberCount = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().size()
 
-  List currentGroupMemberNames = []
-  zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ currentGroupMemberNames.add(it['@ZoneName']) }
+
+  LinkedHashSet currentGroupMemberNames = []
+  currentGroupMembers.each{ currentGroupMemberNames.add(it['@ZoneName']) }
+  Integer currentGroupMemberCount = currentGroupMemberNames.size()
+
+
   String groupName = propertyset['property']['ZoneGroupName'].text()
 
   groupedDevices.each{dev ->
