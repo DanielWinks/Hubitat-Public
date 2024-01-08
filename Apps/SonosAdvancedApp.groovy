@@ -395,7 +395,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   if(discoveredSonos?.name != null) {
     discoveredSonoses[mac] = discoveredSonos
   } else {
-    logDebug("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
+    logInfo("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
   }
 }
 
