@@ -100,8 +100,8 @@ Map mainPage() {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-      input 'applySettingsButton', 'button', title: 'Apply Settings'
-      input 'createPlayerDevices', 'button', title: 'Create Players'
+      // input 'applySettingsButton', 'button', title: 'Apply Settings'
+      // input 'createPlayerDevices', 'button', title: 'Create Players'
     }
   }
 }
