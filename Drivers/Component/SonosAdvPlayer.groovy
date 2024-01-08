@@ -119,6 +119,7 @@ metadata {
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
+      input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
     }
   }
 }
@@ -138,6 +139,7 @@ void configure() {
   createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
   createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)
   createRemoveMuteChildDevice(createMuteChildDevice)
+  createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
 }
@@ -250,57 +252,48 @@ void getFavorites() {
 }
 
 void loadFavorite(String favoriteId) {
-  loadFavoriteFull(favoriteId)
+  String queueMode = "REPLACE"
+  Boolean autoPlay = 'true'
+  Boolean repeatMode = 'repeat one'
+  Boolean shuffle = 'false'
+  Boolean crossfade = 'true'
+  loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
+// void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode)
 
 void loadFavoriteFull(String favoriteId) {
-  String action = "REPLACE"
-  Boolean playOnCompletion = true
-  Boolean repeat = true
-  Boolean repeatOne = false
-  Boolean shuffle = false
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFullLocal(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+  String queueMode = "REPLACE"
+  Boolean autoPlay = 'true'
+  Boolean repeatMode = 'repeat one'
+  Boolean shuffle = 'false'
+  Boolean crossfade = 'true'
+  loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode) {
-  String action = "REPLACE"
-  Boolean playOnCompletion = true
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = false
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFullLocal(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+  String queueMode = "REPLACE"
+  Boolean autoPlay = 'true'
+  Boolean shuffle = 'false'
+  Boolean crossfade = 'true'
+  loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = true
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = false
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFullLocal(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+  Boolean playOnCompletion = 'true'
+  Boolean shuffle = 'false'
+  Boolean crossfade = 'true'
+  loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = true
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFullLocal(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+  Boolean playOnCompletion = 'true'
+  Boolean crossfade = 'true'
+  loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
-  Boolean crossfade = true
-  parent?.componentLoadFavoriteFullLocal(this.device, favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+  Boolean crossfade = 'true'
+  loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
@@ -462,9 +455,8 @@ void setTrackDataEvents(Map trackData) {
   sendEvent(name: 'trackData', value: trackData)
 }
 
-void componentUpdateBatteryStatus() {
-  parent?.componentUpdateBatteryStatus()
-}
+void componentUpdateBatteryStatus() { parent?.componentUpdateBatteryStatus(this.device) }
+void updateChildBatteryStatus(Map event) { getBatteryStatusChild().sendEvent(event) }
 
 // =============================================================================
 // Create Child Devices
@@ -478,7 +470,7 @@ void createRemoveCrossfadeChildDevice(Boolean create) {
       logDebug("Creating CrossfadeControl device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos Crossfade Control',
-          label: "Sonos Crossfade Control - ${this.getDataValue('roomName')}"]
+          label: "Sonos Crossfade Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'Crossfade')
     } catch (UnknownDeviceTypeException e) {
@@ -495,7 +487,7 @@ void createRemoveShuffleChildDevice(Boolean create) {
       logDebug("Creating Shuffle Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos Shuffle Control',
-          label: "Sonos Shuffle Control - ${this.getDataValue('roomName')}"]
+          label: "Sonos Shuffle Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'Shuffle')
     } catch (UnknownDeviceTypeException e) {
@@ -512,7 +504,7 @@ void createRemoveRepeatOneChildDevice(Boolean create) {
       logDebug("Creating RepeatOne Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos RepeatOne Control',
-          label: "Sonos RepeatOne Control - ${this.getDataValue('roomName')}"]
+          label: "Sonos RepeatOne Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'RepeatOne')
       logDebug("ChildDNI = ${child.getDeviceNetworkId()}")
@@ -530,7 +522,7 @@ void createRemoveRepeatAllChildDevice(Boolean create) {
       logDebug("Creating RepeatAll Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos RepeatAll Control',
-          label: "Sonos RepeatAll Control - ${this.getDataValue('roomName')}"]
+          label: "Sonos RepeatAll Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'RepeatAll')
     } catch (UnknownDeviceTypeException e) {
@@ -547,9 +539,25 @@ void createRemoveMuteChildDevice(Boolean create) {
       logDebug("Creating Mute Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos Mute Control',
-          label: "Sonos Mute Control - ${this.getDataValue('roomName')}"]
+          label: "Sonos Mute Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'Mute')
+    } catch (UnknownDeviceTypeException e) {
+      logException('createGroupDevices', e)
+    }
+  } else if (!create && child){ deleteChildDevice(dni) }
+}
+
+void createRemoveBatteryStatusChildDevice(Boolean create) {
+  String dni = getBatteryStatusChildDNI()
+  ChildDeviceWrapper child = getBatteryStatusChild()
+  if(!child && create) {
+    try {
+      logDebug("Creating Battery Status device")
+      child = addChildDevice('dwinks', 'Sonos Advanced Battery Status', dni,
+        [ name: 'Sonos Battery Status',
+          label: "Sonos Battery Status - ${this.getDataValue('name')}"]
+      )
     } catch (UnknownDeviceTypeException e) {
       logException('createGroupDevices', e)
     }
@@ -682,11 +690,13 @@ String getShuffleControlChildDNI() { return "${device.getDeviceNetworkId()}-Shuf
 String getRepeatOneControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatOneControl" }
 String getRepeatAllControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatAllControl" }
 String getMuteControlChildDNI() { return "${device.getDeviceNetworkId()}-MuteControl" }
+String getBatteryStatusChildDNI() { return "${device.getDeviceNetworkId()}-BatteryStatus" }
 ChildDeviceWrapper getCrossfadeControlChild() { return getChildDevice(getCrossfadeControlChildDNI()) }
 ChildDeviceWrapper getShuffleControlChild() { return getChildDevice(getShuffleControlChildDNI()) }
 ChildDeviceWrapper getRepeatOneControlChild() { return getChildDevice(getRepeatOneControlChildDNI()) }
 ChildDeviceWrapper getRepeatAllControlChild() { return getChildDevice(getRepeatAllControlChildDNI()) }
 ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlChildDNI()) }
+ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatteryStatusChildDNI()) }
 
 // =============================================================================
 // Misc helpers
