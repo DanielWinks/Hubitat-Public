@@ -627,7 +627,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
     String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    albumArtURI = albumArtURI.startsWith('/') ? "${dev.getDataValue('localUpnpUrl')}${albumArtURI}" : albumArtURI
+    albumArtURI = albumArtURI.startsWith('/') ? "${cd.getDataValue('localUpnpUrl')}${albumArtURI}" : albumArtURI
     String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : "Not Available"
     String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : "Not Available"
     String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : "Not Available"
