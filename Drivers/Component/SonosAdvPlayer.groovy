@@ -253,46 +253,46 @@ void getFavorites() {
 
 void loadFavorite(String favoriteId) {
   String queueMode = "REPLACE"
-  Boolean autoPlay = 'true'
-  Boolean repeatMode = 'repeat one'
-  Boolean shuffle = 'false'
-  Boolean crossfade = 'true'
+  String autoPlay = 'true'
+  String repeatMode = 'repeat one'
+  String shuffle = 'false'
+  String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 // void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode)
 
 void loadFavoriteFull(String favoriteId) {
   String queueMode = "REPLACE"
-  Boolean autoPlay = 'true'
-  Boolean repeatMode = 'repeat one'
-  Boolean shuffle = 'false'
-  Boolean crossfade = 'true'
+  String autoPlay = 'true'
+  String repeatMode = 'repeat one'
+  String shuffle = 'false'
+  String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode) {
   String queueMode = "REPLACE"
-  Boolean autoPlay = 'true'
-  Boolean shuffle = 'false'
-  Boolean crossfade = 'true'
+  String autoPlay = 'true'
+  String shuffle = 'false'
+  String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
-  Boolean playOnCompletion = 'true'
-  Boolean shuffle = 'false'
-  Boolean crossfade = 'true'
+  String playOnCompletion = 'true'
+  String shuffle = 'false'
+  String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
-  Boolean playOnCompletion = 'true'
-  Boolean crossfade = 'true'
+  String playOnCompletion = 'true'
+  String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  Boolean crossfade = 'true'
+  String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -435,10 +435,6 @@ void setCurrentTrackDuration(String currentTrackDuration){
 
 void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumName, String currentTrackName, Integer currentTrackNumber) {
   if(disableArtistAlbumTrackEvents) {return}
-  currentArtistName = currentArtistName ?: "Not Available"
-  currentAlbumName = currentAlbumName ?: "Not Available"
-  currentTrackNumber = currentTrackNumber ?: 0
-
   sendEvent(name:'currentArtistName', value: currentArtistName)
   sendEvent(name:'currentAlbumName',  value: currentAlbumName)
   sendEvent(name:'currentTrackName',  value: currentTrackName)
@@ -447,9 +443,6 @@ void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumNam
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
   if(disableArtistAlbumTrackEvents) {return}
-  nextArtistName = nextArtistName ?: "Not Available"
-  nextAlbumName = nextAlbumName ?: "Not Available"
-  nextTrackName = nextTrackName ?: "Not Available"
   sendEvent(name:'nextArtistName', value: nextArtistName)
   sendEvent(name:'nextAlbumName',  value: nextAlbumName)
   sendEvent(name:'nextTrackName',  value: nextTrackName)
@@ -710,8 +703,8 @@ ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatterySta
 // =============================================================================
 
 void clearCurrentNextArtistAlbumTrackData() {
-  setCurrentArtistAlbumTrack("Not Available", "Not Available", "Not Available", 0)
-  setNextArtistAlbumTrack("Not Available", "Not Available", "Not Available")
+  setCurrentArtistAlbumTrack(null, null, null, 0)
+  setNextArtistAlbumTrack(null, null, null)
 }
 
 void clearTrackDataEvent() {
