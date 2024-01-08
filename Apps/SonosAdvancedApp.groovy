@@ -567,7 +567,7 @@ String unEscapeOnce(String text) {
   return text.replace('&lt;','<').replace('&gt;','>').replace('&quot;','"')
 }
 
-String unEscapeAVTransportURIMetaData(String text) {
+String unEscapeMetaData(String text) {
   return text.replace('&amp;lt;','<').replace('&amp;gt;','>').replace('&amp;quot;','"')
 }
 
@@ -593,105 +593,96 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
   Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
   String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
-
+  String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
+  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
   groupedDevices.each{dev ->
     dev.sendEvent(name:'status', value: status)
     dev.sendEvent(name:'transportStatus', value: status)
     dev.setPlayMode(currentPlayMode)
+    dev.setCrossfadeMode(currentCrossfadeMode)
+    dev.setCurrentTrackDuration(currentTrackDuration)
   }
 
-  String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
-  // if(avTransportURIMetaDataString) {
-    GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeAVTransportURIMetaData(avTransportURIMetaDataString))
-    String albumArtURI = (avTransportURIMetaData['item']['albumArtURI'].text()).toString()
+
+
+
+  String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
+  if(currentTrackMetaDataString) {
+    GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
+    String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    logDebug("Album Art = ${albumArtURI}")
+
+    String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : null
+    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
+    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
 
     groupedDevices.each{dev ->
-      dev.sendEvent(name:'albumArtURI', value: "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
+      dev.sendEvent(name:'albumArtURI', value: "<img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
+      dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
     }
-  // }
 
-  // String avTransportURI = unescapeXML((instanceId['AVTransportURI']['@val']).toString())
-  // logDebug(avTransportURI)
-  // logDebug((instanceId['AVTransportURIMetaData']['@val']).toString())
-  // String avTransportURIMetaDataString = unescapeXML((instanceId['AVTransportURIMetaData']['@val']).toString())
+    String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
+    Boolean favFound = false
+    String foundFavId = null
+    String foundFavImageUrl = null
+    String foundFavName = null
+    if(state.favs != null) {
+      state.favs.keySet().each{key ->
+        // logDebug("URI: ${enqueuedUri} <=> Key: ${key}")
+        if(enqueuedUri.contains(key)) {
+          favFound = true
+          foundFavId = state.favs[key].id
+          foundFavImageUrl = state.favs[key].imageUrl
+          foundFavName = state.favs[key].name
+          groupedDevices.each{dev -> dev.sendEvent(
+            name: 'currentFavorite',
+            value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+            )
+          }
+        }
+      }
+      if(!favFound) {
+        groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
+      }
+    }
 
-  // GPathResult avTransportURIMetaData = new XmlSlurper().parseText(avTransportURIMetaDataString)
 
-  String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
-  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
-  groupedDevices.each{dev -> dev.setCrossfadeMode(currentCrossfadeMode)}
+    String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
+    logDebug(avTransportURIMetaDataString)
+    if(avTransportURIMetaDataString) {
+      GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeMetaData(avTransportURIMetaDataString))
 
-  groupedDevices.each{dev -> dev.setCurrentTrackDuration(currentTrackDuration)}
+      String metaData = instanceId['EnqueuedTransportURIMetaData']['@val']
+      String uri = instanceId['AVTransportURI']['@val']
+      // String transportUri = uri ?? Seems to be the same on the built-in driver
 
-  if(currentTrackMetaData) {currentTrackMetaDataXML = parseXML(currentTrackMetaData)}
-  // if(currentTrackMetaDataXML) {
-  //   String currentArtistName = status != "stopped" ? currentTrackMetaDataXML['item']['creator'] : null
-  //   String currentAlbumName = status != "stopped" ? currentTrackMetaDataXML['item']['title'] : null
-  //   String currentTrackName = status != "stopped" ? currentTrackMetaDataXML['item']['album'] : null
-
-  //   groupedDevices.each{dev ->
-  //     dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
-  //   }
-
-  //   String uri = instanceId['AVTransportURI']['@val']
-  //   // String transportUri = uri ?? Seems to be the same on the built-in driver
-  //   String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
-  //   String metaData = instanceId['EnqueuedTransportURIMetaData']['@val']
-  //   String trackMetaData = instanceId['CurrentTrackMetaData']['@val']
-
-  //   Boolean favFound = false
-  //   String foundFavId = null
-  //   String foundFavImageUrl = null
-  //   String foundFavName = null
-  //   if(state.favs != null) {
-  //     state.favs.keySet().each{key ->
-  //       // logDebug("URI: ${enqueuedUri} <=> Key: ${key}")
-  //       if(enqueuedUri.contains(key)) {
-  //         favFound = true
-  //         foundFavId = state.favs[key].id
-  //         foundFavImageUrl = state.favs[key].imageUrl
-  //         foundFavName = state.favs[key].name
-  //         groupedDevices.each{dev -> dev.sendEvent(
-  //           name: 'currentFavorite',
-  //           value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-  //           )
-  //         }
-  //       }
-  //     }
-  //     if(!favFound) {
-  //       groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
-  //     }
-  //   }
-
-  //   Map trackData = [
-  //     audioSource: "Sonos Q",
-  //     station: null,
-  //     name: currentAlbumName,
-  //     artist: currentArtistName,
-  //     album: currentAlbumName,
-  //     trackNumber: trackNumber,
-  //     status: status,
-  //     uri: uri,
-  //     trackUri: trackUri,
-  //     transportUri: uri,
-  //     enqueuedUri: enqueuedUri,
-  //     metaData: metaData,
-  //     trackMetaData: trackMetaData
-  //   ]
-  //   groupedDevices.each{dev -> if(dev) {dev.setTrackDataEvents(trackData)}}
-  // } else {
-  //   String currentArtistName = ''
-  //   String currentAlbumName = ''
-  //   String currentTrackName = ''
-  //   trackNumber = ''
-  //   groupedDevices.each{dev -> if(dev) {
-  //     dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber)
-  //     dev.setTrackDataEvents([:])
-  //     }
-  //   }
-  // }
+      Map trackData = [
+        audioSource: "Sonos Q",
+        station: null,
+        name: currentAlbumName,
+        artist: currentArtistName,
+        album: currentAlbumName,
+        trackNumber: trackNumber,
+        status: status,
+        uri: uri,
+        trackUri: trackUri,
+        transportUri: uri,
+        enqueuedUri: enqueuedUri,
+        metaData: metaData,
+        trackMetaData: unEscapeMetaData(currentTrackMetaDataString)
+      ]
+      groupedDevices.each{dev -> if(dev) {dev.setTrackDataEvents(trackData)}}
+    }
+  } else {
+    currentArtistName = ''
+    currentAlbumName = ''
+    currentTrackName = ''
+    trackNumber = 0
+    groupedDevices.each{dev ->
+      dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
+      dev.setTrackDataEvents([:])
+    }
+  }
 
   String nextTrackMetaData = instanceId['NextTrackMetaData']['@val']
   GPathResult nextTrackMetaDataXML
@@ -940,6 +931,27 @@ void componentSetPlayerLevelLocal(DeviceWrapper device, BigDecimal level) {
   asynchttpPost('localControlCallback', params)
 }
 
+void componentSetTrebleLocal(DeviceWrapper device, BigDecimal level) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredTreble: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetTreble', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetBassLocal(DeviceWrapper device, BigDecimal level) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredBass: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetLoudnessLocal(DeviceWrapper device, Boolean desiredLoudness) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredLoudness: desiredLoudness]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetLoudness', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
 void componentMuteGroupLocal(DeviceWrapper device, Boolean desiredMute) {
   String ip = device.getDataValue('localUpnpHost')
   Map controlValues = [DesiredMute: desiredMute]
@@ -1112,15 +1124,15 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   }
   List respData = response.getJson().items
   if(respData.size() == 0) {
-    // logDebug("Response returned from getFavorites API: ${response.getJson()}")
+    logDebug("Response returned from getFavorites API: ${response.getJson()}")
     return
   }
-
+  // logDebug(prettyJson(response.getJson()))
   Map favs = state.favs ?: [:]
   respData.each{
     if(it?.resource?.id?.objectId != null) {
       // logDebug("ObjectId: ${it?.resource?.id?.objectId}")
-      favs["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}"] = [name:it?.name, imageUrl:it?.imageUrl]
+      favs["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}"] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl]
     }
   }
   state.favs = favs
