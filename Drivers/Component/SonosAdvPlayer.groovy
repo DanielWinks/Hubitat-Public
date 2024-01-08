@@ -204,9 +204,9 @@ void mute(){ parent?.componentMutePlayerLocal(this.device, true) }
 void unmute(){ parent?.componentMutePlayerLocal(this.device, false) }
 void setLevel(BigDecimal level) { parent?.componentSetPlayerLevelLocal(this.device, level) }
 void setVolume(BigDecimal level) { setLevel(level) }
-void setTreble(BigDecimal level) { parent?.componentSetTreble(this.device, level)}
-void setBass(BigDecimal level) { parent?.componentSetBass(this.device, level)}
-void setLoudness(String mode) { parent?.componentSetLoudness(this.device, mode)}
+void setTreble(BigDecimal level) { parent?.componentSetTrebleLocal(this.device, level)}
+void setBass(BigDecimal level) { parent?.componentSetBassLocal(this.device, level)}
+void setLoudness(String mode) { parent?.componentSetLoudnessLocal(this.device, mode == 'on')}
 
 void muteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, true) }
@@ -691,7 +691,7 @@ void clearCurrentNextArtistAlbumTrackData() {
 }
 
 void clearTrackDataEvent() {
-  setTrackDataEvents([:])
+  sendEvent(name: 'trackData', value: [:])
 }
 
 List<String> getGroupMemberDNIs() {
