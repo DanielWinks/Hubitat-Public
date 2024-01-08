@@ -308,7 +308,7 @@ library(
 // Subscription methods
 // =============================================================================
 
-void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni) {
+void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni, String callBackPath = '') {
   logDebug("Subscribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
   String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
   if (host && eventSubURL && timeout > 0 && dni) {
@@ -317,7 +317,7 @@ void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, Strin
       path: eventSubURL,
       headers: [
         HOST: host,
-        CALLBACK: "<http://${callback}>",
+        CALLBACK: "<http://${callback}${callBackPath}>",
         NT: 'upnp:event',
         TIMEOUT: "Second-${timeout}"
       ]
