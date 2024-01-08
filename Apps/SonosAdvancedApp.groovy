@@ -392,7 +392,11 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     localUpnpUrl: "http://${ipAddress}:1400",
     localUpnpHost: "${ipAddress}:1400"
   ]
-  discoveredSonoses[mac] = discoveredSonos
+  if(discoveredSonos?.name != null) {
+    discoveredSonoses[mac] = discoveredSonos
+  } else {
+    logDebug("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
+  }
 }
 
 // =============================================================================
