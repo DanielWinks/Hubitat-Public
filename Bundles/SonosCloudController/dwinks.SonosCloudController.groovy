@@ -1234,7 +1234,7 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
 
 void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
   if(!responseIsValid(response, 'componentSetGroupLevelLocalCallback')) { return }
-  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
+  GPathResult xml = unescapeXML(response.getXml())
   List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
   groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
 }

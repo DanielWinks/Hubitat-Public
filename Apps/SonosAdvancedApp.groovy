@@ -411,6 +411,7 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
 
 List<ChildDeviceWrapper> getDevicesFromRincons(List<String> rincons) {
   List<ChildDeviceWrapper> children = rincons.collect{ player -> getDeviceFromRincon(player)  }
+  children.removeAll([null])
   return children
 }
 
@@ -732,16 +733,13 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
   if(!isGroupCoordinator) {return}
 
-  List<DeviceWrapper> groupedDevices = []
-  List<String> groupIds = []
   List<String> groupedRincons = []
   zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children().each{ groupedRincons.add(it['@UUID'].toString()) }
   if(groupedRincons.size() == 0) {
     logDebug("No grouped rincons found!")
     return
   }
-  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
-  groupIds.each{groupedDevices.add(getChildDevice(it))}
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
 
   groupedDevices.each{dev -> if(currentGroupCoordinatorId && dev) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
   groupedDevices.each{dev -> if(groupedRincons && dev && groupedRincons.size() > 0) {dev.updateDataValue('groupIds', groupedRincons.join(','))}}
@@ -1118,10 +1116,10 @@ void componentLoadFavoriteFullLocal(DeviceWrapper device, String favoriteId, Str
   logDebug('Loading favorites full options...')
   String groupId = device.getDataValue('groupId')
   Map data = [
-    action:"REPLACE",
+    action:action,
     favoriteId:favoriteId,
-    playOnCompletion:true,
-    playModes:['repeat': false,'repeatOne': true],
+    playOnCompletion:playOnCompletion,
+    playModes:['repeat': repeat,'repeatOne': repeatOne, 'shuffle': shuffle, 'crossfade': crossfade],
   ]
 
   String localApiUrl = "${device.getDataValue('localApiUrl')}"
@@ -1218,7 +1216,29 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
 //   sendLocalJsonAsync(params: params, data: data)
 // }
 
+void componentUpdateBatteryStatus(DeviceWrapper player) {
+  String baseUrl = player.getDataValue('localUpnpUrl')
+  String uri = "${baseUrl}/status/batterystatus"
+  Map params = [uri: uri, contentType: 'text/xml',]
+  asynchttpGet('componentUpdateBatteryStatusCallback', params, [dni: player.getDeviceNetworkId()])
+}
 
+void componentUpdateBatteryStatusCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'componentUpdateBatteryStatusCallback')) { return }
+  GPathResult xml = response.getXml()
+  String battery = xml['LocalBatteryStatus'].children().find{it['@name'] == "Level"}.text().toString()
+  String powerSource = xml['LocalBatteryStatus'].children().find{it['@name'] == "PowerSource"}.text().toString().replace('USB_POWER','mains').toLowerCase()
+  String health = xml['LocalBatteryStatus'].children().find{it['@name'] == "Health"}.text().toString()
+  String temperature = xml['LocalBatteryStatus'].children().find{it['@name'] == "Temperature"}.text().toString()
+  List<Event> stats = [
+    [name: 'battery', value: battery ],
+    [name: 'powerSource', value: powerSource ],
+    [name: 'health', value: health ],
+    [name: 'temperature', value: temperature ],
+  ]
+  ChildDeviceWrapper child = app.getChildDevice(data.dni)
+  stats.each{ child.updateChildBatteryStatus(it) }
+}
 
 void componentUpdatePlayerInfo(DeviceWrapper device) {
   Map playerInfo = getPlayerInfoLocalSync("${device.getDataValue('deviceIp')}:1443")

@@ -45,6 +45,13 @@
       "namespace": "dwinks",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy",
       "required": true
+    },
+    {
+      "id": "fb684879-f318-4fcd-859f-6a9266522214",
+      "name": "Sonos Advanced Battery Status",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvBatteryStats.groovy",
+      "required": true
     }
   ]
 }
