@@ -1,0 +1,50 @@
+{
+  "packageName": "Sonos Advanced Controller",
+  "author": "Daniel Winks",
+  "version": "0.1.0",
+  "minimumHEVersion": "2.3.4",
+  "dateReleased": "2024-01-07",
+  "bundles": [
+    {
+      "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
+      "name": "Sonos Advanced Controller",
+      "namespace": "dwinks",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/SonosAdvancedController.zip",
+      "required": true
+    }
+  ],
+  "apps": [
+    {
+      "id": "a5e66956-f81b-40e8-ac79-28f7a5530a9a",
+      "name": "SonosAdvancedApp",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy",
+      "required": true,
+      "oauth": false,
+      "primary": false
+    }
+  ],
+  "drivers": [
+    {
+      "id": "60791fce-4431-40fe-823f-daba182cdd12",
+      "name": "Sonos Advanced Group",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy",
+      "required": true
+    },
+    {
+      "id": "35457105-655a-40f0-953a-5c32cb7b9d0e",
+      "name": "Sonos Advanced Player",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy",
+      "required": true
+    },
+    {
+      "id": "1e419d13-89bd-4709-8660-ba34e295236e",
+      "name": "Sonos Advanced Snapshot",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy",
+      "required": true
+    }
+  ]
+}
