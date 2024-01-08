@@ -399,6 +399,17 @@ void processParsedSsdpEvent(LinkedHashMap event) {
 // Helper methods
 // =============================================================================
 
+ChildDeviceWrapper getDeviceFromRincon(String rincon) {
+  List<ChildDeviceWrapper> childDevices = app.getCurrentPlayerDevices()
+  ChildDeviceWrapper dev = childDevices.find{ it.getDataValue('id') == rincon}
+  return dev
+}
+
+List<ChildDeviceWrapper> getDevicesFromRincons(List<String> rincons) {
+  List<ChildDeviceWrapper> children = rincons.collect{ player -> getDeviceFromRincon(player)  }
+  return children
+}
+
 List<String> getCreatedPlayerDevices() {
   List<ChildDeviceWrapper> childDevices = app.getCurrentPlayerDevices()
   List<String> pds = []
@@ -1021,33 +1032,85 @@ void componentPreviousTrackLocal(DeviceWrapper device) {
   asynchttpPost('localControlCallback', params)
 }
 
-void componentUngroupPlayerLocal(DeviceWrapper device) {
+// /////////////////////////////////////////////////////////////////////////////
+// Grouping and Ungrouping
+// /////////////////////////////////////////////////////////////////////////////
+void componentGroupPlayersLocal(DeviceWrapper device) {
+  logDebug('Adding players to group...')
+  String householdId = device.getDataValue('householdId')
+  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  List playerIds = device.getDataValue('playerIds').split(',')
+  ChildDeviceWrapper coordinator = getDeviceFromRincon(groupCoordinatorId)
+  if(coordinator.getDataValue('isGroupCoordinator') == 'false') {
+    componentUngroupPlayerLocalSync(coordinator)
+  }
+  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
+  Map data = ['playerIds': [groupCoordinatorId] + playerIds, musicContextGroupId: coordinatorGroupId]
+  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
+  String endpoint = "households/${householdId}/groups/createGroup"
+  String uri = "${localApiUrl}${endpoint}"
+  Map params = [uri: uri]
+  sendLocalJsonAsync(params: params, data: data)
+}
+
+void componentJoinPlayersToCoordinatorLocal(DeviceWrapper device) {
+  logDebug('Adding players to coordinator...')
+  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  List playerIds = device.getDataValue('playerIds').split(',')
+  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
+  Map data = ['playerIds': [groupCoordinatorId] + playerIds]
+  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
+  String endpoint = "groups/${coordinatorGroupId}/groups/setGroupMembers"
+  String uri = "${localApiUrl}${endpoint}"
+  Map params = [uri: uri]
+  sendLocalJsonAsync(params: params, data: data)
+}
+
+void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
+  logDebug('Removing players from coordinator...')
+  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  ChildDeviceWrapper cd = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
+  if(cd.getDataValue('isGroupCoordinator') == 'false') {
+    logWarn('Can not remove players from coordinator. Coordinator for this defined group is not currently a group coordinator.')
+    return
+  }
+  List<String> followers = device.getDataValue('playerIds').tokenize(',')
+  List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
+  logDebug("Follower Devices ${followerDevices}")
+  followerDevices.each{player -> componentUngroupPlayerLocal(player)}
+}
+
+void componentUngroupPlayerLocal(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
   String ip = device.getDataValue('localUpnpHost')
   Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
   logDebug("Params: ${params}")
-  asynchttpPost('localControlCallback', params)
+  asynchttpPost(callbackMethod, params)
+}
+
+void componentUngroupPlayerLocalSync(DeviceWrapper device) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
+  logDebug("Params: ${params}")
+  httpPost(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      GPathResult xml = resp.data
+      logXml(resp.data)
+    }
+    else { logError(resp.data) }
+  }
 }
 
 void componentUngroupPlayersLocal(DeviceWrapper device) {
   String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  ChildDeviceWrapper cd = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }
-  getZoneGroupAttributesAsync(cd, 'componentUngroupPlayersLocalCallback', [householdId:device.getDataValue('householdId'),  rincon:device.getDataValue('groupCoordinatorId')])
+  List<String> playerIds = device.getDataValue('playerIds').tokenize(',')
+  List<String> allPlayers = [groupCoordinatorId] + playerIds
+  List<ChildDeviceWrapper> allPlayerDevices = getDevicesFromRincons(allPlayers)
+  allPlayerDevices.each{player -> componentUngroupPlayerLocalSync(player) }
 }
 
-void componentUngroupPlayersLocalCallback(AsyncResponse response, Map data) {
-  if(!responseIsValid(response, 'componentUngroupPlayersLocalCallback')) { return }
-  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
-  List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
-
-  String endpoint = "/households/${data.householdId}/groups/createGroup"
-  logDebug(groupedDevices)
-  groupedDevices.each{ cd ->
-    Map params = [body: [playerIds: [cd.getDataValue('id')]]]
-    String ip = "${cd.getDataValue('deviceIp').tokenize(':')[0]}:1443"
-    sendLocalCommandAsync(endpoint: endpoint, params: params, ipAddress: ip)
-  }
-}
-
+// /////////////////////////////////////////////////////////////////////////////
+// Favorites
+// /////////////////////////////////////////////////////////////////////////////
 void componentLoadFavoriteFullLocal(DeviceWrapper device, String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
   logDebug('Loading favorites full options...')
   String groupId = device.getDataValue('groupId')
@@ -1152,19 +1215,7 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
 //   sendLocalJsonAsync(params: params, data: data)
 // }
 
-void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
-  logDebug('Removing players from coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  ChildDeviceWrapper cd = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
-  if(cd.getDataValue('isGroupCoordinator') == 'false') {
-    logWarn('Can not remove players from coordinator. Coordinator for this defined group is not currently a group coordinator.')
-    return
-  }
-  List<String> followers = device.getDataValue('playerIds').tokenize(',')
-  List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
-  logDebug("Follower Devices ${followerDevices}")
-  followerDevices.each{player -> componentUngroupPlayerLocal(player)}
-}
+
 
 void componentUpdatePlayerInfo(DeviceWrapper device) {
   Map playerInfo = getPlayerInfoLocalSync("${device.getDataValue('deviceIp')}:1443")
@@ -1205,30 +1256,3 @@ String getCoordinatorGroupId(String groupCoordinatorId) {
   return coordinatorGroupId
 }
 
-void componentGroupPlayersLocal(DeviceWrapper device) {
-  logDebug('Adding players to group...')
-  String householdId = device.getDataValue('householdId')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List playerIds = device.getDataValue('playerIds').split(',')
-  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
-  Map data = ['playerIds': [groupCoordinatorId] + playerIds, musicContextGroupId: coordinatorGroupId]
-  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
-  String endpoint = "households/${householdId}/groups/createGroup"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
-
-void componentJoinPlayersToCoordinatorLocal(DeviceWrapper device) {
-  logDebug('Adding players to coordinator...')
-  // String householdId = device.getDataValue('householdId')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List playerIds = device.getDataValue('playerIds').split(',')
-  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
-  Map data = ['playerIds': [groupCoordinatorId] + playerIds]
-  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
-  String endpoint = "groups/${coordinatorGroupId}/groups/setGroupMembers"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
