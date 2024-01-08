@@ -140,6 +140,10 @@ void logXml(GPathResult xml) {
   logDebug(serialized.replace('"', '&quot;').replace("'", '&apos;').replace('<', '&lt;').replace('>','&gt;').replace('&','&amp;'))
 }
 
+void logJson(Map message) {
+  logDebug(prettyJson(message))
+}
+
 void logsOff() {
   if (device) {
     logWarn("Logging disabled for ${device}")
