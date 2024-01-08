@@ -655,9 +655,9 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       String metaData = instanceId['EnqueuedTransportURIMetaData']['@val']
       String uri = instanceId['AVTransportURI']['@val']
       // String transportUri = uri ?? Seems to be the same on the built-in driver
-
+      String audioSource = SOURCES[(enqueuedUri.tokenize(':')[0]).toString()]
       Map trackData = [
-        audioSource: "Sonos Q",
+        audioSource: audioSource,
         station: null,
         name: currentAlbumName,
         artist: currentArtistName,
