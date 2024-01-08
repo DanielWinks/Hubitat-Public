@@ -135,6 +135,11 @@ void logClass(obj) {
   logDebug("Object Class Name: ${getObjectClassName(obj)}")
 }
 
+void logXml(GPathResult xml) {
+  String serialized = XmlUtil.serialize(xml)
+  logDebug(serialized.replace('"', '&quot;').replace("'", '&apos;').replace('<', '&lt;').replace('>','&gt;').replace('&','&amp;'))
+}
+
 void logsOff() {
   if (device) {
     logWarn("Logging disabled for ${device}")
