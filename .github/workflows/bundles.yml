@@ -16,7 +16,7 @@ on:
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   build:
-    name: Copy Sonos Cloud Controller Files To Bundle Directory
+    name: Copy Advanced Cloud Controller Files To Bundle Directory
     runs-on: [ubuntu-latest]
     permissions:
       contents: write
@@ -26,22 +26,19 @@ jobs:
 
       - name: Make copy of files
         run: |
-          cp Apps/SonosCloudApp.groovy Bundles/SonosCloudController/dwinks.SonosCloudController.groovy
-          cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosCloudController/dwinks.UtilitiesAndLoggingLibrary.groovy
-          cp Libraries/SMAPILibrary.groovy Bundles/SonosCloudController/dwinks.SMAPILibrary.groovy
-          cp Drivers/Component/SonosCloudGroup.groovy Bundles/SonosCloudController/dwinks.SonosCloudGroup.groovy
-          cp Drivers/Component/SonosCloudPlayer.groovy Bundles/SonosCloudController/dwinks.SonosCloudPlayer.groovy
+          cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosAdvancedController/dwinks.UtilitiesAndLoggingLibrary.groovy
+          cp Libraries/SMAPILibrary.groovy Bundles/SonosAdvancedController/dwinks.SMAPILibrary.groovy
 
       - name: Zip Bundle
         uses: thedoctor0/zip-release@0.7.5
         with:
           type: 'zip'
-          filename: 'SonosCloudController.zip'
-          directory: 'Bundles/SonosCloudController'
+          filename: 'SonosAdvancedController.zip'
+          directory: 'Bundles/SonosAdvancedController'
 
       - name: Move Bundle to parent directory
         run: |
-          mv Bundles/SonosCloudController/SonosCloudController.zip Bundles/SonosCloudController.zip
+          mv Bundles/SonosAdvancedController/SonosAdvancedController.zip Bundles/SonosAdvancedController.zip
 
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
