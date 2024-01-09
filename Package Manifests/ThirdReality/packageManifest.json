@@ -1,0 +1,31 @@
+{
+  "packageName": "ThirdReality Drivers",
+  "author": "Daniel Winks",
+  "version": "1.0.0",
+  "releaseNotes": "v1.0.0 Initial release. Adds 'validation' logic to ensure blinds respond consistently compared to built-in drivers.",
+  "minimumHEVersion": "2.3.4",
+  "dateReleased": "2024-01-09",
+  "licenseFile": "",
+	"documentationLink": "",
+	"communityLink": "",
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
+  "bundles": [
+    {
+      "id": "1eb1e190-c91b-459a-ac08-c87cfc38a198",
+      "name": "ThirdReality Drivers",
+      "namespace": "dwinks",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/ThirdReality.zip",
+      "required": true
+    }
+  ],
+  "drivers": [
+    {
+      "id": "4f314b42-edc7-4705-a5c2-6b358285b8f1",
+      "name": "Third Reality Smart Blind",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/ZigBee/window_shade/ThirdRealitySmartBlind.groovy",
+      "required": true
+    }
+  ]
+}
