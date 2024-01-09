@@ -144,6 +144,15 @@ void logJson(Map message) {
   logDebug(prettyJson(message))
 }
 
+void logErrorXml(GPathResult xml) {
+  String serialized = XmlUtil.serialize(xml)
+  logError(serialized.replace('"', '&quot;').replace("'", '&apos;').replace('<', '&lt;').replace('>','&gt;').replace('&','&amp;'))
+}
+
+void logErrorJson(Map message) {
+  logError(prettyJson(message))
+}
+
 void logsOff() {
   if (device) {
     logWarn("Logging disabled for ${device}")

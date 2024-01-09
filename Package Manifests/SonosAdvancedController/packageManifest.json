@@ -1,7 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.1.5",
+  "version": "0.1.6",
+  "releaseNotes": "v0.1.6 Improvements to logging.",
   "minimumHEVersion": "2.3.4",
   "dateReleased": "2024-01-07",
   "bundles": [
