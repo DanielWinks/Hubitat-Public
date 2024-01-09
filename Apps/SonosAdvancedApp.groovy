@@ -151,7 +151,8 @@ Map localPlayerSelectionPage() {
         type: 'enum',
         options: selectionOptions,
         multiple: true,
-        submitOnChange: true
+        submitOnChange: true,
+        offerAll: false
       )
       href (
         page: 'localPlayerPage',
@@ -203,8 +204,8 @@ Map groupPage() {
         paragraph (state.groupPageError)
       }
       input(name: 'newGroupName', type: 'text', title: 'Group Name:', required: false, submitOnChange: true)
-      input(name: 'newGroupCoordinator', type: 'enum', title: 'Select Coordinator (leader):', multiple: false, options: coordinatorSelectionOptions, required: false, submitOnChange: true)
-      input(name: 'newGroupPlayers', type: 'enum', title: 'Select Players (followers):', multiple: true, options: playerSelectionOptions, required: false, submitOnChange: true, offerAll: true)
+      input(name: 'newGroupCoordinator', type: 'enum', title: 'Select Coordinator (leader):', multiple: false, options: coordinatorSelectionOptions, required: false, submitOnChange: true, offerAll: false)
+      input(name: 'newGroupPlayers', type: 'enum', title: 'Select Players (followers):', multiple: true, options: playerSelectionOptions, required: false, submitOnChange: true, offerAll: false)
       input(name: 'saveGroup', type: 'button', title: 'Save Group?', submitOnChange: true, width: 2, disabled: state.groupPageError != null)
       input(name: 'deleteGroup', type: 'button', title: 'Delete Group?', submitOnChange: true, width: 2)
       input(name: 'cancelGroupEdit', type: 'button', title: 'Cancel Edit?', submitOnChange: true, width: 2)
@@ -474,16 +475,6 @@ GPathResult getDeviceDescriptionLocalSync(String ipAddress) {
     if (resp && resp.data && resp.success) { return resp.data }
     else { logError(resp.data) }
   }
-}
-
-void getPlayerInfoLocal(String ipAddress) {
-  Map params = [
-    uri:  "${getLocalApiPrefix(ipAddress)}/players/local/info",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
-    requestContentType: 'application/json',
-    contentType: 'application/json'
-  ]
-  sendCommandAsync(params, 'getPlayerInfoLocalCallback')
 }
 
 void getPlayerInfoLocalCallback(AsyncResponse response, Map data) {
@@ -804,7 +795,8 @@ void sendLocalCommandAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  sendCommandAsync(params, callbackMethod, args.data)
+  logDebug("sendLocalCommandAsync: ${params}")
+  asynchttpPost(callbackMethod, params, args.data)
 }
 
 void sendLocalQueryAsync(Map args) {
@@ -840,18 +832,6 @@ void sendLocalJsonAsync(Map args) {
   }
   logDebug("sendLocalJsonAsync: ${params}")
   asynchttpPost(callbackMethod, params)
-}
-
-void sendQueryAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
-  if (now() >= state.authTokenExpires - 600) { refreshToken() }
-  try { asynchttpGet(callbackMethod, params, data)}
-  catch (Exception e) {logError("Call failed: ${e.message}")}
-}
-
-void sendCommandAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
-  logDebug("sendCommandAsync params: ${prettyJson(params)}")
-  try{ asynchttpPost(callbackMethod, params, data) }
-  catch(Exception e){ if(e.message.toString() != 'OK') { logError(e.message) } }
 }
 
 void localControlCallback(AsyncResponse response, Map data) {

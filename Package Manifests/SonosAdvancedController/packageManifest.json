@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.1.6",
-  "releaseNotes": "v0.1.6 Improvements to logging.",
+  "version": "0.1.7",
+  "releaseNotes": "v0.1.7 Fixes for \"Toggle All On/Off\" being included in groups.",
   "minimumHEVersion": "2.3.4",
   "dateReleased": "2024-01-07",
   "bundles": [
