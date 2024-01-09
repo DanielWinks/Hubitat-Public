@@ -5,6 +5,8 @@
   "releaseNotes": "v0.1.7 Fixes for \"Toggle All On/Off\" being included in groups.",
   "minimumHEVersion": "2.3.4",
   "dateReleased": "2024-01-07",
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
   "bundles": [
     {
       "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
