@@ -725,7 +725,6 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   Boolean previouslyWasGroupCoordinator = cd.getDataValue('isGroupCoordinator') == 'true'
   if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
     logDebug("Just removed from group!")
-    cd.subscribeToEvents()
   }
   if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
     logDebug("Just added to group!")
@@ -821,6 +820,7 @@ void sendLocalQueryAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
+  logDebug("sendLocalQueryAsync: ${params}")
   asynchttpGet(callbackMethod, params, args.data)
 }
 
@@ -838,13 +838,14 @@ void sendLocalJsonAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  asynchttpPost('localControlCallback', params)
+  logDebug("sendLocalJsonAsync: ${params}")
+  asynchttpPost(callbackMethod, params)
 }
 
 void sendQueryAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
   if (now() >= state.authTokenExpires - 600) { refreshToken() }
   try { asynchttpGet(callbackMethod, params, data)}
-  catch (Exception e) {logDebug("Call failed: ${e.message}")}
+  catch (Exception e) {logError("Call failed: ${e.message}")}
 }
 
 void sendCommandAsync(Map params, String callbackMethod = 'localControlCallback', Map data = null) {
@@ -854,19 +855,27 @@ void sendCommandAsync(Map params, String callbackMethod = 'localControlCallback'
 }
 
 void localControlCallback(AsyncResponse response, Map data) {
-  if (response.status != 200) {logError("post request returned HTTP status ${response.status}")}
-  if (response.hasError()) {logError("post request error: ${response.getErrorMessage()}")}
-  if(response?.getData()) {logDebug("localControlCallback: ${response.getData()}")}
+  if (response?.status != 200 || response.hasError()) {
+    logError("Request returned HTTP status ${response.status}")
+    logError("Request error message: ${response.getErrorMessage()}")
+    try{logError("Request ErrorData: ${response.getErrorData()}")} catch(Exception e){}
+    try{logErrorJson("Request ErrorJson: ${response.getErrorJson()}")} catch(Exception e){}
+    try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
+  }
+  if(response?.status == 200 && response && response.hasError() == false) {
+    logDebug("localControlCallback: ${response.getData()}")
+  }
 }
 
 Boolean responseIsValid(AsyncResponse response, String requestName = null) {
-  if (response.status != 200) {
-    logError("${requestName} request returned HTTP status ${response.status}")
+  if (response?.status != 200 || response.hasError()) {
+    logError("Request returned HTTP status ${response.status}")
+    logError("Request error message: ${response.getErrorMessage()}")
+    try{logError("Request ErrorData: ${response.getErrorData()}")} catch(Exception e){}
+    try{logErrorJson("Request ErrorJson: ${response.getErrorJson()}")} catch(Exception e){}
+    try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
   }
-  if (response.hasError()) {
-    logError("${requestName} request error: ${response.getErrorMessage()}")
-    return false
-  } else { return true }
+  if (response.hasError()) { return false } else { return true }
 }
 
 // =============================================================================
