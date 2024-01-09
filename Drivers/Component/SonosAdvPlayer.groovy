@@ -191,8 +191,8 @@ void speak(String text, BigDecimal volume = null, String voice = null) { deviceP
 
 void setTrack(String uri) { playTrack(uri) }
 void playTrack(String uri, BigDecimal volume = null) { parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
-void playTrackAndRestore(String uri, BigDecimal volume = null) { componentPlayAudioClipLocal(uri, volume) }
-void playTrackAndResume(String uri, BigDecimal volume = null) { componentPlayAudioClipLocal(uri, volume) }
+void playTrackAndRestore(String uri, BigDecimal volume = null) { parent?.componentPlayAudioClipLocal(this.device, uri, volume) }
+void playTrackAndResume(String uri, BigDecimal volume = null) { parent?.componentPlayAudioClipLocal(this.device, uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   parent?.componentPlayTextLocal(this.device, text, volume, voice)
