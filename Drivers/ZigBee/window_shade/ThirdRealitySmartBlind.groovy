@@ -59,8 +59,8 @@ preferences {
 @Field private final Integer CLOSED_LEVEL = 0
 
 void parse(String description) {
-  logDebug("parse(): ${description}")
-  sendEvent(name: 'lastCheckin', value: nowFormatted())
+  // logDebug("parse(): ${description}")
+  runIn(3, 'updateLastCheckin', [overwrite:true])
   if (description?.startsWith('read attr -')) {
     Map descriptionMap = zigbee.parseDescriptionAsMap(description)
     if (descriptionMap.value && descriptionMap?.clusterInt == CLUSTER_WINDOW_COVERING) {
@@ -76,13 +76,21 @@ void parse(String description) {
 
 void setLevelStates(Integer currentLevel, Integer lastLevel) {
   Integer adjLevel = 100 - currentLevel
-  logDebug("Setting current device state to ${adjLevel} for level and ${adjLevel} for position")
+  logDebug("Setting current device state to ${adjLevel} for level and ${adjLevel} for position, last level ${lastLevel}")
+  sendEvent(name: 'windowShade', value: lastLevel < adjLevel ? 'opening' : 'closing')
+  runIn(3, 'setWindowShade', [overwrite:true, data: [adjLevel: adjLevel]])
+}
+
+void updateLastCheckin() {
+  sendEvent(name: 'lastCheckin', value: nowFormatted())
+}
+
+void setWindowShade(Map data) {
+  Integer adjLevel = data.adjLevel
   if (adjLevel == CLOSED_LEVEL || adjLevel == OPEN_LEVEL) {
     sendEvent(name: 'windowShade', value: adjLevel == CLOSED_LEVEL ? 'closed' : 'open')
   } else if (adjLevel != CLOSED_LEVEL && adjLevel != OPEN_LEVEL){
     sendEvent([name:'windowShade', value: 'partially open'])
-  } else {
-    sendEvent(name: 'windowShade', value: lastLevel < adjLevel ? 'opening' : 'closing')
   }
   sendEvent(name: 'level', value: adjLevel)
   sendEvent(name: 'position', value: adjLevel)
@@ -132,12 +140,13 @@ void setLevel(BigDecimal value, rate = null) {
 }
 
 void scheduleValidation() {
+  logDebug('Scheduling validation...')
   runIn(30, 'refresh')
   runIn(60, 'validatePosition')
 }
 
 void validatePosition() {
-  logDebug 'Validating position...'
+  logDebug('Validating position...')
   Integer desiredPosition = state.desiredPosition
   Integer currentPosition = device.currentValue('position')
   if (desiredPosition && desiredPosition != currentPosition) {
@@ -156,11 +165,8 @@ void stopPositionChange() {
 }
 
 void startPositionChange(String direction) {
-  if(direction == 'open') {
-    open()
-  } else if (direction == 'close') {
-    close()
-  }
+  if(direction == 'open') { open() }
+  else if (direction == 'close') { close() }
   runIn(10, 'refresh')
 }
 
@@ -184,6 +190,5 @@ void configure() {
 }
 
 void scheduleRefresh() {
-  unschedule()
   runIn(settings.updateInterval as Integer, 'refresh', [overwrite:true])
 }
