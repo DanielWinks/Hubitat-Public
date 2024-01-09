@@ -549,7 +549,7 @@ String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
   httpPost(params) { resp ->
     if (resp && resp.data && resp.success) {
       GPathResult xml = resp.data
-      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text()
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text().toString()
     }
     else { logError(resp.data) }
   }
@@ -563,7 +563,7 @@ String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
   httpPost(params) { resp ->
     if (resp && resp.data && resp.success) {
       GPathResult xml = resp.data
-      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentMuseHouseholdId'].text()
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentMuseHouseholdId'].text().toString()
     }
     else { logError(resp.data) }
   }
@@ -618,13 +618,16 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
     String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    albumArtURI = albumArtURI.startsWith('/') ? "${cd.getDataValue('localUpnpUrl')}${albumArtURI}" : albumArtURI
     String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : "Not Available"
     String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : "Not Available"
     String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : "Not Available"
 
     groupedDevices.each{dev ->
-      dev.sendEvent(name:'albumArtURI', value: "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
+      if(albumArtURI.startsWith('/')) {
+        dev.sendEvent(name:'albumArtURI', value: "<img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
+      } else {
+        dev.sendEvent(name:'albumArtURI', value: "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
+      }
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
     }
 
@@ -1078,14 +1081,14 @@ void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
 void componentUngroupPlayerLocal(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
   String ip = device.getDataValue('localUpnpHost')
   Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logDebug("Params: ${params}")
+  logDebug("componentUngroupPlayerLocal Params: ${params}")
   asynchttpPost(callbackMethod, params)
 }
 
 void componentUngroupPlayerLocalSync(DeviceWrapper device) {
   String ip = device.getDataValue('localUpnpHost')
   Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logDebug("Params: ${params}")
+  logDebug("componentUngroupPlayerLocalSync Params: ${params}")
   httpPost(params) { resp ->
     if (resp && resp.data && resp.success) {
       GPathResult xml = resp.data
@@ -1269,7 +1272,8 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 }
 
 String getCoordinatorGroupId(String groupCoordinatorId) {
-  String coordinatorGroupId = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('groupId')
+  ChildDeviceWrapper coordinator = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }
+  String coordinatorGroupId = getGroupForPlayerDeviceLocal(coordinator)
   return coordinatorGroupId
 }
 
