@@ -1,0 +1,46 @@
+# This is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+    paths:
+      - Drivers/ZigBee/window_shade/ThirdRealitySmartBlind.groovy
+      - Libraries/UtilitiesAndLoggingLibrary.groovy
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  build:
+    name: Copy ThirdReality Files To Bundle Directory
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
+
+      - name: Make copy of files
+        run: |
+          mkdir -p Bundles/ThirdReality
+          cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/ThirdReality/dwinks.UtilitiesAndLoggingLibrary.groovy
+
+      - name: Zip Bundle
+        uses: thedoctor0/zip-release@0.7.5
+        with:
+          type: 'zip'
+          filename: 'ThirdReality.zip'
+          directory: 'Bundles/ThirdReality'
+
+      - name: Move Bundle to parent directory
+        run: |
+          mkdir -p Bundles
+          mv Bundles/ThirdReality/ThirdReality.zip Bundles/ThirdReality.zip
+
+      - name: Commit changes
+        uses: EndBug/add-and-commit@v9
