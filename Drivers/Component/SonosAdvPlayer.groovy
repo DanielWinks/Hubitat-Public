@@ -219,7 +219,7 @@ void unmuteGroup(){
   else { parent?.componentMutePlayerLocal(this.device, false) }
 }
 void setGroupVolume(BigDecimal level) {
-  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevel(this.device, level) }
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevelLocal(this.device, level) }
   else { parent?.componentSetPlayerLevelLocal(this.device, level)  }
 }
 void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
