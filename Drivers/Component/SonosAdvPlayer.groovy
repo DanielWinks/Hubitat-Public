@@ -435,17 +435,17 @@ void setCurrentTrackDuration(String currentTrackDuration){
 
 void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumName, String currentTrackName, Integer currentTrackNumber) {
   if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'currentArtistName', value: currentArtistName)
-  sendEvent(name:'currentAlbumName',  value: currentAlbumName)
-  sendEvent(name:'currentTrackName',  value: currentTrackName)
-  sendEvent(name:'currentTrackNumber',  value: currentTrackNumber)
+  sendEvent(name:'currentArtistName', value: currentArtistName ?: 'Not Available')
+  sendEvent(name:'currentAlbumName',  value: currentAlbumName ?: 'Not Available')
+  sendEvent(name:'currentTrackName',  value: currentTrackName ?: 'Not Available')
+  sendEvent(name:'currentTrackNumber',  value: currentTrackNumber ?: 0)
 }
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
   if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'nextArtistName', value: nextArtistName)
-  sendEvent(name:'nextAlbumName',  value: nextAlbumName)
-  sendEvent(name:'nextTrackName',  value: nextTrackName)
+  sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available')
+  sendEvent(name:'nextAlbumName',  value: nextAlbumName ?: 'Not Available')
+  sendEvent(name:'nextTrackName',  value: nextTrackName ?: 'Not Available')
 }
 
 void setTrackDataEvents(Map trackData) {
