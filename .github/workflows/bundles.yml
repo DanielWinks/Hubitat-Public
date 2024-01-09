@@ -16,7 +16,7 @@ on:
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   build:
-    name: Copy Advanced Cloud Controller Files To Bundle Directory
+    name: Copy Sonos Advanced Controller Files To Bundle Directory
     runs-on: [ubuntu-latest]
     permissions:
       contents: write
@@ -26,6 +26,7 @@ jobs:
 
       - name: Make copy of files
         run: |
+          mkdir -p Bundles/SonosAdvancedController
           cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosAdvancedController/dwinks.UtilitiesAndLoggingLibrary.groovy
           cp Libraries/SMAPILibrary.groovy Bundles/SonosAdvancedController/dwinks.SMAPILibrary.groovy
 
