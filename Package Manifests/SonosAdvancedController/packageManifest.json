@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.1.9",
-  "releaseNotes": "v0.1.7 Fixes for \"Toggle All On/Off\" being included in groups. \r\nv0.1.8 Fixes for album art, current/next info, improved logging. \r\nv0.1.9 Fix set group volume",
+  "version": "0.1.10",
+  "releaseNotes": "v0.1.7 Fixes for \"Toggle All On/Off\" being included in groups. \r\nv0.1.8 Fixes for album art, current/next info, improved logging. \r\nv0.1.9 Fix set group volume\r\nv0.1.10 Fix 'Play Track And Restore\\Resume' issue.",
   "minimumHEVersion": "2.3.4",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
