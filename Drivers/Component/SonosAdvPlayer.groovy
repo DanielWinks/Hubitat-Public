@@ -258,8 +258,8 @@ void loadFavorite(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 // void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode)
@@ -268,34 +268,35 @@ void loadFavoriteFull(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
-  String playOnCompletion = 'true'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String autoPlay = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
-  String playOnCompletion = 'true'
-  String crossfade = 'true'
+  String autoPlay = 'true'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  String crossfade = 'true'
+  logDebug("Called")
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
