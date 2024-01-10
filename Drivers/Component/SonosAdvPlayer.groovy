@@ -257,7 +257,7 @@ void getFavorites() {
 void loadFavorite(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
-  String repeatMode = 'repeat one'
+  String repeatMode = 'repeat all'
   String shuffle = 'false'
   String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
@@ -267,7 +267,7 @@ void loadFavorite(String favoriteId) {
 void loadFavoriteFull(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
-  String repeatMode = 'repeat one'
+  String repeatMode = 'repeat all'
   String shuffle = 'false'
   String crossfade = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
