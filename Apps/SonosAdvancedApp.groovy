@@ -635,15 +635,15 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
     String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : null
-    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
-    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
+    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
+    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
     String streamContent = status != "stopped" ? currentTrackMetaData['item']['streamContent'] : null
 
     groupedDevices.each{dev ->
       if(albumArtURI.startsWith('/')) {
-        dev.sendEvent(name:'albumArtURI', value: "<img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
+        dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
       } else {
-        dev.sendEvent(name:'albumArtURI', value: "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
+        dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
       }
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
       if(streamContent && (!currentArtistName && !currentAlbumName)) {
@@ -666,7 +666,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
           foundFavName = state.favs[key].name
           groupedDevices.each{dev -> dev.sendEvent(
             name: 'currentFavorite',
-            value: "Favorite #${foundFavId} ${foundFavName} <img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+            value: "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
             )
           }
         }
@@ -718,8 +718,8 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
   if(nextTrackMetaDataXML) {
     String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : "Not Available"
-    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : "Not Available"
-    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : "Not Available"
+    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : "Not Available"
+    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : "Not Available"
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   } else {
     String nextArtistName = "Not Available"
@@ -1223,7 +1223,7 @@ void getFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   formatted.each(){it ->
     child.sendEvent(
       name: "Favorite #${it.key} ${it.value.name}",
-      value: "<img src=\"${it.value.imageUrl}\" width=\"200\" height=\"200\" >",
+      value: "<br><img src=\"${it.value.imageUrl}\" width=\"200\" height=\"200\" >",
       isStateChange: false
     )
   }
