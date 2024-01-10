@@ -311,6 +311,7 @@ void createGroupDevices() {
 void createPlayerDevices() {
   settings.playerDevices.each{ dni ->
     ChildDeviceWrapper cd = app.getChildDevice(dni)
+    Map playerInfo = discoveredSonoses[dni]
     if(cd) {
       logDebug("Not creating ${cd.getDataValue('name')}, child already exists.")
     } else {
@@ -320,7 +321,6 @@ void createPlayerDevices() {
       } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Player driver not found', e)}
     }
     logDebug("Updating player info with latest info from discovery...")
-    Map playerInfo = discoveredSonoses[dni]
     playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
     cd.secondaryConfiguration()
   }
