@@ -600,7 +600,6 @@ String unEscapeMetaData(String text) {
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
   if(!isGroupCoordinator) { return }
-  isFavoritePlaying(cd)
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
@@ -705,6 +704,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String nextTrackName = "Not Available"
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   }
+  if(status == 'playing') {isFavoritePlaying(cd)}
 }
 
 void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
@@ -749,13 +749,13 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   String groupName = propertyset['property']['ZoneGroupName'].text()
 
   groupedDevices.each{dev ->
-    dev.updateDataValue('groupId', groupId)
-    dev.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)
-    dev.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
-    dev.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
-    dev.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
-    dev.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)
-    dev.sendEvent(name: 'groupName', value: groupName)
+    if(groupId) {dev.updateDataValue('groupId', groupId)}
+    if(currentGroupCoordinatorName) {dev.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)}
+    if(currentGroupMemberNames) {dev.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')}
+    if(isGroupCoordinator) {dev.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')}
+    if(currentGroupMemberCount) {dev.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)}
+    if(currentGroupMemberNames) {dev.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)}
+    if(groupName) {dev.sendEvent(name: 'groupName', value: groupName)}
   }
 
   List<Map> events = [
