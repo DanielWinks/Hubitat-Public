@@ -275,7 +275,7 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
-  // runIn(3, 'appGetFavoritesLocal', [overwrite: true])
+  runIn(3, 'appGetFavoritesLocal', [overwrite: true])
 }
 
 // =============================================================================
@@ -1246,7 +1246,6 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
       String serviceId = it?.resource?.id?.serviceId
       String accountId = it?.resource?.id?.accountId
       String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-      logDebug("universalMusicObjectId: ${universalMusicObjectId}")
       favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
     }
   }
