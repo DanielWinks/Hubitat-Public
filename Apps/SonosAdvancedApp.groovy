@@ -634,9 +634,10 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
     String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : "Not Available"
-    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : "Not Available"
-    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : "Not Available"
+    String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : null
+    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
+    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
+    String streamContent = status != "stopped" ? currentTrackMetaData['item']['streamContent'] : null
 
     groupedDevices.each{dev ->
       if(albumArtURI.startsWith('/')) {
@@ -645,6 +646,9 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
         dev.sendEvent(name:'albumArtURI', value: "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
       }
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
+      if(streamContent && (!currentArtistName && !currentAlbumName)) {
+        dev.sendEvent(name: 'trackDescription', value: streamContent)
+      }
     }
 
     String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
