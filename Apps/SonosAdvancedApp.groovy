@@ -275,7 +275,7 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
-  // runIn(3, 'appGetFavorites', [overwrite: true])
+  // runIn(3, 'appGetFavoritesLocal', [overwrite: true])
 }
 
 // =============================================================================
@@ -652,27 +652,33 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     }
 
     String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
+    String enqueuedTransportURIMetaDataString = instanceId['EnqueuedTransportURIMetaData']['@val']
+    String favItemId
+    if(enqueuedTransportURIMetaDataString) {
+      GPathResult enqueuedTransportURIMetaDataXML = new XmlSlurper().parseText(unEscapeMetaData(enqueuedTransportURIMetaDataString))
+      favItemId = enqueuedTransportURIMetaDataXML['item']['@id'].toString()
+    }
+
     Boolean favFound = false
     String foundFavId = null
     String foundFavImageUrl = null
     String foundFavName = null
-    if(state.favs != null) {
-      state.favs.keySet().each{key ->
-        // logDebug("URI: ${enqueuedUri} <=> Key: ${key}")
-        if(enqueuedUri.contains(key)) {
-          favFound = true
-          foundFavId = state.favs[key].id
-          foundFavImageUrl = state.favs[key].imageUrl
-          foundFavName = state.favs[key].name
-          groupedDevices.each{dev -> dev.sendEvent(
-            name: 'currentFavorite',
-            value: "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-            )
-          }
+    if(state.favs) {
+      favFound = state.favs.containsKey(favItemId)
+      logDebug("URI: ${favItemId} <=> Key: ${state.favs.containsKey(favItemId)}")
+      logClass(state.favs.keySet()[0])
+      if(favFound) {
+        foundFavId = state.favs[favItemId].id
+        foundFavImageUrl = state.favs[favItemId].imageUrl
+        foundFavName = state.favs[favItemId].name
+        groupedDevices.each{it.sendEvent(
+          name: 'currentFavorite',
+          value: "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+          )
         }
       }
       if(!favFound) {
-        groupedDevices.each{dev -> dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
+        groupedDevices.each{it.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
       }
     }
 
@@ -680,8 +686,6 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
     if(avTransportURIMetaDataString) {
       GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeMetaData(avTransportURIMetaDataString))
-
-      String metaData = instanceId['EnqueuedTransportURIMetaData']['@val']
       String uri = instanceId['AVTransportURI']['@val']
       // String transportUri = uri ?? Seems to be the same on the built-in driver
       String audioSource = SOURCES[(enqueuedUri.tokenize(':')[0]).toString()]
@@ -697,7 +701,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
         trackUri: trackUri,
         transportUri: uri,
         enqueuedUri: enqueuedUri,
-        metaData: metaData,
+        metaData: unEscapeMetaData(enqueuedTransportURIMetaDataString),
         trackMetaData: unEscapeMetaData(currentTrackMetaDataString)
       ]
       groupedDevices.each{dev -> if(dev) {dev.setTrackDataEvents(trackData)}}
@@ -1237,7 +1241,7 @@ List<String> getUniqueHouseholds() {
 
 void appGetFavoritesLocal() {
   logDebug("Getting (app) favorites...")
-  unschedule('appGetFavorites')
+  unschedule('appGetFavoritesLocal')
   List<ChildDeviceWrapper> children = app.getChildDevices().findAll{ child -> child.getDataValue('isGroupCoordinator') == 'true'}
   Map households = children.collectEntries{cd -> [cd.getDataValue('householdId'), [localApiUrl: cd.getDataValue('localApiUrl'), dni: cd.getDeviceNetworkId()]]}
 
@@ -1252,7 +1256,7 @@ void appGetFavoritesLocal() {
 
 void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   if (response.hasError()) {
-    logError("appGetFavorites error: ${response.getErrorData()}")
+    logError("appGetFavoritesLocal error: ${response.getErrorData()}")
     return
   }
   List respData = response.getJson().items
@@ -1261,11 +1265,11 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
     return
   }
   // logDebug(prettyJson(response.getJson()))
-  Map favs = state.favs ?: [:]
+  Map favs = [:]
   respData.each{
     if(it?.resource?.id?.objectId != null) {
       // logDebug("ObjectId: ${it?.resource?.id?.objectId}")
-      favs["${URLEncoder.encode(it?.resource?.id?.objectId).toLowerCase()}"] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl]
+      favs["${(it?.resource?.id?.objectId).replace(':','%3a')}"] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl]
     }
   }
   state.favs = favs
