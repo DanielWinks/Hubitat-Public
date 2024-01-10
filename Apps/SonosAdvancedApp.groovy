@@ -291,15 +291,17 @@ void createGroupDevices() {
       try {
         logDebug("Creating group device for ${it.key}")
         device = addChildDevice('dwinks', 'Sonos Advanced Group', dni, [name: 'Sonos Group', label: "Sonos Group: ${it.key}"])
-        String groupCoordinatorId = it.value.groupCoordinatorId as String
-        String playerIds =  it.value.playerIds.join(',')
-        ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
-        String householdId = coordDev.getDataValue('householdId')
-        device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
-        device.updateDataValue('playerIds', playerIds)
-        device.updateDataValue('householdId', householdId)
+
+
       } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Group driver not found', e)}
     }
+    String groupCoordinatorId = it.value.groupCoordinatorId as String
+    String playerIds =  it.value.playerIds.join(',')
+    ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
+    String householdId = coordDev.getDataValue('householdId')
+    device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
+    device.updateDataValue('playerIds', playerIds)
+    device.updateDataValue('householdId', householdId)
   }
   app.removeSetting('groupDevices')
   app.updateSetting('groupDevices', [type: 'enum', value: getCreatedGroupDevices()])
@@ -307,20 +309,20 @@ void createGroupDevices() {
 }
 
 void createPlayerDevices() {
-  List<String> willBeCreated = (settings.playerDevices - getCreatedPlayerDevices())
-  willBeCreated.each{ dni ->
+  settings.playerDevices.each{ dni ->
     ChildDeviceWrapper cd = app.getChildDevice(dni)
     if(cd) {
       logDebug("Not creating ${cd.getDataValue('name')}, child already exists.")
     } else {
-      Map playerInfo = discoveredSonoses[dni]
       logInfo("Creating Sonos Advanced Player device for ${playerInfo?.name}")
       try {
-        device = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
-        playerInfo.each { key, value -> device.updateDataValue(key, value as String) }
-        device.secondaryConfiguration()
+        cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
       } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Player driver not found', e)}
     }
+    logDebug("Updating player info with latest info from discovery...")
+    Map playerInfo = discoveredSonoses[dni]
+    playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
+    cd.secondaryConfiguration()
   }
   removeOrphans()
 }
@@ -342,6 +344,7 @@ void removeOrphans() {
 @CompileStatic
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
+  discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
 }
@@ -568,6 +571,19 @@ String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
     else { logError(resp.data) }
   }
   return groupId
+}
+
+Boolean hasLeftAndRightChannelsSync(DeviceWrapper device) {
+  String householdId = device.getDataValue('householdId')
+  String localApiUrl = device.getDataValue('localApiUrl')
+  String endpoint = "households/${householdId}/groups"
+  String uri = "${localApiUrl}${endpoint}"
+  Map params = [uri: uri]
+  Map json = sendLocalJsonQuerySync([params:params])
+  Map playerInfo = json?.players.find{it?.id == device.getDataValue('id')}
+  Boolean hasLeftChannel = playerInfo?.zoneInfo?.members.find{it?.channelMap.contains('LF')}
+  Boolean hasRightChannel = playerInfo?.zoneInfo?.members.find{it?.channelMap.contains('RF')}
+  return hasLeftChannel && hasRightChannel
 }
 
 String unEscapeOnce(String text) {
@@ -802,6 +818,25 @@ void sendLocalCommandAsync(Map args) {
   asynchttpPost(callbackMethod, params, args.data)
 }
 
+Map sendLocalJsonQuerySync(Map args) {
+  if(args?.endpoint == null && args?.params?.uri == null) { return }
+  Map params = args.params ?: [:]
+  params.uri = args.params.uri ?: "${getLocalApiPrefix(args.ipAddress)}${args.endpoint}"
+  params.contentType = args.params.contentType ?: 'application/json'
+  params.requestContentType = args.params.requestContentType ?: 'application/json'
+  params.ignoreSSLIssues = args.params.ignoreSSLIssues ?: true
+  if(params.headers == null) {
+    params.headers = ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000']
+  } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
+    params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
+  }
+  logDebug("sendLocalQuerySync: ${params}")
+  httpGet(params) { resp ->
+    if (resp && resp.data && resp.success) { return resp.data }
+    else { logError(resp.data) }
+  }
+}
+
 void sendLocalQueryAsync(Map args) {
   if(args?.endpoint == null && args?.params?.uri == null) { return }
   String callbackMethod = args.callbackMethod ?: 'localControlCallback'
@@ -952,6 +987,39 @@ void componentSetBassLocal(DeviceWrapper device, BigDecimal level) {
   Map controlValues = [DesiredBass: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
   asynchttpPost('localControlCallback', params)
+}
+
+void componentSetBalanceLocal(DeviceWrapper device, BigDecimal level) {
+  if(!hasLeftAndRightChannelsSync(device)) {
+    logWarn("Can not set balance on non-stereo pair.")
+    return
+  }
+  String ip = device.getDataValue('localUpnpHost')
+  level *= 5
+  if(level < 0) {
+    level = level < -100 ? -100 : level
+    Map controlValues = [DesiredVolume: 100 + level, Channel: "RF"]
+    Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+    controlValues = [DesiredVolume: 100, Channel: "LF"]
+    params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+  } else if(level > 0) {
+    level = level > 100 ? 100 : level
+    Map controlValues = [DesiredVolume: 100 - level, Channel: "LF"]
+    Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+    controlValues = [DesiredVolume: 100, Channel: "RF"]
+    params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+  } else {
+    Map controlValues = [DesiredVolume: 100, Channel: "LF"]
+    Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+    controlValues = [DesiredVolume: 100, Channel: "RF"]
+    params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+  }
 }
 
 void componentSetLoudnessLocal(DeviceWrapper device, Boolean desiredLoudness) {

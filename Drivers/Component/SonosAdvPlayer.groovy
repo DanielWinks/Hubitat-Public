@@ -95,9 +95,11 @@ metadata {
   attribute 'treble', 'number'
   attribute 'bass', 'number'
   attribute 'loudness', 'enum', [ 'on', 'off' ]
+  attribute 'balance', 'number'
   command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
   command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
   command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
+  command 'setBalance', [[name:'Left/Right Balance*', type:"NUMBER", description:"Left/Right Balance (-20..20)", constraints:["NUMBER"]]]
 
 
   attribute 'groupName', 'string'
@@ -209,6 +211,7 @@ void setVolume(BigDecimal level) { setLevel(level) }
 void setTreble(BigDecimal level) { parent?.componentSetTrebleLocal(this.device, level)}
 void setBass(BigDecimal level) { parent?.componentSetBassLocal(this.device, level)}
 void setLoudness(String mode) { parent?.componentSetLoudnessLocal(this.device, mode == 'on')}
+void setBalance(BigDecimal level) { parent?.componentSetBalanceLocal(this.device, level)}
 
 void muteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, true) }
@@ -619,6 +622,15 @@ void processRenderingControlMessages(Map message) {
     sendEvent(name:'volume', value: volume as Integer)
     if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
   }
+  Integer lf = (instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()) as Integer
+  Integer rf = (instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()) as Integer
+  Integer balance = 0
+  if(lf < 100) {
+    balance = ((100 - lf) / 5) as Integer
+  } else if(rf < 100) {
+    balance = -((100 - rf) / 5) as Integer
+  }
+  sendEvent(name: 'balance', value: balance)
 
   String mute = instanceId.children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
