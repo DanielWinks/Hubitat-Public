@@ -600,6 +600,7 @@ String unEscapeMetaData(String text) {
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
   if(!isGroupCoordinator) { return }
+  isFavoritePlaying(cd)
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
@@ -637,8 +638,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : null
     String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
     String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
-    String streamContent = status != "stopped" ? currentTrackMetaData['item']['streamContent'] : null
-
+    String streamContent = status != "stopped" ? currentTrackMetaData['item']['streamContent'].toString() : null
     groupedDevices.each{dev ->
       if(albumArtURI.startsWith('/')) {
         dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
@@ -646,6 +646,9 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
         dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
       }
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
+      streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
+      streamContent = streamContent == 'ZPSTR_CONNECTING' ? 'Connecting...' : streamContent
+      streamContent = !streamContent ? 'Not Available' : streamContent
       if(streamContent && (!currentArtistName && !currentTrackName)) {
         dev.sendEvent(name: 'trackDescription', value: streamContent)
       }
@@ -653,35 +656,6 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
 
     String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
     String enqueuedTransportURIMetaDataString = instanceId['EnqueuedTransportURIMetaData']['@val']
-    String favItemId
-    if(enqueuedTransportURIMetaDataString) {
-      GPathResult enqueuedTransportURIMetaDataXML = new XmlSlurper().parseText(unEscapeMetaData(enqueuedTransportURIMetaDataString))
-      favItemId = enqueuedTransportURIMetaDataXML['item']['@id'].toString()
-    }
-
-    Boolean favFound = false
-    String foundFavId = null
-    String foundFavImageUrl = null
-    String foundFavName = null
-    if(state.favs) {
-      favFound = state.favs.containsKey(favItemId)
-      logDebug("URI: ${favItemId} <=> Key: ${state.favs.containsKey(favItemId)}")
-      logClass(state.favs.keySet()[0])
-      if(favFound) {
-        foundFavId = state.favs[favItemId].id
-        foundFavImageUrl = state.favs[favItemId].imageUrl
-        foundFavName = state.favs[favItemId].name
-        groupedDevices.each{it.sendEvent(
-          name: 'currentFavorite',
-          value: "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-          )
-        }
-      }
-      if(!favFound) {
-        groupedDevices.each{it.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
-      }
-    }
-
 
     String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
     if(avTransportURIMetaDataString) {
@@ -1264,12 +1238,16 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
     logDebug("Response returned from getFavorites API: ${response.getJson()}")
     return
   }
-  // logDebug(prettyJson(response.getJson()))
+  logDebug(prettyJson(response.getJson()))
   Map favs = [:]
   respData.each{
-    if(it?.resource?.id?.objectId != null) {
-      // logDebug("ObjectId: ${it?.resource?.id?.objectId}")
-      favs["${(it?.resource?.id?.objectId).replace(':','%3a')}"] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl]
+    if(it?.resource?.id?.objectId && it?.resource?.id?.serviceId && it?.resource?.id?.accountId) {
+      String objectId = (it?.resource?.id?.objectId).tokenize(':')[1]
+      String serviceId = it?.resource?.id?.serviceId
+      String accountId = it?.resource?.id?.accountId
+      String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
+      logDebug("universalMusicObjectId: ${universalMusicObjectId}")
+      favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
     }
   }
   state.favs = favs
@@ -1277,17 +1255,43 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   // logDebug("formatted response: ${prettyJson(favs)}")
 }
 
-// void removePlayersLocal(String groupCoordinatorId) {
-//   ChildDeviceWrapper cd = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
-//   String coordinatorId = cd.getDataValue('groupCoordinatorId')
-//   Map data = ['playerIds': [groupCoordinatorId]]
+void isFavoritePlaying(DeviceWrapper device) {
+  runInMillis(500, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
+}
 
-//   String localApiUrl = "${cd.getDataValue('localApiUrl')}"
-//   String endpoint = "groups/${coordinatorId}/groups/setGroupMembers"
-//   String uri = "${localApiUrl}${endpoint}"
-//   Map params = [uri: uri]
-//   sendLocalJsonAsync(params: params, data: data)
-// }
+void isFavoritePlayingAsync(Map data) {
+  DeviceWrapper device = app.getChildDevice(data.dni)
+  String groupId = URLEncoder.encode(device.getDataValue('groupId'))
+  String localApiUrl = device.getDataValue('localApiUrl')
+  String endpoint = "groups/${groupId}/playbackMetadata"
+  String uri = "${localApiUrl}${endpoint}"
+  Map params = [uri: uri]
+  sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: device.getDeviceNetworkId()]])
+}
+
+void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
+  if(!responseIsValid(response, 'isFavoritePlayingAsyncCallback')) { return }
+  Map json = response.getJson()
+  String objectId = (json?.container?.id?.objectId).tokenize(':')[1]
+  String serviceId = json?.container?.id?.serviceId
+  String accountId = json?.container?.id?.accountId
+  String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
+  Boolean isFav = state.favs.containsKey(universalMusicObjectId)
+  DeviceWrapper coordDev = app.getChildDevice(data.dni)
+  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(coordDev)
+  if(isFav) {
+    foundFavId = state.favs[universalMusicObjectId].id
+    foundFavImageUrl = state.favs[universalMusicObjectId].imageUrl
+    foundFavName = state.favs[universalMusicObjectId].name
+    groupedDevices.each{it.sendEvent(
+      name: 'currentFavorite',
+      value: "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+      )
+    }
+  } else {
+    groupedDevices.each{it.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
+  }
+}
 
 void componentUpdateBatteryStatus(DeviceWrapper player) {
   String baseUrl = player.getDataValue('localUpnpUrl')
