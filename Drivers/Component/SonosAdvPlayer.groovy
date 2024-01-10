@@ -625,8 +625,12 @@ void processRenderingControlMessages(Map message) {
     sendEvent(name:'volume', value: volume as Integer)
     if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
   }
-  Integer lf = (instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()) as Integer
-  Integer rf = (instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()) as Integer
+  String lfString = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()
+  lfString = lfString ?: '0'
+  String rfString = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()
+  rfString = rfString ?: '0'
+  Integer lf = Integer.parseInt(lfString)
+  Integer rf = Integer.parseInt(rfString)
   Integer balance = 0
   if(lf < 100) {
     balance = ((100 - lf) / 5) as Integer
