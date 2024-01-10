@@ -15,7 +15,7 @@
       "name": "Third Reality Smart Blind Drivers",
       "category": "Window Coverings",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/blinds/Package%20Manifests/ThirdReality/packageManifest.json",
-      "description": "Advanced app and driver for Sonos speakers. Allows non-interrupting TTS, grouping control, and more.",
+      "description": "Improved driver for Third Reality Smart Blinds. Adds 'verfication' checks to ensure blinds always move to 'desired' position, eliminating issues where blinds might otherwise fail to respond to the first ZigBee command sent.",
       "tags": ["Window Coverings", "ZigBee"],
       "id": "0494570e-0fdd-4ea0-a8f4-7eba8e154ddd"
     }
