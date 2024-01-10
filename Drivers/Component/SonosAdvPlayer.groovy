@@ -442,7 +442,7 @@ void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumNam
   sendEvent(name:'currentAlbumName',  value: currentAlbumName ?: 'Not Available')
   sendEvent(name:'currentTrackName',  value: currentTrackName ?: 'Not Available')
   sendEvent(name:'currentTrackNumber',  value: currentTrackNumber ?: 0)
-  String trackDescription = currentAlbumName && currentArtistName ? "${currentAlbumName} by ${currentArtistName}" : null
+  String trackDescription = currentTrackName && currentArtistName ? "${currentTrackName} by ${currentArtistName}" : null
   if(trackDescription) { sendEvent(name: 'trackDescription', value: trackDescription) }
 }
 

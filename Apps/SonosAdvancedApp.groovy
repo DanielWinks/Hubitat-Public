@@ -646,7 +646,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
         dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
       }
       dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
-      if(streamContent && (!currentArtistName && !currentAlbumName)) {
+      if(streamContent && (!currentArtistName && !currentTrackName)) {
         dev.sendEvent(name: 'trackDescription', value: streamContent)
       }
     }
