@@ -33,6 +33,7 @@ metadata {
   ) {
     capability 'Actuator'
     capability 'Switch'
+    capability 'SpeechSynthesis'
 
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
@@ -54,3 +55,7 @@ void on() { joinPlayersToCoordinator() }
 void off() { removePlayersFromCoordinator() }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
 void clearState() { state.clear() }
+void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
+void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
+  parent?.componentPlayTextLocal(this.device, text, volume, voice)
+}
