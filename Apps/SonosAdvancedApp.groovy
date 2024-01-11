@@ -1214,11 +1214,20 @@ void getFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   // state.favs
   // logDebug("formatted response: ${prettyJson(formatted)}")
   formatted.each(){it ->
-    child.sendEvent(
-      name: "Favorite #${it.key} ${it.value.name}",
-      value: "<br><img src=\"${it.value.imageUrl}\" width=\"200\" height=\"200\" >",
-      isStateChange: false
-    )
+    String albumArtURI = it.value?.imageUrl
+    if(albumArtURI.startsWith('/')) {
+      child.sendEvent(
+        name: "Favorite #${it.key} ${it.value?.name}",
+        value: "<br><img src=\"${child.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >",
+        isStateChange: false
+      )
+    } else {
+      child.sendEvent(
+        name: "Favorite #${it.key} ${it.value?.name}",
+        value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >",
+        isStateChange: false
+      )
+    }
   }
 }
 
@@ -1262,6 +1271,9 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
       String accountId = it?.resource?.id?.accountId
       String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
       favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
+    } else if(it?.imageUrl) {
+      String universalMusicObjectId = "${it?.imageUrl}".toString()
+      favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
     }
   }
   state.favs = favs
@@ -1289,21 +1301,29 @@ void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   String objectId = (json?.container?.id?.objectId).tokenize(':')[1]
   String serviceId = json?.container?.id?.serviceId
   String accountId = json?.container?.id?.accountId
+  String imageUrl = json?.container?.imageUrl
+
   String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
+  String universalMusicObjectIdAlt = "${imageUrl}".toString()
   Boolean isFav = state.favs.containsKey(universalMusicObjectId)
+  Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
+
   DeviceWrapper coordDev = app.getChildDevice(data.dni)
   List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(coordDev)
-  if(isFav) {
-    foundFavId = state.favs[universalMusicObjectId].id
-    foundFavImageUrl = state.favs[universalMusicObjectId].imageUrl
-    foundFavName = state.favs[universalMusicObjectId].name
-    groupedDevices.each{it.sendEvent(
-      name: 'currentFavorite',
-      value: "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-      )
+  String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
+  String foundFavId = state.favs[k].id
+  String foundFavImageUrl = state.favs[k].imageUrl
+  String foundFavName = state.favs[k].name
+  groupedDevices.each{
+    String value = 'No favorite playing'
+    if((isFav || isFavAlt) && foundFavImageUrl?.startsWith('/')) {
+      value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${it.getDataValue('localUpnpUrl')}${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+    } else if((isFav || isFavAlt) && !foundFavImageUrl) {
+      value = "Favorite #${foundFavId} ${foundFavName}"
+    } else if(isFav || isFavAlt) {
+      value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
     }
-  } else {
-    groupedDevices.each{it.sendEvent(name: 'currentFavorite', value: 'No favorite playing')}
+    it.sendEvent(name: 'currentFavorite', value: value)
   }
 }
 
