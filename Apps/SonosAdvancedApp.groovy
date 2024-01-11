@@ -1215,7 +1215,7 @@ void getFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   // logDebug("formatted response: ${prettyJson(formatted)}")
   formatted.each(){it ->
     String albumArtURI = it.value?.imageUrl
-    if(albumArtURI.startsWith('/')) {
+    if(albumArtURI?.startsWith('/')) {
       child.sendEvent(
         name: "Favorite #${it.key} ${it.value?.name}",
         value: "<br><img src=\"${child.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >",
