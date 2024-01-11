@@ -881,7 +881,6 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
-
 void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
