@@ -883,18 +883,34 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
 // =============================================================================
 
 void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
-  String playerId = device.getDataValue('id')
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
   Map tts = textToSpeech(text, voice)
   data.streamUrl = tts.uri
   if (volume) data.volume = (int)volume
 
-  String localApiUrl = "${device.getDataValue('localApiUrl')}"
-  String endpoint = "players/${playerId}/audioClip"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
+  if(device.getDataValue('capabilities')) {
+    String playerId = device.getDataValue('id')
+    String localApiUrl = "${device.getDataValue('localApiUrl')}"
+    String endpoint = "players/${playerId}/audioClip"
+    String uri = "${localApiUrl}${endpoint}"
+    Map params = [uri: uri]
+    sendLocalJsonAsync(params: params, data: data)
+  } else {
+    String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+    ChildDeviceWrapper coordinatorDevice = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
+    List<String> followers = device.getDataValue('playerIds').tokenize(',')
+    List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
+    List<ChildDeviceWrapper> allDevices = followerDevices + [coordinatorDevice]
+    allDevices.each{ dev ->
+      String playerId = dev.getDataValue('id')
+      String localApiUrl = "${dev.getDataValue('localApiUrl')}"
+      String endpoint = "players/${playerId}/audioClip"
+      String uri = "${localApiUrl}${endpoint}"
+      Map params = [uri: uri]
+      sendLocalJsonAsync(params: params, data: data)
+    }
+  }
 }
 
 void componentPlayAudioClipLocal(DeviceWrapper device, String streamUrl, BigDecimal volume = null) {
