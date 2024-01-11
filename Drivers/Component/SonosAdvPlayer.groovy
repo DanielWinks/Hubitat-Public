@@ -657,7 +657,7 @@ void processRenderingControlMessages(Map message) {
   if(treble) { sendEvent(name:'treble', value: treble as Integer) }
 
   String loudness = instanceId.children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
-  if(loudness) { sendEvent(name:'loudness', value: loudness == 1 ? 'on' : 'off') }
+  if(loudness) { sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off') }
 }
 
 // =============================================================================
