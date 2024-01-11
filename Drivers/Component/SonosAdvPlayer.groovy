@@ -581,7 +581,6 @@ void parse(String raw) {
   if(message.headers.containsKey('HTTP/1.1 412 Precondition Failed')) {
     logDebug("Expired subscriptions detected, resubscribing to all...")
     logDebug("412: ${message}")
-    device.removeDataValue('sid1')
     device.removeDataValue('sid2')
     device.removeDataValue('sid3')
     device.removeDataValue('sid4')
@@ -591,8 +590,10 @@ void parse(String raw) {
   String sId = message.headers["SID"]
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
   if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    this.device.updateDataValue('sid1', sId)
-    processAVTransportMessages(message)
+    if(this.device.getDataValue('isGroupCoordinator') == 'true') {
+      this.device.updateDataValue('sid1', sId)
+      processAVTransportMessages(message)
+    }
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
     this.device.updateDataValue('sid2', sId)
@@ -678,12 +679,10 @@ void subscribeToEvents() {
   String host = device.getDataValue('localUpnpHost')
   String dni = device.getDeviceNetworkId()
 
-  if(device.getDataValue('sid1')) { sonosEventUnsubscribe('/MediaRenderer/AVTransport/Event', host, dni, device.getDataValue('sid1')) }
-  if(device.getDataValue('sid2')) { sonosEventUnsubscribe('/MediaRenderer/RenderingControl/Event', host, dni, device.getDataValue('sid2')) }
-  if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
-  if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
+  // if(device.getDataValue('sid2')) { sonosEventUnsubscribe('/MediaRenderer/RenderingControl/Event', host, dni, device.getDataValue('sid2')) }
+  // if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
+  // if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
 
-  sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, '/avt')
   sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, '/mrc')
   sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, '/zgt')
   sonosEventSubscribe('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, '/mgrc')
@@ -703,11 +702,33 @@ void resubscribeToEvents() {
   String host = device.getDataValue('localUpnpHost')
   String dni = device.getDeviceNetworkId()
 
-  sonosEventRenew('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid1'))
-  sonosEventRenew('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid2'))
-  sonosEventRenew('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid3'))
-  sonosEventRenew('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid4'))
+  if(device.getDataValue('sid2')) { sonosEventRenew('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid2'))}
+  if(device.getDataValue('sid3')) { sonosEventRenew('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid3'))}
+  if(device.getDataValue('sid4')) { sonosEventRenew('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid4'))}
   runIn(RESUB_INTERVAL-100, 'resubscribeToEvents')
+}
+
+void unsubscribeFromAVTransport() {
+  String host = device.getDataValue('localUpnpHost')
+  String dni = device.getDeviceNetworkId()
+  if(device.getDataValue('sid1')) {
+    sonosEventUnsubscribe('/MediaRenderer/AVTransport/Event', host, dni, device.getDataValue('sid1'))
+    unschedule('resubscribeToAVTransport')
+  }
+}
+
+void subscribeToAVTransport() {
+  String host = device.getDataValue('localUpnpHost')
+  String dni = device.getDeviceNetworkId()
+  sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, '/avt')
+  runIn(RESUB_INTERVAL-100, 'resubscribeToAVTransport')
+}
+
+void resubscribeToAVTransport() {
+  String host = device.getDataValue('localUpnpHost')
+  String dni = device.getDeviceNetworkId()
+  if(device.getDataValue('sid1')) { sonosEventRenew('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid1'))}
+  runIn(RESUB_INTERVAL-100, 'resubscribeToAVTransport')
 }
 
 // =============================================================================

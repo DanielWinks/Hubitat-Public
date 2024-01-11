@@ -600,6 +600,7 @@ String unEscapeMetaData(String text) {
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
   if(!isGroupCoordinator) { return }
+  String coordinatorId = getGroupForPlayerDeviceLocal(cd).tokenize(':')
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
@@ -614,6 +615,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   String numberOfTracks = instanceId['NumberOfTracks']['@val']
   String trackNumber = instanceId['CurrentTrack']['@val']
   String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
+  if(trackUri == "x-rincon:${coordinatorId}") {return}
   Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
   String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
   String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
@@ -624,10 +626,8 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     dev.setPlayMode(currentPlayMode)
     dev.setCrossfadeMode(currentCrossfadeMode)
     dev.setCurrentTrackDuration(currentTrackDuration)
+    if(status == 'stopped') (dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing'))
   }
-
-
-
 
   String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
   if(currentTrackMetaDataString) {
@@ -704,7 +704,8 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String nextTrackName = "Not Available"
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   }
-  if(status == 'playing') {isFavoritePlaying(cd)}
+  isFavoritePlaying(cd)
+  // if(status == 'playing') {isFavoritePlaying(cd)}
 }
 
 void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
@@ -712,22 +713,44 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
   GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
 
   String rincon = cd.getDataValue('id')
+  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
   String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
   Boolean previouslyWasGroupCoordinator = cd.getDataValue('isGroupCoordinator') == 'true'
   if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
     logDebug("Just removed from group!")
+    child.subscribeToAVTransport()
   }
   if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
     logDebug("Just added to group!")
+    child.unsubscribeFromAVTransport()
+    ChildDeviceWrapper coordinator = getDeviceFromRincon(currentGroupCoordinatorId)
+    logDebug("Processing updates to grouped devices to bring them in sync with coordinator.")
+    child.sendEvent(name:'currentCrossfadeMode', value: coordinator.currentState('currentCrossfadeMode')?.value)
+    child.sendEvent(name:'currentRepeatAllMode', value: coordinator.currentState('currentRepeatAllMode')?.value)
+    child.sendEvent(name:'currentRepeatOneMode',  value: coordinator.currentState('currentRepeatOneMode')?.value)
+    child.sendEvent(name:'currentShuffleMode',  value: coordinator.currentState('currentShuffleMode')?.value)
+    child.sendEvent(name:'currentTrackDuration', value: coordinator.currentState('currentTrackDuration')?.value)
+    child.sendEvent(name:'currentTrackName',  value: coordinator.currentState('currentTrackName')?.value)
+    child.sendEvent(name:'currentAlbumName',  value: coordinator.currentState('currentAlbumName')?.value)
+    child.sendEvent(name:'currentArtistName', value: coordinator.currentState('currentArtistName')?.value)
+    child.sendEvent(name:'currentTrackNumber',  value: coordinator.currentState('currentTrackNumber')?.value)
+    child.sendEvent(name:'nextArtistName', value: coordinator.currentState('nextArtistName')?.value)
+    child.sendEvent(name:'nextTrackName',  value: coordinator.currentState('nextTrackName')?.value)
+    child.sendEvent(name:'currentFavorite',  value: coordinator.currentState('currentFavorite')?.value)
+    child.sendEvent(name:'albumArtURI',  value: coordinator.currentState('albumArtURI')?.value)
   }
+
   cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
   if(!isGroupCoordinator) {return}
 
   List<String> groupedRincons = []
   GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
 
-  currentGroupMembers.each{ groupedRincons.add(it['@UUID'].toString()) }
+  currentGroupMembers.each{
+    if(it['@Invisible'] == '1') {return}
+    groupedRincons.add(it['@UUID'].toString())
+  }
   if(groupedRincons.size() == 0) {
     logDebug("No grouped rincons found!")
     return
@@ -742,9 +765,9 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
 
 
   LinkedHashSet currentGroupMemberNames = []
-  currentGroupMembers.each{ currentGroupMemberNames.add(it['@ZoneName']) }
-  Integer currentGroupMemberCount = currentGroupMemberNames.size()
-
+  groupedRincons.each{ gr ->
+    currentGroupMemberNames.add(zoneGroups.children().children().findAll{it['@UUID'] == gr}['@ZoneName']) }
+  Integer currentGroupMemberCount = groupedRincons.size()
 
   String groupName = propertyset['property']['ZoneGroupName'].text()
 
@@ -757,19 +780,6 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
     if(currentGroupMemberNames) {dev.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)}
     if(groupName) {dev.sendEvent(name: 'groupName', value: groupName)}
   }
-
-  List<Map> events = [
-    [name:'currentCrossfadeMode', value: cd.currentState('currentCrossfadeMode')?.value],
-    [name:'currentRepeatAllMode', value: cd.currentState('currentRepeatAllMode')?.value],
-    [name:'currentRepeatOneMode',  value: cd.currentState('currentRepeatOneMode')?.value],
-    [name:'currentShuffleMode',  value: cd.currentState('currentShuffleMode')?.value],
-    [name:'currentTrackDuration', value: cd.currentState('currentTrackDuration')?.value],
-    [name:'currentTrackName',  value: cd.currentState('currentTrackName')?.value],
-    [name:'nextAlbumName',  value: cd.currentState('nextAlbumName')?.value],
-    [name:'nextArtistName', value: cd.currentState('nextArtistName')?.value],
-    [name:'nextTrackName',  value: cd.currentState('nextTrackName')?.value]
-  ]
-  groupedDevices.each{dev -> if(dev && dev.getDataValue('isGroupCoordinator') == 'false') { events.each{dev.sendEvent(it)}}}
 
   // Update group device with current on/off state
   getCurrentGroupDevices().findAll{gds -> gds.getDataValue('groupCoordinatorId') == currentGroupCoordinatorId }.each{gd ->
@@ -1282,17 +1292,21 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
 }
 
 void isFavoritePlaying(DeviceWrapper device) {
-  runInMillis(500, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
+  if(device.getDataValue('isGroupCoordinator') == 'true') {
+    runInMillis(500, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
+  }
 }
 
 void isFavoritePlayingAsync(Map data) {
   DeviceWrapper device = app.getChildDevice(data.dni)
-  String groupId = URLEncoder.encode(device.getDataValue('groupId'))
-  String localApiUrl = device.getDataValue('localApiUrl')
-  String endpoint = "groups/${groupId}/playbackMetadata"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: device.getDeviceNetworkId()]])
+  if(device.getDataValue('isGroupCoordinator') == 'true') {
+    String groupId = URLEncoder.encode(device.getDataValue('groupId'))
+    String localApiUrl = device.getDataValue('localApiUrl')
+    String endpoint = "groups/${groupId}/playbackMetadata"
+    String uri = "${localApiUrl}${endpoint}"
+    Map params = [uri: uri]
+    sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: device.getDeviceNetworkId()]])
+  }
 }
 
 void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
