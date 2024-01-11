@@ -102,6 +102,8 @@ metadata {
   command 'setBalance', [[name:'Left/Right Balance*', type:"NUMBER", description:"Left/Right Balance (-20..20)", constraints:["NUMBER"]]]
 
 
+  attribute 'groupVolume', 'number'
+  attribute 'groupMute', 'string'
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
@@ -602,7 +604,7 @@ void parse(String raw) {
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
     this.device.updateDataValue('sid4', sId)
-    // processGroupRenderingControlMessages(message)
+    processGroupRenderingControlMessages(message)
   }
   else {
     logDebug("Could not determine service type for message: ${message}")
@@ -658,6 +660,14 @@ void processRenderingControlMessages(Map message) {
 
   String loudness = instanceId.children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off') }
+}
+
+void processGroupRenderingControlMessages(Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+  Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
+  String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
+  if(groupVolume) { sendEvent(name:'groupVolume', value: groupVolume) }
+  if(groupMute) { sendEvent(name:'groupMute', value: groupMute ) }
 }
 
 // =============================================================================
