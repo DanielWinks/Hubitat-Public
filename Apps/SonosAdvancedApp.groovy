@@ -1299,14 +1299,13 @@ void isFavoritePlaying(DeviceWrapper device) {
 
 void isFavoritePlayingAsync(Map data) {
   DeviceWrapper device = app.getChildDevice(data.dni)
-  if(device.getDataValue('isGroupCoordinator') == 'true') {
-    String groupId = URLEncoder.encode(device.getDataValue('groupId'))
-    String localApiUrl = device.getDataValue('localApiUrl')
-    String endpoint = "groups/${groupId}/playbackMetadata"
-    String uri = "${localApiUrl}${endpoint}"
-    Map params = [uri: uri]
-    sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: device.getDeviceNetworkId()]])
-  }
+  String groupId = getGroupForPlayerDeviceLocal(device)
+  ChildDeviceWrapper coordDev = getDeviceFromRincon(groupId.tokenize(':')[0])
+  String localApiUrl = coordDev.getDataValue('localApiUrl')
+  String endpoint = "groups/${groupId}/playbackMetadata"
+  String uri = "${localApiUrl}${endpoint}"
+  Map params = [uri: uri]
+  sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: coordDev.getDeviceNetworkId()]])
 }
 
 void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
