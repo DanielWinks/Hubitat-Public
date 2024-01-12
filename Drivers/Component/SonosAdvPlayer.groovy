@@ -142,7 +142,7 @@ void configure() {
   createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
-  secondaryConfiguration()
+  runIn(5, 'secondaryConfiguration')
 }
 
 void secondaryConfiguration() {
