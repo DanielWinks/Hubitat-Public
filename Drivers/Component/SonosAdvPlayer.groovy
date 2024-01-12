@@ -70,8 +70,6 @@ metadata {
   command 'repeatOne'
   command 'repeatAll'
   command 'repeatNone'
-  // command 'subscribeToEvents'
-  // command 'resubscribeToEvents'
 
   attribute 'currentRepeatOneMode', 'enum', [ 'on', 'off' ]
   attribute 'currentRepeatAllMode', 'enum', [ 'on', 'off' ]
@@ -249,7 +247,7 @@ void stop() { parent?.componentStopLocal(this.device) }
 void pause() { parent?.componentPauseLocal(this.device) }
 void nextTrack() { parent?.componentNextTrackLocal(this.device) }
 void previousTrack() { parent?.componentPreviousTrackLocal(this.device) }
-void refresh() {
+void subscribeToEvents() {
   subscribeToZgtEvents()
   subscribeToMrGrcEvents()
   subscribeToMrRcEvents()
@@ -677,7 +675,6 @@ String getDNI() {return device.getDeviceNetworkId()}
 @Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
 
-void subscribeToEvents() { refresh() }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/RenderingControl/Event' //sid2
 // /////////////////////////////////////////////////////////////////////////////
