@@ -46,6 +46,7 @@ if (device != null) {
   preferences {
     input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
     input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
     input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: false
   }
 }
@@ -72,6 +73,7 @@ void installed() {
 
   if (settings.logEnable) { runIn(1800, 'logsOff') }
   if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
+  if (settings.debugLogEnable) { runIn(1800, 'traceLogsOff') }
 }
 
 void uninstalled() {
@@ -125,7 +127,7 @@ void logDebug(message) {
 }
 
 void logTrace(message) {
-  if (settings.logEnable && settings.debugLogEnable) {
+  if (settings.logEnable && settings.traceLogEnable) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
     if(app) log.trace "${app.label ?: app.name }: ${message}"
   }
@@ -171,6 +173,17 @@ void debugLogsOff() {
   }
   if (app) {
     logWarn("Debug logging disabled for ${app}")
+    app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
+  }
+}
+
+void traceLogsOff() {
+  if (device) {
+    logWarn("Trace logging disabled for ${device}")
+    device.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
+  }
+  if (app) {
+    logWarn("Trace logging disabled for ${app}")
     app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
   }
 }
