@@ -20,6 +20,7 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+import hubitat.device.HubResponse
 
 library(
   name: 'SMAPILibrary',
@@ -308,7 +309,7 @@ library(
 // Subscription methods
 // =============================================================================
 
-void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni, String callBackPath = '') {
+void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni, String callBackPath = '', String callbackMethod = 'sonosEventSubscribeCallback') {
   logDebug("Subscribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
   String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
   if (host && eventSubURL && timeout > 0 && dni) {
@@ -321,13 +322,13 @@ void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, Strin
         NT: 'upnp:event',
         TIMEOUT: "Second-${timeout}"
       ]
-    ], dni))
+    ], dni, [callback: callbackMethod]))
   } else {
     throw new IllegalArgumentException('Must provide host, eventSubURL, timeout, and dni')
   }
 }
 
-void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dni, String subscriptionId) {
+void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dni, String subscriptionId, String callbackMethod = 'sonosEventRenewCallback') {
   logDebug("Resubscribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
   if (eventSubURL && host && timeout && dni && subscriptionId) {
     sendHubCommand(new hubitat.device.HubAction([
@@ -338,13 +339,13 @@ void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dn
         SID: "${subscriptionId}",
         TIMEOUT: "Second-${timeout}"
       ]
-    ], dni))
+    ], dni, [callback: callbackMethod]))
   } else {
     throw new IllegalArgumentException('Must provide eventSubURL, host, timeout, dni, and subscriptionId')
   }
 }
 
-void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String subscriptionId) {
+void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String subscriptionId, String callbackMethod = 'sonosEventUnsubscribeCallback') {
   logDebug("Unsubscribing from ${eventSubURL} for ${host} for subId of ${subscriptionId} using DNI of ${dni}")
   if (host && eventSubURL && subscriptionId && dni) {
     sendHubCommand(new hubitat.device.HubAction([
@@ -354,7 +355,7 @@ void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String s
         HOST: host,
         SID: "${subscriptionId}"
       ]
-    ], dni))
+    ], dni, [callback: callbackMethod]))
   } else {
     throw new IllegalArgumentException('Must provide host, eventSubURL, subscriptionId, and dni')
   }
