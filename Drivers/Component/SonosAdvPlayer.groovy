@@ -37,9 +37,7 @@ metadata {
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
   capability "MediaTransport" //attributes:  transportStatus - ENUM - ["playing", "paused", "stopped"]
   capability 'SpeechSynthesis'
-  capability 'Configuration'
   capability 'Initialize'
-  capability 'Refresh'
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -72,7 +70,7 @@ metadata {
   command 'repeatOne'
   command 'repeatAll'
   command 'repeatNone'
-  command 'subscribeToEvents'
+  // command 'subscribeToEvents'
   // command 'resubscribeToEvents'
 
   attribute 'currentRepeatOneMode', 'enum', [ 'on', 'off' ]
