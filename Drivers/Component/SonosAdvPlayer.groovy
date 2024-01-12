@@ -146,6 +146,7 @@ void configure() {
   createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
+  secondaryConfiguration()
 }
 
 void secondaryConfiguration() {
@@ -590,15 +591,12 @@ void parse(String raw) {
     }
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-    this.device.updateDataValue('sid2', sId)
     processRenderingControlMessages(message)
   }
   else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    this.device.updateDataValue('sid3', sId)
     processZoneGroupTopologyMessages(message)
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-    this.device.updateDataValue('sid4', sId)
     processGroupRenderingControlMessages(message)
   }
   else {
@@ -698,7 +696,8 @@ void subscribeToMrRcCallback(HubResponse response) {
     runIn(60, 'subscribeToMrRcEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to MediaRenderer/RenderingControl')
-    this.device.updateDataValue('sid2', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid2', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid2', response.headers["sid"])}
   }
 }
 
@@ -716,7 +715,8 @@ void resubscribeToMrRcCallback(HubResponse response) {
     runIn(60, 'subscribeToMrRcEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to MediaRenderer/RenderingControl')
-    this.device.updateDataValue('sid2', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid2', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid2', response.headers["sid"])}
   }
 }
 
@@ -737,7 +737,8 @@ void subscribeToZgtCallback(HubResponse response) {
     runIn(60, 'subscribeToZgtEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to ZoneGroupTopology')
-    this.device.updateDataValue('sid3', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid3', response.headers["sid"])}
   }
 }
 
@@ -755,7 +756,8 @@ void resubscribeToZgtCallback(HubResponse response) {
     runIn(60, 'subscribeToZgtEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to ZoneGroupTopology')
-    this.device.updateDataValue('sid3', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid3', response.headers["sid"])}
   }
 }
 
@@ -776,7 +778,8 @@ void subscribeToMrAvTCallback(HubResponse response) {
     runIn(60, 'subscribeToAVTransport')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to MediaRenderer/AVTransport')
-    this.device.updateDataValue('sid1', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
   }
 }
 
@@ -794,7 +797,8 @@ void resubscribeToMrAvTCallback(HubResponse response) {
     runIn(60, 'subscribeToAVTransport')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to MediaRenderer/AVTransport')
-    this.device.updateDataValue('sid1', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
   }
 }
 
@@ -831,7 +835,8 @@ void subscribeToMrGrcCallback(HubResponse response) {
     runIn(60, 'subscribeToMrGrcEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to MediaRenderer/GroupRenderingControl')
-    this.device.updateDataValue('sid4', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
   }
 }
 
@@ -847,7 +852,8 @@ void resubscribeToMrGrcCallback(HubResponse response) {
     runIn(60, 'subscribeToMrGrcEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully subscribed to MediaRenderer/GroupRenderingControl')
-    this.device.updateDataValue('sid4', response.headers["SID"])
+    if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
   }
 }
 

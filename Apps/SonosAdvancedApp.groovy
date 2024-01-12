@@ -48,6 +48,7 @@ preferences {
 }
 @Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
+@Field static Map deviceAVTransportEvents = new java.util.concurrent.ConcurrentHashMap()
 
 @Field static Map SOURCES = [
   "\$": "NONE",
@@ -518,17 +519,7 @@ List<DeviceWrapper> getCurrentGroupedDevices(DeviceWrapper device) {
     }
     else { logError(resp.data) }
   }
-  List<DeviceWrapper> groupedDevices = []
-  List<String> groupIds = []
-  if(groupedRincons.size() == 0) {
-    logDebug("No grouped rincons found!")
-    return
-  }
-  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
-  groupIds.each{
-    ChildDeviceWrapper child = getChildDevice(it)
-    if(child) {groupedDevices.add(child)}
-  }
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
   return groupedDevices
 }
 
@@ -611,8 +602,13 @@ String unEscapeMetaData(String text) {
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
+
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
+  List<Map> avts = []
+  Map avtCommands = [:]
+  String avtDni = cd.getDeviceNetworkId()
+  logDebug("AVT messaged from: ${cd}")
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
@@ -631,14 +627,11 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
   currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
 
-  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(cd)
-  groupedDevices.each{dev ->
-    dev.sendEvent(name:'status', value: status)
-    dev.sendEvent(name:'transportStatus', value: status)
-    dev.setPlayMode(currentPlayMode)
-    dev.setCrossfadeMode(currentCrossfadeMode)
-    dev.setCurrentTrackDuration(currentTrackDuration)
-  }
+  avts.add([name:'status', value: status])
+  avts.add([name:'transportStatus', value: status])
+  avtCommands['setPlayMode'] = currentPlayMode
+  avtCommands['setCrossfadeMode'] = currentCrossfadeMode
+  avtCommands['setCurrentTrackDuration'] = currentTrackDuration
 
   String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
   if(currentTrackMetaDataString) {
@@ -649,19 +642,20 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String currentAlbumName = currentTrackMetaData['item']['album']
     String currentTrackName = currentTrackMetaData['item']['title']
     String streamContent = currentTrackMetaData['item']['streamContent'].toString()
-    groupedDevices.each{dev ->
-      if(albumArtURI.startsWith('/')) {
-        dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
-      } else {
-        dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >")
-      }
-      dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
-      streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
-      streamContent = streamContent == 'ZPSTR_CONNECTING' ? 'Connecting...' : streamContent
-      streamContent = !streamContent ? 'Not Available' : streamContent
-      if(streamContent && (!currentArtistName && !currentTrackName)) {
-        dev.sendEvent(name: 'trackDescription', value: streamContent)
-      }
+
+    if(albumArtURI.startsWith('/')) {
+      avts.add([name:'albumArtURI', value: "<br><img src=\"${cd.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >"])
+    } else {
+      avts.add([name:'albumArtURI', value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"])
+    }
+
+    avtCommands['setCurrentArtistAlbumTrack'] = [currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer]
+
+    streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
+    streamContent = streamContent == 'ZPSTR_CONNECTING' ? 'Connecting...' : streamContent
+    streamContent = !streamContent ? 'Not Available' : streamContent
+    if(streamContent && (!currentArtistName && !currentTrackName)) {
+      avts.add([name: 'trackDescription', value: streamContent])
     }
 
     String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
@@ -688,17 +682,11 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
         metaData: unEscapeMetaData(enqueuedTransportURIMetaDataString),
         trackMetaData: unEscapeMetaData(currentTrackMetaDataString)
       ]
-      groupedDevices.each{dev -> if(dev) {dev.setTrackDataEvents(trackData)}}
+      avtCommands['setTrackDataEvents'] = trackData
     }
   } else {
-    currentArtistName = "Not Available"
-    currentAlbumName = "Not Available"
-    currentTrackName = "Not Available"
-    trackNumber = 0
-    groupedDevices.each{dev ->
-      dev.setCurrentArtistAlbumTrack(currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer)
-      dev.setTrackDataEvents([:])
-    }
+    avtCommands['setCurrentArtistAlbumTrack'] = ["Not Available", "Not Available", "Not Available", 0]
+    avtCommands['setTrackDataEvents'] = [:]
   }
 
   String nextTrackMetaData = instanceId['NextTrackMetaData']['@val']
@@ -708,55 +696,52 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String nextArtistName = nextTrackMetaDataXML['item']['creator']
     String nextAlbumName = nextTrackMetaDataXML['item']['album']
     String nextTrackName = nextTrackMetaDataXML['item']['title']
-    groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
+    avtCommands['setNextArtistAlbumTrack'] = [nextArtistName, nextAlbumName, nextTrackName]
   } else {
-    String nextArtistName = "Not Available"
-    String nextAlbumName = "Not Available"
-    String nextTrackName = "Not Available"
-    groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
+    avtCommands['setNextArtistAlbumTrack'] = ["Not Available", "Not Available", "Not Available"]
   }
+  if(!deviceAVTransportEvents) { deviceAVTransportEvents = new java.util.concurrent.ConcurrentHashMap() }
+  deviceAVTransportEvents[avtDni] = [avts:avts, avtCommands:avtCommands]
+  sendAVTransportEventsToGroup(cd)
   isFavoritePlaying(cd)
-  // if(status == 'playing') {isFavoritePlaying(cd)}
 }
 
-void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
+void sendAVTransportEventsToGroup(DeviceWrapper cd) {
+  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(cd)
+  String avtDni = cd.getDeviceNetworkId()
+  List<Map> avts = deviceAVTransportEvents[avtDni]?.avts
+  Map avtCommands = deviceAVTransportEvents[avtDni]?.avtCommands
+  groupedDevices.each{dev ->
+    avts.each{ dev.sendEvent(it) }
+    avtCommands.each{ k,v -> dev."${k}"(v) }
+  }
+}
+
+void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
+  if(!device || !message) {return}
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
+  ChildDeviceWrapper child = app.getChildDevice(device.getDeviceNetworkId())
 
-  String rincon = cd.getDataValue('id')
-  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
+  String rincon = child.getDataValue('id')
   String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
-  Boolean previouslyWasGroupCoordinator = cd.getDataValue('isGroupCoordinator') == 'true'
+  Boolean previouslyWasGroupCoordinator = child.getDataValue('isGroupCoordinator') == 'true'
+  if(isGroupCoordinator == true) {
+    child.subscribeToAVTransport()
+  }
   if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
     logDebug("Just removed from group!")
-    child.subscribeToAVTransport()
   }
   if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
     logDebug("Just added to group!")
     child.unsubscribeFromAVTransport()
     ChildDeviceWrapper coordinator = getDeviceFromRincon(currentGroupCoordinatorId)
-    logDebug("Processing updates to grouped devices to bring them in sync with coordinator.")
-    child.sendEvent(name:'currentCrossfadeMode', value: coordinator.currentState('currentCrossfadeMode')?.value)
-    child.sendEvent(name:'currentRepeatAllMode', value: coordinator.currentState('currentRepeatAllMode')?.value)
-    child.sendEvent(name:'currentRepeatOneMode',  value: coordinator.currentState('currentRepeatOneMode')?.value)
-    child.sendEvent(name:'currentShuffleMode',  value: coordinator.currentState('currentShuffleMode')?.value)
-    child.sendEvent(name:'currentTrackDuration', value: coordinator.currentState('currentTrackDuration')?.value)
-    child.sendEvent(name:'currentTrackName',  value: coordinator.currentState('currentTrackName')?.value)
-    child.sendEvent(name:'currentAlbumName',  value: coordinator.currentState('currentAlbumName')?.value)
-    child.sendEvent(name:'currentArtistName', value: coordinator.currentState('currentArtistName')?.value)
-    child.sendEvent(name:'currentTrackNumber',  value: coordinator.currentState('currentTrackNumber')?.value)
-    child.sendEvent(name:'nextArtistName', value: coordinator.currentState('nextArtistName')?.value)
-    child.sendEvent(name:'nextTrackName',  value: coordinator.currentState('nextTrackName')?.value)
-    child.sendEvent(name:'nextAlbumName',  value: coordinator.currentState('nextAlbumName')?.value)
-    child.sendEvent(name:'currentFavorite',  value: coordinator.currentState('currentFavorite')?.value)
-    child.sendEvent(name:'albumArtURI',  value: coordinator.currentState('albumArtURI')?.value)
-    child.sendEvent(name:'trackDescription',  value: coordinator.currentState('trackDescription')?.value)
-    child.sendEvent(name:'transportStatus',  value: coordinator.currentState('transportStatus')?.value)
-    child.sendEvent(name:'status',  value: coordinator.currentState('status')?.value)
+    logDebug(coordinator)
+    sendAVTransportEventsToGroup(coordinator)
   }
 
-  cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+  child.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
   if(!isGroupCoordinator) {return}
 
   List<String> groupedRincons = []
@@ -1341,9 +1326,9 @@ void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   DeviceWrapper coordDev = app.getChildDevice(data.dni)
   List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(coordDev)
   String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
-  String foundFavId = state.favs[k].id
-  String foundFavImageUrl = state.favs[k].imageUrl
-  String foundFavName = state.favs[k].name
+  String foundFavId = state.favs[k]?.id
+  String foundFavImageUrl = state.favs[k]?.imageUrl
+  String foundFavName = state.favs[k]?.name
   groupedDevices.each{
     String value = 'No favorite playing'
     if((isFav || isFavAlt) && foundFavImageUrl?.startsWith('/')) {
