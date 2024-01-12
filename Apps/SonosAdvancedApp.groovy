@@ -609,13 +609,10 @@ String unEscapeMetaData(String text) {
 }
 
 // =============================================================================
-// Component Methods for Child Events
+// Component Methods for Child Event Processing
 // =============================================================================
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
-  Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
-  if(!isGroupCoordinator) { return }
-  String coordinatorId = getGroupForPlayerDeviceLocal(cd).tokenize(':')
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
@@ -641,7 +638,6 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     dev.setPlayMode(currentPlayMode)
     dev.setCrossfadeMode(currentCrossfadeMode)
     dev.setCurrentTrackDuration(currentTrackDuration)
-    if(status == 'stopped') (dev.sendEvent(name: 'currentFavorite', value: 'No favorite playing'))
   }
 
   String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
@@ -649,10 +645,10 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
     String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
     while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    String currentArtistName = status != "stopped" ? currentTrackMetaData['item']['creator'] : null
-    String currentAlbumName = status != "stopped" ? currentTrackMetaData['item']['album'] : null
-    String currentTrackName = status != "stopped" ? currentTrackMetaData['item']['title'] : null
-    String streamContent = status != "stopped" ? currentTrackMetaData['item']['streamContent'].toString() : null
+    String currentArtistName = currentTrackMetaData['item']['creator']
+    String currentAlbumName = currentTrackMetaData['item']['album']
+    String currentTrackName = currentTrackMetaData['item']['title']
+    String streamContent = currentTrackMetaData['item']['streamContent'].toString()
     groupedDevices.each{dev ->
       if(albumArtURI.startsWith('/')) {
         dev.sendEvent(name:'albumArtURI', value: "<br><img src=\"${dev.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >")
@@ -709,9 +705,9 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   GPathResult nextTrackMetaDataXML
   if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
   if(nextTrackMetaDataXML) {
-    String nextArtistName = status != "stopped" ? nextTrackMetaDataXML['item']['creator'] : "Not Available"
-    String nextAlbumName = status != "stopped" ? nextTrackMetaDataXML['item']['album'] : "Not Available"
-    String nextTrackName = status != "stopped" ? nextTrackMetaDataXML['item']['title'] : "Not Available"
+    String nextArtistName = nextTrackMetaDataXML['item']['creator']
+    String nextAlbumName = nextTrackMetaDataXML['item']['album']
+    String nextTrackName = nextTrackMetaDataXML['item']['title']
     groupedDevices.each{dev -> dev.setNextArtistAlbumTrack(nextArtistName, nextAlbumName, nextTrackName)}
   } else {
     String nextArtistName = "Not Available"
@@ -752,8 +748,12 @@ void processZoneGroupTopologyMessages(DeviceWrapper cd, Map message) {
     child.sendEvent(name:'currentTrackNumber',  value: coordinator.currentState('currentTrackNumber')?.value)
     child.sendEvent(name:'nextArtistName', value: coordinator.currentState('nextArtistName')?.value)
     child.sendEvent(name:'nextTrackName',  value: coordinator.currentState('nextTrackName')?.value)
+    child.sendEvent(name:'nextAlbumName',  value: coordinator.currentState('nextAlbumName')?.value)
     child.sendEvent(name:'currentFavorite',  value: coordinator.currentState('currentFavorite')?.value)
     child.sendEvent(name:'albumArtURI',  value: coordinator.currentState('albumArtURI')?.value)
+    child.sendEvent(name:'trackDescription',  value: coordinator.currentState('trackDescription')?.value)
+    child.sendEvent(name:'transportStatus',  value: coordinator.currentState('transportStatus')?.value)
+    child.sendEvent(name:'status',  value: coordinator.currentState('status')?.value)
   }
 
   cd.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
