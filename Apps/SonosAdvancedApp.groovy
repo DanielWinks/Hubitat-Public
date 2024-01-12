@@ -609,7 +609,6 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   List<Map> avts = []
   Map avtCommands = [:]
   String avtDni = cd.getDeviceNetworkId()
-  logDebug("AVT messaged from: ${cd}")
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
