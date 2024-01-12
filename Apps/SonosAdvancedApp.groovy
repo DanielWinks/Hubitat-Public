@@ -401,7 +401,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   if(discoveredSonos?.name != null) {
     discoveredSonoses[mac] = discoveredSonos
   } else {
-    logInfo("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
+    logTrace("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
   }
 }
 
@@ -726,6 +726,9 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
   String rincon = child.getDataValue('id')
   String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
+  if(!child.getDataValue('isGroupCoordinator')) {
+    child.subscribeToAVTransport()
+  }
   Boolean previouslyWasGroupCoordinator = child.getDataValue('isGroupCoordinator') == 'true'
   if(isGroupCoordinator == true) {
     child.subscribeToAVTransport()
@@ -1294,7 +1297,6 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
 }
 
 void isFavoritePlaying(DeviceWrapper device) {
-  logDebug("Called fav for ${device}")
   if(device.getDataValue('isGroupCoordinator') == 'true') {
     runInMillis(500, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
   }
@@ -1302,6 +1304,7 @@ void isFavoritePlaying(DeviceWrapper device) {
 
 void isFavoritePlayingAsync(Map data) {
   DeviceWrapper device = app.getChildDevice(data.dni)
+  logDebug("Called isFavoritePlaying for ${device}")
   String groupId = getGroupForPlayerDeviceLocal(device)
   ChildDeviceWrapper coordDev = getDeviceFromRincon(groupId.tokenize(':')[0])
   String localApiUrl = coordDev.getDataValue('localApiUrl')
@@ -1376,7 +1379,6 @@ void componentUpdatePlayerInfo(DeviceWrapper device) {
   String id = playerInfo?.playerId
   String isGroupCoordinator = playerInfo?.groupId.tokenize(':')[0] ==id  ? 'true' : 'false'
   device.updateDataValue('isGroupCoordinator', isGroupCoordinator)
-  // logDebug(prettyJson(playerInfo))
 }
 
 void componentSetPlayModesLocal(DeviceWrapper device, Map playModes) {
