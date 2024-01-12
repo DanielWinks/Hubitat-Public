@@ -46,6 +46,7 @@ if (device != null) {
   preferences {
     input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
     input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: true
     input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: false
   }
 }
@@ -125,7 +126,7 @@ void logDebug(message) {
 }
 
 void logTrace(message) {
-  if (settings.logEnable && settings.debugLogEnable) {
+  if (settings.logEnable && settings.traceLogEnable) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
     if(app) log.trace "${app.label ?: app.name }: ${message}"
   }

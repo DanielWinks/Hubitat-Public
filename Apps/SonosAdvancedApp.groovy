@@ -100,6 +100,7 @@ Map mainPage() {
     section {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
+      input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
       // input 'applySettingsButton', 'button', title: 'Apply Settings'
       // input 'createPlayerDevices', 'button', title: 'Create Players'
@@ -737,7 +738,6 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     logDebug("Just added to group!")
     child.unsubscribeFromAVTransport()
     ChildDeviceWrapper coordinator = getDeviceFromRincon(currentGroupCoordinatorId)
-    logDebug(coordinator)
     sendAVTransportEventsToGroup(coordinator)
   }
 
@@ -806,7 +806,7 @@ void sendLocalCommandAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  logDebug("sendLocalCommandAsync: ${params}")
+  logTrace("sendLocalCommandAsync: ${params}")
   asynchttpPost(callbackMethod, params, args.data)
 }
 
@@ -822,7 +822,7 @@ Map sendLocalJsonQuerySync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  logDebug("sendLocalQuerySync: ${params}")
+  logTrace("sendLocalQuerySync: ${params}")
   httpGet(params) { resp ->
     if (resp && resp.data && resp.success) { return resp.data }
     else { logError(resp.data) }
@@ -842,7 +842,7 @@ void sendLocalQueryAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  logDebug("sendLocalQueryAsync: ${params}")
+  logTrace("sendLocalQueryAsync: ${params}")
   asynchttpGet(callbackMethod, params, args.data)
 }
 
@@ -860,7 +860,7 @@ void sendLocalJsonAsync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  logDebug("sendLocalJsonAsync: ${params}")
+  logTrace("sendLocalJsonAsync: ${params}")
   asynchttpPost(callbackMethod, params)
 }
 
@@ -873,7 +873,7 @@ void localControlCallback(AsyncResponse response, Map data) {
     try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
   }
   if(response?.status == 200 && response && response.hasError() == false) {
-    logDebug("localControlCallback: ${response.getData()}")
+    logTrace("localControlCallback: ${response.getData()}")
   }
 }
 
