@@ -787,6 +787,7 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
   }
+  isFavoritePlaying(child)
 }
 
 // =============================================================================
@@ -1270,10 +1271,9 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   }
   List respData = response.getJson().items
   if(respData.size() == 0) {
-    logDebug("Response returned from getFavorites API: ${response.getJson()}")
+    logTrace("Response returned from getFavorites API: ${response.getJson()}")
     return
   }
-  logDebug(prettyJson(response.getJson()))
   Map favs = [:]
   respData.each{
     if(it?.resource?.id?.objectId && it?.resource?.id?.serviceId && it?.resource?.id?.accountId) {
@@ -1289,10 +1289,12 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
   }
   state.favs = favs
   logDebug("App favorites updated!")
-  // logDebug("formatted response: ${prettyJson(favs)}")
+  logTrace("App favorites json: ${prettyJson(response.getJson())}")
+  logTrace("formatted response: ${prettyJson(favs)}")
 }
 
 void isFavoritePlaying(DeviceWrapper device) {
+  logDebug("Called fav for ${device}")
   if(device.getDataValue('isGroupCoordinator') == 'true') {
     runInMillis(500, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
   }
@@ -1312,7 +1314,11 @@ void isFavoritePlayingAsync(Map data) {
 void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   if(!responseIsValid(response, 'isFavoritePlayingAsyncCallback')) { return }
   Map json = response.getJson()
-  String objectId = (json?.container?.id?.objectId).tokenize(':')[1]
+  String objectId = json?.container?.id?.objectId
+  if(objectId) {
+    List tok = objectId.tokenize(':')
+    if(tok.size >= 1) { objectId = tok[1] }
+  }
   String serviceId = json?.container?.id?.serviceId
   String accountId = json?.container?.id?.accountId
   String imageUrl = json?.container?.imageUrl
