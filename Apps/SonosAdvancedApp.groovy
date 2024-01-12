@@ -598,6 +598,7 @@ String unEscapeMetaData(String text) {
 // Component Methods for Child Events
 // =============================================================================
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
+  if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
   Boolean isGroupCoordinator = cd.getDataValue('id') == cd.getDataValue('groupCoordinatorId')
   if(!isGroupCoordinator) { return }
   String coordinatorId = getGroupForPlayerDeviceLocal(cd).tokenize(':')
@@ -608,18 +609,18 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   GPathResult event = new XmlSlurper().parseText(lastChange)
   GPathResult instanceId = event['InstanceID']
 
-  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(cd)
-
+  String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
   String status = (instanceId['TransportState']['@val'].toString()).toLowerCase().replace('_playback','')
   String currentPlayMode = instanceId['CurrentPlayMode']['@val']
   String numberOfTracks = instanceId['NumberOfTracks']['@val']
   String trackNumber = instanceId['CurrentTrack']['@val']
-  String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
-  if(trackUri == "x-rincon:${coordinatorId}") {return}
+
   Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
   String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
   String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
   currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
+
+  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(cd)
   groupedDevices.each{dev ->
     dev.sendEvent(name:'status', value: status)
     dev.sendEvent(name:'transportStatus', value: status)
