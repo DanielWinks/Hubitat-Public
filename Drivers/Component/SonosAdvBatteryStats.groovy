@@ -33,36 +33,11 @@ metadata {
   ) {
     capability 'Battery' //battery - NUMBER, unit:%
     capability 'PowerSource' //powerSource - ENUM ["battery", "dc", "mains", "unknown"]
-    command 'updateBatteryStatus'
+    capability 'TemperatureMeasurement' //temperature - NUMBER, unit:°F || °C
 
-    attribute 'health', 'string'
-    attribute 'temperature', 'string'
-  }
-  preferences() {
-    section(){
-      input 'autoUpdate', 'bool', title: 'Refresh peridocially?', required: true, defaultValue: true
-      input 'updateInterval', 'enum', title: 'Update Interval', required: true, defaultValue: 10, options:
-      [
-        1:'1 Minute',
-        2:'2 Minutes',
-        3:'3 Minutes',
-        4:'4 Minutes',
-        5:'5 Minutes',
-        10:'10 Minutes',
-        15:'15 Minutes',
-        20:'20 Minutes',
-        30:'30 Minutes'
-      ]
-    }
   }
 }
 
 void initialize() { configure() }
-void configure() {
-  unschedule()
-  if(settings.autoUpdate) {
-    schedule(runEveryCustomSeconds(updateInterval as Integer), 'updateBatteryStatus')
-  }
-  updateBatteryStatus()
-}
-void updateBatteryStatus() { parent?.componentUpdateBatteryStatus() }
+void configure() { unschedule() }
+

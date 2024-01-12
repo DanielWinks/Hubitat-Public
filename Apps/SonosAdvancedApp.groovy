@@ -783,6 +783,18 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     if(groupName) {dev.sendEvent(name: 'groupName', value: groupName)}
   }
 
+  String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@MoreInfo']
+  if(moreInfoString) {
+    Map moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0],it[1]]}
+    BigDecimal battTemp = new BigDecimal(moreInfo['BattTmp'])
+    List<Event> stats = [
+      [name: 'battery', value: moreInfo['BattPct'] as Integer, unit: '%' ],
+      [name: 'powerSource', value: moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains' ],
+      [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(battTemp) : battTemp, unit: getTemperatureScale() ],
+    ]
+    stats.each{ child.updateChildBatteryStatus(it) }
+  }
+
   // Update group device with current on/off state
   getCurrentGroupDevices().findAll{gds -> gds.getDataValue('groupCoordinatorId') == currentGroupCoordinatorId }.each{gd ->
     List<String> playerIds = [gd.getDataValue('groupCoordinatorId')] + gd.getDataValue('playerIds').tokenize(',')
@@ -1304,7 +1316,7 @@ void isFavoritePlaying(DeviceWrapper device) {
 
 void isFavoritePlayingAsync(Map data) {
   DeviceWrapper device = app.getChildDevice(data.dni)
-  logDebug("Called isFavoritePlaying for ${device}")
+  logTrace("Called isFavoritePlaying for ${device}")
   String groupId = getGroupForPlayerDeviceLocal(device)
   ChildDeviceWrapper coordDev = getDeviceFromRincon(groupId.tokenize(':')[0])
   String localApiUrl = coordDev.getDataValue('localApiUrl')
@@ -1348,30 +1360,6 @@ void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
     }
     it.sendEvent(name: 'currentFavorite', value: value)
   }
-}
-
-void componentUpdateBatteryStatus(DeviceWrapper player) {
-  String baseUrl = player.getDataValue('localUpnpUrl')
-  String uri = "${baseUrl}/status/batterystatus"
-  Map params = [uri: uri, contentType: 'text/xml',]
-  asynchttpGet('componentUpdateBatteryStatusCallback', params, [dni: player.getDeviceNetworkId()])
-}
-
-void componentUpdateBatteryStatusCallback(AsyncResponse response, Map data) {
-  if(!responseIsValid(response, 'componentUpdateBatteryStatusCallback')) { return }
-  GPathResult xml = response.getXml()
-  String battery = xml['LocalBatteryStatus'].children().find{it['@name'] == "Level"}.text().toString()
-  String powerSource = xml['LocalBatteryStatus'].children().find{it['@name'] == "PowerSource"}.text().toString().replace('USB_POWER','mains').toLowerCase()
-  String health = xml['LocalBatteryStatus'].children().find{it['@name'] == "Health"}.text().toString()
-  String temperature = xml['LocalBatteryStatus'].children().find{it['@name'] == "Temperature"}.text().toString()
-  List<Event> stats = [
-    [name: 'battery', value: battery ],
-    [name: 'powerSource', value: powerSource ],
-    [name: 'health', value: health ],
-    [name: 'temperature', value: temperature ],
-  ]
-  ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  stats.each{ child.updateChildBatteryStatus(it) }
 }
 
 void componentUpdatePlayerInfo(DeviceWrapper device) {
