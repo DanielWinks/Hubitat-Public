@@ -1052,7 +1052,8 @@ void componentSetLoudnessLocal(DeviceWrapper device, Boolean desiredLoudness) {
 }
 
 void componentMuteGroupLocal(DeviceWrapper device, Boolean desiredMute) {
-  String ip = device.getDataValue('localUpnpHost')
+  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredMute: desiredMute]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
   asynchttpPost('localControlCallback', params)
