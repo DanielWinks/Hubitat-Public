@@ -559,6 +559,20 @@ String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
   return groupId
 }
 
+DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
+  String ip = device.getDataValue('localUpnpHost')
+  String groupId
+  Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
+  httpPost(params) { resp ->
+    if (resp && resp.data && resp.success) {
+      GPathResult xml = resp.data
+      groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text().toString()
+    }
+    else { logError(resp.data) }
+  }
+  return getDeviceFromRincon(groupId.tokenize(':')[0])
+}
+
 String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
   String ip = device.getDataValue('localUpnpHost')
   String groupId
@@ -1052,7 +1066,8 @@ void componentSetPlayerRelativeLevelLocal(DeviceWrapper device, Integer adjustme
 }
 
 void componentSetGroupRelativeLevelLocal(DeviceWrapper device, Integer adjustment) {
-  String ip = device.getDataValue('localUpnpHost')
+  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [Adjustment: adjustment]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
