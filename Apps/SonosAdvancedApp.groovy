@@ -604,6 +604,18 @@ String unEscapeMetaData(String text) {
 // Component Methods for Child Event Processing
 // =============================================================================
 
+void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+  Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
+  String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
+  List<ChildDeviceWrapper> groupDevices = getCurrentGroupedDevices(device)
+  logDebug("Devices: ${groupDevices}")
+  groupDevices.each{ dev ->
+    if(groupVolume) { dev.sendEvent(name:'groupVolume', value: groupVolume) }
+    if(groupMute) { dev.sendEvent(name:'groupMute', value: groupMute ) }
+  }
+}
+
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
   List<Map> avts = []
@@ -803,7 +815,7 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
       [name: 'powerSource', value: moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains' ],
       [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(battTemp) : battTemp, unit: getTemperatureScale() ],
     ]
-    stats.each{ child.updateChildBatteryStatus(it) }
+    stats.each{ if(it && child) {child.updateChildBatteryStatus(it) }}
   }
 
   // Update group device with current on/off state
