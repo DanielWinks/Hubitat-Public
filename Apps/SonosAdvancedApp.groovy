@@ -177,7 +177,15 @@ Map localPlayerSelectionPage() {
 Map groupPage() {
   if(!state.userGroups) { state.userGroups = [:] }
   Map coordinatorSelectionOptions = getCurrentPlayerDevices().collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('name')] }
-  Map playerSelectionOptions = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator }
+  Boolean coordIsS1 = (newGroupCoordinator && getDeviceFromRincon(newGroupCoordinator)?.getDataValue('swGen') == '1')
+  logDebug("Selected group coordinator is S1: ${coordIsS1}")
+  Map playerSelectionOptionsS1 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && getDeviceFromRincon(it.key).getDataValue('swGen') =='1' }
+  Map playerSelectionOptionsS2 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && getDeviceFromRincon(it.key).getDataValue('swGen') =='2'}
+  Map playerSelectionOptions = [:]
+  if(!newGroupCoordinator) {playerSelectionOptions = playerSelectionOptionsS1 + playerSelectionOptionsS2}
+  else if(newGroupCoordinator && coordIsS1) {playerSelectionOptions = playerSelectionOptionsS1}
+  else {playerSelectionOptions = playerSelectionOptionsS2}
+
   String edg = app.getSetting('editDeleteGroup')
   if(edg) {
     if(!app.getSetting('newGroupName')) {
