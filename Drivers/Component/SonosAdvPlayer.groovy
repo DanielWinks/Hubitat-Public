@@ -190,7 +190,7 @@ void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(
 void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
-void setTrack(String uri) { playTrack(uri) }
+void setTrack(String uri) { parent?.componentSetStreamUrlLocal(this.device, uri, volume) }
 void playTrack(String uri, BigDecimal volume = null) { parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
 void playTrackAndRestore(String uri, BigDecimal volume = null) { parent?.componentPlayAudioClipLocal(this.device, uri, volume) }
 void playTrackAndResume(String uri, BigDecimal volume = null) { parent?.componentPlayAudioClipLocal(this.device, uri, volume) }
@@ -711,7 +711,7 @@ void resubscribeToMrAvTCallback(HubResponse response) {
     device.removeDataValue('sid1')
     runIn(60, 'subscribeToAVTransport')
   } else if(response.status == 200) {
-    logDebug('Sucessfully resubscribed to MediaRenderer/AVTransport')
+    logTrace('Sucessfully resubscribed to MediaRenderer/AVTransport')
     if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
     if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
   }
