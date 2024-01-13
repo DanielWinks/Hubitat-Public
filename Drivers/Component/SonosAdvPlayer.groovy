@@ -605,6 +605,7 @@ void parse(String raw) {
 
 void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
 void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
+void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
 void processRenderingControlMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult instanceId = propertyset['property']['LastChange']['Event']['InstanceID']
@@ -650,13 +651,7 @@ void processRenderingControlMessages(Map message) {
   if(loudness) { sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off') }
 }
 
-void processGroupRenderingControlMessages(Map message) {
-  GPathResult propertyset = parseSonosMessageXML(message)
-  Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
-  String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
-  if(groupVolume) { sendEvent(name:'groupVolume', value: groupVolume) }
-  if(groupMute) { sendEvent(name:'groupMute', value: groupMute ) }
-}
+
 
 // =============================================================================
 // Subscriptions and Resubscriptions
