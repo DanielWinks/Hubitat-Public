@@ -464,7 +464,7 @@ void setTrackDataEvents(Map trackData) {
   sendEvent(name: 'trackData', value: trackData)
 }
 
-void updateChildBatteryStatus(Map event) { getBatteryStatusChild().sendEvent(event) }
+void updateChildBatteryStatus(Map event) { if(createBatteryStatusChildDevice) {getBatteryStatusChild().sendEvent(event) }}
 
 // =============================================================================
 // Create Child Devices
