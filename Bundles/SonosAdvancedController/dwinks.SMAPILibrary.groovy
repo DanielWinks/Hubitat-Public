@@ -49,7 +49,7 @@ library(
       arguments: [InstanceID: 0, NextURI: '', NextURIMetaData: '']
     ],
     AddURIToQueue: [
-      arguments: [InstanceID: 0, EnqueuedURI: '', EnqueuedURIMetaData: '', DesiredFirstTrackNumberEnqueued:0, EnqueueAsNext:false],
+      arguments: [InstanceID: 0, EnqueuedURI: '', EnqueuedURIMetaData: '', DesiredFirstTrackNumberEnqueued:0, EnqueueAsNext:true],
       outputs: [NumTracksAdded: '', NewQueueLength: '']
     ],
     AddMultipleURIsToQueue: [
@@ -310,7 +310,7 @@ library(
 // =============================================================================
 
 void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, String dni, String callBackPath = '', String callbackMethod = 'sonosEventSubscribeCallback') {
-  logDebug("Subscribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
+  logTrace("Subscribing to ${eventSubURL} for ${host} with timeout of ${timeout} using DNI of ${dni}")
   String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}" //Ex: http://192.168.1.4:39501/notify
   if (host && eventSubURL && timeout > 0 && dni) {
     sendHubCommand(new hubitat.device.HubAction([
@@ -329,7 +329,7 @@ void sonosEventSubscribe(String eventSubURL, String host, Integer timeout, Strin
 }
 
 void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dni, String subscriptionId, String callbackMethod = 'sonosEventRenewCallback') {
-  logDebug("Resubscribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
+  logTrace("Resubscribing to ${eventSubURL} ${host} ${timeout} ${subscriptionId}")
   if (eventSubURL && host && timeout && dni && subscriptionId) {
     sendHubCommand(new hubitat.device.HubAction([
       method: 'SUBSCRIBE',
@@ -346,7 +346,7 @@ void sonosEventRenew(String eventSubURL, String host, Integer timeout, String dn
 }
 
 void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String subscriptionId, String callbackMethod = 'sonosEventUnsubscribeCallback') {
-  logDebug("Unsubscribing from ${eventSubURL} for ${host} for subId of ${subscriptionId} using DNI of ${dni}")
+  logTrace("Unsubscribing from ${eventSubURL} for ${host} for subId of ${subscriptionId} using DNI of ${dni}")
   if (host && eventSubURL && subscriptionId && dni) {
     sendHubCommand(new hubitat.device.HubAction([
       method: 'UNSUBSCRIBE',
