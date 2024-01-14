@@ -96,8 +96,11 @@ Map mainPage() {
         description: 'Select to create/delete Sonos group devices'
       )
     }
+    section('Optional Features (disable to reduce resource usage):', hideable: true) {
+      input 'favMatching', 'bool', title: 'Enable "Current Favorite" status.', required: false, defaultValue: true
+    }
 
-    section {
+    section('Logging Settings:', hideable: true) {
       input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
@@ -285,7 +288,17 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
-  runIn(3, 'appGetFavoritesLocal', [overwrite: true])
+
+  if(!favMatching) {
+    String value = 'Favorite Matching Disabled'
+    getCurrentPlayerDevices().each{
+      it.sendEvent(name: 'currentFavorite', value: value)
+    }
+    state.remove('favs')
+    unschedule('appGetFavoritesLocal')
+  } else {
+    runIn(3, 'appGetFavoritesLocal', [overwrite: true])
+  }
 }
 
 // =============================================================================
@@ -423,6 +436,13 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return dev
 }
 
+
+List<ChildDeviceWrapper> getDevicesFromRincons(LinkedHashSet<String> rincons) {
+  List<ChildDeviceWrapper> children = rincons.collect{ player -> getDeviceFromRincon(player)  }
+  children.removeAll([null])
+  return children
+}
+
 List<ChildDeviceWrapper> getDevicesFromRincons(List<String> rincons) {
   List<ChildDeviceWrapper> children = rincons.collect{ player -> getDeviceFromRincon(player)  }
   children.removeAll([null])
@@ -473,7 +493,9 @@ LinkedHashMap getPlayerInfoLocalSync(String ipAddress) {
   ]
   httpGet(params) { resp ->
     if (resp && resp.data && resp.success) { return resp.data }
-    else { logError(resp.data) }
+    else {
+      logInfo("Connection refused for IP: ${ipAddress}. If this is a Sonos player, please report and issue.")
+    }
   }
 }
 
@@ -691,29 +713,29 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       avts.add([name: 'trackDescription', value: 'Not Available'])
     }
 
-    String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
-    if(avTransportURIMetaDataString && avTransportURIMetaDataString != 'null') {
-      GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeMetaData(avTransportURIMetaDataString))
-      String uri = instanceId['AVTransportURI']['@val']
+    // String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
+    // if(avTransportURIMetaDataString && avTransportURIMetaDataString != 'null') {
+      // GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeMetaData(avTransportURIMetaDataString))
+    String uri = instanceId['AVTransportURI']['@val']
       // String transportUri = uri ?? Seems to be the same on the built-in driver
-      String audioSource = SOURCES[(enqueuedUri.tokenize(':')[0]).toString()]
-      Map trackData = [
-        audioSource: audioSource,
-        station: null,
-        name: currentAlbumName,
-        artist: currentArtistName,
-        album: currentAlbumName,
-        trackNumber: trackNumber,
-        status: status,
-        uri: uri,
-        trackUri: trackUri,
-        transportUri: uri,
-        enqueuedUri: enqueuedUri,
-        metaData: unEscapeMetaData(enqueuedTransportURIMetaDataString),
-        trackMetaData: unEscapeMetaData(currentTrackMetaDataString)
-      ]
-      avtCommands['setTrackDataEvents'] = trackData
-    }
+    String audioSource = SOURCES[(enqueuedUri.tokenize(':')[0]).toString()]
+    Map trackData = [
+      audioSource: audioSource,
+      station: null,
+      name: currentAlbumName,
+      artist: currentArtistName,
+      album: currentAlbumName,
+      trackNumber: trackNumber,
+      status: status,
+      uri: uri,
+      trackUri: trackUri,
+      transportUri: uri,
+      enqueuedUri: enqueuedUri,
+      metaData: unEscapeMetaData(enqueuedTransportURIMetaDataString),
+      trackMetaData: unEscapeMetaData(currentTrackMetaDataString)
+    ]
+    avtCommands['setTrackDataEvents'] = trackData
+    // }
   } else {
     avtCommands['setCurrentArtistAlbumTrack'] = ["Not Available", "Not Available", "Not Available", 0]
     avtCommands['setTrackDataEvents'] = [:]
@@ -778,7 +800,7 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
 
   if(!isGroupCoordinator) {return}
 
-  List<String> groupedRincons = []
+  LinkedHashSet<String> groupedRincons = new LinkedHashSet()
   GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
 
   currentGroupMembers.each{
@@ -789,14 +811,21 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     logDebug("No grouped rincons found!")
     return
   }
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
 
+  LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((child.getDataValue('groupIds').tokenize(',')))
+  if(groupedRincons != oldGroupedRincons) {
+    isFavoritePlaying(child)
+    logTrace('ZGT message parsed, group member changes found.')
+  } else {
+    logTrace('ZGT message parsed, no group member changes.')
+  }
+
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
   groupedDevices.each{dev -> if(currentGroupCoordinatorId && dev) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
   groupedDevices.each{dev -> if(groupedRincons && dev && groupedRincons.size() > 0) {dev.updateDataValue('groupIds', groupedRincons.join(','))}}
 
   String groupId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
   String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
-
 
   LinkedHashSet currentGroupMemberNames = []
   groupedRincons.each{ gr ->
@@ -833,7 +862,6 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
   }
-  isFavoritePlaying(child)
 }
 
 // =============================================================================
@@ -1307,7 +1335,7 @@ void componentGetFavoritesLocal(DeviceWrapper device) {
   String uri = "${localApiUrl}${endpoint}"
   Map params = [uri: uri]
   sendLocalQueryAsync(params: params, callbackMethod: 'getFavoritesLocalCallback', data:[dni: device.getDeviceNetworkId()])
-  appGetFavoritesLocal()
+  if(favMatching) {appGetFavoritesLocal()}
 }
 
 void getFavoritesLocalCallback(AsyncResponse response, Map data = null) {
@@ -1356,7 +1384,7 @@ void appGetFavoritesLocal() {
     Map params = [uri: uri]
     sendLocalQueryAsync(params: params, callbackMethod: 'appGetFavoritesLocalCallback', data:[dni: data.dni])
   }
-  runIn(60*60*3, 'appGetFavoritesLocal', [overwrite: true])
+  if(favMatching) {runIn(60*60*3, 'appGetFavoritesLocal', [overwrite: true])}
 }
 
 void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
@@ -1389,8 +1417,10 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
 }
 
 void isFavoritePlaying(DeviceWrapper device) {
-  if(device.getDataValue('isGroupCoordinator') == 'true') {
-    runInMillis(500, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
+  if(!favMatching) {return}
+  Boolean isGroupCoordinator = device.getDataValue('isGroupCoordinator') == 'true'
+  if(favMatching && isGroupCoordinator) {
+    runInMillis(2000, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
   }
 }
 
@@ -1404,13 +1434,15 @@ void isFavoritePlayingAsync(Map data) {
   String endpoint = "groups/${groupId}/playbackMetadata"
   String uri = "${localApiUrl}${endpoint}"
   Map params = [uri: uri]
-  sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: coordDev.getDeviceNetworkId()]])
+  String coordDni = coordDev.getDeviceNetworkId()
+  sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: coordDni]])
 }
 
 void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   if(!responseIsValid(response, 'isFavoritePlayingAsyncCallback')) { return }
   logTrace("isFavoritePlayingAsyncCallback data: ${data}")
   DeviceWrapper coordDev = app.getChildDevice(data.dni)
+  state.remove("${data.dni}")
   if(!coordDev) { return }
 
   Map json = response.getJson()
