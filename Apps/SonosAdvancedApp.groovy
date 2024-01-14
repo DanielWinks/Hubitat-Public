@@ -770,7 +770,7 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     logDebug("Just added to group!")
     child.unsubscribeFromAVTransport()
     ChildDeviceWrapper coordinator = getDeviceFromRincon(currentGroupCoordinatorId)
-    sendAVTransportEventsToGroup(coordinator)
+    if(coordinator) { sendAVTransportEventsToGroup(coordinator) }
   }
 
   child.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
@@ -1396,19 +1396,20 @@ void isFavoritePlaying(DeviceWrapper device) {
 
 void isFavoritePlayingAsync(Map data) {
   DeviceWrapper device = app.getChildDevice(data.dni)
-  logTrace("Called isFavoritePlaying for ${device}")
   String groupId = getGroupForPlayerDeviceLocal(device)
   ChildDeviceWrapper coordDev = getDeviceFromRincon(groupId.tokenize(':')[0])
+  logTrace("Called isFavoritePlaying for ${device}, got coordDev for group: ${coordDev}")
+  if(!coordDev) {return}
   String localApiUrl = coordDev.getDataValue('localApiUrl')
   String endpoint = "groups/${groupId}/playbackMetadata"
   String uri = "${localApiUrl}${endpoint}"
   Map params = [uri: uri]
-  if(!coordDev) {return}
   sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: coordDev.getDeviceNetworkId()]])
 }
 
 void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   if(!responseIsValid(response, 'isFavoritePlayingAsyncCallback')) { return }
+  logTrace("isFavoritePlayingAsyncCallback data: ${data}")
   DeviceWrapper coordDev = app.getChildDevice(data.dni)
   if(!coordDev) { return }
 
@@ -1426,9 +1427,10 @@ void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   String universalMusicObjectIdAlt = "${imageUrl}".toString()
   Boolean isFav = state.favs.containsKey(universalMusicObjectId)
   Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
-
+  logTrace("isFav and isFavAlt are ${isFav} and ${isFavAlt}")
 
   List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(coordDev)
+  logTrace("Favorites grouped devices in scope: ${groupedDevices}")
   String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
   String foundFavId = state.favs[k]?.id
   String foundFavImageUrl = state.favs[k]?.imageUrl
@@ -1442,6 +1444,7 @@ void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
     } else if(isFav || isFavAlt) {
       value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
     }
+    logTrace("Sending currentFavorite to ${it}")
     it.sendEvent(name: 'currentFavorite', value: value)
   }
 }
