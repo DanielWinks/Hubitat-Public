@@ -51,6 +51,12 @@ if (device != null) {
   }
 }
 
+String dniOrAppId(DeviceWrapper dev = null)
+{
+  if(dev) {return dev.getDeviceNetworkId()}
+  return device?.getDeviceNetworkId() ?: app.getId()
+}
+
 void clearAllStates() {
   state.clear()
   if (device) device.getCurrentStates().each { device.deleteCurrentState(it.name) }
