@@ -51,20 +51,21 @@ preferences {
 @Field static Map deviceAVTransportEvents = new java.util.concurrent.ConcurrentHashMap()
 
 @Field static Map SOURCES = [
-  "\$": "NONE",
-  "x-file-cifs:": "LIBRARY",
-  "x-rincon-mp3radio:": "RADIO",
-  "x-sonosapi-stream:": "RADIO",
-  "x-sonosapi-radio:": "RADIO",
-  "x-sonosapi-hls:": "RADIO",
-  "x-sonos-http:sonos": "RADIO",
-  "aac:": "RADIO",
-  "hls-radio:": "RADIO",
-  "https?:": "WEB_FILE",
-  "x-rincon-stream:": "LINE_IN",
+  "\$": "None",
+  "x-file-cifs:": "Library",
+  "x-rincon-mp3radio:": "Radio",
+  "x-sonosapi-stream:": "Radio",
+  "x-sonosapi-radio:": "Radio",
+  "x-sonosapi-hls:": "Radio",
+  "x-sonos-http:sonos": "Radio",
+  "aac:": "Radio",
+  "hls-radio:": "Radio",
+  "https?:": "File",
+  "x-rincon-stream:": "LineIn",
   "x-sonos-htastream:": "TV",
-  "x-sonos-vli:.*,airplay:": "AIRPLAY",
-  "x-sonos-vli:.*,spotify:": "SPOTIFY_CONNECT",
+  "x-sonos-vli:.*,airplay:": "Airplay",
+  "x-sonos-vli:.*,spotify:": "Spotify",
+  "x-rincon-queue": "Sonos Q"
 ]
 
 @CompileStatic
@@ -98,6 +99,7 @@ Map mainPage() {
     }
     section('Optional Features (disable to reduce resource usage):', hideable: true) {
       input 'favMatching', 'bool', title: 'Enable "Current Favorite" status.', required: false, defaultValue: true
+      input 'trackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
     }
 
     section('Logging Settings:', hideable: true) {
@@ -648,11 +650,13 @@ void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
 
 void processAVTransportMessages(DeviceWrapper cd, Map message) {
   if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
+  if(message.body.contains('&lt;TransportState val=&quot;TRANSITIONING&quot;/&gt;')) { return } //Bail out if this AVTransport message is TRANSITIONING"
   List<Map> avts = []
   Map avtCommands = [:]
   String avtDni = cd.getDeviceNetworkId()
 
   GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
+
   String lastChange = propertyset['property']['LastChange'].text()
 
   GPathResult event = new XmlSlurper().parseText(lastChange)
@@ -705,7 +709,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
     String trackDataAlbumArtUri
     if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
       trackDataAlbumArtUri = "${cd.getDataValue('localUpnpUrl')}${albumArtURI}"
-    } else (!isPlayingLocalTrack) { trackDataAlbumArtUri = "${albumArtURI}" }
+    } else if (!isPlayingLocalTrack) { trackDataAlbumArtUri = "${albumArtURI}" }
 
     avtCommands['setCurrentArtistAlbumTrack'] = [currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer]
 
@@ -718,28 +722,29 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       avts.add([name: 'trackDescription', value: 'Not Available'])
     }
 
-    // String avTransportURIMetaDataString = (instanceId['AVTransportURIMetaData']['@val']).toString()
-    // if(avTransportURIMetaDataString && avTransportURIMetaDataString != 'null') {
-      // GPathResult avTransportURIMetaData = new XmlSlurper().parseText(unEscapeMetaData(avTransportURIMetaDataString))
     String uri = instanceId['AVTransportURI']['@val']
       // String transportUri = uri ?? Seems to be the same on the built-in driver
-    String audioSource = SOURCES[(enqueuedUri.tokenize(':')[0]).toString()]
-    Map trackData = [
-      audioSource: audioSource,
-      station: null,
-      name: currentAlbumName,
-      artist: currentArtistName,
-      album: currentAlbumName,
-      albumArtUrl: trackDataAlbumArtUri,
-      trackNumber: trackNumber,
-      status: status,
-      uri: uri,
-      trackUri: trackUri,
-      transportUri: uri,
-      enqueuedUri: enqueuedUri,
-      metaData: unEscapeMetaData(enqueuedTransportURIMetaDataString),
-      trackMetaData: unEscapeMetaData(currentTrackMetaDataString)
-    ]
+    String audioSource = SOURCES["${(uri.tokenize(':')[0])}"]
+
+    Map trackData = deviceAVTransportEvents[avtDni]?.avtCommands?.'setTrackDataEvents' ?: [:]
+
+    trackData['audioSource'] = audioSource ?: trackData['audioSource']
+    trackData['station'] = null
+    trackData['name'] = currentTrackName
+    trackData['artist'] = currentArtistName
+    trackData['album'] = currentAlbumName
+    trackData['albumArtUrl'] = trackDataAlbumArtUri ?: trackData['albumArtUrl']
+    trackData['trackNumber'] = trackNumber ?: trackData['trackNumber']
+    trackData['status'] = status ?: trackData['status']
+    trackData['uri'] = uri ?: trackData['uri']
+    trackData['trackUri'] = trackUri ?: trackData['trackUri']
+    trackData['transportUri'] = uri ?: trackData['transportUri']
+    trackData['enqueuedUri'] = enqueuedUri ?: trackData['enqueuedUri']
+    if(trackDataMetaData) {
+      trackData['metaData'] = enqueuedTransportURIMetaDataString
+      trackData['trackMetaData'] =  currentTrackMetaDataString ?: trackData['trackMetaData']
+    }
+
     avtCommands['setTrackDataEvents'] = trackData
     // }
   } else {
@@ -780,7 +785,10 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
   ChildDeviceWrapper child = app.getChildDevice(device.getDeviceNetworkId())
-
+  if(!child) {
+    logDebug("Could not get child device: ${device}")
+    return
+  }
   String rincon = child.getDataValue('id')
   String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
@@ -818,13 +826,16 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     return
   }
 
-  LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((child.getDataValue('groupIds').tokenize(',')))
-  if(groupedRincons != oldGroupedRincons) {
-    isFavoritePlaying(child)
-    logTrace('ZGT message parsed, group member changes found.')
-  } else {
-    logTrace('ZGT message parsed, no group member changes.')
+  if(child.getDataValue('groupIds')) {
+    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((child.getDataValue('groupIds').tokenize(',')))
+    if(groupedRincons != oldGroupedRincons) {
+      isFavoritePlaying(child)
+      logTrace('ZGT message parsed, group member changes found.')
+    } else {
+      logTrace('ZGT message parsed, no group member changes.')
+    }
   }
+
 
   List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
   groupedDevices.each{dev -> if(currentGroupCoordinatorId && dev) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
