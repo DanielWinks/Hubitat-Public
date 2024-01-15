@@ -785,7 +785,10 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
   ChildDeviceWrapper child = app.getChildDevice(device.getDeviceNetworkId())
-
+  if(!child) {
+    logDebug("Could not get child device: ${device}")
+    return
+  }
   String rincon = child.getDataValue('id')
   String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
@@ -823,13 +826,16 @@ void processZoneGroupTopologyMessages(DeviceWrapper device, Map message) {
     return
   }
 
-  LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((child.getDataValue('groupIds').tokenize(',')))
-  if(groupedRincons != oldGroupedRincons) {
-    isFavoritePlaying(child)
-    logTrace('ZGT message parsed, group member changes found.')
-  } else {
-    logTrace('ZGT message parsed, no group member changes.')
+  if(child.getDataValue('groupIds')) {
+    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((child.getDataValue('groupIds').tokenize(',')))
+    if(groupedRincons != oldGroupedRincons) {
+      isFavoritePlaying(child)
+      logTrace('ZGT message parsed, group member changes found.')
+    } else {
+      logTrace('ZGT message parsed, no group member changes.')
+    }
   }
+
 
   List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
   groupedDevices.each{dev -> if(currentGroupCoordinatorId && dev) {dev.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)}}
