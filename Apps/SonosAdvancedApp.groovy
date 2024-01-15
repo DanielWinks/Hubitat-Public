@@ -702,6 +702,11 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       avts.add([name:'albumArtURI', value: '<br>'])
     }
 
+    String trackDataAlbumArtUri
+    if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
+      trackDataAlbumArtUri = "${cd.getDataValue('localUpnpUrl')}${albumArtURI}"
+    } else (!isPlayingLocalTrack) { trackDataAlbumArtUri = "${albumArtURI}" }
+
     avtCommands['setCurrentArtistAlbumTrack'] = [currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer]
 
     streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
@@ -725,6 +730,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
       name: currentAlbumName,
       artist: currentArtistName,
       album: currentAlbumName,
+      albumArtUrl: trackDataAlbumArtUri,
       trackNumber: trackNumber,
       status: status,
       uri: uri,

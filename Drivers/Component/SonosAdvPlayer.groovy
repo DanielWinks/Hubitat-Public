@@ -461,7 +461,7 @@ void setTrackDataEvents(Map trackData) {
   if(disableTrackDataEvents) {return}
   trackData['level'] = this.device.currentState('level').value
   trackData['mute'] = this.device.currentState('mute').value
-  sendEvent(name: 'trackData', value: trackData)
+  sendEvent(name: 'trackData', value: JsonOutput.toJson(trackData))
 }
 
 void updateChildBatteryStatus(Map event) { if(createBatteryStatusChildDevice) {getBatteryStatusChild().sendEvent(event) }}
@@ -886,7 +886,7 @@ void clearCurrentNextArtistAlbumTrackData() {
 }
 
 void clearTrackDataEvent() {
-  sendEvent(name: 'trackData', value: [:])
+  sendEvent(name: 'trackData', value: '{}')
 }
 
 List<String> getGroupMemberDNIs() {
