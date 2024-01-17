@@ -22,11 +22,20 @@
   "apps": [
     {
       "id": "691ff71f-1241-4364-bd2d-8ba50fc6abc6",
-      "name": "HTTP Presence Helper",
+      "name": "HTTP Presence Helper App",
       "namespace": "dwinks",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/HttpPresenceHelper.groovy",
-      "required": true,
+      "required": false,
       "oauth": true
+    }
+  ],
+  "drivers": [
+    {
+      "id": "ca1d9dd5-ec7e-496a-b6da-06c4b6a2dcf5",
+      "name": "Virtual Presence Switch with 'just arrived' and 'just departed' 'less than binary' attributes.",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Virtual/VirtualPresenceSwitchExtended.groovy",
+      "required": false
     }
   ]
 }
