@@ -51,6 +51,11 @@ Map mainPage() {
     uninstall: true,
     refreshInterval: 0
   ) {
+    tryCreateAccessToken()
+    if(!state.accessToken) {
+      section ("<h2 style='color:red;'>OAuth is not enabled for app!! Please enable in Apps Code.</h2>"){      }
+    }
+
     section('<h2>Devices</h2>') {
       input 'presenceSensors', 'capability.presenceSensor', title: 'Presence Sensor', required: true, multiple: true
       input 'disableModes', 'mode', title: 'Disable "to away" presence changes in Mode(s)', multiple: true
@@ -115,7 +120,7 @@ void initialize() { configure() }
 void configure() {
   if (state.accessToken == null) {
     logDebug('Creating Access Token...')
-    createAccessToken()
+    tryCreateAccessToken()
     logDebug("accessToken: ${state.accessToken}")
   }
 }
