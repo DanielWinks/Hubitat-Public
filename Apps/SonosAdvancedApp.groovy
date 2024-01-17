@@ -1200,15 +1200,22 @@ void componentSetGroupRelativeLevelLocal(DeviceWrapper device, Integer adjustmen
 }
 
 void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
-  getZoneGroupAttributesAsync(device, 'componentSetGroupLevelLocalCallback', [level:level, rincon:device.getDataValue('id')])
+  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  String ip = coordinator.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredVolume: level]
+  Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
+  asynchttpPost('localControlCallback', params)
 }
+// void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
+//   getZoneGroupAttributesAsync(device, 'componentSetGroupLevelLocalCallback', [level:level, rincon:device.getDataValue('id')])
+// }
 
-void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
-  if(!responseIsValid(response, 'componentSetGroupLevelLocalCallback')) { return }
-  GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
-  List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
-  groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
-}
+// void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
+//   if(!responseIsValid(response, 'componentSetGroupLevelLocalCallback')) { return }
+//   GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
+//   List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
+//   groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
+// }
 
 void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
   String ip = device.getDataValue('localUpnpHost')
