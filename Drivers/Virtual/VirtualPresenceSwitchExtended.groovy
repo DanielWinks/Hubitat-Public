@@ -36,8 +36,6 @@ metadata {
     attribute 'justDeparted', 'ENUM', ['true','false']
     attribute 'extendedPresent', 'ENUM', ['true','false']
     attribute 'extendedAway', 'ENUM', ['true','false']
-    // attribute 'notRecentlyDeparted', 'BOOL'
-    // attribute 'notRecentlyArrived', 'BOOL'
   }
   preferences() {
     section(){
