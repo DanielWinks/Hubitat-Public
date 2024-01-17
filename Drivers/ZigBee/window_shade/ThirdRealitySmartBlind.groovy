@@ -119,6 +119,7 @@ void close() {
   sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
 
+@CompileStatic
 void setPosition(BigDecimal value) {
   logInfo("Setting the Blinds to position: ${value}.")
   setShadePosition(value as Integer)
@@ -134,6 +135,7 @@ void setShadePosition(Integer value) {
   sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
 
+@CompileStatic
 void setLevel(BigDecimal value, rate = null) {
   logInfo("Setting the Blinds to level: ${value}")
   setShadePosition(value as Integer)
