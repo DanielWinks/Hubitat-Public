@@ -33,7 +33,8 @@ definition(
   iconX2Url: '',
   installOnOpen: true,
   iconX3Url: '',
-  singleThreaded: true
+  singleThreaded: false,
+  importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/HttpPresenceHelper.groovy'
 )
 
 
