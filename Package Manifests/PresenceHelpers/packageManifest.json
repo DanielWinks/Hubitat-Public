@@ -15,7 +15,7 @@
       "id": "d908adfb-2567-4638-bea6-2cbc124dee0d",
       "name": "DWinks Utilities and Logging Library",
       "namespace": "dwinks",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/dwinksUtilitiesAndLoggingLibrary.zip",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/UtilitiesAndLoggingLibrary.zip",
       "required": true
     }
   ],
