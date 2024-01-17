@@ -90,9 +90,8 @@ void uninstalled() {
 
 void updated() {
   logDebug('Updated...')
-  try {
-    configure()
-  } catch(e) {
+  try { configure() }
+  catch(e) {
     logWarn("No configure() method defined or configure() resulted in error: ${e}")
   }
 }
