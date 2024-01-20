@@ -182,7 +182,7 @@ String prettyJson(Map jsonInput) {
 
 String nowFormatted() {
   if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
-  else                  return new Date().format('yyyy MMM dd EEE h:mm:ss a')
+  else                  return new Date().format('yyyy-MMM-dd h:mm:ss a')
 }
 
 @CompileStatic
