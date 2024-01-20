@@ -69,7 +69,8 @@ void parse(String description) {
         setLevelStates(currentLevel, device.currentValue('position') as Integer)
       }
     } else if (descriptionMap.value && descriptionMap?.clusterInt == CLUSTER_BATTERY_LEVEL) {
-      sendEvent(name: 'battery', value: ((zigbee.convertHexToInt(descriptionMap.value) - 50) / 1.5) as Integer)
+      Integer battLevel = (((zigbee.convertHexToInt(descriptionMap.value) - 50) / 1.5) as Integer)
+      sendEvent(name: 'battery', value: Math.max(battLevel, 0))
     }
   }
 }
@@ -119,6 +120,7 @@ void close() {
   sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
 
+@CompileStatic
 void setPosition(BigDecimal value) {
   logInfo("Setting the Blinds to position: ${value}.")
   setShadePosition(value as Integer)
@@ -134,6 +136,7 @@ void setShadePosition(Integer value) {
   sendHubCommand(new hubitat.device.HubMultiAction(cmds, hubitat.device.Protocol.ZIGBEE))
 }
 
+@CompileStatic
 void setLevel(BigDecimal value, rate = null) {
   logInfo("Setting the Blinds to level: ${value}")
   setShadePosition(value as Integer)

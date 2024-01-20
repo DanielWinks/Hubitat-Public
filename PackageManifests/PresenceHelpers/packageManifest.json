@@ -1,0 +1,41 @@
+{
+  "packageName": "Presence Helpers, HTTP Presence App",
+  "author": "Daniel Winks",
+  "version": "1.0.0",
+  "releaseNotes": "",
+  "minimumHEVersion": "2.3.4",
+  "dateReleased": "2024-01-17",
+  "licenseFile": "",
+	"documentationLink": "",
+	"communityLink": "",
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
+  "bundles": [
+    {
+      "id": "d908adfb-2567-4638-bea6-2cbc124dee0d",
+      "name": "DWinks Utilities and Logging Library",
+      "namespace": "dwinks",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/UtilitiesAndLoggingLibrary.zip",
+      "required": true
+    }
+  ],
+  "apps": [
+    {
+      "id": "691ff71f-1241-4364-bd2d-8ba50fc6abc6",
+      "name": "HTTP Presence Helper App",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/HttpPresenceHelper.groovy",
+      "required": false,
+      "oauth": true
+    }
+  ],
+  "drivers": [
+    {
+      "id": "ca1d9dd5-ec7e-496a-b6da-06c4b6a2dcf5",
+      "name": "Virtual Presence Switch with 'just arrived' and 'just departed' 'less than binary' attributes.",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Virtual/VirtualPresenceSwitchExtended.groovy",
+      "required": false
+    }
+  ]
+}

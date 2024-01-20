@@ -24,7 +24,7 @@
 #include dwinks.UtilitiesAndLoggingLibrary
 
 metadata {
-  definition (name: 'Virtual Presence with Switch Extended', namespace: 'dwinks', author: 'Daniel Winks') {
+  definition (name: 'Virtual Presence with Switch Extended', namespace: 'dwinks', author: 'Daniel Winks', importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Virtual/VirtualPresenceSwitchExtended.groovy') {
     capability 'PresenceSensor'
     capability 'Switch'
 
@@ -36,8 +36,6 @@ metadata {
     attribute 'justDeparted', 'ENUM', ['true','false']
     attribute 'extendedPresent', 'ENUM', ['true','false']
     attribute 'extendedAway', 'ENUM', ['true','false']
-    // attribute 'notRecentlyDeparted', 'BOOL'
-    // attribute 'notRecentlyArrived', 'BOOL'
   }
   preferences() {
     section(){
