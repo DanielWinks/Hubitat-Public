@@ -78,8 +78,6 @@ String getLocalApiPrefix(String ipAddress) {
 // =============================================================================
 Map mainPage() {
   state.remove("discoveryRunning")
-  boolean configured = settings.clientKey != null && settings.clientSecret != null
-  boolean authenticated = state.authToken != null
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
       label title: 'Sonos Advanced Controller',
@@ -108,7 +106,6 @@ Map mainPage() {
       input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
       // input 'applySettingsButton', 'button', title: 'Apply Settings'
-      // input 'createPlayerDevices', 'button', title: 'Create Players'
     }
   }
 }
@@ -161,6 +158,7 @@ Map localPlayerSelectionPage() {
         submitOnChange: true,
         offerAll: false
       )
+      input 'createPlayerDevices', 'button', title: 'Create Players'
       href (
         page: 'localPlayerPage',
         title: 'Continue Search',
