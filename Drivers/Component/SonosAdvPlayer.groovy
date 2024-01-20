@@ -107,6 +107,8 @@ metadata {
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'Fav', 'string'
+
+  attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   }
 
   preferences {
