@@ -1,6 +1,9 @@
 from flask import Flask
 from flask import request
 import sys
+from xml.etree.ElementTree import ElementTree
+from xml.etree.ElementTree import Element
+from xml.etree.ElementTree import SubElement
 import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
@@ -13,6 +16,12 @@ def log():
     sys.stdout.flush()
     sys.stdout.write('Body: {}\r\n'.format(ET.tostring(root, encoding='unicode')))
     sys.stdout.flush()
+    tree = ElementTree(root)
+    with open('/Users/danielwinks/Code/Hubitat-Public/xml.xml', 'a') as f:
+        f.write('\r\n')
+        tree.write(f, encoding='unicode')
+        f.flush()
+        f.close()
     return '200: OK'
 
 if __name__ == '__main__':

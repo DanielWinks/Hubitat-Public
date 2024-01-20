@@ -46,8 +46,15 @@ if (device != null) {
   preferences {
     input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
     input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
     input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: false
   }
+}
+
+String dniOrAppId(DeviceWrapper dev = null)
+{
+  if(dev) {return dev.getDeviceNetworkId()}
+  return device?.getDeviceNetworkId() ?: app.getId()
 }
 
 void clearAllStates() {
@@ -72,6 +79,7 @@ void installed() {
 
   if (settings.logEnable) { runIn(1800, 'logsOff') }
   if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
+  if (settings.debugLogEnable) { runIn(1800, 'traceLogsOff') }
 }
 
 void uninstalled() {
@@ -82,9 +90,8 @@ void uninstalled() {
 
 void updated() {
   logDebug('Updated...')
-  try {
-    configure()
-  } catch(e) {
+  try { configure() }
+  catch(e) {
     logWarn("No configure() method defined or configure() resulted in error: ${e}")
   }
 }
@@ -125,7 +132,7 @@ void logDebug(message) {
 }
 
 void logTrace(message) {
-  if (settings.logEnable && settings.debugLogEnable) {
+  if (settings.logEnable && settings.traceLogEnable) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
     if(app) log.trace "${app.label ?: app.name }: ${message}"
   }
@@ -171,6 +178,17 @@ void debugLogsOff() {
   }
   if (app) {
     logWarn("Debug logging disabled for ${app}")
+    app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
+  }
+}
+
+void traceLogsOff() {
+  if (device) {
+    logWarn("Trace logging disabled for ${device}")
+    device.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
+  }
+  if (app) {
+    logWarn("Trace logging disabled for ${app}")
     app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
   }
 }

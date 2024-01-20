@@ -37,9 +37,7 @@ metadata {
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
   capability "MediaTransport" //attributes:  transportStatus - ENUM - ["playing", "paused", "stopped"]
   capability 'SpeechSynthesis'
-  capability 'Configuration'
   capability 'Initialize'
-  capability 'Refresh'
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -72,8 +70,6 @@ metadata {
   command 'repeatOne'
   command 'repeatAll'
   command 'repeatNone'
-  command 'subscribeToEvents'
-  // command 'resubscribeToEvents'
 
   attribute 'currentRepeatOneMode', 'enum', [ 'on', 'off' ]
   attribute 'currentRepeatAllMode', 'enum', [ 'on', 'off' ]
@@ -95,11 +91,15 @@ metadata {
   attribute 'treble', 'number'
   attribute 'bass', 'number'
   attribute 'loudness', 'enum', [ 'on', 'off' ]
+  attribute 'balance', 'number'
   command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
   command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
   command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
+  command 'setBalance', [[name:'Left/Right Balance*', type:"NUMBER", description:"Left/Right Balance (-20..20)", constraints:["NUMBER"]]]
 
 
+  attribute 'groupVolume', 'number'
+  attribute 'groupMute', 'string'
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
@@ -142,6 +142,7 @@ void configure() {
   createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
+  runIn(5, 'secondaryConfiguration')
 }
 
 void secondaryConfiguration() {
@@ -189,10 +190,10 @@ void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(
 void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
-void setTrack(String uri) { playTrack(uri) }
+void setTrack(String uri) { parent?.componentSetStreamUrlLocal(this.device, uri, volume) }
 void playTrack(String uri, BigDecimal volume = null) { parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
-void playTrackAndRestore(String uri, BigDecimal volume = null) { componentPlayAudioClipLocal(uri, volume) }
-void playTrackAndResume(String uri, BigDecimal volume = null) { componentPlayAudioClipLocal(uri, volume) }
+void playTrackAndRestore(String uri, BigDecimal volume = null) { parent?.componentPlayAudioClipLocal(this.device, uri, volume) }
+void playTrackAndResume(String uri, BigDecimal volume = null) { parent?.componentPlayAudioClipLocal(this.device, uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   parent?.componentPlayTextLocal(this.device, text, volume, voice)
@@ -209,6 +210,7 @@ void setVolume(BigDecimal level) { setLevel(level) }
 void setTreble(BigDecimal level) { parent?.componentSetTrebleLocal(this.device, level)}
 void setBass(BigDecimal level) { parent?.componentSetBassLocal(this.device, level)}
 void setLoudness(String mode) { parent?.componentSetLoudnessLocal(this.device, mode == 'on')}
+void setBalance(BigDecimal level) { parent?.componentSetBalanceLocal(this.device, level)}
 
 void muteGroup(){
   if(this.device.currentState('isGrouped')?.value == 'on') {parent?.componentMuteGroupLocal(this.device, true) }
@@ -219,7 +221,7 @@ void unmuteGroup(){
   else { parent?.componentMutePlayerLocal(this.device, false) }
 }
 void setGroupVolume(BigDecimal level) {
-  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevel(this.device, level) }
+  if(this.device.currentState('isGrouped')?.value == 'on') { parent?.componentSetGroupLevelLocal(this.device, level) }
   else { parent?.componentSetPlayerLevelLocal(this.device, level)  }
 }
 void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
@@ -245,7 +247,11 @@ void stop() { parent?.componentStopLocal(this.device) }
 void pause() { parent?.componentPauseLocal(this.device) }
 void nextTrack() { parent?.componentNextTrackLocal(this.device) }
 void previousTrack() { parent?.componentPreviousTrackLocal(this.device) }
-void refresh() {subscribeToEvents()}
+void subscribeToEvents() {
+  subscribeToZgtEvents()
+  subscribeToMrGrcEvents()
+  subscribeToMrRcEvents()
+}
 
 void getFavorites() {
   Map favorites = parent?.componentGetFavoritesLocal(this.device)
@@ -254,9 +260,9 @@ void getFavorites() {
 void loadFavorite(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
-  String repeatMode = 'repeat one'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String repeatMode = 'repeat all'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 // void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode)
@@ -264,35 +270,36 @@ void loadFavorite(String favoriteId) {
 void loadFavoriteFull(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
-  String repeatMode = 'repeat one'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String repeatMode = 'repeat all'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
-  String playOnCompletion = 'true'
-  String shuffle = 'false'
-  String crossfade = 'true'
+  String autoPlay = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
-  String playOnCompletion = 'true'
-  String crossfade = 'true'
+  String autoPlay = 'true'
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  String crossfade = 'true'
+  logDebug("Called")
+  String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -435,28 +442,29 @@ void setCurrentTrackDuration(String currentTrackDuration){
 
 void setCurrentArtistAlbumTrack(String currentArtistName, String currentAlbumName, String currentTrackName, Integer currentTrackNumber) {
   if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'currentArtistName', value: currentArtistName)
-  sendEvent(name:'currentAlbumName',  value: currentAlbumName)
-  sendEvent(name:'currentTrackName',  value: currentTrackName)
-  sendEvent(name:'currentTrackNumber',  value: currentTrackNumber)
+  sendEvent(name:'currentArtistName', value: currentArtistName ?: 'Not Available')
+  sendEvent(name:'currentAlbumName',  value: currentAlbumName ?: 'Not Available')
+  sendEvent(name:'currentTrackName',  value: currentTrackName ?: 'Not Available')
+  sendEvent(name:'currentTrackNumber',  value: currentTrackNumber ?: 0)
+  String trackDescription = currentTrackName && currentArtistName ? "${currentTrackName} by ${currentArtistName}" : null
+  if(trackDescription) { sendEvent(name: 'trackDescription', value: trackDescription) }
 }
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
   if(disableArtistAlbumTrackEvents) {return}
-  sendEvent(name:'nextArtistName', value: nextArtistName)
-  sendEvent(name:'nextAlbumName',  value: nextAlbumName)
-  sendEvent(name:'nextTrackName',  value: nextTrackName)
+  sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available')
+  sendEvent(name:'nextAlbumName',  value: nextAlbumName ?: 'Not Available')
+  sendEvent(name:'nextTrackName',  value: nextTrackName ?: 'Not Available')
 }
 
 void setTrackDataEvents(Map trackData) {
   if(disableTrackDataEvents) {return}
   trackData['level'] = this.device.currentState('level').value
   trackData['mute'] = this.device.currentState('mute').value
-  sendEvent(name: 'trackData', value: trackData)
+  sendEvent(name: 'trackData', value: JsonOutput.toJson(trackData))
 }
 
-void componentUpdateBatteryStatus() { parent?.componentUpdateBatteryStatus(this.device) }
-void updateChildBatteryStatus(Map event) { getBatteryStatusChild().sendEvent(event) }
+void updateChildBatteryStatus(Map event) { if(createBatteryStatusChildDevice) {getBatteryStatusChild().sendEvent(event) }}
 
 // =============================================================================
 // Create Child Devices
@@ -570,33 +578,21 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
 
 void parse(String raw) {
   LinkedHashMap message = parseLanMessage(raw)
-  if(message.headers.containsKey('HTTP/1.1 412 Precondition Failed')) {
-    logDebug("Expired subscriptions detected, resubscribing to all...")
-    logDebug("412: ${message}")
-    device.removeDataValue('sid1')
-    device.removeDataValue('sid2')
-    device.removeDataValue('sid3')
-    device.removeDataValue('sid4')
-    runIn(30, 'subscribeToEvents', [overwrite: true])
-  }
   if(message.body == null) {return}
-  String sId = message.headers["SID"]
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
   if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    this.device.updateDataValue('sid1', sId)
-    processAVTransportMessages(message)
+    if(this.device.getDataValue('isGroupCoordinator') == 'true') {
+      processAVTransportMessages(message)
+    }
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-    this.device.updateDataValue('sid2', sId)
     processRenderingControlMessages(message)
   }
   else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    this.device.updateDataValue('sid3', sId)
     processZoneGroupTopologyMessages(message)
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-    this.device.updateDataValue('sid4', sId)
-    // processGroupRenderingControlMessages(message)
+    processGroupRenderingControlMessages(message)
   }
   else {
     logDebug("Could not determine service type for message: ${message}")
@@ -609,6 +605,7 @@ void parse(String raw) {
 
 void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
 void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
+void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
 void processRenderingControlMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult instanceId = propertyset['property']['LastChange']['Event']['InstanceID']
@@ -619,6 +616,19 @@ void processRenderingControlMessages(Map message) {
     sendEvent(name:'volume', value: volume as Integer)
     if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
   }
+  String lfString = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()
+  lfString = lfString ?: '0'
+  String rfString = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()
+  rfString = rfString ?: '0'
+  Integer lf = Integer.parseInt(lfString)
+  Integer rf = Integer.parseInt(rfString)
+  Integer balance = 0
+  if(lf < 100) {
+    balance = ((100 - lf) / 5) as Integer
+  } else if(rf < 100) {
+    balance = -((100 - rf) / 5) as Integer
+  }
+  sendEvent(name: 'balance', value: balance)
 
   String mute = instanceId.children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
@@ -638,48 +648,216 @@ void processRenderingControlMessages(Map message) {
   if(treble) { sendEvent(name:'treble', value: treble as Integer) }
 
   String loudness = instanceId.children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
-  if(loudness) { sendEvent(name:'loudness', value: loudness == 1 ? 'on' : 'off') }
+  if(loudness) { sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off') }
 }
+
+
 
 // =============================================================================
 // Subscriptions and Resubscriptions
 // =============================================================================
-
-void subscribeToEvents() {
-  String host = device.getDataValue('localUpnpHost')
-  String dni = device.getDeviceNetworkId()
-
-  if(device.getDataValue('sid1')) { sonosEventUnsubscribe('/MediaRenderer/AVTransport/Event', host, dni, device.getDataValue('sid1')) }
-  if(device.getDataValue('sid2')) { sonosEventUnsubscribe('/MediaRenderer/RenderingControl/Event', host, dni, device.getDataValue('sid2')) }
-  if(device.getDataValue('sid3')) { sonosEventUnsubscribe('/ZoneGroupTopology/Event', host, dni, device.getDataValue('sid3')) }
-  if(device.getDataValue('sid4')) { sonosEventUnsubscribe('/MediaRenderer/GroupRenderingControl/Event', host, dni, device.getDataValue('sid4')) }
-
-  sonosEventSubscribe('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, '/avt')
-  sonosEventSubscribe('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, '/mrc')
-  sonosEventSubscribe('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, '/zgt')
-  sonosEventSubscribe('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, '/mgrc')
-
   // sonosEventSubscribe('/MediaRenderer/Queue/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/MediaServer/ContentDirectory/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/MusicServices/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/SystemProperties/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/AlarmClock/Event', host, RESUB_INTERVAL, dni)
 
-  unschedule('resubscribeToEvents')
-  runIn(RESUB_INTERVAL-100, 'resubscribeToEvents')
+String getlocalUpnpHost() {return device.getDataValue('localUpnpHost')}
+String getDNI() {return device.getDeviceNetworkId()}
+@Field private final String MRRC_EVENTS  =  '/MediaRenderer/RenderingControl/Event'
+@Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
+@Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
+@Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
+
+// /////////////////////////////////////////////////////////////////////////////
+// '/MediaRenderer/AVTransport/Event' //sid1
+// /////////////////////////////////////////////////////////////////////////////
+void subscribeToAVTransport() {
+  if(device.getDataValue('sid1')) { resubscribeToAVTransport() }
+  else {
+    sonosEventSubscribe(MRAVT_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/avt', 'subscribeToMrAvTCallback')
+    unschedule('resubscribeToAVTransport')
+    runIn(RESUB_INTERVAL-100, 'resubscribeToAVTransport')
+  }
+}
+
+void subscribeToMrAvTCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to subscribe to MediaRenderer/AVTransport. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid1')
+    runIn(60, 'subscribeToAVTransport')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully subscribed to MediaRenderer/AVTransport')
+    if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
+  }
+}
+
+void resubscribeToAVTransport() {
+  if(device.getDataValue('sid1')) {
+    sonosEventRenew(MRAVT_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid1'), 'resubscribeToMrAvTCallback')
+  } else { subscribeToAVTransport() }
+  runIn(RESUB_INTERVAL-100, 'resubscribeToAVTransport')
+}
+
+void resubscribeToMrAvTCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to resubscribe to MediaRenderer/AVTransport. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid1')
+    runIn(60, 'subscribeToAVTransport')
+  } else if(response.status == 200) {
+    logTrace('Sucessfully resubscribed to MediaRenderer/AVTransport')
+    if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
+  }
+}
+
+void unsubscribeFromAVTransport() {
+  if(device.getDataValue('sid1')) {
+    sonosEventUnsubscribe(MRAVT_EVENTS, getlocalUpnpHost(), getDNI(), device.getDataValue('sid1'), 'unsubscribeToMrAvTCallback')
+    unschedule('resubscribeToAVTransport')
+  }
+}
+
+void unsubscribeToMrAvTCallback(HubResponse response) {
+  if(response.status == 412){
+    logDebug('Failed to unsubscribe to MediaRenderer/AVTransport. This is likely due to not currently being subscribed and is safely ignored.')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully unsubscribed to MediaRenderer/AVTransport')
+  }
+  device.removeDataValue('sid1')
 }
 
 
-void resubscribeToEvents() {
-  String host = device.getDataValue('localUpnpHost')
-  String dni = device.getDeviceNetworkId()
-
-  sonosEventRenew('/MediaRenderer/AVTransport/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid1'))
-  sonosEventRenew('/MediaRenderer/RenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid2'))
-  sonosEventRenew('/ZoneGroupTopology/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid3'))
-  sonosEventRenew('/MediaRenderer/GroupRenderingControl/Event', host, RESUB_INTERVAL, dni, device.getDataValue('sid4'))
-  runIn(RESUB_INTERVAL-100, 'resubscribeToEvents')
+// /////////////////////////////////////////////////////////////////////////////
+// '/MediaRenderer/RenderingControl/Event' //sid2
+// /////////////////////////////////////////////////////////////////////////////
+void subscribeToMrRcEvents() {
+  if(device.getDataValue('sid2')) { resubscribeToMrRcEvents() }
+  else {
+    sonosEventSubscribe(MRRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/mrc', 'subscribeToMrRcCallback')
+    unschedule('resubscribeToMrRcEvents')
+    runIn(RESUB_INTERVAL-100, 'resubscribeToMrRcEvents')
+  }
 }
+
+void subscribeToMrRcCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to subscribe to MediaRenderer/RenderingControl. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid2')
+    runIn(60, 'subscribeToMrRcEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully subscribed to MediaRenderer/RenderingControl')
+    if(response.headers["SID"]) {device.updateDataValue('sid2', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid2', response.headers["sid"])}
+  }
+}
+
+void resubscribeToMrRcEvents() {
+  if(device.getDataValue('sid2')) {
+    sonosEventRenew(MRRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid2'), 'resubscribeToMrRcCallback')
+  } else { subscribeToMrRcEvents() }
+  runIn(RESUB_INTERVAL-100, 'resubscribeToMrRcEvents')
+}
+
+void resubscribeToMrRcCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to resubscribe to MediaRenderer/RenderingControl. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid2')
+    runIn(60, 'subscribeToMrRcEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully resubscribed to MediaRenderer/RenderingControl')
+    if(response.headers["SID"]) {device.updateDataValue('sid2', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid2', response.headers["sid"])}
+  }
+}
+
+
+// /////////////////////////////////////////////////////////////////////////////
+// '/ZoneGroupTopology/Event' //sid3
+// /////////////////////////////////////////////////////////////////////////////
+void subscribeToZgtEvents() {
+  if(device.getDataValue('sid3')) { resubscribeToZgtEvents() }
+  else {
+    sonosEventSubscribe(ZGT_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/zgt', 'subscribeToZgtCallback')
+    unschedule('resubscribeToZgtEvents')
+    runIn(RESUB_INTERVAL-100, 'resubscribeToZgtEvents')
+  }
+}
+
+void subscribeToZgtCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to subscribe to ZoneGroupTopology. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid3')
+    runIn(60, 'subscribeToZgtEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully subscribed to ZoneGroupTopology')
+    if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid3', response.headers["sid"])}
+  }
+}
+
+void resubscribeToZgtEvents() {
+  if(device.getDataValue('sid3')) {
+    sonosEventRenew(MRRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid3'), 'resubscribeToZgtCallback')
+  } else { subscribeToZgtEvents() }
+  runIn(RESUB_INTERVAL-100, 'resubscribeToZgtEvents')
+}
+
+void resubscribeToZgtCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to resubscribe to ZoneGroupTopology. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid3')
+    runIn(60, 'subscribeToZgtEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully resubscribed to ZoneGroupTopology')
+    if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid3', response.headers["sid"])}
+  }
+}
+
+
+// /////////////////////////////////////////////////////////////////////////////
+// '/MediaRenderer/GroupRenderingControl/Event' //sid4
+// /////////////////////////////////////////////////////////////////////////////
+void subscribeToMrGrcEvents() {
+  if(device.getDataValue('sid4')) { resubscribeToMrGrcEvents() }
+  else {
+    sonosEventSubscribe(MRGRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/mgrc', 'subscribeToMrGrcCallback')
+    unschedule('resubscribeToMrGrcEvents')
+    runIn(RESUB_INTERVAL-100, 'resubscribeToMrGrcEvents')
+  }
+}
+
+void subscribeToMrGrcCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to resubscribe to MediaRenderer/GroupRenderingControl. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid4')
+    runIn(60, 'subscribeToMrGrcEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully subscribed to MediaRenderer/GroupRenderingControl')
+    if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
+  }
+}
+
+void resubscribeToMrGrcEvents() {
+  if(device.getDataValue('sid4')) { sonosEventRenew(MRGRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid4'), 'resubscribeToMrGrcCallback')}
+  runIn(RESUB_INTERVAL-100, 'resubscribeToMrGrcEvents')
+}
+
+void resubscribeToMrGrcCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to resubscribe to MediaRenderer/GroupRenderingControl. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid4')
+    runIn(60, 'subscribeToMrGrcEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully resubscribed to MediaRenderer/GroupRenderingControl')
+    if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
+  }
+}
+
 
 // =============================================================================
 // Child Device Helpers
@@ -708,7 +886,7 @@ void clearCurrentNextArtistAlbumTrackData() {
 }
 
 void clearTrackDataEvent() {
-  sendEvent(name: 'trackData', value: [:])
+  sendEvent(name: 'trackData', value: '{}')
 }
 
 List<String> getGroupMemberDNIs() {

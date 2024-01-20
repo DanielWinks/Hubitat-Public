@@ -26,7 +26,7 @@
 @Field static final String baseUrl = 'https://api.weather.gov'
 
 metadata {
-  definition(name: 'NWS Forecast And Alerts', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '', singleThreaded: true) {
+  definition(name: 'NWS Forecast And Alerts', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '', singleThreaded: false) {
     capability 'Sensor'
     capability 'Refresh'
 
@@ -195,9 +195,9 @@ void getHourlyForecastCallback(AsyncResponse response, Map data = null) {
 
     sendEvent(name: "forecast${it}h", value: forecast, descriptionText: "Updated forecast${it}h from NWS")
   }
-  def temps = periods.findAll{it -> it.number < 13}.collectEntries() { [it.temperature] }.keySet()
-  eventSend('temperatureHi', temps.max())
-  eventSend('temperatureLo', temps.min())
+  List<Integer> temps = periods.findAll{it -> it.number < 13}.collect(){ it.temperature as Integer }
+  sendEvent(name: 'temperatureHi', value: temps.max(), descriptionText: "Hi temp for next 12 hours is ${temps.max()}")
+  sendEvent(name: 'temperatureLo', value: temps.min(), descriptionText: "Lo temp for next 12 hours is ${temps.min()}")
 }
 
 void getHiAndLo(){
@@ -218,12 +218,12 @@ void getHiAndLoCallback(AsyncResponse response, Map data = null) {
   jsonData = response.getJson()
   state.hourlyUnits = jsonData?.properties?.units
   periods = jsonData?.properties?.periods
-  def temps = periods.findAll{it -> it.number < 13}.collectEntries() { [it.temperature] }.keySet()
-  def probPrecip = periods.findAll{it -> it.number < 13}.collectEntries() { [it.probabilityOfPrecipitation.value] }.keySet()
+  List<Integer> temps = periods.findAll{it -> it.number < 13}.collect(){ it.temperature as Integer }
+  List<Integer> probPrecip = periods.findAll{it -> it.number < 13}.collect(){ it.probabilityOfPrecipitation.value as Integer }
   logDebug("Max/Min: ${temps.max()}/${temps.min()}")
-  eventSend('temperatureHi', temps.max())
-  eventSend('temperatureLo', temps.min())
-  eventSend('probabilityOfPrecipitation12h', probPrecip.max())
+  sendEvent(name: 'temperatureHi', value: temps.max(), descriptionText: "Hi temp for next 12 hours is ${temps.max()}")
+  sendEvent(name: 'temperatureLo', value: temps.min(), descriptionText: "Lo temp for next 12 hours is ${temps.min()}")
+  sendEvent(name: 'probabilityOfPrecipitation12h', value: probPrecip.max(), unit: '%', descriptionText: "Updated probabilityOfPrecipitation from NWS for next 12 hours is: ${probPrecip.max()}")
 }
 
 @CompileStatic
