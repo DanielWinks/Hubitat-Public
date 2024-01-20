@@ -29,6 +29,7 @@ metadata {
     name: 'Sonos Advanced Player',
     namespace: 'dwinks',
     author: 'Daniel Winks',
+    singleThreaded: true,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
 
@@ -109,6 +110,7 @@ metadata {
   attribute 'Fav', 'string'
 
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
+  attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
   }
 
   preferences {
