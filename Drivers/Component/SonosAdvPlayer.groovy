@@ -181,7 +181,7 @@ void disableCrossfade() { setCrossfade('off') }
 
 void setShuffle(String mode) {
   logDebug("Setting shuffle mode to ${mode}")
-  Map playModes = mode = 'on' ? [ 'shuffle': true ] : [ 'shuffle': false ]
+  Map playModes = mode == 'on' ? [ 'shuffle': true ] : [ 'shuffle': false ]
   parent?.componentSetPlayModesLocal(this.device, ['playModes': playModes ])
 }
 void shuffleOn() { setShuffle('on') }
@@ -324,30 +324,31 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 // =============================================================================
 void componentRefresh(DeviceWrapper child) {
   String command = child.getDataValue('command')
+  logDebug("Child: ${child} command: ${command}")
   switch(command) {
-    case 'CrossFade':
-      getCrossfadeControlChild().sendEvent(name:'switch', value: this.device.currentState('currentCrossfadeMode')?.value )
+    case 'Crossfade':
+      getCrossfadeControlChild().sendEvent(name:'switch', value: device.currentState('currentCrossfadeMode')?.value )
     break
     case 'Shuffle':
-      getShuffleControlChild().sendEvent(name:'switch', value: this.device.currentState('currentShuffleMode')?.value )
+      getShuffleControlChild().sendEvent(name:'switch', value: device.currentState('currentShuffleMode')?.value )
     break
     case 'RepeatOne':
-      getRepeatOneControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatOneMode')?.value)
+      getRepeatOneControlChild().sendEvent(name:'switch', value: device.currentState('currentRepeatOneMode')?.value)
     break
     case 'RepeatAll':
-      getRepeatAllControlChild().sendEvent(name:'switch', value: this.device.currentState('currentRepeatAllMode')?.value )
+      getRepeatAllControlChild().sendEvent(name:'switch', value: device.currentState('currentRepeatAllMode')?.value )
     break
     case 'Mute':
-      String muteValue = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
+      String muteValue = device.currentState('mute')?.value != null ? device.currentState('mute').value : 'unmuted'
       getMuteControlChild().sendEvent(name:'switch', value: muteValue )
     break
   }
 }
 
 void componentOn(DeviceWrapper child) {
-  String command = child.getDataValue('command')
+  String command = child.getDataValue('command').toString()
   switch(command) {
-    case 'CrossFade':
+    case 'Crossfade':
       enableCrossfade()
     break
     case 'Shuffle':
@@ -366,7 +367,7 @@ void componentOn(DeviceWrapper child) {
 void componentOff(DeviceWrapper child) {
     String command = child.getDataValue('command')
   switch(command) {
-    case 'CrossFade':
+    case 'Crossfade':
       disableCrossfade()
     break
     case 'Shuffle':
@@ -608,7 +609,94 @@ void parse(String raw) {
 // =============================================================================
 
 void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
-void processZoneGroupTopologyMessages(Map message) { parent?.processZoneGroupTopologyMessages(this.device, message)}
+void processZoneGroupTopologyMessages(Map message) {
+  String rincon = device.getDataValue('id')
+  GPathResult propertyset = parseSonosMessageXML(message)
+  GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
+  String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
+
+
+  Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
+  if(isGroupCoordinator && !device.getDataValue('sid1')) { subscribeToAVTransport() }
+
+  Boolean previouslyWasGroupCoordinator = device.getDataValue('isGroupCoordinator') == 'true'
+  if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
+    logDebug("Just removed from group!")
+  }
+  if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
+    logDebug("Just added to group!")
+    unsubscribeFromAVTransport()
+    parent?.updatePlayerCurrentStates(this.device, currentGroupCoordinatorId)
+  }
+
+  device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+  device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
+
+  LinkedHashSet<String> groupedRincons = new LinkedHashSet()
+  GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
+
+  currentGroupMembers.each{
+    if(it['@Invisible'] == '1') {return}
+    groupedRincons.add(it['@UUID'].toString())
+  }
+  if(groupedRincons.size() == 0) {
+    logDebug("No grouped rincons found!")
+    return
+  }
+
+  if(device.getDataValue('groupIds')) {
+    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+    if(groupedRincons != oldGroupedRincons) {
+      logTrace('ZGT message parsed, group member changes found.')
+    } else {
+      logTrace('ZGT message parsed, no group member changes.')
+    }
+  }
+
+  device.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)
+  device.updateDataValue('groupIds', groupedRincons.join(','))
+
+  String groupId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
+  String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
+
+  LinkedHashSet currentGroupMemberNames = []
+  groupedRincons.each{ gr ->
+    currentGroupMemberNames.add(zoneGroups.children().children().findAll{it['@UUID'] == gr}['@ZoneName']) }
+  Integer currentGroupMemberCount = groupedRincons.size()
+
+
+  String groupName = (propertyset['property']['ZoneGroupName'].text()).toString()
+  if(groupName && groupedRincons) {
+    parent?.updateZoneGroupName(groupName, groupedRincons)
+  }
+
+  if(groupId) {device.updateDataValue('groupId', groupId)}
+  if(currentGroupCoordinatorName) {device.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)}
+  device.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
+  device.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
+  if(currentGroupMemberNames.size() > 0) {device.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)}
+  if(groupName) {device.sendEvent(name: 'groupName', value: groupName)}
+
+
+  String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@MoreInfo']
+  if(moreInfoString) {
+    Map moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0],it[1]]}
+    BigDecimal battTemp = new BigDecimal(moreInfo['BattTmp'])
+    List<Event> stats = [
+      [name: 'battery', value: moreInfo['BattPct'] as Integer, unit: '%' ],
+      [name: 'powerSource', value: moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains' ],
+      [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(battTemp) : battTemp, unit: getTemperatureScale() ],
+    ]
+    stats.each{ if(it) {updateChildBatteryStatus(it) }}
+  }
+
+  String zonePlayerUUIDsInGroup = propertyset['property']['ZonePlayerUUIDsInGroup'].text()
+  if(zonePlayerUUIDsInGroup) {
+    List<String> playersInGroup = zonePlayerUUIDsInGroup.tokenize(',')
+    parent?.updateGroupDevices(playersInGroup[0], playersInGroup.tail())
+  }
+}
+
 void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
 void processRenderingControlMessages(Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
