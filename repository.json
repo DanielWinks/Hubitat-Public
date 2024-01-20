@@ -6,7 +6,7 @@
     {
       "name": "Sonos Advanced Controller",
       "category": "Integrations",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Package%20Manifests/SonosAdvancedController/packageManifest.json",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json",
       "description": "Advanced app and driver for Sonos speakers. Allows non-interrupting TTS, grouping control, and more.",
       "tags": ["Speakers", "Multimedia", "LAN"],
       "id": "6cad9e9c-4b0b-423b-b0e1-1c5a3c0d1196"
@@ -14,7 +14,7 @@
     {
       "name": "Third Reality Smart Blind Drivers",
       "category": "Window Coverings",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/blinds/Package%20Manifests/ThirdReality/packageManifest.json",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/ThirdReality/packageManifest.json",
       "description": "Improved driver for Third Reality Smart Blinds. Adds 'verfication' checks to ensure blinds always move to 'desired' position, eliminating issues where blinds might otherwise fail to respond to the first ZigBee command sent.",
       "tags": ["Window Coverings", "ZigBee"],
       "id": "0494570e-0fdd-4ea0-a8f4-7eba8e154ddd"
@@ -22,7 +22,7 @@
     {
       "name": "HTTP Presence Helper",
       "category": "Presence & Location",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Package%20Manifests/PresenceHelpers/packageManifest.json",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/PresenceHelpers/packageManifest.json",
       "description": "HTTP Presence Helper App. Provides local and cloud endpoints for present/not present updates of presence/",
       "tags": ["Utility", "Presence & Location"],
       "id": "5810284c-4abc-4e79-a9f4-fd21d9f90fb4"
