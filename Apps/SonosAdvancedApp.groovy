@@ -389,7 +389,19 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   String ipPort = convertHexToInt(event.deviceAddress)
 
   LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
+  if(playerInfo) {
+    logTrace("Discovered playerInfo for ${ipAddress}: ${playerInfo}")
+  } else {
+    logTrace("Did not receive playerInfo for ${ipAddress}")
+  }
+
   GPathResult deviceDescription = getDeviceDescriptionLocalSync("${ipAddress}")
+  if(deviceDescription) {
+    logTrace("Discovered device description for ${ipAddress}: ${XmlUtil.serialize(deviceDescription)}")
+  } else {
+    logTrace("Did not receive device description for ${ipAddress}")
+  }
+
 
   LinkedHashMap playerInfoDevice = playerInfo.device as LinkedHashMap
 
@@ -473,11 +485,15 @@ List<String> getUserGroupsDNIsFromUserGroups() {
 }
 
 List<ChildDeviceWrapper> getCurrentPlayerDevices() {
-  return app.getChildDevices().findAll{ child -> child.getDataValue('id')}
+  List<ChildDeviceWrapper> currentPlayers = []
+  app.getChildDevices().each{child -> if(child.getDataValue('id')) { currentPlayers.add(child)}}
+  return currentPlayers
 }
 
 List<ChildDeviceWrapper> getCurrentGroupDevices() {
-  return app.getChildDevices().findAll{ child -> child.getDataValue('id') == null}
+  List<ChildDeviceWrapper> currentGroupDevs = []
+  app.getChildDevices().each{child -> if(child.getDataValue('id') == null) { currentGroupDevs.add(child)}}
+  return currentGroupDevs
 }
 
 List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
@@ -650,12 +666,13 @@ void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
   }
 }
 
-void processAVTransportMessages(DeviceWrapper cd, GPathResult propertyset) {
+void processAVTransportMessages(DeviceWrapper cd, Map message) {
   if(!state.deviceAVTransportEvents) { state.deviceAVTransportEvents = new LinkedHashMap() }
   List<Map> avts = []
   Map avtCommands = [:]
   String avtDni = cd.getDeviceNetworkId()
 
+  GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
   String lastChange = propertyset['property']['LastChange'].text()
   if(!lastChange) {return}
   GPathResult event = new XmlSlurper().parseText(lastChange)

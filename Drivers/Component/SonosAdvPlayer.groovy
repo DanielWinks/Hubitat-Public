@@ -613,8 +613,7 @@ void processAVTransportMessages(Map message) {
   if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
   if(message.body.contains('&lt;TransportState val=&quot;TRANSITIONING&quot;/&gt;')) { return } //Bail out if this AVTransport message is TRANSITIONING"
 
-  GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
-  parent?.processAVTransportMessages(this.device, propertyset)
+  parent?.processAVTransportMessages(this.device, message)
 }
 
 void processZoneGroupTopologyMessages(Map message) {
