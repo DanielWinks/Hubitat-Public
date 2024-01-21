@@ -125,14 +125,24 @@ Map localPlayerPage() {
 		name: "localPlayerPage",
 		title: "Discovery Started!",
 		nextPage: 'localPlayerSelectionPage',
-    refreshInterval: 3,
 		install: false,
 		uninstall: false
   ) {
     section("Please wait while we discover your Sonos. Discovery can take five minutes or more, so sit back and relax! Click Next once discovered.") {
-      paragraph ("Found Devices (${discoveredSonoses.size()}): ${foundDevices}")
+      paragraph (
+        "<span class='app-state-${app.id}-sonosDiscoveredCount'>Found Devices (0): </span>" +
+        "<span class='app-state-${app.id}-sonosDiscovered'></span>"
+      )
     }
   }
+}
+
+String getFoundSonoses() {
+  String foundDevices = ''
+  List<String> discoveredSonosesNames = discoveredSonoses.collect{ it.value?.name }
+  discoveredSonosesNames.sort()
+  discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
+  return foundDevices
 }
 
 Map localPlayerSelectionPage() {
@@ -150,7 +160,7 @@ Map localPlayerSelectionPage() {
     section("Select your device(s) below.") {
       input (
         name: 'playerDevices',
-        title: "Select Sonos (${discoveredSonoses.size()} found)",
+        title: "Select Sonos (${discoveredSonoses.size()} found):",
         type: 'enum',
         options: selectionOptions,
         multiple: true,
@@ -337,12 +347,16 @@ void createPlayerDevices() {
     if(cd) {
       logDebug("Not creating ${cd.getDataValue('name')}, child already exists.")
     } else {
-      logInfo("Creating Sonos Advanced Player device for ${playerInfo?.name}")
-      try {
-        cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
-      } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Player driver not found', e)}
+      if(playerInfo) {
+        logInfo("Creating Sonos Advanced Player device for ${playerInfo?.name}")
+        try {
+          cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
+        } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Player driver not found', e)}
+      } else {
+        logWarn("Attempted to create child device for ${dni} but did not find playerInfo")
+      }
     }
-    logDebug("Updating player info with latest info from discovery...")
+    logInfo("Updating player info with latest info from discovery...")
     playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
     cd.secondaryConfiguration()
   }
@@ -383,7 +397,6 @@ void ssdpEventHandler(Event event) {
   processParsedSsdpEvent(parsedEvent)
 }
 
-@CompileStatic
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event.networkAddress)
   String ipPort = convertHexToInt(event.deviceAddress)
@@ -430,8 +443,10 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     localUpnpUrl: "http://${ipAddress}:1400",
     localUpnpHost: "${ipAddress}:1400"
   ]
-  if(discoveredSonos?.name != null) {
+  if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
+    app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
+    app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
   } else {
     logTrace("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
   }
