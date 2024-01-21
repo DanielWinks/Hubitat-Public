@@ -23,7 +23,6 @@
       "namespace": "dwinks",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy",
       "required": true,
-      "oauth": false,
       "primary": true
     }
   ],
