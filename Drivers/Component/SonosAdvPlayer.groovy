@@ -189,7 +189,7 @@ void shuffleOff() { setShuffle('off') }
 
 void ungroupPlayer() { parent?.componentUngroupPlayerLocal(this.device) }
 
-void playText(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
+void playText(String text, BigDecimal volume = null) { devicePlayTextNoRestore(text, volume) }
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
@@ -201,6 +201,10 @@ void playTrackAndResume(String uri, BigDecimal volume = null) { parent?.componen
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   parent?.componentPlayTextLocal(this.device, text, volume, voice)
+}
+
+void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
+  parent?.componentPlayTextNoRestoreLocal(this.device, text, volume, voice)
 }
 
 void devicePlayTrack(String uri, BigDecimal volume = null) {
@@ -269,7 +273,6 @@ void loadFavorite(String favoriteId) {
   String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
-// void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode)
 
 void loadFavoriteFull(String favoriteId) {
   String queueMode = "REPLACE"
@@ -608,7 +611,13 @@ void parse(String raw) {
 // Parse Helper Methods
 // =============================================================================
 
-void processAVTransportMessages(Map message) { parent?.processAVTransportMessages(this.device, message) }
+void processAVTransportMessages(Map message) {
+  if(message.body.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
+  if(message.body.contains('&lt;TransportState val=&quot;TRANSITIONING&quot;/&gt;')) { return } //Bail out if this AVTransport message is TRANSITIONING"
+  GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
+  parent?.processAVTransportMessages(this.device, propertyset)
+}
+
 void processZoneGroupTopologyMessages(Map message) {
   String rincon = device.getDataValue('id')
   GPathResult propertyset = parseSonosMessageXML(message)
