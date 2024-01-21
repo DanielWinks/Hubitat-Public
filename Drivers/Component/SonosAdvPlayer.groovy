@@ -684,17 +684,20 @@ void processZoneGroupTopologyMessages(Map message) {
   if(currentGroupMemberNames.size() > 0) {device.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)}
   if(groupName) {device.sendEvent(name: 'groupName', value: groupName)}
 
-
-  String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@MoreInfo']
-  if(moreInfoString) {
-    Map moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0],it[1]]}
-    BigDecimal battTemp = new BigDecimal(moreInfo['BattTmp'])
-    List<Event> stats = [
-      [name: 'battery', value: moreInfo['BattPct'] as Integer, unit: '%' ],
-      [name: 'powerSource', value: moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains' ],
-      [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(battTemp) : battTemp, unit: getTemperatureScale() ],
-    ]
-    stats.each{ if(it) {updateChildBatteryStatus(it) }}
+  if(createBatteryStatusChildDevice) {
+    String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@MoreInfo']
+    if(moreInfoString) {
+      Map moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0],it[1]]}
+      if(moreInfo.containsKey('BattTmp') && moreInfo.containsKey('BattPct') && moreInfo.containsKey('BattChg')) {
+        BigDecimal battTemp = new BigDecimal(moreInfo['BattTmp'])
+        List<Event> stats = [
+          [name: 'battery', value: moreInfo['BattPct'] as Integer, unit: '%' ],
+          [name: 'powerSource', value: moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains' ],
+          [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(battTemp) : battTemp, unit: getTemperatureScale() ],
+        ]
+        stats.each{ if(it) {updateChildBatteryStatus(it) }}
+      }
+    }
   }
 
   String zonePlayerUUIDsInGroup = propertyset['property']['ZonePlayerUUIDsInGroup'].text()

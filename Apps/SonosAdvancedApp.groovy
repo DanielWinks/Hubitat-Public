@@ -526,11 +526,12 @@ LinkedHashMap getPlayerInfoLocalSync(String ipAddress) {
     contentType: 'application/json',
     ignoreSSLIssues: true
   ]
-  httpGet(params) { resp ->
-    if (resp && resp.data && resp.success) { return resp.data }
-    else {
-      logInfo("Connection refused for IP: ${ipAddress}. If this is a Sonos player, please report and issue.")
+  try {
+    httpGet(params) { resp ->
+      if (resp && resp.data && resp.success) { return resp.data }
     }
+  } catch(Exception e){
+    logInfo("Connection refused for IP: ${ipAddress}. If this is a Sonos player, please report and issue.")
   }
 }
 
@@ -802,6 +803,7 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
 void sendAVTransportEventsToGroup(DeviceWrapper cd) {
   List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(cd)
   String avtDni = cd.getDeviceNetworkId()
+  ChildDeviceWrapper coordinator = app.getChildDevice(avtDni)
   List<Map> avts = state.deviceAVTransportEvents[avtDni]?.avts
   Map avtCommands = state.deviceAVTransportEvents[avtDni]?.avtCommands
   groupedDevices.each{dev ->
@@ -811,13 +813,20 @@ void sendAVTransportEventsToGroup(DeviceWrapper cd) {
 }
 
 void updatePlayerCurrentStates(DeviceWrapper cd, String currentGroupCoordinatorId) {
+  if(!cd) {return}
+  if(!currentGroupCoordinatorId) {return}
   ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
   String avtDni = getDNIFromRincon(currentGroupCoordinatorId)
-  List<Map> avts = state.deviceAVTransportEvents[avtDni]?.avts
-  Map avtCommands = state.deviceAVTransportEvents[avtDni]?.avtCommands
-  avts.each{ child.sendEvent(it) }
-  avtCommands.each{ k,v -> child."${k}"(v) }
+  ChildDeviceWrapper coordinator = app.getChildDevice(avtDni)
+  if(state.deviceAVTransportEvents.containsKey(avtDni)) {
+    List<Map> avts = state.deviceAVTransportEvents[avtDni]?.avts
+    Map avtCommands = state.deviceAVTransportEvents[avtDni]?.avtCommands
+    avts.each{ child.sendEvent(it) }
+    avtCommands.each{ k,v -> child."${k}"(v) }
+  }
+  child.sendEvent(name: 'currentFavorite', value: coordinator.currentValue('currentFavorite', true))
 }
+
 
 void updateZoneGroupName(String zoneGroupName, LinkedHashSet<String> rinconsToUpdate) {
   List<ChildDeviceWrapper> childrenToUpdate = getDevicesFromRincons(rinconsToUpdate)
