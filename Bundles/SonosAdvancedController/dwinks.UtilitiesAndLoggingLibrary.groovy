@@ -79,7 +79,7 @@ void installed() {
 
   if (settings.logEnable) { runIn(1800, 'logsOff') }
   if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
-  if (settings.debugLogEnable) { runIn(1800, 'traceLogsOff') }
+  if (settings.traceLogEnable) { runIn(1800, 'traceLogsOff') }
 }
 
 void uninstalled() {
