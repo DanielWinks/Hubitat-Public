@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.3.17',
+    version: '0.3.18',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: true,
@@ -105,6 +105,8 @@ metadata {
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
+  attribute 'groupId', 'string'
+  attribute 'groupCoordinatorId', 'string'
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
@@ -662,6 +664,7 @@ void processZoneGroupTopologyMessages(Map message) {
   }
 
   device.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)
+  device.sendEvent(name: 'groupCoordinatorId', value: currentGroupCoordinatorId)
   device.updateDataValue('groupIds', groupedRincons.join(','))
 
   String groupId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
@@ -679,6 +682,7 @@ void processZoneGroupTopologyMessages(Map message) {
   }
 
   if(groupId) {device.updateDataValue('groupId', groupId)}
+  if(groupId) {device.sendEvent(name: 'groupId', value: groupId)}
   if(currentGroupCoordinatorName) {device.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)}
   device.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
   device.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
