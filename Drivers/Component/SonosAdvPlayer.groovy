@@ -27,6 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
+    version: '0.3.17',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: true,
@@ -620,7 +621,7 @@ void processZoneGroupTopologyMessages(Map message) {
   String rincon = device.getDataValue('id')
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
-  String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator']
+  String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator'].toString()
 
 
   Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
@@ -674,7 +675,7 @@ void processZoneGroupTopologyMessages(Map message) {
 
   String groupName = (propertyset['property']['ZoneGroupName'].text()).toString()
   if(groupName && groupedRincons) {
-    parent?.updateZoneGroupName(groupName, groupedRincons)
+    parent?.updateZoneGroupName(groupName, groupedRincons as List)
   }
 
   if(groupId) {device.updateDataValue('groupId', groupId)}
@@ -700,10 +701,10 @@ void processZoneGroupTopologyMessages(Map message) {
     }
   }
 
-  String zonePlayerUUIDsInGroup = propertyset['property']['ZonePlayerUUIDsInGroup'].text()
+  String zonePlayerUUIDsInGroup = (propertyset['property']['ZonePlayerUUIDsInGroup'].text()).toString()
   if(zonePlayerUUIDsInGroup) {
     List<String> playersInGroup = zonePlayerUUIDsInGroup.tokenize(',')
-    parent?.updateGroupDevices(playersInGroup[0], playersInGroup.tail())
+    parent?.updateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail() as List)
   }
 }
 

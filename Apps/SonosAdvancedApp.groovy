@@ -28,6 +28,7 @@ import com.hubitat.hub.domain.Location
 
 definition(
   name: 'Sonos Advanced Controller',
+  version: '0.3.17',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -149,7 +150,17 @@ Map localPlayerSelectionPage() {
   state.remove("discoveryRunning")
 	unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
 	unsubscribe(location, 'sdpTerm.ssdp:all')
-  Map selectionOptions = discoveredSonoses.collectEntries{id, player -> [(id): player.name]}
+  LinkedHashMap newlyDiscovered = discoveredSonoses.collectEntries{id, player -> [(id.toString()): player.name]}
+  LinkedHashMap previouslyCreated = getCurrentPlayerDevices().collectEntries{[(it.getDeviceNetworkId().toString()): it.getDataValue('name')]}
+  LinkedHashMap selectionOptions = previouslyCreated
+  Integer newlyFoundCount = 0
+  newlyDiscovered.each{ k,v ->
+    if(!selectionOptions.containsKey(k)) {
+      selectionOptions[k] = v
+      newlyFoundCount++
+    }
+  }
+
   dynamicPage(
 		name: "localPlayerSelectionPage",
 		title: "Select Sonos Devices",
@@ -160,7 +171,7 @@ Map localPlayerSelectionPage() {
     section("Select your device(s) below.") {
       input (
         name: 'playerDevices',
-        title: "Select Sonos (${discoveredSonoses.size()} found):",
+        title: "Select Sonos (${newlyFoundCount} newly found, ${getCurrentPlayerDevices().size()} previously created):",
         type: 'enum',
         options: selectionOptions,
         multiple: true,
@@ -174,7 +185,7 @@ Map localPlayerSelectionPage() {
         description: 'Click to show'
       )
       List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices.contains(p.getDeviceNetworkId()) )}
-      if(willBeRemoved.size() > 0) {
+      if(willBeRemoved.size() > 0 && !skipOrphanRemoval) {
         paragraph("The following devices will be removed: ${willBeRemoved.collect{it.getDataValue('name')}.join(', ')}")
       }
       List<String> willBeCreated = (settings.playerDevices - getCreatedPlayerDevices())
@@ -182,6 +193,7 @@ Map localPlayerSelectionPage() {
         String s = willBeCreated.collect{p -> selectionOptions.get(p)}.join(', ')
         paragraph("The following devices will be created: ${s}")
       }
+      input 'skipOrphanRemoval', 'bool', title: 'Add devices only/skip removal', required: false, defaultValue: false, submitOnChange: true
     }
   }
 }
@@ -360,16 +372,26 @@ void createPlayerDevices() {
     playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
     cd.secondaryConfiguration()
   }
-  removeOrphans()
+  if(!skipOrphanRemoval) {removeOrphans()}
 }
 
 void removeOrphans() {
-  app.getChildDevices().each{ child ->
+  getCurrentGroupDevices.each{ child ->
     String dni = child.getDeviceNetworkId()
-    if(dni in settings.playerDevices || dni in settings.groupDevices) { return }
+    if(dni in settings.groupDevices) { return }
     else {
-      logInfo("Removing child not found in selected devices list: ${child}")
+      logInfo("Removing group device not found in selected devices list: ${child}")
       app.deleteChildDevice(dni)
+    }
+  }
+  if(!skipOrphanRemoval) {
+    getCurrentPlayerDevices().each{ child ->
+      String dni = child.getDeviceNetworkId()
+      if(dni in settings.playerDevices) { return }
+      else {
+        logInfo("Removing player device not found in selected devices list: ${child}")
+        app.deleteChildDevice(dni)
+      }
     }
   }
 }
@@ -828,7 +850,7 @@ void updatePlayerCurrentStates(DeviceWrapper cd, String currentGroupCoordinatorI
 }
 
 
-void updateZoneGroupName(String zoneGroupName, LinkedHashSet<String> rinconsToUpdate) {
+void updateZoneGroupName(String zoneGroupName, List<String> rinconsToUpdate) {
   List<ChildDeviceWrapper> childrenToUpdate = getDevicesFromRincons(rinconsToUpdate)
   logTrace("Updating ${childrenToUpdate} with new group name.")
   childrenToUpdate.each{it.sendEvent(name: 'groupName', value: zoneGroupName)}
