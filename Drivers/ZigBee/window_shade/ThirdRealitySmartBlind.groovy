@@ -93,6 +93,7 @@ void setWindowShade(Map data) {
   } else if (adjLevel != CLOSED_LEVEL && adjLevel != OPEN_LEVEL){
     sendEvent([name:'windowShade', value: 'partially open'])
   }
+  if(adjLevel == 1) {adjLevel = 0}
   sendEvent(name: 'level', value: adjLevel)
   sendEvent(name: 'position', value: adjLevel)
 }
@@ -151,12 +152,12 @@ void scheduleValidation() {
 void validatePosition() {
   logDebug('Validating position...')
   Integer desiredPosition = state.desiredPosition
-  Integer currentPosition = device.currentValue('position')
-  if (desiredPosition && desiredPosition != currentPosition) {
-    setPosition(new BigDecimal(desiredPosition))
-  } else {
-    logDebug 'Desired position matches current position. Success!'
+  Integer currentPosition = device.currentValue('position', true)
+  if (desiredPosition == currentPosition) {
+    logDebug('Desired position matches current position. Success!')
     state.clear()
+  } else {
+    setPosition(new BigDecimal(desiredPosition))
   }
 }
 
