@@ -19,7 +19,7 @@
   "apps": [
     {
       "id": "a5e66956-f81b-40e8-ac79-28f7a5530a9a",
-      "name": "SonosAdvancedApp",
+      "name": "Sonos Advanced Controller",
       "namespace": "dwinks",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy",
       "required": true,
