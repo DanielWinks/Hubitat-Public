@@ -26,7 +26,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Battery Status',
-    version: '0.3.19',
+    version: '0.3.20',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,

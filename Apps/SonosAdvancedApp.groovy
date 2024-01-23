@@ -28,7 +28,7 @@ import com.hubitat.hub.domain.Location
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.3.19',
+  version: '0.3.20',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -535,7 +535,7 @@ List<ChildDeviceWrapper> getCurrentGroupDevices() {
 }
 
 List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
-  List<String> playerIds = [device.getDataValue('groupCoordinatorId')]
+  List<String> playerIds = [device.currentValue('groupCoordinatorId', true)]
   playerIds.addAll(device.getDataValue('playerIds').split(','))
   return playerIds
 }
@@ -585,11 +585,6 @@ void getPlayerInfoLocalCallback(AsyncResponse response, Map data) {
   String householdId = respJson?.householdId
   String playerId = respJson?.playerId
   String groupId = respJson?.groupId
-}
-
-String getGroupForPlayerDevice(DeviceWrapper device) {
-  logDebug("Got groupId for player: ${device.getDataValue('groupId')}")
-  return device.getDataValue('groupId')
 }
 
 void getZoneGroupAttributesAsync(DeviceWrapper device, String callbackMethod = 'getZoneGroupAttributesAsyncCallback', Map data = null) {
@@ -824,7 +819,6 @@ void processAVTransportMessages(DeviceWrapper cd, Map message) {
   }
   state.deviceAVTransportEvents[avtDni] = [avts:avts, avtCommands:avtCommands]
   sendAVTransportEventsToGroup(cd)
-  isFavoritePlaying(cd)
 }
 
 void sendAVTransportEventsToGroup(DeviceWrapper cd) {
@@ -855,15 +849,15 @@ void updatePlayerCurrentStates(DeviceWrapper cd, String currentGroupCoordinatorI
 }
 
 
-void updateZoneGroupName(String zoneGroupName, List<String> rinconsToUpdate) {
+void updateZoneGroupName(String zoneGroupName, LinkedHashSet rinconsToUpdate) {
   List<ChildDeviceWrapper> childrenToUpdate = getDevicesFromRincons(rinconsToUpdate)
   logTrace("Updating ${childrenToUpdate} with new group name.")
   childrenToUpdate.each{it.sendEvent(name: 'groupName', value: zoneGroupName)}
 }
 
-void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
+void updateGroupDevices(String coordinatorId, ArrayList playersInGroup) {
   // Update group device with current on/off state
-  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll{gds -> gds.getDataValue('groupCoordinatorId') == coordinatorId }
+  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll{gds -> gds.currentValue('groupCoordinatorId', true) == coordinatorId }
   groupsForCoord.each{gd ->
     List<String> playerIds = gd.getDataValue('playerIds').tokenize(',')
     Boolean allPlayersAreGrouped = playersInGroup.containsAll(playerIds) && playersInGroup.size() == playerIds.size()
@@ -999,7 +993,7 @@ void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume
     Map params = [uri: uri]
     sendLocalJsonAsync(params: params, data: data)
   } else {
-    String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+    String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
     ChildDeviceWrapper coordinatorDevice = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
     List<String> followers = device.getDataValue('playerIds').tokenize(',')
     List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
@@ -1042,13 +1036,13 @@ void componentPlayAudioClipLocal(DeviceWrapper device, String streamUrl, BigDeci
 }
 
 void removeAllTracksFromQueue(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map params = getSoapActionParams(ip, AVTransport, 'RemoveAllTracksFromQueue')
   asynchttpPost(callbackMethod, params)
 }
 
 void setAVTransportURIAndPlay(DeviceWrapper device, String currentURI, String currentURIMetaData = null) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map controlValues = [CurrentURI: currentURI, CurrentURIMetaData: currentURIMetaData]
   if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
@@ -1063,7 +1057,7 @@ void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
 }
 
 void setAVTransportURI(DeviceWrapper device, String currentURI, String currentURIMetaData = null) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map controlValues = [CurrentURI: currentURI, CurrentURIMetaData: currentURIMetaData]
   if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
@@ -1072,7 +1066,7 @@ void setAVTransportURI(DeviceWrapper device, String currentURI, String currentUR
 }
 
 void addURIToQueue(DeviceWrapper device, String enqueuedURI, String currentURIMetaData = null) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map controlValues = [EnqueuedURI: enqueuedURI, CurrentURIMetaData: currentURIMetaData]
   if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
   Map params = getSoapActionParams(ip, AVTransport, 'AddURIToQueue', controlValues)
@@ -1224,31 +1218,31 @@ void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
 }
 
 void componentPlayLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map params = getSoapActionParams(ip, AVTransport, 'Play')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentPauseLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map params = getSoapActionParams(ip, AVTransport, 'Pause')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentStopLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map params = getSoapActionParams(ip, AVTransport, 'Stop')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentNextTrackLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map params = getSoapActionParams(ip, AVTransport, 'Next')
   asynchttpPost('localControlCallback', params)
 }
 
 void componentPreviousTrackLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.getDataValue('groupCoordinatorId'))
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
   Map params = getSoapActionParams(ip, AVTransport, 'Previous')
   asynchttpPost('localControlCallback', params)
 }
@@ -1259,7 +1253,7 @@ void componentPreviousTrackLocal(DeviceWrapper device) {
 void componentGroupPlayersLocal(DeviceWrapper device) {
   logDebug('Adding players to group...')
   String householdId = device.getDataValue('householdId')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
   List playerIds = device.getDataValue('playerIds').split(',')
   ChildDeviceWrapper coordinator = getDeviceFromRincon(groupCoordinatorId)
   if(coordinator.getDataValue('isGroupCoordinator') == 'false') {
@@ -1276,7 +1270,7 @@ void componentGroupPlayersLocal(DeviceWrapper device) {
 
 void componentJoinPlayersToCoordinatorLocal(DeviceWrapper device) {
   logDebug('Adding players to coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
   List playerIds = device.getDataValue('playerIds').split(',')
   String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
   Map data = ['playerIds': [groupCoordinatorId] + playerIds]
@@ -1289,7 +1283,7 @@ void componentJoinPlayersToCoordinatorLocal(DeviceWrapper device) {
 
 void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
   logDebug('Removing players from coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
   ChildDeviceWrapper cd = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
   if(cd.getDataValue('isGroupCoordinator') == 'false') {
     logWarn('Can not remove players from coordinator. Coordinator for this defined group is not currently a group coordinator.')
@@ -1322,7 +1316,7 @@ void componentUngroupPlayerLocalSync(DeviceWrapper device) {
 }
 
 void componentUngroupPlayersLocal(DeviceWrapper device) {
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
   List<String> playerIds = device.getDataValue('playerIds').tokenize(',')
   List<String> allPlayers = [groupCoordinatorId] + playerIds
   List<ChildDeviceWrapper> allPlayerDevices = getDevicesFromRincons(allPlayers)
@@ -1441,10 +1435,7 @@ void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
 
 void isFavoritePlaying(DeviceWrapper device) {
   if(!favMatching) {return}
-  Boolean isGroupCoordinator = device.getDataValue('isGroupCoordinator') == 'true'
-  if(favMatching && isGroupCoordinator) {
-    runInMillis(2000, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
-  }
+  runInMillis(2000, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
 }
 
 void isFavoritePlayingAsync(Map data) {
@@ -1513,7 +1504,7 @@ void componentUpdatePlayerInfo(DeviceWrapper device) {
 
 void componentSetPlayModesLocal(DeviceWrapper device, Map playModes) {
   logDebug('Setting Play Modes...')
-  String groupId = device.getDataValue('groupId')
+  String groupId = currentValue('groupId', true)
   String localApiUrl = getLocalApiUrlForPlayer(device)
   String endpoint = "groups/${groupId}/playback/playMode"
   String uri = "${localApiUrl}${endpoint}"
@@ -1522,7 +1513,7 @@ void componentSetPlayModesLocal(DeviceWrapper device, Map playModes) {
 }
 
 String getLocalApiUrlForPlayer(DeviceWrapper device) {
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
+  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
   String localApiUrl = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localApiUrl')
   return localApiUrl
 }

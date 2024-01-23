@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.3.19',
+    version: '0.3.20',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: true,
@@ -150,6 +150,9 @@ void configure() {
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
   runIn(5, 'secondaryConfiguration')
+  device.removeDataValue('groupCoordinatorId')
+  device.removeDataValue('isGroupCoordinator')
+  device.removeDataValue('groupId')
 }
 
 void secondaryConfiguration() {
@@ -262,6 +265,7 @@ void subscribeToEvents() {
   subscribeToZgtEvents()
   subscribeToMrGrcEvents()
   subscribeToMrRcEvents()
+  subscribeToGMEvents()
 }
 
 void getFavorites() {
@@ -591,8 +595,10 @@ void parse(String raw) {
   if(message.body == null) {return}
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
   if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    if(this.device.getDataValue('isGroupCoordinator') == 'true') {
+    logDebug(device.currentValue('isGroupCoordinator', true))
+    if(device.currentValue('isGroupCoordinator', true) == 'on') {
       processAVTransportMessages(message)
+      parent?.isFavoritePlaying(this.device)
     }
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
@@ -603,6 +609,9 @@ void parse(String raw) {
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
     processGroupRenderingControlMessages(message)
+  }
+  else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
+    processGroupManagementMessages(message)
   }
   else {
     logDebug("Could not determine service type for message: ${message}")
@@ -623,24 +632,6 @@ void processZoneGroupTopologyMessages(Map message) {
   String rincon = device.getDataValue('id')
   GPathResult propertyset = parseSonosMessageXML(message)
   GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
-  String currentGroupCoordinatorId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@Coordinator'].toString()
-
-
-  Boolean isGroupCoordinator = currentGroupCoordinatorId == rincon
-  if(isGroupCoordinator && !device.getDataValue('sid1')) { subscribeToAVTransport() }
-
-  Boolean previouslyWasGroupCoordinator = device.getDataValue('isGroupCoordinator') == 'true'
-  if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
-    logDebug("Just removed from group!")
-  }
-  if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
-    logDebug("Just added to group!")
-    unsubscribeFromAVTransport()
-    parent?.updatePlayerCurrentStates(this.device, currentGroupCoordinatorId)
-  }
-
-  device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
-  device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
 
   LinkedHashSet<String> groupedRincons = new LinkedHashSet()
   GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
@@ -663,11 +654,7 @@ void processZoneGroupTopologyMessages(Map message) {
     }
   }
 
-  device.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)
-  device.sendEvent(name: 'groupCoordinatorId', value: currentGroupCoordinatorId)
   device.updateDataValue('groupIds', groupedRincons.join(','))
-
-  String groupId = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent()['@ID']
   String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
 
   LinkedHashSet currentGroupMemberNames = []
@@ -678,11 +665,9 @@ void processZoneGroupTopologyMessages(Map message) {
 
   String groupName = (propertyset['property']['ZoneGroupName'].text()).toString()
   if(groupName && groupedRincons) {
-    parent?.updateZoneGroupName(groupName, groupedRincons as List)
+    parent?.updateZoneGroupName(groupName, groupedRincons)
   }
 
-  if(groupId) {device.updateDataValue('groupId', groupId)}
-  if(groupId) {device.sendEvent(name: 'groupId', value: groupId)}
   if(currentGroupCoordinatorName) {device.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)}
   device.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
   device.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
@@ -708,8 +693,30 @@ void processZoneGroupTopologyMessages(Map message) {
   String zonePlayerUUIDsInGroup = (propertyset['property']['ZonePlayerUUIDsInGroup'].text()).toString()
   if(zonePlayerUUIDsInGroup) {
     List<String> playersInGroup = zonePlayerUUIDsInGroup.tokenize(',')
-    parent?.updateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail() as List)
+    parent?.updateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail())
   }
+}
+
+void processGroupManagementMessages(Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+  String localGroupUUID = (propertyset['property']['LocalGroupUUID'].text()).toString()
+  Boolean isGroupCoordinator = (propertyset['property']['GroupCoordinatorIsLocal'].text()).toString() == '1'
+  String coordinatorRincon = localGroupUUID.tokenize(':')[0]
+  Boolean previouslyWasGroupCoordinator = device.currentValue('isGroupCoordinator', true) == 'on'
+  logDebug("Is group coordinator = ${isGroupCoordinator}")
+  if(isGroupCoordinator && !device.getDataValue('sid1')) { subscribeToAVTransport() }
+  if(isGroupCoordinator == true && previouslyWasGroupCoordinator == false) {
+    logDebug("Just removed from group!")
+  }
+  if(isGroupCoordinator == false && previouslyWasGroupCoordinator ==  true) {
+    logDebug("Just added to group!")
+    unsubscribeFromAVTransport()
+    parent?.updatePlayerCurrentStates(this.device, coordinatorRincon)
+  }
+
+  device.sendEvent(name: 'groupId', value: localGroupUUID)
+  device.sendEvent(name: 'groupCoordinatorId', value: coordinatorRincon)
+  device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
 }
 
 void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
@@ -775,6 +782,7 @@ String getDNI() {return device.getDeviceNetworkId()}
 @Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
 @Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
+@Field private final String GM_EVENTS    =  '/GroupManagement/Event'
 
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
@@ -962,6 +970,49 @@ void resubscribeToMrGrcCallback(HubResponse response) {
     logDebug('Sucessfully resubscribed to MediaRenderer/GroupRenderingControl')
     if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
     if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
+  }
+}
+
+// /////////////////////////////////////////////////////////////////////////////
+// '/GroupManagement/Event' //sid5
+// /////////////////////////////////////////////////////////////////////////////
+void subscribeToGMEvents() {
+  if(device.getDataValue('sid5')) { resubscribeToGMEvents() }
+  else {
+    sonosEventSubscribe(GM_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/gm', 'subscribeToGMCallback')
+    unschedule('resubscribeToGMEvents')
+    runIn(RESUB_INTERVAL-100, 'resubscribeToGMEvents')
+  }
+}
+
+void subscribeToGMCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to subscribe to GroupManagement. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid5')
+    runIn(60, 'subscribeToGMEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully subscribed to GroupManagement')
+    if(response.headers["SID"]) {device.updateDataValue('sid5', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid5', response.headers["sid"])}
+  }
+}
+
+void resubscribeToGMEvents() {
+  if(device.getDataValue('sid5')) {
+    sonosEventRenew(GM_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid5'), 'resubscribeToGMCallback')
+  } else { subscribeToMrRcEvents() }
+  runIn(RESUB_INTERVAL-100, 'resubscribeToGMEvents')
+}
+
+void resubscribeToGMCallback(HubResponse response) {
+  if(response.status == 412){
+    logWarn('Failed to resubscribe to GroupManagement. Will trying subscribing again in 60 seconds.')
+    device.removeDataValue('sid5')
+    runIn(60, 'subscribeToGMEvents')
+  } else if(response.status == 200) {
+    logDebug('Sucessfully resubscribed to GroupManagement')
+    if(response.headers["SID"]) {device.updateDataValue('sid5', response.headers["SID"])}
+    if(response.headers["sid"]) {device.updateDataValue('sid5', response.headers["sid"])}
   }
 }
 
