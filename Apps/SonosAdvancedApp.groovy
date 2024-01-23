@@ -28,7 +28,7 @@ import com.hubitat.hub.domain.Location
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.3.18',
+  version: '0.3.19',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -160,6 +160,7 @@ Map localPlayerSelectionPage() {
       newlyFoundCount++
     }
   }
+  if(!settings.playerDevices) {settings.playerDevices = []}
 
   dynamicPage(
 		name: "localPlayerSelectionPage",
@@ -376,7 +377,7 @@ void createPlayerDevices() {
 }
 
 void removeOrphans() {
-  getCurrentGroupDevices.each{ child ->
+  getCurrentGroupDevices().each{ child ->
     String dni = child.getDeviceNetworkId()
     if(dni in settings.groupDevices) { return }
     else {
@@ -553,7 +554,7 @@ LinkedHashMap getPlayerInfoLocalSync(String ipAddress) {
       if (resp && resp.data && resp.success) { return resp.data }
     }
   } catch(Exception e){
-    logInfo("Connection refused for IP: ${ipAddress}. If this is a Sonos player, please report and issue.")
+    logInfo("Could not connect to: ${ipAddress}. If this is a Sonos player, please report an issue. Note that RIGHT channel speakers on a stereo pair, subwoofers, or rear channel speakers this is expected. Only LEFT channel in stereo pairs (or Arc/Beam in a center + rear setup) will respond.")
   }
 }
 
@@ -564,9 +565,13 @@ GPathResult getDeviceDescriptionLocalSync(String ipAddress) {
     requestContentType: 'application/xml',
     contentType: 'application/xml'
   ]
-  httpGet(params) { resp ->
-    if (resp && resp.data && resp.success) { return resp.data }
-    else { logError(resp.data) }
+  try {
+    httpGet(params) { resp ->
+      if (resp && resp.data && resp.success) { return resp.data }
+      else { logError(resp.data) }
+    }
+  } catch(Exception e){
+    logInfo("Could not connect to: ${ipAddress}. If this is a Sonos player, please report an issue. Note that RIGHT channel speakers on a stereo pair, subwoofers, or rear channel speakers this is expected. Only LEFT channel in stereo pairs (or Arc/Beam in a center + rear setup) will respond.")
   }
 }
 
