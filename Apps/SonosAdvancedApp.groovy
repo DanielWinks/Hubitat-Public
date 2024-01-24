@@ -1316,7 +1316,7 @@ void componentUngroupPlayerLocalSync(DeviceWrapper device) {
 }
 
 void componentUngroupPlayersLocal(DeviceWrapper device) {
-  String groupCoordinatorId = device.getData('groupCoordinatorId')
+  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
   List<String> playerIds = device.getDataValue('playerIds').tokenize(',')
   List<String> allPlayers = [groupCoordinatorId] + playerIds
   List<ChildDeviceWrapper> allPlayerDevices = getDevicesFromRincons(allPlayers)
