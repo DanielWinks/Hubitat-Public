@@ -141,12 +141,12 @@ metadata {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
-  createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)
-  createRemoveShuffleChildDevice(createShuffleChildDevice)
-  createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
-  createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)
-  createRemoveMuteChildDevice(createMuteChildDevice)
-  createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
+  if(createCrossfadeChildDevice) {createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)}
+  if(createShuffleChildDevice) {createRemoveShuffleChildDevice(createShuffleChildDevice)}
+  if(createRepeatOneChildDevice) {createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)}
+  if(createRepeatAllChildDevice) {createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)}
+  if(createMuteChildDevice) {createRemoveMuteChildDevice(createMuteChildDevice)}
+  if(createBatteryStatusChildDevice) {createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)}
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
   runIn(5, 'secondaryConfiguration')
