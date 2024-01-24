@@ -150,9 +150,6 @@ void configure() {
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
   runIn(5, 'secondaryConfiguration')
-  device.removeDataValue('groupCoordinatorId')
-  device.removeDataValue('isGroupCoordinator')
-  device.removeDataValue('groupId')
 }
 
 void secondaryConfiguration() {
@@ -715,8 +712,11 @@ void processGroupManagementMessages(Map message) {
   }
 
   device.sendEvent(name: 'groupId', value: localGroupUUID)
+  device.updateDataValue(name: 'groupId', value: localGroupUUID)
   device.sendEvent(name: 'groupCoordinatorId', value: coordinatorRincon)
+  device.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)
   device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
+  device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
 }
 
 void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
