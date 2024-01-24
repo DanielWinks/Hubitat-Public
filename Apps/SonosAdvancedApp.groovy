@@ -1502,7 +1502,7 @@ void componentUpdatePlayerInfo(DeviceWrapper device) {
 
 void componentSetPlayModesLocal(DeviceWrapper device, Map playModes) {
   logDebug('Setting Play Modes...')
-  String groupId = currentValue('groupId', true)
+  String groupId = device.currentValue('groupId', true)
   String localApiUrl = getLocalApiUrlForPlayer(device)
   String endpoint = "groups/${groupId}/playback/playMode"
   String uri = "${localApiUrl}${endpoint}"
