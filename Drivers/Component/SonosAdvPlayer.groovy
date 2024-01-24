@@ -712,9 +712,9 @@ void processGroupManagementMessages(Map message) {
   }
 
   device.sendEvent(name: 'groupId', value: localGroupUUID)
-  device.updateDataValue(name: 'groupId', value: localGroupUUID)
+  device.updateDataValue('groupId', localGroupUUID)
   device.sendEvent(name: 'groupCoordinatorId', value: coordinatorRincon)
-  device.updateDataValue('groupCoordinatorId', currentGroupCoordinatorId)
+  device.updateDataValue('groupCoordinatorId', coordinatorRincon)
   device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
   device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
 }
