@@ -1298,14 +1298,14 @@ void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
 void componentUngroupPlayerLocal(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
   String ip = device.getDataValue('localUpnpHost')
   Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logDebug("componentUngroupPlayerLocal Params: ${params}")
+  logTrace("componentUngroupPlayerLocal Params: ${params}")
   asynchttpPost(callbackMethod, params)
 }
 
 void componentUngroupPlayerLocalSync(DeviceWrapper device) {
   String ip = device.getDataValue('localUpnpHost')
   Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logDebug("componentUngroupPlayerLocalSync Params: ${params}")
+  logTrace("componentUngroupPlayerLocalSync Params: ${params}")
   httpPost(params) { resp ->
     if (resp && resp.data && resp.success) {
       GPathResult xml = resp.data
