@@ -115,6 +115,8 @@ Map localPlayerPage() {
     subscribeToSsdpEvents(location)
     ssdpDiscover()
     state.discoveryRunning = true
+    app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+
   }
 
   dynamicPage(
@@ -145,7 +147,6 @@ Map localPlayerSelectionPage() {
   state.remove("discoveryRunning")
 	unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
 	unsubscribe(location, 'sdpTerm.ssdp:all')
-  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   LinkedHashMap newlyDiscovered = discoveredSonoses.collectEntries{id, player -> [(id.toString()): player.name]}
   LinkedHashMap previouslyCreated = getCurrentPlayerDevices().collectEntries{[(it.getDeviceNetworkId().toString()): it.getDataValue('name')]}
   LinkedHashMap selectionOptions = previouslyCreated
@@ -156,7 +157,6 @@ Map localPlayerSelectionPage() {
       newlyFoundCount++
     }
   }
-  if(!settings.playerDevices) {settings.playerDevices = []}
 
   dynamicPage(
 		name: "localPlayerSelectionPage",
