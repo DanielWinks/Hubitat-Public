@@ -79,7 +79,7 @@ void installed() {
 
   if (settings.logEnable) { runIn(1800, 'logsOff') }
   if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
-  if (settings.debugLogEnable) { runIn(1800, 'traceLogsOff') }
+  if (settings.traceLogEnable) { runIn(1800, 'traceLogsOff') }
 }
 
 void uninstalled() {
@@ -90,9 +90,8 @@ void uninstalled() {
 
 void updated() {
   logDebug('Updated...')
-  try {
-    configure()
-  } catch(e) {
+  try { configure() }
+  catch(e) {
     logWarn("No configure() method defined or configure() resulted in error: ${e}")
   }
 }
@@ -201,7 +200,7 @@ String prettyJson(Map jsonInput) {
 
 String nowFormatted() {
   if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
-  else                  return new Date().format('yyyy MMM dd EEE h:mm:ss a')
+  else                  return new Date().format('yyyy-MMM-dd h:mm:ss a')
 }
 
 @CompileStatic
