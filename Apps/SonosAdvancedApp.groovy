@@ -116,7 +116,6 @@ Map localPlayerPage() {
     ssdpDiscover()
     state.discoveryRunning = true
     app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-
   }
 
   dynamicPage(
@@ -436,7 +435,6 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     return
   }
 
-
   LinkedHashMap playerInfoDevice = playerInfo?.device as LinkedHashMap
 
   String modelName = deviceDescription['device']['modelName']
@@ -450,6 +448,10 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   String playerId = playerInfo?.playerId
   String groupId = playerInfo?.groupId
   List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
+
+  if(event?.mac && playerInfoDevice?.name) {
+    logInfo("Received SSDP event response for MAC: ${event.mac}, device name: ${playerInfoDevice?.name}")
+  }
 
   LinkedHashMap discoveredSonos = [
     name: playerName,
