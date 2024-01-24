@@ -47,8 +47,8 @@ preferences {
   page(name: 'localPlayerSelectionPage')
   page(name: 'groupPage')
 }
-@Field static Map playerSelectionOptions = new LinkedHashMap()
-@Field static Map discoveredSonoses = new LinkedHashMap()
+@Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
+@Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 
 @Field static Map SOURCES = [
   "\$": "None",
@@ -115,12 +115,7 @@ Map localPlayerPage() {
     subscribeToSsdpEvents(location)
     ssdpDiscover()
     state.discoveryRunning = true
-    discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
   }
-  app.removeSetting('playerDevices')
-  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-  String foundDevices = ''
-  discoveredSonoses.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos.value?.name}" }
 
   dynamicPage(
 		name: "localPlayerPage",
@@ -150,6 +145,7 @@ Map localPlayerSelectionPage() {
   state.remove("discoveryRunning")
 	unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
 	unsubscribe(location, 'sdpTerm.ssdp:all')
+  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   LinkedHashMap newlyDiscovered = discoveredSonoses.collectEntries{id, player -> [(id.toString()): player.name]}
   LinkedHashMap previouslyCreated = getCurrentPlayerDevices().collectEntries{[(it.getDeviceNetworkId().toString()): it.getDataValue('name')]}
   LinkedHashMap selectionOptions = previouslyCreated
@@ -426,16 +422,18 @@ void processParsedSsdpEvent(LinkedHashMap event) {
 
   LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
   if(playerInfo) {
-    logTrace("Discovered playerInfo for ${ipAddress}: ${playerInfo}")
+    logTrace("Discovered playerInfo for ${ipAddress}")
   } else {
     logTrace("Did not receive playerInfo for ${ipAddress}")
+    return
   }
 
   GPathResult deviceDescription = getDeviceDescriptionLocalSync("${ipAddress}")
   if(deviceDescription) {
-    logTrace("Discovered device description for ${ipAddress}: ${XmlUtil.serialize(deviceDescription)}")
+    logTrace("Discovered device description for ${ipAddress}")
   } else {
     logTrace("Did not receive device description for ${ipAddress}")
+    return
   }
 
 
@@ -471,7 +469,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
     app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
   } else {
-    logTrace("Device responded to SSDP discovery, but did not provide device description: ${discoveredSonos}")
+    logTrace("Device id:${discoveredSonos?.id} responded to SSDP discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
 }
 
@@ -993,7 +991,7 @@ void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume
     Map params = [uri: uri]
     sendLocalJsonAsync(params: params, data: data)
   } else {
-    String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
+    String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
     ChildDeviceWrapper coordinatorDevice = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
     List<String> followers = device.getDataValue('playerIds').tokenize(',')
     List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
