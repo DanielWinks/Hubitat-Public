@@ -28,7 +28,7 @@ import com.hubitat.hub.domain.Location
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.3.24',
+  version: '0.3.25',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
