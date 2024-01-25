@@ -28,7 +28,7 @@ import com.hubitat.hub.domain.Location
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.3.23',
+  version: '0.3.24',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -451,6 +451,21 @@ void processParsedSsdpEvent(LinkedHashMap event) {
 
   if(event?.mac && playerInfoDevice?.name) {
     logInfo("Received SSDP event response for MAC: ${event.mac}, device name: ${playerInfoDevice?.name}")
+  }
+
+  if(event?.mac == null) {
+    mac = getMACFromIP(ipAddress)
+    logWarn("Had to re-request MAC address, likely caused by misbehaving networking gear. Second attempt to get MAC resulted in ${mac}")
+    if(!mac) {
+      logWarn('Second attempt to get MAC for device failed. Attempting 3rd MAC address retrieval...')
+      mac = (deviceDescription['device']['MACAddress']).toString().replace(':','')
+      if(mac) {
+        logWarn("Successfully obtained MAC address: ${mac}")
+      } else {
+        logWarn('Could not get MAC address.')
+        return
+      }
+    }
   }
 
   LinkedHashMap discoveredSonos = [
