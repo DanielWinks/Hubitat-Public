@@ -439,9 +439,9 @@ void processParsedSsdpEvent(LinkedHashMap event) {
 
   String modelName = deviceDescription['device']['modelName']
 	String ssdpPath = event?.ssdpPath
-	String mac = event?.mac as String
+	String mac = (deviceDescription['device']['MACAddress']).toString().replace(':','')
   String playerName = playerInfoDevice?.name
-  String playerDni = event?.mac
+  String playerDni = mac
   String swGen = playerInfoDevice?.swGen
   String websocketUrl = playerInfoDevice?.websocketUrl
   String householdId = playerInfo?.householdId
@@ -449,23 +449,8 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   String groupId = playerInfo?.groupId
   List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
 
-  if(event?.mac && playerInfoDevice?.name) {
-    logInfo("Received SSDP event response for MAC: ${event.mac}, device name: ${playerInfoDevice?.name}")
-  }
-
-  if(event?.mac == null) {
-    mac = getMACFromIP(ipAddress)
-    logWarn("Had to re-request MAC address, likely caused by misbehaving networking gear. Second attempt to get MAC resulted in ${mac}")
-    if(!mac) {
-      logWarn('Second attempt to get MAC for device failed. Attempting 3rd MAC address retrieval...')
-      mac = (deviceDescription['device']['MACAddress']).toString().replace(':','')
-      if(mac) {
-        logWarn("Successfully obtained MAC address: ${mac}")
-      } else {
-        logWarn('Could not get MAC address.')
-        return
-      }
-    }
+  if(mac && playerInfoDevice?.name) {
+    logInfo("Received SSDP event response for MAC: ${mac}, device name: ${playerInfoDevice?.name}")
   }
 
   LinkedHashMap discoveredSonos = [
