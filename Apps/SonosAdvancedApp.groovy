@@ -49,6 +49,7 @@ preferences {
 }
 @Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
+@Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 
 @Field static Map SOURCES = [
   "\$": "None",
@@ -312,10 +313,8 @@ void configure() {
       it.sendEvent(name: 'currentFavorite', value: value)
     }
     state.remove('favs')
-    unschedule('appGetFavoritesLocal')
-  } else {
-    runIn(3, 'appGetFavoritesLocal', [overwrite: true])
   }
+  unschedule('appGetFavoritesLocal')
 }
 
 // =============================================================================
@@ -368,6 +367,17 @@ void createPlayerDevices() {
     playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
     cd.secondaryConfiguration()
   }
+  discoveredSonosSecondaries.each{ k,v ->
+    ChildDeviceWrapper primary = getDeviceFromRincon(v.primaryDeviceId)
+
+    List<String> secondaryWebsocketUrls = primary.getDataValue('secondaryWebsocketUrls') ? primary.getDataValue('secondaryWebsocketUrls').tokenize(',') : []
+    secondaryWebsocketUrls.add(v.websocketUrl)
+    primary.updateDataValue('secondaryWebsocketUrls', secondaryWebsocketUrls.join(','))
+
+    List<String> secondaryIds = primary.getDataValue('secondaryIds') ? primary.getDataValue('secondaryIds').tokenize(',') : []
+    secondaryIds.add(v.id)
+    primary.updateDataValue('secondaryIds', secondaryIds.join(','))
+  }
   if(!skipOrphanRemoval) {removeOrphans()}
 }
 
@@ -399,6 +409,7 @@ void removeOrphans() {
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
+  discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
 }
@@ -466,6 +477,23 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     localUpnpUrl: "http://${ipAddress}:1400",
     localUpnpHost: "${ipAddress}:1400"
   ]
+  if(playerInfoDevice?.primaryDeviceId && playerInfoDevice?.capabilities.contains('AUDIO_CLIP')) {
+    LinkedHashMap discoveredSonosSecondary = [
+      primaryDeviceId: playerInfoDevice?.primaryDeviceId,
+      id: playerId,
+      swGen: swGen,
+      capabilities: deviceCapabilities,
+      modelName: modelName,
+      householdId: householdId,
+      websocketUrl: websocketUrl,
+      deviceIp: "${ipAddress}",
+      localApiUrl: "https://${ipAddress}:1443/api/v1/",
+      localUpnpUrl: "http://${ipAddress}:1400",
+      localUpnpHost: "${ipAddress}:1400"
+    ]
+    discoveredSonosSecondaries[mac] = discoveredSonosSecondary
+    logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+  }
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
     app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
@@ -1074,10 +1102,6 @@ void addURIToQueue(DeviceWrapper device, String enqueuedURI, String currentURIMe
   asynchttpPost('localControlCallback', params)
 }
 
-void rebootPlayer(DeviceWrapper device) {
-  // http://<sonos_ip>:1400/reboot //TODO FINISH THIS
-}
-
 String getMetaData(String title = '', String service = 'SA_RINCON65031_') {
   return  (
     '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
@@ -1177,13 +1201,6 @@ void componentMuteGroupLocal(DeviceWrapper device, Boolean desiredMute) {
   asynchttpPost('localControlCallback', params)
 }
 
-void componentSetPlayerRelativeLevelLocal(DeviceWrapper device, Integer adjustment) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map controlValues = [Adjustment: adjustment]
-  Map params = getSoapActionParams(ip, RenderingControl, 'SetRelativeVolume', controlValues)
-  asynchttpPost('localControlCallback', params)
-}
-
 void componentSetGroupRelativeLevelLocal(DeviceWrapper device, Integer adjustment) {
   DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
   String ip = coordinator.getDataValue('localUpnpHost')
@@ -1199,53 +1216,7 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
 }
-// void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
-//   getZoneGroupAttributesAsync(device, 'componentSetGroupLevelLocalCallback', [level:level, rincon:device.getDataValue('id')])
-// }
 
-// void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
-//   if(!responseIsValid(response, 'componentSetGroupLevelLocalCallback')) { return }
-//   GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
-//   List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
-//   groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
-// }
-
-void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map controlValues = [DesiredMute: desiredMute]
-  Map params = getSoapActionParams(ip, RenderingControl, 'SetMute', controlValues)
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentPlayLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Play')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentPauseLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Pause')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentStopLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Stop')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentNextTrackLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Next')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentPreviousTrackLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Previous')
-  asynchttpPost('localControlCallback', params)
-}
 
 // /////////////////////////////////////////////////////////////////////////////
 // Grouping and Ungrouping
@@ -1343,94 +1314,14 @@ void componentLoadFavoriteFullLocal(DeviceWrapper device, String favoriteId, Str
   sendLocalJsonAsync(params: params, data: data)
 }
 
-void componentGetFavoritesLocal(DeviceWrapper device) {
-  logDebug('Getting favorites...')
-  String householdId = device.getDataValue('householdId')
-
-  String localApiUrl = "${device.getDataValue('localApiUrl')}"
-  String endpoint = "households/${householdId}/favorites"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalQueryAsync(params: params, callbackMethod: 'getFavoritesLocalCallback', data:[dni: device.getDeviceNetworkId()])
-  if(favMatching) {appGetFavoritesLocal()}
-}
-
-void getFavoritesLocalCallback(AsyncResponse response, Map data = null) {
-  ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  if (response.hasError()) {
-    logError("componentGetFavoritesLocal error: ${response.getErrorData()}")
-    return
-  }
-  List respData = response.getJson().items
-  Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
-  // state.favs
-  // logDebug("formatted response: ${prettyJson(formatted)}")
-  formatted.each(){it ->
-    String albumArtURI = it.value?.imageUrl
-    if(albumArtURI?.startsWith('/')) {
-      child.sendEvent(
-        name: "Favorite #${it.key} ${it.value?.name}",
-        value: "<br><img src=\"${child.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >",
-        isStateChange: false
-      )
-    } else {
-      child.sendEvent(
-        name: "Favorite #${it.key} ${it.value?.name}",
-        value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >",
-        isStateChange: false
-      )
-    }
-  }
-}
-
 List<String> getUniqueHouseholds() {
   List<ChildDeviceWrapper> children = app.getChildDevices()
   List<String> households = children.collect{cd -> cd.getDataValue('householdId')}.unique{a,b -> a <=> b}
   return households
 }
 
-void appGetFavoritesLocal() {
-  logDebug("Getting (app) favorites...")
-  unschedule('appGetFavoritesLocal')
-  List<ChildDeviceWrapper> children = app.getChildDevices().findAll{ child -> child.getDataValue('isGroupCoordinator') == 'true'}
-  Map households = children.collectEntries{cd -> [cd.getDataValue('householdId'), [localApiUrl: cd.getDataValue('localApiUrl'), dni: cd.getDeviceNetworkId()]]}
-
-  households.each{householdId, data ->
-    String endpoint = "households/${householdId}/favorites"
-    String uri = "${data.localApiUrl}${endpoint}"
-    Map params = [uri: uri]
-    sendLocalQueryAsync(params: params, callbackMethod: 'appGetFavoritesLocalCallback', data:[dni: data.dni])
-  }
-  if(favMatching) {runIn(60*60*3, 'appGetFavoritesLocal', [overwrite: true])}
-}
-
-void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
-  if (response.hasError()) {
-    logError("appGetFavoritesLocal error: ${response.getErrorData()}")
-    return
-  }
-  List respData = response.getJson().items
-  if(respData.size() == 0) {
-    logTrace("Response returned from getFavorites API: ${response.getJson()}")
-    return
-  }
-  Map favs = [:]
-  respData.each{
-    if(it?.resource?.id?.objectId && it?.resource?.id?.serviceId && it?.resource?.id?.accountId) {
-      String objectId = (it?.resource?.id?.objectId).tokenize(':')[1]
-      String serviceId = it?.resource?.id?.serviceId
-      String accountId = it?.resource?.id?.accountId
-      String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-      favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
-    } else if(it?.imageUrl) {
-      String universalMusicObjectId = "${it?.imageUrl}".toString()
-      favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
-    }
-  }
+void setFavorites(Map favs) {
   state.favs = favs
-  logDebug("App favorites updated!")
-  // logTrace("App favorites json: ${prettyJson(response.getJson())}")
-  // logTrace("formatted response: ${prettyJson(favs)}")
 }
 
 void isFavoritePlaying(DeviceWrapper device) {
