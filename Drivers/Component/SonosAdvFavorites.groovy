@@ -33,13 +33,11 @@ metadata {
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvFavorites.groovy'
   ) {
     capability 'Actuator'
-    capability 'Switch'
-
     command 'getFavorites'
   }
 }
 
-void initialize() {}
-void configure() {}
+void initialize() {configure()}
+void configure() {getFavorites()}
 void getFavorites() {parent?.getFavorites()}
 void setFavorites(String favorites) {state.favorites = favorites}
