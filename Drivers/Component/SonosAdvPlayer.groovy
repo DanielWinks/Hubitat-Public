@@ -135,6 +135,8 @@ metadata {
       input 'includeTrackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
       input name: 'volumeAdjustAmount', title: 'Volume up/down Adjust default:(+/- 5%)', type: 'enum', required: false, defaultValue: 5,
       options: [1:'+/- 1%', 2:'+/- 2%', 3:'+/- 3%', 4:'+/- 4%', 5:'+/- 5%', 10:'+/- 10%', 20:'+/- 20%']
+      input name: 'ttsBoostAmount', title: 'TTS Volume boost/cut default:(+10%)', type: 'enum', required: false, defaultValue: 10,
+      options: [(-10):'-10%', (-5):'-5%', 0:'No Change', 5:'+5%', 10:'+10%', 15:'+15%', 20:'+20%']
       input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
       input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
@@ -147,6 +149,10 @@ metadata {
     }
   }
 }
+
+Boolean processBatteryStatusChildDeviceMessages() {return createBatteryStatusChildDevice}
+Boolean loadAudioClipOnRightChannel() {return createRightChannelChildDevice}
+
 
 String getCurrentTTSVoice() {
   Map params = [uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false"]
@@ -202,14 +208,14 @@ void test() {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
-  if(createCrossfadeChildDevice) {createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)}
-  if(createShuffleChildDevice) {createRemoveShuffleChildDevice(createShuffleChildDevice)}
-  if(createRepeatOneChildDevice) {createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)}
-  if(createRepeatAllChildDevice) {createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)}
-  if(createMuteChildDevice) {createRemoveMuteChildDevice(createMuteChildDevice)}
-  if(createBatteryStatusChildDevice) {createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)}
-  if(createFavoritesChildDevice) {createRemoveFavoritesChildDevice(createFavoritesChildDevice)}
-  if(createRightChannelChildDevice) {createRemoveRightChannelChildDevice(createRightChannelChildDevice)}
+  createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)
+  createRemoveShuffleChildDevice(createShuffleChildDevice)
+  createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
+  createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)
+  createRemoveMuteChildDevice(createMuteChildDevice)
+  createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
+  createRemoveFavoritesChildDevice(createFavoritesChildDevice)
+  createRemoveRightChannelChildDevice(createRightChannelChildDevice)
   if(disableTrackDataEvents) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
   atomicState.audioClipPlaying = false
@@ -260,7 +266,7 @@ void setShuffle(String mode) {
 void shuffleOn() { setShuffle('on') }
 void shuffleOff() { setShuffle('off') }
 
-void ungroupPlayer() { parent?.componentUngroupPlayerLocal(this.device) }
+void ungroupPlayer() { playerCreateNewGroup() }
 
 void playText(String text, BigDecimal volume = null) { devicePlayTextNoRestore(text, volume) }
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
@@ -273,16 +279,19 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume, createRightChannelChildDevice, chimeBeforeTTS) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClip(textToSpeech(text, voice).uri, volume, createRightChannelChildDevice, chimeBeforeTTS)
+  playerLoadAudioClip(textToSpeech(text, voice).uri, volume + (ttsBoostAmount as Integer), createRightChannelChildDevice, chimeBeforeTTS)
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume, createRightChannelChildDevice)
+  playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume + (ttsBoostAmount as Integer))
 }
 
+void playHighPriorityTrack(String uri, BigDecimal volume = null) {
+  playerLoadAudioClipHighPriority(uri, volume)
+}
 
 void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
-  parent?.componentPlayTextNoRestoreLocal(this.device, text, volume, voice)
+  parent?.componentPlayTextNoRestoreLocal(this.device, text, volume + (ttsBoostAmount as Integer), voice)
 }
 
 void devicePlayTrack(String uri, BigDecimal volume = null) {
@@ -489,7 +498,17 @@ void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String
   sendEvent(name:'nextTrackName',  value: nextTrackName ?: 'Not Available')
 }
 
-void updateChildBatteryStatus(Map event) { if(createBatteryStatusChildDevice) {getBatteryStatusChild().sendEvent(event) }}
+void updateChildBatteryStatus(Integer battery, String powerSource, BigDecimal temperature) {
+  if(createBatteryStatusChildDevice) {
+    ChildDeviceWrapper child = getBatteryStatusChild()
+    List<Event> stats = [
+      [name: 'battery', value: battery, unit: '%' ],
+      [name: 'powerSource', value: powerSource ],
+      [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(temperature) : temperature, unit: getTemperatureScale() ],
+    ]
+    stats.each{ child.sendEvent(it) }
+  }
+}
 
 // =============================================================================
 // Child Device Helpers
@@ -605,7 +624,8 @@ void createRemoveMuteChildDevice(Boolean create) {
 void createRemoveBatteryStatusChildDevice(Boolean create) {
   String dni = getBatteryStatusChildDNI()
   ChildDeviceWrapper child = getBatteryStatusChild()
-  if(!child && create) {
+  Boolean hasBattery = deviceHasBattery()
+  if(!child && create && hasBattery) {
     try {
       logDebug("Creating Battery Status device")
       child = addChildDevice('dwinks', 'Sonos Advanced Battery Status', dni,
@@ -615,7 +635,23 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveBatteryStatusChildDevice', e)
     }
-  } else if(!create && child){ deleteChildDevice(dni) }
+  }
+  else if(!create && child){ deleteChildDevice(dni) }
+  else if(!child && create && !hasBattery) {
+    logWarn('Not creating child battery device. No battery detected.')
+    this.device.updateSetting('createBatteryStatusChildDevice', false)
+  }
+}
+
+Boolean deviceHasBattery() {
+  Map params = [uri: "${getLocalUpnpUrl()}/status/batterystatus"]
+  params.textParser = true
+  httpGet(params) {resp ->
+    if(resp.status == 200) {
+      return ((resp.data).toString()).contains('LocalBatteryStatus')
+    }
+  }
+  return false
 }
 
 void createRemoveFavoritesChildDevice(Boolean create) {
@@ -678,7 +714,9 @@ void parse(String raw) {
     processRenderingControlMessages(message)
   }
   else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    processZoneGroupTopologyMessages(message)
+    String rincon = getId()
+    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+    processZoneGroupTopologyMessages(message.body, rincon, oldGroupedRincons)
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
     processGroupRenderingControlMessages(message)
@@ -816,10 +854,10 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
   }
 }
 
-void processZoneGroupTopologyMessages(Map message) {
-  String rincon = device.getDataValue('id')
-  GPathResult propertyset = parseSonosMessageXML(message)
-  GPathResult zoneGroups = propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
+@CompileStatic
+void processZoneGroupTopologyMessages(String xmlString, String rincon, LinkedHashSet oldGroupedRincons) {
+  GPathResult propertyset = new XmlSlurper().parseText(xmlString)
+  GPathResult zoneGroups = (GPathResult)propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
 
   LinkedHashSet<String> groupedRincons = new LinkedHashSet()
   GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
@@ -829,20 +867,18 @@ void processZoneGroupTopologyMessages(Map message) {
     groupedRincons.add(it['@UUID'].toString())
   }
   if(groupedRincons.size() == 0) {
-    logDebug("No grouped rincons found!")
+    logTrace("No grouped rincons found!")
     return
   }
 
-  if(device.getDataValue('groupIds')) {
-    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
-    if(groupedRincons != oldGroupedRincons) {
-      logTrace('ZGT message parsed, group member changes found.')
-    } else {
-      logTrace('ZGT message parsed, no group member changes.')
-    }
+  if(groupedRincons != oldGroupedRincons) {
+    logTrace('ZGT message parsed, group member changes found.')
+  } else {
+    logTrace('ZGT message parsed, no group member changes.')
   }
 
-  device.updateDataValue('groupIds', groupedRincons.join(','))
+  setGroupPlayerIds(groupedRincons.toList())
+
   String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
 
   LinkedHashSet currentGroupMemberNames = []
@@ -851,39 +887,44 @@ void processZoneGroupTopologyMessages(Map message) {
   Integer currentGroupMemberCount = groupedRincons.size()
 
 
-  String groupName = (propertyset['property']['ZoneGroupName'].text()).toString()
+  String groupName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
   if(groupName && groupedRincons) {
-    parent?.updateZoneGroupName(groupName, groupedRincons)
+    updateZoneGroupName(groupName, groupedRincons)
   }
 
-  if(currentGroupCoordinatorName) {device.sendEvent(name: 'groupCoordinatorName', value: currentGroupCoordinatorName)}
-  device.sendEvent(name: 'isGrouped', value: currentGroupMemberCount > 1 ? 'on' : 'off')
-  device.sendEvent(name: 'groupMemberCount', value: currentGroupMemberCount)
-  if(currentGroupMemberNames.size() > 0) {device.sendEvent(name: 'groupMemberNames' , value: currentGroupMemberNames)}
-  if(groupName) {device.sendEvent(name: 'groupName', value: groupName)}
+  if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
+  setIsGrouped(currentGroupMemberCount > 1)
+  setGroupMemberCount(currentGroupMemberCount)
+  if(currentGroupMemberNames.size() > 0) {setGroupMemberNames(currentGroupMemberNames.toList())}
+  if(groupName) {setGroupName(groupName)}
 
 
-  if(createBatteryStatusChildDevice) {
+  if(processBatteryStatusChildDeviceMessages()) {
     String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@MoreInfo']
     if(moreInfoString) {
-      Map moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0],it[1]]}
+      Map<String,String> moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0].toString(),it[1].toString()]}
       if(moreInfo.containsKey('BattTmp') && moreInfo.containsKey('BattPct') && moreInfo.containsKey('BattChg')) {
-        BigDecimal battTemp = new BigDecimal(moreInfo['BattTmp'])
-        List<Event> stats = [
-          [name: 'battery', value: moreInfo['BattPct'] as Integer, unit: '%' ],
-          [name: 'powerSource', value: moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains' ],
-          [name: 'temperature', value: getTemperatureScale() == 'F' ? celsiusToFahrenheit(battTemp) : battTemp, unit: getTemperatureScale() ],
-        ]
-        stats.each{ if(it) {updateChildBatteryStatus(it) }}
+        Integer battery =  moreInfo['BattPct'] as Integer
+        String powerSource = moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains'
+        BigDecimal temperature = new BigDecimal(moreInfo['BattTmp'])
+        updateChildBatteryStatus(battery, powerSource, temperature)
       }
     }
   }
 
-  String zonePlayerUUIDsInGroup = (propertyset['property']['ZonePlayerUUIDsInGroup'].text()).toString()
+  String zonePlayerUUIDsInGroup = ((GPathResult)propertyset['property']['ZonePlayerUUIDsInGroup']).text().toString()
   if(zonePlayerUUIDsInGroup) {
     List<String> playersInGroup = zonePlayerUUIDsInGroup.tokenize(',')
-    parent?.updateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail())
+    parentUpdateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail())
   }
+}
+
+void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
+  parent?.updateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail())
+}
+
+void updateZoneGroupName(String groupName, LinkedHashSet<String> groupedRincons) {
+  parent?.updateZoneGroupName(groupName, groupedRincons)
 }
 
 void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
@@ -1087,9 +1128,9 @@ void resubscribeToZgtEvents() {
 
 void resubscribeToZgtCallback(HubResponse response) {
   if(response.status == 412){
-    logWarn('Failed to resubscribe to ZoneGroupTopology. Will trying subscribing again in 60 seconds.')
+    logWarn('Failed to resubscribe to ZoneGroupTopology. Will trying subscribing again in 30 seconds.')
     device.removeDataValue('sid3')
-    runIn(60, 'subscribeToZgtEvents')
+    runIn(30, 'subscribeToZgtEvents')
   } else if(response.status == 200) {
     logDebug('Sucessfully resubscribed to ZoneGroupTopology')
     if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
@@ -1279,7 +1320,17 @@ void setGroupName(String groupName) {
 }
 
 Boolean getIsGrouped() {
-  return this.device.currentState('isGrouped')?.value == 'on'
+  return this.device.currentValue('isGrouped') == 'on'
+}
+void setIsGrouped(Boolean isGrouped) {
+  this.device.sendEvent(name: 'isGrouped', value: isGrouped ? 'on' : 'off')
+}
+
+Integer getGroupMemberCount() {
+  return this.device.currentValue('groupMemberCount') as Integer
+}
+void setGroupMemberCount(Integer groupMemberCount) {
+  this.device.sendEvent(name: 'groupMemberCount', value: groupMemberCount)
 }
 
 String getGroupCoordinatorId() {
@@ -1343,10 +1394,10 @@ List<String> getGroupFollowerDNIs() {
   return getGroupPlayerIds() - [getId()]
 }
 
-String getGroupPlayerNames() {
+String getGroupMemberNames() {
   return this.device.currentValue('groupMemberNames')
 }
-void setGroupPlayerNames(List<String> groupPlayerNames) {
+void setGroupMemberNames(List<String> groupPlayerNames) {
   this.device.sendEvent(name: 'groupMemberNames' , value: groupPlayerNames.toString())
 }
 
@@ -1486,7 +1537,7 @@ void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
   sendEvent(name: 'trackDescription', value: trackDescription)
 
-  // if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
+  if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
   if(isGroupedAndCoordinator()) {
     parent?.setTrackDescription(getGroupFollowerDNIs(), trackDescription)
   }
@@ -1792,7 +1843,7 @@ void playerSetPlayerVolume(Integer volume) {
   Map command = [
     'namespace':'playerVolume',
     'command':'setVolume',
-    'groupId':"${getId()}"
+    'playerId':"${getId()}"
   ]
   Map args = [
     'volume': volume
@@ -1807,7 +1858,7 @@ void playerSetPlayerMute(Boolean muted) {
   Map command = [
     'namespace':'playerVolume',
     'command':'setMute',
-    'groupId':"${getId()}"
+    'playerId':"${getId()}"
   ]
   Map args = [
     'muted': muted
@@ -1822,7 +1873,7 @@ void playerSetPlayerRelativeVolume(Integer volumeDelta) {
   Map command = [
     'namespace':'playerVolume',
     'command':'setRelativeVolume',
-    'groupId':"${getId()}"
+    'playerId':"${getId()}"
   ]
   Map args = [
     'volumeDelta': volumeDelta
@@ -1914,7 +1965,7 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
 }
 
 @CompileStatic
-void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null, Boolean rightChannel, Boolean chimeBeforeTTS) {
+void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null) {
   logTrace('playerLoadAudioClip')
   Map<String,String> command = [
     'namespace':'audioClip',
@@ -1926,7 +1977,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   if(volume) {args.volume = volume}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
-  if(rightChannel) {
+  if(loadAudioClipOnRightChannel()) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
@@ -2007,6 +2058,9 @@ void dequeueAudioClip() {
   atomicState.audioClipPlaying = true
 }
 
+// =============================================================================
+// Grouping and Ungrouping
+// =============================================================================
 @CompileStatic
 void playerGetGroupsFull() {
   Map command = [
@@ -2019,6 +2073,30 @@ void playerGetGroupsFull() {
   logTrace(json)
   sendWsMessage(json)
 }
+
+@CompileStatic
+void playerCreateNewGroup() {
+  List playerIds = ["${getId()}"]
+  playerCreateGroup(playerIds)
+}
+
+@CompileStatic
+void playerCreateGroup(List playerIds) {
+  Map command = [
+    'namespace':'groups',
+    'command':'createGroup',
+    'householdId':"${getHouseholdId()}"
+  ]
+  Map args = [
+    'musicContextGroupId': null,
+    'playerIds': playerIds
+  ]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+}
+
+
 
 // =============================================================================
 // Websocket Incoming Data Processing
@@ -2050,8 +2128,8 @@ void processWebsocketMessage(String message) {
     String coordinatorName = players.find{it?.id == group.coordinatorId}?.name
     setGroupCoordinatorName(coordinatorName)
 
-    List<String> groupPlayerNames = group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name}
-    setGroupPlayerNames(groupPlayerNames)
+    List<String> groupMemberNames = group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name}
+    setGroupMemberNames(groupMemberNames)
   }
 
   //Process groupCoordinatorChanged
@@ -2137,7 +2215,11 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
     if(eventData?.currentItem || eventData?.streamInfo) {
-      parent?.isFavoritePlaying(this.device, eventData)
+      runIn(1, 'isFavoritePlaying', [overwrite: true, data: eventData ])
     }
   }
+}
+
+void isFavoritePlaying(Map data) {
+  parent?.isFavoritePlaying(this.device, data)
 }

@@ -803,6 +803,11 @@ void setNextTrackName(List<String> rincons, String value) {
   groupedDevices.each{dev -> dev.setNextTrackName(value)}
 }
 
+void setCurrentFavorite(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentFavorite(value)}
+}
+
 // void sendCommandToCoordinator(String coordinatorRincon, String command, Object arg) {
 //   ChildDeviceWrapper coordinator = getDeviceFromRincon(coordinatorRincon)
 //   coordinator.command(arg)
@@ -1023,7 +1028,7 @@ void setAVTransportURIAndPlay(DeviceWrapper device, String currentURI, String cu
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
   if(!responseIsValid(response, 'setAVTransportURICallback')) { return }
   ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  componentPlayLocal(child)
+  child.play()
 }
 
 void setAVTransportURI(DeviceWrapper device, String currentURI, String currentURIMetaData = null) {

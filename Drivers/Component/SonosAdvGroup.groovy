@@ -41,10 +41,36 @@ metadata {
     command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
 
+    command 'playHighPriorityTTS', [
+      [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
+      [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]],
+      [name: 'Voice name', type: "ENUM", constraints: getTTSVoices().collect{it.name}.sort(), defaultValue: getCurrentTTSVoice()]
+    ]
+
+    command 'playHighPriorityTrack', [
+      [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
+      [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
+    ]
+
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
   }
 }
+
+String getCurrentTTSVoice() {
+  Map params = [uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false"]
+  params.contentType = 'application/json'
+  params.requestContentType = 'application/json'
+  String voice
+  httpGet(params) {resp ->
+    if(resp.status == 200) {
+      def json = resp.data
+      voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
+    }
+  }
+  return voice
+}
+
 
 void initialize() {}
 void configure() {}
@@ -57,6 +83,31 @@ void off() { removePlayersFromCoordinator() }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
 void clearState() { state.clear() }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
+
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   parent?.componentPlayTextLocal(this.device, text, volume, voice)
+}
+
+List<DeviceWrapper> getGroupMemberDevices() {
+  List<String> players = getAllPlayersInGroupDevice()
+  return parent?.getDevicesFromRincons(players)
+}
+
+void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
+  List<DeviceWrapper> devs = getGroupMemberDevices()
+  devs.each{it.playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume)}
+}
+
+void playHighPriorityTrack(String uri, BigDecimal volume = null) {
+  List<DeviceWrapper> devs = getGroupMemberDevices()
+  devs.each{it.playerLoadAudioClipHighPriority(uri, volume)}
+}
+
+// =============================================================================
+// Getters and Setters
+// =============================================================================
+List<String> getAllPlayersInGroupDevice() {
+  List<String> players = [this.device.getDataValue('groupCoordinatorId')]
+  players.add(this.device.getDataValue('playerIds').tokenize(','))
+  return players
 }
