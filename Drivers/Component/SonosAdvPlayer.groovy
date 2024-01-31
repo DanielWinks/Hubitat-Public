@@ -41,9 +41,6 @@ metadata {
   capability 'SpeechSynthesis'
   capability 'Initialize'
 
-  command 'initializeWebsocketConnection'
-  command 'playerGetGroupsFull'
-
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
   command 'setShuffle', [[ name: 'Shuffle Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -113,7 +110,6 @@ metadata {
     [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
   ]
 
-  command 'test'
   attribute 'groupVolume', 'number'
   attribute 'groupMute', 'string'
   attribute 'groupName', 'string'
@@ -156,6 +152,9 @@ metadata {
 
 Boolean processBatteryStatusChildDeviceMessages() {return createBatteryStatusChildDevice}
 Boolean loadAudioClipOnRightChannel() {return createRightChannelChildDevice}
+Integer getTTSBoostAmount() {
+  return ttsBoostAmount as Integer
+}
 
 
 String getCurrentTTSVoice() {
@@ -170,19 +169,6 @@ String getCurrentTTSVoice() {
     }
   }
   return voice
-}
-
-
-
-void test() {
-  logWarn(getLocation().tts)
-  logWarn(getLocation().ttsVoices)
-  logWarn(getLocation().ttsCurrent)
-  logWarn(getLocation().getCurrentTTSVoice)
-  logWarn(getLocation())
-  getLocation().each{
-    logWarn(it)
-  }
 }
 
 // =============================================================================
@@ -283,11 +269,11 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume, createRightChannelChildDevice, chimeBeforeTTS) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClip(textToSpeech(text, voice).uri, volume + (ttsBoostAmount as Integer), createRightChannelChildDevice, chimeBeforeTTS)
+  playerLoadAudioClip(textToSpeech(text, voice).uri, volume, createRightChannelChildDevice, chimeBeforeTTS)
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume + (ttsBoostAmount as Integer))
+  playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume )
 }
 
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
@@ -295,7 +281,9 @@ void playHighPriorityTrack(String uri, BigDecimal volume = null) {
 }
 
 void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
-  parent?.componentPlayTextNoRestoreLocal(this.device, text, volume + (ttsBoostAmount as Integer), voice)
+  if(volume) { volume += getTTSBoostAmount() }
+  else { volume = getPlayerVolume() + getTTSBoostAmount() }
+  parent?.componentPlayTextNoRestoreLocal(this.device, text, volume, voice)
 }
 
 void devicePlayTrack(String uri, BigDecimal volume = null) {
@@ -343,23 +331,46 @@ void setGroupMute(String mode) {
 }
 void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
-    playerSetGroupRelativeVolume(-(volumeAdjustAmount as Integer))
+    playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupRelativeVolume((volumeAdjustAmount as Integer))
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   }
-  else { playerSetPlayerRelativeVolume((volumeAdjustAmount as Integer)) }
+  else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 }
 void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
-    playerSetGroupRelativeVolume(-(volumeAdjustAmount as Integer))
+    playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupRelativeVolume(-(volumeAdjustAmount as Integer))
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   }
-  else { playerSetPlayerRelativeVolume(-(volumeAdjustAmount as Integer)) }
+  else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
 
-void volumeUp() { playerSetPlayerRelativeVolume((volumeAdjustAmount as Integer)) }
-void volumeDown() { playerSetPlayerRelativeVolume(-(volumeAdjustAmount as Integer)) }
+void volumeUp() { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
+void volumeDown() { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
+
+Integer getPlayerVolumeAdjAmount() {
+  Integer currentVolume = (this.device.currentValue('volume', true) as Integer)
+  if(currentVolume < 11) {
+    return volumeAdjustAmountLow ? volumeAdjustAmountLow as Integer : volumeAdjustAmount as Integer
+  } else if(currentVolume >= 11 && currentVolume < 21) {
+    return volumeAdjustAmountMid ? volumeAdjustAmountMid as Integer : volumeAdjustAmount as Integer
+  } else {
+    return volumeAdjustAmount as Integer
+  }
+}
+
+Integer getGroupVolumeAdjAmount() {
+  Integer currentVolume = (this.device.currentValue('groupVolume', true) as Integer)
+  if(currentVolume < 11) {
+    return volumeAdjustAmountLow ? volumeAdjustAmountLow as Integer : volumeAdjustAmount as Integer
+  } else if(currentVolume >= 11 && currentVolume < 21) {
+    return volumeAdjustAmountMid ? volumeAdjustAmountMid as Integer : volumeAdjustAmount as Integer
+  } else {
+    return volumeAdjustAmount as Integer
+  }
+}
+
 
 void play() { playerPlay() }
 void stop() { playerStop() }
@@ -710,17 +721,15 @@ void parse(String raw) {
   if(message.body == null) {return}
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
   if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    if(device.currentValue('isGroupCoordinator', true) == 'on') {
-      processAVTransportMessages(message.body, getLocalUpnpUrl(), disableTrackDataEvents, includeTrackDataMetaData)
-    }
+    processAVTransportMessages(message.body, getLocalUpnpUrl(), disableTrackDataEvents, includeTrackDataMetaData)
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-    processRenderingControlMessages(message)
+    processRenderingControlMessages(message?.body)
   }
   else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
     String rincon = getId()
     LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
-    processZoneGroupTopologyMessages(message.body, rincon, oldGroupedRincons)
+    processZoneGroupTopologyMessages(message?.body, rincon, oldGroupedRincons)
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
     processGroupRenderingControlMessages(message)
@@ -739,6 +748,11 @@ void parse(String raw) {
 @CompileStatic
 String unEscapeMetaData(String text) {
   return text.replace('&amp;lt;','<').replace('&amp;gt;','>').replace('&amp;quot;','"')
+}
+
+@CompileStatic
+String unEscapeLastChangeXML(String text) {
+  return text.replace('&lt;','<').replace('&gt;','>')
 }
 
 @CompileStatic
@@ -765,18 +779,21 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
   }
 
   String status = (instanceId['TransportState']['@val'].toString()).toLowerCase().replace('_playback','')
+  setStatusTransportStatus(status)
+
   String currentPlayMode = instanceId['CurrentPlayMode']['@val']
+  setPlayMode(currentPlayMode)
+
   String numberOfTracks = instanceId['NumberOfTracks']['@val']
   String trackNumber = instanceId['CurrentTrack']['@val']
 
   Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
   String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
-  String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
-
-  setStatusTransportStatus(status)
-  setPlayMode(currentPlayMode)
-  setCrossfadeMode(currentCrossfadeMode == '1' ? 'on' : 'off')
   setCurrentTrackDuration(currentTrackDuration)
+
+  String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
+  setCrossfadeMode(currentCrossfadeMode == '1' ? 'on' : 'off')
+
 
   String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
   if(currentTrackMetaDataString) {
@@ -788,20 +805,12 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
     String currentTrackName = currentTrackMetaData['item']['title']
     String streamContent = currentTrackMetaData['item']['streamContent'].toString()
 
-    setCurrentArtistName(currentArtistName)
-    setCurrentAlbumName(currentAlbumName)
-    setCurrentTrackName(currentTrackName)
-    setCurrentTrackNumber(trackNumber as Integer)
-    setAlbumArtURI(albumArtURI, isPlayingLocalTrack)
-
     String trackDescription = currentTrackName && currentArtistName ? "${currentTrackName} by ${currentArtistName}" : null
     streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
     streamContent = streamContent == 'ZPSTR_CONNECTING' ? 'Connecting...' : streamContent
     streamContent = !streamContent ? 'Not Available' : streamContent
     if(streamContent && (!currentArtistName && !currentTrackName)) { trackDescription = streamContent }
     else if(isPlayingLocalTrack) { trackDescription = 'Not Available' }
-
-    setTrackDescription(trackDescription)
 
     String trackDataAlbumArtUri
     if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
@@ -813,7 +822,6 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
     String audioSource = SOURCES["${(uri.tokenize(':')[0])}"]
     if(!disableTrackDataEvents) {
       Map trackData = [:]
-
       trackData['audioSource'] = audioSource ?: trackData['audioSource']
       trackData['station'] = null
       trackData['name'] = currentTrackName
@@ -832,6 +840,13 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
       }
       setTrackDataEvents(trackData)
     }
+    setCurrentArtistName(currentArtistName)
+    setCurrentAlbumName(currentAlbumName)
+    setCurrentTrackName(currentTrackName)
+    setCurrentTrackNumber(trackNumber as Integer)
+    setTrackDescription(trackDescription)
+  setAlbumArtURI(albumArtURI, isPlayingLocalTrack)
+
   } else {
     setCurrentArtistName('Not Available')
     setCurrentAlbumName('Not Available')
@@ -932,19 +947,18 @@ void updateZoneGroupName(String groupName, LinkedHashSet<String> groupedRincons)
 }
 
 void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
-void processRenderingControlMessages(Map message) {
-  GPathResult propertyset = parseSonosMessageXML(message)
-  GPathResult instanceId = propertyset['property']['LastChange']['Event']['InstanceID']
 
-  String volume = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'Master'}['@val']
-  if(volume) {
-    sendEvent(name:'level', value: volume as Integer)
-    sendEvent(name:'volume', value: volume as Integer)
-    if(volume && (volume as Integer) > 0) { state.restoreLevelAfterUnmute = volume }
-  }
-  String lfString = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()
+@CompileStatic
+void processRenderingControlMessages(String xmlString) {
+  GPathResult propertyset = parseSonosMessageXML(xmlString)
+  GPathResult instanceId = (GPathResult)propertyset['property']['LastChange']['Event']['InstanceID']
+
+  String volume = instanceId.children().findAll{GPathResult it -> it.name() == 'Volume' && it['@channel'] == 'Master'}['@val']
+  if(volume) { setPlayerVolume(volume as Integer) }
+
+  String lfString = instanceId.children().findAll{((GPathResult)it).name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()
   lfString = lfString ?: '0'
-  String rfString = instanceId.children().findAll{it.name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()
+  String rfString = instanceId.children().findAll{((GPathResult)it).name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()
   rfString = rfString ?: '0'
   Integer lf = Integer.parseInt(lfString)
   Integer rf = Integer.parseInt(rfString)
@@ -954,30 +968,22 @@ void processRenderingControlMessages(Map message) {
   } else if(rf < 100) {
     balance = -((100 - rf) / 5) as Integer
   }
-  sendEvent(name: 'balance', value: balance)
+  setBalance(balance)
 
-  String mute = instanceId.children().findAll{it.name() == 'Mute' && it['@channel'] == 'Master'}['@val']
+  String mute = instanceId.children().findAll{((GPathResult)it).name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
-    String muted = mute == '1' ? 'muted' : 'unmuted'
-    String previousMutedState = this.device.currentState('mute')?.value != null ? this.device.currentState('mute').value : 'unmuted'
-    if(muted == 'unmuted' && previousMutedState == 'muted' && enableAirPlayUnmuteVolumeFix) {
-      logDebug("Restoring volume after unmute event to level: ${state.restoreLevelAfterUnmute}")
-      setLevel(state.restoreLevelAfterUnmute as Integer)
-    }
-    sendEvent(name:'mute', value: muted)
+    setMuteState(mute == '1' ? 'muted' : 'unmuted')
   }
 
   String bass = instanceId['Bass']['@val']
-  if(bass) { sendEvent(name:'bass', value: bass as Integer) }
+  if(bass) { setBassState(bass as Integer) }
 
   String treble = instanceId['Treble']['@val']
-  if(treble) { sendEvent(name:'treble', value: treble as Integer) }
+  if(treble) { setTrebleState(treble as Integer) }
 
-  String loudness = instanceId.children().findAll{it.name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
-  if(loudness) { sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off') }
+  String loudness = instanceId.children().findAll{((GPathResult)it).name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
+  if(loudness) { setLoudnessState(loudness == '1' ? 'on' : 'off') }
 }
-
-
 
 // =============================================================================
 // Subscriptions and Resubscriptions
@@ -1345,21 +1351,22 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   this.device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
   this.device.sendEvent(name: 'groupCoordinatorId', value: groupCoordinatorId)
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
-  Boolean previouslyWasGroupCoordinator = isGroupCoordinator != getIsGroupCoordinator()
-
+  Boolean previouslyWasGroupCoordinator = getIsGroupCoordinator()
   setIsGroupCoordinator(isGroupCoordinator)
 
-  if(isGroupCoordinator) {
-    if(!this.device.getDataValue('sid1')) {subscribeToAVTransport()}
-    logDebug("Just removed from group!")
-  } else {
-    if(previouslyWasGroupCoordinator) {
-      logDebug("Just added to group!")
+  if(isGroupCoordinator && !previouslyWasGroupCoordinator) {
+    if(!this.device.getDataValue('sid1')) {
+      subscribeToAVTransport()
+      getPlaybackMetadataStatus()
+      logTrace('Just became group coordinator, subscribing to AVT.')
+    }
+  } else if(previouslyWasGroupCoordinator && !isGroupCoordinator) {
+      logTrace("Just added to group!")
       unsubscribeFromAVTransport()
       parent?.updatePlayerCurrentStates(this.device, groupCoordinatorId)
-    } else {logTrace("Group coordinator status has not changed.")}
-  }
+  } else {logTrace("Group coordinator status has not changed.")}
 }
+
 
 String getGroupCoordinatorName() {
   return this.device.currentValue('groupCoordinatorName', true)
@@ -1444,6 +1451,39 @@ void setStatusTransportStatus(String status) {
 }
 String getTransportStatus() {
   return this.device.currentValue('transportStatus')
+}
+
+Integer getPlayerVolume() {
+  return this.device.currentValue('volume') as Integer
+}
+void setPlayerVolume(Integer volume) {
+  sendEvent(name:'level', value: volume)
+  sendEvent(name:'volume', value: volume)
+  if(volume > 0) { state.restoreLevelAfterUnmute = volume }
+}
+void setBalance(Integer balance) {
+  sendEvent(name: 'balance', value: balance)
+}
+String getMuteState() {
+  return this.device.currentValue('mute')
+}
+void setMuteState(String muted) {
+  String previousMutedState = getMuteState() != null ? getMuteState() : 'unmuted'
+  if(muted == 'unmuted' && previousMutedState == 'muted' && enableAirPlayUnmuteVolumeFix) {
+    logDebug("Restoring volume after unmute event to level: ${state.restoreLevelAfterUnmute}")
+    setLevel(state.restoreLevelAfterUnmute as Integer)
+  }
+  sendEvent(name:'mute', value: muted)
+}
+
+void setBassState(Integer bass) {
+  sendEvent(name:'bass', value: bass)
+}
+void setTrebleState(Integer treble) {
+  sendEvent(name:'treble', value: treble)
+}
+void setLoudnessState(String loudness) {
+  sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off')
 }
 
 void setPlayMode(String playMode){
@@ -1978,7 +2018,8 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   ]
   Map args = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos', 'priority': 'HIGH']
   if(uri) {args.streamUrl = uri}
-  if(volume) {args.volume = volume}
+  if(volume) {args.volume = volume + getTTSBoostAmount()}
+  else {args.volume = getPlayerVolume() + getTTSBoostAmount()}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
   if(loadAudioClipOnRightChannel()) {
@@ -2011,7 +2052,8 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ri
   ]
   Map args = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
   if(uri) {args.streamUrl = uri}
-  if(volume) {args.volume = volume}
+  if(volume) {args.volume = volume + getTTSBoostAmount()}
+  else {args.volume = getPlayerVolume() + getTTSBoostAmount()}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
   if(rightChannel) {
@@ -2080,12 +2122,12 @@ void playerGetGroupsFull() {
 
 @CompileStatic
 void playerCreateNewGroup() {
-  List playerIds = ["${getId()}"]
+  List playerIds = ["${getId()}".toString()]
   playerCreateGroup(playerIds)
 }
 
 @CompileStatic
-void playerCreateGroup(List playerIds) {
+void playerCreateGroup(List<String> playerIds) {
   Map command = [
     'namespace':'groups',
     'command':'createGroup',
@@ -2094,6 +2136,22 @@ void playerCreateGroup(List playerIds) {
   Map args = [
     'musicContextGroupId': null,
     'playerIds': playerIds
+  ]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+}
+
+@CompileStatic
+void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = []) {
+  Map command = [
+    'namespace':'groups',
+    'command':'modifyGroupMembers',
+    'groupId':"${getGroupId()}"
+  ]
+  Map args = [
+    'playerIdsToAdd': playerIdsToAdd,
+    'playerIdsToRemove': playerIdsToRemove
   ]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)

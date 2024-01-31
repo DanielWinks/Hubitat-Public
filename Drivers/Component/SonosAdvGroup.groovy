@@ -74,10 +74,6 @@ String getCurrentTTSVoice() {
 
 void initialize() {}
 void configure() {}
-void groupPlayers() { parent?.componentGroupPlayersLocal(this.device) }
-void joinPlayersToCoordinator() { parent?.componentJoinPlayersToCoordinatorLocal(this.device) }
-void removePlayersFromCoordinator() { parent?.componentRemovePlayersFromCoordinatorLocal(this.device) }
-void ungroupPlayers() { parent?.componentUngroupPlayersLocal(this.device) }
 void on() { joinPlayersToCoordinator() }
 void off() { removePlayersFromCoordinator() }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
@@ -88,26 +84,66 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
   parent?.componentPlayTextLocal(this.device, text, volume, voice)
 }
 
-List<DeviceWrapper> getGroupMemberDevices() {
-  List<String> players = getAllPlayersInGroupDevice()
-  return parent?.getDevicesFromRincons(players)
-}
-
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
-  List<DeviceWrapper> devs = getGroupMemberDevices()
-  devs.each{it.playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume)}
+  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  allDevs.each{it.playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume)}
 }
 
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
-  List<DeviceWrapper> devs = getGroupMemberDevices()
-  devs.each{it.playerLoadAudioClipHighPriority(uri, volume)}
+  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  allDevs.each{it.playerLoadAudioClipHighPriority(uri, volume)}
+}
+
+void joinPlayersToCoordinator() {
+  List<String> followers = getAllFollowersInGroupDevice()
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  coordinator.playerModifyGroupMembers(followers)
+}
+
+void removePlayersFromCoordinator() {
+  List<DeviceWrapper> allFollowers = getAllFollowerDevicesInGroupDevice()
+  allFollowers.each{it.playerCreateNewGroup()}
+}
+
+void groupPlayers() {
+  List<String> allPlayers = getAllPlayersInGroupDevice()
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  coordinator.playerCreateGroup(allPlayers)
+}
+
+void ungroupPlayers() {
+  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  allDevs.each{it.playerCreateNewGroup()}
 }
 
 // =============================================================================
 // Getters and Setters
 // =============================================================================
+String getCoordinatorId() {
+  return this.device.getDataValue('groupCoordinatorId')
+}
+
 List<String> getAllPlayersInGroupDevice() {
   List<String> players = [this.device.getDataValue('groupCoordinatorId')]
-  players.add(this.device.getDataValue('playerIds').tokenize(','))
+  players.addAll(this.device.getDataValue('playerIds').tokenize(','))
   return players
+}
+
+List<String> getAllFollowersInGroupDevice() {
+  List<String> players = this.device.getDataValue('playerIds').tokenize(',')
+  return players
+}
+
+List<DeviceWrapper> getAllPlayerDevicesInGroupDevice() {
+  List<String> players = getAllPlayersInGroupDevice()
+  return parent?.getDevicesFromRincons(players)
+}
+
+List<DeviceWrapper> getAllFollowerDevicesInGroupDevice() {
+  List<String> players = getAllFollowersInGroupDevice()
+  return parent?.getDevicesFromRincons(players)
+}
+
+DeviceWrapper getCoordinatorDevice() {
+  return parent?.getDeviceFromRincon(getCoordinatorId())
 }

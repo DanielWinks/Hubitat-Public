@@ -726,7 +726,6 @@ void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
   Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
   String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
   List<ChildDeviceWrapper> groupDevices = getCurrentGroupedDevices(device)
-  logTrace("Devices: ${groupDevices}")
   groupDevices.each{ dev ->
     if(groupVolume) { dev.sendEvent(name:'groupVolume', value: groupVolume) }
     if(groupMute) { dev.sendEvent(name:'groupMute', value: groupMute ) }
@@ -953,36 +952,6 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
-void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
-  logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
-  Map tts = textToSpeech(text, voice)
-  data.streamUrl = tts.uri
-  if (volume) data.volume = (int)volume
-
-  if(device.getDataValue('capabilities')) {
-    String playerId = device.getDataValue('id')
-    String localApiUrl = "${device.getDataValue('localApiUrl')}"
-    String endpoint = "players/${playerId}/audioClip"
-    String uri = "${localApiUrl}${endpoint}"
-    Map params = [uri: uri]
-    sendLocalJsonAsync(params: params, data: data)
-  } else {
-    String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-    ChildDeviceWrapper coordinatorDevice = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
-    List<String> followers = device.getDataValue('playerIds').tokenize(',')
-    List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
-    List<ChildDeviceWrapper> allDevices = followerDevices + [coordinatorDevice]
-    allDevices.each{ dev ->
-      String playerId = dev.getDataValue('id')
-      String localApiUrl = "${dev.getDataValue('localApiUrl')}"
-      String endpoint = "players/${playerId}/audioClip"
-      String uri = "${localApiUrl}${endpoint}"
-      Map params = [uri: uri]
-      sendLocalJsonAsync(params: params, data: data)
-    }
-  }
-}
 
 void componentPlayTextNoRestoreLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
@@ -994,20 +963,6 @@ void componentPlayTextNoRestoreLocal(DeviceWrapper device, String text, BigDecim
   String playerId = device.getDataValue('id')
   if(volume) {componentSetGroupLevelLocal(device, volume)}
   setAVTransportURIAndPlay(device, streamUrl)
-}
-
-void componentPlayAudioClipLocal(DeviceWrapper device, String streamUrl, BigDecimal volume = null) {
-  String playerId = device.getDataValue('id')
-  logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
-  if (streamUrl?.toUpperCase() != 'CHIME') { data.streamUrl = streamUrl }
-  if (volume) { data['volume'] = (int)volume }
-
-  String localApiUrl = "${device.getDataValue('localApiUrl')}"
-  String endpoint = "players/${playerId}/audioClip"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data:data)
 }
 
 void removeAllTracksFromQueue(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
@@ -1164,82 +1119,6 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
   asynchttpPost('localControlCallback', params)
 }
 
-
-// /////////////////////////////////////////////////////////////////////////////
-// Grouping and Ungrouping
-// /////////////////////////////////////////////////////////////////////////////
-void componentGroupPlayersLocal(DeviceWrapper device) {
-  logDebug('Adding players to group...')
-  String householdId = device.getDataValue('householdId')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List playerIds = device.getDataValue('playerIds').split(',')
-  ChildDeviceWrapper coordinator = getDeviceFromRincon(groupCoordinatorId)
-  if(coordinator.getDataValue('isGroupCoordinator') == 'false') {
-    componentUngroupPlayerLocalSync(coordinator)
-  }
-  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
-  Map data = ['playerIds': [groupCoordinatorId] + playerIds, musicContextGroupId: coordinatorGroupId]
-  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
-  String endpoint = "households/${householdId}/groups/createGroup"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
-
-void componentJoinPlayersToCoordinatorLocal(DeviceWrapper device) {
-  logDebug('Adding players to coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List playerIds = device.getDataValue('playerIds').split(',')
-  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
-  Map data = ['playerIds': [groupCoordinatorId] + playerIds]
-  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
-  String endpoint = "groups/${coordinatorGroupId}/groups/setGroupMembers"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
-
-void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
-  logDebug('Removing players from coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  ChildDeviceWrapper cd = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
-  if(cd.getDataValue('isGroupCoordinator') == 'false') {
-    logWarn('Can not remove players from coordinator. Coordinator for this defined group is not currently a group coordinator.')
-    return
-  }
-  List<String> followers = device.getDataValue('playerIds').tokenize(',')
-  List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
-  logDebug("Follower Devices ${followerDevices}")
-  followerDevices.each{player -> componentUngroupPlayerLocal(player)}
-}
-
-void componentUngroupPlayerLocal(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
-  String ip = device.getDataValue('localUpnpHost')
-  Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logTrace("componentUngroupPlayerLocal Params: ${params}")
-  asynchttpPost(callbackMethod, params)
-}
-
-void componentUngroupPlayerLocalSync(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logTrace("componentUngroupPlayerLocalSync Params: ${params}")
-  httpPost(params) { resp ->
-    if (resp && resp.data && resp.success) {
-      GPathResult xml = resp.data
-      logXml(resp.data)
-    }
-    else { logError(resp.data) }
-  }
-}
-
-void componentUngroupPlayersLocal(DeviceWrapper device) {
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List<String> playerIds = device.getDataValue('playerIds').tokenize(',')
-  List<String> allPlayers = [groupCoordinatorId] + playerIds
-  List<ChildDeviceWrapper> allPlayerDevices = getDevicesFromRincons(allPlayers)
-  allPlayerDevices.each{player -> componentUngroupPlayerLocalSync(player) }
-}
 
 // /////////////////////////////////////////////////////////////////////////////
 // Favorites
