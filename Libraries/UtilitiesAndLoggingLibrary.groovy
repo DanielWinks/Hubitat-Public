@@ -27,6 +27,7 @@ import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.app.InstalledAppWrapper
 import com.hubitat.app.ParentDeviceWrapper
 import com.hubitat.hub.domain.Event
+import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
 import groovy.transform.Field
@@ -34,6 +35,9 @@ import hubitat.scheduling.AsyncResponse
 import hubitat.device.HubResponse
 import groovy.util.slurpersupport.GPathResult
 import groovy.xml.XmlUtil
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Semaphore
 
 library(
   name: 'UtilitiesAndLoggingLibrary',
