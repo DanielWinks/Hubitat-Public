@@ -26,7 +26,7 @@
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.3.25',
+  version: '0.4.0',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -35,7 +35,7 @@ definition(
   iconX2Url: '',
   installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: true,
+  singleThreaded: false,
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy'
 )
 
@@ -1239,23 +1239,6 @@ void componentUngroupPlayersLocal(DeviceWrapper device) {
 // /////////////////////////////////////////////////////////////////////////////
 // Favorites
 // /////////////////////////////////////////////////////////////////////////////
-// void componentLoadFavoriteFullLocal(DeviceWrapper device, String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
-//   logDebug('Loading favorites full options...')
-//   Map data = [
-//     action:action,
-//     favoriteId:favoriteId,
-//     playOnCompletion:playOnCompletion,
-//     playModes:['repeat': repeat,'repeatOne': repeatOne, 'shuffle': shuffle, 'crossfade': crossfade],
-//   ]
-//   String groupId = getGroupForPlayerDeviceLocal(device)
-//   ChildDeviceWrapper coordinator = getDeviceFromRincon(groupId.tokenize(':')[0])
-//   String localApiUrl = "${coordinator.getDataValue('localApiUrl')}"
-//   String endpoint = "groups/${groupId}/favorites"
-//   String uri = "${localApiUrl}${endpoint}"
-//   Map params = [uri: uri]
-//   sendLocalJsonAsync(params: params, data: data)
-// }
-
 List<String> getUniqueHouseholds() {
   List<ChildDeviceWrapper> children = app.getChildDevices()
   List<String> households = children.collect{cd -> cd.getDataValue('householdId')}.unique{a,b -> a <=> b}
@@ -1280,9 +1263,7 @@ void isFavoritePlaying(DeviceWrapper cd, Map json) {
   String imageUrl = json?.container?.imageUrl
 
   String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-  logInfo("universalMusicObjectId ${universalMusicObjectId}")
   String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
-  logInfo("universalMusicObjectIdAlt ${universalMusicObjectIdAlt}")
   Boolean isFav = state.favs.containsKey(universalMusicObjectId)
   Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
   logTrace("isFav and isFavAlt are ${isFav} and ${isFavAlt}")

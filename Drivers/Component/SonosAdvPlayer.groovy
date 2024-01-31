@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.3.23',
+    version: '0.4.0',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
@@ -1486,7 +1486,7 @@ void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
   sendEvent(name: 'trackDescription', value: trackDescription)
 
-  if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
+  // if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
   if(isGroupedAndCoordinator()) {
     parent?.setTrackDescription(getGroupFollowerDNIs(), trackDescription)
   }
@@ -1679,7 +1679,6 @@ void getPlaybackMetadataStatus() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('getPlaybackMetadataStatus')
   sendWsMessage(json)
 }
 
@@ -2027,7 +2026,7 @@ void playerGetGroupsFull() {
 void processWebsocketMessage(String message) {
   String prettyJson = JsonOutput.prettyPrint(message)
   List<Map> json = slurper.parseText(message)
-  logTrace(prettyJson)
+  // logTrace(prettyJson)
 
   Map eventType = json[0]
   Map eventData = json[1]
@@ -2063,6 +2062,10 @@ void processWebsocketMessage(String message) {
       logDebug("Group playerIds: ${group.playerIds}")
       logDebug("Group Id: ${group.id}")
     }
+  }
+
+  if(createFavoritesChildDevice && eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
+    getFavorites()
   }
 
   if(createFavoritesChildDevice && eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
@@ -2123,6 +2126,12 @@ void processWebsocketMessage(String message) {
         logTrace("Stop command unavailable for current stream, issuing pause command...")
         playerPause()
       }
+    }
+  }
+
+  if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
+    if(eventData?.playbackState == 'PLAYBACK_STATE_PLAYING') {
+      if(getIsGroupCoordinator()) {getPlaybackMetadataStatus()}
     }
   }
 
