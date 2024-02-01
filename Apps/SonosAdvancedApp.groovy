@@ -434,15 +434,17 @@ void removeOrphans() {
 // =============================================================================
 
 
+@Field static ConcurrentLinkedQueue<LinkedHashMap> discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 
 // =============================================================================
 // Local Discovery
 // =============================================================================
-@CompileStatic
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
+  atomicState.remove('processingDiscoveryQueue')
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
   discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
+  discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
 }
@@ -456,7 +458,21 @@ void subscribeToSsdpEvents(Location location) {
 
 void ssdpEventHandler(Event event) {
 	LinkedHashMap parsedEvent = parseLanMessage(event?.description)
-  processParsedSsdpEvent(parsedEvent)
+  discoveryQueue.add(parsedEvent)
+  if(!atomicState.processingDiscoveryQueue) {
+    atomicState.processingDiscoveryQueue = true
+    processDiscoveryQueue()
+  }
+}
+
+void processDiscoveryQueue() {
+  if(discoveryQueue.size() > 0) {
+    processParsedSsdpEvent(discoveryQueue.poll())
+    runIn(1, 'processDiscoveryQueue')
+    logDebug('More messages to process')
+  } else {
+    logDebug('No more messages to process')
+  }
 }
 
 @CompileStatic
@@ -1201,6 +1217,7 @@ void isFavoritePlaying(DeviceWrapper cd, Map json) {
   Boolean isFav = state.favs.containsKey(universalMusicObjectId)
   Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
   logTrace("isFav and isFavAlt are ${isFav} and ${isFavAlt}")
+  logTrace("universalMusicObjectId and universalMusicObjectIdAlt are ${universalMusicObjectId} and ${universalMusicObjectIdAlt}")
 
   String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
   String foundFavId = state.favs[k]?.id
