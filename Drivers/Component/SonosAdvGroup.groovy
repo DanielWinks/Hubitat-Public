@@ -52,6 +52,11 @@ metadata {
       [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
     ]
 
+    command 'enqueueLowPriorityTrack', [
+      [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
+      [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
+    ]
+
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
   }
@@ -92,6 +97,11 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
   allDevs.each{it.playerLoadAudioClipHighPriority(uri, volume)}
+}
+
+void enqueueLowPriorityTrack(String uri, BigDecimal volume = null) {
+  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  allDevs.each{it.playerLoadAudioClip(uri, volume)}
 }
 
 void joinPlayersToCoordinator() {

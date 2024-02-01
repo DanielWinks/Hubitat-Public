@@ -807,11 +807,6 @@ void setCurrentFavorite(List<String> rincons, String value) {
   groupedDevices.each{dev -> dev.setCurrentFavorite(value)}
 }
 
-// void sendCommandToCoordinator(String coordinatorRincon, String command, Object arg) {
-//   ChildDeviceWrapper coordinator = getDeviceFromRincon(coordinatorRincon)
-//   coordinator.command(arg)
-// }
-
 void updatePlayerCurrentStates(DeviceWrapper cd, String coordinatorRincon) {
   if(!cd) {return}
   if(!coordinatorRincon) {return}

@@ -150,11 +150,27 @@ metadata {
   }
 }
 
-Boolean processBatteryStatusChildDeviceMessages() {return createBatteryStatusChildDevice}
-Boolean loadAudioClipOnRightChannel() {return createRightChannelChildDevice}
-Integer getTTSBoostAmount() {
-  return ttsBoostAmount as Integer
-}
+// =============================================================================
+// Preference Getters And Passthrough Renames For Clarity
+// =============================================================================
+Boolean disableTrackDataEvents() { return disableTrackDataEvents != null ? disableTrackDataEvents : true }
+Boolean includeTrackDataMetaData() { return includeTrackDataMetaData != null ? includeTrackDataMetaData : false }
+Integer getVolumeAdjustAmountLow() { return volumeAdjustAmountLow != null ? volumeAdjustAmountLow as Integer : 5 }
+Integer getVolumeAdjustAmountMid() { return volumeAdjustAmountMid != null ? volumeAdjustAmountMid as Integer : 5 }
+Integer getVolumeAdjustAmount() { return volumeAdjustAmount != null ? volumeAdjustAmount as Integer : 5 }
+Integer getTTSBoostAmount() { return ttsBoostAmount != null ? ttsBoostAmount as Integer : 10 }
+Boolean disableArtistAlbumTrackEvents() { return disableArtistAlbumTrackEvents != null ? disableArtistAlbumTrackEvents : false }
+Boolean createCrossfadeChildDevice() { return createCrossfadeChildDevice != null ? createCrossfadeChildDevice : false }
+Boolean createShuffleChildDevice() { return createShuffleChildDevice != null ? createShuffleChildDevice : false }
+Boolean createRepeatOneChildDevice() { return createRepeatOneChildDevice != null ? createRepeatOneChildDevice : false }
+Boolean createRepeatAllChildDevice() { return createRepeatAllChildDevice != null ? createRepeatAllChildDevice : false }
+Boolean createBatteryStatusChildDevice() { return createBatteryStatusChildDevice != null ? createBatteryStatusChildDevice : false }
+Boolean createFavoritesChildDevice() { return createFavoritesChildDevice != null ? createFavoritesChildDevice : false }
+Boolean createRightChannelChildDevice() { return createRightChannelChildDevice != null ? createRightChannelChildDevice : false }
+Boolean chimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
+
+Boolean processBatteryStatusChildDeviceMessages() {return createBatteryStatusChildDevice()}
+Boolean loadAudioClipOnRightChannel() {return createRightChannelChildDevice()}
 
 
 String getCurrentTTSVoice() {
@@ -170,6 +186,11 @@ String getCurrentTTSVoice() {
   }
   return voice
 }
+// =============================================================================
+// End Preference Getters And Passthrough Renames For Clarity
+// =============================================================================
+
+
 
 // =============================================================================
 // Fields
@@ -194,6 +215,12 @@ String getCurrentTTSVoice() {
   "x-rincon-queue": "Sonos Q"
 ]
 // =============================================================================
+// End Fields
+// =============================================================================
+
+
+
+// =============================================================================
 // Initialize and Configure
 // =============================================================================
 void initialize() { configure() }
@@ -206,7 +233,7 @@ void configure() {
   createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
   createRemoveFavoritesChildDevice(createFavoritesChildDevice)
   createRemoveRightChannelChildDevice(createRightChannelChildDevice)
-  if(disableTrackDataEvents) { clearTrackDataEvent() }
+  if(disableTrackDataEvents()) { clearTrackDataEvent() }
   if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
   atomicState.audioClipPlaying = false
   migrationCleanup()
@@ -222,6 +249,11 @@ void secondaryConfiguration() {
 void migrationCleanup() {
   unschedule('resubscribeToGMEvents')
 }
+// =============================================================================
+// End Initialize and Configure
+// =============================================================================
+
+
 
 // =============================================================================
 // Device Methods
@@ -352,25 +384,24 @@ void volumeDown() { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 Integer getPlayerVolumeAdjAmount() {
   Integer currentVolume = (this.device.currentValue('volume', true) as Integer)
   if(currentVolume < 11) {
-    return volumeAdjustAmountLow ? volumeAdjustAmountLow as Integer : volumeAdjustAmount as Integer
+    return getVolumeAdjustAmountLow()
   } else if(currentVolume >= 11 && currentVolume < 21) {
-    return volumeAdjustAmountMid ? volumeAdjustAmountMid as Integer : volumeAdjustAmount as Integer
+    return getVolumeAdjustAmountMid()
   } else {
-    return volumeAdjustAmount as Integer
+    return getVolumeAdjustAmount()
   }
 }
 
 Integer getGroupVolumeAdjAmount() {
   Integer currentVolume = (this.device.currentValue('groupVolume', true) as Integer)
   if(currentVolume < 11) {
-    return volumeAdjustAmountLow ? volumeAdjustAmountLow as Integer : volumeAdjustAmount as Integer
+    return getVolumeAdjustAmountLow()
   } else if(currentVolume >= 11 && currentVolume < 21) {
-    return volumeAdjustAmountMid ? volumeAdjustAmountMid as Integer : volumeAdjustAmount as Integer
+    return getVolumeAdjustAmountMid()
   } else {
-    return volumeAdjustAmount as Integer
+    return getVolumeAdjustAmount()
   }
 }
-
 
 void play() { playerPlay() }
 void stop() { playerStop() }
@@ -440,6 +471,9 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
     parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
   }
 }
+// =============================================================================
+// End Device Methods
+// =============================================================================
 
 
 
@@ -524,11 +558,14 @@ void updateChildBatteryStatus(Integer battery, String powerSource, BigDecimal te
     stats.each{ child.sendEvent(it) }
   }
 }
+// =============================================================================
+// End Child device methods
+// =============================================================================
+
 
 // =============================================================================
 // Child Device Helpers
 // =============================================================================
-
 String getCrossfadeControlChildDNI() { return "${device.getDeviceNetworkId()}-CrossfadeControl" }
 String getShuffleControlChildDNI() { return "${device.getDeviceNetworkId()}-ShuffleControl" }
 String getRepeatOneControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatOneControl" }
@@ -545,11 +582,15 @@ ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlC
 ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatteryStatusChildDNI()) }
 ChildDeviceWrapper getFavoritesChild() { return getChildDevice(getFavoritesChildDNI()) }
 ChildDeviceWrapper getRightChannelChild() { return getChildDevice(getRightChannelChildDNI()) }
+// =============================================================================
+// End Child Device Helpers
+// =============================================================================
+
+
 
 // =============================================================================
 // Create Child Devices
 // =============================================================================
-
 void createRemoveCrossfadeChildDevice(Boolean create) {
   String dni = getCrossfadeControlChildDNI()
   ChildDeviceWrapper child = getCrossfadeControlChild()
@@ -707,6 +748,10 @@ void createRemoveRightChannelChildDevice(Boolean create) {
     this.device.updateSetting('createRightChannelChildDevice', false)
   }
 }
+// =============================================================================
+// Create Child Devices
+// =============================================================================
+
 
 
 // =============================================================================
@@ -721,7 +766,7 @@ void parse(String raw) {
   if(message.body == null) {return}
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
   if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    processAVTransportMessages(message.body, getLocalUpnpUrl(), disableTrackDataEvents, includeTrackDataMetaData)
+    processAVTransportMessages(message.body, getLocalUpnpUrl(), disableTrackDataEvents(), includeTrackDataMetaData)
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
     processRenderingControlMessages(message?.body)
@@ -741,6 +786,11 @@ void parse(String raw) {
     logDebug("Could not determine service type for message: ${message}")
   }
 }
+// =============================================================================
+// End Parse
+// =============================================================================
+
+
 
 // =============================================================================
 // Parse Helper Methods
@@ -793,7 +843,6 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
 
   String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
   setCrossfadeMode(currentCrossfadeMode == '1' ? 'on' : 'off')
-
 
   String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
   if(currentTrackMetaDataString) {
@@ -984,9 +1033,14 @@ void processRenderingControlMessages(String xmlString) {
   String loudness = instanceId.children().findAll{((GPathResult)it).name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { setLoudnessState(loudness == '1' ? 'on' : 'off') }
 }
+// =============================================================================
+// Parse Helper Methods
+// =============================================================================
+
+
 
 // =============================================================================
-// Subscriptions and Resubscriptions
+// UPnP Subscriptions and Resubscriptions
 // =============================================================================
   // sonosEventSubscribe('/MediaRenderer/Queue/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/MediaServer/ContentDirectory/Event', host, RESUB_INTERVAL, dni)
@@ -1189,13 +1243,14 @@ void resubscribeToMrGrcCallback(HubResponse response) {
     if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
   }
 }
-
+// =============================================================================
+// End UPnP Subscriptions and Resubscriptions
+// =============================================================================
 
 
 // =============================================================================
 // Misc helpers
 // =============================================================================
-
 void clearCurrentNextArtistAlbumTrackData() {
   setCurrentArtistAlbumTrack(null, null, null, 0)
   setNextArtistAlbumTrack(null, null, null)
@@ -1205,26 +1260,9 @@ void clearTrackDataEvent() {
   sendEvent(name: 'trackData', value: '{}')
 }
 
-List<String> getGroupMemberDNIs() {
-  List groupMemberDNIs = []
-  String groupIds = this.device.getDataValue('groupIds')
-  logDebug("Getting group member DNIs... ${groupIds}")
-  if(groupIds.contains(',')) {
-    List<String> groupMemberRincons = groupIds.tokenize(',')
-    groupMemberRincons.remove(this.device.getDataValue('id'))
-    groupMemberRincons.each{it -> groupMemberDNIs.add("${it}".tokenize('_')[1][0..-6])}
-    return groupMemberDNIs
-  } else {
-    return []
-  }
-}
 
-String getDeviceData(String name) {
-  return this.device.getDataValue(name)
-}
-void setDeviceData(String name, String value) {
-  this.device.updateDataValue(name, value)
-}
+
+
 
 // =============================================================================
 // Getters and Setters
@@ -1272,7 +1310,6 @@ String getRightChannelDeviceIp() {
 void setRightChannelDeviceIp(String ipAddress) {
   this.device.updateDataValue('rightChannelDeviceIp', ipAddress)
 }
-
 
 String getHouseholdId(){
   return this.device.getDataValue('householdId')
@@ -1366,7 +1403,6 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
       parent?.updatePlayerCurrentStates(this.device, groupCoordinatorId)
   } else {logTrace("Group coordinator status has not changed.")}
 }
-
 
 String getGroupCoordinatorName() {
   return this.device.currentValue('groupCoordinatorName', true)
@@ -1589,7 +1625,7 @@ void setTrackDescription(String trackDescription) {
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
 
 void setTrackDataEvents(Map trackData) {
-  if(!disableTrackDataEvents) {
+  if(!disableTrackDataEvents()) {
     trackData['level'] = this.device.currentValue('level')
     trackData['mute'] = this.device.currentValue('mute')
     sendEvent(name: 'trackData', value: JsonOutput.toJson(trackData))
@@ -1597,7 +1633,6 @@ void setTrackDataEvents(Map trackData) {
   if(isGroupedAndCoordinator()) { parent?.setTrackDataEvents(getGroupFollowerDNIs(), trackData) }
 }
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
-
 
 void setNextArtistName(String nextArtistName) {
   if(!disableArtistAlbumTrackEvents) { sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available') }
@@ -1636,6 +1671,9 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'currentFavorite', value: getCurrentFavorite()])
   return currentStates
 }
+// =============================================================================
+// End Getters and Setters
+// =============================================================================
 
 // =============================================================================
 // Websocket Connection and Initialization
@@ -1676,6 +1714,11 @@ void initializeWebsocketConnection() {
 void renewWebsocketConnection() {
   initializeWebsocketConnection()
 }
+// =============================================================================
+// End Websocket Connection and Initialization
+// =============================================================================
+
+
 
 // =============================================================================
 // Websocket Subscriptions and polling
@@ -1790,6 +1833,12 @@ void subscribeToFavorites(String groupId) {
   logDebug('subscribeToFavorites')
   sendWsMessage(json)
 }
+// =============================================================================
+// End Websocket Subscriptions and polling
+// =============================================================================
+
+
+
 // =============================================================================
 // Websocket Commands
 // =============================================================================
@@ -2029,7 +2078,6 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   sendAudioClipHighPriority(audioClip)
 }
 
-
 void sendAudioClipHighPriority(Map clipMessage) {
   if(!clipMessage) {return}
   ChildDeviceWrapper rightChannel = getRightChannelChild()
@@ -2043,7 +2091,7 @@ void sendAudioClipHighPriority(Map clipMessage) {
 }
 
 @CompileStatic
-void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean rightChannel, Boolean chimeBeforeTTS) {
+void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean chimeBeforeTTS = false) {
   logTrace('playerLoadAudioClip')
   Map<String,String> command = [
     'namespace':'audioClip',
@@ -2056,18 +2104,18 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ri
   else {args.volume = getPlayerVolume() + getTTSBoostAmount()}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
-  if(rightChannel) {
+  if(loadAudioClipOnRightChannel()) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  if(audioClipQueue.size() == 0 && chimeBeforeTTS) {playerLoadAudioClipChime(volume, rightChannel)}
+  if(audioClipQueue.size() == 0 && chimeBeforeTTS) {playerLoadAudioClipChime(volume)}
   enqueueAudioClip(audioClip)
   logTrace('Enqueued')
 }
 
 
 @CompileStatic
-void playerLoadAudioClipChime(BigDecimal volume = null, Boolean rightChannel) {
+void playerLoadAudioClipChime(BigDecimal volume = null) {
   Map<String,String> command = [
     'namespace':'audioClip',
     'command':'loadAudioClip',
@@ -2077,7 +2125,7 @@ void playerLoadAudioClipChime(BigDecimal volume = null, Boolean rightChannel) {
   if(volume) {args.volume = volume}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
-  if(rightChannel) {
+  if(loadAudioClipOnRightChannel()) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
@@ -2103,6 +2151,9 @@ void dequeueAudioClip() {
   }
   atomicState.audioClipPlaying = true
 }
+// =============================================================================
+// End Websocket Commands
+// =============================================================================
 
 // =============================================================================
 // Grouping and Ungrouping
