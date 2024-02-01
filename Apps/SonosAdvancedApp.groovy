@@ -35,7 +35,7 @@ definition(
   iconX2Url: '',
   installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: false,
+  singleThreaded: true,
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy'
 )
 
@@ -45,10 +45,13 @@ preferences {
   page(name: 'localPlayerSelectionPage')
   page(name: 'groupPage')
 }
+
+// =============================================================================
+// Fields
+// =============================================================================
 @Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
-
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -66,11 +69,28 @@ preferences {
   "x-sonos-vli:.*,spotify:": "Spotify",
   "x-rincon-queue": "Sonos Q"
 ]
+// =============================================================================
+// End Fields
+// =============================================================================
 
+
+// =============================================================================
+// Getters and Setters
+// =============================================================================
 @CompileStatic
 String getLocalApiPrefix(String ipAddress) {
   return "https://${ipAddress}/api/v1"
 }
+
+String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
+  String localUpnpHost = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localUpnpHost')
+  return localUpnpHost
+}
+
+
+// =============================================================================
+// End Getters and Setters
+// =============================================================================
 
 // =============================================================================
 // App Pages
@@ -131,14 +151,6 @@ Map localPlayerPage() {
       )
     }
   }
-}
-
-String getFoundSonoses() {
-  String foundDevices = ''
-  List<String> discoveredSonosesNames = discoveredSonoses.collect{ it.value?.name }
-  discoveredSonosesNames.sort()
-  discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
-  return foundDevices
 }
 
 Map localPlayerSelectionPage() {
@@ -253,6 +265,11 @@ Map groupPage() {
     }
   }
 }
+// =============================================================================
+// End App Pages
+// =============================================================================
+
+
 
 // =============================================================================
 // Button Handlers
@@ -292,6 +309,11 @@ void cancelGroupEdit() {
   app.removeSetting('newGroupCoordinator')
   app.removeSetting('editDeleteGroup')
 }
+// =============================================================================
+// End Button Handlers
+// =============================================================================
+
+
 
 // =============================================================================
 // Initialize() and Configure()
@@ -314,6 +336,11 @@ void configure() {
   }
   unschedule('appGetFavoritesLocal')
 }
+// =============================================================================
+// End Initialize() and Configure()
+// =============================================================================
+
+
 
 // =============================================================================
 // Create Child Devices
@@ -402,6 +429,11 @@ void removeOrphans() {
     }
   }
 }
+// =============================================================================
+// End Create Child Devices
+// =============================================================================
+
+
 
 // =============================================================================
 // Local Discovery
@@ -427,6 +459,7 @@ void ssdpEventHandler(Event event) {
   processParsedSsdpEvent(parsedEvent)
 }
 
+@CompileStatic
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event?.networkAddress)
   String ipPort = convertHexToInt(event?.deviceAddress)
@@ -478,7 +511,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     localUpnpUrl: "http://${ipAddress}:1400",
     localUpnpHost: "${ipAddress}:1400"
   ]
-  if(playerInfoDevice?.primaryDeviceId && playerInfoDevice?.capabilities.contains('AUDIO_CLIP')) {
+  if(playerInfoDevice?.primaryDeviceId && deviceCapabilities.contains('AUDIO_CLIP')) {
     LinkedHashMap discoveredSonosSecondary = [
       primaryDeviceId: playerInfoDevice?.primaryDeviceId,
       id: playerId,
@@ -497,18 +530,34 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   }
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
-    app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
-    app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
+    sendFoundSonosEvents()
   } else {
     logTrace("Device id:${discoveredSonos?.id} responded to SSDP discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
 }
 
+@CompileStatic
+String getFoundSonoses() {
+  String foundDevices = ''
+  List<String> discoveredSonosesNames = discoveredSonoses.collect{Object k, Object v -> ((LinkedHashMap)v)?.name as String }
+  discoveredSonosesNames.sort()
+  discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
+  return foundDevices
+}
+
+void sendFoundSonosEvents() {
+  app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
+  app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
+}
+// =============================================================================
+// End Local Discovery
+// =============================================================================
+
+
+
 // =============================================================================
 // Helper methods
 // =============================================================================
-
-
 String getDNIFromRincon(String rincon) {
   return rincon.tokenize('_')[1][0..-6]
 }
@@ -716,11 +765,15 @@ String unEscapeOnce(String text) {
 String unEscapeMetaData(String text) {
   return text.replace('&amp;lt;','<').replace('&amp;gt;','>').replace('&amp;quot;','"')
 }
+// =============================================================================
+// Helper methods
+// =============================================================================
+
+
 
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
-
 void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
@@ -834,9 +887,14 @@ void updateGroupDevices(String coordinatorId, ArrayList playersInGroup) {
     else { gd.sendEvent(name: 'switch', value: 'off') }
   }
 }
+// =============================================================================
+// Component Methods for Child Event Processing
+// =============================================================================
+
+
 
 // =============================================================================
-// Get and Post Helpers
+// HTTP Helpers
 // =============================================================================
 void sendLocalCommandAsync(Map args) {
   if(args?.endpoint == null && args?.params?.uri == null) { return }
@@ -943,11 +1001,15 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
   }
   if (response.hasError()) { return false } else { return true }
 }
+// =============================================================================
+// HTTP Helpers
+// =============================================================================
+
+
 
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
-
 void componentPlayTextNoRestoreLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
@@ -997,16 +1059,6 @@ void addURIToQueue(DeviceWrapper device, String enqueuedURI, String currentURIMe
   Map params = getSoapActionParams(ip, AVTransport, 'AddURIToQueue', controlValues)
   // removeAllTracksFromQueue(device)
   asynchttpPost('localControlCallback', params)
-}
-
-String getMetaData(String title = '', String service = 'SA_RINCON65031_') {
-  return  (
-    '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
-    'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
-    '<item id="R:0/0/0" parentID="R:0/0" restricted="true"> ' +
-    "<dc:title>${title}</dc:title>"+'<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>' +
-    '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">'+"${service}"+'</desc></item></DIDL-Lite>'
-  )
 }
 
 void componentLoadStreamUrlLocal(DeviceWrapper device, String streamUrl, BigDecimal volume = null) {
@@ -1113,17 +1165,14 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
 }
+// =============================================================================
+// Local Control Component Methods
+// =============================================================================
 
 
-// /////////////////////////////////////////////////////////////////////////////
+// =============================================================================
 // Favorites
-// /////////////////////////////////////////////////////////////////////////////
-List<String> getUniqueHouseholds() {
-  List<ChildDeviceWrapper> children = app.getChildDevices()
-  List<String> households = children.collect{cd -> cd.getDataValue('householdId')}.unique{a,b -> a <=> b}
-  return households
-}
-
+// =============================================================================
 void setFavorites(Map favs) {
   logTrace('Updated favs for matching...')
   state.favs = favs
@@ -1155,43 +1204,8 @@ void isFavoritePlaying(DeviceWrapper cd, Map json) {
   ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
   child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
+// =============================================================================
+// Favorites
+// =============================================================================
 
-void componentUpdatePlayerInfo(DeviceWrapper device) {
-  Map playerInfo = getPlayerInfoLocalSync("${device.getDataValue('deviceIp')}:1443")
-  String id = playerInfo?.playerId
-  String isGroupCoordinator = playerInfo?.groupId.tokenize(':')[0] ==id  ? 'true' : 'false'
-  device.updateDataValue('isGroupCoordinator', isGroupCoordinator)
-}
-
-void componentSetPlayModesLocal(DeviceWrapper device, Map playModes) {
-  logDebug('Setting Play Modes...')
-  String groupId = device.currentValue('groupId', true)
-  String localApiUrl = getLocalApiUrlForPlayer(device)
-  String endpoint = "groups/${groupId}/playback/playMode"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: playModes)
-}
-
-String getLocalApiUrlForPlayer(DeviceWrapper device) {
-  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
-  String localApiUrl = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localApiUrl')
-  return localApiUrl
-}
-
-String getLocalApiUrlForCoordinatorId(String groupCoordinatorId) {
-  String localApiUrl = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localApiUrl')
-  return localApiUrl
-}
-
-String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
-  String localUpnpHost = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localUpnpHost')
-  return localUpnpHost
-}
-
-String getCoordinatorGroupId(String groupCoordinatorId) {
-  ChildDeviceWrapper coordinator = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }
-  String coordinatorGroupId = getGroupForPlayerDeviceLocal(coordinator)
-  return coordinatorGroupId
-}
 

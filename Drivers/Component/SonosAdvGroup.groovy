@@ -60,7 +60,14 @@ metadata {
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
   }
+  preferences {
+    section('Device Settings') {
+      input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
+    }
+  }
 }
+Boolean getChimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
+
 
 String getCurrentTTSVoice() {
   Map params = [uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false"]
@@ -86,7 +93,9 @@ void clearState() { state.clear() }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  parent?.componentPlayTextLocal(this.device, text, volume, voice)
+  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  logDebug(allDevs)
+  allDevs.each{it.playerLoadAudioClip(textToSpeech(text, voice).uri, volume, getChimeBeforeTTS())}
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {

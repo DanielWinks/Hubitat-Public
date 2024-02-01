@@ -153,24 +153,24 @@ metadata {
 // =============================================================================
 // Preference Getters And Passthrough Renames For Clarity
 // =============================================================================
-Boolean disableTrackDataEvents() { return disableTrackDataEvents != null ? disableTrackDataEvents : true }
-Boolean includeTrackDataMetaData() { return includeTrackDataMetaData != null ? includeTrackDataMetaData : false }
+Boolean getDisableTrackDataEvents() { return disableTrackDataEvents != null ? disableTrackDataEvents : true }
+Boolean getIncludeTrackDataMetaData() { return includeTrackDataMetaData != null ? includeTrackDataMetaData : false }
 Integer getVolumeAdjustAmountLow() { return volumeAdjustAmountLow != null ? volumeAdjustAmountLow as Integer : 5 }
 Integer getVolumeAdjustAmountMid() { return volumeAdjustAmountMid != null ? volumeAdjustAmountMid as Integer : 5 }
 Integer getVolumeAdjustAmount() { return volumeAdjustAmount != null ? volumeAdjustAmount as Integer : 5 }
 Integer getTTSBoostAmount() { return ttsBoostAmount != null ? ttsBoostAmount as Integer : 10 }
-Boolean disableArtistAlbumTrackEvents() { return disableArtistAlbumTrackEvents != null ? disableArtistAlbumTrackEvents : false }
-Boolean createCrossfadeChildDevice() { return createCrossfadeChildDevice != null ? createCrossfadeChildDevice : false }
-Boolean createShuffleChildDevice() { return createShuffleChildDevice != null ? createShuffleChildDevice : false }
-Boolean createRepeatOneChildDevice() { return createRepeatOneChildDevice != null ? createRepeatOneChildDevice : false }
-Boolean createRepeatAllChildDevice() { return createRepeatAllChildDevice != null ? createRepeatAllChildDevice : false }
-Boolean createBatteryStatusChildDevice() { return createBatteryStatusChildDevice != null ? createBatteryStatusChildDevice : false }
-Boolean createFavoritesChildDevice() { return createFavoritesChildDevice != null ? createFavoritesChildDevice : false }
-Boolean createRightChannelChildDevice() { return createRightChannelChildDevice != null ? createRightChannelChildDevice : false }
-Boolean chimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
+Boolean getDisableArtistAlbumTrackEvents() { return disableArtistAlbumTrackEvents != null ? disableArtistAlbumTrackEvents : false }
+Boolean getCreateCrossfadeChildDevice() { return createCrossfadeChildDevice != null ? createCrossfadeChildDevice : false }
+Boolean getCreateShuffleChildDevice() { return createShuffleChildDevice != null ? createShuffleChildDevice : false }
+Boolean getCreateRepeatOneChildDevice() { return createRepeatOneChildDevice != null ? createRepeatOneChildDevice : false }
+Boolean getCreateRepeatAllChildDevice() { return createRepeatAllChildDevice != null ? createRepeatAllChildDevice : false }
+Boolean getCreateBatteryStatusChildDevice() { return createBatteryStatusChildDevice != null ? createBatteryStatusChildDevice : false }
+Boolean getCreateFavoritesChildDevice() { return createFavoritesChildDevice != null ? createFavoritesChildDevice : false }
+Boolean getCreateRightChannelChildDevice() { return createRightChannelChildDevice != null ? createRightChannelChildDevice : false }
+Boolean getChimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
 
-Boolean processBatteryStatusChildDeviceMessages() {return createBatteryStatusChildDevice()}
-Boolean loadAudioClipOnRightChannel() {return createRightChannelChildDevice()}
+Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
+Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
 
 
 String getCurrentTTSVoice() {
@@ -195,8 +195,9 @@ String getCurrentTTSVoice() {
 // =============================================================================
 // Fields
 // =============================================================================
-@Field private final Integer RESUB_INTERVAL = 7200
-@Field static ConcurrentLinkedQueue<Map> audioClipQueue = new ConcurrentLinkedQueue<Map>()
+@Field final Integer RESUB_INTERVAL = 7200
+@Field static LinkedHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new LinkedHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -214,6 +215,10 @@ String getCurrentTTSVoice() {
   "x-sonos-vli:.*,spotify:": "Spotify",
   "x-rincon-queue": "Sonos Q"
 ]
+@Field private final String MRRC_EVENTS  =  '/MediaRenderer/RenderingControl/Event'
+@Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
+@Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
+@Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
 // =============================================================================
 // End Fields
 // =============================================================================
@@ -225,29 +230,36 @@ String getCurrentTTSVoice() {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
-  createRemoveCrossfadeChildDevice(createCrossfadeChildDevice)
-  createRemoveShuffleChildDevice(createShuffleChildDevice)
-  createRemoveRepeatOneChildDevice(createRepeatOneChildDevice)
-  createRemoveRepeatAllChildDevice(createRepeatAllChildDevice)
+  createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
+  createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
+  createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
+  createRemoveRepeatAllChildDevice(getCreateRepeatAllChildDevice())
   createRemoveMuteChildDevice(createMuteChildDevice)
-  createRemoveBatteryStatusChildDevice(createBatteryStatusChildDevice)
-  createRemoveFavoritesChildDevice(createFavoritesChildDevice)
-  createRemoveRightChannelChildDevice(createRightChannelChildDevice)
-  if(disableTrackDataEvents()) { clearTrackDataEvent() }
-  if(disableArtistAlbumTrackEvents) { clearCurrentNextArtistAlbumTrackData() }
+  createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
+  createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
+  createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
+  if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
+  if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
   atomicState.audioClipPlaying = false
   migrationCleanup()
   runIn(5, 'secondaryConfiguration')
 }
 
 void secondaryConfiguration() {
-  parent?.componentUpdatePlayerInfo(this.device)
   initializeWebsocketConnection()
+  audioClipQueueInitialization()
   runIn(10, 'subscribeToEvents')
 }
 
 void migrationCleanup() {
   unschedule('resubscribeToGMEvents')
+}
+
+void audioClipQueueInitialization() {
+  if(audioClipQueue == null) { audioClipQueue = new LinkedHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!audioClipQueue.containsKey(getId())) {
+    audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
+  }
 }
 // =============================================================================
 // End Initialize and Configure
@@ -297,11 +309,11 @@ void speak(String text, BigDecimal volume = null, String voice = null) { deviceP
 
 void setTrack(String uri) { parent?.componentSetStreamUrlLocal(this.device, uri, volume) }
 void playTrack(String uri, BigDecimal volume = null) { parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
-void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume, createRightChannelChildDevice, chimeBeforeTTS) }
-void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume, createRightChannelChildDevice, chimeBeforeTTS) }
+void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
+void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClip(textToSpeech(text, voice).uri, volume, createRightChannelChildDevice, chimeBeforeTTS)
+  playerLoadAudioClip(textToSpeech(text, voice).uri, volume)
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
@@ -324,7 +336,7 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
 
 void mute(){ playerSetPlayerMute(true) }
 void unmute(){ playerSetPlayerMute(false) }
-void setLevel(BigDecimal level) { playerSetPlayerVolume(level) }
+void setLevel(BigDecimal level) { playerSetPlayerVolume(level as Integer) }
 void setVolume(BigDecimal level) { setLevel(level) }
 void setTreble(BigDecimal level) { parent?.componentSetTrebleLocal(this.device, level)}
 void setBass(BigDecimal level) { parent?.componentSetBassLocal(this.device, level)}
@@ -351,11 +363,11 @@ void setGroupVolume(BigDecimal level) {
   if(isGroupedAndCoordinator()) {
     playerSetGroupVolume(level)
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupVolume(level)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupVolume(level as Integer)
   }
-  else { playerSetPlayerVolume(level) }
+  else { playerSetPlayerVolume(level as Integer) }
 }
-void setGroupLevel(BigDecimal level) { setGroupVolume(level) }
+void setGroupLevel(BigDecimal level) { setGroupVolume(level as Integer) }
 void setGroupMute(String mode) {
   logDebug("Setting group mute to ${mode}")
   if(mode == 'muted') { muteGroup() }
@@ -541,14 +553,14 @@ void componentOff(DeviceWrapper child) {
 }
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
-  if(disableArtistAlbumTrackEvents) {return}
+  if(getDisableArtistAlbumTrackEvents()) {return}
   sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available')
   sendEvent(name:'nextAlbumName',  value: nextAlbumName ?: 'Not Available')
   sendEvent(name:'nextTrackName',  value: nextTrackName ?: 'Not Available')
 }
 
 void updateChildBatteryStatus(Integer battery, String powerSource, BigDecimal temperature) {
-  if(createBatteryStatusChildDevice) {
+  if(getCreateBatteryStatusChildDevice()) {
     ChildDeviceWrapper child = getBatteryStatusChild()
     List<Event> stats = [
       [name: 'battery', value: battery, unit: '%' ],
@@ -766,7 +778,7 @@ void parse(String raw) {
   if(message.body == null) {return}
   String serviceType = message.headers["X-SONOS-SERVICETYPE"]
   if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    processAVTransportMessages(message.body, getLocalUpnpUrl(), disableTrackDataEvents(), includeTrackDataMetaData)
+    processAVTransportMessages(message.body, getLocalUpnpUrl())
   }
   else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
     processRenderingControlMessages(message?.body)
@@ -806,7 +818,7 @@ String unEscapeLastChangeXML(String text) {
 }
 
 @CompileStatic
-void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean disableTrackDataEvents, Boolean includeTrackDataMetaData) {
+void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   if(xmlString.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
   if(xmlString.contains('&lt;TransportState val=&quot;TRANSITIONING&quot;/&gt;')) { return } //Bail out if this AVTransport message is TRANSITIONING"
 
@@ -869,7 +881,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
     String uri = instanceId['AVTransportURI']['@val']
       // String transportUri = uri ?? Seems to be the same on the built-in driver
     String audioSource = SOURCES["${(uri.tokenize(':')[0])}"]
-    if(!disableTrackDataEvents) {
+    if(!getDisableTrackDataEvents()) {
       Map trackData = [:]
       trackData['audioSource'] = audioSource ?: trackData['audioSource']
       trackData['station'] = null
@@ -883,7 +895,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl, Boolean d
       trackData['trackUri'] = trackUri ?: trackData['trackUri']
       trackData['transportUri'] = uri ?: trackData['transportUri']
       trackData['enqueuedUri'] = enqueuedUri ?: trackData['enqueuedUri']
-      if(includeTrackDataMetaData) {
+      if(getIncludeTrackDataMetaData()) {
         trackData['metaData'] = enqueuedTransportURIMetaDataString
         trackData['trackMetaData'] =  currentTrackMetaDataString ?: trackData['trackMetaData']
       }
@@ -1050,10 +1062,7 @@ void processRenderingControlMessages(String xmlString) {
 
 String getlocalUpnpHost() {return device.getDataValue('localUpnpHost')}
 String getDNI() {return device.getDeviceNetworkId()}
-@Field private final String MRRC_EVENTS  =  '/MediaRenderer/RenderingControl/Event'
-@Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
-@Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
-@Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
+
 
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
@@ -1560,55 +1569,55 @@ void setPlayMode(String playMode){
 
 void setCurrentRepeatOneMode(String value) {
   sendEvent(name:'currentRepeatOneMode', value: value)
-  if(createRepeatOneChildDevice) { getRepeatOneControlChild().sendEvent(name:'switch', value: value) }
+  if(getCreateRepeatOneChildDevice()) { getRepeatOneControlChild().sendEvent(name:'switch', value: value) }
 }
 String getCurrentRepeatOneMode() { return this.device.currentValue('currentRepeatOneMode') }
 
 void setCurrentRepeatAllMode(String value) {
   sendEvent(name:'currentRepeatAllMode', value: value)
-  if(createRepeatAllChildDevice) { getRepeatAllControlChild().sendEvent(name:'switch', value: value) }
+  if(getCreateRepeatAllChildDevice()) { getRepeatAllControlChild().sendEvent(name:'switch', value: value) }
 }
 String getCurrentRepeatAllMode() { return this.device.currentValue('currentRepeatAllMode') }
 
 void setCurrentShuffleMode(String value) {
   sendEvent(name:'currentShuffleMode', value: value)
-  if(createShuffleChildDevice) { getShuffleControlChild().sendEvent(name:'switch', value: value) }
+  if(getCreateShuffleChildDevice()) { getShuffleControlChild().sendEvent(name:'switch', value: value) }
 }
 String getCurrentShuffleMode() { return this.device.currentValue('currentShuffleMode') }
 
 void setCrossfadeMode(String currentCrossfadeMode) {
   sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
-  if(createCrossfadeChildDevice) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
+  if(getCreateCrossfadeChildDevice()) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
   if(isGroupedAndCoordinator()) {parent?.setCrossfadeMode(getGroupFollowerDNIs(), currentCrossfadeMode)}
 }
 String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMode') }
 
 void setCurrentTrackDuration(String currentTrackDuration){
-  if(!disableArtistAlbumTrackEvents) {sendEvent(name:'currentTrackDuration', value: currentTrackDuration)}
+  if(!getDisableArtistAlbumTrackEvents()) {sendEvent(name:'currentTrackDuration', value: currentTrackDuration)}
   if(isGroupedAndCoordinator()) {parent?.setCurrentTrackDuration(getGroupFollowerDNIs(), currentTrackDuration)}
 }
 String getCurrentTrackDuration() { return this.device.currentValue('currentTrackDuration') }
 
 void setCurrentArtistName(String currentArtistName) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'currentArtistName', value: currentArtistName ?: 'Not Available') }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentArtistName', value: currentArtistName ?: 'Not Available') }
   if(isGroupedAndCoordinator()) { parent?.setCurrentArtistName(getGroupFollowerDNIs(), currentArtistName) }
 }
 String getCurrentArtistName() { return this.device.currentValue('currentArtistName') }
 
 void setCurrentAlbumName(String currentAlbumName) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'currentAlbumName', value: currentAlbumName ?: 'Not Available') }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentAlbumName', value: currentAlbumName ?: 'Not Available') }
   if(isGroupedAndCoordinator()) { parent?.setCurrentAlbumName(getGroupFollowerDNIs(), currentAlbumName) }
 }
 String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName') }
 
 void setCurrentTrackName(String currentTrackName) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'currentTrackName', value: currentTrackName ?: 'Not Available') }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentTrackName', value: currentTrackName ?: 'Not Available') }
   if(isGroupedAndCoordinator()) { parent?.setCurrentTrackName(getGroupFollowerDNIs(), currentTrackName) }
 }
 String getCurrentTrackName() { return this.device.currentValue('currentTrackName') }
 
 void setCurrentTrackNumber(Integer currentTrackNumber) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'currentTrackNumber', value: currentTrackNumber ?: 0) }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentTrackNumber', value: currentTrackNumber ?: 0) }
   if(isGroupedAndCoordinator()) { parent?.setCurrentTrackNumber(getGroupFollowerDNIs(), currentTrackNumber) }
 }
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
@@ -1625,7 +1634,7 @@ void setTrackDescription(String trackDescription) {
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
 
 void setTrackDataEvents(Map trackData) {
-  if(!disableTrackDataEvents()) {
+  if(!getDisableTrackDataEvents()) {
     trackData['level'] = this.device.currentValue('level')
     trackData['mute'] = this.device.currentValue('mute')
     sendEvent(name: 'trackData', value: JsonOutput.toJson(trackData))
@@ -1635,19 +1644,19 @@ void setTrackDataEvents(Map trackData) {
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
 
 void setNextArtistName(String nextArtistName) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available') }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available') }
   if(isGroupedAndCoordinator()) { parent?.setNextArtistName(getGroupFollowerDNIs(), nextArtistName) }
 }
 String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 
 void setNextAlbumName(String nextAlbumName) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'nextAlbumName', value: nextAlbumName ?: 'Not Available') }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'nextAlbumName', value: nextAlbumName ?: 'Not Available') }
   if(isGroupedAndCoordinator()) { parent?.setNextAlbumName(getGroupFollowerDNIs(), nextAlbumName) }
 }
 String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 
 void setNextTrackName(String nextTrackName) {
-  if(!disableArtistAlbumTrackEvents) { sendEvent(name:'nextTrackName', value: nextTrackName ?: 'Not Available') }
+  if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'nextTrackName', value: nextTrackName ?: 'Not Available') }
   if(isGroupedAndCoordinator()) { parent?.setNextTrackName(getGroupFollowerDNIs(), nextTrackName) }
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
@@ -1671,6 +1680,24 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'currentFavorite', value: getCurrentFavorite()])
   return currentStates
 }
+
+@CompileStatic
+ConcurrentLinkedQueue<Map> getAudioClipQueue() {
+  audioClipQueueInitialization()
+  return audioClipQueue[getId()]
+}
+
+@CompileStatic
+Integer getAudioClipQueueLength() {
+  audioClipQueueInitialization()
+  return getAudioClipQueue().size() as Integer
+}
+
+@CompileStatic
+Boolean getAudioClipQueueIsEmpty() {
+  audioClipQueueInitialization()
+  return getAudioClipQueue().size() == 0
+}
 // =============================================================================
 // End Getters and Setters
 // =============================================================================
@@ -1678,8 +1705,6 @@ List<Map> getCurrentPlayingStatesForGroup() {
 // =============================================================================
 // Websocket Connection and Initialization
 // =============================================================================
-@Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
-
 void webSocketStatus(String message) {
   if(message == 'failure: null') { this.device.updateDataValue('websocketStatus', 'closed')}
   if(message == 'status: open') { this.device.updateDataValue('websocketStatus', 'open')}
@@ -1705,7 +1730,7 @@ void sendWsMessage(String message) {
 
 void initializeWebsocketConnection() {
   wsConnect()
-  if(createFavoritesChildDevice) {subscribeToFavorites()}
+  if(getCreateFavoritesChildDevice()) {subscribeToFavorites()}
   subscribeToPlaylists()
   subscribeToAudioClip()
   subscribeToGroups()
@@ -2059,7 +2084,7 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
 
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null) {
-  logTrace('playerLoadAudioClip')
+  logTrace('playerLoadAudioClipHighPriority')
   Map<String,String> command = [
     'namespace':'audioClip',
     'command':'loadAudioClip',
@@ -2091,7 +2116,7 @@ void sendAudioClipHighPriority(Map clipMessage) {
 }
 
 @CompileStatic
-void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean chimeBeforeTTS = false) {
+void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean chimeBeforeTTS = getChimeBeforeTTS()) {
   logTrace('playerLoadAudioClip')
   Map<String,String> command = [
     'namespace':'audioClip',
@@ -2108,7 +2133,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  if(audioClipQueue.size() == 0 && chimeBeforeTTS) {playerLoadAudioClipChime(volume)}
+  if(getAudioClipQueueIsEmpty() && chimeBeforeTTS) {playerLoadAudioClipChime(volume)}
   enqueueAudioClip(audioClip)
   logTrace('Enqueued')
 }
@@ -2132,16 +2157,18 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
   enqueueAudioClip(audioClip)
 }
 
-
 void enqueueAudioClip(Map clipMessage) {
-  Boolean queueWasEmpty = audioClipQueue.size() == 0
-  audioClipQueue.add(clipMessage)
-  if(queueWasEmpty && !atomicState.audioClipPlaying) {dequeueAudioClip()}
+  logTrace('enqueueAudioClip')
+  Boolean queueWasEmpty = getAudioClipQueueIsEmpty()
+  getAudioClipQueue().add(clipMessage)
+  if(queueWasEmpty && atomicState.audioClipPlaying == false) {dequeueAudioClip()}
+  else { subscribeToAudioClip() }
 }
 //The graphic and typographic operators know this well, in reality all the professions dealing with the universe of communication have a stable relationship with these words, but what is it? Lorem ipsum is a dummy text without any sense.  It is a sequence of Latin words that, as they are positioned, do not form sentences with a complete sense, but give life to a test text useful to fill spaces that will subsequently be occupied from ad hoc texts composed by communication professionals.  It is certainly the most famous placeholder text even if there are different versions distinguishable from the order in which the Latin words are repeated.  Lorem ipsum contains the typefaces more in use, an aspect that allows you to have an overview of the rendering of the text in terms of font choice and font size .
 void dequeueAudioClip() {
+  logTrace('dequeueAudioClip')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
-  Map clipMessage = audioClipQueue.poll()
+  Map clipMessage = getAudioClipQueue().poll()
   if(!clipMessage) {return}
   if(clipMessage.rightChannel) {
     sendWsMessage(clipMessage.leftChannel)
@@ -2255,11 +2282,11 @@ void processWebsocketMessage(String message) {
     }
   }
 
-  if(createFavoritesChildDevice && eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
+  if(getCreateFavoritesChildDevice() && eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
     getFavorites()
   }
 
-  if(createFavoritesChildDevice && eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
+  if(getCreateFavoritesChildDevice() && eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
     List respData = eventData?.items
     Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it?.imageUrl]] }
     String html = '<!DOCTYPE html><html><body><ul>'
@@ -2327,9 +2354,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    if(eventData?.currentItem || eventData?.streamInfo) {
-      runIn(1, 'isFavoritePlaying', [overwrite: true, data: eventData ])
-    }
+    runIn(1, 'isFavoritePlaying', [overwrite: true, data: eventData ])
   }
 }
 

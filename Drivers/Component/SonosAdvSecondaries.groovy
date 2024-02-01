@@ -32,16 +32,29 @@ metadata {
     component: true,
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSecondaries.groovy'
   ) {
-    // capability 'Actuator'
-    // capability 'Switch'
-
-  }
+      capability 'Initialize'
+    }
 }
+// =============================================================================
+// Fields
+// =============================================================================
+@Field private final Integer RESUB_INTERVAL = 7200
+// =============================================================================
+// End Fields
+// =============================================================================
 
-void initialize() {configure()}
-void configure() {
-  initializeWebsocketConnection()
-}
+
+
+// =============================================================================
+// Initialize And Configure
+// =============================================================================
+void initialize() { configure() }
+void configure() { initializeWebsocketConnection() }
+// =============================================================================
+// End Initialize And Configure
+// =============================================================================
+
+
 
 // =============================================================================
 // Websocket Connection and Initialization
@@ -60,22 +73,20 @@ void wsConnect() {
   runIn(RESUB_INTERVAL-100, 'renewWebsocketConnection')
 }
 
-void wsClose() {
-  interfaces.webSocket.close()
-}
+void wsClose() { interfaces.webSocket.close() }
 
 void sendWsMessage(String message) {
-  if(this.device.getDataValue('websocketStatus') != 'open') { wsConnect() }
+  if(this.device.getDataValue('websocketStatus') != 'open') { initializeWebsocketConnection() }
   interfaces.webSocket.sendMessage(message)
 }
 
-void initializeWebsocketConnection() {
-  wsConnect()
-}
+void initializeWebsocketConnection() { wsConnect() }
+void renewWebsocketConnection() { initializeWebsocketConnection() }
+// =============================================================================
+// End Websocket Connection and Initialization
+// =============================================================================
 
-void renewWebsocketConnection() {
-  initializeWebsocketConnection()
-}
+
 
 // =============================================================================
 // Getters and Setters
@@ -113,6 +124,11 @@ String getId() {
 void setId(String id) {
   this.device.updateDataValue('id', id)
 }
+// =============================================================================
+// End Getters and Setters
+// =============================================================================
+
+
 
 // =============================================================================
 // Websocket Commands
@@ -121,9 +137,16 @@ void setId(String id) {
 void playerLoadAudioClip(String json) {
   sendWsMessage(json)
 }
+// =============================================================================
+// End Websocket Commands
+// =============================================================================
+
+
 
 // =============================================================================
 // Parse
 // =============================================================================
-
 void parse(String message) {}
+// =============================================================================
+// End Parse
+// =============================================================================
