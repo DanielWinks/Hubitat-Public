@@ -991,16 +991,10 @@ void processZoneGroupTopologyMessages(String xmlString, String rincon, LinkedHas
       }
     }
   }
-
-  String zonePlayerUUIDsInGroup = ((GPathResult)propertyset['property']['ZonePlayerUUIDsInGroup']).text().toString()
-  if(zonePlayerUUIDsInGroup) {
-    List<String> playersInGroup = zonePlayerUUIDsInGroup.tokenize(',')
-    parentUpdateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail())
-  }
 }
 
 void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
-  parent?.updateGroupDevices(playersInGroup[0].toString(), playersInGroup.tail())
+  parent?.updateGroupDevices(coordinatorId, playersInGroup)
 }
 
 void updateZoneGroupName(String groupName, LinkedHashSet<String> groupedRincons) {
@@ -1403,6 +1397,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   if(isGroupCoordinator && !previouslyWasGroupCoordinator) {
     if(!this.device.getDataValue('sid1')) {
       subscribeToAVTransport()
+      initializeWebsocketConnection()
       getPlaybackMetadataStatus()
       logTrace('Just became group coordinator, subscribing to AVT.')
     }
@@ -1444,6 +1439,10 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   this.device.updateDataValue('groupIds', groupPlayerIds.join(','))
   this.device.sendEvent(name: 'isGrouped', value: groupPlayerIds.size() > 1 ? 'on' : 'off')
   this.device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
+  if(isGroupedAndCoordinator()) {
+    logTrace('Updating group device with new group membership information')
+    parentUpdateGroupDevices(getId(), groupPlayerIds)
+  }
 }
 
 List<String> getGroupFollowerDNIs() {

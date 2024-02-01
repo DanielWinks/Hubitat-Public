@@ -877,12 +877,18 @@ void updateZoneGroupName(String zoneGroupName, LinkedHashSet rinconsToUpdate) {
   childrenToUpdate.each{it.sendEvent(name: 'groupName', value: zoneGroupName)}
 }
 
-void updateGroupDevices(String coordinatorId, ArrayList playersInGroup) {
+@CompileStatic
+void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
+  logTrace('updateGroupDevices')
   // Update group device with current on/off state
   List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll{it.getDataValue('groupCoordinatorId') == coordinatorId }
   groupsForCoord.each{gd ->
     List<String> playerIds = gd.getDataValue('playerIds').tokenize(',')
-    Boolean allPlayersAreGrouped = playersInGroup.containsAll(playerIds) && playersInGroup.size() == playerIds.size()
+    HashSet<String> list1 = new  HashSet<String>(playerIds)
+    HashSet<String> list2 = new  HashSet<String>(playersInGroup)
+    list1.add(coordinatorId)
+    list2.add(coordinatorId)
+    Boolean allPlayersAreGrouped = list1.equals(list2)
     if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
   }
