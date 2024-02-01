@@ -713,13 +713,11 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
 
 Boolean deviceHasBattery() {
   Map params = [uri: "${getLocalUpnpUrl()}/status/batterystatus"]
-  params.textParser = true
   httpGet(params) {resp ->
     if(resp.status == 200) {
-      return ((resp.data).toString()).contains('LocalBatteryStatus')
-    }
+      return resp.data.children().find{it.name() == 'LocalBatteryStatus'}.size() > 0
+    } else { return false }
   }
-  return false
 }
 
 void createRemoveFavoritesChildDevice(Boolean create) {
@@ -784,9 +782,8 @@ void parse(String raw) {
     processRenderingControlMessages(message?.body)
   }
   else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    String rincon = getId()
     LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
-    processZoneGroupTopologyMessages(message?.body, rincon, oldGroupedRincons)
+    processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
     processGroupRenderingControlMessages(message)
@@ -935,12 +932,14 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
 }
 
 @CompileStatic
-void processZoneGroupTopologyMessages(String xmlString, String rincon, LinkedHashSet oldGroupedRincons) {
+void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGroupedRincons) {
   GPathResult propertyset = new XmlSlurper().parseText(xmlString)
-  GPathResult zoneGroups = (GPathResult)propertyset['property']['ZoneGroupState']['ZoneGroupState']['ZoneGroups']
+  String zoneGroupStateString = ((GPathResult)propertyset['property']['ZoneGroupState']).text() //['ZoneGroupState']['ZoneGroups']
+  GPathResult zoneGroupState = new XmlSlurper().parseText(unEscapeLastChangeXML(zoneGroupStateString))
+  GPathResult zoneGroups = (GPathResult)zoneGroupState['ZoneGroups']
 
   LinkedHashSet<String> groupedRincons = new LinkedHashSet()
-  GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == rincon}.parent().children()
+  GPathResult currentGroupMembers = zoneGroups.children().children().findAll{it['@UUID'] == getId()}.parent().children()
 
   currentGroupMembers.each{
     if(it['@Invisible'] == '1') {return}
@@ -948,7 +947,6 @@ void processZoneGroupTopologyMessages(String xmlString, String rincon, LinkedHas
   }
   if(groupedRincons.size() == 0) {
     logTrace("No grouped rincons found!")
-    return
   }
 
   if(groupedRincons != oldGroupedRincons) {
@@ -959,8 +957,7 @@ void processZoneGroupTopologyMessages(String xmlString, String rincon, LinkedHas
 
   setGroupPlayerIds(groupedRincons.toList())
 
-  String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@ZoneName']
-
+  String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == getId()}['@ZoneName']
   LinkedHashSet currentGroupMemberNames = []
   groupedRincons.each{ gr ->
     currentGroupMemberNames.add(zoneGroups.children().children().findAll{it['@UUID'] == gr}['@ZoneName']) }
@@ -978,9 +975,8 @@ void processZoneGroupTopologyMessages(String xmlString, String rincon, LinkedHas
   if(currentGroupMemberNames.size() > 0) {setGroupMemberNames(currentGroupMemberNames.toList())}
   if(groupName) {setGroupName(groupName)}
 
-
   if(processBatteryStatusChildDeviceMessages()) {
-    String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == rincon}['@MoreInfo']
+    String moreInfoString = zoneGroups.children().children().findAll{it['@UUID'] == getId()}['@MoreInfo']
     if(moreInfoString) {
       Map<String,String> moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0].toString(),it[1].toString()]}
       if(moreInfo.containsKey('BattTmp') && moreInfo.containsKey('BattPct') && moreInfo.containsKey('BattChg')) {
@@ -2281,11 +2277,11 @@ void processWebsocketMessage(String message) {
     }
   }
 
-  if(getCreateFavoritesChildDevice() && eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
+  if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
     getFavorites()
   }
 
-  if(getCreateFavoritesChildDevice() && eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
+  if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
     List respData = eventData?.items
     Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it?.imageUrl]] }
     String html = '<!DOCTYPE html><html><body><ul>'
@@ -2303,8 +2299,10 @@ void processWebsocketMessage(String message) {
       }
     }
     html += '</ul></body></html>'
-    ChildDeviceWrapper favDev = getFavoritesChild()
-    favDev.setFavorites(html)
+    if(getCreateFavoritesChildDevice()) {
+      ChildDeviceWrapper favDev = getFavoritesChild()
+      favDev.setFavorites(html)
+    }
     InstalledAppWrapper p = this.getParent()
     if(p.getSetting('favMatching')) {
       Map favs = [:]
