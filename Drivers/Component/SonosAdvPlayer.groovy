@@ -30,7 +30,7 @@ metadata {
     version: '0.4.0',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    singleThreaded: false,
+    singleThreaded: true,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
 
@@ -146,6 +146,7 @@ metadata {
       input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
       input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
       input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
+      input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
     }
   }
 }
@@ -168,6 +169,7 @@ Boolean getCreateBatteryStatusChildDevice() { return createBatteryStatusChildDev
 Boolean getCreateFavoritesChildDevice() { return createFavoritesChildDevice != null ? createFavoritesChildDevice : false }
 Boolean getCreateRightChannelChildDevice() { return createRightChannelChildDevice != null ? createRightChannelChildDevice : false }
 Boolean getChimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
+Boolean getAlwaysUseLoadAudioClip() { return alwaysUseLoadAudioClip != null ? alwaysUseLoadAudioClip : true }
 
 Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
 Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
@@ -302,13 +304,19 @@ void shuffleOff() { setShuffle('off') }
 
 void ungroupPlayer() { playerCreateNewGroup() }
 
-void playText(String text, BigDecimal volume = null) { devicePlayTextNoRestore(text, volume) }
+void playText(String text, BigDecimal volume = null) {
+  if(getAlwaysUseLoadAudioClip()) { devicePlayText(text, volume) }
+  else{ devicePlayTextNoRestore(text, volume) }
+}
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
 void setTrack(String uri) { parent?.componentSetStreamUrlLocal(this.device, uri, volume) }
-void playTrack(String uri, BigDecimal volume = null) { parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
+void playTrack(String uri, BigDecimal volume = null) {
+  if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
+  else{ parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
+}
 void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
@@ -1329,6 +1337,9 @@ List<String> getSecondaryIds() {
 void setSecondaryIds(List<String> ids) {
   this.device.updateDataValue('secondaryIds', ids.join(','))
 }
+Boolean hasSecondaries() {
+  return this.device.getDataValue('secondaryIds') && this.device.getDataValue('secondaryIds').size() > 0
+}
 String getRightChannelId() {
   return this.device.getDataValue('rightChannelId')
 }
@@ -1395,6 +1406,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
       subscribeToAVTransport()
       initializeWebsocketConnection()
       getPlaybackMetadataStatus()
+      playerGetGroupsFull()
       logTrace('Just became group coordinator, subscribing to AVT.')
     }
   } else if(previouslyWasGroupCoordinator && !isGroupCoordinator) {
@@ -2231,6 +2243,28 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
   sendWsMessage(json)
 }
 
+@CompileStatic
+void playerEvictUnlistedPlayers(List<String> playerIdsToKeep) {
+  List<String> playerIdsToRemove = getGroupPlayerIds() - playerIdsToKeep
+  playerModifyGroupMembers(playerIdsToKeep, playerIdsToRemove)
+}
+
+// @CompileStatic
+// void playerBecomeCoordinatorOfGroup(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = []) {
+//   Map command = [
+//     'namespace':'groups',
+//     'command':'modifyGroupMembers',
+//     'groupId':"${getGroupId()}"
+//   ]
+//   Map args = [
+//     'playerIdsToAdd': playerIdsToAdd,
+//     'playerIdsToRemove': playerIdsToRemove
+//   ]
+//   String json = JsonOutput.toJson([command,args])
+//   logTrace(json)
+//   sendWsMessage(json)
+// }
+
 
 
 // =============================================================================
@@ -2265,6 +2299,13 @@ void processWebsocketMessage(String message) {
 
     List<String> groupMemberNames = group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name}
     setGroupMemberNames(groupMemberNames)
+
+    if(hasSecondaries()) {
+      String rightChannelId = players.find{it?.id == getId()}?.zoneInfo?.members.find{it?.channelMap.contains('RF') }?.id
+      setRightChannelRincon(rightChannelId)
+    }
+
+    // logError("Right channel: ${rightChannelId} should be: RINCON_542A1B5D6A7001400")
   }
 
   //Process groupCoordinatorChanged
@@ -2327,12 +2368,13 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    if(eventData?.audioClips[0]?.status == 'DONE') {
+    logTrace(prettyJson)
+    if(eventData?.audioClips.find{it?.status == 'DONE'}) {
       atomicState.audioClipPlaying = false
       dequeueAudioClip()
     }
-    if(eventData?.audioClips[0]?.status == 'ACTIVE') {atomicState.audioClipPlaying = true}
-    if(eventData?.audioClips[0]?.status == 'ERROR') {atomicState.audioClipPlaying = false}
+    else if(eventData?.audioClips.find{it?.status == 'ACTIVE'}) {atomicState.audioClipPlaying = true}
+    else if(eventData?.audioClips.find{it?.status == 'ERROR'}) {atomicState.audioClipPlaying = false}
   }
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
