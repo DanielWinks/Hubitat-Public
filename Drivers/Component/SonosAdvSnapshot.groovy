@@ -30,6 +30,7 @@ metadata {
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
+    singleThreaded: true,
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy'
   ) {
     capability 'Actuator'
