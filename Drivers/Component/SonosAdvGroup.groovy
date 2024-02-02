@@ -30,6 +30,7 @@ metadata {
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
+    singleThreaded: true,
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy'
   ) {
     capability 'Actuator'
@@ -40,6 +41,7 @@ metadata {
     command 'joinPlayersToCoordinator'
     command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
+    command 'evictUnlistedPlayers'
 
     command 'playHighPriorityTTS', [
       [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
@@ -133,6 +135,12 @@ void groupPlayers() {
 void ungroupPlayers() {
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
   allDevs.each{it.playerCreateNewGroup()}
+}
+
+void evictUnlistedPlayers() {
+  List<String> allPlayers = getAllPlayersInGroupDevice()
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  coordinator.playerCreateGroup(allPlayers)
 }
 
 // =============================================================================
