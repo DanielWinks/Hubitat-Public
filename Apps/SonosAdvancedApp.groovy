@@ -35,7 +35,7 @@ definition(
   iconX2Url: '',
   installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: false,
+  singleThreaded: true,
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy'
 )
 
@@ -1216,8 +1216,6 @@ void isFavoritePlaying(DeviceWrapper cd, Map json) {
   String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
   Boolean isFav = state.favs.containsKey(universalMusicObjectId)
   Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
-  logTrace("isFav and isFavAlt are ${isFav} and ${isFavAlt}")
-  logTrace("universalMusicObjectId and universalMusicObjectIdAlt are ${universalMusicObjectId} and ${universalMusicObjectIdAlt}")
 
   String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
   String foundFavId = state.favs[k]?.id
