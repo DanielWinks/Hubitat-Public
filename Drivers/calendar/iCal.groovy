@@ -102,7 +102,7 @@ void processEventsStatic(AsyncResponse response, Map data, LinkedHashMap setting
     switch(line[0]) {
       case 'X-WR-CALNAME':
         // logDebug "setting name"
-        eventSend("calendarName", line[1].replace('\\',''))
+        sendEvent(name: "calendarName", value: line[1].replace('\\',''))
     }
   }
 
@@ -241,26 +241,26 @@ void processEventsStatic(AsyncResponse response, Map data, LinkedHashMap setting
     }
   }
   if (events[0] && withinDays(events[0].startDate, setting.daysToGet as Integer)) {
-    eventSend("nextEventFriendlyString", nefs)
-    eventSend("nextEventJson", events[0])
-    eventSend("nextEventStart", events[0].startDate)
-    eventSend("nextEventEnd", events[0].endDate)
-    eventSend("nextEventSummary", events[0].summary)
-    eventSend("startDateFriendly", events[0].startDateFriendly)
+    sendEvent(name: "nextEventFriendlyString", value: nefs)
+    sendEvent(name: "nextEventJson", value: events[0])
+    sendEvent(name: "nextEventStart", value: events[0].startDate)
+    sendEvent(name: "nextEventEnd", value: events[0].endDate)
+    sendEvent(name: "nextEventSummary", value: events[0].summary)
+    sendEvent(name: "startDateFriendly", value: events[0].startDateFriendly)
 
     for(Integer i = 0;i< numEvents;i++) {
-      eventSend("event${i}Json", events[i])
+      sendEvent(name: "event${i}Json", value: events[i])
     }
 
     if (withinDays(events[0].startDate, setting.onDuration as Integer)) {
-      eventSend("switch", "on")
+      sendEvent(name: "switch", value: "on")
     } else {
-      eventSend("switch", "off")
+      sendEvent(name: "switch", value: "off")
     }
   } else {
     nefs = "."
-    eventSend("nextEventFriendlyString", nefs)
-    eventSend("switch", "off")
+    sendEvent(name: "nextEventFriendlyString", value: nefs)
+    sendEvent(name: "switch", value: "off")
   }
 }
 
@@ -270,12 +270,12 @@ void getEvents() {
   params.contentType = 'text/html; charset=UTF-8'
   params.requestContentType = 'text/html; charset=UTF-8'
 
-  clearStates()
+  clearAllStates()
   asynchttpGet('processEvents', params)
 }
 void initialize() {configure()}
 void configure(){
-  clearStates()
+  clearAllStates()
   if (!iCalUri){
     logWarn "iCal Uri not provided"
     return

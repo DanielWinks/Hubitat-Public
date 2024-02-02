@@ -97,7 +97,7 @@ metadata {
 void initialize() {configure()}
 void configure(){
   unschedule()
-  clearStates()
+  clearAllStates()
   getUri()
   refresh()
   scheduleRefresh()
@@ -208,8 +208,8 @@ void getHourlyForecast() {
       sendEvent(name: "forecast${it}h", value: forecast, descriptionText: "Updated forecast${it}h from NWS")
       }
       def temps = periods.findAll{it -> it.number < 13}.collectEntries() { [it.temperature] }.keySet()
-      eventSend("temperatureHi", temps.max())
-      eventSend("temperatureLo", temps.min())
+      sendEvent(name:"temperatureHi", value:temps.max())
+      sendEvent(name:"temperatureLo", value:temps.min())
     } else {
       logWarn "Error: ${resp?.status}"
     }
@@ -226,8 +226,8 @@ void getHiAndLo( ){
       state.hourlyUnits = jsonData?.properties?.units
       periods = jsonData?.properties?.periods
       def temps = periods.findAll{it -> it.number < 13}.collectEntries() { [it.temperature] }.keySet()
-      eventSend("temperatureHi", temps.max())
-      eventSend("temperatureLo", temps.min())
+      sendEvent(name:"temperatureHi", value:temps.max())
+      sendEvent(name:"temperatureLo", value:temps.min())
     } else {
       logWarn "Error: ${resp?.status}"
     }
