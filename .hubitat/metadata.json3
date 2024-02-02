@@ -1,0 +1,238 @@
+{
+  "files": [
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/UtilitiesAndLoggingLibrary.groovy",
+      "id": 3,
+      "codeType": "library",
+      "version": 84
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/ZigBee/window_shade/ThirdRealitySmartBlind.groovy",
+      "id": 652,
+      "codeType": "driver",
+      "version": 229
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/HTTPSwitch.groovy",
+      "codeType": "driver",
+      "id": 803,
+      "version": 13
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/ESPHome_Device_Helper.groovy",
+      "codeType": "app",
+      "id": 221,
+      "version": 60
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/HTTPPowerSensor.groovy",
+      "codeType": "driver",
+      "id": 804,
+      "version": 3
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/HTTPPlantSensor.groovy",
+      "codeType": "driver",
+      "id": 805,
+      "version": 10
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/HTTPMultiSwitchParent.groovy",
+      "codeType": "driver",
+      "id": 806,
+      "version": 8
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/GenericComponentSwitch.groovy",
+      "id": 678,
+      "codeType": "driver",
+      "version": 12
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/GenericComponentPowerMonitoringSwitch.groovy",
+      "id": 686,
+      "codeType": "driver",
+      "version": 26
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/ZwaveLibrary.groovy",
+      "codeType": "library",
+      "id": 14,
+      "version": 1
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/ZwaveLibraryMetering.groovy",
+      "codeType": "library",
+      "id": 15,
+      "version": 1
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Zwave/ZoozZen20Parent.groovy",
+      "id": 691,
+      "codeType": "driver",
+      "version": 131
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/httpLibrary.groovy",
+      "codeType": "library",
+      "id": 16,
+      "version": 21
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/genericComponentLibrary.groovy",
+      "codeType": "library",
+      "id": 17,
+      "version": 4
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/HTTPSwitchPowerMonitoring.groovy",
+      "codeType": "driver",
+      "id": 811,
+      "version": 5
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/SonosCloudApp.groovy",
+      "id": 208,
+      "codeType": "app",
+      "version": 965
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/childDeviceLibrary.groovy",
+      "codeType": "library",
+      "id": 18,
+      "version": 2
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosCloudPlayer.groovy",
+      "id": 675,
+      "codeType": "driver",
+      "version": 186
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosCloudGroup.groovy",
+      "id": 812,
+      "codeType": "driver",
+      "version": 17
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/SonosLocal.groovy",
+      "codeType": "app",
+      "id": 136,
+      "version": 133
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/SonosMusicAPILibrary.groovy",
+      "codeType": "library",
+      "id": 6,
+      "version": 94
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/HttpPresenceHelper.groovy",
+      "codeType": "app",
+      "id": 224,
+      "version": 5
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/HttpPresenceAdvanced.groovy",
+      "codeType": "app",
+      "id": 137,
+      "version": 1
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Virtual/VirtualPresenceSwitchExtended.groovy",
+      "id": 813,
+      "codeType": "driver",
+      "version": 3
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Virtual/virtualPresenceSwitchExtended.groovy",
+      "id": 813,
+      "codeType": "driver",
+      "version": 8
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/SunriseSimulation.groovy",
+      "id": 194,
+      "codeType": "app",
+      "version": 113
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/NWSForecast.groovy",
+      "id": 667,
+      "codeType": "driver",
+      "version": 124
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Libraries/SMAPILibrary.groovy",
+      "id": 6,
+      "codeType": "library",
+      "version": 124
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/SonosAdvancedApp.groovy",
+      "id": 140,
+      "codeType": "app",
+      "version": 204
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosAdvGroup.groovy",
+      "id": 670,
+      "codeType": "driver",
+      "version": 32
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosAdvPlayer.groovy",
+      "id": 671,
+      "codeType": "driver",
+      "version": 438
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosAdvSnapshot.groovy",
+      "codeType": "driver",
+      "id": 814,
+      "version": 1
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Virtual/sunPosition.groovy",
+      "id": 707,
+      "codeType": "driver",
+      "version": 73
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosAdvBatteryStats.groovy",
+      "codeType": "driver",
+      "id": 815,
+      "version": 10
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Apps/ShellyDeviceHelper.groovy",
+      "codeType": "app",
+      "id": 227,
+      "version": 9
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/HTTP/moonraker3DPrinter.groovy",
+      "codeType": "driver",
+      "id": 819,
+      "version": 1
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/hpm.groovy",
+      "id": 139,
+      "codeType": "app",
+      "version": 5
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosAdvFavorites.groovy",
+      "codeType": "driver",
+      "id": 710,
+      "version": 3
+    },
+    {
+      "filepath": "/Users/danielwinks/Code/Hubitat-Public/Drivers/Component/SonosAdvSecondaries.groovy",
+      "codeType": "driver",
+      "id": 711,
+      "version": 7
+    }
+  ]
+}

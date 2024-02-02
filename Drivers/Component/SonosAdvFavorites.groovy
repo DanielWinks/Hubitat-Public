@@ -25,20 +25,19 @@
 
 metadata {
   definition(
-    name: 'Sonos Advanced Battery Status',
+    name: 'Sonos Advanced Favorites',
     version: '0.4.0',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
-    importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvBatteryStats.groovy'
+    importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvFavorites.groovy'
   ) {
-    capability 'Battery' //battery - NUMBER, unit:%
-    capability 'PowerSource' //powerSource - ENUM ["battery", "dc", "mains", "unknown"]
-    capability 'TemperatureMeasurement' //temperature - NUMBER, unit:°F || °C
-
+    capability 'Actuator'
+    command 'getFavorites'
   }
 }
 
-void initialize() { configure() }
-void configure() { unschedule() }
-
+void initialize() {configure()}
+void configure() {getFavorites()}
+void getFavorites() {parent?.getFavorites()}
+void setFavorites(String favorites) {state.favorites = favorites}

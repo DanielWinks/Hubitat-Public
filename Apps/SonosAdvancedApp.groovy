@@ -20,15 +20,13 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
 */
-import com.hubitat.hub.domain.Location
-
 
 #include dwinks.UtilitiesAndLoggingLibrary
 #include dwinks.SMAPILibrary
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.3.25',
+  version: '0.4.0',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -47,9 +45,13 @@ preferences {
   page(name: 'localPlayerSelectionPage')
   page(name: 'groupPage')
 }
+
+// =============================================================================
+// Fields
+// =============================================================================
 @Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
-
+@Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -67,11 +69,28 @@ preferences {
   "x-sonos-vli:.*,spotify:": "Spotify",
   "x-rincon-queue": "Sonos Q"
 ]
+// =============================================================================
+// End Fields
+// =============================================================================
 
+
+// =============================================================================
+// Getters and Setters
+// =============================================================================
 @CompileStatic
 String getLocalApiPrefix(String ipAddress) {
   return "https://${ipAddress}/api/v1"
 }
+
+String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
+  String localUpnpHost = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localUpnpHost')
+  return localUpnpHost
+}
+
+
+// =============================================================================
+// End Getters and Setters
+// =============================================================================
 
 // =============================================================================
 // App Pages
@@ -132,14 +151,6 @@ Map localPlayerPage() {
       )
     }
   }
-}
-
-String getFoundSonoses() {
-  String foundDevices = ''
-  List<String> discoveredSonosesNames = discoveredSonoses.collect{ it.value?.name }
-  discoveredSonosesNames.sort()
-  discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
-  return foundDevices
 }
 
 Map localPlayerSelectionPage() {
@@ -254,6 +265,11 @@ Map groupPage() {
     }
   }
 }
+// =============================================================================
+// End App Pages
+// =============================================================================
+
+
 
 // =============================================================================
 // Button Handlers
@@ -293,6 +309,11 @@ void cancelGroupEdit() {
   app.removeSetting('newGroupCoordinator')
   app.removeSetting('editDeleteGroup')
 }
+// =============================================================================
+// End Button Handlers
+// =============================================================================
+
+
 
 // =============================================================================
 // Initialize() and Configure()
@@ -312,11 +333,14 @@ void configure() {
       it.sendEvent(name: 'currentFavorite', value: value)
     }
     state.remove('favs')
-    unschedule('appGetFavoritesLocal')
-  } else {
-    runIn(3, 'appGetFavoritesLocal', [overwrite: true])
   }
+  unschedule('appGetFavoritesLocal')
 }
+// =============================================================================
+// End Initialize() and Configure()
+// =============================================================================
+
+
 
 // =============================================================================
 // Create Child Devices
@@ -368,6 +392,20 @@ void createPlayerDevices() {
     playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
     cd.secondaryConfiguration()
   }
+
+  discoveredSonosSecondaries.each{ k,v ->
+    ChildDeviceWrapper primary = getDeviceFromRincon(v.primaryDeviceId)
+    primary.removeDataValue('secondaryIds')
+    primary.removeDataValue('secondaryLocalUpnpUrls')
+    primary.removeDataValue('secondaryWebsocketUrls')
+    List<String> secondaryDeviceIps = primary.getDataValue('secondaryDeviceIps') ? primary.getDataValue('secondaryDeviceIps').tokenize(',') : []
+    if(!secondaryDeviceIps.contains(v.deviceIp)) {secondaryDeviceIps.add(v.deviceIp)}
+    primary.updateDataValue('secondaryDeviceIps', secondaryDeviceIps.join(','))
+
+    List<String> secondaryIds = primary.getDataValue('secondaryIds') ? primary.getDataValue('secondaryIds').tokenize(',') : []
+    if(!secondaryDeviceIps.contains(v.id)) {secondaryIds.add(v.id)}
+    primary.updateDataValue('secondaryIds', secondaryIds.join(','))
+  }
   if(!skipOrphanRemoval) {removeOrphans()}
 }
 
@@ -391,14 +429,22 @@ void removeOrphans() {
     }
   }
 }
+// =============================================================================
+// End Create Child Devices
+// =============================================================================
+
+
+@Field static ConcurrentLinkedQueue<LinkedHashMap> discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 
 // =============================================================================
 // Local Discovery
 // =============================================================================
-@CompileStatic
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
+  atomicState.remove('processingDiscoveryQueue')
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
+  discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
+  discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
 }
@@ -412,9 +458,24 @@ void subscribeToSsdpEvents(Location location) {
 
 void ssdpEventHandler(Event event) {
 	LinkedHashMap parsedEvent = parseLanMessage(event?.description)
-  processParsedSsdpEvent(parsedEvent)
+  discoveryQueue.add(parsedEvent)
+  if(!atomicState.processingDiscoveryQueue) {
+    atomicState.processingDiscoveryQueue = true
+    processDiscoveryQueue()
+  }
 }
 
+void processDiscoveryQueue() {
+  if(discoveryQueue.size() > 0) {
+    processParsedSsdpEvent(discoveryQueue.poll())
+    runIn(1, 'processDiscoveryQueue')
+    logDebug('More messages to process')
+  } else {
+    logDebug('No more messages to process')
+  }
+}
+
+@CompileStatic
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event?.networkAddress)
   String ipPort = convertHexToInt(event?.deviceAddress)
@@ -466,20 +527,53 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     localUpnpUrl: "http://${ipAddress}:1400",
     localUpnpHost: "${ipAddress}:1400"
   ]
+  if(playerInfoDevice?.primaryDeviceId && deviceCapabilities.contains('AUDIO_CLIP')) {
+    LinkedHashMap discoveredSonosSecondary = [
+      primaryDeviceId: playerInfoDevice?.primaryDeviceId,
+      id: playerId,
+      swGen: swGen,
+      capabilities: deviceCapabilities,
+      modelName: modelName,
+      householdId: householdId,
+      websocketUrl: websocketUrl,
+      deviceIp: "${ipAddress}",
+      localApiUrl: "https://${ipAddress}:1443/api/v1/",
+      localUpnpUrl: "http://${ipAddress}:1400",
+      localUpnpHost: "${ipAddress}:1400"
+    ]
+    discoveredSonosSecondaries[mac] = discoveredSonosSecondary
+    logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+  }
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
-    app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
-    app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
+    sendFoundSonosEvents()
   } else {
     logTrace("Device id:${discoveredSonos?.id} responded to SSDP discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
 }
 
+@CompileStatic
+String getFoundSonoses() {
+  String foundDevices = ''
+  List<String> discoveredSonosesNames = discoveredSonoses.collect{Object k, Object v -> ((LinkedHashMap)v)?.name as String }
+  discoveredSonosesNames.sort()
+  discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
+  return foundDevices
+}
+
+void sendFoundSonosEvents() {
+  app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
+  app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
+}
+// =============================================================================
+// End Local Discovery
+// =============================================================================
+
+
+
 // =============================================================================
 // Helper methods
 // =============================================================================
-
-
 String getDNIFromRincon(String rincon) {
   return rincon.tokenize('_')[1][0..-6]
 }
@@ -687,165 +781,109 @@ String unEscapeOnce(String text) {
 String unEscapeMetaData(String text) {
   return text.replace('&amp;lt;','<').replace('&amp;gt;','>').replace('&amp;quot;','"')
 }
+// =============================================================================
+// Helper methods
+// =============================================================================
+
+
 
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
-
 void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
   String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
   List<ChildDeviceWrapper> groupDevices = getCurrentGroupedDevices(device)
-  logTrace("Devices: ${groupDevices}")
   groupDevices.each{ dev ->
     if(groupVolume) { dev.sendEvent(name:'groupVolume', value: groupVolume) }
     if(groupMute) { dev.sendEvent(name:'groupMute', value: groupMute ) }
   }
 }
 
-void processAVTransportMessages(DeviceWrapper cd, Map message) {
-  if(!state.deviceAVTransportEvents) { state.deviceAVTransportEvents = new LinkedHashMap() }
-  List<Map> avts = []
-  Map avtCommands = [:]
-  String avtDni = cd.getDeviceNetworkId()
-
-  GPathResult propertyset = new XmlSlurper().parseText(message.body as String)
-  String lastChange = propertyset['property']['LastChange'].text()
-  if(!lastChange) {return}
-  GPathResult event = new XmlSlurper().parseText(lastChange)
-  GPathResult instanceId = event['InstanceID']
-
-  String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
-  String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
-  String enqueuedTransportURIMetaDataString = instanceId['EnqueuedTransportURIMetaData']['@val']
-  String avTransportURI = instanceId['AVTransportURI']['@val']
-
-  Boolean isPlayingLocalTrack = false
-  if(trackUri.startsWith('http') && trackUri == enqueuedUri && trackUri == avTransportURI) {
-    isPlayingLocalTrack = true
-    logTrace("Playing Local Track")
-  }
-  String status = (instanceId['TransportState']['@val'].toString()).toLowerCase().replace('_playback','')
-  String currentPlayMode = instanceId['CurrentPlayMode']['@val']
-  String numberOfTracks = instanceId['NumberOfTracks']['@val']
-  String trackNumber = instanceId['CurrentTrack']['@val']
-
-  Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
-  String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
-  String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
-  currentCrossfadeMode = currentCrossfadeMode=='1' ? 'on' : 'off'
-
-  avts.add([name:'status', value: status])
-  avts.add([name:'transportStatus', value: status])
-  avtCommands['setPlayMode'] = currentPlayMode
-  avtCommands['setCrossfadeMode'] = currentCrossfadeMode
-  avtCommands['setCurrentTrackDuration'] = currentTrackDuration
-
-  String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
-  if(currentTrackMetaDataString) {
-    GPathResult currentTrackMetaData = new XmlSlurper().parseText(unEscapeMetaData(currentTrackMetaDataString))
-    String albumArtURI = (currentTrackMetaData['item']['albumArtURI'].text()).toString()
-    while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    String currentArtistName = currentTrackMetaData['item']['creator']
-    String currentAlbumName = currentTrackMetaData['item']['album']
-    String currentTrackName = currentTrackMetaData['item']['title']
-    String streamContent = currentTrackMetaData['item']['streamContent'].toString()
-
-    if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
-      avts.add([name:'albumArtURI', value: "<br><img src=\"${cd.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >"])
-    } else if(!isPlayingLocalTrack) {
-      avts.add([name:'albumArtURI', value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"])
-    } else {
-      avts.add([name:'albumArtURI', value: '<br>'])
-    }
-
-    String trackDataAlbumArtUri
-    if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
-      trackDataAlbumArtUri = "${cd.getDataValue('localUpnpUrl')}${albumArtURI}"
-    } else if (!isPlayingLocalTrack) { trackDataAlbumArtUri = "${albumArtURI}" }
-
-    avtCommands['setCurrentArtistAlbumTrack'] = [currentArtistName, currentAlbumName, currentTrackName, trackNumber as Integer]
-
-    streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
-    streamContent = streamContent == 'ZPSTR_CONNECTING' ? 'Connecting...' : streamContent
-    streamContent = !streamContent ? 'Not Available' : streamContent
-    if(streamContent && (!currentArtistName && !currentTrackName)) {
-      avts.add([name: 'trackDescription', value: streamContent])
-    } else if(isPlayingLocalTrack) {
-      avts.add([name: 'trackDescription', value: 'Not Available'])
-    }
-
-    String uri = instanceId['AVTransportURI']['@val']
-      // String transportUri = uri ?? Seems to be the same on the built-in driver
-    String audioSource = SOURCES["${(uri.tokenize(':')[0])}"]
-
-    Map trackData = state.deviceAVTransportEvents[avtDni]?.avtCommands?.'setTrackDataEvents' ?: [:]
-
-    trackData['audioSource'] = audioSource ?: trackData['audioSource']
-    trackData['station'] = null
-    trackData['name'] = currentTrackName
-    trackData['artist'] = currentArtistName
-    trackData['album'] = currentAlbumName
-    trackData['albumArtUrl'] = trackDataAlbumArtUri ?: trackData['albumArtUrl']
-    trackData['trackNumber'] = trackNumber ?: trackData['trackNumber']
-    trackData['status'] = status ?: trackData['status']
-    trackData['uri'] = uri ?: trackData['uri']
-    trackData['trackUri'] = trackUri ?: trackData['trackUri']
-    trackData['transportUri'] = uri ?: trackData['transportUri']
-    trackData['enqueuedUri'] = enqueuedUri ?: trackData['enqueuedUri']
-    if(trackDataMetaData) {
-      trackData['metaData'] = enqueuedTransportURIMetaDataString
-      trackData['trackMetaData'] =  currentTrackMetaDataString ?: trackData['trackMetaData']
-    }
-
-    avtCommands['setTrackDataEvents'] = trackData
-    // }
-  } else {
-    avtCommands['setCurrentArtistAlbumTrack'] = ["Not Available", "Not Available", "Not Available", 0]
-    avtCommands['setTrackDataEvents'] = [:]
-  }
-
-  String nextTrackMetaData = instanceId['NextTrackMetaData']['@val']
-  GPathResult nextTrackMetaDataXML
-  if(nextTrackMetaData) {nextTrackMetaDataXML = parseXML(nextTrackMetaData)}
-  if(nextTrackMetaDataXML) {
-    String nextArtistName = nextTrackMetaDataXML['item']['creator']
-    String nextAlbumName = nextTrackMetaDataXML['item']['album']
-    String nextTrackName = nextTrackMetaDataXML['item']['title']
-    avtCommands['setNextArtistAlbumTrack'] = [nextArtistName, nextAlbumName, nextTrackName]
-  } else {
-    avtCommands['setNextArtistAlbumTrack'] = ["Not Available", "Not Available", "Not Available"]
-  }
-  state.deviceAVTransportEvents[avtDni] = [avts:avts, avtCommands:avtCommands]
-  sendAVTransportEventsToGroup(cd)
+void setAlbumArtURI(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setAlbumArtURI(value)}
 }
 
-void sendAVTransportEventsToGroup(DeviceWrapper cd) {
-  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(cd)
-  String avtDni = cd.getDeviceNetworkId()
-  ChildDeviceWrapper coordinator = app.getChildDevice(avtDni)
-  List<Map> avts = state.deviceAVTransportEvents[avtDni]?.avts
-  Map avtCommands = state.deviceAVTransportEvents[avtDni]?.avtCommands
-  groupedDevices.each{dev ->
-    avts.each{ dev.sendEvent(it) }
-    avtCommands.each{ k,v -> dev."${k}"(v) }
-  }
+void setStatusTransportStatus(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setStatusTransportStatus(value)}
 }
 
-void updatePlayerCurrentStates(DeviceWrapper cd, String currentGroupCoordinatorId) {
+void setPlayMode(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setPlayMode(value)}
+}
+
+void setCrossfadeMode(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCrossfadeMode(value)}
+}
+
+void setCurrentTrackDuration(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentTrackDuration(value)}
+}
+
+void setCurrentArtistName(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentArtistName(value)}
+}
+
+void setCurrentAlbumName(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentAlbumName(value)}
+}
+
+void setCurrentTrackName(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentTrackName(value)}
+}
+
+void setCurrentTrackNumber(List<String> rincons, Integer value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentTrackNumber(value)}
+}
+
+void setTrackDescription(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setTrackDescription(value)}
+}
+
+void setTrackDataEvents(List<String> rincons, Map value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setTrackDataEvents(value)}
+}
+
+void setNextArtistName(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setNextArtistName(value)}
+}
+
+void setNextAlbumName(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setNextAlbumName(value)}
+}
+
+void setNextTrackName(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setNextTrackName(value)}
+}
+
+void setCurrentFavorite(List<String> rincons, String value) {
+  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
+  groupedDevices.each{dev -> dev.setCurrentFavorite(value)}
+}
+
+void updatePlayerCurrentStates(DeviceWrapper cd, String coordinatorRincon) {
   if(!cd) {return}
-  if(!currentGroupCoordinatorId) {return}
+  if(!coordinatorRincon) {return}
   ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  String avtDni = getDNIFromRincon(currentGroupCoordinatorId)
-  ChildDeviceWrapper coordinator = app.getChildDevice(avtDni)
-  if(state.deviceAVTransportEvents.containsKey(avtDni)) {
-    List<Map> avts = state.deviceAVTransportEvents[avtDni]?.avts
-    Map avtCommands = state.deviceAVTransportEvents[avtDni]?.avtCommands
-    avts.each{ child.sendEvent(it) }
-    avtCommands.each{ k,v -> child."${k}"(v) }
-  }
-  child.sendEvent(name: 'currentFavorite', value: coordinator.currentValue('currentFavorite', true))
+  ChildDeviceWrapper coordinator = getDeviceFromRincon(coordinatorRincon)
+  List<Map> evts = coordinator.getCurrentPlayingStatesForGroup()
+  evts.each{ child.sendEvent(it) }
+  logTrace("Updated ${child.getDataValue('name')} with current states from ${coordinator.getDataValue('name')}")
 }
 
 
@@ -855,19 +893,30 @@ void updateZoneGroupName(String zoneGroupName, LinkedHashSet rinconsToUpdate) {
   childrenToUpdate.each{it.sendEvent(name: 'groupName', value: zoneGroupName)}
 }
 
-void updateGroupDevices(String coordinatorId, ArrayList playersInGroup) {
+@CompileStatic
+void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
+  logTrace('updateGroupDevices')
   // Update group device with current on/off state
   List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll{it.getDataValue('groupCoordinatorId') == coordinatorId }
   groupsForCoord.each{gd ->
     List<String> playerIds = gd.getDataValue('playerIds').tokenize(',')
-    Boolean allPlayersAreGrouped = playersInGroup.containsAll(playerIds) && playersInGroup.size() == playerIds.size()
+    HashSet<String> list1 = new  HashSet<String>(playerIds)
+    HashSet<String> list2 = new  HashSet<String>(playersInGroup)
+    list1.add(coordinatorId)
+    list2.add(coordinatorId)
+    Boolean allPlayersAreGrouped = list1.equals(list2)
     if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
   }
 }
+// =============================================================================
+// Component Methods for Child Event Processing
+// =============================================================================
+
+
 
 // =============================================================================
-// Get and Post Helpers
+// HTTP Helpers
 // =============================================================================
 void sendLocalCommandAsync(Map args) {
   if(args?.endpoint == null && args?.params?.uri == null) { return }
@@ -974,41 +1023,15 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
   }
   if (response.hasError()) { return false } else { return true }
 }
+// =============================================================================
+// HTTP Helpers
+// =============================================================================
+
+
 
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
-void componentPlayTextLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
-  logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
-  Map tts = textToSpeech(text, voice)
-  data.streamUrl = tts.uri
-  if (volume) data.volume = (int)volume
-
-  if(device.getDataValue('capabilities')) {
-    String playerId = device.getDataValue('id')
-    String localApiUrl = "${device.getDataValue('localApiUrl')}"
-    String endpoint = "players/${playerId}/audioClip"
-    String uri = "${localApiUrl}${endpoint}"
-    Map params = [uri: uri]
-    sendLocalJsonAsync(params: params, data: data)
-  } else {
-    String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-    ChildDeviceWrapper coordinatorDevice = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
-    List<String> followers = device.getDataValue('playerIds').tokenize(',')
-    List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
-    List<ChildDeviceWrapper> allDevices = followerDevices + [coordinatorDevice]
-    allDevices.each{ dev ->
-      String playerId = dev.getDataValue('id')
-      String localApiUrl = "${dev.getDataValue('localApiUrl')}"
-      String endpoint = "players/${playerId}/audioClip"
-      String uri = "${localApiUrl}${endpoint}"
-      Map params = [uri: uri]
-      sendLocalJsonAsync(params: params, data: data)
-    }
-  }
-}
-
 void componentPlayTextNoRestoreLocal(DeviceWrapper device, String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
@@ -1019,20 +1042,6 @@ void componentPlayTextNoRestoreLocal(DeviceWrapper device, String text, BigDecim
   String playerId = device.getDataValue('id')
   if(volume) {componentSetGroupLevelLocal(device, volume)}
   setAVTransportURIAndPlay(device, streamUrl)
-}
-
-void componentPlayAudioClipLocal(DeviceWrapper device, String streamUrl, BigDecimal volume = null) {
-  String playerId = device.getDataValue('id')
-  logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
-  if (streamUrl?.toUpperCase() != 'CHIME') { data.streamUrl = streamUrl }
-  if (volume) { data['volume'] = (int)volume }
-
-  String localApiUrl = "${device.getDataValue('localApiUrl')}"
-  String endpoint = "players/${playerId}/audioClip"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data:data)
 }
 
 void removeAllTracksFromQueue(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
@@ -1053,7 +1062,7 @@ void setAVTransportURIAndPlay(DeviceWrapper device, String currentURI, String cu
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
   if(!responseIsValid(response, 'setAVTransportURICallback')) { return }
   ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  componentPlayLocal(child)
+  child.play()
 }
 
 void setAVTransportURI(DeviceWrapper device, String currentURI, String currentURIMetaData = null) {
@@ -1072,20 +1081,6 @@ void addURIToQueue(DeviceWrapper device, String enqueuedURI, String currentURIMe
   Map params = getSoapActionParams(ip, AVTransport, 'AddURIToQueue', controlValues)
   // removeAllTracksFromQueue(device)
   asynchttpPost('localControlCallback', params)
-}
-
-void rebootPlayer(DeviceWrapper device) {
-  // http://<sonos_ip>:1400/reboot //TODO FINISH THIS
-}
-
-String getMetaData(String title = '', String service = 'SA_RINCON65031_') {
-  return  (
-    '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
-    'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
-    '<item id="R:0/0/0" parentID="R:0/0" restricted="true"> ' +
-    "<dc:title>${title}</dc:title>"+'<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>' +
-    '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">'+"${service}"+'</desc></item></DIDL-Lite>'
-  )
 }
 
 void componentLoadStreamUrlLocal(DeviceWrapper device, String streamUrl, BigDecimal volume = null) {
@@ -1177,13 +1172,6 @@ void componentMuteGroupLocal(DeviceWrapper device, Boolean desiredMute) {
   asynchttpPost('localControlCallback', params)
 }
 
-void componentSetPlayerRelativeLevelLocal(DeviceWrapper device, Integer adjustment) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map controlValues = [Adjustment: adjustment]
-  Map params = getSoapActionParams(ip, RenderingControl, 'SetRelativeVolume', controlValues)
-  asynchttpPost('localControlCallback', params)
-}
-
 void componentSetGroupRelativeLevelLocal(DeviceWrapper device, Integer adjustment) {
   DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
   String ip = coordinator.getDataValue('localUpnpHost')
@@ -1199,267 +1187,22 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
 }
-// void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
-//   getZoneGroupAttributesAsync(device, 'componentSetGroupLevelLocalCallback', [level:level, rincon:device.getDataValue('id')])
-// }
+// =============================================================================
+// Local Control Component Methods
+// =============================================================================
 
-// void componentSetGroupLevelLocalCallback(AsyncResponse response, Map data) {
-//   if(!responseIsValid(response, 'componentSetGroupLevelLocalCallback')) { return }
-//   GPathResult xml = new XmlSlurper().parseText(unescapeXML(response.getData()))
-//   List<DeviceWrapper> groupedDevices = getGroupedPlayerDevicesFromGetZoneGroupAttributes(xml, data.rincon)
-//   groupedDevices.each{ componentSetPlayerLevelLocal(it, data.level) }
-// }
 
-void componentMutePlayerLocal(DeviceWrapper device, Boolean desiredMute) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map controlValues = [DesiredMute: desiredMute]
-  Map params = getSoapActionParams(ip, RenderingControl, 'SetMute', controlValues)
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentPlayLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Play')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentPauseLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Pause')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentStopLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Stop')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentNextTrackLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Next')
-  asynchttpPost('localControlCallback', params)
-}
-
-void componentPreviousTrackLocal(DeviceWrapper device) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map params = getSoapActionParams(ip, AVTransport, 'Previous')
-  asynchttpPost('localControlCallback', params)
-}
-
-// /////////////////////////////////////////////////////////////////////////////
-// Grouping and Ungrouping
-// /////////////////////////////////////////////////////////////////////////////
-void componentGroupPlayersLocal(DeviceWrapper device) {
-  logDebug('Adding players to group...')
-  String householdId = device.getDataValue('householdId')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List playerIds = device.getDataValue('playerIds').split(',')
-  ChildDeviceWrapper coordinator = getDeviceFromRincon(groupCoordinatorId)
-  if(coordinator.getDataValue('isGroupCoordinator') == 'false') {
-    componentUngroupPlayerLocalSync(coordinator)
-  }
-  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
-  Map data = ['playerIds': [groupCoordinatorId] + playerIds, musicContextGroupId: coordinatorGroupId]
-  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
-  String endpoint = "households/${householdId}/groups/createGroup"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
-
-void componentJoinPlayersToCoordinatorLocal(DeviceWrapper device) {
-  logDebug('Adding players to coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List playerIds = device.getDataValue('playerIds').split(',')
-  String coordinatorGroupId = getCoordinatorGroupId(groupCoordinatorId)
-  Map data = ['playerIds': [groupCoordinatorId] + playerIds]
-  String localApiUrl = getLocalApiUrlForCoordinatorId(groupCoordinatorId)
-  String endpoint = "groups/${coordinatorGroupId}/groups/setGroupMembers"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
-
-void componentRemovePlayersFromCoordinatorLocal(DeviceWrapper device) {
-  logDebug('Removing players from coordinator...')
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  ChildDeviceWrapper cd = app.getChildDevices().find{cd ->  cd.getDataValue('id') == groupCoordinatorId}
-  if(cd.getDataValue('isGroupCoordinator') == 'false') {
-    logWarn('Can not remove players from coordinator. Coordinator for this defined group is not currently a group coordinator.')
-    return
-  }
-  List<String> followers = device.getDataValue('playerIds').tokenize(',')
-  List<ChildDeviceWrapper> followerDevices = app.getChildDevices().findAll{ it.getDataValue('id') in followers }
-  logDebug("Follower Devices ${followerDevices}")
-  followerDevices.each{player -> componentUngroupPlayerLocal(player)}
-}
-
-void componentUngroupPlayerLocal(DeviceWrapper device, String callbackMethod = 'localControlCallback') {
-  String ip = device.getDataValue('localUpnpHost')
-  Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logTrace("componentUngroupPlayerLocal Params: ${params}")
-  asynchttpPost(callbackMethod, params)
-}
-
-void componentUngroupPlayerLocalSync(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
-  Map params = getSoapActionParams(ip, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
-  logTrace("componentUngroupPlayerLocalSync Params: ${params}")
-  httpPost(params) { resp ->
-    if (resp && resp.data && resp.success) {
-      GPathResult xml = resp.data
-      logXml(resp.data)
-    }
-    else { logError(resp.data) }
-  }
-}
-
-void componentUngroupPlayersLocal(DeviceWrapper device) {
-  String groupCoordinatorId = device.getDataValue('groupCoordinatorId')
-  List<String> playerIds = device.getDataValue('playerIds').tokenize(',')
-  List<String> allPlayers = [groupCoordinatorId] + playerIds
-  List<ChildDeviceWrapper> allPlayerDevices = getDevicesFromRincons(allPlayers)
-  allPlayerDevices.each{player -> componentUngroupPlayerLocalSync(player) }
-}
-
-// /////////////////////////////////////////////////////////////////////////////
+// =============================================================================
 // Favorites
-// /////////////////////////////////////////////////////////////////////////////
-void componentLoadFavoriteFullLocal(DeviceWrapper device, String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
-  logDebug('Loading favorites full options...')
-  Map data = [
-    action:action,
-    favoriteId:favoriteId,
-    playOnCompletion:playOnCompletion,
-    playModes:['repeat': repeat,'repeatOne': repeatOne, 'shuffle': shuffle, 'crossfade': crossfade],
-  ]
-  String groupId = getGroupForPlayerDeviceLocal(device)
-  ChildDeviceWrapper coordinator = getDeviceFromRincon(groupId.tokenize(':')[0])
-  String localApiUrl = "${coordinator.getDataValue('localApiUrl')}"
-  String endpoint = "groups/${groupId}/favorites"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: data)
-}
-
-void componentGetFavoritesLocal(DeviceWrapper device) {
-  logDebug('Getting favorites...')
-  String householdId = device.getDataValue('householdId')
-
-  String localApiUrl = "${device.getDataValue('localApiUrl')}"
-  String endpoint = "households/${householdId}/favorites"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalQueryAsync(params: params, callbackMethod: 'getFavoritesLocalCallback', data:[dni: device.getDeviceNetworkId()])
-  if(favMatching) {appGetFavoritesLocal()}
-}
-
-void getFavoritesLocalCallback(AsyncResponse response, Map data = null) {
-  ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  if (response.hasError()) {
-    logError("componentGetFavoritesLocal error: ${response.getErrorData()}")
-    return
-  }
-  List respData = response.getJson().items
-  Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it.imageUrl]] }
-  // state.favs
-  // logDebug("formatted response: ${prettyJson(formatted)}")
-  formatted.each(){it ->
-    String albumArtURI = it.value?.imageUrl
-    if(albumArtURI?.startsWith('/')) {
-      child.sendEvent(
-        name: "Favorite #${it.key} ${it.value?.name}",
-        value: "<br><img src=\"${child.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" >",
-        isStateChange: false
-      )
-    } else {
-      child.sendEvent(
-        name: "Favorite #${it.key} ${it.value?.name}",
-        value: "<br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >",
-        isStateChange: false
-      )
-    }
-  }
-}
-
-List<String> getUniqueHouseholds() {
-  List<ChildDeviceWrapper> children = app.getChildDevices()
-  List<String> households = children.collect{cd -> cd.getDataValue('householdId')}.unique{a,b -> a <=> b}
-  return households
-}
-
-void appGetFavoritesLocal() {
-  logDebug("Getting (app) favorites...")
-  unschedule('appGetFavoritesLocal')
-  List<ChildDeviceWrapper> children = app.getChildDevices().findAll{ child -> child.getDataValue('isGroupCoordinator') == 'true'}
-  Map households = children.collectEntries{cd -> [cd.getDataValue('householdId'), [localApiUrl: cd.getDataValue('localApiUrl'), dni: cd.getDeviceNetworkId()]]}
-
-  households.each{householdId, data ->
-    String endpoint = "households/${householdId}/favorites"
-    String uri = "${data.localApiUrl}${endpoint}"
-    Map params = [uri: uri]
-    sendLocalQueryAsync(params: params, callbackMethod: 'appGetFavoritesLocalCallback', data:[dni: data.dni])
-  }
-  if(favMatching) {runIn(60*60*3, 'appGetFavoritesLocal', [overwrite: true])}
-}
-
-void appGetFavoritesLocalCallback(AsyncResponse response, Map data = null) {
-  if (response.hasError()) {
-    logError("appGetFavoritesLocal error: ${response.getErrorData()}")
-    return
-  }
-  List respData = response.getJson().items
-  if(respData.size() == 0) {
-    logTrace("Response returned from getFavorites API: ${response.getJson()}")
-    return
-  }
-  Map favs = [:]
-  respData.each{
-    if(it?.resource?.id?.objectId && it?.resource?.id?.serviceId && it?.resource?.id?.accountId) {
-      String objectId = (it?.resource?.id?.objectId).tokenize(':')[1]
-      String serviceId = it?.resource?.id?.serviceId
-      String accountId = it?.resource?.id?.accountId
-      String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-      favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
-    } else if(it?.imageUrl) {
-      String universalMusicObjectId = "${it?.imageUrl}".toString()
-      favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
-    }
-  }
+// =============================================================================
+void setFavorites(Map favs) {
+  logTrace('Updated favs for matching...')
   state.favs = favs
-  logDebug("App favorites updated!")
-  // logTrace("App favorites json: ${prettyJson(response.getJson())}")
-  // logTrace("formatted response: ${prettyJson(favs)}")
 }
 
-void isFavoritePlaying(DeviceWrapper device) {
+void isFavoritePlaying(DeviceWrapper cd, Map json) {
   if(!favMatching) {return}
-  runInMillis(2000, 'isFavoritePlayingAsync', [overwrite: true, data:[dni: device.getDeviceNetworkId()]])
-}
-
-void isFavoritePlayingAsync(Map data) {
-  DeviceWrapper device = app.getChildDevice(data.dni)
-  String groupId = getGroupForPlayerDeviceLocal(device)
-  ChildDeviceWrapper coordDev = getDeviceFromRincon(groupId.tokenize(':')[0])
-  logTrace("Called isFavoritePlaying for ${device}, got coordDev for group: ${coordDev}")
-  if(!coordDev) {return}
-  String localApiUrl = coordDev.getDataValue('localApiUrl')
-  String endpoint = "groups/${groupId}/playbackMetadata"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  String coordDni = coordDev.getDeviceNetworkId()
-  sendLocalQueryAsync([params:params, callbackMethod: 'isFavoritePlayingAsyncCallback', data: [dni: coordDni]])
-}
-
-void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
-  if(!responseIsValid(response, 'isFavoritePlayingAsyncCallback')) { return }
-  logTrace("isFavoritePlayingAsyncCallback data: ${data}")
-  DeviceWrapper coordDev = app.getChildDevice(data.dni)
-  state.remove("${data.dni}")
-  if(!coordDev) { return }
-
-  Map json = response.getJson()
+  logTrace('isFavoritePlaying called')
   String objectId = json?.container?.id?.objectId
   if(objectId) {
     List tok = objectId.tokenize(':')
@@ -1470,67 +1213,20 @@ void isFavoritePlayingAsyncCallback(AsyncResponse response, Map data) {
   String imageUrl = json?.container?.imageUrl
 
   String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-  String universalMusicObjectIdAlt = "${imageUrl}".toString()
+  String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
   Boolean isFav = state.favs.containsKey(universalMusicObjectId)
   Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
-  logTrace("isFav and isFavAlt are ${isFav} and ${isFavAlt}")
 
-  List<DeviceWrapper> groupedDevices = getCurrentGroupedDevices(coordDev)
-  logTrace("Favorites grouped devices in scope: ${groupedDevices}")
   String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
   String foundFavId = state.favs[k]?.id
   String foundFavImageUrl = state.favs[k]?.imageUrl
   String foundFavName = state.favs[k]?.name
-  groupedDevices.each{
-    String value = 'No favorite playing'
-    if((isFav || isFavAlt) && foundFavImageUrl?.startsWith('/')) {
-      value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${it.getDataValue('localUpnpUrl')}${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-    } else if((isFav || isFavAlt) && !foundFavImageUrl) {
-      value = "Favorite #${foundFavId} ${foundFavName}"
-    } else if(isFav || isFavAlt) {
-      value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-    }
-    logTrace("Sending currentFavorite to ${it}")
-    it.sendEvent(name: 'currentFavorite', value: value)
-  }
+  logTrace("Sending currentFavorite to ${cd}")
+  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
+  child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
+// =============================================================================
+// Favorites
+// =============================================================================
 
-void componentUpdatePlayerInfo(DeviceWrapper device) {
-  Map playerInfo = getPlayerInfoLocalSync("${device.getDataValue('deviceIp')}:1443")
-  String id = playerInfo?.playerId
-  String isGroupCoordinator = playerInfo?.groupId.tokenize(':')[0] ==id  ? 'true' : 'false'
-  device.updateDataValue('isGroupCoordinator', isGroupCoordinator)
-}
-
-void componentSetPlayModesLocal(DeviceWrapper device, Map playModes) {
-  logDebug('Setting Play Modes...')
-  String groupId = device.currentValue('groupId', true)
-  String localApiUrl = getLocalApiUrlForPlayer(device)
-  String endpoint = "groups/${groupId}/playback/playMode"
-  String uri = "${localApiUrl}${endpoint}"
-  Map params = [uri: uri]
-  sendLocalJsonAsync(params: params, data: playModes)
-}
-
-String getLocalApiUrlForPlayer(DeviceWrapper device) {
-  String groupCoordinatorId = device.currentValue('groupCoordinatorId', true)
-  String localApiUrl = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localApiUrl')
-  return localApiUrl
-}
-
-String getLocalApiUrlForCoordinatorId(String groupCoordinatorId) {
-  String localApiUrl = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localApiUrl')
-  return localApiUrl
-}
-
-String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
-  String localUpnpHost = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localUpnpHost')
-  return localUpnpHost
-}
-
-String getCoordinatorGroupId(String groupCoordinatorId) {
-  ChildDeviceWrapper coordinator = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }
-  String coordinatorGroupId = getGroupForPlayerDeviceLocal(coordinator)
-  return coordinatorGroupId
-}
 

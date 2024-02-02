@@ -383,6 +383,13 @@ GPathResult parseSonosMessageXML(Map message) {
 }
 
 @CompileStatic
+GPathResult parseSonosMessageXML(String xml) {
+  String body = xml.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
+  GPathResult propertyset = new XmlSlurper().parseText(body)
+  return propertyset
+}
+
+@CompileStatic
 String getBaseControlXML(Map service, String action, Map controlValues = null) {
   String preArgs = (
   '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'+

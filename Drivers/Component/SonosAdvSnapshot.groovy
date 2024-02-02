@@ -26,10 +26,11 @@
 metadata {
   definition(
     name: 'Sonos Advanced Snapshot',
-    version: '0.3.23',
+    version: '0.4.0',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
+    singleThreaded: true,
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy'
   ) {
     capability 'Actuator'
