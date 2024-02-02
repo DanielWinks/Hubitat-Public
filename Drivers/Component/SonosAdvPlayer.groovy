@@ -1737,7 +1737,7 @@ void sendWsMessage(String message) {
 
 void initializeWebsocketConnection() {
   wsConnect()
-  if(getCreateFavoritesChildDevice()) {subscribeToFavorites()}
+  if(getRightChannelChild()) {subscribeToFavorites()}
   subscribeToPlaylists()
   subscribeToAudioClip()
   subscribeToGroups()
