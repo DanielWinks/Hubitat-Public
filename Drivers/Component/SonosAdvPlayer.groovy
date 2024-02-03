@@ -1423,15 +1423,19 @@ String getGroupCoordinatorName() {
   return this.device.currentValue('groupCoordinatorName', true)
 }
 void setGroupCoordinatorName(String groupCoordinatorName) {
-  this.device.sendEvent(name: 'groupCoordinatorName ', value: groupCoordinatorName)
+  if(groupCoordinatorName != getGroupCoordinatorName()) {
+    this.device.sendEvent(name: 'groupCoordinatorName ', value: groupCoordinatorName)
+  }
 }
 
 Boolean getIsGroupCoordinator() {
   return this.device.getDataValue('isGroupCoordinator') == 'true'
 }
 void setIsGroupCoordinator(Boolean isGroupCoordinator) {
-  this.device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
-  this.device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
+  if(isGroupCoordinator != getIsGroupCoordinator()) {
+    this.device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+    this.device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
+  }
 }
 
 Boolean isGroupedAndCoordinator() {
