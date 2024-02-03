@@ -1205,7 +1205,7 @@ void setFavorites(Map favs) {
 
 void isFavoritePlaying(DeviceWrapper cd, Map json) {
   if(!favMatching) {return}
-  if(!state.fav) {return}
+  if(!state.favs) {return}
   logTrace('isFavoritePlaying called')
   String objectId = json?.container?.id?.objectId
   if(objectId) {
