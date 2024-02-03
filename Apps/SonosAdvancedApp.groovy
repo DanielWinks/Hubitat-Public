@@ -144,7 +144,10 @@ Map localPlayerPage() {
 		install: false,
 		uninstall: false
   ) {
-    section("Please wait while we discover your Sonos. Discovery can take five minutes or more, so sit back and relax! Click Next once discovered.") {
+    section("Please wait while we discover your Sonos. Click Next when the discovery queue has been fully process. You will receive notification below when done.") {
+      paragraph (
+        "<span class='app-state-${app.id}-discoveryInProgress'></span>"
+      )
       paragraph (
         "<span class='app-state-${app.id}-sonosDiscoveredCount'>Found Devices (0): </span>" +
         "<span class='app-state-${app.id}-sonosDiscovered'></span>"
@@ -390,21 +393,19 @@ void createPlayerDevices() {
     }
     logInfo("Updating player info with latest info from discovery...")
     playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
+
+    LinkedHashMap<String,String> macToRincon = discoveredSonoses.collectEntries{ k,v -> [k, v.id]}
+    String rincon = macToRincon[dni]
+    LinkedHashMap<String,Map> secondaries = discoveredSonosSecondaries.findAll{k,v -> v.primaryDeviceId == rincon}
+    if(secondaries){
+      List<String> secondaryDeviceIps = secondaries.collect{it.value.deviceIp}
+      List<String> secondaryIds = secondaries.collect{it.value.id}
+      if(secondaryDeviceIps && secondaryIds) {
+        cd.updateDataValue('secondaryDeviceIps', secondaryDeviceIps.join(','))
+        cd.updateDataValue('secondaryIds', secondaryIds.join(','))
+      }
+    }
     cd.secondaryConfiguration()
-  }
-
-  discoveredSonosSecondaries.each{ k,v ->
-    ChildDeviceWrapper primary = getDeviceFromRincon(v.primaryDeviceId)
-    primary.removeDataValue('secondaryIds')
-    primary.removeDataValue('secondaryLocalUpnpUrls')
-    primary.removeDataValue('secondaryWebsocketUrls')
-    List<String> secondaryDeviceIps = primary.getDataValue('secondaryDeviceIps') ? primary.getDataValue('secondaryDeviceIps').tokenize(',') : []
-    if(!secondaryDeviceIps.contains(v.deviceIp)) {secondaryDeviceIps.add(v.deviceIp)}
-    primary.updateDataValue('secondaryDeviceIps', secondaryDeviceIps.join(','))
-
-    List<String> secondaryIds = primary.getDataValue('secondaryIds') ? primary.getDataValue('secondaryIds').tokenize(',') : []
-    if(!secondaryDeviceIps.contains(v.id)) {secondaryIds.add(v.id)}
-    primary.updateDataValue('secondaryIds', secondaryIds.join(','))
   }
   if(!skipOrphanRemoval) {removeOrphans()}
 }
@@ -442,8 +443,8 @@ void removeOrphans() {
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   atomicState.remove('processingDiscoveryQueue')
-  discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
-  discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
+  discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
+  discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
@@ -468,10 +469,12 @@ void ssdpEventHandler(Event event) {
 void processDiscoveryQueue() {
   if(discoveryQueue.size() > 0) {
     processParsedSsdpEvent(discoveryQueue.poll())
-    runIn(1, 'processDiscoveryQueue')
+    runInMillis(333, 'processDiscoveryQueue')
     logDebug('More messages to process')
+    app.sendEvent(name: 'discoveryInProgress', value: 'Processing discovery queue...')
   } else {
     logDebug('No more messages to process')
+    app.sendEvent(name: 'discoveryInProgress', value: 'Discovery complete, please click next...')
   }
 }
 
@@ -542,7 +545,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
       localUpnpHost: "${ipAddress}:1400"
     ]
     discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-    logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+    logDebug("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
   }
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
@@ -1202,6 +1205,7 @@ void setFavorites(Map favs) {
 
 void isFavoritePlaying(DeviceWrapper cd, Map json) {
   if(!favMatching) {return}
+  if(!state.fav) {return}
   logTrace('isFavoritePlaying called')
   String objectId = json?.container?.id?.objectId
   if(objectId) {

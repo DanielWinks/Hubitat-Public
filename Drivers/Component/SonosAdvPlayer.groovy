@@ -232,6 +232,12 @@ String getCurrentTTSVoice() {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
+  atomicState.audioClipPlaying = false
+  migrationCleanup()
+  runIn(5, 'secondaryConfiguration')
+}
+
+void secondaryConfiguration() {
   createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
   createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
@@ -242,12 +248,7 @@ void configure() {
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  atomicState.audioClipPlaying = false
-  migrationCleanup()
-  runIn(5, 'secondaryConfiguration')
-}
 
-void secondaryConfiguration() {
   initializeWebsocketConnection()
   audioClipQueueInitialization()
   runIn(10, 'subscribeToEvents')
@@ -1306,9 +1307,11 @@ String getRightChannelRincon() {
 void setRightChannelRincon(String rincon) {
   logTrace("Setting right channel RINCON to ${rincon}")
   this.device.updateDataValue('rightChannelId', rincon)
-  Long secondaryIndex = getSecondaryIds().findIndexValues{it == rincon}[0]
-  String rightChannelIpAddress = getSecondaryDeviceIps()[secondaryIndex as Integer]
-  setRightChannelDeviceIp(rightChannelIpAddress)
+  if(getSecondaryIds()) {
+    Long secondaryIndex = getSecondaryIds().findIndexValues{it == rincon}[0]
+    String rightChannelIpAddress = getSecondaryDeviceIps()[secondaryIndex as Integer]
+    setRightChannelDeviceIp(rightChannelIpAddress)
+  }
 }
 
 String getRightChannelDeviceIp() {
