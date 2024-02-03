@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.4.0",
-  "releaseNotes": "v0.4.0 Major rewrite, again. Added much support for websockets. Added favorites child device. Added right channel child device. Lots more changes.",
+  "version": "0.4.1",
+  "releaseNotes": "0.4.1 Discovery fixes for secondary devices.\r\nv0.4.0 Major rewrite, again. Added much support for websockets. Added favorites child device. Added right channel child device. Lots more changes.",
   "minimumHEVersion": "2.3.7.114",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
