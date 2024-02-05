@@ -625,6 +625,11 @@ List<ChildDeviceWrapper> getCurrentPlayerDevices() {
   return currentPlayers
 }
 
+// @CompileStatic
+// void registerAllPlayersInRinconMap(DeviceWrapper cd) {
+//   cd.addAllPlayersToRinconMap(getCurrentPlayerDevices())
+// }
+
 List<ChildDeviceWrapper> getCurrentGroupDevices() {
   List<ChildDeviceWrapper> currentGroupDevs = []
   app.getChildDevices().each{child -> if(child.getDataValue('id') == null) { currentGroupDevs.add(child)}}
@@ -793,6 +798,7 @@ String unEscapeMetaData(String text) {
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
+
 void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
@@ -807,11 +813,6 @@ void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
 void setAlbumArtURI(List<String> rincons, String value) {
   List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
   groupedDevices.each{dev -> dev.setAlbumArtURI(value)}
-}
-
-void setStatusTransportStatus(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setStatusTransportStatus(value)}
 }
 
 void setPlayMode(List<String> rincons, String value) {
