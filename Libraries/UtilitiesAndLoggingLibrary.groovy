@@ -38,6 +38,8 @@ import hubitat.scheduling.AsyncResponse
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
+import java.time.Instant
+import java.time.Duration
 
 library(
   name: 'UtilitiesAndLoggingLibrary',
