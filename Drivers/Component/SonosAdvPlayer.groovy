@@ -154,22 +154,22 @@ metadata {
 // =============================================================================
 // Preference Getters And Passthrough Renames For Clarity
 // =============================================================================
-Boolean getDisableTrackDataEvents() { return disableTrackDataEvents != null ? disableTrackDataEvents : true }
-Boolean getIncludeTrackDataMetaData() { return includeTrackDataMetaData != null ? includeTrackDataMetaData : false }
-Integer getVolumeAdjustAmountLow() { return volumeAdjustAmountLow != null ? volumeAdjustAmountLow as Integer : 5 }
-Integer getVolumeAdjustAmountMid() { return volumeAdjustAmountMid != null ? volumeAdjustAmountMid as Integer : 5 }
-Integer getVolumeAdjustAmount() { return volumeAdjustAmount != null ? volumeAdjustAmount as Integer : 5 }
-Integer getTTSBoostAmount() { return ttsBoostAmount != null ? ttsBoostAmount as Integer : 10 }
-Boolean getDisableArtistAlbumTrackEvents() { return disableArtistAlbumTrackEvents != null ? disableArtistAlbumTrackEvents : false }
-Boolean getCreateCrossfadeChildDevice() { return createCrossfadeChildDevice != null ? createCrossfadeChildDevice : false }
-Boolean getCreateShuffleChildDevice() { return createShuffleChildDevice != null ? createShuffleChildDevice : false }
-Boolean getCreateRepeatOneChildDevice() { return createRepeatOneChildDevice != null ? createRepeatOneChildDevice : false }
-Boolean getCreateRepeatAllChildDevice() { return createRepeatAllChildDevice != null ? createRepeatAllChildDevice : false }
-Boolean getCreateBatteryStatusChildDevice() { return createBatteryStatusChildDevice != null ? createBatteryStatusChildDevice : false }
-Boolean getCreateFavoritesChildDevice() { return createFavoritesChildDevice != null ? createFavoritesChildDevice : false }
-Boolean getCreateRightChannelChildDevice() { return createRightChannelChildDevice != null ? createRightChannelChildDevice : false }
-Boolean getChimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
-Boolean getAlwaysUseLoadAudioClip() { return alwaysUseLoadAudioClip != null ? alwaysUseLoadAudioClip : true }
+Boolean getDisableTrackDataEvents() { return settings.disableTrackDataEvents != null ? settings.disableTrackDataEvents : true }
+Boolean getIncludeTrackDataMetaData() { return settings.includeTrackDataMetaData != null ? settings.includeTrackDataMetaData : false }
+Integer getVolumeAdjustAmountLow() { return settings.volumeAdjustAmountLow != null ? settings.volumeAdjustAmountLow as Integer : 5 }
+Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != null ? settings.volumeAdjustAmountMid as Integer : 5 }
+Integer getVolumeAdjustAmount() { return settings.volumeAdjustAmount != null ? settings.volumeAdjustAmount as Integer : 5 }
+Integer getTTSBoostAmount() { return settings.ttsBoostAmount != null ? settings.ttsBoostAmount as Integer : 10 }
+Boolean getDisableArtistAlbumTrackEvents() { return settings.disableArtistAlbumTrackEvents != null ? settings.disableArtistAlbumTrackEvents : false }
+Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDevice != null ? settings.createCrossfadeChildDevice : false }
+Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
+Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
+Boolean getCreateRepeatAllChildDevice() { return settings.createRepeatAllChildDevice != null ? settings.createRepeatAllChildDevice : false }
+Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
+Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
+Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
+Boolean getChimeBeforeTTS() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
+Boolean getAlwaysUseLoadAudioClip() { return settings.alwaysUseLoadAudioClip != null ? settings.alwaysUseLoadAudioClip : true }
 
 Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
 Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
@@ -197,8 +197,10 @@ String getCurrentTTSVoice() {
 // =============================================================================
 // Fields
 // =============================================================================
-@Field final Integer RESUB_INTERVAL = 7200
 @Field static LinkedHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new LinkedHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
+@Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
+@Field static ConcurrentHashMap<String, Instant> subscriptionInstants = new ConcurrentHashMap<String, Instant>()
 @Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
 @Field static Map SOURCES = [
   "\$": "None",
@@ -217,10 +219,30 @@ String getCurrentTTSVoice() {
   "x-sonos-vli:.*,spotify:": "Spotify",
   "x-rincon-queue": "Sonos Q"
 ]
-@Field private final String MRRC_EVENTS  =  '/MediaRenderer/RenderingControl/Event'
-@Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
-@Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
+@Field final Integer RESUB_INTERVAL = 3600
+
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
+@Field private final String MRAVT_EVENTS_CALLBACK =  'subscribeResubscribeToMrAvTCallback'
+@Field private final String MRAVT_EVENTS_UNSUB_CALLBACK =  'unsubscribeToMrAvTCallback'
+@Field private final String MRAVT_EVENTS_DOMAIN =  'MediaRenderer/AVTransport'
+
+@Field private final String MRRC_EVENTS  =  '/MediaRenderer/RenderingControl/Event'
+@Field private final String MRRC_EVENTS_CALLBACK  =  'subscribeResubscribeMrRcCallback'
+@Field private final String MRRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeMrRcCallback'
+@Field private final String MRRC_EVENTS_DOMAIN  =  'MediaRenderer/RenderingControl'
+
+
+@Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
+@Field private final String ZGT_EVENTS_CALLBACK  =  'subscribeResubscribeToZgtCallback'
+@Field private final String ZGT_EVENTS_UNSUB_CALLBACK =  'unsubscribeToZgtCallback'
+@Field private final String ZGT_EVENTS_DOMAIN  =  'ZoneGroupTopology'
+
+@Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
+@Field private final String MRGRC_EVENTS_CALLBACK  =  'subscribeResubscribeToMrGrcCallback'
+@Field private final String MRGRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeToMrGrcCallback'
+@Field private final String MRGRC_EVENTS_DOMAIN  =  'MediaRenderer/GroupRenderingControl'
+
+
 // =============================================================================
 // End Fields
 // =============================================================================
@@ -230,11 +252,25 @@ String getCurrentTTSVoice() {
 // =============================================================================
 // Initialize and Configure
 // =============================================================================
-void initialize() { configure() }
+void initialize() {
+  configure()
+  fullRenewSubscriptions()
+  runEvery3Hours('fullRenewSubscriptions')
+  runEvery10Minutes('registerRinconId')
+}
 void configure() {
   atomicState.audioClipPlaying = false
   migrationCleanup()
   runIn(5, 'secondaryConfiguration')
+}
+
+void fullRenewSubscriptions() {
+  unsubscribeToMrAvTCallback()
+  unsubscribeFromMrRcEvents()
+  unsubscribeFromZgtEvents()
+  unsubscribeFromMrGrcEvents()
+  runIn(15, 'subscribeToEvents', [overwrite: true])
+  runIn(15, 'initializeWebsocketConnection', [overwrite: true])
 }
 
 void secondaryConfiguration() {
@@ -248,14 +284,29 @@ void secondaryConfiguration() {
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-
-  initializeWebsocketConnection()
   audioClipQueueInitialization()
-  runIn(10, 'subscribeToEvents')
+  rinconMapInitialization()
+  if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
 }
 
 void migrationCleanup() {
   unschedule('resubscribeToGMEvents')
+  if(settings.disableTrackDataEvents == null) { settings.disableTrackDataEvents = true }
+  if(settings.includeTrackDataMetaData == null) { settings.includeTrackDataMetaData = false }
+  if(settings.volumeAdjustAmountLow == null) { settings.volumeAdjustAmountLow = 5 }
+  if(settings.volumeAdjustAmountMid == null) { settings.volumeAdjustAmountMid = 5 }
+  if(settings.volumeAdjustAmount == null) { settings.volumeAdjustAmount = 5 }
+  if(settings.ttsBoostAmount == null) { settings.ttsBoostAmount = 10 }
+  if(settings.disableArtistAlbumTrackEvents == null) { settings.disableArtistAlbumTrackEvents = false }
+  if(settings.createCrossfadeChildDevice == null) { settings.createCrossfadeChildDevice = false }
+  if(settings.createShuffleChildDevice == null) { settings.createShuffleChildDevice = false }
+  if(settings.createRepeatOneChildDevice == null) { settings.createRepeatOneChildDevice = false }
+  if(settings.createRepeatAllChildDevice == null) { settings.createRepeatAllChildDevice = false }
+  if(settings.createBatteryStatusChildDevice == null) { settings.createBatteryStatusChildDevice = false }
+  if(settings.createFavoritesChildDevice == null) { settings.createFavoritesChildDevice = false }
+  if(settings.createRightChannelChildDevice == null) { settings.createRightChannelChildDevice = false }
+  if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
+  if(settings.alwaysUseLoadAudioClip == null) { settings.alwaysUseLoadAudioClip = true }
 }
 
 void audioClipQueueInitialization() {
@@ -263,6 +314,20 @@ void audioClipQueueInitialization() {
   if(!audioClipQueue.containsKey(getId())) {
     audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
   }
+}
+
+void rinconMapInitialization() {
+  if(rinconRegistry == null) {rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()}
+  registerRinconId()
+  logInfo("RinconMap: ${rinconRegistry}")
+}
+
+void subscriptionInstantsInitialization() {
+  if(subscriptionInstants == null) {subscriptionInstants = new ConcurrentHashMap<String, Instant>()}
+}
+
+void registerRinconId() {
+  rinconRegistry[getId()] = this.device
 }
 // =============================================================================
 // End Initialize and Configure
@@ -273,6 +338,7 @@ void audioClipQueueInitialization() {
 // =============================================================================
 // Device Methods
 // =============================================================================
+@CompileStatic
 void setRepeatMode(String mode) {
   logDebug("Setting repeat mode to ${mode}")
   Map playModes = [
@@ -283,34 +349,48 @@ void setRepeatMode(String mode) {
   if(mode == 'repeat all') { playModes.repeat = true }
   playerSetPlayModes(playModes)
 }
+@CompileStatic
 void repeatOne() { setRepeatMode('repeat one') }
+@CompileStatic
 void repeatAll() { setRepeatMode('repeat all') }
+@CompileStatic
 void repeatNone() { setRepeatMode('off') }
 
+@CompileStatic
 void setCrossfade(String mode) {
   logDebug("Setting crossfade mode to ${mode}")
   Map playModes = mode == 'on' ? [ 'crossfade': true ] : [ 'crossfade': false ]
   playerSetPlayModes(playModes)
 }
+@CompileStatic
 void enableCrossfade() { setCrossfade('on') }
+@CompileStatic
 void disableCrossfade() { setCrossfade('off') }
 
+@CompileStatic
 void setShuffle(String mode) {
   logDebug("Setting shuffle mode to ${mode}")
   Map playModes = mode == 'on' ? [ 'shuffle': true ] : [ 'shuffle': false ]
   playerSetPlayModes(playModes)
 }
+@CompileStatic
 void shuffleOn() { setShuffle('on') }
+@CompileStatic
 void shuffleOff() { setShuffle('off') }
 
+@CompileStatic
 void ungroupPlayer() { playerCreateNewGroup() }
 
+@CompileStatic
 void playText(String text, BigDecimal volume = null) {
   if(getAlwaysUseLoadAudioClip()) { devicePlayText(text, volume) }
   else{ devicePlayTextNoRestore(text, volume) }
 }
+@CompileStatic
 void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
+@CompileStatic
 void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
+@CompileStatic
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
 void setTrack(String uri) { parent?.componentSetStreamUrlLocal(this.device, uri, volume) }
@@ -318,7 +398,9 @@ void playTrack(String uri, BigDecimal volume = null) {
   if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
   else{ parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
 }
+@CompileStatic
 void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
+@CompileStatic
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
@@ -329,6 +411,7 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
   playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume )
 }
 
+@CompileStatic
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
   playerLoadAudioClipHighPriority(uri, volume)
 }
@@ -343,9 +426,12 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
   parent?.componentLoadStreamUrlLocal(this.device, uri, volume)
 }
 
+@CompileStatic
 void mute(){ playerSetPlayerMute(true) }
+@CompileStatic
 void unmute(){ playerSetPlayerMute(false) }
 void setLevel(BigDecimal level) { playerSetPlayerVolume(level as Integer) }
+@CompileStatic
 void setVolume(BigDecimal level) { setLevel(level) }
 void setTreble(BigDecimal level) { parent?.componentSetTrebleLocal(this.device, level)}
 void setBass(BigDecimal level) { parent?.componentSetBassLocal(this.device, level)}
@@ -399,7 +485,9 @@ void groupVolumeDown() {
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
 
+@CompileStatic
 void volumeUp() { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
+@CompileStatic
 void volumeDown() { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 
 Integer getPlayerVolumeAdjAmount() {
@@ -424,17 +512,24 @@ Integer getGroupVolumeAdjAmount() {
   }
 }
 
+@CompileStatic
 void play() { playerPlay() }
+@CompileStatic
 void stop() { playerStop() }
+@CompileStatic
 void pause() { playerPause() }
+@CompileStatic
 void nextTrack() { playerSkipToNextTrack() }
+@CompileStatic
 void previousTrack() { playerSkipToPreviousTrack() }
+@CompileStatic
 void subscribeToEvents() {
   subscribeToZgtEvents()
   subscribeToMrGrcEvents()
   subscribeToMrRcEvents()
 }
 
+@CompileStatic
 void loadFavorite(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
@@ -444,6 +539,7 @@ void loadFavorite(String favoriteId) {
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
+@CompileStatic
 void loadFavoriteFull(String favoriteId) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
@@ -453,6 +549,7 @@ void loadFavoriteFull(String favoriteId) {
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
+@CompileStatic
 void loadFavoriteFull(String favoriteId, String repeatMode) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
@@ -461,6 +558,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode) {
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
+@CompileStatic
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
   String autoPlay = 'true'
   String shuffleMode = 'false'
@@ -468,12 +566,14 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
+@CompileStatic
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
   String autoPlay = 'true'
   String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
+@CompileStatic
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
   String crossfadeMode = 'true'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
@@ -587,6 +687,7 @@ void updateChildBatteryStatus(Integer battery, String powerSource, BigDecimal te
 // =============================================================================
 // Child Device Helpers
 // =============================================================================
+
 String getCrossfadeControlChildDNI() { return "${device.getDeviceNetworkId()}-CrossfadeControl" }
 String getShuffleControlChildDNI() { return "${device.getDeviceNetworkId()}-ShuffleControl" }
 String getRepeatOneControlChildDNI() { return "${device.getDeviceNetworkId()}-RepeatOneControl" }
@@ -830,7 +931,6 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
 
   GPathResult propertyset = new XmlSlurper().parseText(xmlString)
   String lastChange = ((GPathResult)propertyset['property']['LastChange']).text().toString()
-
   if(!lastChange) {return}
   GPathResult event = new XmlSlurper().parseText(lastChange)
   GPathResult instanceId = (GPathResult)event['InstanceID']
@@ -1061,195 +1161,318 @@ void processRenderingControlMessages(String xmlString) {
 
 String getlocalUpnpHost() {return device.getDataValue('localUpnpHost')}
 String getDNI() {return device.getDeviceNetworkId()}
+Boolean hasSid(String sid) {
+  return device.getDataValue('sid1') != null
+}
+String getSid(String sid) {
+  return device.getDataValue(sid)
+}
+void setSid(String sid, String value) {
+  device.updateDataValue(sid, value)
+}
+void deleteSid(String sid) {
+  subscriptionInstants.remove("${getId()}${sid}".toString())
+  device.removeDataValue(sid)
+}
+@CompileStatic
+Boolean subValid(String sid) {
+  Instant sidInstant = subscriptionInstants.containsKey("${getId()}${sid}") ? subscriptionInstants["${getId()}${sid}"] : null
+  Duration dur = Duration.between(sidInstant, Instant.now())
+  long seconds = dur.getSeconds()
+  return ((seconds - 100) < RESUB_INTERVAL)
+}
+@CompileStatic
+void updateSid(String sid, Map headers) {
+  subscriptionInstants["${getId()}${sid}".toString()] = Instant.now()
+  if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
+  if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
+}
 
+void scheduleResubscriptionToEvents(String eventsToResub) {
+  runIn(RESUB_INTERVAL-100, eventsToResub, [overwrite: true])
+}
+
+void retrySubscription(String eventsToRetry) {
+  runIn(60, eventsToRetry, [overwrite: true])
+}
+
+void removeResub(String resub) {
+  unschedule(resub)
+}
 
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
 // /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
 void subscribeToAVTransport() {
-  if(device.getDataValue('sid1')) { resubscribeToAVTransport() }
-  else {
-    sonosEventSubscribe(MRAVT_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/avt', 'subscribeToMrAvTCallback')
-    unschedule('resubscribeToAVTransport')
-    runIn(RESUB_INTERVAL-100, 'resubscribeToAVTransport')
-  }
+  String subId = 'sid1'
+  String subPath = '/avt'
+  String evtSub = MRAVT_EVENTS
+  String callback = MRAVT_EVENTS_CALLBACK
+  if(hasSid(subId) && subValid(subId)) { resubscribeToAVTransport() }
+  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
 }
 
-void subscribeToMrAvTCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to subscribe to MediaRenderer/AVTransport. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid1')
-    runIn(60, 'subscribeToAVTransport')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully subscribed to MediaRenderer/AVTransport')
-    if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
-  }
-}
-
+@CompileStatic
 void resubscribeToAVTransport() {
-  if(device.getDataValue('sid1')) {
-    sonosEventRenew(MRAVT_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid1'), 'resubscribeToMrAvTCallback')
+  String subId = 'sid1'
+  String resub = 'resubscribeToAVTransport'
+  String evtSub = MRAVT_EVENTS
+  String callback = MRAVT_EVENTS_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
   } else { subscribeToAVTransport() }
-  runIn(RESUB_INTERVAL-100, 'resubscribeToAVTransport')
+  scheduleResubscriptionToEvents(resub)
 }
 
-void resubscribeToMrAvTCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to resubscribe to MediaRenderer/AVTransport. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid1')
-    runIn(60, 'subscribeToAVTransport')
-  } else if(response.status == 200) {
-    logTrace('Sucessfully resubscribed to MediaRenderer/AVTransport')
-    if(response.headers["SID"]) {device.updateDataValue('sid1', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid1', response.headers["sid"])}
+@CompileStatic
+void subscribeResubscribeToMrAvTCallback(HubResponse response) {
+  String sub = 'subscribeToAVTransport'
+  String resub = 'resubscribeToAVTransport'
+  String subId = 'sid1'
+  String domain = MRAVT_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
+    deleteSid(subId)
+    retrySubscription(sub)
+  } else if(response?.status == 200) {
+    logDebug("Sucessfully subscribed to ${domain}")
+    updateSid(subId, response.headers)
+    scheduleResubscriptionToEvents(resub)
   }
 }
 
+@CompileStatic
 void unsubscribeFromAVTransport() {
-  if(device.getDataValue('sid1')) {
-    sonosEventUnsubscribe(MRAVT_EVENTS, getlocalUpnpHost(), getDNI(), device.getDataValue('sid1'), 'unsubscribeToMrAvTCallback')
-    unschedule('resubscribeToAVTransport')
+  String subId = 'sid1'
+  String resub = 'resubscribeToAVTransport'
+  String evtSub = MRAVT_EVENTS
+  String callback = MRAVT_EVENTS_UNSUB_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+    removeResub(resub)
   }
 }
 
+@CompileStatic
 void unsubscribeToMrAvTCallback(HubResponse response) {
-  if(response.status == 412){
-    logDebug('Failed to unsubscribe to MediaRenderer/AVTransport. This is likely due to not currently being subscribed and is safely ignored.')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully unsubscribed to MediaRenderer/AVTransport')
+  String subId = 'sid1'
+  String domain = MRAVT_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
+  } else if(response?.status == 200) {
+    logTrace("Sucessfully unsubscribed to ${domain}")
   }
-  device.removeDataValue('sid1')
+  deleteSid(subId)
 }
 
 
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/RenderingControl/Event' //sid2
 // /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
 void subscribeToMrRcEvents() {
-  if(device.getDataValue('sid2')) { resubscribeToMrRcEvents() }
-  else {
-    sonosEventSubscribe(MRRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/mrc', 'subscribeToMrRcCallback')
-    unschedule('resubscribeToMrRcEvents')
-    runIn(RESUB_INTERVAL-100, 'resubscribeToMrRcEvents')
-  }
+  String subId = 'sid2'
+  String subPath = '/mrc'
+  String evtSub = MRRC_EVENTS
+  String callback = MRRC_EVENTS_CALLBACK
+  if(hasSid(subId) && subValid(subId)) { resubscribeToMrRcEvents() }
+  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
 }
 
-void subscribeToMrRcCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to subscribe to MediaRenderer/RenderingControl. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid2')
-    runIn(60, 'subscribeToMrRcEvents')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully subscribed to MediaRenderer/RenderingControl')
-    if(response.headers["SID"]) {device.updateDataValue('sid2', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid2', response.headers["sid"])}
-  }
-}
-
+@CompileStatic
 void resubscribeToMrRcEvents() {
-  if(device.getDataValue('sid2')) {
-    sonosEventRenew(MRRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid2'), 'resubscribeToMrRcCallback')
+  String subId = 'sid2'
+  String resub = 'resubscribeToMrRcEvents'
+  String evtSub = MRAVT_EVENTS
+  String callback = MRAVT_EVENTS_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
   } else { subscribeToMrRcEvents() }
-  runIn(RESUB_INTERVAL-100, 'resubscribeToMrRcEvents')
+  scheduleResubscriptionToEvents(resub)
 }
 
-void resubscribeToMrRcCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to resubscribe to MediaRenderer/RenderingControl. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid2')
-    runIn(60, 'subscribeToMrRcEvents')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully resubscribed to MediaRenderer/RenderingControl')
-    if(response.headers["SID"]) {device.updateDataValue('sid2', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid2', response.headers["sid"])}
+@CompileStatic
+void subscribeResubscribeMrRcCallback(HubResponse response) {
+  String sub = 'subscribeToMrRcEvents'
+  String resub = 'resubscribeToMrRcEvents'
+  String subId = 'sid2'
+  String domain = MRRC_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
+    deleteSid(subId)
+    retrySubscription(sub)
+  } else if(response?.status == 200) {
+    logDebug("Sucessfully subscribed to ${domain}")
+    updateSid(subId, response.headers)
+    scheduleResubscriptionToEvents(resub)
   }
 }
 
+@CompileStatic
+void unsubscribeFromMrRcEvents() {
+  String subId = 'sid2'
+  String resub = 'resubscribeToMrRcEvents'
+  String evtSub = MRRC_EVENTS
+  String callback = MRRC_EVENTS_UNSUB_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+    removeResub(resub)
+  }
+}
+
+@CompileStatic
+void unsubscribeFromMrRcEventsCallback(HubResponse response) {
+  String subId = 'sid2'
+  String domain = MRRC_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
+  } else if(response?.status == 200) {
+    logTrace("Sucessfully unsubscribed to ${domain}")
+  }
+  deleteSid(subId)
+}
 
 // /////////////////////////////////////////////////////////////////////////////
 // '/ZoneGroupTopology/Event' //sid3
 // /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
 void subscribeToZgtEvents() {
-  if(device.getDataValue('sid3')) { resubscribeToZgtEvents() }
-  else {
-    sonosEventSubscribe(ZGT_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/zgt', 'subscribeToZgtCallback')
-    unschedule('resubscribeToZgtEvents')
-    runIn(RESUB_INTERVAL-100, 'resubscribeToZgtEvents')
-  }
+  String subId = 'sid3'
+  String subPath = '/zgt'
+  String evtSub = ZGT_EVENTS
+  String callback = ZGT_EVENTS_CALLBACK
+  if(hasSid(subId) && subValid(subId)) { resubscribeToZgtEvents() }
+  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
 }
 
-void subscribeToZgtCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to subscribe to ZoneGroupTopology. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid3')
-    runIn(60, 'subscribeToZgtEvents')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully subscribed to ZoneGroupTopology')
-    if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid3', response.headers["sid"])}
-  }
-}
-
+@CompileStatic
 void resubscribeToZgtEvents() {
-  if(device.getDataValue('sid3')) {
-    sonosEventRenew(MRRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid3'), 'resubscribeToZgtCallback')
+  String subId = 'sid3'
+  String resub = 'resubscribeToZgtEvents'
+  String evtSub = ZGT_EVENTS
+  String callback = ZGT_EVENTS_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
   } else { subscribeToZgtEvents() }
-  runIn(RESUB_INTERVAL-100, 'resubscribeToZgtEvents')
+  scheduleResubscriptionToEvents(resub)
+}
+
+@CompileStatic
+void subscribeResubscribeToZgtCallback(HubResponse response) {
+  String sub = 'subscribeToZgtEvents'
+  String resub = 'resubscribeToZgtEvents'
+  String subId = 'sid3'
+  String domain = ZGT_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
+    deleteSid(subId)
+    retrySubscription(sub)
+  } else if(response?.status == 200) {
+    logDebug("Sucessfully subscribed to ${domain}")
+    updateSid(subId, response.headers)
+    scheduleResubscriptionToEvents(resub)
+  }
 }
 
 void resubscribeToZgtCallback(HubResponse response) {
-  if(response.status == 412){
+  if(response?.status == 412){
     logWarn('Failed to resubscribe to ZoneGroupTopology. Will trying subscribing again in 30 seconds.')
-    device.removeDataValue('sid3')
-    runIn(30, 'subscribeToZgtEvents')
-  } else if(response.status == 200) {
+    deleteSid('sid3')
+    retrySubscription('subscribeToZgtEvents')
+  } else if(response?.status == 200) {
     logDebug('Sucessfully resubscribed to ZoneGroupTopology')
-    if(response.headers["SID"]) {device.updateDataValue('sid3', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid3', response.headers["sid"])}
+    updateSid('sid3', response.headers)
   }
 }
 
+@CompileStatic
+void unsubscribeFromZgtEvents() {
+  String subId = 'sid3'
+  String resub = 'resubscribeToZgtEvents'
+  String evtSub = ZGT_EVENTS
+  String callback = ZGT_EVENTS_UNSUB_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+    removeResub(resub)
+  }
+}
 
+@CompileStatic
+void unsubscribeFromZgtEventsCallback(HubResponse response) {
+  String subId = 'sid3'
+  String domain = ZGT_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
+  } else if(response?.status == 200) {
+    logTrace("Sucessfully unsubscribed to ${domain}")
+  }
+  deleteSid(subId)
+}
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/GroupRenderingControl/Event' //sid4
 // /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
 void subscribeToMrGrcEvents() {
-  if(device.getDataValue('sid4')) { resubscribeToMrGrcEvents() }
-  else {
-    sonosEventSubscribe(MRGRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), '/mgrc', 'subscribeToMrGrcCallback')
-    unschedule('resubscribeToMrGrcEvents')
-    runIn(RESUB_INTERVAL-100, 'resubscribeToMrGrcEvents')
-  }
+  String subId = 'sid4'
+  String subPath = '/mgrc'
+  String evtSub = MRGRC_EVENTS
+  String callback = MRGRC_EVENTS_CALLBACK
+  if(hasSid(subId) && subValid(subId)) { resubscribeToMrGrcEvents() }
+  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
 }
 
-void subscribeToMrGrcCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to resubscribe to MediaRenderer/GroupRenderingControl. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid4')
-    runIn(60, 'subscribeToMrGrcEvents')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully subscribed to MediaRenderer/GroupRenderingControl')
-    if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
-  }
-}
-
+@CompileStatic
 void resubscribeToMrGrcEvents() {
-  if(device.getDataValue('sid4')) { sonosEventRenew(MRGRC_EVENTS, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), device.getDataValue('sid4'), 'resubscribeToMrGrcCallback')}
-  runIn(RESUB_INTERVAL-100, 'resubscribeToMrGrcEvents')
+  String subId = 'sid4'
+  String resub = 'resubscribeToMrGrcEvents'
+  String evtSub = MRGRC_EVENTS
+  String callback = MRGRC_EVENTS_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
+  } else { subscribeToMrGrcEvents() }
+  scheduleResubscriptionToEvents(resub)
 }
 
-void resubscribeToMrGrcCallback(HubResponse response) {
-  if(response.status == 412){
-    logWarn('Failed to resubscribe to MediaRenderer/GroupRenderingControl. Will trying subscribing again in 60 seconds.')
-    device.removeDataValue('sid4')
-    runIn(60, 'subscribeToMrGrcEvents')
-  } else if(response.status == 200) {
-    logDebug('Sucessfully resubscribed to MediaRenderer/GroupRenderingControl')
-    if(response.headers["SID"]) {device.updateDataValue('sid4', response.headers["SID"])}
-    if(response.headers["sid"]) {device.updateDataValue('sid4', response.headers["sid"])}
+@CompileStatic
+void subscribeResubscribeToMrGrcCallback(HubResponse response) {
+  String sub = 'subscribeToMrGrcEvents'
+  String resub = 'resubscribeToMrGrcEvents'
+  String subId = 'sid4'
+  String domain = MRGRC_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
+    deleteSid(subId)
+    retrySubscription(sub)
+  } else if(response?.status == 200) {
+    logDebug("Sucessfully subscribed to ${domain}")
+    updateSid(subId, response.headers)
+    scheduleResubscriptionToEvents(resub)
   }
+}
+
+@CompileStatic
+void unsubscribeFromMrGrcEvents() {
+  String subId = 'sid4'
+  String resub = 'resubscribeToMrGrcEvents'
+  String evtSub = MRGRC_EVENTS
+  String callback = MRGRC_EVENTS_UNSUB_CALLBACK
+  if(hasSid(subId)) {
+    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+    removeResub(resub)
+  }
+}
+
+@CompileStatic
+void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
+  String subId = 'sid4'
+  String domain = MRGRC_EVENTS_DOMAIN
+  if(response?.status == 412){
+    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
+  } else if(response?.status == 200) {
+    logTrace("Sucessfully unsubscribed to ${domain}")
+  }
+  deleteSid(subId)
 }
 // =============================================================================
 // End UPnP Subscriptions and Resubscriptions
@@ -1320,6 +1543,17 @@ String getRightChannelDeviceIp() {
 void setRightChannelDeviceIp(String ipAddress) {
   this.device.updateDataValue('rightChannelDeviceIp', ipAddress)
 }
+
+@CompileStatic
+DeviceWrapper getDeviceFromRincon(String rincon) {
+  return rinconRegistry.containsKey(rincon) ? rinconRegistry[rincon] : null
+}
+@CompileStatic
+List<DeviceWrapper> getDevicesFromRincons(List<String> rincons) {
+  List<DeviceWrapper> devs = rinconRegistry.collect{k,v -> k in rincons ? v : null}
+  return devs.size() > 0 ? devs : null
+}
+
 
 String getHouseholdId(){
   return this.device.getDataValue('householdId')
@@ -1460,7 +1694,7 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   }
 }
 
-List<String> getGroupFollowerDNIs() {
+List<String> getGroupFollowerRincons() {
   return getGroupPlayerIds() - [getId()]
 }
 
@@ -1479,7 +1713,7 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
     uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
   }
   setAlbumArtURI(uri)
-  if(isGroupedAndCoordinator()) {parent?.setAlbumArtURI(getGroupFollowerDNIs(), uri)}
+  if(isGroupedAndCoordinator()) {parent?.setAlbumArtURI(getGroupFollowerRincons(), uri)}
 }
 void setAlbumArtURI(String uri) { sendEvent([name:'albumArtURI', value: uri]) }
 String getAlbumArtURI() {
@@ -1496,7 +1730,7 @@ void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String found
     value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
   }
   setCurrentFavorite(value)
-  if(isGroupedAndCoordinator()) {parent?.setCurrentFavorite(getGroupFollowerDNIs(), value)}
+  if(isGroupedAndCoordinator()) {parent?.setCurrentFavorite(getGroupFollowerRincons(), value)}
 }
 void setCurrentFavorite(String uri) { sendEvent([name:'currentFavorite', value: uri]) }
 String getCurrentFavorite() {
@@ -1506,7 +1740,10 @@ String getCurrentFavorite() {
 void setStatusTransportStatus(String status) {
   sendEvent(name: 'status', value: status)
   sendEvent(name: 'transportStatus', value: status)
-  if(isGroupedAndCoordinator()) {parent?.setStatusTransportStatus(getGroupFollowerDNIs(), status)}
+  if(isGroupedAndCoordinator()) {
+    List<DeviceWrapper> groupDevices = parent?.getDevicesFromRincons(getGroupFollowerRincons())
+    groupDevices.each{ it.setStatusTransportStatus(status)}
+  }
 }
 String getTransportStatus() {
   return this.device.currentValue('transportStatus')
@@ -1522,6 +1759,9 @@ void setPlayerVolume(Integer volume) {
 }
 void setBalance(Integer balance) {
   sendEvent(name: 'balance', value: balance)
+}
+Boolean getIsMuted() {
+  return getMuteState() == 'muted'
 }
 String getMuteState() {
   return this.device.currentValue('mute')
@@ -1578,7 +1818,7 @@ void setPlayMode(String playMode){
       setCurrentShuffleMode('on')
     break
   }
-  if(isGroupedAndCoordinator()) {parent?.setPlayMode(getGroupFollowerDNIs(), playMode)}
+  if(isGroupedAndCoordinator()) {parent?.setPlayMode(getGroupFollowerRincons(), playMode)}
 }
 
 void setCurrentRepeatOneMode(String value) {
@@ -1602,37 +1842,37 @@ String getCurrentShuffleMode() { return this.device.currentValue('currentShuffle
 void setCrossfadeMode(String currentCrossfadeMode) {
   sendEvent(name:'currentCrossfadeMode', value: currentCrossfadeMode)
   if(getCreateCrossfadeChildDevice()) { getCrossfadeControlChild().sendEvent(name:'switch', value: currentCrossfadeMode) }
-  if(isGroupedAndCoordinator()) {parent?.setCrossfadeMode(getGroupFollowerDNIs(), currentCrossfadeMode)}
+  if(isGroupedAndCoordinator()) {parent?.setCrossfadeMode(getGroupFollowerRincons(), currentCrossfadeMode)}
 }
 String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMode') }
 
 void setCurrentTrackDuration(String currentTrackDuration){
   if(!getDisableArtistAlbumTrackEvents()) {sendEvent(name:'currentTrackDuration', value: currentTrackDuration)}
-  if(isGroupedAndCoordinator()) {parent?.setCurrentTrackDuration(getGroupFollowerDNIs(), currentTrackDuration)}
+  if(isGroupedAndCoordinator()) {parent?.setCurrentTrackDuration(getGroupFollowerRincons(), currentTrackDuration)}
 }
 String getCurrentTrackDuration() { return this.device.currentValue('currentTrackDuration') }
 
 void setCurrentArtistName(String currentArtistName) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentArtistName', value: currentArtistName ?: 'Not Available') }
-  if(isGroupedAndCoordinator()) { parent?.setCurrentArtistName(getGroupFollowerDNIs(), currentArtistName) }
+  if(isGroupedAndCoordinator()) { parent?.setCurrentArtistName(getGroupFollowerRincons(), currentArtistName) }
 }
 String getCurrentArtistName() { return this.device.currentValue('currentArtistName') }
 
 void setCurrentAlbumName(String currentAlbumName) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentAlbumName', value: currentAlbumName ?: 'Not Available') }
-  if(isGroupedAndCoordinator()) { parent?.setCurrentAlbumName(getGroupFollowerDNIs(), currentAlbumName) }
+  if(isGroupedAndCoordinator()) { parent?.setCurrentAlbumName(getGroupFollowerRincons(), currentAlbumName) }
 }
 String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName') }
 
 void setCurrentTrackName(String currentTrackName) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentTrackName', value: currentTrackName ?: 'Not Available') }
-  if(isGroupedAndCoordinator()) { parent?.setCurrentTrackName(getGroupFollowerDNIs(), currentTrackName) }
+  if(isGroupedAndCoordinator()) { parent?.setCurrentTrackName(getGroupFollowerRincons(), currentTrackName) }
 }
 String getCurrentTrackName() { return this.device.currentValue('currentTrackName') }
 
 void setCurrentTrackNumber(Integer currentTrackNumber) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'currentTrackNumber', value: currentTrackNumber ?: 0) }
-  if(isGroupedAndCoordinator()) { parent?.setCurrentTrackNumber(getGroupFollowerDNIs(), currentTrackNumber) }
+  if(isGroupedAndCoordinator()) { parent?.setCurrentTrackNumber(getGroupFollowerRincons(), currentTrackNumber) }
 }
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
 
@@ -1642,7 +1882,7 @@ void setTrackDescription(String trackDescription) {
 
   if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
   if(isGroupedAndCoordinator()) {
-    parent?.setTrackDescription(getGroupFollowerDNIs(), trackDescription)
+    parent?.setTrackDescription(getGroupFollowerRincons(), trackDescription)
   }
 }
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
@@ -1653,25 +1893,25 @@ void setTrackDataEvents(Map trackData) {
     trackData['mute'] = this.device.currentValue('mute')
     sendEvent(name: 'trackData', value: JsonOutput.toJson(trackData))
   }
-  if(isGroupedAndCoordinator()) { parent?.setTrackDataEvents(getGroupFollowerDNIs(), trackData) }
+  if(isGroupedAndCoordinator()) { parent?.setTrackDataEvents(getGroupFollowerRincons(), trackData) }
 }
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
 
 void setNextArtistName(String nextArtistName) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'nextArtistName', value: nextArtistName ?: 'Not Available') }
-  if(isGroupedAndCoordinator()) { parent?.setNextArtistName(getGroupFollowerDNIs(), nextArtistName) }
+  if(isGroupedAndCoordinator()) { parent?.setNextArtistName(getGroupFollowerRincons(), nextArtistName) }
 }
 String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 
 void setNextAlbumName(String nextAlbumName) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'nextAlbumName', value: nextAlbumName ?: 'Not Available') }
-  if(isGroupedAndCoordinator()) { parent?.setNextAlbumName(getGroupFollowerDNIs(), nextAlbumName) }
+  if(isGroupedAndCoordinator()) { parent?.setNextAlbumName(getGroupFollowerRincons(), nextAlbumName) }
 }
 String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 
 void setNextTrackName(String nextTrackName) {
   if(!getDisableArtistAlbumTrackEvents()) { sendEvent(name:'nextTrackName', value: nextTrackName ?: 'Not Available') }
-  if(isGroupedAndCoordinator()) { parent?.setNextTrackName(getGroupFollowerDNIs(), nextTrackName) }
+  if(isGroupedAndCoordinator()) { parent?.setNextTrackName(getGroupFollowerRincons(), nextTrackName) }
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 
@@ -1730,7 +1970,7 @@ void wsConnect() {
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
   interfaces.webSocket.connect(this.device.getDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
   unschedule('renewWebsocketConnection')
-  runIn(RESUB_INTERVAL-100, 'renewWebsocketConnection')
+  scheduleResubscriptionToEvents('renewWebsocketConnection')
 }
 
 void wsClose() {
@@ -2132,6 +2372,9 @@ void sendAudioClipHighPriority(Map clipMessage) {
 @CompileStatic
 void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean chimeBeforeTTS = getChimeBeforeTTS()) {
   logTrace('playerLoadAudioClip')
+  if(getIsMuted()) {
+    logTrace('Skipping loadAudioClip notification because player is muted.')
+  }
   Map<String,String> command = [
     'namespace':'audioClip',
     'command':'loadAudioClip',
@@ -2155,6 +2398,10 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
 
 @CompileStatic
 void playerLoadAudioClipChime(BigDecimal volume = null) {
+  logTrace('playerLoadAudioClipChime')
+  if(getIsMuted()) {
+    logTrace('Skipping loadAudioClip notification because player is muted.')
+  }
   Map<String,String> command = [
     'namespace':'audioClip',
     'command':'loadAudioClip',
