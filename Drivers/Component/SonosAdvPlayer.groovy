@@ -197,7 +197,7 @@ String getCurrentTTSVoice() {
 // =============================================================================
 // Fields
 // =============================================================================
-@Field static LinkedHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new LinkedHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, Instant> subscriptionInstants = new ConcurrentHashMap<String, Instant>()
@@ -892,7 +892,10 @@ void parse(String raw) {
     processRenderingControlMessages(message?.body)
   }
   else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
+    if(device.getDataValue('groupIds') != null) {
+      oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+    }
     processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
   }
   else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
