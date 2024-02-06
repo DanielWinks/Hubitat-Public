@@ -144,7 +144,7 @@ Map localPlayerPage() {
 		install: false,
 		uninstall: false
   ) {
-    section("Please wait while we discover your Sonos. Click Next when the discovery queue has been fully process. You will receive notification below when done.") {
+    section("Please wait while we discover your Sonos. Click Next when all your devices have been discovered.") {
       paragraph (
         "<span class='app-state-${app.id}-discoveryInProgress'></span>"
       )
@@ -181,7 +181,7 @@ Map localPlayerSelectionPage() {
     section("Select your device(s) below.") {
       input (
         name: 'playerDevices',
-        title: "Select Sonos (${newlyFoundCount} newly found, ${getCurrentPlayerDevices().size()} previously created):",
+        title: "Select Sonos (${newlyFoundCount} newly found primaries, ${getCurrentPlayerDevices().size()} previously created):",
         type: 'enum',
         options: selectionOptions,
         multiple: true,
@@ -435,14 +435,12 @@ void removeOrphans() {
 // =============================================================================
 
 
-@Field static ConcurrentLinkedQueue<LinkedHashMap> discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 
 // =============================================================================
 // Local Discovery
 // =============================================================================
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
-  atomicState.remove('processingDiscoveryQueue')
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
@@ -458,24 +456,8 @@ void subscribeToSsdpEvents(Location location) {
 }
 
 void ssdpEventHandler(Event event) {
-	LinkedHashMap parsedEvent = parseLanMessage(event?.description)
-  discoveryQueue.add(parsedEvent)
-  if(!atomicState.processingDiscoveryQueue) {
-    atomicState.processingDiscoveryQueue = true
-    processDiscoveryQueue()
-  }
-}
-
-void processDiscoveryQueue() {
-  if(discoveryQueue.size() > 0) {
-    processParsedSsdpEvent(discoveryQueue.poll())
-    runInMillis(333, 'processDiscoveryQueue')
-    logDebug('More messages to process')
-    app.sendEvent(name: 'discoveryInProgress', value: 'Processing discovery queue...')
-  } else {
-    logDebug('No more messages to process')
-    app.sendEvent(name: 'discoveryInProgress', value: 'Discovery complete, please click next...')
-  }
+  LinkedHashMap parsedEvent = parseLanMessage(event?.description)
+  processParsedSsdpEvent(parsedEvent)
 }
 
 @CompileStatic
@@ -514,7 +496,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
 
   if(mac && playerInfoDevice?.name) {
-    logInfo("Received SSDP event response for MAC: ${mac}, device name: ${playerInfoDevice?.name}")
+    logTrace("Received SSDP event response for MAC: ${mac}, device name: ${playerInfoDevice?.name}")
   }
 
   LinkedHashMap discoveredSonos = [
@@ -545,7 +527,7 @@ void processParsedSsdpEvent(LinkedHashMap event) {
       localUpnpHost: "${ipAddress}:1400"
     ]
     discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-    logDebug("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+    logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
   }
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
@@ -559,13 +541,21 @@ void processParsedSsdpEvent(LinkedHashMap event) {
 String getFoundSonoses() {
   String foundDevices = ''
   List<String> discoveredSonosesNames = discoveredSonoses.collect{Object k, Object v -> ((LinkedHashMap)v)?.name as String }
+  List<String> discoveredSonosesSecondaryPrimaryIds = discoveredSonosSecondaries.collect{Object k, Object v -> ((LinkedHashMap)v)?.primaryDeviceId as String }
+  logInfo(discoveredSonosesSecondaryPrimaryIds)
+  discoveredSonosesSecondaryPrimaryIds.each{
+    if(discoveredSonoses.containsKey(getDNIFromRincon(it))) {
+      logInfo(((LinkedHashMap)discoveredSonoses[getDNIFromRincon(it)])?.name as String)
+      discoveredSonosesNames.add("${((LinkedHashMap)discoveredSonoses[getDNIFromRincon(it)])?.name as String} Right Channel".toString())
+    }
+  }
   discoveredSonosesNames.sort()
   discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
   return foundDevices
 }
 
 void sendFoundSonosEvents() {
-  app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()}): ")
+  app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()} primary, ${discoveredSonosSecondaries.size()} secondary): ")
   app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
 }
 // =============================================================================
@@ -577,6 +567,7 @@ void sendFoundSonosEvents() {
 // =============================================================================
 // Helper methods
 // =============================================================================
+@CompileStatic
 String getDNIFromRincon(String rincon) {
   return rincon.tokenize('_')[1][0..-6]
 }
