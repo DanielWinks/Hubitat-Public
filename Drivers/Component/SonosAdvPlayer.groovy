@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.4.3',
+    version: '0.4.4',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: true,
@@ -879,35 +879,39 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 // Parse
 // =============================================================================
 void parse(String raw) {
-  if(!raw.startsWith('mac:')){
-    processWebsocketMessage(raw)
-    return
-  }
-  LinkedHashMap message = parseLanMessage(raw)
-  if(message.body == null) {return}
-  String serviceType = message.headers["X-SONOS-SERVICETYPE"]
-  if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    processAVTransportMessages(message.body, getLocalUpnpUrl())
-  }
-  else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-    processRenderingControlMessages(message?.body)
-  }
-  else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
-    if(device.getDataValue('groupIds') != null) {
-      oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+  try {
+    if(!raw.startsWith('mac:')){
+      processWebsocketMessage(raw)
+      return
     }
-    processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+    LinkedHashMap message = parseLanMessage(raw)
+    if(message.body == null) {return}
+    String serviceType = message.headers["X-SONOS-SERVICETYPE"]
+    if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
+      processAVTransportMessages(message.body, getLocalUpnpUrl())
+    }
+    else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
+      processRenderingControlMessages(message?.body)
+    }
+    else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
+      if(message?.body.contains('ThirdPartyMediaServersX') || message?.body.contains('AvailableSoftwareUpdate')) { return }
+      LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
+      if(device.getDataValue('groupIds') != null) {
+        oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+      }
+      processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+    }
+    else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+      processGroupRenderingControlMessages(message)
+    }
+    else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
+      processGroupManagementMessages(message)
+    }
+    else {
+      logDebug("Could not determine service type for message: ${message}")
+    }
   }
-  else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-    processGroupRenderingControlMessages(message)
-  }
-  else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
-    processGroupManagementMessages(message)
-  }
-  else {
-    logDebug("Could not determine service type for message: ${message}")
-  }
+  catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
 }
 // =============================================================================
 // End Parse
@@ -2405,6 +2409,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
   logTrace('playerLoadAudioClip')
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
+    return
   }
   Map<String,String> command = [
     'namespace':'audioClip',
@@ -2432,6 +2437,7 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
   logTrace('playerLoadAudioClipChime')
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
+    return
   }
   Map<String,String> command = [
     'namespace':'audioClip',
@@ -2451,24 +2457,23 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
 
 void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
-  Boolean queueWasEmpty = getAudioClipQueueIsEmpty()
   getAudioClipQueue().add(clipMessage)
-  if(queueWasEmpty && atomicState.audioClipPlaying == false) {dequeueAudioClip()}
-  else { subscribeToAudioClip() }
+  subscribeToAudioClip()
+  if(atomicState.audioClipPlaying == false) {dequeueAudioClip()}
 }
-//The graphic and typographic operators know this well, in reality all the professions dealing with the universe of communication have a stable relationship with these words, but what is it? Lorem ipsum is a dummy text without any sense.  It is a sequence of Latin words that, as they are positioned, do not form sentences with a complete sense, but give life to a test text useful to fill spaces that will subsequently be occupied from ad hoc texts composed by communication professionals.  It is certainly the most famous placeholder text even if there are different versions distinguishable from the order in which the Latin words are repeated.  Lorem ipsum contains the typefaces more in use, an aspect that allows you to have an overview of the rendering of the text in terms of font choice and font size .
+
 void dequeueAudioClip() {
   logTrace('dequeueAudioClip')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   Map clipMessage = getAudioClipQueue().poll()
   if(!clipMessage) {return}
+  atomicState.audioClipPlaying = true
   if(clipMessage.rightChannel) {
     sendWsMessage(clipMessage.leftChannel)
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
   } else {
     sendWsMessage(clipMessage.leftChannel)
   }
-  atomicState.audioClipPlaying = true
 }
 // =============================================================================
 // End Websocket Commands

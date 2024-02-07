@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.4.3",
-  "releaseNotes": "v0.4.3 Improved websocket connectivity checks. TTS skips playing on muted speakers. Groundwork for lateral data transfer between player devices, avoiding round trips to parent app, which should bring measurable reduction in resource usage. \r\nv0.4.2 Discovery fixes for secondary devices Favs match fix.\r\nv0.4.0 Major rewrite, again. Added much support for websockets. Added favorites child device. Added right channel child device. Lots more changes.",
+  "version": "0.4.4",
+  "releaseNotes": "v0.4.4 Really skip TTS messages on muted speakers. Fixes to TTS queue to make it less likely to get 'hung'. Prevent SAX error caused during Sonos update check.\r\nv0.4.3 Improved websocket connectivity checks. TTS skips playing on muted speakers. Groundwork for lateral data transfer between player devices, avoiding round trips to parent app, which should bring measurable reduction in resource usage. \r\nv0.4.2 Discovery fixes for secondary devices Favs match fix.\r\nv0.4.0 Major rewrite, again. Added much support for websockets. Added favorites child device. Added right channel child device. Lots more changes.",
   "minimumHEVersion": "2.3.7.114",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
