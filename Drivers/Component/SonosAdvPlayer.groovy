@@ -201,6 +201,7 @@ String getCurrentTTSVoice() {
 @Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, Instant> subscriptionInstants = new ConcurrentHashMap<String, Instant>()
+@Field static ConcurrentHashMap<String, Boolean> webSocketStatuses = new ConcurrentHashMap<String, Instant>()
 @Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
 @Field static Map SOURCES = [
   "\$": "None",
@@ -269,8 +270,9 @@ void fullRenewSubscriptions() {
   unsubscribeFromMrRcEvents()
   unsubscribeFromZgtEvents()
   unsubscribeFromMrGrcEvents()
-  runIn(15, 'subscribeToEvents', [overwrite: true])
-  runIn(15, 'initializeWebsocketConnection', [overwrite: true])
+  if(webSocketStatuses == null) {webSocketStatuses = new ConcurrentHashMap<String, Boolean>()}
+  runIn(2, 'initializeWebsocketConnection', [overwrite: true])
+  runIn(20, 'subscribeToEvents', [overwrite: true])
 }
 
 void secondaryConfiguration() {
@@ -1650,7 +1652,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   if(isGroupCoordinator) {
     if(!subValid('sid1')) {
       subscribeToAVTransport()
-      initializeWebsocketConnection()
+      subscribeToWsEvents()
       getPlaybackMetadataStatus()
       playerGetGroupsFull()
       logTrace('Just became group coordinator, subscribing to AVT.')
@@ -1927,20 +1929,20 @@ String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 @CompileStatic
 List<Map> getCurrentPlayingStatesForGroup() {
   List currentStates = []
-  currentStates.add([name: 'albumArtURI', value: getAlbumArtURI()])
-  currentStates.add([name: 'status', value: getTransportStatus()])
-  currentStates.add([name: 'transportStatus', value: getTransportStatus()])
-  currentStates.add([name: 'currentRepeatOneMode', value: getCurrentRepeatOneMode()])
-  currentStates.add([name: 'currentRepeatAllMode', value: getCurrentRepeatAllMode()])
-  currentStates.add([name: 'currentShuffleMode', value: getCurrentShuffleMode()])
-  currentStates.add([name: 'currentCrossfadeMode', value: getCrossfadeMode()])
-  currentStates.add([name: 'currentTrackDuration', value: getCurrentTrackDuration()])
-  currentStates.add([name: 'currentArtistName', value: getCurrentArtistName()])
-  currentStates.add([name: 'currentAlbumName', value: getCurrentAlbumName()])
-  currentStates.add([name: 'currentTrackName', value: getCurrentTrackName()])
-  currentStates.add([name: 'trackDescription', value: getTrackDescription()])
-  currentStates.add([name: 'trackData', value: getTrackDataEvents()])
-  currentStates.add([name: 'currentFavorite', value: getCurrentFavorite()])
+  currentStates.add([name: 'albumArtURI',           value: getAlbumArtURI()])
+  currentStates.add([name: 'status',                value: getTransportStatus()])
+  currentStates.add([name: 'transportStatus',       value: getTransportStatus()])
+  currentStates.add([name: 'currentRepeatOneMode',  value: getCurrentRepeatOneMode()])
+  currentStates.add([name: 'currentRepeatAllMode',  value: getCurrentRepeatAllMode()])
+  currentStates.add([name: 'currentShuffleMode',    value: getCurrentShuffleMode()])
+  currentStates.add([name: 'currentCrossfadeMode',  value: getCrossfadeMode()])
+  currentStates.add([name: 'currentTrackDuration',  value: getCurrentTrackDuration()])
+  currentStates.add([name: 'currentArtistName',     value: getCurrentArtistName()])
+  currentStates.add([name: 'currentAlbumName',      value: getCurrentAlbumName()])
+  currentStates.add([name: 'currentTrackName',      value: getCurrentTrackName()])
+  currentStates.add([name: 'trackDescription',      value: getTrackDescription()])
+  currentStates.add([name: 'trackData',             value: getTrackDataEvents()])
+  currentStates.add([name: 'currentFavorite',       value: getCurrentFavorite()])
   return currentStates
 }
 
@@ -1961,6 +1963,24 @@ Boolean getAudioClipQueueIsEmpty() {
   audioClipQueueInitialization()
   return getAudioClipQueue().size() == 0
 }
+
+@CompileStatic
+Boolean isWebsocketConnected() {
+  logInfo("WS Status ${webSocketStatuses[getId()]}")
+  return webSocketStatuses[getId()] == true
+}
+String getWebSocketStatus() {
+  return this.device.getDataValue('websocketStatus')
+}
+void setWebSocketStatus(String status) {
+  this.device.updateDataValue('websocketStatus', status)
+  if(status == 'open') {
+    webSocketStatuses[getId()] = true
+    runIn(15, 'subscribeToWsEvents')
+  } else {
+    webSocketStatuses[getId()] = false
+  }
+}
 // =============================================================================
 // End Getters and Setters
 // =============================================================================
@@ -1969,10 +1989,14 @@ Boolean getAudioClipQueueIsEmpty() {
 // Websocket Connection and Initialization
 // =============================================================================
 void webSocketStatus(String message) {
-  if(message == 'failure: null') { this.device.updateDataValue('websocketStatus', 'closed')}
-  if(message == 'status: open') { this.device.updateDataValue('websocketStatus', 'open')}
-  if(message == 'failure: connect timed out') { this.device.updateDataValue('websocketStatus', 'connect timed out')}
-  logTrace("Socket Status: ${message}")
+  if(message == 'failure: null') { setWebSocketStatus('closed')}
+  else if(message == 'failure: connect timed out') { setWebSocketStatus('connect timed out')}
+  else if(message == 'status: open') { setWebSocketStatus('open')}
+  else if(message == 'status: closing') { setWebSocketStatus('closing')}
+  else {
+    setWebSocketStatus('unknown')
+    logWarn("Websocket status: ${message}")
+  }
 }
 
 void wsConnect() {
@@ -1987,21 +2011,13 @@ void wsClose() {
 }
 
 void sendWsMessage(String message) {
-  if(this.device.getDataValue('websocketStatus') != 'open') { wsConnect() }
+  Boolean isConnected = isWebsocketConnected()
+  if(!isConnected) { wsConnect() }
   interfaces.webSocket.sendMessage(message)
 }
 
-void initializeWebsocketConnection() {
-  wsConnect()
-  if(getRightChannelChild()) {subscribeToFavorites()}
-  subscribeToPlaylists()
-  subscribeToAudioClip()
-  subscribeToGroups()
-}
-
-void renewWebsocketConnection() {
-  initializeWebsocketConnection()
-}
+void initializeWebsocketConnection() { wsConnect() }
+void renewWebsocketConnection() { initializeWebsocketConnection() }
 // =============================================================================
 // End Websocket Connection and Initialization
 // =============================================================================
@@ -2011,6 +2027,13 @@ void renewWebsocketConnection() {
 // =============================================================================
 // Websocket Subscriptions and polling
 // =============================================================================
+void subscribeToWsEvents() {
+  if(getRightChannelChild()) {subscribeToFavorites()}
+  subscribeToPlaylists()
+  subscribeToAudioClip()
+  subscribeToGroups()
+}
+
 @CompileStatic
 void subscribeToGroups() {
   Map command = [
