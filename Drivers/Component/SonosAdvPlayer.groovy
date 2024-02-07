@@ -880,35 +880,39 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 // Parse
 // =============================================================================
 void parse(String raw) {
-  if(!raw.startsWith('mac:')){
-    processWebsocketMessage(raw)
-    return
-  }
-  LinkedHashMap message = parseLanMessage(raw)
-  if(message.body == null) {return}
-  String serviceType = message.headers["X-SONOS-SERVICETYPE"]
-  if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-    processAVTransportMessages(message.body, getLocalUpnpUrl())
-  }
-  else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-    processRenderingControlMessages(message?.body)
-  }
-  else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-    LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
-    if(device.getDataValue('groupIds') != null) {
-      oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+  try {
+    if(!raw.startsWith('mac:')){
+      processWebsocketMessage(raw)
+      return
     }
-    processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+    LinkedHashMap message = parseLanMessage(raw)
+    if(message.body == null) {return}
+    String serviceType = message.headers["X-SONOS-SERVICETYPE"]
+    if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
+      processAVTransportMessages(message.body, getLocalUpnpUrl())
+    }
+    else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
+      processRenderingControlMessages(message?.body)
+    }
+    else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
+      if(message?.body.contains('ThirdPartyMediaServersX') || message?.body.contains('AvailableSoftwareUpdate')) { return }
+      LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
+      if(device.getDataValue('groupIds') != null) {
+        oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+      }
+      processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+    }
+    else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+      processGroupRenderingControlMessages(message)
+    }
+    else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
+      processGroupManagementMessages(message)
+    }
+    else {
+      logDebug("Could not determine service type for message: ${message}")
+    }
   }
-  else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-    processGroupRenderingControlMessages(message)
-  }
-  else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
-    processGroupManagementMessages(message)
-  }
-  else {
-    logDebug("Could not determine service type for message: ${message}")
-  }
+  catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
 }
 // =============================================================================
 // End Parse
