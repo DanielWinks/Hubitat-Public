@@ -321,7 +321,6 @@ void audioClipQueueInitialization() {
 void rinconMapInitialization() {
   if(rinconRegistry == null) {rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()}
   registerRinconId()
-  logInfo("RinconMap: ${rinconRegistry}")
 }
 
 void subscriptionInstantsInitialization() {
@@ -1966,7 +1965,6 @@ Boolean getAudioClipQueueIsEmpty() {
 
 @CompileStatic
 Boolean isWebsocketConnected() {
-  logInfo("WS Status ${webSocketStatuses[getId()]}")
   return webSocketStatuses[getId()] == true
 }
 String getWebSocketStatus() {
