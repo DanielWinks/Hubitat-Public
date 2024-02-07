@@ -542,11 +542,11 @@ String getFoundSonoses() {
   String foundDevices = ''
   List<String> discoveredSonosesNames = discoveredSonoses.collect{Object k, Object v -> ((LinkedHashMap)v)?.name as String }
   List<String> discoveredSonosesSecondaryPrimaryIds = discoveredSonosSecondaries.collect{Object k, Object v -> ((LinkedHashMap)v)?.primaryDeviceId as String }
-  logInfo(discoveredSonosesSecondaryPrimaryIds)
   discoveredSonosesSecondaryPrimaryIds.each{
-    if(discoveredSonoses.containsKey(getDNIFromRincon(it))) {
-      logInfo(((LinkedHashMap)discoveredSonoses[getDNIFromRincon(it)])?.name as String)
-      discoveredSonosesNames.add("${((LinkedHashMap)discoveredSonoses[getDNIFromRincon(it)])?.name as String} Right Channel".toString())
+    String primaryDNI = getDNIFromRincon(it)
+    if(discoveredSonoses.containsKey(primaryDNI)) {
+      LinkedHashMap primary = (LinkedHashMap)discoveredSonoses[primaryDNI]
+      discoveredSonosesNames.add("${primary?.name as String} Right Channel".toString())
     }
   }
   discoveredSonosesNames.sort()
