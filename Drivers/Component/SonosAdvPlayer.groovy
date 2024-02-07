@@ -1980,22 +1980,6 @@ void setWebSocketStatus(String status) {
   }
 }
 
-@CompileStatic
-Boolean isWebsocketConnected() {
-  return webSocketStatuses[getId()] == true
-}
-String getWebSocketStatus() {
-  return this.device.getDataValue('websocketStatus')
-}
-void setWebSocketStatus(String status) {
-  this.device.updateDataValue('websocketStatus', status)
-  if(status == 'open') {
-    webSocketStatuses[getId()] = true
-    runIn(15, 'subscribeToWsEvents')
-  } else {
-    webSocketStatuses[getId()] = false
-  }
-}
 // =============================================================================
 // End Getters and Setters
 // =============================================================================
