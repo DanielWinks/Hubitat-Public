@@ -26,7 +26,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Secondaries',
-    version: '0.4.2',
+    version: '0.4.3',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
@@ -62,9 +62,12 @@ void configure() { initializeWebsocketConnection() }
 // =============================================================================
 void webSocketStatus(String message) {
   if(message == 'failure: null') { this.device.updateDataValue('websocketStatus', 'closed')}
-  if(message == 'status: open') { this.device.updateDataValue('websocketStatus', 'open')}
-  if(message == 'failure: connect timed out') { this.device.updateDataValue('websocketStatus', 'connect timed out')}
-  logTrace("Socket Status: ${message}")
+  else if(message == 'failure: connect timed out') { this.device.updateDataValue('websocketStatus', 'connect timed out')}
+  else if(message == 'status: open') { this.device.updateDataValue('websocketStatus', 'open')}
+  else {
+    this.device.updateDataValue('websocketStatus', 'unknown')
+    logWarn("Websocket status: ${message}")
+  }
 }
 
 void wsConnect() {
