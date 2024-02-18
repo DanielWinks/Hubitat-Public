@@ -1196,12 +1196,12 @@ void setFavorites(Map favs) {
 }
 
 void isFavoritePlaying(DeviceWrapper cd, Map json) {
-  if(!favMatching) {return}
-  if(!state.favs) {return}
+  if(favMatching == false || favMatching == null) {return}
+  if(state.favs == null) {return}
   logTrace('isFavoritePlaying called')
   String objectId = json?.container?.id?.objectId
-  if(objectId) {
-    List tok = objectId.tokenize(':')
+  if(objectId != null && objectId != '') {
+    List tok = objectId?.tokenize(':')
     if(tok.size >= 1) { objectId = tok[1] }
   }
   String serviceId = json?.container?.id?.serviceId
@@ -1219,7 +1219,7 @@ void isFavoritePlaying(DeviceWrapper cd, Map json) {
   String foundFavName = state.favs[k]?.name
   logTrace("Sending currentFavorite to ${cd}")
   ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
+  if(child != null) { child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt)) }
 }
 // =============================================================================
 // Favorites
