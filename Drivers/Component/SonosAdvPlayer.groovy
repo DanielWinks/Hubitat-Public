@@ -198,6 +198,7 @@ String getCurrentTTSVoice() {
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, Instant> subscriptionInstants = new ConcurrentHashMap<String, Instant>()
@@ -312,16 +313,19 @@ void migrationCleanup() {
 }
 
 void audioClipQueueInitialization() {
-  if(audioClipQueue == null) { audioClipQueue = new LinkedHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(audioClipQueue == null) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueue.containsKey(getId())) {
     audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
+  }
+  if(audioClipQueueTimers == null) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!audioClipQueueTimers.containsKey(getId())) {
+    audioClipQueueTimers[getId()] = new LinkedHashMap()
   }
 }
 
 void rinconMapInitialization() {
   if(rinconRegistry == null) {rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()}
   registerRinconId()
-  logInfo("RinconMap: ${rinconRegistry}")
 }
 
 void subscriptionInstantsInitialization() {
@@ -406,7 +410,10 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClip(textToSpeech(text, voice).uri, volume)
+  LinkedHashMap tts = textToSpeech(text, voice)
+  tts.each{k,v ->
+    logDebug("Key: ${k} Value: ${v} Class: ${getObjectClassName(v)}")}
+  playerLoadAudioClip(tts.uri, volume, tts.duration)
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
@@ -879,40 +886,44 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 // =============================================================================
 // Parse
 // =============================================================================
+@CompileStatic
 void parse(String raw) {
   try {
     if(!raw.startsWith('mac:')){
       processWebsocketMessage(raw)
       return
     }
-    LinkedHashMap message = parseLanMessage(raw)
-    if(message.body == null) {return}
-    String serviceType = message.headers["X-SONOS-SERVICETYPE"]
-    if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-      processAVTransportMessages(message.body, getLocalUpnpUrl())
+    LinkedHashMap message = getMapForRaw(raw)
+    LinkedHashMap messageHeaders = (LinkedHashMap)message.headers
+    String messageBody = (message.body).toString()
+    if(messageBody == null || messageBody == '') {return}
+    String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
+    if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
+      processAVTransportMessages(messageBody, getLocalUpnpUrl())
     }
-    else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-      processRenderingControlMessages(message?.body)
+    else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
+      processRenderingControlMessages(messageBody)
     }
-    else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-      if(message?.body.contains('ThirdPartyMediaServersX') || message?.body.contains('AvailableSoftwareUpdate')) { return }
+    else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
+      if(messageBody.contains('ThirdPartyMediaServersX') || messageBody.contains('AvailableSoftwareUpdate')) { return }
       LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
-      if(device.getDataValue('groupIds') != null) {
-        oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+      if(getGroupPlayerIds() != null) {
+        oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
       }
-      processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+      processZoneGroupTopologyMessages(messageBody, oldGroupedRincons)
     }
-    else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+    else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
       processGroupRenderingControlMessages(message)
-    }
-    else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
-      processGroupManagementMessages(message)
     }
     else {
       logDebug("Could not determine service type for message: ${message}")
     }
   }
   catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
+}
+
+LinkedHashMap getMapForRaw(String raw) {
+  return parseLanMessage(raw)
 }
 // =============================================================================
 // End Parse
@@ -1108,14 +1119,22 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
 }
 
 void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
+  if(coordinatorId == null || coordinatorId == '') {return}
+  if(playersInGroup == null || playersInGroup.size() == 0) {return}
   parent?.updateGroupDevices(coordinatorId, playersInGroup)
 }
 
 void updateZoneGroupName(String groupName, LinkedHashSet<String> groupedRincons) {
+  if(groupName == null || groupName == '') {return}
+  if(groupedRincons == null || groupedRincons.size() == 0) {return}
   parent?.updateZoneGroupName(groupName, groupedRincons)
 }
 
-void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
+void processGroupRenderingControlMessages(Map message) {
+  if(message != null && message.size() > 0) {
+    parent?.processGroupRenderingControlMessages(this.device, message)
+  }
+}
 
 @CompileStatic
 void processRenderingControlMessages(String xmlString) {
@@ -1174,6 +1193,13 @@ Boolean hasSid(String sid) {
   logTrace("hasSid: ${device.getDataValue(sid) != null}")
   return device.getDataValue(sid) != null
 }
+
+DeviceWrapper getThisDevice() {
+  return this.device as DeviceWrapper
+}
+InstalledAppWrapper getParentApp() {
+  return getParent() as InstalledAppWrapper
+}
 String getSid(String sid) {
   return device.getDataValue(sid)
 }
@@ -1188,12 +1214,12 @@ void deleteSid(String sid) {
 Boolean subValid(String sid) {
   if(!hasSid(sid)) {return false}
   Instant sidInstant = subscriptionInstants.containsKey("${getId()}${sid}".toString()) ? subscriptionInstants["${getId()}${sid}".toString()] : null
-  logTrace("sidInstant: ${sidInstant}")
+  // logTrace("sidInstant: ${sidInstant}")
   if(sidInstant == null) {return false}
   Duration dur = Duration.between(sidInstant, Instant.now())
-  logTrace("Duration ${dur}")
+  // logTrace("Duration ${dur}")
   long seconds = dur.getSeconds()
-  logTrace("Seconds: ${seconds}")
+  // logTrace("Seconds: ${seconds}")
   return ((seconds - 100) < RESUB_INTERVAL)
 }
 @CompileStatic
@@ -1664,12 +1690,16 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   } else if(!isGroupCoordinator) {
       logTrace("Just added to group!")
       unsubscribeFromAVTransport()
-      parent?.updatePlayerCurrentStates(this.device, groupCoordinatorId)
+      // parent?.updatePlayerCurrentStates(this.device, groupCoordinatorId)
+      DeviceWrapper coordinator = rinconRegistry[groupCoordinatorId]
+      logInfo("Coordinator is: ${coordinator}")
+      List<Map> evts = coordinator.getCurrentPlayingStatesForGroup()
+      evts.each{ sendEvent(it) }
   } else {logTrace("Group coordinator status has not changed.")}
 }
 
 String getGroupCoordinatorName() {
-  return this.device.currentValue('groupCoordinatorName', true)
+  return this.device.currentValue('groupCoordinatorName')
 }
 void setGroupCoordinatorName(String groupCoordinatorName) {
   if(groupCoordinatorName != getGroupCoordinatorName()) {
@@ -1957,6 +1987,19 @@ ConcurrentLinkedQueue<Map> getAudioClipQueue() {
 }
 
 @CompileStatic
+LinkedHashMap getAudioClipQueueTimers() {
+  audioClipQueueInitialization()
+  return audioClipQueueTimers[getId()]
+}
+
+@CompileStatic
+void addTimerToAudioClipQueueTimers(Long clipDuration, String clipUri) {
+  LinkedHashMap timers = getAudioClipQueueTimers()
+  timers[clipUri] = Instant.now().getEpochSecond() + clipDuration
+  // runIn(clipDuration + 10, 'dequeueAudioClip')
+}
+
+@CompileStatic
 Integer getAudioClipQueueLength() {
   audioClipQueueInitialization()
   return getAudioClipQueue().size() as Integer
@@ -1970,7 +2013,7 @@ Boolean getAudioClipQueueIsEmpty() {
 
 @CompileStatic
 Boolean isWebsocketConnected() {
-  logInfo("WS Status ${webSocketStatuses[getId()]}")
+  logTrace("WS Status ${webSocketStatuses[getId()]}")
   return webSocketStatuses[getId()] == true
 }
 String getWebSocketStatus() {
@@ -1988,6 +2031,8 @@ void setWebSocketStatus(String status) {
 // =============================================================================
 // End Getters and Setters
 // =============================================================================
+
+
 
 // =============================================================================
 // Websocket Connection and Initialization
@@ -2406,8 +2451,9 @@ void sendAudioClipHighPriority(Map clipMessage) {
 }
 
 @CompileStatic
-void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean chimeBeforeTTS = getChimeBeforeTTS()) {
+void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0) {
   logTrace('playerLoadAudioClip')
+  // subscribeToAudioClip()
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
     return
@@ -2427,7 +2473,9 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  if(getAudioClipQueueIsEmpty() && chimeBeforeTTS) {playerLoadAudioClipChime(volume)}
+  if(getAudioClipQueueIsEmpty() && getChimeBeforeTTS()) {playerLoadAudioClipChime(volume)}
+  if(duration > 0) { audioClip.duration = duration }
+  audioClip.uri = uri
   enqueueAudioClip(audioClip)
   logTrace('Enqueued')
 }
@@ -2436,6 +2484,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
 @CompileStatic
 void playerLoadAudioClipChime(BigDecimal volume = null) {
   logTrace('playerLoadAudioClipChime')
+  // subscribeToAudioClip()
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
     return
@@ -2453,13 +2502,13 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
+  audioClip.duration = 8
   enqueueAudioClip(audioClip)
 }
 
 void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
   getAudioClipQueue().add(clipMessage)
-  subscribeToAudioClip()
   if(atomicState.audioClipPlaying == false) {dequeueAudioClip()}
 }
 
@@ -2467,8 +2516,12 @@ void dequeueAudioClip() {
   logTrace('dequeueAudioClip')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   Map clipMessage = getAudioClipQueue().poll()
-  if(!clipMessage) {return}
+  if(!clipMessage) {
+    return
+    logTrace('No more audio clips to dequeue.')
+  }
   atomicState.audioClipPlaying = true
+  addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
   if(clipMessage.rightChannel) {
     sendWsMessage(clipMessage.leftChannel)
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
@@ -2564,7 +2617,7 @@ void playerEvictUnlistedPlayers(List<String> playerIdsToKeep) {
 void processWebsocketMessage(String message) {
   String prettyJson = JsonOutput.prettyPrint(message)
   List<Map> json = slurper.parseText(message)
-  // logTrace(prettyJson)
+  logTrace(prettyJson)
 
   Map eventType = json[0]
   Map eventData = json[1]
@@ -2659,7 +2712,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    logTrace(prettyJson)
+    logTrace("Audio Clip Status: ${prettyJson}")
     if(eventData?.audioClips.find{it?.status == 'DONE'}) {
       atomicState.audioClipPlaying = false
       dequeueAudioClip()
@@ -2683,11 +2736,13 @@ void processWebsocketMessage(String message) {
     }
   }
 
-  if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
+  if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata' && eventData != null && eventData.size() > 0) {
     runIn(1, 'isFavoritePlaying', [overwrite: true, data: eventData ])
   }
 }
 
-void isFavoritePlaying(Map data) {
-  parent?.isFavoritePlaying(this.device, data)
+void isFavoritePlaying(Map eventData) {
+  if(eventData != null && eventData.size() > 0) {
+    getParentApp()?.isFavoritePlaying(getThisDevice(), eventData)
+  }
 }
