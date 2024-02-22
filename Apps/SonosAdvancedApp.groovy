@@ -871,23 +871,6 @@ void setCurrentFavorite(List<String> rincons, String value) {
   groupedDevices.each{dev -> dev.setCurrentFavorite(value)}
 }
 
-void updatePlayerCurrentStates(DeviceWrapper cd, String coordinatorRincon) {
-  if(!cd) {return}
-  if(!coordinatorRincon) {return}
-  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  ChildDeviceWrapper coordinator = getDeviceFromRincon(coordinatorRincon)
-  List<Map> evts = coordinator.getCurrentPlayingStatesForGroup()
-  evts.each{ child.sendEvent(it) }
-  logTrace("Updated ${child.getDataValue('name')} with current states from ${coordinator.getDataValue('name')}")
-}
-
-
-void updateZoneGroupName(String zoneGroupName, LinkedHashSet rinconsToUpdate) {
-  List<ChildDeviceWrapper> childrenToUpdate = getDevicesFromRincons(rinconsToUpdate)
-  logTrace("Updating ${childrenToUpdate} with new group name.")
-  childrenToUpdate.each{it.sendEvent(name: 'groupName', value: zoneGroupName)}
-}
-
 @CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
@@ -1195,32 +1178,7 @@ void setFavorites(Map favs) {
   state.favs = favs
 }
 
-void isFavoritePlaying(DeviceWrapper cd, Map json) {
-  if(!favMatching) {return}
-  if(!state.favs) {return}
-  logTrace('isFavoritePlaying called')
-  String objectId = json?.container?.id?.objectId
-  if(objectId) {
-    List tok = objectId.tokenize(':')
-    if(tok.size >= 1) { objectId = tok[1] }
-  }
-  String serviceId = json?.container?.id?.serviceId
-  String accountId = json?.container?.id?.accountId
-  String imageUrl = json?.container?.imageUrl
 
-  String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-  String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
-  Boolean isFav = state.favs.containsKey(universalMusicObjectId)
-  Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
-
-  String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
-  String foundFavId = state.favs[k]?.id
-  String foundFavImageUrl = state.favs[k]?.imageUrl
-  String foundFavName = state.favs[k]?.name
-  logTrace("Sending currentFavorite to ${cd}")
-  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
-}
 // =============================================================================
 // Favorites
 // =============================================================================
