@@ -294,7 +294,7 @@ void secondaryConfiguration() {
   rinconMapInitialization()
   groupsRegistryInitialization()
   statesRegistryInitialization()
-  if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
+  favoritesMapInitialization()
 }
 
 void migrationCleanup() {
@@ -351,6 +351,10 @@ void registerRinconId() {
 DeviceWrapper getDeviceWrapperForRincon(String rincon) {
   if(rinconRegistry.containsKey(rincon)) { return rinconRegistry[rincon] }
   return null
+}
+
+void favoritesMapInitialization() {
+  if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
 }
 // =============================================================================
 // End Initialize and Configure
@@ -1200,7 +1204,6 @@ void addEventToRegistry(Event event) {
 String getlocalUpnpHost() {return device.getDataValue('localUpnpHost')}
 String getDNI() {return device.getDeviceNetworkId()}
 Boolean hasSid(String sid) {
-  logTrace("hasSid: ${device.getDataValue(sid) != null}")
   return device.getDataValue(sid) != null
 }
 String getSid(String sid) {
@@ -1217,7 +1220,6 @@ void deleteSid(String sid) {
 Boolean subValid(String sid) {
   if(!hasSid(sid)) {return false}
   Instant sidInstant = subscriptionInstants.containsKey("${getId()}${sid}".toString()) ? subscriptionInstants["${getId()}${sid}".toString()] : null
-  logTrace("sidInstant: ${sidInstant}")
   if(sidInstant == null) {return false}
   Duration dur = Duration.between(sidInstant, Instant.now())
   logTrace("Duration ${dur}")
@@ -2032,7 +2034,6 @@ LinkedHashMap<String,LinkedHashMap> getStatesRegistryForGroup() {
 @CompileStatic
 void addEventToStatesRegistry(String eventName, LinkedHashMap event) {
   statesRegistryInitialization()
-  logTrace("Adding ${eventName} to registry ${event}")
   LinkedHashMap<String,LinkedHashMap> sr = getStatesRegistryForGroup()
   if(sr == null) {
     logWarn("Could not get states registry for group...")
@@ -2069,14 +2070,10 @@ void raiseEventsFromStatesRegistryCallback() {
   sr.each{k, event ->
     if(getDisableArtistAlbumTrackEvents() == true && k in eventsToSkipForDisabledTrackData()) {return}
     if(k == 'trackData') {
-      if(getDisableTrackDataEvents() == true) {
-        logDebug('Track data events are disabled...')
-        return
-      }
+      if(getDisableTrackDataEvents() == true) {return}
       else {
         event.value['level'] = this.device.currentValue('level')
         event.value['mute'] = this.device.currentValue('mute')
-        logDebug('Setting level and mute....')
       }
     }
 
@@ -2101,6 +2098,14 @@ void updateGroupStatesIfNeededCallback() {
     List<DeviceWrapper> groupDevices = getGroupedDevicesFromRinconRegistry()
     groupDevices.each{ it.updateStates()}
   }
+}
+
+ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
+  return favoritesMap
+}
+
+void clearFavoritesMap() {
+  favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 }
 // =============================================================================
 // End Getters and Setters
@@ -2657,31 +2662,13 @@ void playerEvictUnlistedPlayers(List<String> playerIdsToKeep) {
   playerModifyGroupMembers(playerIdsToKeep, playerIdsToRemove)
 }
 
-// @CompileStatic
-// void playerBecomeCoordinatorOfGroup(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = []) {
-//   Map command = [
-//     'namespace':'groups',
-//     'command':'modifyGroupMembers',
-//     'groupId':"${getGroupId()}"
-//   ]
-//   Map args = [
-//     'playerIdsToAdd': playerIdsToAdd,
-//     'playerIdsToRemove': playerIdsToRemove
-//   ]
-//   String json = JsonOutput.toJson([command,args])
-//   logTrace(json)
-//   sendWsMessage(json)
-// }
-
-
-
 // =============================================================================
 // Websocket Incoming Data Processing
 // =============================================================================
+@CompileStatic
 void processWebsocketMessage(String message) {
-  String prettyJson = JsonOutput.prettyPrint(message)
-  List<Map> json = slurper.parseText(message)
-  // logTrace(prettyJson)
+  ArrayList json = (ArrayList)slurper.parseText(message)
+  // logTrace(JsonOutput.prettyPrint(message))
 
   Map eventType = json[0]
   Map eventData = json[1]
@@ -2693,37 +2680,40 @@ void processWebsocketMessage(String message) {
 
   //Process groups
   if(eventType?.type == 'groups' && eventType?.name == 'groups') {
-    List<Map> groups = eventData.groups
-    Map group = groups.find{ it?.playerIds.contains(getId()) }
+    ArrayList<Map> groups = (ArrayList<Map>)eventData.groups
+    Map group = groups.find{ ((String)it?.playerIds).contains(getId()) }
 
-    setGroupId(group.id)
-    setGroupName(group.name)
-    setGroupPlayerIds(group.playerIds)
-    setGroupCoordinatorId(group.coordinatorId)
+    setGroupId(group.id.toString())
+    setGroupName(group.name.toString())
+    setGroupPlayerIds((ArrayList<String>)group.playerIds)
+    setGroupCoordinatorId(group.coordinatorId.toString())
 
-    List<Map> players = eventData.players
+    ArrayList<Map> players = (ArrayList<Map>)eventData.players
     String coordinatorName = players.find{it?.id == group.coordinatorId}?.name
-    setGroupCoordinatorName(coordinatorName)
+    setGroupCoordinatorName(coordinatorName.toString())
 
-    List<String> groupMemberNames = group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name}
+    List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
     setGroupMemberNames(groupMemberNames)
 
     if(hasSecondaries()) {
-      String rightChannelId = players.find{it?.id == getId()}?.zoneInfo?.members.find{it?.channelMap.contains('RF') }?.id
+      Map p = (Map)players.find{it?.id == getId()}
+      Map zInfo = (Map)p?.zoneInfo
+      ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
+      String rightChannelId = members.find{((ArrayList<String>)it?.channelMap).contains('RF') }?.id
       setRightChannelRincon(rightChannelId)
     }
-
-    // logError("Right channel: ${rightChannelId} should be: RINCON_542A1B5D6A7001400")
   }
 
   //Process groupCoordinatorChanged
   if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged') {
-    if(group?.groupStatus == 'GROUP_STATUS_UPDATED') {
-      logDebug("Group name: ${group.name}")
-      logDebug("Group coordinatorId: ${group.coordinatorId}")
-      logDebug("Group playerIds: ${group.playerIds}")
-      logDebug("Group Id: ${group.id}")
-    }
+    logWarn("if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged')")
+    // ArrayList<LinkedHashMap> groups = (ArrayList<LinkedHashMap>)eventData.groups
+    // if(group?.groupStatus == 'GROUP_STATUS_UPDATED') {
+    //   logDebug("Group name: ${group.name}")
+    //   logDebug("Group coordinatorId: ${group.coordinatorId}")
+    //   logDebug("Group playerIds: ${group.playerIds}")
+    //   logDebug("Group Id: ${group.id}")
+    // }
   }
 
   if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
@@ -2731,14 +2721,13 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
-    List respData = eventData?.items
-    Map formatted = respData.collectEntries() { [it.id, [name:it.name, imageUrl:it?.imageUrl]] }
+    ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
+    Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it.id, [name:it.name, imageUrl:it?.imageUrl]] }
     String html = '<!DOCTYPE html><html><body><ul>'
-    state.remove('favorites')
+
     formatted.each(){fav ->
       String albumArtURI = fav.value.imageUrl
       String s = "Favorite #${fav.key} ${fav.value.name}"
-
       if(albumArtURI == null) {
         html += "<li>${s}: No Image Art Available</li>"
       } else if(albumArtURI.startsWith('/')) {
@@ -2748,41 +2737,41 @@ void processWebsocketMessage(String message) {
       }
     }
     html += '</ul></body></html>'
-    if(getCreateFavoritesChildDevice()) {
-      ChildDeviceWrapper favDev = getFavoritesChild()
-      favDev.setFavorites(html)
-    }
-    InstalledAppWrapper p = this.getParent()
-    if(p.getSetting('favMatching')) {
-      Map favs = [:]
-      respData.each{
-        if(it?.resource?.id?.objectId && it?.resource?.id?.serviceId && it?.resource?.id?.accountId) {
-          String objectId = it?.resource?.id?.objectId
-          if(objectId) {
+    setChildFavs(html)
+
+    clearFavoritesMap()
+    respData.each{
+      Map item = (Map)it
+      Map resource = (Map)item?.resource
+      if(resource != null) {
+        Map id = (Map)resource?.id
+        if(id != null) {
+          String objectId = id?.objectId
+          String serviceId = id?.serviceId
+          String accountId = id?.accountId
+          if(objectId != null) {
             List tok = objectId.tokenize(':')
-            if(tok.size >= 1) { objectId = tok[1] }
+            if(tok.size() >= 1) { objectId = tok[1] }
           }
-          String serviceId = it?.resource?.id?.serviceId
-          String accountId = it?.resource?.id?.accountId
           String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-          favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
-        } else if(it?.imageUrl) {
-          String universalMusicObjectId = ("${it?.imageUrl}".toString()).split('&v=')[0]
-          favs[universalMusicObjectId] = [id:it?.id, name:it?.name, imageUrl:it?.imageUrl, service: it?.service?.name]
+          getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
         }
+      } else if(item?.imageUrl != null) {
+        String universalMusicObjectId = ("${item?.imageUrl}".toString()).split('&v=')[0]
+        getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
       }
-      p.setFavorites(favs)
     }
   }
 
+
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    logTrace(prettyJson)
-    if(eventData?.audioClips.find{it?.status == 'DONE'}) {
-      atomicState.audioClipPlaying = false
-      dequeueAudioClip()
+    logTrace(JsonOutput.prettyPrint(message))
+    ArrayList<Map> audioClips = (ArrayList<Map>)eventData?.audioClips
+    if(audioClips != null && audioClips.find{it?.status == 'DONE'}) {
+      setAudioClipPlaying(false)
     }
-    else if(eventData?.audioClips.find{it?.status == 'ACTIVE'}) {atomicState.audioClipPlaying = true}
-    else if(eventData?.audioClips.find{it?.status == 'ERROR'}) {atomicState.audioClipPlaying = false}
+    else if(audioClips.find{it?.status == 'ACTIVE'}) {setAudioClipPlaying(true)}
+    else if(audioClips.find{it?.status == 'ERROR'}) {setAudioClipPlaying(false)}
   }
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
@@ -2801,37 +2790,48 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    runIn(1, 'isFavoritePlaying', [overwrite: true, data: eventData ])
+    updateFavsIn(3, eventData)
   }
 }
 
-void isFavoritePlaying(Map data) {
-  parent?.isFavoritePlaying(this.device, data)
+void updateFavsIn(Integer time, Map data) {
+  runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
 }
 
-void isFavoritePlaying(DeviceWrapper cd, Map json) {
-  if(!favMatching) {return}
-  if(!state.favs) {return}
-  logTrace('isFavoritePlaying called')
-  String objectId = json?.container?.id?.objectId
-  if(objectId) {
+void setChildFavs(String html) {
+  if(getCreateFavoritesChildDevice()) {
+    ChildDeviceWrapper favDev = getFavoritesChild()
+    favDev.setFavorites(html)
+  }
+}
+
+void setAudioClipPlaying(Boolean s) {
+  atomicState.audioClipPlaying = s
+  if(s == false) {dequeueAudioClip()}
+}
+
+@CompileStatic
+void isFavoritePlaying(Map json) {
+  LinkedHashMap container = (LinkedHashMap)json?.container
+  LinkedHashMap id = (LinkedHashMap)container?.id
+  String objectId = id?.objectId
+  if(objectId != null && objectId != '') {
     List tok = objectId.tokenize(':')
-    if(tok.size >= 1) { objectId = tok[1] }
+    if(tok.size() >= 1) { objectId = tok[1] }
   }
-  String serviceId = json?.container?.id?.serviceId
-  String accountId = json?.container?.id?.accountId
-  String imageUrl = json?.container?.imageUrl
+  String serviceId = id?.serviceId
+  String accountId = id?.accountId
+  String imageUrl = container?.imageUrl
 
   String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
   String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
-  Boolean isFav = state.favs.containsKey(universalMusicObjectId)
-  Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
+  Boolean isFav = favoritesMap.containsKey(universalMusicObjectId)
+  Boolean isFavAlt = favoritesMap.containsKey(universalMusicObjectIdAlt)
 
   String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
-  String foundFavId = state.favs[k]?.id
-  String foundFavImageUrl = state.favs[k]?.imageUrl
-  String foundFavName = state.favs[k]?.name
-  logTrace("Sending currentFavorite to ${cd}")
-  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
+  String foundFavId = favoritesMap[k]?.id
+  String foundFavImageUrl = favoritesMap[k]?.imageUrl
+  String foundFavName = favoritesMap[k]?.name
+
+  setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
