@@ -469,7 +469,7 @@ void muteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(true)
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupMute(true)
+    getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()
   }
   else { playerSetPlayerMute(true) }
 }
@@ -477,7 +477,7 @@ void unmuteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(false)
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupMute(false)
+    getDeviceFromRincon(getGroupCoordinatorId()).unmuteGroup()
   }
   else { playerSetPlayerMute(false) }
 }
@@ -485,7 +485,7 @@ void setGroupVolume(BigDecimal level) {
   if(isGroupedAndCoordinator()) {
     playerSetGroupVolume(level)
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupVolume(level as Integer)
+    getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level)
   }
   else { playerSetPlayerVolume(level as Integer) }
 }
@@ -499,7 +499,7 @@ void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
+    getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeUp()
   }
   else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 }
@@ -507,7 +507,7 @@ void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
+    getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeDown()
   }
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
@@ -616,7 +616,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   if(isGroupedAndCoordinator()) {
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
   } else if(isGroupedAndNotCoordinator) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+    getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
 // =============================================================================
@@ -1144,7 +1144,16 @@ void updateZoneGroupName(String groupName) {
   updateGroupStatesIfNeeded()
 }
 
-void processGroupRenderingControlMessages(Map message) { parent?.processGroupRenderingControlMessages(this.device, message) }
+void processGroupRenderingControlMessages(Map message) {
+  GPathResult propertyset = parseSonosMessageXML(message)
+  Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
+  String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
+  addEventToStatesRegistry('groupVolume', [name:'groupVolume', value: groupVolume])
+  addEventToStatesRegistry('groupMute', [name:'groupMute', value: groupMute])
+  raiseEventsFromStatesRegistry()
+  updateGroupStatesIfNeeded()
+}
+
 
 @CompileStatic
 void processRenderingControlMessages(String xmlString) {
@@ -1794,7 +1803,6 @@ void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String found
     value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
   }
   setCurrentFavorite(value)
-  if(isGroupedAndCoordinator()) {parent?.setCurrentFavorite(getGroupFollowerRincons(), value)}
 }
 void setCurrentFavorite(String uri) {
   addEventToStatesRegistry('currentFavorite', [name:'currentFavorite', value: uri])
