@@ -32,6 +32,13 @@ metadata {
     section(){
       input 'autoOffTime', 'enum', title: 'Duration Before Auto-Off', required: true, defaultValue: 1800, options:
       [
+        15:'15 Seconds',
+        30:'30 Seconds',
+        45:'45 Seconds',
+        60:'1 Minute',
+        120:'2 Minutes',
+        180:'3 Minutes',
+        240:'4 Minutes',
         300:'5 Minutes',
         600:'10 Minutes',
         900:'15 Minutes',
