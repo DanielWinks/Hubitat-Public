@@ -1729,7 +1729,7 @@ String getGroupCoordinatorName() {
 }
 void setGroupCoordinatorName(String groupCoordinatorName) {
   if(groupCoordinatorName != getGroupCoordinatorName()) {
-    this.device.sendEvent(name: 'groupCoordinatorName ', value: groupCoordinatorName)
+    this.device.sendEvent(name: 'groupCoordinatorName', value: groupCoordinatorName)
   }
 }
 
