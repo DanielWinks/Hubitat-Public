@@ -330,13 +330,7 @@ void configure() {
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
 
-  if(!favMatching) {
-    String value = 'Favorite Matching Disabled'
-    getCurrentPlayerDevices().each{
-      it.sendEvent(name: 'currentFavorite', value: value)
-    }
-    state.remove('favs')
-  }
+  state.remove('favs')
   unschedule('appGetFavoritesLocal')
 }
 // =============================================================================
@@ -1168,19 +1162,3 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
-
-
-// =============================================================================
-// Favorites
-// =============================================================================
-void setFavorites(Map favs) {
-  logTrace('Updated favs for matching...')
-  state.favs = favs
-}
-
-
-// =============================================================================
-// Favorites
-// =============================================================================
-
-
