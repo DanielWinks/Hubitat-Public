@@ -1,25 +1,12 @@
-# This is a basic workflow to help you get started with Actions
-
 name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
     branches: [ "main" ]
     paths:
-      - Drivers/Component/SonosAdvBatteryStats.groovy
-      - Drivers/Component/SonosAdvGroup.groovy
-      - Drivers/Component/SonosAdvPlayer.groovy
-      - Drivers/Component/SonosAdvSnapshot.groovy
-      - Apps/SonosAdvancedApp.groovy
       - Libraries/SMAPILibrary.groovy
       - Libraries/UtilitiesAndLoggingLibrary.groovy
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   build:
     name: Copy Sonos Advanced Controller Files To Bundle Directory
