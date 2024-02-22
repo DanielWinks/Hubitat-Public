@@ -199,6 +199,8 @@ String getCurrentTTSVoice() {
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
+@Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
+@Field static ConcurrentHashMap<String, LinkedHashMap<String,Event>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,Event>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, Instant> subscriptionInstants = new ConcurrentHashMap<String, Instant>()
 @Field static ConcurrentHashMap<String, Boolean> webSocketStatuses = new ConcurrentHashMap<String, Instant>()
@@ -288,6 +290,7 @@ void secondaryConfiguration() {
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
   audioClipQueueInitialization()
   rinconMapInitialization()
+  groupsAndStatesRegistryInitialization()
   if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
 }
 
@@ -327,8 +330,24 @@ void subscriptionInstantsInitialization() {
   if(subscriptionInstants == null) {subscriptionInstants = new ConcurrentHashMap<String, Instant>()}
 }
 
+void groupsRegistryInitialization() {
+  if(groupsRegistry == null) {groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()}
+  if(!groupsRegistry.containsKey(getId())) {groupsRegistry[getId()] = new ArrayList<DeviceWrapper>()}
+}
+
+void statesRegistryInitialization() {
+  if(statesRegistry == null) {statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,Event>>()}
+  if(!statesRegistry.containsKey(getId())) {statesRegistry[getId()] = new LinkedHashMap<String,Event>()}
+}
+
 void registerRinconId() {
   rinconRegistry[getId()] = this.device
+}
+
+@CompileStatic
+DeviceWrapper getDeviceWrapperForRincon(String rincon) {
+  if(rinconRegistry.containsKey(rincon)) { return rinconRegistry[rincon] }
+  return null
 }
 // =============================================================================
 // End Initialize and Configure
@@ -1152,6 +1171,10 @@ void processRenderingControlMessages(String xmlString) {
   String loudness = instanceId.children().findAll{((GPathResult)it).name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { setLoudnessState(loudness == '1' ? 'on' : 'off') }
 }
+
+void addEventToRegistry(Event event) {
+
+}
 // =============================================================================
 // Parse Helper Methods
 // =============================================================================
@@ -1576,11 +1599,15 @@ void setHouseholdId(String householdId) {
   this.device.updateDataValue('householdId', householdId)
 }
 
+DeviceWrapper getDevice() {return this.device}
+
+@CompileStatic
 String getId() {
-  return this.device.getDataValue('id')
+  return getDevice().getDataValue('id')
 }
+@CompileStatic
 void setId(String id) {
-  this.device.updateDataValue('id', id)
+  getDevice().updateDataValue('id', id)
 }
 List<String> getSecondaryIds() {
   return this.device.getDataValue('secondaryIds').tokenize(',')
@@ -1982,6 +2009,36 @@ void setWebSocketStatus(String status) {
   } else {
     webSocketStatuses[getId()] = false
   }
+}
+
+@CompileStatic
+ArrayList<DeviceWrapper> getGroupsRegistry() {
+  groupsRegistryInitialization()
+  return groupsRegistry[getId()]
+}
+@CompileStatic
+void setGroupForPlayers(ArrayList<DeviceWrapper> playersInGroup) {
+  groupsRegistryInitialization()
+  groupsRegistry[getId()] = playersInGroup
+}
+@CompileStatic
+void setGroupsForPlayerRincons(ArrayList<String> rinconsInGroup) {
+  ArrayList<DeviceWrapper> playersInGroup = new ArrayList<DeviceWrapper>()
+  rinconsInGroup.each{playersInGroup.add(getDeviceWrapperForRincon(it))}
+  groupsRegistryInitialization()
+  groupsRegistry[getId()] = playersInGroup
+}
+
+
+@CompileStatic
+LinkedHashMap<String,Event> getStatesRegistryForPlayer() {
+  statesRegistryInitialization()
+  return statesRegistry[getId()]
+}
+@CompileStatic
+void addEventToStatesRegistry(String eventName, Event event) {
+  statesRegistryInitialization()
+  statesRegistry[getId()][eventName] = event
 }
 
 // =============================================================================
