@@ -2714,7 +2714,7 @@ void processWebsocketMessage(String message) {
 
   //Process groupCoordinatorChanged
   if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged') {
-    logWarn("if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged')")
+    // logWarn("if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged')")
     // ArrayList<LinkedHashMap> groups = (ArrayList<LinkedHashMap>)eventData.groups
     // if(group?.groupStatus == 'GROUP_STATUS_UPDATED') {
     //   logDebug("Group name: ${group.name}")
