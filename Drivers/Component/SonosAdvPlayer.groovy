@@ -468,7 +468,7 @@ void setBalance(BigDecimal level) { parent?.componentSetBalanceLocal(this.device
 void muteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(true)
-  } else if(isGroupedAndNotCoordinator) {
+  } else if(isGroupedAndNotCoordinator()) {
     getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()
   }
   else { playerSetPlayerMute(true) }
@@ -476,7 +476,7 @@ void muteGroup(){
 void unmuteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(false)
-  } else if(isGroupedAndNotCoordinator) {
+  } else if(isGroupedAndNotCoordinator()) {
     getDeviceFromRincon(getGroupCoordinatorId()).unmuteGroup()
   }
   else { playerSetPlayerMute(false) }
@@ -484,7 +484,7 @@ void unmuteGroup(){
 void setGroupVolume(BigDecimal level) {
   if(isGroupedAndCoordinator()) {
     playerSetGroupVolume(level)
-  } else if(isGroupedAndNotCoordinator) {
+  } else if(isGroupedAndNotCoordinator()) {
     getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level)
   }
   else { playerSetPlayerVolume(level as Integer) }
@@ -498,7 +498,7 @@ void setGroupMute(String mode) {
 void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
-  } else if(isGroupedAndNotCoordinator) {
+  } else if(isGroupedAndNotCoordinator()) {
     getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeUp()
   }
   else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
@@ -506,7 +506,7 @@ void groupVolumeUp() {
 void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
-  } else if(isGroupedAndNotCoordinator) {
+  } else if(isGroupedAndNotCoordinator()) {
     getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeDown()
   }
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
@@ -613,9 +613,9 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   Boolean repeatOne = repeatMode == 'repeat one'
   Boolean shuffle = shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
-  if(isGroupedAndCoordinator()) {
+  if(getIsGroupCoordinator() == true) {
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-  } else if(isGroupedAndNotCoordinator) {
+  } else if(isGroupedAndNotCoordinator() == true) {
     getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
