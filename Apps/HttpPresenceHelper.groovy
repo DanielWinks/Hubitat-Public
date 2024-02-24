@@ -58,7 +58,8 @@ Map mainPage() {
     }
 
     section('<h2>Devices</h2>') {
-      input 'presenceSensors', 'capability.presenceSensor', title: 'Presence Sensor', required: true, multiple: true
+      input 'presenceSensors', 'capability.presenceSensor', title: 'Presence Sensor', required: false, multiple: true
+      input 'motionSensors', 'capability.motionSensor', title: 'Motion Sensor', required: false, multiple: true
       input 'disableModes', 'mode', title: 'Disable "to away" presence changes in Mode(s)', multiple: true
     }
 
@@ -94,6 +95,7 @@ mappings {
 Map arriveWebhook() {
   unschedule()
   presenceSensor.each{ p -> p.arrived() }
+  motionSensors.each{ p -> p.active() }
   return render(contentType: "text/html", data: "<p>Arrived!</p>", status: 200)
 }
 
@@ -108,6 +110,7 @@ Map departWebhook() {
 
 void depart() {
   presenceSensor.each{ p -> p.departed() }
+  motionSensors.each{ p -> p.inactive() }
 }
 
 String getLocalUriArrive() { return getFullLocalApiServerUrl() + "/arrive?access_token=${state.accessToken}" }

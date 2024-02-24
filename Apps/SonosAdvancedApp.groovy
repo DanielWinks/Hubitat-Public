@@ -26,7 +26,7 @@
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.4.4',
+  version: '0.5.1',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
@@ -330,13 +330,7 @@ void configure() {
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
 
-  if(!favMatching) {
-    String value = 'Favorite Matching Disabled'
-    getCurrentPlayerDevices().each{
-      it.sendEvent(name: 'currentFavorite', value: value)
-    }
-    state.remove('favs')
-  }
+  state.remove('favs')
   unschedule('appGetFavoritesLocal')
 }
 // =============================================================================
@@ -789,105 +783,6 @@ String unEscapeMetaData(String text) {
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
-
-void processGroupRenderingControlMessages(DeviceWrapper device, Map message) {
-  GPathResult propertyset = parseSonosMessageXML(message)
-  Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
-  String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
-  List<ChildDeviceWrapper> groupDevices = getCurrentGroupedDevices(device)
-  groupDevices.each{ dev ->
-    if(groupVolume) { dev.sendEvent(name:'groupVolume', value: groupVolume) }
-    if(groupMute) { dev.sendEvent(name:'groupMute', value: groupMute ) }
-  }
-}
-
-void setAlbumArtURI(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setAlbumArtURI(value)}
-}
-
-void setPlayMode(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setPlayMode(value)}
-}
-
-void setCrossfadeMode(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCrossfadeMode(value)}
-}
-
-void setCurrentTrackDuration(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCurrentTrackDuration(value)}
-}
-
-void setCurrentArtistName(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCurrentArtistName(value)}
-}
-
-void setCurrentAlbumName(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCurrentAlbumName(value)}
-}
-
-void setCurrentTrackName(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCurrentTrackName(value)}
-}
-
-void setCurrentTrackNumber(List<String> rincons, Integer value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCurrentTrackNumber(value)}
-}
-
-void setTrackDescription(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setTrackDescription(value)}
-}
-
-void setTrackDataEvents(List<String> rincons, Map value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setTrackDataEvents(value)}
-}
-
-void setNextArtistName(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setNextArtistName(value)}
-}
-
-void setNextAlbumName(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setNextAlbumName(value)}
-}
-
-void setNextTrackName(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setNextTrackName(value)}
-}
-
-void setCurrentFavorite(List<String> rincons, String value) {
-  List<DeviceWrapper> groupedDevices = getDevicesFromRincons(rincons)
-  groupedDevices.each{dev -> dev.setCurrentFavorite(value)}
-}
-
-void updatePlayerCurrentStates(DeviceWrapper cd, String coordinatorRincon) {
-  if(!cd) {return}
-  if(!coordinatorRincon) {return}
-  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  ChildDeviceWrapper coordinator = getDeviceFromRincon(coordinatorRincon)
-  List<Map> evts = coordinator.getCurrentPlayingStatesForGroup()
-  evts.each{ child.sendEvent(it) }
-  logTrace("Updated ${child.getDataValue('name')} with current states from ${coordinator.getDataValue('name')}")
-}
-
-
-void updateZoneGroupName(String zoneGroupName, LinkedHashSet rinconsToUpdate) {
-  List<ChildDeviceWrapper> childrenToUpdate = getDevicesFromRincons(rinconsToUpdate)
-  logTrace("Updating ${childrenToUpdate} with new group name.")
-  childrenToUpdate.each{it.sendEvent(name: 'groupName', value: zoneGroupName)}
-}
-
 @CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
@@ -1185,44 +1080,3 @@ void componentSetGroupLevelLocal(DeviceWrapper device, BigDecimal level) {
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
-
-
-// =============================================================================
-// Favorites
-// =============================================================================
-void setFavorites(Map favs) {
-  logTrace('Updated favs for matching...')
-  state.favs = favs
-}
-
-void isFavoritePlaying(DeviceWrapper cd, Map json) {
-  if(favMatching == false || favMatching == null) {return}
-  if(state.favs == null) {return}
-  logTrace('isFavoritePlaying called')
-  String objectId = json?.container?.id?.objectId
-  if(objectId != null && objectId != '') {
-    List tok = objectId?.tokenize(':')
-    if(tok.size >= 1) { objectId = tok[1] }
-  }
-  String serviceId = json?.container?.id?.serviceId
-  String accountId = json?.container?.id?.accountId
-  String imageUrl = json?.container?.imageUrl
-
-  String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-  String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
-  Boolean isFav = state.favs.containsKey(universalMusicObjectId)
-  Boolean isFavAlt = state.favs.containsKey(universalMusicObjectIdAlt)
-
-  String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
-  String foundFavId = state.favs[k]?.id
-  String foundFavImageUrl = state.favs[k]?.imageUrl
-  String foundFavName = state.favs[k]?.name
-  logTrace("Sending currentFavorite to ${cd}")
-  ChildDeviceWrapper child = app.getChildDevice(cd.getDeviceNetworkId())
-  if(child != null) { child.setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt)) }
-}
-// =============================================================================
-// Favorites
-// =============================================================================
-
-
