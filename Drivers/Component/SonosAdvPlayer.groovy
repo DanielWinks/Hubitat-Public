@@ -263,6 +263,7 @@ void initialize() {
   fullRenewSubscriptions()
   // runEvery3Hours('fullRenewSubscriptions')
   runEvery10Minutes('registerRinconId')
+  runEvery10Minutes('checkSubscriptions')
 }
 void configure() {
   atomicState.audioClipPlaying = false
@@ -360,6 +361,13 @@ DeviceWrapper getDeviceWrapperForRincon(String rincon) {
 
 void favoritesMapInitialization() {
   if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
+}
+
+void checkSubscriptions() {
+  if(!lastMrRcEventWithin(900)) { subscribeToMrRcEvents() }
+  if(!lastMrGrcEventWithin(900)) { subscribeToMrGrcEvents() }
+  if(!lastZgtEventWithin(900)) { subscribeToZgtEvents() }
+  if(!lastWebsocketEventWithin(900)) { renewWebsocketConnection() }
 }
 // =============================================================================
 // End Initialize and Configure
@@ -918,6 +926,7 @@ void parse(String raw) {
   registerRinconId()
   try {
     if(!raw.startsWith('mac:')){
+      setLastWebsocketEvent()
       processWebsocketMessage(raw)
       return
     }
@@ -927,8 +936,9 @@ void parse(String raw) {
     if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
       processAVTransportMessages(message.body, getLocalUpnpUrl())
     }
-    else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
-      processRenderingControlMessages(messageBody)
+    else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
+      setLastInboundMrRcEvent()
+      processRenderingControlMessages(message?.body)
     }
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
       if(messageBody.contains('ThirdPartyMediaServersX') || messageBody.contains('AvailableSoftwareUpdate')) { return }
@@ -936,9 +946,11 @@ void parse(String raw) {
       if(getGroupPlayerIds() != null) {
         oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
       }
-      processZoneGroupTopologyMessages(messageBody, oldGroupedRincons)
+      setLastInboundZgtEvent()
+      processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
     }
-    else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+    else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+      setLastInboundMrGrcEvent()
       processGroupRenderingControlMessages(message)
     }
     else {
@@ -1644,9 +1656,64 @@ void setHouseholdId(String householdId) {
   this.device.updateDataValue('householdId', householdId)
 }
 
+@CompileStatic
+Instant getLastInboundMrRcEvent() {
+  return Instant.parse(getDeviceDataValue('lastMrRcEvent'))
+}
+@CompileStatic
+Instant setLastInboundMrRcEvent() {
+  return setDeviceDataValue('lastMrRcEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastMrRcEventWithin(Long seconds) {
+  return Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond() < seconds
+}
+
+@CompileStatic
+Instant getLastInboundZgtEvent() {
+  return Instant.parse(getDeviceDataValue('lastZgtEvent'))
+}
+@CompileStatic
+Instant setLastInboundZgtEvent() {
+  return setDeviceDataValue('lastZgtEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastZgtEventWithin(Integer seconds) {
+  return Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond() < seconds
+}
+
+@CompileStatic
+Instant getLastInboundMrGrcEvent() {
+  return Instant.parse(getDeviceDataValue('lastMrGrcEvent'))
+}
+@CompileStatic
+Instant setLastInboundMrGrcEvent() {
+  return setDeviceDataValue('lastMrGrcEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastMrGrcEventWithin(Integer seconds) {
+  return Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond() < seconds
+}
+
+@CompileStatic
+Instant getLastWebsocketEvent() {
+  return Instant.parse(getDeviceDataValue('lastWebsocketEvent'))
+}
+@CompileStatic
+Instant setLastWebsocketEvent() {
+  return setDeviceDataValue('lastWebsocketEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastWebsocketEventWithin(Integer seconds) {
+  return Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond() < seconds
+}
+
 DeviceWrapper getDevice() { return this.device }
 
 LinkedHashMap getDeviceSettings() { return this.settings }
+
+String getDeviceDataValue(String name) { return this.device.getDataValue(name) }
+void setDeviceDataValue(String name, String value) { this.device.updateDataValue(name, value) }
 
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
