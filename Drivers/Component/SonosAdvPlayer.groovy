@@ -445,8 +445,6 @@ void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioC
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   LinkedHashMap tts = textToSpeech(text, voice)
-  tts.each{k,v ->
-    logDebug("Key: ${k} Value: ${v} Class: ${getObjectClassName(v)}")}
   playerLoadAudioClip(tts.uri, volume, tts.duration)
 }
 
