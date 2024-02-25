@@ -364,9 +364,12 @@ void favoritesMapInitialization() {
 }
 
 void checkSubscriptions() {
-  if(!lastMrRcEventWithin(900)) { subscribeToMrRcEvents() }
-  if(!lastMrGrcEventWithin(900)) { subscribeToMrGrcEvents() }
-  if(!lastZgtEventWithin(900)) { subscribeToZgtEvents() }
+  if(!lastMrRcEventWithin(900)) {
+    resubscribeToMrRcEvents()
+
+  }
+  if(!lastMrGrcEventWithin(900)) { resubscribeToMrGrcEvents() }
+  if(!lastZgtEventWithin(900)) { resubscribeToZgtEvents() }
   if(!lastWebsocketEventWithin(900)) { renewWebsocketConnection() }
 }
 // =============================================================================
@@ -928,28 +931,30 @@ void parse(String raw) {
       processWebsocketMessage(raw)
       return
     }
-    LinkedHashMap message = parseLanMessage(raw)
-    if(message?.body == null) {return}
-    String serviceType = message?.headers["X-SONOS-SERVICETYPE"]
-    if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-      processAVTransportMessages(message.body, getLocalUpnpUrl())
+    LinkedHashMap message = getMapForRaw(raw)
+    LinkedHashMap messageHeaders = (LinkedHashMap)message.headers
+    String xmlBody = (String)message.body
+    if(xmlBody == null || xmlBody == '') {return}
+    String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
+    if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
+      processAVTransportMessages(xmlBody, getLocalUpnpUrl())
     }
-    else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
+    else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
       setLastInboundMrRcEvent()
-      processRenderingControlMessages(message?.body)
+      processRenderingControlMessages(xmlBody)
     }
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
-      if(messageBody.contains('ThirdPartyMediaServersX') || messageBody.contains('AvailableSoftwareUpdate')) { return }
+      if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
       LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
       if(getGroupPlayerIds() != null) {
         oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
       }
       setLastInboundZgtEvent()
-      processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+      processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)
     }
-    else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+    else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
       setLastInboundMrGrcEvent()
-      processGroupRenderingControlMessages(message)
+      processGroupRenderingControlMessages(xmlBody)
     }
     else {
       logDebug("Could not determine service type for message: ${message}")
@@ -1166,7 +1171,7 @@ void updateZoneGroupName(String groupName) {
   updateGroupStatesIfNeeded()
 }
 
-void processGroupRenderingControlMessages(Map message) {
+void processGroupRenderingControlMessages(String message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
   String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
@@ -1251,23 +1256,21 @@ void setSid(String sid, String value) {
   device.updateDataValue(sid, value)
 }
 void deleteSid(String sid) {
-  subscriptionInstants.remove("${getId()}${sid}".toString())
   device.removeDataValue(sid)
+  device.removeDataValue("${sid}-expires")
 }
 @CompileStatic
 Boolean subValid(String sid) {
-  if(!hasSid(sid)) {return false}
-  Instant sidInstant = subscriptionInstants.containsKey("${getId()}${sid}".toString()) ? subscriptionInstants["${getId()}${sid}".toString()] : null
-  if(sidInstant == null) {return false}
-  Duration dur = Duration.between(sidInstant, Instant.now())
-  // logTrace("Duration ${dur}")
-  long seconds = dur.getSeconds()
-  // logTrace("Seconds: ${seconds}")
-  return ((seconds - 100) < RESUB_INTERVAL)
+  Long exp = getDeviceDataValue("${sid}-expires") as Long
+  if(exp < Instant.now().getEpochSecond()) {
+    return false
+  } else {
+    return true
+  }
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
-  subscriptionInstants["${getId()}${sid}".toString()] = Instant.now()
+  setDeviceDataValue("${sid}-expires", (Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)).toString())
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
 }
@@ -1276,8 +1279,8 @@ void scheduleResubscriptionToEvents(String eventsToResub) {
   runIn(RESUB_INTERVAL-100, eventsToResub, [overwrite: true])
 }
 
-void retrySubscription(String eventsToRetry) {
-  runIn(60, eventsToRetry, [overwrite: true])
+void retrySubscription(String eventsToRetry, Integer retryTime = 60) {
+  runIn(retryTime, eventsToRetry, [overwrite: true])
 }
 
 void removeResub(String resub) {
@@ -1316,9 +1319,14 @@ void subscribeResubscribeToMrAvTCallback(HubResponse response) {
   String subId = 'sid1'
   String domain = MRAVT_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1383,9 +1391,14 @@ void subscribeResubscribeMrRcCallback(HubResponse response) {
   String subId = 'sid2'
   String domain = MRRC_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1449,9 +1462,14 @@ void subscribeResubscribeToZgtCallback(HubResponse response) {
   String subId = 'sid3'
   String domain = ZGT_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1525,9 +1543,14 @@ void subscribeResubscribeToMrGrcCallback(HubResponse response) {
   String subId = 'sid4'
   String domain = MRGRC_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1664,6 +1687,7 @@ Instant setLastInboundMrRcEvent() {
 }
 @CompileStatic
 Boolean lastMrRcEventWithin(Long seconds) {
+  logInfo("lastMrRcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrRcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond() < seconds
 }
 
@@ -1677,6 +1701,7 @@ Instant setLastInboundZgtEvent() {
 }
 @CompileStatic
 Boolean lastZgtEventWithin(Integer seconds) {
+  logInfo("lastZgtEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundZgtEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond() < seconds
 }
 
@@ -1690,6 +1715,7 @@ Instant setLastInboundMrGrcEvent() {
 }
 @CompileStatic
 Boolean lastMrGrcEventWithin(Integer seconds) {
+  logInfo("lastMrGrcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrGrcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond() < seconds
 }
 
@@ -1703,6 +1729,7 @@ Instant setLastWebsocketEvent() {
 }
 @CompileStatic
 Boolean lastWebsocketEventWithin(Integer seconds) {
+  logInfo("lastWebsocketEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastWebsocketEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond() < seconds
 }
 
@@ -2705,7 +2732,9 @@ void dequeueAudioClip() {
     logTrace('No more audio clips to dequeue.')
   }
   atomicState.audioClipPlaying = true
-  addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
+  if(clipMessage?.duration != null && clipMessage?.duration > 0) {
+    addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
+  }
   if(clipMessage.rightChannel) {
     sendWsMessage(clipMessage.leftChannel)
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
