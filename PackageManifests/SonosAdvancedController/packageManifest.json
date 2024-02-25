@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.5.1",
-  "releaseNotes": "v0.5.1 No longer wakes parent app for 'coordinator -> follower' updates. Hopefully this resolves the 'cannot obtain semaphore' issue. Should also be a fair bit less total CPU usage. Moved almost everything 'player' related into the player driver.",
+  "version": "0.5.2",
+  "releaseNotes": "v0.5.2: Improvements to subscription/resubscription handling \r\nv0.5.1 No longer wakes parent app for 'coordinator -> follower' updates. Hopefully this resolves the 'cannot obtain semaphore' issue. Should also be a fair bit less total CPU usage. Moved almost everything 'player' related into the player driver.",
   "minimumHEVersion": "2.3.7.114",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
