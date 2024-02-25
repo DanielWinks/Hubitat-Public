@@ -363,14 +363,19 @@ void favoritesMapInitialization() {
   if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
 }
 
+@CompileStatic
 void checkSubscriptions() {
-  if(!lastMrRcEventWithin(900)) {
-    resubscribeToMrRcEvents()
+  try {if(!lastMrRcEventWithin(900)) {resubscribeToMrRcEvents()}}
+  catch(java.lang.NullPointerException e) {subscribeToMrRcEvents()}
 
-  }
-  if(!lastMrGrcEventWithin(900)) { resubscribeToMrGrcEvents() }
-  if(!lastZgtEventWithin(900)) { resubscribeToZgtEvents() }
-  if(!lastWebsocketEventWithin(900)) { renewWebsocketConnection() }
+  try {if(!lastMrGrcEventWithin(900)) {resubscribeToMrGrcEvents()}}
+  catch(java.lang.NullPointerException e) {subscribeToMrGrcEvents()}
+
+  try {if(!lastZgtEventWithin(900)) {resubscribeToZgtEvents()}}
+  catch(java.lang.NullPointerException e) {subscribeToZgtEvents()}
+
+  try {if(!lastWebsocketEventWithin(900)) {renewWebsocketConnection()}}
+  catch(java.lang.NullPointerException e) {renewWebsocketConnection()}
 }
 // =============================================================================
 // End Initialize and Configure
