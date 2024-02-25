@@ -1692,7 +1692,7 @@ Instant setLastInboundMrRcEvent() {
 }
 @CompileStatic
 Boolean lastMrRcEventWithin(Long seconds) {
-  logInfo("lastMrRcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrRcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond()}")
+  logTrace("lastMrRcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrRcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond() < seconds
 }
 
@@ -1706,7 +1706,7 @@ Instant setLastInboundZgtEvent() {
 }
 @CompileStatic
 Boolean lastZgtEventWithin(Integer seconds) {
-  logInfo("lastZgtEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundZgtEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond()}")
+  logTrace("lastZgtEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundZgtEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond() < seconds
 }
 
@@ -1720,7 +1720,7 @@ Instant setLastInboundMrGrcEvent() {
 }
 @CompileStatic
 Boolean lastMrGrcEventWithin(Integer seconds) {
-  logInfo("lastMrGrcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrGrcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond()}")
+  logTrace("lastMrGrcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrGrcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond() < seconds
 }
 
@@ -1734,7 +1734,7 @@ Instant setLastWebsocketEvent() {
 }
 @CompileStatic
 Boolean lastWebsocketEventWithin(Integer seconds) {
-  logInfo("lastWebsocketEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastWebsocketEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond()}")
+  logTrace("lastWebsocketEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastWebsocketEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond()}")
   return Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond() < seconds
 }
 
