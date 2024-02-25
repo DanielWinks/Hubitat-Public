@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.5.1',
+    version: '0.5.2',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: true,
@@ -200,6 +200,7 @@ String getCurrentTTSVoice() {
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
@@ -262,6 +263,7 @@ void initialize() {
   fullRenewSubscriptions()
   // runEvery3Hours('fullRenewSubscriptions')
   runEvery10Minutes('registerRinconId')
+  runEvery10Minutes('checkSubscriptions')
 }
 void configure() {
   atomicState.audioClipPlaying = false
@@ -318,9 +320,13 @@ void migrationCleanup() {
 }
 
 void audioClipQueueInitialization() {
-  if(audioClipQueue == null) { audioClipQueue = new LinkedHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(audioClipQueue == null) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueue.containsKey(getId())) {
     audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
+  }
+  if(audioClipQueueTimers == null) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!audioClipQueueTimers.containsKey(getId())) {
+    audioClipQueueTimers[getId()] = new LinkedHashMap()
   }
 }
 
@@ -355,6 +361,21 @@ DeviceWrapper getDeviceWrapperForRincon(String rincon) {
 
 void favoritesMapInitialization() {
   if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
+}
+
+@CompileStatic
+void checkSubscriptions() {
+  try {if(!lastMrRcEventWithin(900)) {resubscribeToMrRcEvents()}}
+  catch(java.lang.NullPointerException e) {subscribeToMrRcEvents()}
+
+  try {if(!lastMrGrcEventWithin(900)) {resubscribeToMrGrcEvents()}}
+  catch(java.lang.NullPointerException e) {subscribeToMrGrcEvents()}
+
+  try {if(!lastZgtEventWithin(900)) {resubscribeToZgtEvents()}}
+  catch(java.lang.NullPointerException e) {subscribeToZgtEvents()}
+
+  try {if(!lastWebsocketEventWithin(900)) {renewWebsocketConnection()}}
+  catch(java.lang.NullPointerException e) {renewWebsocketConnection()}
 }
 // =============================================================================
 // End Initialize and Configure
@@ -431,7 +452,8 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClip(textToSpeech(text, voice).uri, volume)
+  LinkedHashMap tts = textToSpeech(text, voice)
+  playerLoadAudioClip(tts.uri, volume, tts.duration)
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
@@ -905,41 +927,49 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 // =============================================================================
 // Parse
 // =============================================================================
+@CompileStatic
 void parse(String raw) {
   registerRinconId()
   try {
     if(!raw.startsWith('mac:')){
+      setLastWebsocketEvent()
       processWebsocketMessage(raw)
       return
     }
-    LinkedHashMap message = parseLanMessage(raw)
-    if(message?.body == null) {return}
-    String serviceType = message?.headers["X-SONOS-SERVICETYPE"]
-    if(serviceType == 'AVTransport' || message.headers.containsKey('NOTIFY /avt HTTP/1.1')) {
-      processAVTransportMessages(message.body, getLocalUpnpUrl())
+    LinkedHashMap message = getMapForRaw(raw)
+    LinkedHashMap messageHeaders = (LinkedHashMap)message.headers
+    String xmlBody = (String)message.body
+    if(xmlBody == null || xmlBody == '') {return}
+    String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
+    if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
+      processAVTransportMessages(xmlBody, getLocalUpnpUrl())
     }
-    else if(serviceType == 'RenderingControl' || message.headers.containsKey('NOTIFY /mrc HTTP/1.1')) {
-      processRenderingControlMessages(message?.body)
+    else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
+      setLastInboundMrRcEvent()
+      processRenderingControlMessages(xmlBody)
     }
-    else if(serviceType == 'ZoneGroupTopology' || message.headers.containsKey('NOTIFY /zgt HTTP/1.1')) {
-      if(message?.body.contains('ThirdPartyMediaServersX') || message?.body.contains('AvailableSoftwareUpdate')) { return }
+    else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
+      if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
       LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
-      if(device.getDataValue('groupIds') != null) {
-        oldGroupedRincons = new LinkedHashSet((device.getDataValue('groupIds').tokenize(',')))
+      if(getGroupPlayerIds() != null) {
+        oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
       }
-      processZoneGroupTopologyMessages(message?.body, oldGroupedRincons)
+      setLastInboundZgtEvent()
+      processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)
     }
-    else if(serviceType == 'GroupRenderingControl' || message.headers.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-      processGroupRenderingControlMessages(message)
-    }
-    else if(serviceType == 'GroupManager' || message.headers.containsKey('NOTIFY /gm HTTP/1.1')) {
-      processGroupManagementMessages(message)
+    else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+      setLastInboundMrGrcEvent()
+      processGroupRenderingControlMessages(xmlBody)
     }
     else {
       logDebug("Could not determine service type for message: ${message}")
     }
   }
   catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
+}
+
+LinkedHashMap getMapForRaw(String raw) {
+  return parseLanMessage(raw)
 }
 // =============================================================================
 // End Parse
@@ -1135,6 +1165,8 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
 }
 
 void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
+  if(coordinatorId == null || coordinatorId == '') {return}
+  if(playersInGroup == null || playersInGroup.size() == 0) {return}
   parent?.updateGroupDevices(coordinatorId, playersInGroup)
 }
 
@@ -1144,7 +1176,7 @@ void updateZoneGroupName(String groupName) {
   updateGroupStatesIfNeeded()
 }
 
-void processGroupRenderingControlMessages(Map message) {
+void processGroupRenderingControlMessages(String message) {
   GPathResult propertyset = parseSonosMessageXML(message)
   Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
   String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
@@ -1215,6 +1247,13 @@ String getDNI() {return device.getDeviceNetworkId()}
 Boolean hasSid(String sid) {
   return device.getDataValue(sid) != null
 }
+
+DeviceWrapper getThisDevice() {
+  return this.device as DeviceWrapper
+}
+InstalledAppWrapper getParentApp() {
+  return getParent() as InstalledAppWrapper
+}
 String getSid(String sid) {
   return device.getDataValue(sid)
 }
@@ -1222,23 +1261,21 @@ void setSid(String sid, String value) {
   device.updateDataValue(sid, value)
 }
 void deleteSid(String sid) {
-  subscriptionInstants.remove("${getId()}${sid}".toString())
   device.removeDataValue(sid)
+  device.removeDataValue("${sid}-expires")
 }
 @CompileStatic
 Boolean subValid(String sid) {
-  if(!hasSid(sid)) {return false}
-  Instant sidInstant = subscriptionInstants.containsKey("${getId()}${sid}".toString()) ? subscriptionInstants["${getId()}${sid}".toString()] : null
-  if(sidInstant == null) {return false}
-  Duration dur = Duration.between(sidInstant, Instant.now())
-  logTrace("Duration ${dur}")
-  long seconds = dur.getSeconds()
-  logTrace("Seconds: ${seconds}")
-  return ((seconds - 100) < RESUB_INTERVAL)
+  Long exp = getDeviceDataValue("${sid}-expires") as Long
+  if(exp > Instant.now().getEpochSecond() && hasSid(sid) == true) {
+    return true
+  } else {
+    return false
+  }
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
-  subscriptionInstants["${getId()}${sid}".toString()] = Instant.now()
+  setDeviceDataValue("${sid}-expires", (Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)).toString())
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
 }
@@ -1247,8 +1284,8 @@ void scheduleResubscriptionToEvents(String eventsToResub) {
   runIn(RESUB_INTERVAL-100, eventsToResub, [overwrite: true])
 }
 
-void retrySubscription(String eventsToRetry) {
-  runIn(60, eventsToRetry, [overwrite: true])
+void retrySubscription(String eventsToRetry, Integer retryTime = 60) {
+  runIn(retryTime, eventsToRetry, [overwrite: true])
 }
 
 void removeResub(String resub) {
@@ -1287,9 +1324,14 @@ void subscribeResubscribeToMrAvTCallback(HubResponse response) {
   String subId = 'sid1'
   String domain = MRAVT_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1354,9 +1396,14 @@ void subscribeResubscribeMrRcCallback(HubResponse response) {
   String subId = 'sid2'
   String domain = MRRC_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1420,9 +1467,14 @@ void subscribeResubscribeToZgtCallback(HubResponse response) {
   String subId = 'sid3'
   String domain = ZGT_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1496,9 +1548,14 @@ void subscribeResubscribeToMrGrcCallback(HubResponse response) {
   String subId = 'sid4'
   String domain = MRGRC_EVENTS_DOMAIN
   if(response?.status == 412){
-    logWarn("Failed to subscribe/resubscribe to ${domain}. Will try again in 60 seconds.")
-    deleteSid(subId)
-    retrySubscription(sub)
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      retrySubscription(sub, 60)
+    }
   } else if(response?.status == 200) {
     logTrace("Sucessfully subscribed to ${domain}")
     updateSid(subId, response.headers)
@@ -1625,9 +1682,68 @@ void setHouseholdId(String householdId) {
   this.device.updateDataValue('householdId', householdId)
 }
 
+@CompileStatic
+Instant getLastInboundMrRcEvent() {
+  return Instant.parse(getDeviceDataValue('lastMrRcEvent'))
+}
+@CompileStatic
+Instant setLastInboundMrRcEvent() {
+  return setDeviceDataValue('lastMrRcEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastMrRcEventWithin(Long seconds) {
+  logInfo("lastMrRcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrRcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond()}")
+  return Instant.now().getEpochSecond() - getLastInboundMrRcEvent().getEpochSecond() < seconds
+}
+
+@CompileStatic
+Instant getLastInboundZgtEvent() {
+  return Instant.parse(getDeviceDataValue('lastZgtEvent'))
+}
+@CompileStatic
+Instant setLastInboundZgtEvent() {
+  return setDeviceDataValue('lastZgtEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastZgtEventWithin(Integer seconds) {
+  logInfo("lastZgtEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundZgtEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond()}")
+  return Instant.now().getEpochSecond() - getLastInboundZgtEvent().getEpochSecond() < seconds
+}
+
+@CompileStatic
+Instant getLastInboundMrGrcEvent() {
+  return Instant.parse(getDeviceDataValue('lastMrGrcEvent'))
+}
+@CompileStatic
+Instant setLastInboundMrGrcEvent() {
+  return setDeviceDataValue('lastMrGrcEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastMrGrcEventWithin(Integer seconds) {
+  logInfo("lastMrGrcEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastInboundMrGrcEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond()}")
+  return Instant.now().getEpochSecond() - getLastInboundMrGrcEvent().getEpochSecond() < seconds
+}
+
+@CompileStatic
+Instant getLastWebsocketEvent() {
+  return Instant.parse(getDeviceDataValue('lastWebsocketEvent'))
+}
+@CompileStatic
+Instant setLastWebsocketEvent() {
+  return setDeviceDataValue('lastWebsocketEvent', Instant.now().toString())
+}
+@CompileStatic
+Boolean lastWebsocketEventWithin(Integer seconds) {
+  logInfo("lastWebsocketEvent Now: ${Instant.now().getEpochSecond()} - last message: ${getLastWebsocketEvent().getEpochSecond()}, difference: ${Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond()}")
+  return Instant.now().getEpochSecond() - getLastWebsocketEvent().getEpochSecond() < seconds
+}
+
 DeviceWrapper getDevice() { return this.device }
 
 LinkedHashMap getDeviceSettings() { return this.settings }
+
+String getDeviceDataValue(String name) { return this.device.getDataValue(name) }
+void setDeviceDataValue(String name, String value) { this.device.updateDataValue(name, value) }
 
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
@@ -1725,7 +1841,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
 }
 
 String getGroupCoordinatorName() {
-  return this.device.currentValue('groupCoordinatorName', true)
+  return this.device.currentValue('groupCoordinatorName')
 }
 void setGroupCoordinatorName(String groupCoordinatorName) {
   if(groupCoordinatorName != getGroupCoordinatorName()) {
@@ -1987,6 +2103,19 @@ ConcurrentLinkedQueue<Map> getAudioClipQueue() {
 }
 
 @CompileStatic
+LinkedHashMap getAudioClipQueueTimers() {
+  audioClipQueueInitialization()
+  return audioClipQueueTimers[getId()]
+}
+
+@CompileStatic
+void addTimerToAudioClipQueueTimers(Long clipDuration, String clipUri) {
+  LinkedHashMap timers = getAudioClipQueueTimers()
+  timers[clipUri] = Instant.now().getEpochSecond() + clipDuration
+  // runIn(clipDuration + 10, 'dequeueAudioClip')
+}
+
+@CompileStatic
 Integer getAudioClipQueueLength() {
   audioClipQueueInitialization()
   return getAudioClipQueue().size() as Integer
@@ -2118,6 +2247,8 @@ void clearFavoritesMap() {
 // =============================================================================
 // End Getters and Setters
 // =============================================================================
+
+
 
 // =============================================================================
 // Websocket Connection and Initialization
@@ -2536,8 +2667,9 @@ void sendAudioClipHighPriority(Map clipMessage) {
 }
 
 @CompileStatic
-void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean chimeBeforeTTS = getChimeBeforeTTS()) {
+void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0) {
   logTrace('playerLoadAudioClip')
+  // subscribeToAudioClip()
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
     return
@@ -2557,7 +2689,9 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  if(getAudioClipQueueIsEmpty() && chimeBeforeTTS) {playerLoadAudioClipChime(volume)}
+  if(getAudioClipQueueIsEmpty() && getChimeBeforeTTS()) {playerLoadAudioClipChime(volume)}
+  if(duration > 0) { audioClip.duration = duration }
+  audioClip.uri = uri
   enqueueAudioClip(audioClip)
   logTrace('Enqueued')
 }
@@ -2566,6 +2700,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Boolean ch
 @CompileStatic
 void playerLoadAudioClipChime(BigDecimal volume = null) {
   logTrace('playerLoadAudioClipChime')
+  // subscribeToAudioClip()
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
     return
@@ -2583,13 +2718,13 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
+  audioClip.duration = 8
   enqueueAudioClip(audioClip)
 }
 
 void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
   getAudioClipQueue().add(clipMessage)
-  subscribeToAudioClip()
   if(atomicState.audioClipPlaying == false) {dequeueAudioClip()}
 }
 
@@ -2597,8 +2732,14 @@ void dequeueAudioClip() {
   logTrace('dequeueAudioClip')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   Map clipMessage = getAudioClipQueue().poll()
-  if(!clipMessage) {return}
+  if(!clipMessage) {
+    return
+    logTrace('No more audio clips to dequeue.')
+  }
   atomicState.audioClipPlaying = true
+  if(clipMessage?.duration != null && clipMessage?.duration > 0) {
+    addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
+  }
   if(clipMessage.rightChannel) {
     sendWsMessage(clipMessage.leftChannel)
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)

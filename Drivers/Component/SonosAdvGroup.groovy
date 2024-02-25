@@ -26,7 +26,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Group',
-    version: '0.5.1',
+    version: '0.5.2',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
@@ -68,7 +68,7 @@ metadata {
     }
   }
 }
-Boolean getChimeBeforeTTS() { return chimeBeforeTTS != null ? chimeBeforeTTS : false }
+Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
 
 
 String getCurrentTTSVoice() {
@@ -86,7 +86,9 @@ String getCurrentTTSVoice() {
 }
 
 
-void initialize() {}
+void initialize() {
+  if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
+}
 void configure() {}
 void on() { joinPlayersToCoordinator() }
 void off() { removePlayersFromCoordinator() }
@@ -97,7 +99,7 @@ void speak(String text, BigDecimal volume = null, String voice = null) { deviceP
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
   logDebug(allDevs)
-  allDevs.each{it.playerLoadAudioClip(textToSpeech(text, voice).uri, volume, getChimeBeforeTTS())}
+  allDevs.each{it.playerLoadAudioClip(textToSpeech(text, voice).uri, volume, getChimeBeforeTTSSetting())}
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
