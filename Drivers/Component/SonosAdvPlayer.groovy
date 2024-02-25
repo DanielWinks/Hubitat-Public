@@ -2737,9 +2737,9 @@ void dequeueAudioClip() {
     logTrace('No more audio clips to dequeue.')
   }
   atomicState.audioClipPlaying = true
-  if(clipMessage?.duration != null && clipMessage?.duration > 0) {
-    addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
-  }
+  // if(clipMessage?.duration != null && clipMessage?.duration > 0) {
+  //   addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
+  // }
   if(clipMessage.rightChannel) {
     sendWsMessage(clipMessage.leftChannel)
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
