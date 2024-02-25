@@ -1267,10 +1267,10 @@ void deleteSid(String sid) {
 @CompileStatic
 Boolean subValid(String sid) {
   Long exp = getDeviceDataValue("${sid}-expires") as Long
-  if(exp < Instant.now().getEpochSecond()) {
-    return false
-  } else {
+  if(exp > Instant.now().getEpochSecond() && hasSid(sid) == true) {
     return true
+  } else {
+    return false
   }
 }
 @CompileStatic
