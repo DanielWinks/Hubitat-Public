@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.5.2',
+    version: '0.5.4',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: true,
@@ -205,7 +205,6 @@ String getCurrentTTSVoice() {
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static ConcurrentHashMap<String, Instant> subscriptionInstants = new ConcurrentHashMap<String, Instant>()
 @Field static ConcurrentHashMap<String, Boolean> webSocketStatuses = new ConcurrentHashMap<String, Instant>()
 @Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
 @Field static Map SOURCES = [
@@ -333,10 +332,6 @@ void audioClipQueueInitialization() {
 void rinconMapInitialization() {
   if(rinconRegistry == null) {rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()}
   registerRinconId()
-}
-
-void subscriptionInstantsInitialization() {
-  if(subscriptionInstants == null) {subscriptionInstants = new ConcurrentHashMap<String, Instant>()}
 }
 
 void groupsRegistryInitialization() {
@@ -2816,7 +2811,9 @@ void playerEvictUnlistedPlayers(List<String> playerIdsToKeep) {
 // =============================================================================
 @CompileStatic
 void processWebsocketMessage(String message) {
+  if(message == null || message == '') {return}
   ArrayList json = (ArrayList)slurper.parseText(message)
+  if(json.size() < 2) {return}
   // logTrace(JsonOutput.prettyPrint(message))
 
   Map eventType = json[0]
@@ -2944,7 +2941,12 @@ void processWebsocketMessage(String message) {
 }
 
 void updateFavsIn(Integer time, Map data) {
-  runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
+  if(getCreateFavoritesChildDevice() == true && (favoritesMap == null || favoritesMap.size() < 1)) {
+    getFavorites()
+    runIn(time + 5, 'isFavoritePlaying', [overwrite: true, data: data ])
+  } else {
+    runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
+  }
 }
 
 void setChildFavs(String html) {
