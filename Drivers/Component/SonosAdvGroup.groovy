@@ -99,7 +99,7 @@ void speak(String text, BigDecimal volume = null, String voice = null) { deviceP
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
   logDebug(allDevs)
-  allDevs.each{it.playerLoadAudioClip(textToSpeech(text, voice).uri, volume, getChimeBeforeTTSSetting())}
+  allDevs.each{it.playerLoadAudioClip(textToSpeech(text, voice).uri, volume)}
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {

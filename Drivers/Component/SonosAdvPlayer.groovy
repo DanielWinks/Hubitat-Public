@@ -261,7 +261,7 @@ void initialize() {
   configure()
   fullRenewSubscriptions()
   // runEvery3Hours('fullRenewSubscriptions')
-  runEvery10Minutes('registerRinconId')
+  runEvery1Minute('registerRinconId')
   runEvery10Minutes('checkSubscriptions')
 }
 void configure() {
@@ -2827,26 +2827,34 @@ void processWebsocketMessage(String message) {
   //Process groups
   if(eventType?.type == 'groups' && eventType?.name == 'groups') {
     ArrayList<Map> groups = (ArrayList<Map>)eventData.groups
-    Map group = groups.find{ ((String)it?.playerIds).contains(getId()) }
+    if(groups != null && groups.size() > 0) {
+      Map group = groups.find{ ((String)it?.playerIds).contains(getId()) }
 
-    setGroupId(group.id.toString())
-    setGroupName(group.name.toString())
-    setGroupPlayerIds((ArrayList<String>)group.playerIds)
-    setGroupCoordinatorId(group.coordinatorId.toString())
+      setGroupId(group.id.toString())
+      setGroupName(group.name.toString())
+      setGroupPlayerIds((ArrayList<String>)group.playerIds)
+      setGroupCoordinatorId(group.coordinatorId.toString())
 
-    ArrayList<Map> players = (ArrayList<Map>)eventData.players
-    String coordinatorName = players.find{it?.id == group.coordinatorId}?.name
-    setGroupCoordinatorName(coordinatorName.toString())
+      ArrayList<Map> players = (ArrayList<Map>)eventData.players
+      String coordinatorName = players.find{it?.id == group.coordinatorId}?.name
+      setGroupCoordinatorName(coordinatorName.toString())
 
-    List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
-    setGroupMemberNames(groupMemberNames)
+      List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
+      setGroupMemberNames(groupMemberNames)
 
-    if(hasSecondaries()) {
-      Map p = (Map)players.find{it?.id == getId()}
-      Map zInfo = (Map)p?.zoneInfo
-      ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
-      String rightChannelId = members.find{((ArrayList<String>)it?.channelMap).contains('RF') }?.id
-      setRightChannelRincon(rightChannelId)
+      if(hasSecondaries() == true && players != null && players.size() > 0) {
+        Map p = (Map)players.find{it?.id == getId()}
+        if(p != null && p.size() > 0) {
+          Map zInfo = (Map)p?.zoneInfo
+          if(zInfo != null && zInfo.size() > 0) {
+            ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
+            if(members != null && members.size() > 0) {
+              String rightChannelId = members.find{((ArrayList<String>)it?.channelMap).contains('RF') }?.id
+              setRightChannelRincon(rightChannelId)
+            }
+          }
+        }
+      }
     }
   }
 
