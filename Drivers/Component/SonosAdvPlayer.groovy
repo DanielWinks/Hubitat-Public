@@ -925,6 +925,7 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 @CompileStatic
 void parse(String raw) {
   registerRinconId()
+  if(raw == null || raw == '') {return}
   try {
     if(!raw.startsWith('mac:')){
       setLastWebsocketEvent()
@@ -932,8 +933,9 @@ void parse(String raw) {
       return
     }
     LinkedHashMap message = getMapForRaw(raw)
-    LinkedHashMap messageHeaders = (LinkedHashMap)message.headers
-    String xmlBody = (String)message.body
+    LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
+    String xmlBody = (String)message?.body
+    if(messageHeaders == null || messageHeaders.size() < 1) {return}
     if(xmlBody == null || xmlBody == '') {return}
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
     if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
@@ -1171,10 +1173,14 @@ void updateZoneGroupName(String groupName) {
   updateGroupStatesIfNeeded()
 }
 
-void processGroupRenderingControlMessages(String message) {
-  GPathResult propertyset = parseSonosMessageXML(message)
-  Integer groupVolume = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupVolume'}.text())
-  String groupMute = Integer.parseInt(propertyset.'**'.find{it.name() == 'GroupMute'}.text()) == 1 ? 'muted' : 'unmuted'
+@CompileStatic
+void processGroupRenderingControlMessages(String xmlString) {
+  GPathResult propertyset = new XmlSlurper().parseText(xmlString)
+  GPathResult gVol = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupVolume'}
+  Integer groupVolume = Integer.parseInt(gVol.text())
+  GPathResult gMute = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupMute'}
+  String groupMute = Integer.parseInt(gMute.text()) == 1 ? 'muted' : 'unmuted'
+
   addEventToStatesRegistry('groupVolume', [name:'groupVolume', value: groupVolume])
   addEventToStatesRegistry('groupMute', [name:'groupMute', value: groupMute])
   raiseEventsFromStatesRegistry()
