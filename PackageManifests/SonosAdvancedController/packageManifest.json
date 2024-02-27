@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.5.4",
-  "releaseNotes": "Fixed speak not working from group device.\r\n0.5.3 Fix cast exception from TTS queue checking code that wasn't supposed to be added yet, \r\nv0.5.2: Improvements to subscription/resubscription handling \r\nv0.5.1 No longer wakes parent app for 'coordinator -> follower' updates. Hopefully this resolves the 'cannot obtain semaphore' issue. Should also be a fair bit less total CPU usage. Moved almost everything 'player' related into the player driver.",
+  "version": "0.5.5",
+  "releaseNotes": "0.5.5 Removed subscription check, to see if it's responsible high load issue.\r\nFixed speak not working from group device.\r\n0.5.3 Fix cast exception from TTS queue checking code that wasn't supposed to be added yet, \r\nv0.5.2: Improvements to subscription/resubscription handling \r\nv0.5.1 No longer wakes parent app for 'coordinator -> follower' updates. Hopefully this resolves the 'cannot obtain semaphore' issue. Should also be a fair bit less total CPU usage. Moved almost everything 'player' related into the player driver.",
   "minimumHEVersion": "2.3.7.114",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
