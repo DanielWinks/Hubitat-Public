@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.5.5',
+    version: '0.6.0',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
@@ -123,8 +123,6 @@ metadata {
 
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
-
-  command 'updateStates'
   }
 
   preferences {
@@ -1072,20 +1070,26 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   }
 
   String nextTrackMetaData = instanceId['NextTrackMetaData']['@val']
-  if(nextTrackMetaData) {
+  if(nextTrackMetaData != null && nextTrackMetaData != '') {
     GPathResult nextTrackMetaDataXML = new XmlSlurper().parseText(nextTrackMetaData)
     if(nextTrackMetaDataXML) {
       String nextArtistName = nextTrackMetaDataXML['item']['creator']
+      if(nextArtistName != null && nextArtistName != '') { setNextArtistName(nextArtistName) }
+      else { setNextArtistName('Not Available') }
+
       String nextAlbumName = nextTrackMetaDataXML['item']['album']
+      if(nextAlbumName != null && nextAlbumName != '') { setNextAlbumName(nextAlbumName) }
+      else { setNextAlbumName('Not Available') }
+
       String nextTrackName = nextTrackMetaDataXML['item']['title']
-      setNextArtistName(nextArtistName)
-      setNextAlbumName(nextAlbumName)
-      setNextTrackName(nextTrackName)
-    } else {
-      setNextArtistName('Not Available')
-      setNextAlbumName('Not Available')
-      setNextTrackName('Not Available')
+      if(nextTrackName != null && nextTrackName != '') { setNextTrackName(nextTrackName) }
+      else { setNextTrackName('Not Available') }
+
     }
+  } else {
+    setNextArtistName('Not Available')
+    setNextAlbumName('Not Available')
+    setNextTrackName('Not Available')
   }
 }
 
@@ -2146,25 +2150,24 @@ void setWebSocketStatus(String status) {
   }
 }
 
-@CompileStatic
-List<String> eventsToSkipForDisabledTrackData() {
-  return [
-    'currentTrackDuration',
-    'currentArtistName',
-    'currentAlbumName',
-    'currentTrackName',
-    'currentTrackNumber',
-    'nextArtistName',
-    'nextAlbumName',
-    'nextTrackName'
-  ]
-}
+// @CompileStatic
+// List<String> eventsToSkipForDisabledTrackData() {
+//   return [
+//     'currentTrackDuration',
+//     'currentArtistName',
+//     'currentAlbumName',
+//     'currentTrackName',
+//     'currentTrackNumber',
+//     'nextArtistName',
+//     'nextAlbumName',
+//     'nextTrackName'
+//   ]
+// }
 
 void sendGroupEvents() {runIn(1, 'sendEventsToGroupMembers', [overwrite: true])}
 
 @CompileStatic
 void sendEventsToGroupMembers() {
-  logDebug("isGroupedAndCoordinator ${isGroupedAndCoordinator()}")
   if(isGroupedAndCoordinator()) {
     List<String> groupDNIs = getGroupFollowerDNIs()
     List<Map> eventsToSend = getCurrentPlayingStatesForGroup()
@@ -2931,16 +2934,20 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    updateFavsIn(3, eventData)
+    logTrace('Getting currently playing favorite...')
+    updateFavsIn(2, eventData)
   }
 }
 
 void updateFavsIn(Integer time, Map data) {
-  if(getCreateFavoritesChildDevice() == true && (favoritesMap == null || favoritesMap.size() < 1)) {
-    getFavorites()
-    runIn(time + 5, 'isFavoritePlaying', [overwrite: true, data: data ])
-  } else {
-    runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
+  if(getCreateFavoritesChildDevice() == true) {
+    if(favoritesMap == null || favoritesMap.size() < 1) {
+      logTrace('Favorites map is null, requesting favorites...')
+      getFavorites()
+      runIn(time + 7, 'isFavoritePlaying', [overwrite: true, data: data ])
+    } else {
+      runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
+    }
   }
 }
 
