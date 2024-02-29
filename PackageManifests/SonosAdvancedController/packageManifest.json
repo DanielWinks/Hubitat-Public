@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.6.0",
-  "releaseNotes": "0.6.0 Use streamlined parent app call to send data to followers.",
+  "version": "0.6.1",
+  "releaseNotes": "0.6.1 Jsonify trackData for SharpTools/WebCoRE\r\n0.6.0 Use streamlined parent app call to send data to followers.",
   "minimumHEVersion": "2.3.7.114",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
