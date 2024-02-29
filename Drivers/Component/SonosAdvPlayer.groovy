@@ -30,7 +30,7 @@ metadata {
     version: '0.5.5',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    singleThreaded: true,
+    singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
 
@@ -261,13 +261,16 @@ void initialize() {
   configure()
   fullRenewSubscriptions()
   // runEvery3Hours('fullRenewSubscriptions')
-  runEvery1Minute('registerRinconId')
-  runEvery10Minutes('checkSubscriptions')
 }
 void configure() {
   atomicState.audioClipPlaying = false
   migrationCleanup()
   runIn(5, 'secondaryConfiguration')
+}
+
+void registerRinconId() {
+  unschedule('registerRinconId')
+  unschedule('checkSubscriptions')
 }
 
 void fullRenewSubscriptions() {
@@ -277,7 +280,7 @@ void fullRenewSubscriptions() {
   unsubscribeFromMrGrcEvents()
   if(webSocketStatuses == null) {webSocketStatuses = new ConcurrentHashMap<String, Boolean>()}
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
-  runIn(20, 'subscribeToEvents', [overwrite: true])
+  runIn(7, 'subscribeToEvents', [overwrite: true])
 }
 
 void secondaryConfiguration() {
@@ -292,14 +295,14 @@ void secondaryConfiguration() {
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
   audioClipQueueInitialization()
-  rinconMapInitialization()
   groupsRegistryInitialization()
-  statesRegistryInitialization()
   favoritesMapInitialization()
 }
 
 void migrationCleanup() {
   unschedule('resubscribeToGMEvents')
+  unschedule('registerRinconId')
+  unschedule('checkSubscriptions')
   if(settings.disableTrackDataEvents == null) { settings.disableTrackDataEvents = true }
   if(settings.includeTrackDataMetaData == null) { settings.includeTrackDataMetaData = false }
   if(settings.volumeAdjustAmountLow == null) { settings.volumeAdjustAmountLow = 5 }
@@ -329,29 +332,10 @@ void audioClipQueueInitialization() {
   }
 }
 
-void rinconMapInitialization() {
-  if(rinconRegistry == null) {rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()}
-  registerRinconId()
-}
 
 void groupsRegistryInitialization() {
   if(groupsRegistry == null) {groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()}
   if(!groupsRegistry.containsKey(getId())) {groupsRegistry[getId()] = new ArrayList<DeviceWrapper>()}
-}
-
-void statesRegistryInitialization() {
-  if(statesRegistry == null) {statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()}
-  if(!statesRegistry.containsKey(getGroupId())) {statesRegistry[getGroupId()] = new LinkedHashMap<String,LinkedHashMap>()}
-}
-
-void registerRinconId() {
-  rinconRegistry[getId()] = this.device
-}
-
-@CompileStatic
-DeviceWrapper getDeviceWrapperForRincon(String rincon) {
-  if(rinconRegistry.containsKey(rincon)) { return rinconRegistry[rincon] }
-  return null
 }
 
 void favoritesMapInitialization() {
@@ -924,7 +908,6 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 // =============================================================================
 @CompileStatic
 void parse(String raw) {
-  registerRinconId()
   if(raw == null || raw == '') {return}
   try {
     if(!raw.startsWith('mac:')){
@@ -1068,7 +1051,10 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
       trackData['metaData'] = enqueuedTransportURIMetaDataString
       trackData['trackMetaData'] =  currentTrackMetaDataString ?: trackData['trackMetaData']
     }
-    setTrackDataEvents(trackData)
+    if(!getDisableTrackDataEvents()) {
+      setTrackDataEvents(trackData)
+    }
+
 
     setCurrentArtistName(currentArtistName)
     setCurrentAlbumName(currentAlbumName)
@@ -1122,6 +1108,12 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
   }
 
   if(groupedRincons != oldGroupedRincons) {
+    List<String> newRincons = new ArrayList<String>()
+    newRincons.addAll(groupedRincons - oldGroupedRincons)
+    if(newRincons.size() > 0) {
+      logTrace("Sending events to newly joined member(s): ${newRincons}")
+      sendEventsToNewGroupMembers(newRincons)
+    }
     logTrace('ZGT message parsed, group member changes found.')
   } else {
     logTrace('ZGT message parsed, no group member changes.')
@@ -1167,10 +1159,10 @@ void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup)
   parent?.updateGroupDevices(coordinatorId, playersInGroup)
 }
 
+@CompileStatic
 void updateZoneGroupName(String groupName) {
-  addEventToStatesRegistry('groupName', [name: 'groupName', value: groupName])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('groupName', groupName)
+  sendGroupEvents()
 }
 
 @CompileStatic
@@ -1181,10 +1173,27 @@ void processGroupRenderingControlMessages(String xmlString) {
   GPathResult gMute = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupMute'}
   String groupMute = Integer.parseInt(gMute.text()) == 1 ? 'muted' : 'unmuted'
 
-  addEventToStatesRegistry('groupVolume', [name:'groupVolume', value: groupVolume])
-  addEventToStatesRegistry('groupMute', [name:'groupMute', value: groupMute])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  setGroupVolumeState(groupVolume)
+  setGroupMuteState(groupMute)
+  sendGroupEvents()
+}
+
+@CompileStatic
+void setGroupVolumeState(Integer groupVolume) {
+  sendDeviceEvent('groupVolume', groupVolume)
+}
+@CompileStatic
+Integer getGroupVolumeState() {
+  return getDevice().currentValue('groupVolume',true) as Integer
+}
+
+@CompileStatic
+void setGroupMuteState(String groupMute) {
+  sendDeviceEvent('groupMute', groupMute)
+}
+@CompileStatic
+String getGroupMuteState() {
+  return getDevice().currentValue('groupMute',true).toString()
 }
 
 
@@ -1657,25 +1666,6 @@ void setRightChannelDeviceIp(String ipAddress) {
   this.device.updateDataValue('rightChannelDeviceIp', ipAddress)
 }
 
-@CompileStatic
-DeviceWrapper getDeviceFromRincon(String rincon) {
-  return rinconRegistry.containsKey(rincon) ? rinconRegistry[rincon] : null
-}
-@CompileStatic
-List<DeviceWrapper> getDevicesFromRincons(List<String> rincons) {
-  List<DeviceWrapper> devs = rinconRegistry.collect{k,v -> k in rincons ? v : null}
-  return devs.size() > 0 ? devs : null
-}
-
-@CompileStatic
-ArrayList<DeviceWrapper> getGroupedDevicesFromRinconRegistry() {
-  List<DeviceWrapper> devs = new ArrayList<DeviceWrapper>()
-  List<String> rincons = getGroupPlayerIds()
-  rincons.remove(getId())
-  rincons.each{devs.add(getDeviceFromRincon(it))}
-  return devs
-}
-
 String getHouseholdId(){
   return this.device.getDataValue('householdId')
 }
@@ -1745,6 +1735,8 @@ LinkedHashMap getDeviceSettings() { return this.settings }
 
 String getDeviceDataValue(String name) { return this.device.getDataValue(name) }
 void setDeviceDataValue(String name, String value) { this.device.updateDataValue(name, value) }
+
+void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
 
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
@@ -1821,10 +1813,11 @@ String getGroupCoordinatorId() {
 @CompileStatic
 void setGroupCoordinatorId(String groupCoordinatorId) {
   logTrace("setGroupCoordinatorId ${groupCoordinatorId}")
+  String previousGroupCoordinator = getGroupCoordinatorId()
   setDeviceDataValue('groupCoordinatorId', groupCoordinatorId)
   getDevice().sendEvent(name: 'groupCoordinatorId', value: groupCoordinatorId)
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
-  Boolean previouslyWasGroupCoordinator = getIsGroupCoordinator()
+  Boolean previouslyWasGroupCoordinator = getId() == previousGroupCoordinator
   setIsGroupCoordinator(isGroupCoordinator)
 
   if(isGroupCoordinator) {
@@ -1838,7 +1831,6 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   } else if(!isGroupCoordinator && previouslyWasGroupCoordinator) {
       logTrace("Just added to group!")
       unsubscribeFromAVTransport()
-      updateStates()
   } else {logTrace("Group coordinator status has not changed.")}
 }
 
@@ -1887,6 +1879,15 @@ List<String> getGroupFollowerRincons() {
   return getGroupPlayerIds() - [getId()]
 }
 
+List<String> getGroupFollowerDNIs() {
+  return getGroupFollowerRincons().collect{ it.tokenize('_')[1][0..-6] }
+}
+
+@CompileStatic
+String getDNIFromRincon(String rincon) {
+  return rincon.tokenize('_')[1][0..-6]
+}
+
 String getGroupMemberNames() {
   return this.device.currentValue('groupMemberNames')
 }
@@ -1902,9 +1903,8 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
   } else if(!isPlayingLocalTrack) {
     uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
   }
-  addEventToStatesRegistry('albumArtURI', [name:'albumArtURI', value: uri])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('albumArtURI', uri)
+  sendGroupEvents()
 }
 
 String getAlbumArtURI() {
@@ -1922,20 +1922,20 @@ void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String found
   }
   setCurrentFavorite(value)
 }
+@CompileStatic
 void setCurrentFavorite(String uri) {
-  addEventToStatesRegistry('currentFavorite', [name:'currentFavorite', value: uri])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentFavorite', uri)
+  sendGroupEvents()
 }
 String getCurrentFavorite() {
   return this.device.currentValue('currentFavorite', true)
 }
 
+@CompileStatic
 void setStatusTransportStatus(String status) {
-  addEventToStatesRegistry('status', [name: 'status', value: status])
-  addEventToStatesRegistry('transportStatus', [name: 'transportStatus', value: status])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('status', status)
+  sendDeviceEvent('transportStatus', status)
+  sendGroupEvents()
 }
 String getTransportStatus() {
   return this.device.currentValue('transportStatus')
@@ -1977,124 +1977,124 @@ void setLoudnessState(String loudness) {
   sendEvent(name:'loudness', value: loudness == '1' ? 'on' : 'off')
 }
 
+@CompileStatic
 void setPlayMode(String playMode){
   switch(playMode) {
     case 'NORMAL':
-      addEventToStatesRegistry('currentRepeatOneMode', [name:'currentRepeatOneMode', value: 'off'])
-      addEventToStatesRegistry('currentRepeatAllMode', [name:'currentRepeatAllMode', value: 'off'])
-      addEventToStatesRegistry('currentShuffleMode', [name:'currentShuffleMode', value: 'off'])
+      sendDeviceEvent('currentRepeatOneMode', 'off')
+      sendDeviceEvent('currentRepeatAllMode', 'off')
+      sendDeviceEvent('currentShuffleMode', 'off')
     break
     case 'REPEAT_ALL':
-      addEventToStatesRegistry('currentRepeatOneMode', [name:'currentRepeatOneMode', value: 'off'])
-      addEventToStatesRegistry('currentRepeatAllMode', [name:'currentRepeatAllMode', value: 'on'])
-      addEventToStatesRegistry('currentShuffleMode', [name:'currentShuffleMode', value: 'off'])
+      sendDeviceEvent('currentRepeatOneMode', 'off')
+      sendDeviceEvent('currentRepeatAllMode', 'on')
+      sendDeviceEvent('currentShuffleMode', 'off')
     break
     case 'REPEAT_ONE':
-      addEventToStatesRegistry('currentRepeatOneMode', [name:'currentRepeatOneMode', value: 'on'])
-      addEventToStatesRegistry('currentRepeatAllMode', [name:'currentRepeatAllMode', value: 'off'])
-      addEventToStatesRegistry('currentShuffleMode', [name:'currentShuffleMode', value: 'off'])
+      sendDeviceEvent('currentRepeatOneMode', 'on')
+      sendDeviceEvent('currentRepeatAllMode', 'off')
+      sendDeviceEvent('currentShuffleMode', 'off')
     break
     case 'SHUFFLE_NOREPEAT':
-      addEventToStatesRegistry('currentRepeatOneMode', [name:'currentRepeatOneMode', value: 'off'])
-      addEventToStatesRegistry('currentRepeatAllMode', [name:'currentRepeatAllMode', value: 'off'])
-      addEventToStatesRegistry('currentShuffleMode', [name:'currentShuffleMode', value: 'on'])
+      sendDeviceEvent('currentRepeatOneMode', 'off')
+      sendDeviceEvent('currentRepeatAllMode', 'off')
+      sendDeviceEvent('currentShuffleMode', 'on')
     break
     case 'SHUFFLE':
-      addEventToStatesRegistry('currentRepeatOneMode', [name:'currentRepeatOneMode', value: 'off'])
-      addEventToStatesRegistry('currentRepeatAllMode', [name:'currentRepeatAllMode', value: 'on'])
-      addEventToStatesRegistry('currentShuffleMode', [name:'currentShuffleMode', value: 'on'])
+      sendDeviceEvent('currentRepeatOneMode', 'off')
+      sendDeviceEvent('currentRepeatAllMode', 'on')
+      sendDeviceEvent('currentShuffleMode', 'on')
     break
     case 'SHUFFLE_REPEAT_ONE':
-      addEventToStatesRegistry('currentRepeatOneMode', [name:'currentRepeatOneMode', value: 'on'])
-      addEventToStatesRegistry('currentRepeatAllMode', [name:'currentRepeatAllMode', value: 'off'])
-      addEventToStatesRegistry('currentShuffleMode', [name:'currentShuffleMode', value: 'on'])
+      sendDeviceEvent('currentRepeatOneMode', 'on')
+      sendDeviceEvent('currentRepeatAllMode', 'off')
+      sendDeviceEvent('currentShuffleMode', 'on')
     break
   }
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendGroupEvents()
 }
 
 String getCurrentRepeatOneMode() { return this.device.currentValue('currentRepeatOneMode') }
 String getCurrentRepeatAllMode() { return this.device.currentValue('currentRepeatAllMode') }
 String getCurrentShuffleMode() { return this.device.currentValue('currentShuffleMode') }
 
+@CompileStatic
 void setCrossfadeMode(String currentCrossfadeMode) {
-  addEventToStatesRegistry('currentCrossfadeMode', [name:'currentCrossfadeMode', value: currentCrossfadeMode])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentCrossfadeMode', currentCrossfadeMode)
+  sendGroupEvents()
 }
 String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMode') }
 
+@CompileStatic
 void setCurrentTrackDuration(String currentTrackDuration){
-  addEventToStatesRegistry('currentTrackDuration', [name:'currentTrackDuration', value: currentTrackDuration])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentTrackDuration', currentTrackDuration)
+  sendGroupEvents()
 }
 String getCurrentTrackDuration() { return this.device.currentValue('currentTrackDuration') }
 
+@CompileStatic
 void setCurrentArtistName(String currentArtistName) {
-  addEventToStatesRegistry('currentArtistName', [name:'currentArtistName', value: currentArtistName ?: 'Not Available'])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentArtistName', currentArtistName ?: 'Not Available')
+  sendGroupEvents()
 }
 String getCurrentArtistName() { return this.device.currentValue('currentArtistName') }
 
+@CompileStatic
 void setCurrentAlbumName(String currentAlbumName) {
-  addEventToStatesRegistry('currentAlbumName', [name:'currentAlbumName', value: currentAlbumName ?: 'Not Available'])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentAlbumName', currentAlbumName ?: 'Not Available')
+  sendGroupEvents()
 }
 String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName') }
 
+@CompileStatic
 void setCurrentTrackName(String currentTrackName) {
-  addEventToStatesRegistry('currentTrackName', [name:'currentTrackName', value: currentTrackName ?: 'Not Available'])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentTrackName', currentTrackName ?: 'Not Available')
+  sendGroupEvents()
 }
 String getCurrentTrackName() { return this.device.currentValue('currentTrackName') }
 
+@CompileStatic
 void setCurrentTrackNumber(Integer currentTrackNumber) {
-  addEventToStatesRegistry('currentTrackNumber', [name:'currentTrackNumber', value: currentTrackNumber ?: 0])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('currentTrackNumber', currentTrackNumber ?: 0)
+  sendGroupEvents()
 }
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
 
+@CompileStatic
 void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
-  addEventToStatesRegistry('trackDescription', [name: 'trackDescription', value: trackDescription])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('trackDescription', trackDescription)
+  sendGroupEvents()
 
   if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
 }
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
 
+@CompileStatic
 void setTrackDataEvents(Map trackData) {
-  addEventToStatesRegistry('trackData', [name: 'trackData', value: trackData])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('trackData', trackData)
+  sendGroupEvents()
 }
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
 
+@CompileStatic
 void setNextArtistName(String nextArtistName) {
-  addEventToStatesRegistry('nextArtistName', [name:'nextArtistName', value: nextArtistName ?: 'Not Available'])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('nextArtistName', nextArtistName ?: 'Not Available')
+  sendGroupEvents()
 }
 String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 
+@CompileStatic
 void setNextAlbumName(String nextAlbumName) {
-  addEventToStatesRegistry('nextAlbumName', [name:'nextAlbumName', value: nextAlbumName ?: 'Not Available'])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('nextAlbumName', nextAlbumName ?: 'Not Available')
+  sendGroupEvents()
 }
 String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 
+@CompileStatic
 void setNextTrackName(String nextTrackName) {
-  addEventToStatesRegistry('nextTrackName', [name:'nextTrackName', value: nextTrackName ?: 'Not Available'])
-  updateStates()
-  updateGroupStatesIfNeeded()
+  sendDeviceEvent('nextTrackName', nextTrackName ?: 'Not Available')
+  sendGroupEvents()
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 
@@ -2147,41 +2147,6 @@ void setWebSocketStatus(String status) {
 }
 
 @CompileStatic
-ArrayList<DeviceWrapper> getGroupsRegistry() {
-  groupsRegistryInitialization()
-  return groupsRegistry[getId()]
-}
-@CompileStatic
-void setGroupForPlayers(ArrayList<DeviceWrapper> playersInGroup) {
-  groupsRegistryInitialization()
-  groupsRegistry[getId()] = playersInGroup
-}
-@CompileStatic
-void setGroupsForPlayerRincons(ArrayList<String> rinconsInGroup) {
-  ArrayList<DeviceWrapper> playersInGroup = new ArrayList<DeviceWrapper>()
-  rinconsInGroup.each{playersInGroup.add(getDeviceWrapperForRincon(it))}
-  groupsRegistryInitialization()
-  groupsRegistry[getId()] = playersInGroup
-}
-
-
-@CompileStatic
-LinkedHashMap<String,LinkedHashMap> getStatesRegistryForGroup() {
-  statesRegistryInitialization()
-  return statesRegistry[getGroupId()]
-}
-@CompileStatic
-void addEventToStatesRegistry(String eventName, LinkedHashMap event) {
-  statesRegistryInitialization()
-  LinkedHashMap<String,LinkedHashMap> sr = getStatesRegistryForGroup()
-  if(sr == null) {
-    logWarn("Could not get states registry for group...")
-    return
-  }
-  sr[eventName] = event
-}
-
-@CompileStatic
 List<String> eventsToSkipForDisabledTrackData() {
   return [
     'currentTrackDuration',
@@ -2195,49 +2160,39 @@ List<String> eventsToSkipForDisabledTrackData() {
   ]
 }
 
-void raiseEventsFromStatesRegistry() {
-  runIn(1, 'raiseEventsFromStatesRegistryCallback', [overwrite: true])
-}
+void sendGroupEvents() {runIn(1, 'sendEventsToGroupMembers', [overwrite: true])}
 
 @CompileStatic
-void raiseEventsFromStatesRegistryCallback() {
-  LinkedHashMap<String,LinkedHashMap> sr = getStatesRegistryForGroup()
-  if(sr == null) {
-    logWarn("Could not get states registry for group...")
-    return
-  }
-  sr.each{k, event ->
-    if(getDisableArtistAlbumTrackEvents() == true && k in eventsToSkipForDisabledTrackData()) {return}
-    if(k == 'trackData') {
-      if(getDisableTrackDataEvents() == true) {return}
-      else {
-        event.value['level'] = this.device.currentValue('level')
-        event.value['mute'] = this.device.currentValue('mute')
+void sendEventsToGroupMembers() {
+  logDebug("isGroupedAndCoordinator ${isGroupedAndCoordinator()}")
+  if(isGroupedAndCoordinator()) {
+    List<String> groupDNIs = getGroupFollowerDNIs()
+    List<Map> eventsToSend = getCurrentPlayingStatesForGroup()
+    groupDNIs.each{ String dni ->
+      eventsToSend.each{ event ->
+        parentSendEventToDNI(dni, (String)event.name, event.value)
       }
     }
-
-    getDevice().sendEvent(event)
-    if(k == 'currentRepeatOneMode' && getCreateRepeatOneChildDevice()) {getRepeatOneControlChild().sendEvent(name:'switch', value: event.value)}
-    if(k == 'currentRepeatAllMode' && getCreateRepeatAllChildDevice()) {getRepeatAllControlChild().sendEvent(name:'switch', value: event.value)}
-    if(k == 'currentRepeatOneMode' && getCreateShuffleChildDevice()) {getShuffleControlChild().sendEvent(name:'switch', value: event.value)}
-    if(k == 'currentCrossfadeMode' && getCreateCrossfadeChildDevice()) {getCrossfadeControlChild().sendEvent(name:'switch', value: event.value)}
-
   }
 }
 
 @CompileStatic
-void updateStates() {raiseEventsFromStatesRegistry()}
-
-void updateGroupStatesIfNeeded() {
-  runIn(3, 'updateGroupStatesIfNeededCallback', [overwrite: true])
-}
-
-void updateGroupStatesIfNeededCallback() {
-  if(isGroupedAndCoordinator()) {
-    List<DeviceWrapper> groupDevices = getGroupedDevicesFromRinconRegistry()
-    groupDevices.each{ it.updateStates()}
+void sendEventsToNewGroupMembers(List<String> newRincons) {
+  List<String> groupDNIs = newRincons.collect{getDNIFromRincon(it)}
+  logTrace("GroupDNIs ${groupDNIs}")
+  List<Map> eventsToSend = getCurrentPlayingStatesForGroup()
+  groupDNIs.each{ String dni ->
+    logTrace("Sending events to: ${dni}")
+    eventsToSend.each{ event ->
+      parentSendEventToDNI(dni, (String)event.name, event.value)
+    }
   }
 }
+
+void parentSendEventToDNI(String dni, String name, Object value) {
+  parent?.sendEvent(dni, [name:name, value:value])
+}
+
 
 ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
   return favoritesMap
@@ -2245,6 +2200,31 @@ ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
 
 void clearFavoritesMap() {
   favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
+}
+
+@CompileStatic
+List<Map> getCurrentPlayingStatesForGroup() {
+  List currentStates = []
+  currentStates.add([name: 'albumArtURI',           value: getAlbumArtURI()])
+  currentStates.add([name: 'status',                value: getTransportStatus()])
+  currentStates.add([name: 'transportStatus',       value: getTransportStatus()])
+  currentStates.add([name: 'currentRepeatOneMode',  value: getCurrentRepeatOneMode()])
+  currentStates.add([name: 'currentRepeatAllMode',  value: getCurrentRepeatAllMode()])
+  currentStates.add([name: 'currentShuffleMode',    value: getCurrentShuffleMode()])
+  currentStates.add([name: 'currentCrossfadeMode',  value: getCrossfadeMode()])
+  currentStates.add([name: 'currentTrackDuration',  value: getCurrentTrackDuration()])
+  currentStates.add([name: 'currentArtistName',     value: getCurrentArtistName()])
+  currentStates.add([name: 'currentAlbumName',      value: getCurrentAlbumName()])
+  currentStates.add([name: 'currentTrackName',      value: getCurrentTrackName()])
+  currentStates.add([name: 'trackDescription',      value: getTrackDescription()])
+  currentStates.add([name: 'trackData',             value: getTrackDataEvents()])
+  currentStates.add([name: 'currentFavorite',       value: getCurrentFavorite()])
+  currentStates.add([name: 'nextAlbumName',         value: getNextAlbumName()])
+  currentStates.add([name: 'nextArtistName',        value: getNextArtistName()])
+  currentStates.add([name: 'nextTrackName',         value: getNextTrackName()])
+  currentStates.add([name: 'groupVolume',           value: getGroupVolumeState()])
+  currentStates.add([name: 'groupMute',             value: getGroupMuteState()])
+  return currentStates
 }
 // =============================================================================
 // End Getters and Setters
@@ -2295,7 +2275,6 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // Websocket Subscriptions and polling
 // =============================================================================
 void subscribeToWsEvents() {
-  if(getRightChannelChild()) {subscribeToFavorites()}
   subscribeToPlaylists()
   subscribeToAudioClip()
   subscribeToGroups()
@@ -2401,7 +2380,7 @@ void getPlaybackMetadataStatus() {
 @CompileStatic
 void subscribeToFavorites(String groupId) {
   Map command = [
-    'namespace':'playbackMetadata',
+    'namespace':'favorites',
     'command':'subscribe',
     'groupId':"${groupId}"
   ]
