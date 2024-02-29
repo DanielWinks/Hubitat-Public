@@ -29,17 +29,18 @@ import com.hubitat.app.ParentDeviceWrapper
 import com.hubitat.hub.domain.Event
 import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 import groovy.transform.Field
 import groovy.util.slurpersupport.GPathResult
 import groovy.xml.XmlUtil
 import hubitat.device.HubResponse
 import hubitat.scheduling.AsyncResponse
+import java.time.Duration
+import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
-import java.time.Instant
-import java.time.Duration
 
 library(
   name: 'UtilitiesAndLoggingLibrary',
