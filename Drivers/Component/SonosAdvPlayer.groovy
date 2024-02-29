@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.6.0',
+    version: '0.6.1',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
@@ -2076,7 +2076,7 @@ String getTrackDescription() { return this.device.currentValue('trackDescription
 
 @CompileStatic
 void setTrackDataEvents(Map trackData) {
-  sendDeviceEvent('trackData', trackData)
+  sendDeviceEvent('trackData', JsonOutput.toJson(trackData))
   sendGroupEvents()
 }
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
