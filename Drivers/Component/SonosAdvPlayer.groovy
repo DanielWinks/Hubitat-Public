@@ -3238,8 +3238,9 @@ void processWebsocketMessage(String message) {
   if(json.size() < 2) {return}
   // logTrace(JsonOutput.prettyPrint(message))
 
-  Map eventType = json[0]
-  Map eventData = json[1]
+  Map eventType = (json as List)[0]
+  Map eventData = (json as List)[1]
+  if(eventType == null || eventData == null) {return}
 
   //Process subscriptions
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
@@ -3249,21 +3250,28 @@ void processWebsocketMessage(String message) {
   //Process groups
   if(eventType?.type == 'groups' && eventType?.name == 'groups') {
     // logDebug("Groups: ${prettyJson(eventData)}")
-    ArrayList<Map> groups = (ArrayList<Map>)eventData.groups
+    ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
       Map group = groups.find{ ((String)it?.playerIds).contains(getId()) }
 
-      setGroupId(group.id.toString())
-      setGroupName(group.name.toString())
-      setGroupPlayerIds((ArrayList<String>)group.playerIds)
+      String groupId = group?.id.toString()
+      if(groupId != null && groupId != '') {setGroupId(groupId)}
+
+      String groupName = group?.name.toString()
+      if(groupName != null && groupName != '') {setGroupName(groupName)}
+
+      ArrayList<String> playerIds = (ArrayList<String>)group?.playerIds
+      if(playerIds != null && playerIds.size() > 0) {setGroupPlayerIds(playerIds)}
       setGroupCoordinatorId(group.coordinatorId.toString())
 
-      ArrayList<Map> players = (ArrayList<Map>)eventData.players
+      ArrayList<Map> players = (ArrayList<Map>)eventData?.players
       String coordinatorName = players.find{it?.id == group.coordinatorId}?.name
       setGroupCoordinatorName(coordinatorName.toString())
 
-      List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
-      setGroupMemberNames(groupMemberNames)
+      try {
+        List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
+        setGroupMemberNames(groupMemberNames)
+      } catch (Exception e) {logTrace('Could not get group member names, continuing on...')}
 
       if(hasSecondaries() == true && players != null && players.size() > 0) {
         Map p = (Map)players.find{it?.id == getId()}
@@ -3299,43 +3307,48 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
-    Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it.id, [name:it.name, imageUrl:it?.imageUrl]] }
-    String html = '<!DOCTYPE html><html><body><ul>'
+    if(respData != null && respData.size() > 0) {
+      Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
+      String html = '<!DOCTYPE html><html><body><ul>'
 
-    formatted.each(){fav ->
-      String albumArtURI = fav.value.imageUrl
-      String s = "Favorite #${fav.key} ${fav.value.name}"
-      if(albumArtURI == null) {
-        html += "<li>${s}: No Image Art Available</li>"
-      } else if(albumArtURI.startsWith('/')) {
-        html += "<li>${s}: <br><img src=\"${getDeviceDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
-      } else {
-        html += "<li>${s}: <br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
-      }
-    }
-    html += '</ul></body></html>'
-    setChildFavs(html)
-
-    clearFavoritesMap()
-    respData.each{
-      Map item = (Map)it
-      Map resource = (Map)item?.resource
-      if(resource != null) {
-        Map id = (Map)resource?.id
-        if(id != null) {
-          String objectId = id?.objectId
-          String serviceId = id?.serviceId
-          String accountId = id?.accountId
-          if(objectId != null) {
-            List tok = objectId.tokenize(':')
-            if(tok.size() >= 1) { objectId = tok[1] }
-          }
-          String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-          getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
+      formatted.each(){fav ->
+        String albumArtURI = fav?.value?.imageUrl
+        String s = "Favorite #${fav?.key} ${fav?.value?.name}"
+        if(albumArtURI == null) {
+          html += "<li>${s}: No Image Art Available</li>"
+        } else if(albumArtURI.startsWith('/')) {
+          html += "<li>${s}: <br><img src=\"${getDeviceDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
+        } else {
+          html += "<li>${s}: <br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
         }
-      } else if(item?.imageUrl != null) {
-        String universalMusicObjectId = ("${item?.imageUrl}".toString()).split('&v=')[0]
-        getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
+      }
+      html += '</ul></body></html>'
+      setChildFavs(html)
+
+
+      clearFavoritesMap()
+      respData.each{
+        Map item = (Map)it
+        if(item != null && item.size() > 0) {
+          Map resource = (Map)item?.resource
+          if(resource != null && resource.size() > 0) {
+            Map id = (Map)resource?.id
+            if(id != null) {
+              String objectId = id?.objectId
+              String serviceId = id?.serviceId
+              String accountId = id?.accountId
+              if(objectId != null) {
+                List tok = objectId?.tokenize(':')
+                if(tok.size() >= 1) { objectId = tok[1] }
+              }
+              String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
+              getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
+            }
+          } else if(item?.imageUrl != null) {
+            String universalMusicObjectId = ("${item?.imageUrl}".toString()).split('&v=')[0]
+            getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
+          }
+        }
       }
     }
   }
