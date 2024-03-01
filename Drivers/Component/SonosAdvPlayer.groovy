@@ -370,22 +370,11 @@ void groupsRegistryInitialization() {
 
 void favoritesMapInitialization() {
   if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
+  if(getCreateFavoritesChildDevice() == true) {runIn(6,'getFavorites')}
 }
 
 @CompileStatic
-void checkSubscriptions() {
-  // try {if(!lastMrRcEventWithin(900)) {resubscribeToMrRcEvents()}}
-  // catch(java.lang.NullPointerException e) {subscribeToMrRcEvents()}
-
-  // try {if(!lastMrGrcEventWithin(900)) {resubscribeToMrGrcEvents()}}
-  // catch(java.lang.NullPointerException e) {subscribeToMrGrcEvents()}
-
-  // try {if(!lastZgtEventWithin(900)) {resubscribeToZgtEvents()}}
-  // catch(java.lang.NullPointerException e) {subscribeToZgtEvents()}
-
-  // try {if(!lastWebsocketEventWithin(900)) {renewWebsocketConnection()}}
-  // catch(java.lang.NullPointerException e) {renewWebsocketConnection()}
-}
+void checkSubscriptions() {}
 // =============================================================================
 // End Initialize and Configure
 // =============================================================================
@@ -3392,7 +3381,7 @@ void updateFavsIn(Integer time, Map data) {
     } else {
       runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
     }
-  } else if(favoritesMap != null) {
+  } else if(favoritesMap != null && favoritesMap.size() > 0) {
     runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
   }
 }
