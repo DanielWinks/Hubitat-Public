@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.6.1',
+    version: '0.6.2',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
@@ -199,7 +199,7 @@ String getCurrentTTSVoice() {
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static ConcurrentHashMap<String, DeviceWrapper> rinconRegistry = new ConcurrentHashMap<String, DeviceWrapper>()
+@Field static java.util.concurrent.Semaphore deviceDataMutex = new java.util.concurrent.Semaphore(1)
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -1272,7 +1272,7 @@ String getSid(String sid) {
   return device.getDataValue(sid)
 }
 void setSid(String sid, String value) {
-  device.updateDataValue(sid, value)
+  setDeviceDataValue(sid, value)
 }
 void deleteSid(String sid) {
   device.removeDataValue(sid)
@@ -1625,37 +1625,37 @@ void clearTrackDataEvent() {
 // Getters and Setters
 // =============================================================================
 String getLocalApiUrl(){
-  return "https://${this.device.getDataValue('deviceIp')}:1443/api/v1/"
+  return "https://${getDeviceDataValue('deviceIp')}:1443/api/v1/"
 }
 String getLocalUpnpHost(){
-  return "${this.device.getDataValue('deviceIp')}:1400"
+  return "${getDeviceDataValue('deviceIp')}:1400"
 }
 String getLocalUpnpUrl(){
-  return "http://${this.device.getDataValue('deviceIp')}:1400"
+  return "http://${getDeviceDataValue('deviceIp')}:1400"
 }
 String getLocalWsUrl(){
-  return "wss://${this.device.getDataValue('deviceIp')}:1443/websocket/api"
+  return "wss://${getDeviceDataValue('deviceIp')}:1443/websocket/api"
 }
 
 List<String> getLocalApiUrlSecondaries(){
-  List<String> secondaryDeviceIps = this.device.getDataValue('secondaryDeviceIps').tokenize(',')
+  List<String> secondaryDeviceIps = getDeviceDataValue('secondaryDeviceIps').tokenize(',')
   return secondaryDeviceIps.collect{"https://${it}:1443/api/v1/"}
 }
 List<String> getLocalUpnpHostSecondaries(){
-  List<String> secondaryDeviceIps = this.device.getDataValue('secondaryDeviceIps').tokenize(',')
+  List<String> secondaryDeviceIps = getDeviceDataValue('secondaryDeviceIps').tokenize(',')
   return secondaryDeviceIps.collect{"${it}:1400"}
 }
 List<String> getLocalUpnpUrlSecondaries(){
-  List<String> secondaryDeviceIps = this.device.getDataValue('secondaryDeviceIps').tokenize(',')
+  List<String> secondaryDeviceIps = getDeviceDataValue('secondaryDeviceIps').tokenize(',')
   return secondaryDeviceIps.collect{"http://${it}:1400"}
 }
 
 String getRightChannelRincon() {
-  return this.device.getDataValue('rightChannelId')
+  return getDeviceDataValue('rightChannelId')
 }
 void setRightChannelRincon(String rincon) {
   logTrace("Setting right channel RINCON to ${rincon}")
-  this.device.updateDataValue('rightChannelId', rincon)
+  setDeviceDataValue('rightChannelId', rincon)
   if(getSecondaryIds()) {
     Long secondaryIndex = getSecondaryIds().findIndexValues{it == rincon}[0]
     String rightChannelIpAddress = getSecondaryDeviceIps()[secondaryIndex as Integer]
@@ -1664,17 +1664,17 @@ void setRightChannelRincon(String rincon) {
 }
 
 String getRightChannelDeviceIp() {
-  return this.device.getDataValue('rightChannelDeviceIp')
+  return getDeviceDataValue('rightChannelDeviceIp')
 }
 void setRightChannelDeviceIp(String ipAddress) {
-  this.device.updateDataValue('rightChannelDeviceIp', ipAddress)
+  setDeviceDataValue('rightChannelDeviceIp', ipAddress)
 }
 
 String getHouseholdId(){
-  return this.device.getDataValue('householdId')
+  return getDeviceDataValue('householdId')
 }
 void setHouseholdId(String householdId) {
-  this.device.updateDataValue('householdId', householdId)
+  setDeviceDataValue('householdId', householdId)
 }
 
 @CompileStatic
@@ -1737,52 +1737,58 @@ DeviceWrapper getDevice() { return this.device }
 
 LinkedHashMap getDeviceSettings() { return this.settings }
 
-String getDeviceDataValue(String name) { return this.device.getDataValue(name) }
-void setDeviceDataValue(String name, String value) { this.device.updateDataValue(name, value) }
+String getDeviceDataValue(String name) {
+  synchronized(deviceDataMutex) {
+    return this.device.getDataValue(name)
+  }
+}
+void setDeviceDataValue(String name, String value) {
+  synchronized(deviceDataMutex) {
+    this.device.updateDataValue(name, value)
+  }
+}
 
 void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
 
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
 @CompileStatic
-String getId() {
-  return getDevice().getDataValue('id')
+String getId() { return getDeviceDataValue('id')
 }
 @CompileStatic
-void setId(String id) {
-  getDevice().updateDataValue('id', id)
+void setId(String id) { setDeviceDataValue('id', id)
 }
 List<String> getSecondaryIds() {
-  return this.device.getDataValue('secondaryIds').tokenize(',')
+  return getDeviceDataValue('secondaryIds').tokenize(',')
 }
 void setSecondaryIds(List<String> ids) {
-  this.device.updateDataValue('secondaryIds', ids.join(','))
+  setDeviceDataValue('secondaryIds', ids.join(','))
 }
 Boolean hasSecondaries() {
-  return this.device.getDataValue('secondaryIds') && this.device.getDataValue('secondaryIds').size() > 0
+  return getDeviceDataValue('secondaryIds') && getDeviceDataValue('secondaryIds').size() > 0
 }
 String getRightChannelId() {
-  return this.device.getDataValue('rightChannelId')
+  return getDeviceDataValue('rightChannelId')
 }
 
 String getDeviceIp() {
-  return this.device.getDataValue('deviceIp')
+  return getDeviceDataValue('deviceIp')
 }
 void setDeviceIp(String ipAddress) {
-  this.device.updateDataValue('deviceIp', ipAddress)
+  setDeviceDataValue('deviceIp', ipAddress)
 }
 List<String> getSecondaryDeviceIps() {
-  return this.device.getDataValue('secondaryDeviceIps').tokenize(',')
+  return getDeviceDataValue('secondaryDeviceIps').tokenize(',')
 }
 void setSecondaryDeviceIps(List<String> ipAddresses) {
-  this.device.updateDataValue('secondaryDeviceIps', ipAddresses.join(','))
+  setDeviceDataValue('secondaryDeviceIps', ipAddresses.join(','))
 }
 
 String getGroupId() {
-  return this.device.getDataValue('groupId')
+  return getDeviceDataValue('groupId')
 }
 void setGroupId(String groupId) {
-  this.device.updateDataValue('groupId', groupId)
+  setDeviceDataValue('groupId', groupId)
   this.device.sendEvent(name: 'groupId', value: groupId)
   if(getIsGroupCoordinator()) {
     subscribeToPlayback(groupId)
@@ -1812,7 +1818,7 @@ void setGroupMemberCount(Integer groupMemberCount) {
 }
 
 String getGroupCoordinatorId() {
-  return this.device.getDataValue('groupCoordinatorId')
+  return getDeviceDataValue('groupCoordinatorId')
 }
 @CompileStatic
 void setGroupCoordinatorId(String groupCoordinatorId) {
@@ -1848,11 +1854,11 @@ void setGroupCoordinatorName(String groupCoordinatorName) {
 }
 
 Boolean getIsGroupCoordinator() {
-  return this.device.getDataValue('isGroupCoordinator') == 'true'
+  return getDeviceDataValue('isGroupCoordinator') == 'true'
 }
 void setIsGroupCoordinator(Boolean isGroupCoordinator) {
   if(isGroupCoordinator != getIsGroupCoordinator()) {
-    this.device.updateDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+    setDeviceDataValue('isGroupCoordinator', isGroupCoordinator.toString())
     this.device.sendEvent(name: 'isGroupCoordinator', value: isGroupCoordinator ? 'on' : 'off')
   }
 }
@@ -1866,11 +1872,11 @@ Boolean isGroupedAndNotCoordinator() {
 }
 
 List<String> getGroupPlayerIds() {
-  return this.device.getDataValue('groupPlayerIds').tokenize(',')
+  return getDeviceDataValue('groupPlayerIds').tokenize(',')
 }
 void setGroupPlayerIds(List<String> groupPlayerIds) {
-  this.device.updateDataValue('groupPlayerIds', groupPlayerIds.join(','))
-  this.device.updateDataValue('groupIds', groupPlayerIds.join(','))
+  setDeviceDataValue('groupPlayerIds', groupPlayerIds.join(','))
+  setDeviceDataValue('groupIds', groupPlayerIds.join(','))
   this.device.sendEvent(name: 'isGrouped', value: groupPlayerIds.size() > 1 ? 'on' : 'off')
   this.device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
   if(isGroupedAndCoordinator()) {
@@ -2138,10 +2144,10 @@ Boolean isWebsocketConnected() {
   return webSocketStatuses[getId()] == true
 }
 String getWebSocketStatus() {
-  return this.device.getDataValue('websocketStatus')
+  return getDeviceDataValue('websocketStatus')
 }
 void setWebSocketStatus(String status) {
-  this.device.updateDataValue('websocketStatus', status)
+  setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
     webSocketStatuses[getId()] = true
     runIn(15, 'subscribeToWsEvents')
@@ -2251,7 +2257,7 @@ void webSocketStatus(String message) {
 
 void wsConnect() {
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
-  interfaces.webSocket.connect(this.device.getDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
+  interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
   unschedule('renewWebsocketConnection')
   scheduleResubscriptionToEvents('renewWebsocketConnection')
 }
@@ -2875,7 +2881,7 @@ void processWebsocketMessage(String message) {
       if(albumArtURI == null) {
         html += "<li>${s}: No Image Art Available</li>"
       } else if(albumArtURI.startsWith('/')) {
-        html += "<li>${s}: <br><img src=\"${this.device.getDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
+        html += "<li>${s}: <br><img src=\"${getDeviceDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
       } else {
         html += "<li>${s}: <br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
       }
