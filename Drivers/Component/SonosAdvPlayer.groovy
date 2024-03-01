@@ -155,8 +155,10 @@ metadata {
         input 'createNightModeChildDevice', 'bool', title: 'Create child device for Night Mode control', required: false, defaultValue: false
         input 'createSpeechEnhancementChildDevice', 'bool', title: 'Create child device for Speech Enhancement control', required: false, defaultValue: false
       }
-      input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
-      input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
+      if(hasAudioClipCapability() == true) {
+        input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
+        input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
+      }
     }
   }
 }
@@ -208,6 +210,12 @@ Boolean hasHTPlaybackCapability() {
   } else {return false}
 }
 
+@CompileStatic
+Boolean hasAudioClipCapability() {
+  if(device != null) {
+    return getDeviceDataValue('capabilities').contains('AUDIO_CLIP')
+  } else {return false}
+}
 // =============================================================================
 // End Preference Getters And Passthrough Renames For Clarity
 // =============================================================================
@@ -442,10 +450,10 @@ void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(t
 @CompileStatic
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
-void setTrack(String uri) { parent?.componentSetStreamUrlLocal(this.device, uri, volume) }
+void setTrack(String uri) { componentSetStreamUrlLocal(uri, volume) }
 void playTrack(String uri, BigDecimal volume = null) {
   if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
-  else{ parent?.componentLoadStreamUrlLocal(this.device, uri, volume) }
+  else{ componentLoadStreamUrlLocal(uri, volume) }
 }
 @CompileStatic
 void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
@@ -453,27 +461,41 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
+  if(volume) { volume += getTTSBoostAmount() }
+  else { volume = getPlayerVolume() + getTTSBoostAmount() }
   LinkedHashMap tts = textToSpeech(text, voice)
-  playerLoadAudioClip(tts.uri, volume, tts.duration)
+  if(hasAudioClipCapability() == true) {
+    playerLoadAudioClip(tts.uri, volume, tts.duration)
+  } else {
+    componentPlayTextNoRestoreLocal(text, volume, voice)
+  }
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
-  playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume )
+  if(hasAudioClipCapability() == true) {
+    playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume )
+  } else {
+    componentPlayTextNoRestoreLocal(textToSpeech(text, voice).uri, volume, voice)
+  }
 }
 
 @CompileStatic
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
-  playerLoadAudioClipHighPriority(uri, volume)
+  if(hasAudioClipCapability() == true) {
+    playerLoadAudioClipHighPriority(uri, volume)
+  } else {
+    componentLoadStreamUrlLocal(uri, volume)
+  }
 }
 
 void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
   if(volume) { volume += getTTSBoostAmount() }
   else { volume = getPlayerVolume() + getTTSBoostAmount() }
-  parent?.componentPlayTextNoRestoreLocal(this.device, text, volume, voice)
+  componentPlayTextNoRestoreLocal(text, volume, voice)
 }
 
 void devicePlayTrack(String uri, BigDecimal volume = null) {
-  parent?.componentLoadStreamUrlLocal(this.device, uri, volume)
+  componentLoadStreamUrlLocal(uri, volume)
 }
 
 @CompileStatic
@@ -483,10 +505,10 @@ void unmute(){ playerSetPlayerMute(false) }
 void setLevel(BigDecimal level) { playerSetPlayerVolume(level as Integer) }
 @CompileStatic
 void setVolume(BigDecimal level) { setLevel(level) }
-void setTreble(BigDecimal level) { parent?.componentSetTrebleLocal(this.device, level)}
-void setBass(BigDecimal level) { parent?.componentSetBassLocal(this.device, level)}
-void setLoudness(String mode) { parent?.componentSetLoudnessLocal(this.device, mode == 'on')}
-void setBalance(BigDecimal level) { parent?.componentSetBalanceLocal(this.device, level)}
+void setTreble(BigDecimal level) { componentSetTrebleLocal(level)}
+void setBass(BigDecimal level) { componentSetBassLocal(level)}
+void setLoudness(String mode) { componentSetLoudnessLocal(mode == 'on')}
+void setBalance(BigDecimal level) { componentSetBalanceLocal(level)}
 
 void muteGroup(){
   if(isGroupedAndCoordinator()) {
@@ -695,8 +717,10 @@ void componentRefresh(DeviceWrapper child) {
   }
 }
 
+@CompileStatic
 void componentOn(DeviceWrapper child) {
   String command = child.getDataValue('command').toString()
+  if(command == null) {command = getChildCommandFromDNI(child) }
   logDebug("Child: ${child} command: ${command}")
   switch(command) {
     case 'Crossfade':
@@ -720,8 +744,10 @@ void componentOn(DeviceWrapper child) {
   }
 }
 
+@CompileStatic
 void componentOff(DeviceWrapper child) {
-    String command = child.getDataValue('command')
+  String command = child.getDataValue('command')
+  if(command == null) {command = getChildCommandFromDNI(child) }
   switch(command) {
     case 'Crossfade':
       disableCrossfade()
@@ -1210,10 +1236,18 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
     logTrace("No grouped rincons found!")
   }
 
+  String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == getId()}['@ZoneName']
+  if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
+
+  String currentGroupCoordinatorRincon = zoneGroups.children().children().findAll{it['@UUID'] == getId()}.parent()['@Coordinator']
+  if(currentGroupCoordinatorRincon) {setGroupCoordinatorId(currentGroupCoordinatorRincon)}
+
+  Boolean isGroupCoordinator = currentGroupCoordinatorRincon == getId()
+
   if(groupedRincons != oldGroupedRincons) {
     List<String> newRincons = new ArrayList<String>()
     newRincons.addAll(groupedRincons - oldGroupedRincons)
-    if(newRincons.size() > 0) {
+    if(newRincons.size() > 0 && isGroupCoordinator == true) {
       logTrace("Sending events to newly joined member(s): ${newRincons}")
       sendEventsToNewGroupMembers(newRincons)
     }
@@ -1224,7 +1258,7 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
 
   setGroupPlayerIds(groupedRincons.toList())
 
-  String currentGroupCoordinatorName = zoneGroups.children().children().findAll{it['@UUID'] == getId()}['@ZoneName']
+
   LinkedHashSet currentGroupMemberNames = []
   groupedRincons.each{ gr ->
     currentGroupMemberNames.add(zoneGroups.children().children().findAll{it['@UUID'] == gr}['@ZoneName']) }
@@ -1236,7 +1270,6 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
     updateZoneGroupName(groupName)
   }
 
-  if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
   setIsGrouped(currentGroupMemberCount > 1)
   setGroupMemberCount(currentGroupMemberCount)
   if(currentGroupMemberNames.size() > 0) {setGroupMemberNames(currentGroupMemberNames.toList())}
@@ -1254,6 +1287,21 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
       }
     }
   }
+}
+
+@CompileStatic
+void clearCurrentPlayingStates() {
+  setCurrentArtistName('Not Available')
+  setCurrentAlbumName('Not Available')
+  setCurrentTrackName('Not Available')
+  setCurrentTrackNumber(0)
+  setTrackDataEvents([:])
+  setNextArtistName('Not Available')
+  setNextAlbumName('Not Available')
+  setNextTrackName('Not Available')
+  sendDeviceEvent('albumArtURI' ,'Not Available')
+  sendDeviceEvent('currentFavorite','Not Available')
+  sendDeviceEvent('trackDescription','Not Available')
 }
 
 void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
@@ -1971,6 +2019,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
 
   if(isGroupCoordinator) {
     if(!subValid('sid1')) {
+      clearCurrentPlayingStates()
       subscribeToAVTransport()
       subscribeToWsEvents()
       getPlaybackMetadataStatus()
@@ -3016,6 +3065,171 @@ void httpPostAsync(Map params, String callback = 'localControlCallback') {
 // =============================================================================
 
 
+
+// =============================================================================
+// Local Control Component Methods
+// =============================================================================
+void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
+  logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
+  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
+  Map tts = textToSpeech(text, voice)
+  String streamUrl = tts.uri
+  if (volume) data.volume = (int)volume
+
+  String playerId = getId()
+  if(volume) {componentSetGroupLevelLocal(device, volume)}
+  setAVTransportURIAndPlay(device, streamUrl)
+}
+
+void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  Map params = getSoapActionParams(ip, AVTransport, 'RemoveAllTracksFromQueue')
+  asynchttpPost(callbackMethod, params)
+}
+
+void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  Map controlValues = [CurrentURI: currentURI, CurrentURIMetaData: currentURIMetaData]
+  if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
+  Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
+  Map data = [dni:device.getDeviceNetworkId()]
+  asynchttpPost('setAVTransportURIAndPlayCallback', params, data)
+}
+
+void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
+  if(!responseIsValid(response, 'setAVTransportURICallback')) { return }
+  ChildDeviceWrapper child = app.getChildDevice(data.dni)
+  child.play()
+}
+
+void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  Map controlValues = [CurrentURI: currentURI, CurrentURIMetaData: currentURIMetaData]
+  if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
+  Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
+  Map data = [dni:device.getDeviceNetworkId()]
+  asynchttpPost('localControlCallback', params, data)
+}
+
+void addURIToQueue(String enqueuedURI, String currentURIMetaData = null) {
+  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  Map controlValues = [EnqueuedURI: enqueuedURI, CurrentURIMetaData: currentURIMetaData]
+  if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
+  Map params = getSoapActionParams(ip, AVTransport, 'AddURIToQueue', controlValues)
+  // removeAllTracksFromQueue(device)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
+  String playerId = device.getDataValue('id')
+  logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
+  if(volume) {componentSetGroupLevelLocal(device, volume)}
+  setAVTransportURIAndPlay(device, streamUrl)
+}
+
+void componentSetStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
+  String playerId = device.getDataValue('id')
+  logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
+  if(volume) {componentSetGroupLevelLocal(device, volume)}
+  setAVTransportURI(device, streamUrl)
+}
+
+void getDeviceStateAsync(String callbackMethod = 'localControlCallback', Map service, String action, Map data = null, Map controlValues = null) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map params = getSoapActionParams(ip, service, action, controlValues)
+  asynchttpPost(callbackMethod, params, data)
+}
+
+void componentSetPlayerLevelLocal(BigDecimal level) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredVolume: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetTrebleLocal(BigDecimal level) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredTreble: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetTreble', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetBassLocal(BigDecimal level) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredBass: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetBalanceLocal(BigDecimal level) {
+  if(!hasLeftAndRightChannelsSync(device)) {
+    logWarn("Can not set balance on non-stereo pair.")
+    return
+  }
+  String ip = device.getDataValue('localUpnpHost')
+  level *= 5
+  if(level < 0) {
+    level = level < -100 ? -100 : level
+    Map controlValues = [DesiredVolume: 100 + level, Channel: "RF"]
+    Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+    controlValues = [DesiredVolume: 100, Channel: "LF"]
+    params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+  } else if(level > 0) {
+    level = level > 100 ? 100 : level
+    Map controlValues = [DesiredVolume: 100 - level, Channel: "LF"]
+    Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+    controlValues = [DesiredVolume: 100, Channel: "RF"]
+    params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+  } else {
+    Map controlValues = [DesiredVolume: 100, Channel: "LF"]
+    Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+    controlValues = [DesiredVolume: 100, Channel: "RF"]
+    params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
+    asynchttpPost('localControlCallback', params)
+  }
+}
+
+void componentSetLoudnessLocal(Boolean desiredLoudness) {
+  String ip = device.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredLoudness: desiredLoudness]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetLoudness', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentMuteGroupLocal(Boolean desiredMute) {
+  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  String ip = coordinator.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredMute: desiredMute]
+  Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetGroupRelativeLevelLocal(Integer adjustment) {
+  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  String ip = coordinator.getDataValue('localUpnpHost')
+  Map controlValues = [Adjustment: adjustment]
+  Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+
+void componentSetGroupLevelLocal(BigDecimal level) {
+  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  String ip = coordinator.getDataValue('localUpnpHost')
+  Map controlValues = [DesiredVolume: level]
+  Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
+  asynchttpPost('localControlCallback', params)
+}
+// =============================================================================
+// Local Control Component Methods
+// =============================================================================
+
+
+
 // =============================================================================
 // Websocket Incoming Data Processing
 // =============================================================================
@@ -3169,6 +3383,8 @@ void updateFavsIn(Integer time, Map data) {
     } else {
       runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
     }
+  } else if(favoritesMap != null) {
+    runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
   }
 }
 
