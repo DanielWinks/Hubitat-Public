@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.6.2',
+    version: '0.7.0',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
@@ -1038,6 +1038,8 @@ void parse(String raw) {
       processWebsocketMessage(raw)
       return
     }
+  } catch (Exception e) { logWarn("Ran into an issue parsing websocket: ${e}") }
+  try {
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
     String xmlBody = (String)message?.body
@@ -1045,30 +1047,37 @@ void parse(String raw) {
     if(xmlBody == null || xmlBody == '') {return}
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
     if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
-      processAVTransportMessages(xmlBody, getLocalUpnpUrl())
+      try {
+        processAVTransportMessages(xmlBody, getLocalUpnpUrl())
+      } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
     }
     else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
-      setLastInboundMrRcEvent()
-      processRenderingControlMessages(xmlBody)
+      try {
+        setLastInboundMrRcEvent()
+        processRenderingControlMessages(xmlBody)
+      } catch (Exception e) { logWarn("Ran into an issue parsing mrc: ${e}") }
     }
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
-      if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
-      LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
-      if(getGroupPlayerIds() != null) {
-        oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
-      }
-      setLastInboundZgtEvent()
-      processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)
+      try {
+        if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
+        LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
+        if(getGroupPlayerIds() != null) {
+          oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
+        }
+        setLastInboundZgtEvent()
+        processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)
+      } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
     }
     else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-      setLastInboundMrGrcEvent()
-      processGroupRenderingControlMessages(xmlBody)
+      try {
+        setLastInboundMrGrcEvent()
+        processGroupRenderingControlMessages(xmlBody)
+      } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
     }
     else {
       logDebug("Could not determine service type for message: ${message}")
     }
-  }
-  catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
+  } catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
 }
 
 LinkedHashMap getMapForRaw(String raw) {
