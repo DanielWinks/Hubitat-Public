@@ -94,6 +94,8 @@ metadata {
   attribute 'bass', 'number'
   attribute 'loudness', 'enum', [ 'on', 'off' ]
   attribute 'balance', 'number'
+  attribute 'nightMode', 'enum', [ 'on', 'off' ]
+  attribute 'speechEnhancement', 'enum', [ 'on', 'off' ]
   command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
   command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
   command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -142,9 +144,17 @@ metadata {
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
-      input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
+      if(deviceHasBattery() == true) {
+        input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
+      }
       input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
-      input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
+      if(getRightChannelRincon() != null && getRightChannelRincon() != '') {
+        input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
+      }
+      if(hasHTPlaybackCapability() == true) {
+        input 'createNightModeChildDevice', 'bool', title: 'Create child device for Night Mode control', required: false, defaultValue: false
+        input 'createSpeechEnhancementChildDevice', 'bool', title: 'Create child device for Speech Enhancement control', required: false, defaultValue: false
+      }
       input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
       input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
     }
@@ -168,6 +178,8 @@ Boolean getCreateRepeatAllChildDevice() { return settings.createRepeatAllChildDe
 Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
 Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
 Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
+Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
+Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
 Boolean getChimeBeforeTTS() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
 Boolean getAlwaysUseLoadAudioClip() { return settings.alwaysUseLoadAudioClip != null ? settings.alwaysUseLoadAudioClip : true }
 
@@ -188,6 +200,14 @@ String getCurrentTTSVoice() {
   }
   return voice
 }
+
+@CompileStatic
+Boolean hasHTPlaybackCapability() {
+  if(device != null) {
+    return getDeviceDataValue('capabilities').contains('HT_PLAYBACK')
+  } else {return false}
+}
+
 // =============================================================================
 // End Preference Getters And Passthrough Renames For Clarity
 // =============================================================================
@@ -290,6 +310,8 @@ void secondaryConfiguration() {
   createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
   createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
+  createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
+  createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
   audioClipQueueInitialization()
@@ -315,6 +337,8 @@ void migrationCleanup() {
   if(settings.createBatteryStatusChildDevice == null) { settings.createBatteryStatusChildDevice = false }
   if(settings.createFavoritesChildDevice == null) { settings.createFavoritesChildDevice = false }
   if(settings.createRightChannelChildDevice == null) { settings.createRightChannelChildDevice = false }
+  if(settings.createNightModeChildDevice == null) { settings.createNightModeChildDevice = false }
+  if(settings.createSpeechEnhancementChildDevice == null) { settings.createSpeechEnhancementChildDevice = false }
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
   if(settings.alwaysUseLoadAudioClip == null) { settings.alwaysUseLoadAudioClip = true }
 }
@@ -627,31 +651,53 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 // =============================================================================
 // Child device methods
 // =============================================================================
+String getChildCommandFromDNI(DeviceWrapper dev) {
+  if(dev.getDeviceNetworkId() == getCrossfadeControlChildDNI()) {return 'Crossfade'}
+  if(dev.getDeviceNetworkId() == getShuffleControlChildDNI()) {return 'Shuffle'}
+  if(dev.getDeviceNetworkId() == getRepeatOneControlChildDNI()) {return 'RepeatOne'}
+  if(dev.getDeviceNetworkId() == getRepeatAllControlChildDNI()) {return 'RepeatAll'}
+  if(dev.getDeviceNetworkId() == getMuteControlChildDNI()) {return 'Mute'}
+  if(dev.getDeviceNetworkId() == getBatteryStatusChildDNI()) {return 'BatteryStatus'}
+  if(dev.getDeviceNetworkId() == getFavoritesChildDNI()) {return 'Favorites'}
+  if(dev.getDeviceNetworkId() == getRightChannelChildDNI()) {return 'RightChannel'}
+  if(dev.getDeviceNetworkId() == getNightModeChildDNI()) {return 'NightMode'}
+  if(dev.getDeviceNetworkId() == getSpeechEnhancementChildDNI()) {return 'SpeechEnhancement'}
+}
+
+@CompileStatic
 void componentRefresh(DeviceWrapper child) {
-  String command = child.getDataValue('command')
+  String command = getChildDeviceDataValue(child, 'command')
+  if(command == null) {command = getChildCommandFromDNI(child) }
   logDebug("Child: ${child} command: ${command}")
   switch(command) {
     case 'Crossfade':
-      getCrossfadeControlChild().sendEvent(name:'switch', value: device.currentState('currentCrossfadeMode')?.value )
+      getCrossfadeControlChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('currentCrossfadeMode') )
     break
     case 'Shuffle':
-      getShuffleControlChild().sendEvent(name:'switch', value: device.currentState('currentShuffleMode')?.value )
+      getShuffleControlChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('currentShuffleMode') )
     break
     case 'RepeatOne':
-      getRepeatOneControlChild().sendEvent(name:'switch', value: device.currentState('currentRepeatOneMode')?.value)
+      getRepeatOneControlChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('currentRepeatOneMode'))
     break
     case 'RepeatAll':
-      getRepeatAllControlChild().sendEvent(name:'switch', value: device.currentState('currentRepeatAllMode')?.value )
+      getRepeatAllControlChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('currentRepeatAllMode') )
     break
     case 'Mute':
-      String muteValue = device.currentState('mute')?.value != null ? device.currentState('mute').value : 'unmuted'
+      String muteValue = getDeviceCurrentStateValue('mute') != null ? getDeviceCurrentStateValue('mute') : 'unmuted'
       getMuteControlChild().sendEvent(name:'switch', value: muteValue )
+    break
+    case 'NightMode':
+      getNightModeChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('nightMode') )
+    break
+    case 'SpeechEnhancement':
+      getSpeechEnhancementChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('speechEnhancement') )
     break
   }
 }
 
 void componentOn(DeviceWrapper child) {
   String command = child.getDataValue('command').toString()
+  logDebug("Child: ${child} command: ${command}")
   switch(command) {
     case 'Crossfade':
       enableCrossfade()
@@ -665,8 +711,13 @@ void componentOn(DeviceWrapper child) {
     case 'RepeatAll':
       repeatAll()
     break
+    case 'NightMode':
+      setNightMode(true)
+    break
+    case 'SpeechEnhancement':
+      setDialogMode(true)
+    break
   }
-
 }
 
 void componentOff(DeviceWrapper child) {
@@ -683,6 +734,12 @@ void componentOff(DeviceWrapper child) {
     break
     case 'RepeatAll':
       repeatNone()
+    break
+    case 'NightMode':
+      setNightMode(false)
+    break
+    case 'SpeechEnhancement':
+      setDialogMode(false)
     break
   }
 }
@@ -722,6 +779,8 @@ String getMuteControlChildDNI() { return "${device.getDeviceNetworkId()}-MuteCon
 String getBatteryStatusChildDNI() { return "${device.getDeviceNetworkId()}-BatteryStatus" }
 String getFavoritesChildDNI() { return "${device.getDeviceNetworkId()}-Favorites" }
 String getRightChannelChildDNI() { return "${device.getDeviceNetworkId()}-RightChannel" }
+String getNightModeChildDNI() { return "${device.getDeviceNetworkId()}-NightMode" }
+String getSpeechEnhancementChildDNI() { return "${device.getDeviceNetworkId()}-SpeechEnhancement" }
 ChildDeviceWrapper getCrossfadeControlChild() { return getChildDevice(getCrossfadeControlChildDNI()) }
 ChildDeviceWrapper getShuffleControlChild() { return getChildDevice(getShuffleControlChildDNI()) }
 ChildDeviceWrapper getRepeatOneControlChild() { return getChildDevice(getRepeatOneControlChildDNI()) }
@@ -730,6 +789,8 @@ ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlC
 ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatteryStatusChildDNI()) }
 ChildDeviceWrapper getFavoritesChild() { return getChildDevice(getFavoritesChildDNI()) }
 ChildDeviceWrapper getRightChannelChild() { return getChildDevice(getRightChannelChildDNI()) }
+ChildDeviceWrapper getNightModeChild() { return getChildDevice(getNightModeChildDNI()) }
+ChildDeviceWrapper getSpeechEnhancementChild() { return getChildDevice(getSpeechEnhancementChildDNI()) }
 // =============================================================================
 // End Child Device Helpers
 // =============================================================================
@@ -848,11 +909,13 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
 }
 
 Boolean deviceHasBattery() {
-  Map params = [uri: "${getLocalUpnpUrl()}/status/batterystatus"]
-  httpGet(params) {resp ->
-    if(resp.status == 200) {
-      return resp.data.children().find{it.name() == 'LocalBatteryStatus'}.size() > 0
-    } else { return false }
+  if(device != null) {
+        Map params = [uri: "${getLocalUpnpUrl()}/status/batterystatus"]
+    httpGet(params) {resp ->
+      if(resp.status == 200) {
+        return resp.data.children().find{it.name() == 'LocalBatteryStatus'}.size() > 0
+      } else { return false }
+    }
   }
 }
 
@@ -894,6 +957,42 @@ void createRemoveRightChannelChildDevice(Boolean create) {
 
     this.device.updateSetting('createRightChannelChildDevice', false)
   }
+}
+
+void createRemoveNightModeChildDevice(Boolean create) {
+  String dni = getNightModeChildDNI()
+  ChildDeviceWrapper child = getNightModeChild()
+  if(!child && create) {
+    try {
+      logDebug("Creating NightMode device")
+      child = addChildDevice('hubitat', 'Generic Component Switch', dni,
+        [ name: 'Sonos NightMode Control',
+          label: "Sonos NightMode - ${this.getDataValue('name')}"]
+      )
+      child.updateDataValue('command', 'NightMode')
+    } catch (UnknownDeviceTypeException e) {
+      logException('createRemoveNightModeChildDevice', e)
+    }
+  }
+  else if(!create && child){ deleteChildDevice(dni) }
+}
+
+void createRemoveSpeechEnhancementChildDevice(Boolean create) {
+  String dni = getSpeechEnhancementChildDNI()
+  ChildDeviceWrapper child = getSpeechEnhancementChild()
+  if(!child && create) {
+    try {
+      logDebug("Creating SpeechEnhancement device")
+      child = addChildDevice('hubitat', 'Generic Component Switch', dni,
+        [ name: 'Sonos SpeechEnhancement Control',
+          label: "Sonos SpeechEnhancement - ${this.getDataValue('name')}"]
+      )
+      child.updateDataValue('command', 'SpeechEnhancement')
+    } catch (UnknownDeviceTypeException e) {
+      logException('createRemoveSpeechEnhancementChildDevice', e)
+    }
+  }
+  else if(!create && child){ deleteChildDevice(dni) }
 }
 // =============================================================================
 // Create Child Devices
@@ -1200,6 +1299,18 @@ String getGroupMuteState() {
   return getDevice().currentValue('groupMute',true).toString()
 }
 
+@CompileStatic
+void setNightModeState(String value) {
+  sendDeviceEvent('nightMode', value)
+  sendChildEvent(getNightModeChild(), 'switch', value)
+}
+
+@CompileStatic
+void setDialogLevelState(String value) {
+  sendDeviceEvent('speechEnhancement', value)
+  sendChildEvent(getSpeechEnhancementChild(), 'switch', value)
+}
+
 
 @CompileStatic
 void processRenderingControlMessages(String xmlString) {
@@ -1236,10 +1347,12 @@ void processRenderingControlMessages(String xmlString) {
 
   String loudness = instanceId.children().findAll{((GPathResult)it).name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
   if(loudness) { setLoudnessState(loudness == '1' ? 'on' : 'off') }
-}
 
-void addEventToRegistry(Event event) {
+  String nightMode = instanceId['NightMode']['@val']
+  if(nightMode) { setNightModeState(nightMode == '1' ? 'on' : 'off') }
 
+  String dialogLevel = instanceId['DialogLevel']['@val']
+  if(dialogLevel) { setDialogLevelState(dialogLevel == '1' ? 'on' : 'off') }
 }
 // =============================================================================
 // Parse Helper Methods
@@ -1616,7 +1729,9 @@ void clearCurrentNextArtistAlbumTrackData() {
 void clearTrackDataEvent() {
   sendEvent(name: 'trackData', value: '{}')
 }
-
+// =============================================================================
+// End Misc Helpers
+// =============================================================================
 
 
 
@@ -1738,17 +1853,41 @@ DeviceWrapper getDevice() { return this.device }
 LinkedHashMap getDeviceSettings() { return this.settings }
 
 String getDeviceDataValue(String name) {
-  synchronized(deviceDataMutex) {
-    return this.device.getDataValue(name)
+  if(this.device != null) {
+    synchronized(deviceDataMutex) {
+      return this.device.getDataValue(name)
+    }
   }
 }
 void setDeviceDataValue(String name, String value) {
-  synchronized(deviceDataMutex) {
-    this.device.updateDataValue(name, value)
+  if(this.device != null) {
+    synchronized(deviceDataMutex) {
+      this.device.updateDataValue(name, value)
+    }
+  }
+}
+
+Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
+  if(this.device != null) {
+    synchronized(deviceDataMutex) {
+      return this.device.currentValue(name, skipCache)
+    }
   }
 }
 
 void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
+
+void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
+  if(child != null) {child.sendEvent(name:name, value:value)}
+}
+
+Object getChildCurrentStateValue(DeviceWrapper child, String name, Boolean skipCache = false) {
+  if(child != null) {child.currentValue(name, skipCache)}
+}
+
+String getChildDeviceDataValue(DeviceWrapper child, String name) {
+  if(child != null) { return child.getDataValue(name) }
+}
 
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
@@ -1994,31 +2133,49 @@ void setPlayMode(String playMode){
       sendDeviceEvent('currentRepeatOneMode', 'off')
       sendDeviceEvent('currentRepeatAllMode', 'off')
       sendDeviceEvent('currentShuffleMode', 'off')
+      sendChildEvent(getRepeatOneControlChild(), 'switch', 'off')
+      sendChildEvent(getRepeatAllControlChild(), 'switch', 'off')
+      sendChildEvent(getShuffleControlChild(), 'switch', 'off')
     break
     case 'REPEAT_ALL':
       sendDeviceEvent('currentRepeatOneMode', 'off')
       sendDeviceEvent('currentRepeatAllMode', 'on')
       sendDeviceEvent('currentShuffleMode', 'off')
+      sendChildEvent(getRepeatOneControlChild(), 'switch', 'off')
+      sendChildEvent(getRepeatAllControlChild(), 'switch', 'on')
+      sendChildEvent(getShuffleControlChild(), 'switch', 'off')
     break
     case 'REPEAT_ONE':
       sendDeviceEvent('currentRepeatOneMode', 'on')
       sendDeviceEvent('currentRepeatAllMode', 'off')
       sendDeviceEvent('currentShuffleMode', 'off')
+      sendChildEvent(getRepeatOneControlChild(), 'switch', 'on')
+      sendChildEvent(getRepeatAllControlChild(), 'switch', 'off')
+      sendChildEvent(getShuffleControlChild(), 'switch', 'off')
     break
     case 'SHUFFLE_NOREPEAT':
       sendDeviceEvent('currentRepeatOneMode', 'off')
       sendDeviceEvent('currentRepeatAllMode', 'off')
       sendDeviceEvent('currentShuffleMode', 'on')
+      sendChildEvent(getRepeatOneControlChild(), 'switch', 'off')
+      sendChildEvent(getRepeatAllControlChild(), 'switch', 'off')
+      sendChildEvent(getShuffleControlChild(), 'switch', 'on')
     break
     case 'SHUFFLE':
       sendDeviceEvent('currentRepeatOneMode', 'off')
       sendDeviceEvent('currentRepeatAllMode', 'on')
       sendDeviceEvent('currentShuffleMode', 'on')
+      sendChildEvent(getRepeatOneControlChild(), 'switch', 'off')
+      sendChildEvent(getRepeatAllControlChild(), 'switch', 'on')
+      sendChildEvent(getShuffleControlChild(), 'switch', 'on')
     break
     case 'SHUFFLE_REPEAT_ONE':
       sendDeviceEvent('currentRepeatOneMode', 'on')
       sendDeviceEvent('currentRepeatAllMode', 'off')
       sendDeviceEvent('currentShuffleMode', 'on')
+      sendChildEvent(getRepeatOneControlChild(), 'switch', 'on')
+      sendChildEvent(getRepeatAllControlChild(), 'switch', 'off')
+      sendChildEvent(getShuffleControlChild(), 'switch', 'on')
     break
   }
   sendGroupEvents()
@@ -2032,6 +2189,7 @@ String getCurrentShuffleMode() { return this.device.currentValue('currentShuffle
 void setCrossfadeMode(String currentCrossfadeMode) {
   sendDeviceEvent('currentCrossfadeMode', currentCrossfadeMode)
   sendGroupEvents()
+  sendChildEvent(getCrossfadeControlChild(), 'switch', currentCrossfadeMode)
 }
 String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMode') }
 
@@ -2741,6 +2899,8 @@ void dequeueAudioClip() {
 // End Websocket Commands
 // =============================================================================
 
+
+
 // =============================================================================
 // Grouping and Ungrouping
 // =============================================================================
@@ -2800,6 +2960,61 @@ void playerEvictUnlistedPlayers(List<String> playerIdsToKeep) {
   List<String> playerIdsToRemove = getGroupPlayerIds() - playerIdsToKeep
   playerModifyGroupMembers(playerIdsToKeep, playerIdsToRemove)
 }
+// =============================================================================
+// End Grouping and Ungrouping
+// =============================================================================
+
+
+
+// =============================================================================
+// SOAP Commands
+// =============================================================================
+@CompileStatic
+void setNightMode(Boolean desiredValue) {
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [EQType: 'NightMode', DesiredValue: desiredValue ? 1 : 0]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
+  httpPostAsync(params)
+}
+
+@CompileStatic
+void setDialogMode(Boolean desiredValue) {
+  logTrace('setDialogMode')
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [EQType: 'DialogLevel', DesiredValue: desiredValue ? 1 : 0]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
+  logDebug(params)
+  httpPostAsync(params)
+}
+
+@CompileStatic
+void componentSetBassLocal(DeviceWrapper device, BigDecimal level) {
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [DesiredBass: level]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
+  httpPostAsync(params)
+}
+
+void localControlCallback(AsyncResponse response, Map data) {
+  if (response?.status != 200 || response.hasError()) {
+    logError("Request returned HTTP status ${response.status}")
+    logError("Request error message: ${response.getErrorMessage()}")
+    try{logError("Request ErrorData: ${response.getErrorData()}")} catch(Exception e){}
+    try{logErrorJson("Request ErrorJson: ${response.getErrorJson()}")} catch(Exception e){}
+    try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
+  }
+  if(response?.status == 200 && response && response.hasError() == false) {
+    logTrace("localControlCallback: ${response.getData()}")
+  }
+}
+
+void httpPostAsync(Map params, String callback = 'localControlCallback') {
+  asynchttpPost(callback, params)
+}
+// =============================================================================
+// End SOAP Commands
+// =============================================================================
+
 
 // =============================================================================
 // Websocket Incoming Data Processing
@@ -2994,3 +3209,6 @@ void isFavoritePlaying(Map json) {
 
   setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
+// =============================================================================
+// End Websocket Incoming Data Processing
+// =============================================================================
