@@ -255,7 +255,9 @@ library(
     SetBass: [arguments: [InstanceID: 0, DesiredBass: 0]],
     SetTreble: [arguments: [InstanceID: 0, DesiredTreble: 0]],
     GetLoudness: [arguments: [InstanceID: 0, Channel: "Master"]],
-    SetLoudness: [arguments: [InstanceID: 0, Channel: "Master", DesiredLoudness: true]]
+    SetLoudness: [arguments: [InstanceID: 0, Channel: "Master", DesiredLoudness: true]],
+    GetEQ: [arguments: [InstanceID: 0, EQType: "NightMode"]],
+    SetEQ: [arguments: [InstanceID: 0, EQType: "DialogLevel", DesiredValue: 0]]
   ]
 ]
 
@@ -405,6 +407,7 @@ String getBaseControlXML(Map service, String action, Map controlValues = null) {
 
 @CompileStatic
 Map getSoapActionParams(String deviceIp, Map service, String action, Map controlValues = null) {
+  logTrace("Get SOAP action params: IP=${deviceIp} Service=${service} Action=${action} ControlValues=${controlValues}")
   String body = getBaseControlXML(service, action, controlValues)
   String uri = "http://${deviceIp}${service.controlURL}"
   String soapAction = "${service.serviceType}#${action}"
