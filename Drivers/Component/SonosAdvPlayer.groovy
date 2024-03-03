@@ -222,17 +222,19 @@ Boolean hasAudioClipCapability() {
 
 
 
+import java.util.Random
 // =============================================================================
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static java.util.concurrent.Semaphore deviceDataMutex = new java.util.concurrent.Semaphore(1)
+@Field static java.util.concurrent.Semaphore subscribeMutex = new java.util.concurrent.Semaphore(1)
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static ConcurrentHashMap<String, Boolean> webSocketStatuses = new ConcurrentHashMap<String, Instant>()
 @Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
+@Field static java.util.Random rand = new java.util.Random()
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -284,6 +286,8 @@ Boolean hasAudioClipCapability() {
 // Initialize and Configure
 // =============================================================================
 void initialize() {
+  subscribeMutex.release()
+  deviceDataMutex.release()
   configure()
   fullRenewSubscriptions()
   // runEvery3Hours('fullRenewSubscriptions')
@@ -300,11 +304,15 @@ void registerRinconId() {
 }
 
 void fullRenewSubscriptions() {
+  setDeviceDataValue('WS-playback', 'Unsubscribed')
+  setDeviceDataValue('WS-playbackMetadata', 'Unsubscribed')
+  setDeviceDataValue('WS-playlists', 'Unsubscribed')
+  setDeviceDataValue('WS-audioClip', 'Unsubscribed')
+  setDeviceDataValue('WS-groups', 'Unsubscribed')
   unsubscribeFromAVTransport()
   unsubscribeFromMrRcEvents()
   unsubscribeFromZgtEvents()
   unsubscribeFromMrGrcEvents()
-  if(webSocketStatuses == null) {webSocketStatuses = new ConcurrentHashMap<String, Boolean>()}
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
   runIn(7, 'subscribeToEvents', [overwrite: true])
 }
@@ -1038,7 +1046,11 @@ void parse(String raw) {
       processWebsocketMessage(raw)
       return
     }
-  } catch (Exception e) { logWarn("Ran into an issue parsing websocket: ${e}") }
+  } catch (Exception e) {
+    logWarn("Ran into an issue parsing websocket: ${e}")
+
+    logWarn("JSON from failed websocket parse: ${raw}")
+    }
   try {
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
@@ -1445,13 +1457,15 @@ void setSid(String sid, String value) {
   setDeviceDataValue(sid, value)
 }
 void deleteSid(String sid) {
+  logTrace("Removing SID for ${sid}")
   device.removeDataValue(sid)
   device.removeDataValue("${sid}-expires")
 }
 @CompileStatic
 Boolean subValid(String sid) {
   Long exp = getDeviceDataValue("${sid}-expires") as Long
-  if(exp > Instant.now().getEpochSecond() && hasSid(sid) == true) {
+  if(exp == null) { return false }
+  if((exp - RESUB_INTERVAL / 2) > Instant.now().getEpochSecond() && hasSid(sid) == true) {
     return true
   } else {
     return false
@@ -1472,33 +1486,121 @@ void retrySubscription(String eventsToRetry, Integer retryTime = 60) {
   runIn(retryTime, eventsToRetry, [overwrite: true])
 }
 
-void removeResub(String resub) {
-  unschedule(resub)
+void removeResub(String resub) { unschedule(resub)}
+
+Integer getRandomLockRetry(Integer low = 3, Integer high = 30) {
+  return Math.abs( rand.nextInt() % (high - low) ) + low
 }
 
+@CompileStatic
+void upnpSubscribeGeneric(String sub, String subId, String subPath, String callback, String evtSub) {
+  Boolean acquired = subscribeMutex.tryAcquire()
+  if(acquired == true) {
+    try {
+      if(subValid(subId) != true) {
+        sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
+      }
+    } catch(Exception e) {
+      logInfo("Subscription to ${evtSub} failed due to ${e}")
+      logInfo("Values used for attempt: sub:${sub} subId:${subId} subPath:${subPath} callback:${callback} evtSub:${evtSub}")
+      subscribeMutex.release()
+    }
+  } else {
+    Integer timeout = getRandomLockRetry()
+    logTrace("${sub} attempt in progress...trying again in ${timeout} seconds.")
+    retrySubscription(sub, timeout)
+  }
+}
+
+@CompileStatic
+void upnpResubscribeGeneric(String resub, String subId, String evtSub, String callback) {
+  Boolean acquired = subscribeMutex.tryAcquire()
+  if(acquired == true) {
+    try {
+      if(subValid(subId)) {
+        sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
+      } else { subscribeToAVTransport() }
+    } catch(Exception e) {
+      logInfo("Subscription to ${evtSub} failed due to ${e}")
+      logInfo("Values used for attempt: resub:${resub} subId:${subId} callback:${callback} evtSub:${evtSub}")
+      subscribeMutex.release()
+    }
+  } else {
+    Integer timeout = getRandomLockRetry()
+    logTrace("${resub} attempt in progress...trying again in ${timeout} seconds.")
+    retrySubscription(resub, timeout)
+  }
+}
+
+@CompileStatic
+void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evtSub, String callback) {
+  Boolean acquired = subscribeMutex.tryAcquire()
+  if(acquired == true) {
+    try {
+      sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+      deleteSid(subId)
+      removeResub(resub)
+    } catch(Exception e) {
+      logInfo("${unsub} failed due to ${e}")
+      subscribeMutex.release()
+    }
+  } else {
+    Integer timeout = getRandomLockRetry()
+    logTrace("${unsub} attempt in progress...trying again in ${timeout} seconds.")
+    retrySubscription(resub, timeout)
+  }
+}
+
+@CompileStatic
+void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {
+  if(response?.status == 412){
+    if(hasSid(subId)) {
+      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+      deleteSid(subId)
+      retrySubscription(sub, 5)
+    } else {
+      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+      logInfo("Values used for attempt: sub:${sub} subId:${subId} resub:${resub} domain:${domain}")
+      retrySubscription(sub, 60)
+    }
+  } else if(response?.status == 200) {
+    logTrace("Sucessfully subscribed to ${domain}")
+    updateSid(subId, response.headers)
+    scheduleResubscriptionToEvents(resub)
+  }
+  subscribeMutex.release()
+}
+
+@CompileStatic
+void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse response) {
+  if(response?.status == 412){
+    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
+  } else if(response?.status == 200) {
+    logTrace("Sucessfully unsubscribed to ${domain}")
+  }
+  deleteSid(subId)
+  subscribeMutex.release()
+}
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToAVTransport() {
+  String sub = 'subscribeToAVTransport'
   String subId = 'sid1'
   String subPath = '/avt'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
-  if(subValid(subId)) { resubscribeToAVTransport() }
-  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
+  upnpSubscribeGeneric(sub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
 void resubscribeToAVTransport() {
-  String subId = 'sid1'
   String resub = 'resubscribeToAVTransport'
+  String subId = 'sid1'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
-  if(subValid(subId)) {
-    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
-  } else { subscribeToAVTransport() }
-  scheduleResubscriptionToEvents(resub)
+  upnpResubscribeGeneric(resub, subId, evtSub, callback)
 }
 
 @CompileStatic
@@ -1507,70 +1609,45 @@ void subscribeResubscribeToMrAvTCallback(HubResponse response) {
   String resub = 'resubscribeToAVTransport'
   String subId = 'sid1'
   String domain = MRAVT_EVENTS_DOMAIN
-  if(response?.status == 412){
-    if(hasSid(subId)) {
-      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
-      deleteSid(subId)
-      retrySubscription(sub, 5)
-    } else {
-      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
-      retrySubscription(sub, 60)
-    }
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully subscribed to ${domain}")
-    updateSid(subId, response.headers)
-    scheduleResubscriptionToEvents(resub)
-  }
+  subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
 
 @CompileStatic
 void unsubscribeFromAVTransport() {
+  String unsub = 'unsubscribeFromAVTransport'
   String subId = 'sid1'
   String resub = 'resubscribeToAVTransport'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_UNSUB_CALLBACK
-  if(subValid(subId)) {
-    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
-    removeResub(resub)
-  } else if (hasSid(subId)) {deleteSid(subId)}
+  upnpUnsubscribeGeneric(unsub, subId, resub, evtSub, callback)
 }
 
 @CompileStatic
 void unsubscribeToMrAvTCallback(HubResponse response) {
   String subId = 'sid1'
   String domain = MRAVT_EVENTS_DOMAIN
-  if(response?.status == 412){
-    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully unsubscribed to ${domain}")
-  }
-  deleteSid(subId)
+  upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
-
-
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/RenderingControl/Event' //sid2
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToMrRcEvents() {
+  String sub = 'subscribeToMrRcEvents'
   String subId = 'sid2'
   String subPath = '/mrc'
   String evtSub = MRRC_EVENTS
   String callback = MRRC_EVENTS_CALLBACK
-  if(subValid(subId)) { resubscribeToMrRcEvents() }
-  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
+  upnpSubscribeGeneric(sub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
 void resubscribeToMrRcEvents() {
-  String subId = 'sid2'
   String resub = 'resubscribeToMrRcEvents'
+  String subId = 'sid2'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
-  if(subValid(subId)) {
-    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
-  } else { subscribeToMrRcEvents() }
-  scheduleResubscriptionToEvents(resub)
+  upnpResubscribeGeneric(resub, subId, evtSub, callback)
 }
 
 @CompileStatic
@@ -1579,44 +1656,24 @@ void subscribeResubscribeMrRcCallback(HubResponse response) {
   String resub = 'resubscribeToMrRcEvents'
   String subId = 'sid2'
   String domain = MRRC_EVENTS_DOMAIN
-  if(response?.status == 412){
-    if(hasSid(subId)) {
-      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
-      deleteSid(subId)
-      retrySubscription(sub, 5)
-    } else {
-      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
-      retrySubscription(sub, 60)
-    }
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully subscribed to ${domain}")
-    updateSid(subId, response.headers)
-    scheduleResubscriptionToEvents(resub)
-  }
+  subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
 
 @CompileStatic
 void unsubscribeFromMrRcEvents() {
+  String unsub = 'unsubscribeFromMrRcEvents'
   String subId = 'sid2'
   String resub = 'resubscribeToMrRcEvents'
   String evtSub = MRRC_EVENTS
   String callback = MRRC_EVENTS_UNSUB_CALLBACK
-  if(subValid(subId)) {
-    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
-    removeResub(resub)
-  } else if (hasSid(subId)) {deleteSid(subId)}
+  upnpUnsubscribeGeneric(unsub, subId, resub, evtSub, callback)
 }
 
 @CompileStatic
 void unsubscribeFromMrRcEventsCallback(HubResponse response) {
   String subId = 'sid2'
   String domain = MRRC_EVENTS_DOMAIN
-  if(response?.status == 412){
-    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully unsubscribed to ${domain}")
-  }
-  deleteSid(subId)
+  upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 
 // /////////////////////////////////////////////////////////////////////////////
@@ -1624,24 +1681,21 @@ void unsubscribeFromMrRcEventsCallback(HubResponse response) {
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToZgtEvents() {
+  String sub = 'subscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_CALLBACK
-  if(subValid(subId)) { resubscribeToZgtEvents() }
-  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
+  upnpSubscribeGeneric(sub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
 void resubscribeToZgtEvents() {
-  String subId = 'sid3'
   String resub = 'resubscribeToZgtEvents'
+  String subId = 'sid3'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_CALLBACK
-  if(subValid(subId)) {
-    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
-  } else { subscribeToZgtEvents() }
-  scheduleResubscriptionToEvents(resub)
+  upnpResubscribeGeneric(resub, subId, evtSub, callback)
 }
 
 @CompileStatic
@@ -1650,79 +1704,45 @@ void subscribeResubscribeToZgtCallback(HubResponse response) {
   String resub = 'resubscribeToZgtEvents'
   String subId = 'sid3'
   String domain = ZGT_EVENTS_DOMAIN
-  if(response?.status == 412){
-    if(hasSid(subId)) {
-      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
-      deleteSid(subId)
-      retrySubscription(sub, 5)
-    } else {
-      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
-      retrySubscription(sub, 60)
-    }
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully subscribed to ${domain}")
-    updateSid(subId, response.headers)
-    scheduleResubscriptionToEvents(resub)
-  }
-}
-
-void resubscribeToZgtCallback(HubResponse response) {
-  if(response?.status == 412){
-    logWarn('Failed to resubscribe to ZoneGroupTopology. Will trying subscribing again in 30 seconds.')
-    deleteSid('sid3')
-    retrySubscription('subscribeToZgtEvents')
-  } else if(response?.status == 200) {
-    logTrace('Sucessfully resubscribed to ZoneGroupTopology')
-    updateSid('sid3', response.headers)
-  }
+  subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
 
 @CompileStatic
 void unsubscribeFromZgtEvents() {
+  String unsub = 'unsubscribeFromZgtEvents'
   String subId = 'sid3'
   String resub = 'resubscribeToZgtEvents'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_UNSUB_CALLBACK
-  if(subValid(subId)) {
-    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
-    removeResub(resub)
-  } else if (hasSid(subId)) {deleteSid(subId)}
+  upnpUnsubscribeGeneric(unsub, subId, resub, evtSub, callback)
 }
 
 @CompileStatic
 void unsubscribeFromZgtEventsCallback(HubResponse response) {
   String subId = 'sid3'
   String domain = ZGT_EVENTS_DOMAIN
-  if(response?.status == 412){
-    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully unsubscribed to ${domain}")
-  }
-  deleteSid(subId)
+  upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/GroupRenderingControl/Event' //sid4
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToMrGrcEvents() {
+  String sub = 'subscribeToMrGrcEvents'
   String subId = 'sid4'
   String subPath = '/mgrc'
   String evtSub = MRGRC_EVENTS
   String callback = MRGRC_EVENTS_CALLBACK
-  if(subValid(subId)) { resubscribeToMrGrcEvents() }
-  else { sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback) }
+  upnpSubscribeGeneric(sub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
 void resubscribeToMrGrcEvents() {
-  String subId = 'sid4'
   String resub = 'resubscribeToMrGrcEvents'
+  String subId = 'sid4'
   String evtSub = MRGRC_EVENTS
   String callback = MRGRC_EVENTS_CALLBACK
-  if(subValid(subId)) {
-    sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
-  } else { subscribeToMrGrcEvents() }
-  scheduleResubscriptionToEvents(resub)
+  upnpResubscribeGeneric(resub, subId, evtSub, callback)
 }
 
 @CompileStatic
@@ -1731,44 +1751,24 @@ void subscribeResubscribeToMrGrcCallback(HubResponse response) {
   String resub = 'resubscribeToMrGrcEvents'
   String subId = 'sid4'
   String domain = MRGRC_EVENTS_DOMAIN
-  if(response?.status == 412){
-    if(hasSid(subId)) {
-      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
-      deleteSid(subId)
-      retrySubscription(sub, 5)
-    } else {
-      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
-      retrySubscription(sub, 60)
-    }
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully subscribed to ${domain}")
-    updateSid(subId, response.headers)
-    scheduleResubscriptionToEvents(resub)
-  }
+  subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
 
 @CompileStatic
 void unsubscribeFromMrGrcEvents() {
+  String unsub = 'unsubscribeFromMrGrcEvents'
   String subId = 'sid4'
   String resub = 'resubscribeToMrGrcEvents'
   String evtSub = MRGRC_EVENTS
   String callback = MRGRC_EVENTS_UNSUB_CALLBACK
-  if(subValid(subId)) {
-    sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
-    removeResub(resub)
-  } else if (hasSid(subId)) {deleteSid(subId)}
+  upnpUnsubscribeGeneric(unsub, subId, resub, evtSub, callback)
 }
 
 @CompileStatic
 void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
   String subId = 'sid4'
   String domain = MRGRC_EVENTS_DOMAIN
-  if(response?.status == 412){
-    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully unsubscribed to ${domain}")
-  }
-  deleteSid(subId)
+  upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 // =============================================================================
 // End UPnP Subscriptions and Resubscriptions
@@ -1984,13 +1984,31 @@ String getGroupId() {
   return getDeviceDataValue('groupId')
 }
 void setGroupId(String groupId) {
+  String oldGroupId = getGroupId()
   setDeviceDataValue('groupId', groupId)
   this.device.sendEvent(name: 'groupId', value: groupId)
-  if(getIsGroupCoordinator()) {
-    subscribeToPlayback(groupId)
-    // subscribeToPlaybackMetadata(groupId)
+  if(getIsGroupCoordinator() == true && isCurrentlySubcribedToCoodinatorWS() == false) {
+    runIn(1, 'subscribeToPlaybackDebounce', [data:[groupId:groupId], overwrite:true])
   }
 }
+
+void subscribeToPlaybackDebounce(Map data = null) {
+  String groupId = data?.groupId
+  if(groupId != null && groupId != '') {
+    subscribeToPlayback(groupId)
+    subscribeToPlaybackMetadata(groupId)
+  }
+}
+@CompileStatic
+Boolean isCurrentlySubcribedToCoodinatorWS() {
+  return getDeviceDataValue('WS-playback') == 'Subscribed' && getDeviceDataValue('WS-playbackMetadata') == 'Subscribed'
+}
+@CompileStatic
+Boolean isCurrentlySubcribedToPlaylistWS() { return getDeviceDataValue('WS-playlists') == 'Subscribed' }
+@CompileStatic
+Boolean isCurrentlySubcribedToAudioClipWS() { return getDeviceDataValue('WS-audioClip') == 'Subscribed' }
+@CompileStatic
+Boolean isCurrentlySubcribedToGroupsWS() { return getDeviceDataValue('WS-groups') == 'Subscribed' }
 
 String getGroupName() {
   return this.device.currentValue('groupName',true)
@@ -2029,16 +2047,20 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   if(isGroupCoordinator) {
     if(!subValid('sid1')) {
       clearCurrentPlayingStates()
-      subscribeToAVTransport()
-      subscribeToWsEvents()
-      getPlaybackMetadataStatus()
-      playerGetGroupsFull()
+      subscribeToCoordinatorSubs()
       logTrace('Just became group coordinator, subscribing to AVT.')
     }
   } else if(!isGroupCoordinator && previouslyWasGroupCoordinator) {
       logTrace("Just added to group!")
       unsubscribeFromAVTransport()
   } else {logTrace("Group coordinator status has not changed.")}
+}
+
+void subscribeToCoordinatorSubs() {
+  runIn(2, 'subscribeToAVTransport', [overwrite: true])
+  runIn(2, 'subscribeToWsEvents', [overwrite: true])
+  runIn(2, 'getPlaybackMetadataStatus', [overwrite: true])
+  runIn(2, 'playerGetGroupsFull', [overwrite: true])
 }
 
 String getGroupCoordinatorName() {
@@ -2356,35 +2378,23 @@ Boolean getAudioClipQueueIsEmpty() {
 }
 
 @CompileStatic
-Boolean isWebsocketConnected() {
-  return webSocketStatuses[getId()] == true
-}
-String getWebSocketStatus() {
-  return getDeviceDataValue('websocketStatus')
-}
+Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 'open' }
+
+@CompileStatic
+String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
+
+@CompileStatic
 void setWebSocketStatus(String status) {
   setDeviceDataValue('websocketStatus', status)
-  if(status == 'open') {
-    webSocketStatuses[getId()] = true
-    runIn(15, 'subscribeToWsEvents')
-  } else {
-    webSocketStatuses[getId()] = false
+  if(status == 'open') { subscribeToWsEvents() }
+  else {
+    setDeviceDataValue('WS-playback', 'Unsubscribed')
+    setDeviceDataValue('WS-playbackMetadata', 'Unsubscribed')
+    setDeviceDataValue('WS-playlists', 'Unsubscribed')
+    setDeviceDataValue('WS-audioClip', 'Unsubscribed')
+    setDeviceDataValue('WS-groups', 'Unsubscribed')
   }
 }
-
-// @CompileStatic
-// List<String> eventsToSkipForDisabledTrackData() {
-//   return [
-//     'currentTrackDuration',
-//     'currentArtistName',
-//     'currentAlbumName',
-//     'currentTrackName',
-//     'currentTrackNumber',
-//     'nextArtistName',
-//     'nextAlbumName',
-//     'nextTrackName'
-//   ]
-// }
 
 void sendGroupEvents() {runIn(1, 'sendEventsToGroupMembers', [overwrite: true])}
 
@@ -2499,10 +2509,11 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // =============================================================================
 // Websocket Subscriptions and polling
 // =============================================================================
-void subscribeToWsEvents() {
-  subscribeToPlaylists()
-  subscribeToAudioClip()
-  subscribeToGroups()
+void subscribeToWsEvents() { runIn(1, 'subscribeToWsEventsDebounce', [overwrite: true]) }
+void subscribeToWsEventsDebounce() {
+  if(isCurrentlySubcribedToPlaylistWS() == false ) { subscribeToPlaylists() }
+  if(isCurrentlySubcribedToAudioClipWS() == false ) { subscribeToAudioClip() }
+  if(isCurrentlySubcribedToGroupsWS() == false ) { subscribeToGroups() }
 }
 
 @CompileStatic
@@ -3255,6 +3266,9 @@ void processWebsocketMessage(String message) {
   //Process subscriptions
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
     logTrace("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was sucessful' : 'failed'}")
+    if(eventType?.success == true && eventType?.namespace != null && eventType?.namespace != '') {
+      setDeviceDataValue("WS-${eventType?.namespace}", 'Subscribed')
+    }
   }
 
   //Process groups
