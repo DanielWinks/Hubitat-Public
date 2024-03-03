@@ -2281,7 +2281,7 @@ void setTrackDescription(String trackDescription) {
   sendDeviceEvent('trackDescription', trackDescription)
   sendGroupEvents()
 
-  if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatus()}
+  if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatusIn()}
 }
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
 
@@ -3375,14 +3375,19 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     if(eventData?.playbackState == 'PLAYBACK_STATE_PLAYING') {
-      if(getIsGroupCoordinator()) {getPlaybackMetadataStatus()}
+      if(getIsGroupCoordinator()) {getPlaybackMetadataStatusIn()}
     }
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
     logTrace('Getting currently playing favorite...')
     updateFavsIn(2, eventData)
+    updateFavsIn(5, eventData)
   }
+}
+
+void getPlaybackMetadataStatusIn(Integer time = 2) {
+  runIn(time, 'getPlaybackMetadataStatus', [overwrite: true])
 }
 
 void updateFavsIn(Integer time, Map data) {
