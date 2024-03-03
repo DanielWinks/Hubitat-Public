@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.7.0',
+    version: '0.7.2',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
@@ -223,13 +223,18 @@ Boolean hasAudioClipCapability() {
 
 
 import java.util.Random
+import java.util.concurrent.Semaphore
 // =============================================================================
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static java.util.concurrent.Semaphore deviceDataMutex = new java.util.concurrent.Semaphore(1)
-@Field static java.util.concurrent.Semaphore subscribeMutex = new java.util.concurrent.Semaphore(1)
+@Field static Semaphore deviceDataMutex = new Semaphore(1)
+@Field static Semaphore avtSubscribeMutex = new Semaphore(1)
+@Field static Semaphore zgtSubscribeMutex = new Semaphore(1)
+@Field static Semaphore mrrcSubscribeMutex = new Semaphore(1)
+@Field static Semaphore mrgrcSubscribeMutex = new Semaphore(1)
+@Field static Semaphore unsubscribeMutex = new Semaphore(4)
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -286,8 +291,12 @@ import java.util.Random
 // Initialize and Configure
 // =============================================================================
 void initialize() {
-  subscribeMutex.release()
   deviceDataMutex.release()
+  avtSubscribeMutex.release()
+  zgtSubscribeMutex.release()
+  mrrcSubscribeMutex.release()
+  mrgrcSubscribeMutex.release()
+  unsubscribeMutex.release(4)
   configure()
   fullRenewSubscriptions()
   // runEvery3Hours('fullRenewSubscriptions')
@@ -381,19 +390,7 @@ void favoritesMapInitialization() {
 }
 
 @CompileStatic
-void checkSubscriptions() {
-  // try {if(!lastMrRcEventWithin(900)) {resubscribeToMrRcEvents()}}
-  // catch(java.lang.NullPointerException e) {subscribeToMrRcEvents()}
-
-  // try {if(!lastMrGrcEventWithin(900)) {resubscribeToMrGrcEvents()}}
-  // catch(java.lang.NullPointerException e) {subscribeToMrGrcEvents()}
-
-  // try {if(!lastZgtEventWithin(900)) {resubscribeToZgtEvents()}}
-  // catch(java.lang.NullPointerException e) {subscribeToZgtEvents()}
-
-  // try {if(!lastWebsocketEventWithin(900)) {renewWebsocketConnection()}}
-  // catch(java.lang.NullPointerException e) {renewWebsocketConnection()}
-}
+void checkSubscriptions() {}
 // =============================================================================
 // End Initialize and Configure
 // =============================================================================
@@ -1488,14 +1485,40 @@ void retrySubscription(String eventsToRetry, Integer retryTime = 60) {
 
 void removeResub(String resub) { unschedule(resub)}
 
-Integer getRandomLockRetry(Integer low = 3, Integer high = 30) {
+Integer getRandomLockRetry(Integer low = 8, Integer high = 30) {
   return Math.abs( rand.nextInt() % (high - low) ) + low
 }
 
 @CompileStatic
+Semaphore getMutexForSid(String sid) {
+  if(sid == 'sid1') {return avtSubscribeMutex}
+  if(sid == 'sid2') {return mrrcSubscribeMutex}
+  if(sid == 'sid3') {return zgtSubscribeMutex}
+  if(sid == 'sid4') {return mrgrcSubscribeMutex}
+}
+
+void unlockSubscribeMutexAfterTimeout(String sid) {
+  logTrace("Scheduling unlock of subscribeMutex in 5 seconds...")
+  runIn(5, 'unlockSubscribeMutexAfterTimeoutCallback', [overwrite: true, data:['sid':sid]])
+}
+void unlockSubscribeMutexAfterTimeoutCallback(Map data) {
+  Semaphore mutex = getMutexForSid(data['sid'])
+  mutex.release()
+  }
+
+void unlockUnsubscribeMutexAfterTimeout() {
+  logTrace("Scheduling unlock of unsubscribeMutex in 5 seconds...")
+  runIn(5, 'unlockUnsubscribeMutexAfterTimeoutCallback', [overwrite: true])
+}
+void unlockUnsubscribeMutexAfterTimeoutCallback() {unsubscribeMutex.release()}
+
+@CompileStatic
 void upnpSubscribeGeneric(String sub, String subId, String subPath, String callback, String evtSub) {
-  Boolean acquired = subscribeMutex.tryAcquire()
+  Semaphore mutex = getMutexForSid(subId)
+  Boolean acquired = mutex.tryAcquire()
   if(acquired == true) {
+    logTrace('Acquired lock, proceeding to subscribe...')
+    unlockSubscribeMutexAfterTimeout(subId)
     try {
       if(subValid(subId) != true) {
         sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
@@ -1503,7 +1526,7 @@ void upnpSubscribeGeneric(String sub, String subId, String subPath, String callb
     } catch(Exception e) {
       logInfo("Subscription to ${evtSub} failed due to ${e}")
       logInfo("Values used for attempt: sub:${sub} subId:${subId} subPath:${subPath} callback:${callback} evtSub:${evtSub}")
-      subscribeMutex.release()
+      mutex.release()
     }
   } else {
     Integer timeout = getRandomLockRetry()
@@ -1513,17 +1536,22 @@ void upnpSubscribeGeneric(String sub, String subId, String subPath, String callb
 }
 
 @CompileStatic
-void upnpResubscribeGeneric(String resub, String subId, String evtSub, String callback) {
-  Boolean acquired = subscribeMutex.tryAcquire()
+void upnpResubscribeGeneric(String resub, String subId, String subPath, String callback, String evtSub) {
+  Semaphore mutex = getMutexForSid(subId)
+  Boolean acquired = mutex.tryAcquire()
   if(acquired == true) {
+    logTrace('Acquired lock, proceeding to resubscribe...')
+    unlockSubscribeMutexAfterTimeout(subId)
     try {
       if(subValid(subId)) {
         sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
-      } else { subscribeToAVTransport() }
+      } else {
+        sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
+      }
     } catch(Exception e) {
       logInfo("Subscription to ${evtSub} failed due to ${e}")
       logInfo("Values used for attempt: resub:${resub} subId:${subId} callback:${callback} evtSub:${evtSub}")
-      subscribeMutex.release()
+      mutex.release()
     }
   } else {
     Integer timeout = getRandomLockRetry()
@@ -1534,15 +1562,18 @@ void upnpResubscribeGeneric(String resub, String subId, String evtSub, String ca
 
 @CompileStatic
 void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evtSub, String callback) {
-  Boolean acquired = subscribeMutex.tryAcquire()
+  Boolean acquired = unsubscribeMutex.tryAcquire()
   if(acquired == true) {
+    unlockUnsubscribeMutexAfterTimeout()
     try {
-      sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
-      deleteSid(subId)
-      removeResub(resub)
+      if(evtSub != null && subId != null && callback != null && resub != null) {
+        sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+        deleteSid(subId)
+        removeResub(resub)
+      }
     } catch(Exception e) {
       logInfo("${unsub} failed due to ${e}")
-      subscribeMutex.release()
+      unsubscribeMutex.release()
     }
   } else {
     Integer timeout = getRandomLockRetry()
@@ -1553,6 +1584,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 @CompileStatic
 void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {
+  Semaphore mutex = getMutexForSid(subId)
   if(response?.status == 412){
     if(hasSid(subId)) {
       logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
@@ -1568,7 +1600,7 @@ void subscribeResubscribeGenericCallback(String sub, String resub, String subId,
     updateSid(subId, response.headers)
     scheduleResubscriptionToEvents(resub)
   }
-  subscribeMutex.release()
+  mutex.release()
 }
 
 @CompileStatic
@@ -1579,7 +1611,7 @@ void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse res
     logTrace("Sucessfully unsubscribed to ${domain}")
   }
   deleteSid(subId)
-  subscribeMutex.release()
+  unsubscribeMutex.release()
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
@@ -1598,9 +1630,10 @@ void subscribeToAVTransport() {
 void resubscribeToAVTransport() {
   String resub = 'resubscribeToAVTransport'
   String subId = 'sid1'
+  String subPath = '/avt'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
-  upnpResubscribeGeneric(resub, subId, evtSub, callback)
+  upnpResubscribeGeneric(resub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
@@ -1645,9 +1678,10 @@ void subscribeToMrRcEvents() {
 void resubscribeToMrRcEvents() {
   String resub = 'resubscribeToMrRcEvents'
   String subId = 'sid2'
+  String subPath = '/mrc'
   String evtSub = MRAVT_EVENTS
   String callback = MRAVT_EVENTS_CALLBACK
-  upnpResubscribeGeneric(resub, subId, evtSub, callback)
+  upnpResubscribeGeneric(resub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
@@ -1693,9 +1727,10 @@ void subscribeToZgtEvents() {
 void resubscribeToZgtEvents() {
   String resub = 'resubscribeToZgtEvents'
   String subId = 'sid3'
+  String subPath = '/zgt'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_CALLBACK
-  upnpResubscribeGeneric(resub, subId, evtSub, callback)
+  upnpResubscribeGeneric(resub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
@@ -1740,9 +1775,10 @@ void subscribeToMrGrcEvents() {
 void resubscribeToMrGrcEvents() {
   String resub = 'resubscribeToMrGrcEvents'
   String subId = 'sid4'
+  String subPath = '/mgrc'
   String evtSub = MRGRC_EVENTS
   String callback = MRGRC_EVENTS_CALLBACK
-  upnpResubscribeGeneric(resub, subId, evtSub, callback)
+  upnpResubscribeGeneric(resub, subId, subPath, callback, evtSub)
 }
 
 @CompileStatic
@@ -2526,7 +2562,6 @@ void subscribeToGroups() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToGroups')
   sendWsMessage(json)
 }
 
@@ -2540,7 +2575,6 @@ void subscribeToFavorites() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToFavorites')
   sendWsMessage(json)
 }
 
@@ -2554,7 +2588,7 @@ void subscribeToPlaylists() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToPlaylists')
+  logTrace('subscribeToPlaylists')
   sendWsMessage(json)
 }
 
@@ -2568,7 +2602,6 @@ void subscribeToAudioClip() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToAudioClip')
   sendWsMessage(json)
 }
 
@@ -2582,7 +2615,6 @@ void subscribeToPlayback(String groupId) {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToPlayback')
   sendWsMessage(json)
 }
 
@@ -2596,7 +2628,6 @@ void subscribeToPlaybackMetadata(String groupId) {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToPlaybackMetadata')
   sendWsMessage(json)
 }
 
@@ -2623,7 +2654,6 @@ void subscribeToFavorites(String groupId) {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logDebug('subscribeToFavorites')
   sendWsMessage(json)
 }
 // =============================================================================
@@ -3052,7 +3082,6 @@ void setDialogMode(Boolean desiredValue) {
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: desiredValue ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
-  logDebug(params)
   httpPostAsync(params)
 }
 
@@ -3265,7 +3294,7 @@ void processWebsocketMessage(String message) {
 
   //Process subscriptions
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
-    logTrace("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was sucessful' : 'failed'}")
+    logTrace("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was successful' : 'failed'}")
     if(eventType?.success == true && eventType?.namespace != null && eventType?.namespace != '') {
       setDeviceDataValue("WS-${eventType?.namespace}", 'Subscribed')
     }
@@ -3367,7 +3396,7 @@ void processWebsocketMessage(String message) {
 
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    logTrace(JsonOutput.prettyPrint(message))
+    // logTrace(JsonOutput.prettyPrint(message))
     ArrayList<Map> audioClips = (ArrayList<Map>)eventData?.audioClips
     if(audioClips != null && audioClips.find{it?.status == 'DONE'}) {
       setAudioClipPlaying(false)
@@ -3392,12 +3421,12 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    logTrace('Getting currently playing favorite...')
     updateFavsIn(2, eventData)
   }
 }
 
 void updateFavsIn(Integer time, Map data) {
+  logTrace('Getting currently playing favorite...')
   if(getCreateFavoritesChildDevice() == true) {
     if(favoritesMap == null || favoritesMap.size() < 1) {
       logTrace('Favorites map is null, requesting favorites...')
