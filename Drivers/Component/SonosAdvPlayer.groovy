@@ -2546,8 +2546,7 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // =============================================================================
 // Websocket Subscriptions and polling
 // =============================================================================
-void subscribeToWsEvents() { runIn(1, 'subscribeToWsEventsDebounce', [overwrite: true]) }
-void subscribeToWsEventsDebounce() {
+void subscribeToWsEvents() {
   if(isCurrentlySubcribedToPlaylistWS() == false ) { subscribeToPlaylists() }
   if(isCurrentlySubcribedToAudioClipWS() == false ) { subscribeToAudioClip() }
   if(isCurrentlySubcribedToGroupsWS() == false ) { subscribeToGroups() }
