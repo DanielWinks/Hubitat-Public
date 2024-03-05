@@ -1,8 +1,8 @@
 {
   "packageName": "Sonos Advanced Controller",
   "author": "Daniel Winks",
-  "version": "0.7.2",
-  "releaseNotes": "0.7.2 Fixes for looping subscriptions on initialize() for some users.\r\n0.7.1 Improved null checking in websocket parse method.\r\n0.7.0 Add Night Mode and Dialog Enhancement for Arc/Beam/Ray supported. To use enable the child device for them in preferences and toggle child device switch on/off. Many other fixes.\r\n0.6.2 Add semaphore locking around all updateDataValue/getDataValue calls to prevent concurrent access exceptions.\r\n0.6.1 Jsonify trackData for SharpTools/WebCoRE\r\n0.6.0 Use streamlined parent app call to send data to followers.",
+  "version": "0.7.3",
+  "releaseNotes": "0.7.3 Remove debounce from WS events\r\n0.7.2 Fixes for looping subscriptions on initialize() for some users.\r\n0.7.1 Improved null checking in websocket parse method.\r\n0.7.0 Add Night Mode and Dialog Enhancement for Arc/Beam/Ray supported. To use enable the child device for them in preferences and toggle child device switch on/off. Many other fixes.\r\n0.6.2 Add semaphore locking around all updateDataValue/getDataValue calls to prevent concurrent access exceptions.\r\n0.6.1 Jsonify trackData for SharpTools/WebCoRE\r\n0.6.0 Use streamlined parent app call to send data to followers.",
   "minimumHEVersion": "2.3.7.114",
   "dateReleased": "2024-01-07",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
