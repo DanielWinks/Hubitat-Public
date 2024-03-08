@@ -1,8 +1,8 @@
 {
   "packageName": "Presence Helpers, HTTP Presence App",
   "author": "Daniel Winks",
-  "version": "1.0.0",
-  "releaseNotes": "",
+  "version": "1.0.1",
+  "releaseNotes": "1.0.1 Fixed typo on `presenceSensor` that should be `presenceSensors`",
   "minimumHEVersion": "2.3.4",
   "dateReleased": "2024-01-17",
   "licenseFile": "",
