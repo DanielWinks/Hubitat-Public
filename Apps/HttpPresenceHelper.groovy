@@ -94,7 +94,7 @@ mappings {
 
 Map arriveWebhook() {
   unschedule()
-  presenceSensor.each{ p -> p.arrived() }
+  presenceSensors.each{ p -> p.arrived() }
   motionSensors.each{ p -> p.active() }
   return render(contentType: "text/html", data: "<p>Arrived!</p>", status: 200)
 }
@@ -109,7 +109,7 @@ Map departWebhook() {
 }
 
 void depart() {
-  presenceSensor.each{ p -> p.departed() }
+  presenceSensors.each{ p -> p.departed() }
   motionSensors.each{ p -> p.inactive() }
 }
 
