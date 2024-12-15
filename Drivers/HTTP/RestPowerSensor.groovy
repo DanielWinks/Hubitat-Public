@@ -1,3 +1,4 @@
+
 /**
  *  MIT License
  *  Copyright 2023 Daniel Winks (daniel.winks@gmail.com)
@@ -19,35 +20,76 @@
  *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
- */
+ **/
 
-library(
-  name: 'httpLibrary',
-  namespace: 'dwinks',
-  author: 'Daniel Winks',
-  description: 'HTTP Device Library',
-  importUrl: ''
-)
+#include dwinks.UtilitiesAndLoggingLibrary
+
+metadata {
+  definition (name: 'Rest Power Sensor',namespace: 'dwinks', author: 'Daniel Winks', importUrl:'') {
+    command 'restartESP'
+    capability 'Refresh'
+    capability 'PowerMeter' //power - NUMBER, unit:W
+    capability 'EnergyMeter' //energy - NUMBER, unit:kWh
+
+    attribute 'status', 'ENUM', ['online', 'offline']
+    attribute 'uptime', 'NUMBER'
+  }
+
+  preferences {
+    section {
+      input 'ip', 'string', title:'IP Address', description: '', required: true, displayDuringSetup: true
+      input 'port', 'string', title:'Port', description: '', required: true, displayDuringSetup: true, defaultValue: '80'
+      input 'power', 'string', title:'Power Sensor Name', description: '', required: true, displayDuringSetup: true
+      input 'energy', 'string', title:'Total Daily Energy Sensor Name', description: '', required: true, displayDuringSetup: true
+      input 'autoUpdate', 'bool', title: "Refresh peridocially?", required: true, defaultValue: true
+      input 'updateInterval', 'enum', title: 'Sensor Update Interval', required: true, defaultValue: 10, options:
+      [
+        10:'10 Seconds',
+        30:'30 Seconds',
+        60:'1 Minute',
+        120:'2 Minutes',
+        180:'3 Minutes',
+        240:'4 Minutes',
+        300:'5 Minutes',
+        600:'10 Minutes',
+        900:'15 Minutes',
+        1200:'20 Minutes',
+        1800:'30 Minutes',
+        3600:'60 Minutes'
+      ]
+    }
+  }
+}
 
 @Field static final String UPTIME_STATE = '/sensor/uptime'
 @Field static final String RESTART_ESP = '/button/restart/press'
+String powerState() { return "/sensor/${power.toLowerCase().replace(' ','_')}" }
+String energyState() { return "/sensor/${energy.toLowerCase().replace(' ','_')}" }
+
+void refresh() { refreshPowerMonitor() }
+void refreshPowerMonitor() {
+  sendQueryAsync(powerState(), 'refreshCallback', [sensor:'power'])
+  sendQueryAsync(energyState(), 'refreshCallback', [sensor:'energy'])
+}
+
+void refreshCallback(AsyncResponse response, Map data = null){
+  logDebug("response.status = ${response.status}")
+  if(response.hasError()) {
+    logDebug("${response.getErrorData()}")
+    return
+  }
+  Map jsonBody = response.getJson()
+  logDebug(prettyJson(jsonBody))
+  if(data.sensor == 'power') { sendEvent(name:'power', value:jsonBody?.value) }
+  if(data.sensor == 'energy') { sendEvent(name:'energy', value:jsonBody?.value) }
+}
 
 void initialize() { configure() }
 void configure() {
   String newDni = getMACFromIP(ip)
   device.setDeviceNetworkId(newDni)
-  checkConnection()
   refresh()
   unschedule()
-  runEvery3Hours('checkConnection')
-  runEvery30Minutes('refresh')
-  try {
-    createChildDevices()
-  } catch (IllegalArgumentException e) {
-    logDebug 'Child device(s) already exist...'
-  } catch (MissingMethodException e) {
-    logDebug("No child devices to create...")
-  }
   if(settings.autoUpdate != null && settings.autoUpdate == true) {
     logDebug("Autoupdate every ${settings?.updateInterval} seconds...")
     Integer interval = settings?.updateInterval as Integer
@@ -65,24 +107,11 @@ void configure() {
 }
 
 void restartESP() { sendCommandAsync(RESTART_ESP, null, null) }
-void checkConnection() { sendQueryAsync(UPTIME_STATE, 'checkConnectionCallback') }
-void checkConnectionCallback(AsyncResponse response, Map data = null){
-  logDebug("response.status = ${response.status}")
-  if(response.hasError()) {
-    sendEvent(name:'status', value:'offline')
-  } else {
-    Map responseData = parseJson(response.getData())
-    logDebug("response.getData() = ${responseData}")
-    sendEvent(name:'status', value:'online')
-    sendEvent(name:'uptime', value: "${responseData.value.toInteger()}")
-  }
-}
-
 
 void sendCommandAsync(String path, String callbackMethod, Map data = null) {
   try{
     Map params = [uri : "http://${ip}:${port}${path}"]
-    logDebug("${params.uri}")
+    logDebug("URI: ${params.uri}")
     asynchttpPost(callbackMethod, params, data)
   }
   catch(Exception e){
@@ -95,7 +124,7 @@ void sendCommandAsync(String path, String callbackMethod, Map data = null) {
 
 void sendQueryAsync(String path, String callback, Map data = null) {
   Map params = [uri : "http://${ip}:${port}${path}"]
-  logDebug("${params.uri}")
+  logDebug("URI: ${params.uri}")
   try {
     asynchttpGet(callback, params, data)
   } catch (Exception e) {
