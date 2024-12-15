@@ -210,9 +210,9 @@ String nowFormatted() {
 }
 
 @CompileStatic
-String runEveryCustomSeconds(Integer minutes) {
+String runEveryCustomSeconds(Integer seconds) {
   String currentSecond = new Date().format('ss')
-  return "${currentSecond} /${minutes} * * * ?"
+  return "${currentSecond}/${seconds} * * ? * * *"
 }
 
 @CompileStatic
