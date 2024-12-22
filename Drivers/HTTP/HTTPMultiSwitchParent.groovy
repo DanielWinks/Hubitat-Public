@@ -49,10 +49,10 @@ metadata {
   }
 }
 
-@Field static final String RELAY1 = 'ac_relay_1'
-@Field static final String RELAY2 = 'ac_relay_2'
-@Field static final String RELAY3 = 'ac_relay_3'
-@Field static final String USBRELAY = 'usb_relay'
+@Field static final String RELAY1 = 'switch-ac_relay_1'
+@Field static final String RELAY2 = 'switch-ac_relay_2'
+@Field static final String RELAY3 = 'switch-ac_relay_3'
+@Field static final String USBRELAY = 'switch-usb_relay'
 
 @Field static final String RELAY1_STATE = '/switch/ac_relay_1'
 @Field static final String RELAY2_STATE = '/switch/ac_relay_2'
@@ -73,6 +73,12 @@ String turnOffACRelay1CommandTopic() { return "${RELAY1_STATE}/turn_off" }
 String turnOffACRelay2CommandTopic() { return "${RELAY2_STATE}/turn_off" }
 String turnOffACRelay3CommandTopic() { return "${RELAY3_STATE}/turn_off" }
 String turnOffUSBRelayCommandTopic() { return "${USBRELAY_STATE}/turn_off" }
+
+String refreshACRelay1CommandTopic() { return "${RELAY1_STATE}" }
+String refreshACRelay2CommandTopic() { return "${RELAY2_STATE}" }
+String refreshACRelay3CommandTopic() { return "${RELAY3_STATE}" }
+String refreshUSBRelayCommandTopic() { return "${USBRELAY_STATE}" }
+
 
 void createChildDevices() {
   if (getChildDevice("${getACRelay1DNI()}") == null) {
@@ -105,36 +111,21 @@ void createChildDevices() {
 }
 
 void refresh() {
-  sendQueryAsync(RELAY1_STATE, 'switchStateCallback', [switch:RELAY1])
-  sendQueryAsync(RELAY2_STATE, 'switchStateCallback', [switch:RELAY2])
-  sendQueryAsync(RELAY3_STATE, 'switchStateCallback', [switch:RELAY3])
-  sendQueryAsync(USBRELAY_STATE, 'switchStateCallback', [switch:USBRELAY])
+  sendQueryAsync(RELAY1_STATE, 'refreshCallback', null)
+  sendQueryAsync(RELAY2_STATE, 'refreshCallback', null)
+  sendQueryAsync(RELAY3_STATE, 'refreshCallback', null)
+  sendQueryAsync(USBRELAY_STATE, 'refreshCallback', null)
 }
 
-void switchStateCallback(AsyncResponse response, Map data = null){
-  logDebug("response.status = ${response.status}")
+void refreshCallback(AsyncResponse response, Map data = null){
+  // logDebug("response.status = ${response.status}")
   if(response.hasError()) {
     logDebug("${response.getErrorData()}")
     return
   }
 
-  Map responseJson = parseJson(response.getData())
-  String childState = responseJson.state.toLowerCase()
-
-  if(data.switch == RELAY1) { getChildDevice("${getACRelay1DNI()}").parse(childState) }
-  if(data.switch == RELAY2) { getChildDevice("${getACRelay2DNI()}").parse(childState) }
-  if(data.switch == RELAY3) { getChildDevice("${getACRelay3DNI()}").parse(childState) }
-  if(data.switch == USBRELAY) { getChildDevice("${getUSBRelayDNI()}").parse(childState) }
-  if(
-    getChildDevice("${getACRelay1DNI()}")?.currentState("switch")?.value == 'on' &&
-    getChildDevice("${getACRelay2DNI()}")?.currentState("switch")?.value == 'on' &&
-    getChildDevice("${getACRelay3DNI()}")?.currentState("switch")?.value == 'on' &&
-    getChildDevice("${getUSBRelayDNI()}")?.currentState("switch")?.value == 'on'
-    ) {
-    sendEvent(name:'switch', value:'on', descriptionText:'All relays are now on', isStateChange:true)
-  } else {
-    sendEvent(name:'switch', value:'off', descriptionText:'All relays are now off', isStateChange:true)
-  }
+  Map jsonData = parseJson(response.getData())
+  if(jsonData != null) { processJson(jsonData) }
 }
 
 
@@ -166,17 +157,27 @@ void componentOn(DeviceWrapper device) {
   if (dni == "${getUSBRelayDNI()}") { sendCommandAsync(turnOnUSBRelayCommandTopic(), null, null) }
 }
 
+void componentRefresh(DeviceWrapper device) {
+  String dni = "${device.deviceNetworkId}"
+  if (dni == "${getACRelay1DNI()}") { sendCommandAsync(refreshACRelay1CommandTopic(), null, null) }
+  if (dni == "${getACRelay2DNI()}") { sendCommandAsync(refreshACRelay2CommandTopic(), null, null) }
+  if (dni == "${getACRelay3DNI()}") { sendCommandAsync(refreshACRelay3CommandTopic(), null, null) }
+  if (dni == "${getUSBRelayDNI()}") { sendCommandAsync(refreshUSBRelayCommandTopic(), null, null) }
+}
+
 void parse(message) {
   Map parsedMessage = parseLanMessage(message)
-  Map jsonBody = parseJson(parsedMessage.body)
-  logDebug(prettyJson(jsonBody))
+  Map jsonData = parseJson(parsedMessage.body)
+  logDebug(prettyJson(jsonData))
+  if(jsonData != null) { processJson(jsonData) }
+}
 
-  String childState = jsonBody.state.toLowerCase()
-
-  if(jsonBody.switch == RELAY1) { getChildDevice("${getACRelay1DNI()}").parse(childState) }
-  if(jsonBody.switch == RELAY2) { getChildDevice("${getACRelay2DNI()}").parse(childState) }
-  if(jsonBody.switch == RELAY3) { getChildDevice("${getACRelay3DNI()}").parse(childState) }
-  if(jsonBody.switch == USBRELAY) { getChildDevice("${getUSBRelayDNI()}").parse(childState) }
+void processJson(Map jsonData) {
+  logDebug(prettyJson(jsonData))
+  if(jsonData?.id == RELAY1)   { getChildDevice("${getACRelay1DNI()}").parse(jsonData?.value ? 'on' : 'off') }
+  if(jsonData?.id == RELAY2)   { getChildDevice("${getACRelay2DNI()}").parse(jsonData?.value ? 'on' : 'off') }
+  if(jsonData?.id == RELAY3)   { getChildDevice("${getACRelay3DNI()}").parse(jsonData?.value ? 'on' : 'off') }
+  if(jsonData?.id == USBRELAY) { getChildDevice("${getUSBRelayDNI()}").parse(jsonData?.value ? 'on' : 'off') }
   if(
     getChildDevice("${getACRelay1DNI()}")?.currentState("switch")?.value == 'on' &&
     getChildDevice("${getACRelay2DNI()}")?.currentState("switch")?.value == 'on' &&

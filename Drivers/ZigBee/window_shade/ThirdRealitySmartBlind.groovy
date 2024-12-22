@@ -70,7 +70,7 @@ void parse(String description) {
       }
     } else if (descriptionMap.value && descriptionMap?.clusterInt == CLUSTER_BATTERY_LEVEL) {
       Integer battLevel = (((zigbee.convertHexToInt(descriptionMap.value) - 50) / 1.5) as Integer)
-      sendEvent(name: 'battery', value: Math.max(battLevel, 0))
+      sendEvent(name: 'battery', value: boundedLevel(battLevel))
     }
   }
 }
@@ -87,15 +87,16 @@ void updateLastCheckin() {
 }
 
 void setWindowShade(Map data) {
-  Integer adjLevel = data.adjLevel
+  Integer adjLevel = boundedLevel(data.adjLevel as Integer)
+  logDebug("adjLevel: ${adjLevel}")
   if (adjLevel == CLOSED_LEVEL || adjLevel == OPEN_LEVEL) {
     sendEvent(name: 'windowShade', value: adjLevel == CLOSED_LEVEL ? 'closed' : 'open')
   } else if (adjLevel != CLOSED_LEVEL && adjLevel != OPEN_LEVEL){
     sendEvent([name:'windowShade', value: 'partially open'])
   }
   if(adjLevel == 1) {adjLevel = 0}
-  sendEvent(name: 'level', value: adjLevel)
-  sendEvent(name: 'position', value: adjLevel)
+  sendEvent(name: 'level', value: boundedLevel(adjLevel as Integer))
+  sendEvent(name: 'position', value: boundedLevel(adjLevel as Integer))
 }
 
 void updateFirmware() {
@@ -195,4 +196,8 @@ void configure() {
 
 void scheduleRefresh() {
   runIn(settings.updateInterval as Integer, 'refresh', [overwrite:true])
+}
+
+Integer boundedLevel(Integer level, Integer min = 0, Integer max = 100) {
+  return (Math.min(Math.max(level, min), max) as Integer)
 }

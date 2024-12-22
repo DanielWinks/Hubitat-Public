@@ -115,6 +115,8 @@ void printerInfoCallback(AsyncResponse response, Map data = null) {
     return
   }
   Map res = response.getJson().result
+  logDebug(prettyJson(res))
+
   printerOn()
   sendEvent(name:'klippyState', value:res.state, descriptionText:"Klippy is now ${res.state}", isStateChange:true)
   sendEvent(name:'stateMessage', value:res.state_message, descriptionText:"${res.state_message}", isStateChange:true)
@@ -128,6 +130,7 @@ void printerQueryCallback(AsyncResponse response, Map data = null) {
   }
   printerOn()
   Map res = response.getJson().result.status
+  logDebug(prettyJson(res))
 
   Map heater_bed = res.heater_bed
   Map extruder = res.extruder

@@ -19,39 +19,16 @@
  *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
-*/
+ */
 
 #include dwinks.UtilitiesAndLoggingLibrary
+#include dwinks.genericComponentLibrary
 
 metadata {
-  definition (name: 'Virtual Instant Off Switch With Button', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '') {
-    capability 'Switch'
-    capability 'PushableButton'
-
-  }
-  preferences() {
-    section(){ }
+  definition(name: 'Generic Component Power Monitor', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
+  capability "PowerMeter" //power - NUMBER, unit:W
+  capability "EnergyMeter" //energy - NUMBER, unit:kWh
+  capability "CurrentMeter" //amperage - NUMBER, unit:A
+  capability "VoltageMeasurement" //voltage - NUMBER, unit:V  frequency - NUMBER, unit:Hz
   }
 }
-
-void initialize() { configure() }
-
-void configure() {
-  if(this.device.currentValue('switch', true) == 'on') {scheduleAutoOff()}
-  sendEvent(name: 'numberOfButtons', value: 1)
-}
-void scheduleAutoOff() { runInMillis(1, 'autoOff', [overwrite:true]) }
-
-void on() {
-  scheduleAutoOff()
-  sendEvent(name: 'switch', value: 'on')
-  push(1)
-}
-
-void off() {
-  unschedule('autoOff')
-  sendEvent(name: 'switch', value: 'off')
-}
-
-void autoOff() { off() }
-void push(buttonNumber) { sendEvent(name: 'pushed', value: buttonNumber, isStateChange:true) }

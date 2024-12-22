@@ -86,22 +86,20 @@ void refreshCallback(AsyncResponse response, Map data = null){
 
 void initialize() { configure() }
 void configure() {
-  String newDni = getMACFromIP(ip)
-  device.setDeviceNetworkId(newDni)
   refresh()
   unschedule()
   if(settings.autoUpdate != null && settings.autoUpdate == true) {
     logDebug("Autoupdate every ${settings?.updateInterval} seconds...")
     Integer interval = settings?.updateInterval as Integer
-    if(interval < 60) { 
-      schedule(runEveryCustomSeconds(interval as Integer), 'refresh') 
+    if(interval < 60) {
+      schedule(runEveryCustomSeconds(interval as Integer), 'refresh')
     }
-    if(interval >= 60 && interval < 3600) { 
+    if(interval >= 60 && interval < 3600) {
       String cron = runEveryCustomMinutes((interval/60) as Integer)
-      schedule(cron, 'refresh') 
+      schedule(cron, 'refresh')
     }
-    if(interval == 3600) { 
-      schedule(runEveryCustomHours((interval/3600) as Integer), 'refresh') 
+    if(interval == 3600) {
+      schedule(runEveryCustomHours((interval/3600) as Integer), 'refresh')
     }
   }
 }

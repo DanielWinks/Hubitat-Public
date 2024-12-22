@@ -33,7 +33,7 @@ metadata {
     capability "VoltageMeasurement" //voltage - NUMBER, unit:V  frequency - NUMBER, unit:Hz
     capability "EnergyMeter" //energy - NUMBER, unit:kWh
     capability "CurrentMeter" //amperage - NUMBER, unit:A
-    capability "Sensor"
+    capability "Consumable" //consumableStatus - ENUM ["missing", "order", "maintenance_required", "good", "replace"]
 
     command 'restartESP'
     command 'initialize'
@@ -100,22 +100,14 @@ void parse(message) {
 
 void processJson(Map jsonData) {
   logDebug(prettyJson(jsonData))
-  if(jsonData?.id == 'switch-relay') {
-    sendEvent(name:'switch', value:jsonData?.value ? "on" : "off", descriptionText:"Relay is now ${jsonData?.value}", isStateChange:true)
-  }
-  if(jsonData?.id == 'sensor-voltage') {
-    sendEvent(name:'voltage', value:jsonData?.value, descriptionText:"voltage is now ${jsonData?.value}", isStateChange:true)
-  }
-  if(jsonData?.id == 'sensor-frequency') {
-    sendEvent(name:'frequency', value:jsonData?.value, descriptionText:"frequency is now ${jsonData?.value}", isStateChange:true)
-  }
-  if(jsonData?.id == 'sensor-power') {
-    sendEvent(name:'power', value:jsonData?.value, descriptionText:"power is now ${jsonData?.value}", isStateChange:true)
-  }
-  if(jsonData?.id == 'sensor-current') {
-    sendEvent(name:'amperage', value:jsonData?.value, descriptionText:"amperage is now ${jsonData?.value}", isStateChange:true)
-  }
-  if(jsonData?.id == 'sensor-total_daily_energy') {
-    sendEvent(name:'energy', value:jsonData?.value, descriptionText:"energy is now ${jsonData?.value}", isStateChange:true)
-  }
+  if(jsonData?.switch != null) { sendEvent(name:'switch', value:jsonData?.switch, descriptionText:"Relay is now ${jsonData?.switch}", isStateChange:true) }
+  if(jsonData?.energy5Min != null) { sendEvent(name:'energy5Min', value:jsonData?.energy5Min, descriptionText:"energy5Min is now ${jsonData?.energy5Min}", isStateChange:true) }
+  if(jsonData?.energy15Min != null) { sendEvent(name:'energy15Min', value:jsonData?.energy15Min, descriptionText:"energy15Min is now ${jsonData?.energy15Min}", isStateChange:true) }
+  if(jsonData?.energy1Hr != null) { sendEvent(name:'energy1Hr', value:jsonData?.energy1Hr, descriptionText:"energy1Hr is now ${jsonData?.energy1Hr}", isStateChange:true) }
+  if(jsonData?.energyDaily != null) { sendEvent(name:'energyDaily', value:jsonData?.energyDaily, descriptionText:"energyDaily is now ${jsonData?.energyDaily}", isStateChange:true) }
+  if(jsonData?.voltage != null) { sendEvent(name:'voltage', value:jsonData?.voltage, descriptionText:"voltage is now ${jsonData?.voltage}", isStateChange:true) }
+  if(jsonData?.frequency != null) { sendEvent(name:'frequency', value:jsonData?.frequency, descriptionText:"frequency is now ${jsonData?.frequency}", isStateChange:true) }
+  if(jsonData?.power != null) { sendEvent(name:'power', value:jsonData?.power, descriptionText:"power is now ${jsonData?.power}", isStateChange:true) }
+  if(jsonData?.amperage != null) { sendEvent(name:'amperage', value:jsonData?.amperage, descriptionText:"amperage is now ${jsonData?.amperage}", isStateChange:true) }
+  if(jsonData?.energy != null) { sendEvent(name:'energy', value:jsonData?.energy, descriptionText:"energy is now ${jsonData?.energy}", isStateChange:true) }
 }
