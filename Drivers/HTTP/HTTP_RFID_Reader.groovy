@@ -28,12 +28,20 @@
 metadata {
   definition (name: 'HTTP RFID Reader', namespace: 'dwinks', author: 'Daniel Winks', importUrl:'') {
     capability 'Sensor'
+    capability 'PushableButton'
+    capability 'Switch'
 
     command 'restartESP'
-    command 'deleteChildDevices'
     command 'checkConnection'
+    // command 'setButtonNum'
+    command 'setPendingChoreList'
+    command 'setAllToNoMaintenanceNeeded'
 
-    attribute 'lastTag', 'STRING'
+    attribute 'lastUID', 'STRING'
+    attribute 'tagMessage', 'STRING'
+    attribute 'choreId', 'STRING'
+    attribute 'commandId', 'STRING'
+    attribute 'pendingChores', 'STRING'
 
     attribute 'status', 'ENUM', ['online', 'offline']
     attribute 'uptime', 'NUMBER'
@@ -59,16 +67,20 @@ ChildDeviceWrapper getOrCreateChildDevice(String name) {
   if (child == null) {
     child = addChildDevice(
       'dwinks',
-      'Virtual Instant Off Switch With Button',
+      'Virtual Auto Off Switch With Button And Consumable',
       "${getChildDNI(name)}",
-      [ name: 'Virtual Instant Off Switch With Button', label: "RFID - ${name}" ]
+      [ name: 'Virtual Auto Off Switch With Button And Consumable', label: "RFID - ${name}" ]
     )
   }
   return child
 }
 
 void murderChildren() {deleteChildDevices()}
+// void setButtonNum() {sendEvent(name: 'numberOfButtons', value: 25)}
 
+void push(Integer buttonNumber) { sendEvent(name: 'pushed', value: buttonNumber, isStateChange:true) }
+void on() {}
+void off() {}
 
 void parse(message) {
   Map parsedMessage = parseLanMessage(message)
@@ -78,8 +90,42 @@ void parse(message) {
 
 void processJson(Map jsonData) {
   logDebug(prettyJson(jsonData))
-  if(jsonData?.id == 'RFID' && jsonData?.value != null && jsonData?.value != ''){
-    ChildDeviceWrapper child = getOrCreateChildDevice(jsonData?.value)
+  if(jsonData?.tagMessage != null) { sendEvent(name: 'tagMessage', value: jsonData.tagMessage, isStateChange:true) }
+  ChildDeviceWrapper child = null
+  if(jsonData?.lastUID != null) {
+    child = getOrCreateChildDevice(jsonData?.lastUID)
     child.on()
+    if(jsonData?.beginChores == null && jsonData?.commandCard == null) { child.setConsumableStatus('good') }
+    sendEvent(name: 'lastUID', value: jsonData.lastUID, isStateChange:true)
+  }
+  if(jsonData?.choreId != null) { sendEvent(name: 'choreId', value: jsonData.choreId, isStateChange:true) }
+  if(jsonData?.commandId != null) { sendEvent(name: 'commandId', value: jsonData.commandId, isStateChange:true) }
+  if(jsonData?.buttonNumber != null) { push(jsonData.buttonNumber as Integer) }
+  if(jsonData?.commandCard != null) { sendEvent(name: 'switch', value: device.currentValue('switch') == 'on' ? 'off' : 'on') } // Enter parental command mode
+  // While in parental mode, scanned tags will be set to off and maintenance_required
+  if(device.currentValue('switch') == 'on' && jsonData?.commandCard == null) {
+    child.setConsumableStatus('maintenance_required')
+    child.off()
+  }
+  setPendingChoreList()
+}
+
+void setPendingChoreList() {
+  String pendingChores = "The following chores need to be completed "
+  List<ChildDeviceWrapper> children = []
+  children = getChildDevices().findAll{it.currentValue('consumableStatus') == 'maintenance_required'}
+  children.each{ child ->
+    logDebug("Child needs completed: ${child}")
+    pendingChores += "${child.getLabel()}".replace('Chore -','')
+    pendingChores += ', '
+  }
+  if(children.size() == 0) { pendingChores = 'No chores need completed at this time'}
+  sendEvent(name: 'pendingChores', value: pendingChores, isStateChange: true)
+}
+
+void setAllToNoMaintenanceNeeded() {
+  List<ChildDeviceWrapper> children = getChildDevices()
+  children.each { child ->
+    child.setConsumableStatus('good')
   }
 }
