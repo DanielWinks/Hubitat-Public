@@ -1680,8 +1680,8 @@ void resubscribeToMrRcEvents() {
   String resub = 'resubscribeToMrRcEvents'
   String subId = 'sid2'
   String subPath = '/mrc'
-  String evtSub = MRAVT_EVENTS
-  String callback = MRAVT_EVENTS_CALLBACK
+  String evtSub = MRRC_EVENTS
+  String callback = MRRC_EVENTS_CALLBACK
   upnpResubscribeGeneric(resub, subId, subPath, callback, evtSub)
 }
 
