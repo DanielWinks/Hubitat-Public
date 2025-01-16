@@ -29,6 +29,11 @@ metadata {
     capability 'PushableButton'
     capability 'Consumable' //consumableStatus - ENUM ['missing', 'order', 'maintenance_required', 'good', 'replace']
 
+    attribute 'assignee', 'STRING' // To be used for auto-off 'chore switches'
+    command 'setAssignee'
+    command 'setMaintenanceRequired'
+    command 'setMaintenanceRequiredIfSwitchOff'
+
   }
   preferences() {
     section(){
@@ -89,18 +94,42 @@ void on() {
   sendEvent(name: 'switch', value: 'on')
   push(1)
   setConsumableStatus('good')
+  setAssignee('unassigned')
+  parent?.update()
 }
 
 void off() {
   unschedule('autoOff')
   sendEvent(name: 'switch', value: 'off')
+  parent?.update()
 }
 
 void setConsumableStatus(String status) {
   if(status in ['missing', 'order', 'maintenance_required', 'good', 'replace']) {
     sendEvent(name: 'consumableStatus', value: status)
+    parent?.update()
   }
 }
 
+void setAssignee(String assigneeName) {
+  sendEvent(name: 'assignee', value: assigneeName)
+  parent?.update()
+}
+
 void autoOff() { off() }
-void push(buttonNumber) { sendEvent(name: 'pushed', value: buttonNumber, isStateChange:true) }
+void push(buttonNumber) {
+  sendEvent(name: 'pushed', value: buttonNumber, isStateChange:true)
+  parent?.update()
+}
+
+void setMaintenanceRequired() {
+  off()
+  setConsumableStatus('maintenance_required')
+}
+
+void setMaintenanceRequiredIfSwitchOff() {
+  if(device.currentValue('switch') == 'off') {
+    setConsumableStatus('maintenance_required')
+    setAssignee('unassigned')
+  }
+}
