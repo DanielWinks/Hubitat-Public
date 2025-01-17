@@ -164,7 +164,7 @@ String getPendingPersonalChoresForChildText(String name) {
   String pendingChores = "The following chores need to be completed by ${name} "
   children.each{ child ->
     logDebug("Child needs completed: ${child}")
-    pendingChores += "${child.getLabel()}".replace('Chore -','')
+    pendingChores += "${child.getLabel()}".replace('Chore -','').replace("${name}",'')
     pendingChores += ', '
   }
 
