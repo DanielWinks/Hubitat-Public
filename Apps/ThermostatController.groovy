@@ -33,6 +33,9 @@
 // If the user manually changes the temperature during night mode, it remembers the new setting and uses it for future night mode adjustments.
 // Logging options are provided for debugging and monitoring.
 
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.hub.domain.Event
+
 #include dwinks.UtilitiesAndLoggingLibrary
 
 definition(
@@ -78,42 +81,53 @@ Map mainPage() {
   }
 }
 
+// =============================================================================
+// Lifecycle Management
+// =============================================================================
+
 void configure() {
   unsubscribe()
   initialize()
 }
 
 void initialize() {
-  // unschedule()
-  // clearAllStates()
+  ensureStateDefaults()
   subscribe(thermostat, 'thermostatEventHandler')
   subscribe(contactSensors, 'contact', 'contactSensorEventHandler')
-  subscribe(location, "mode.Away", 'awayModeEventHandler')
-  subscribe(location, "mode.Night", 'nightModeEventHandler')
-  logDebug(location.getMode())
+  subscribe(location, 'mode.Away', 'awayModeEventHandler')
+  subscribe(location, 'mode.Night', 'nightModeEventHandler')
+  logDebug("Active location mode: ${location.getMode()}")
 }
 
-boolean everyoneIsAway() {
-  return settings.awaySensors?.all { p -> p.currentValue('presence') == 'not present' }
+private void ensureStateDefaults() {
+  if (state.setpointsRestored == null) {
+    state.setpointsRestored = true
+  }
+  if (!state.currentOperatingState) {
+    state.currentOperatingState = 'Normal'
+  }
 }
+
+// =============================================================================
+// Contact Sensor Handling
+// =============================================================================
 
 void contactSensorEventHandler(Event evt) {
   logDebug("contactSensorEventHandler: ${evt.device.displayName} is ${evt.value}")
   if (evt.value == 'open') {
     runIn(openWindowDuration * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
-  } else if (evt.value == 'closed') {
+    return
+  }
+
+  if (evt.value == 'closed') {
     if (allContactSensorsClosed()) {
       unschedule('disableThermostatDueToOpenWindow')
-      logInfo('Enabling thermostat as everyone is away and all windows/doors are closed')
+      logInfo('All windows/doors closed; restoring thermostat automation')
       thermostat.auto()
     } else {
-      logInfo('Not enabling thermostat because a window/door is still open')
+      logInfo('Another window/door remains open; keeping thermostat disabled')
     }
   }
-}
-
-boolean allContactSensorsClosed() {
-  return settings.contactSensors?.every { cs -> cs.currentValue('contact') == 'closed' }
 }
 
 void disableThermostatDueToOpenWindow() {
@@ -121,60 +135,80 @@ void disableThermostatDueToOpenWindow() {
   thermostat.off()
 }
 
-void awayModeEventHandler(Event evt) {
-  logDebug("awayModeEventHandler: ${evt.device.displayName} is ${evt.value}")
-  if (evt.value == 'Away' && state.setpointsRestored == true) {
-    logInfo('Location is in "Away" mode')
-    // Save current high/low setpoints
-    state.setPointLow = thermostat.currentValue('heatingSetpoint')
-    state.setPointHigh = thermostat.currentValue('coolingSetpoint')
-    // Flag to specify that we are storing setpoints that have not been restored yet
-    state.setpointsRestored = false
-    // Set thermostat to away mode settings
-    thermostat.setHeatingSetpoint(awayModeVirtualThermostat.currentValue('heatingSetpoint'))
-    thermostat.setCoolingSetpoint(awayModeVirtualThermostat.currentValue('coolingSetpoint'))
-    state.currentOperatingState = 'Away'
-  } else {
-    logInfo('Location is not in "Away" mode')
-    // Restore previous high/low setpoints
-    if (state.setPointLow != null && state.setPointHigh != null) {
-      thermostat.setHeatingSetpoint(state.setPointLow as Double)
-      thermostat.setCoolingSetpoint(state.setPointHigh as Double)
-      state.setpointsRestored = true
-      state.currentOperatingState = 'Normal'
-    }
-  }
-}
-
-void nightModeEventHandler(Event evt) {
-  logDebug("nightModeEventHandler: ${evt.device.displayName} is ${evt.value}")
-  if (evt.value == 'Night' && state.setpointsRestored == true) {
-    logInfo('Location is in "Night" mode')
-    // Save current high/low setpoints
-    state.setPointLow = thermostat.currentValue('heatingSetpoint')
-    state.setPointHigh = thermostat.currentValue('coolingSetpoint')
-    // Flag to specify that we are storing setpoints that have not been restored yet
-    state.setpointsRestored = false
-    // Set thermostat to night mode settings
-    thermostat.setHeatingSetpoint(nightModeVirtualThermostat.currentValue('heatingSetpoint'))
-    thermostat.setCoolingSetpoint(nightModeVirtualThermostat.currentValue('coolingSetpoint'))
-    state.currentOperatingState = 'Night'
-  } else {
-    logInfo('Location is not in "Night" mode')
-    // Restore previous high/low setpoints
-    if (state.setPointLow != null && state.setPointHigh != null) {
-      thermostat.setHeatingSetpoint(state.setPointLow as Double)
-      thermostat.setCoolingSetpoint(state.setPointHigh as Double)
-      state.setpointsRestored = true
-      state.currentOperatingState = 'Normal'
-    }
-  }
+private boolean allContactSensorsClosed() {
+  return settings.contactSensors?.every { cs -> cs.currentValue('contact') == 'closed' } ?: true
 }
 
 boolean anyContactSensorsOpen() {
-  return settings.contactSensors?.any { cs -> cs.currentValue('contact') == 'open' }
+  return settings.contactSensors?.any { cs -> cs.currentValue('contact') == 'open' } ?: false
 }
 
-void thermostatEventHandler(evt) {
-  logDebug("thermostatEventHandler: ${evt.device.displayName}, ${evt.type}: ${evt.value}")
+// =============================================================================
+// Mode Coordination
+// =============================================================================
+
+void awayModeEventHandler(Event evt) {
+  handleModeChange('Away', awayModeVirtualThermostat, evt)
+}
+
+void nightModeEventHandler(Event evt) {
+  handleModeChange('Night', nightModeVirtualThermostat, evt)
+}
+
+private void handleModeChange(String modeName, DeviceWrapper modeThermostat, Event evt) {
+  logDebug("${modeName} mode event: ${evt.device.displayName} reported ${evt.value}")
+  if (evt.value == modeName && state.setpointsRestored == true) {
+    logInfo("Location entered \"${modeName}\" mode")
+    if (storeCurrentSetpoints()) {
+      applyVirtualThermostatSetpoints(modeThermostat, modeName)
+    }
+    return
+  }
+
+  if (evt.value != modeName && state.setpointsRestored == false) {
+    logInfo("Location exited \"${modeName}\" mode")
+    restoreStoredSetpoints()
+  }
+}
+
+private boolean storeCurrentSetpoints() {
+  BigDecimal low = thermostat.currentValue('heatingSetpoint') as BigDecimal
+  BigDecimal high = thermostat.currentValue('coolingSetpoint') as BigDecimal
+  if (low == null || high == null) {
+    logWarn('Unable to capture current setpoints; heating or cooling value missing')
+    return false
+  }
+  state.setPointLow = low
+  state.setPointHigh = high
+  state.setpointsRestored = false
+  return true
+}
+
+private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, String modeName) {
+  if (modeThermostat == null) {
+    logWarn("No virtual thermostat configured for ${modeName} mode")
+    return
+  }
+  Double heat = (modeThermostat.currentValue('heatingSetpoint') as BigDecimal)?.toDouble()
+  Double cool = (modeThermostat.currentValue('coolingSetpoint') as BigDecimal)?.toDouble()
+  if (heat != null) {
+    thermostat.setHeatingSetpoint(heat)
+  }
+  if (cool != null) {
+    thermostat.setCoolingSetpoint(cool)
+  }
+  state.currentOperatingState = modeName
+}
+
+private void restoreStoredSetpoints() {
+  BigDecimal low = state.setPointLow as BigDecimal
+  BigDecimal high = state.setPointHigh as BigDecimal
+  if (low == null || high == null) {
+    logWarn('No stored setpoints available to restore')
+    return
+  }
+  thermostat.setHeatingSetpoint(low.toDouble())
+  thermostat.setCoolingSetpoint(high.toDouble())
+  state.setpointsRestored = true
+  state.currentOperatingState = 'Normal'
 }
