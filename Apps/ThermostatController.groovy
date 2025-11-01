@@ -212,3 +212,15 @@ private void restoreStoredSetpoints() {
   state.setpointsRestored = true
   state.currentOperatingState = 'Normal'
 }
+
+// =============================================================================
+// Telemetry & Future Hooks
+// =============================================================================
+
+boolean everyoneIsAway() {
+  return settings.awaySensors?.all { p -> p.currentValue('presence') == 'not present' } ?: false
+}
+
+void thermostatEventHandler(Event evt) {
+  logDebug("thermostatEventHandler: ${evt.device.displayName}, ${evt.type}: ${evt.value}")
+}
