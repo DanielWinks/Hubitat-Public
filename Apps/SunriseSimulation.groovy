@@ -6,7 +6,7 @@ definition(
   name: 'Sunrise Simulation',
   namespace: 'dwinks',
   author: 'Daniel Winks',
-  description: 'Slowly rise CT or RGBW bulbs for gentle wakeup.',
+  description: 'Slowly raise RGBW bulbs for gentle wakeup.',
   category: '',
   iconUrl: '',
   iconX2Url: '',
@@ -14,14 +14,7 @@ definition(
 )
 
 preferences {page(name: 'mainPage', title: 'Sunrise Simulation')}
-mappings {path("/sunriseStart") {action: [GET: "sunriseStartWebhook"]}}
-
-String getLocalUri() { return getFullLocalApiServerUrl() + "/sunriseStart?access_token=${state.accessToken}" }
-String getCloudUri() { return "${getApiServerUrl()}/${hubUID}/apps/${app.id}/sunriseStart?access_token=${state.accessToken}" }
-
 Map mainPage() {
-
-  List rules = RMUtils.getRuleList('5.0')
   dynamicPage(
     name: 'mainPage',
     title: '<h1>Sunrise Simulation</h1>',
@@ -29,25 +22,21 @@ Map mainPage() {
     uninstall: true,
     refreshInterval: 0
   ) {
-    tryCreateAccessToken()
-    if(!state.accessToken) {
-      section ("<h2 style='color:red;'>OAuth is not enabled for app!! Please enable in Apps code.</h2>"){      }
-    }
     section('<h2>Devices</h2>') {
-      input (name: 'birdsongRule', title: 'Rule to run to start morning birdsong', type: 'enum', options: rules, required: true, multiple: false)
-      input (name: 'annoucementsRule', title: 'Rule to run to start morning announcements', type: 'enum', options: rules, required: true, multiple: false)
-      input 'startSwitches', 'capability.switch', title: 'Start Sunrise with switches', required: false, multiple: true
+      input ('birdsongSwitch', 'capability.switch', title: 'Switch to start morning birdsong', required: false, multiple: false)
+      input ('annoucementsSwitch', 'capability.switch', title: 'Switch to start morning announcements', required: false, multiple: false)
+      input ('startSwitches', 'capability.switch', title: 'Start Sunrise with switches', required: false, multiple: true)
 
       // input "ctBulbs", "capability.colorTemperature", title: "Color Temp capable bulbs", required: false, multiple: true
-      input 'rgbwBulbs', 'capability.colorControl', title: 'RGB capable bulbs', required: false, multiple: true
-      input 'disableSwitches', 'capability.switch', title: 'Disable Sunrise with switches', required: false, multiple: true
-      input 'snoozeSwitches', 'capability.switch', title: 'Snooze Sunrise with switches', required: false, multiple: true
-      input 'requiredPresence', 'capability.presenceSensor', title: 'Required presence for Sunrise', required: false, multiple: true
+      input ('rgbwBulbs', 'capability.colorControl', title: 'RGB capable bulbs', required: false, multiple: true)
+      input ('disableSwitches', 'capability.switch', title: 'Disable Sunrise with switches', required: false, multiple: true)
+      input ('snoozeSwitches', 'capability.switch', title: 'Snooze Sunrise with switches', required: false, multiple: true)
+      input ('requiredPresence', 'capability.presenceSensor', title: 'Required presence for Sunrise', required: false, multiple: true)
     }
 
     section('<h2>Sunrise Settings</h2>') {
-      input 'sunriseDuration', 'number', title: 'Duration of minutes to brighten lights', range: '10..60', required: true, defaultValue: 30
-      input 'snoozeDuration', 'number', title: 'Duration of minutes to snooze', range: '10..60', required: true, defaultValue: 30
+      input ('sunriseDuration', 'number', title: 'Duration of minutes to brighten lights', range: '10..60', required: true, defaultValue: 30)
+      input ('snoozeDuration', 'number', title: 'Duration of minutes to snooze', range: '10..60', required: true, defaultValue: 30)
     }
 
     section("Webhooks") {
