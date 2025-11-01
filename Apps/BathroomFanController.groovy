@@ -1,4 +1,33 @@
-#include dwinks.UtilitiesAndLogging
+/**
+ *  MIT License
+ *  Copyright 2023 Daniel Winks (daniel.winks@gmail.com)
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the "Software"), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in all
+ *  copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ **/
+
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.app.exception.UnknownDeviceTypeException
+import com.hubitat.hub.domain.Event
+import groovy.transform.Field
+
+#include dwinks.UtilitiesAndLoggingLibrary
 
 definition (
   name: "Bathroom Fan Controller",
@@ -11,13 +40,18 @@ definition (
   iconX3Url: ""
 )
 
-preferences {page(name: "mainPage", title: "Bathroom Fan Controller")}
+preferences { page(name: "mainPage", title: "Bathroom Fan Controller") }
+
+// =============================================================================
+// App Page & Configuration
+// =============================================================================
 
 Map mainPage() {
   dynamicPage(name: "mainPage", title: "", install: true, uninstall: true, refreshInterval: 0) {
     section("<b>Device Instructions</b>", hideable: true, hidden: false) {
       paragraph "The humidity sensor(s) you select will control the fan switch you select."
       input "humiditySensors", "capability.relativeHumidityMeasurement", title: "Humidity Sensor(s)", multiple: true, required: true
+      input "householdHumiditySensor", "capability.relativeHumidityMeasurement", title: "Optional Household Humidity Sensor, i.e. central thermostat humidity sensor", multiple: false, required: false
       input "fanSwitch", "capability.switch", title: "Fan Switch", required: true
       paragraph "The door sensor you select will turn off the fan when the door has been open for a specified time, 10 minutes by default. Optional."
       input "doorSensor", "capability.contactSensor", title: "Door Sensor", required: false
@@ -57,18 +91,26 @@ Map mainPage() {
 @Field static final String humidityStaticSensor = 'humidity-stats'
 String getHumidityStatSensor() { return "${app.id}-${humidityStaticSensor}" }
 
-void updated() {
+// =============================================================================
+// Lifecycle
+// =============================================================================
+
+void configure() {
   unsubscribe()
   ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
   initializeApp(child)
 }
 
 void initializeApp(ChildDeviceWrapper child) {
-  humiditySensors.each() { sensor -> subscribe(sensor, "humidity", humidityEvent)}
+  humiditySensors.each { sensor -> subscribe(sensor, "humidity", humidityEvent) }
   subscribe(fanSwitch, "switch", switchEvent)
   subscribe(doorSensor, "contact", contactEvent)
   subscribe(child, highHumMode, childHumidityEvent)
 }
+
+// =============================================================================
+// Child Device Management
+// =============================================================================
 
 ChildDeviceWrapper getOrCreateChildDevices(String childDNI) {
   DeviceWrapper device = app.getChildDevice(childDNI)
@@ -83,19 +125,25 @@ ChildDeviceWrapper getOrCreateChildDevices(String childDNI) {
   return device
 }
 
+// =============================================================================
+// Humidity Processing
+// =============================================================================
+
 void humidityEvent(Event event) {
   logDebug("Received humidity event: ${event.value}")
   ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
   BigDecimal value = new BigDecimal(event.value)
   state.lastHumidity = value
-  if(value > 0 && value < 100) {child.logHumidityEvent(value)}
+  if (value > 0 && value < 100) {
+    child.logHumidityEvent(value)
+  }
 }
 
 void childHumidityEvent(Event event) {
   BigDecimal historicalHumidity = new BigDecimal(event.value)
   logDebug("Humidity Mode: ${highHumMode}")
   BigDecimal lastHumidity = (new BigDecimal(state.lastHumidity)).setScale(1, BigDecimal.ROUND_HALF_UP)
-  if(lastHumidity - changeLimit > historicalHumidity) {
+  if (lastHumidity - changeLimit > historicalHumidity) {
     fanSwitch.on()
     logDebug("Last Humidity Reading(${lastHumidity}) was great enough to trigger a fan event.")
     logDebug("Historical Humidity(${historicalHumidity}) was outside change limit(${changeLimit}) of Last Humidity Reading(${lastHumidity})")
@@ -105,15 +153,20 @@ void childHumidityEvent(Event event) {
   }
 }
 
+// =============================================================================
+// Fan & Door Event Handling
+// =============================================================================
+
 void switchEvent(Event event) {
   logDebug("Received switch event: ${event.value}")
-  if (event.value == "off") { app.getState().remove('fanOnSince')}
-  else if (event.value == "on") {
+  if (event.value == "off") {
+    app.getState().remove('fanOnSince')
+  } else if (event.value == "on") {
     state.fanOnSince = now()
-    if(maxRuntime > 0) {
-      logDebug("Scheduling fan shutoff for ${doorOpenTime} minutes")
+    if (maxRuntime > 0) {
+      logDebug("Scheduling fan shutoff for ${maxRuntime} minutes")
       runIn(maxRuntime * 60, "runtimeExceeded")
-      }
+    }
   }
 }
 
