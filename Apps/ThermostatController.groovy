@@ -25,12 +25,13 @@
 // It uses virtual thermostats to store 'away' and 'night' mode settings.
 // It remembers manual changes, so it does not fight the user.
 // If a window or door is open, it can disable the thermostat to save energy.
-// It uses presence sensors to determine if anyone is home.
+// It uses Hubitat's location modes to determine 'away' and 'night' states.
 // If everyone is away, it sets the thermostat to auto mode.
 // If someone arrives home, it sets the thermostat to auto mode, restoring previous temperature settings.
 // If everyone leaves, it saves the current temperature settings and turns the thermostat to 'away' temperature settings.
 // At night, it can set the thermostat to a lower temperature for energy savings.
-// If the user manually changes the temperature during night mode, it remembers the new setting and uses it for future night mode adjustments.
+// When changing between away and night modes, it does not store the setpoints again,
+// as we do not want to overwrite the stored setpoint for normal operation.
 // Logging options are provided for debugging and monitoring.
 
 import com.hubitat.app.DeviceWrapper
@@ -94,9 +95,17 @@ void initialize() {
   ensureStateDefaults()
   subscribe(thermostat, 'thermostatEventHandler')
   subscribe(contactSensors, 'contact', 'contactSensorEventHandler')
-  subscribe(location, 'mode.Away', 'awayModeEventHandler')
-  subscribe(location, 'mode.Night', 'nightModeEventHandler')
+  subscribe(location, 'mode', 'locationModeChangeHandler')
+  // Handle the initial mode change
+  String mode = location.getMode()
   logDebug("Active location mode: ${location.getMode()}")
+  if (mode == 'Away') {
+    handleModeChange('Away', awayModeVirtualThermostat)
+  } else if (mode == 'Night') {
+    handleModeChange('Night', nightModeVirtualThermostat)
+  } else {
+    handleModeChange(location.getMode())
+  }
 }
 
 private void ensureStateDefaults() {
@@ -114,6 +123,9 @@ private void ensureStateDefaults() {
 
 void contactSensorEventHandler(Event evt) {
   logDebug("contactSensorEventHandler: ${evt.device.displayName} is ${evt.value}")
+  if  ( !disableWithOpenWindowsOrDoors) {
+    return
+  }
   if (evt.value == 'open') {
     runIn(openWindowDuration * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
     return
@@ -147,26 +159,51 @@ boolean anyContactSensorsOpen() {
 // Mode Coordination
 // =============================================================================
 
-void awayModeEventHandler(Event evt) {
-  handleModeChange('Away', awayModeVirtualThermostat, evt)
+void locationModeChangeHandler(Event evt) {
+  String mode = evt.value
+  logDebug("locationModeChangeHandler: Location mode changed to ${mode}")
+  if (mode == 'Away') {
+    handleModeChange('Away', awayModeVirtualThermostat)
+  } else if (mode == 'Night') {
+    handleModeChange('Night', nightModeVirtualThermostat)
+  } else {
+    if (state.setpointsRestored == false) {
+      logInfo("Location exited \"${mode}\" mode; restoring previous setpoints")
+      restoreStoredSetpoints()
+    }
+  }
 }
 
-void nightModeEventHandler(Event evt) {
-  handleModeChange('Night', nightModeVirtualThermostat, evt)
-}
-
-private void handleModeChange(String modeName, DeviceWrapper modeThermostat, Event evt) {
-  logDebug("${modeName} mode event: ${evt.device.displayName} reported ${evt.value}")
-  if (evt.value == modeName && state.setpointsRestored == true) {
+private void handleModeChange(String modeName, DeviceWrapper modeThermostat=null) {
+  // Only store current setpoints if not already stored;
+  // We're only interested in storing the non-away and non-night setpoints
+  // We don't want to overwrite the stored setpoints if we're already in away or night mode
+  // When jumping straight between away and night modes, it should not store the setpoints again
+  if (modeName == 'Away') {
     logInfo("Location entered \"${modeName}\" mode")
-    if (storeCurrentSetpoints()) {
+    if (state.setpointsRestored == true) {
+      if (storeCurrentSetpoints()) {
+        applyVirtualThermostatSetpoints(modeThermostat, modeName)
+      }
+    } else {
+      applyVirtualThermostatSetpoints(modeThermostat, modeName)
+    }
+    return
+  } else if (modeName == 'Night') {
+    logInfo("Location entered \"${modeName}\" mode")
+    if (state.setpointsRestored == true) {
+      if (storeCurrentSetpoints()) {
+        applyVirtualThermostatSetpoints(modeThermostat, modeName)
+      }
+    } else {
       applyVirtualThermostatSetpoints(modeThermostat, modeName)
     }
     return
   }
 
-  if (evt.value != modeName && state.setpointsRestored == false) {
+  if (modeName != 'Away' && modeName != 'Night' && state.setpointsRestored == false) {
     logInfo("Location exited \"${modeName}\" mode")
+    state.currentOperatingState = 'Normal'
     restoreStoredSetpoints()
   }
 }
@@ -197,6 +234,7 @@ private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, Strin
   if (cool != null) {
     thermostat.setCoolingSetpoint(cool)
   }
+  thermostat.auto()
   state.currentOperatingState = modeName
 }
 
@@ -210,16 +248,13 @@ private void restoreStoredSetpoints() {
   thermostat.setHeatingSetpoint(low.toDouble())
   thermostat.setCoolingSetpoint(high.toDouble())
   state.setpointsRestored = true
+  thermostat.auto()
   state.currentOperatingState = 'Normal'
 }
 
 // =============================================================================
 // Telemetry & Future Hooks
 // =============================================================================
-
-boolean everyoneIsAway() {
-  return settings.awaySensors?.all { p -> p.currentValue('presence') == 'not present' } ?: false
-}
 
 void thermostatEventHandler(Event evt) {
   logDebug("thermostatEventHandler: ${evt.device.displayName}, ${evt.type}: ${evt.value}")

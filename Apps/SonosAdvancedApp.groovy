@@ -456,8 +456,8 @@ void ssdpEventHandler(Event event) {
 
 @CompileStatic
 void processParsedSsdpEvent(LinkedHashMap event) {
-  String ipAddress = convertHexToIP(event?.networkAddress)
-  String ipPort = convertHexToInt(event?.deviceAddress)
+  String ipAddress = convertHexToIP(event?.networkAddress as String)
+  String ipPort = convertHexToInt(event?.deviceAddress as String).toString()
 
   LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
   if(playerInfo) {

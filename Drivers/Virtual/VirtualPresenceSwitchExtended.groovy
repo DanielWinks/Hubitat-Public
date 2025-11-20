@@ -105,33 +105,61 @@ metadata {
   }
 }
 
+// =============================================================================
+// Lifecycle & Scheduling
+// =============================================================================
+
 void initialize() { configure() }
-void configure() { unschedule() }
-void cancelSchedules() { unschedule() }
+
+void configure() {
+  // Nothing to set up beyond clearing any stray schedules when the driver starts.
+  unschedule()
+}
+
+void cancelSchedules() {
+  // External consumers can call this to abort any pending transitions.
+  unschedule()
+}
+
+// =============================================================================
+// Command Entry Points
+// =============================================================================
 
 void arrived() { on() }
 void departed() { off() }
 
 void on() {
+  // Ensure we stop any departure flow before processing an arrival.
   unschedule('processDeparted')
-  if ((settings.arrivedDelay as Long) > 0) {
-    runIn(settings.arrivedDelay as Long, 'processArrived')
-  } else { processArrived() }
+  Long delay = settingAsLong('arrivedDelay')
+  if (delay > 0L) {
+    runIn(delay, 'processArrived')
+  } else {
+    processArrived()
+  }
 }
+
+void off() {
+  // Ensure we stop any arrival flow before processing a departure.
+  unschedule('processArrived')
+  Long delay = settingAsLong('departDelay')
+  if (delay > 0L) {
+    runIn(delay, 'processDeparted')
+  } else {
+    processDeparted()
+  }
+}
+
+// =============================================================================
+// Core Presence Transitions
+// =============================================================================
 
 void processArrived() {
   extendedOff()
   sendEvent(name: 'presence', value: 'present')
   sendEvent(name: 'switch', value: 'on')
   justArrivedOn()
-  runIn(settings.extendedPresentTime as Long, 'extendedPresentOn')
-}
-
-void off() {
-  unschedule('processArrived')
-  if ((settings.departDelay as Long) > 0) {
-    runIn(settings.departDelay as Long, 'processDeparted')
-  } else { processDeparted() }
+  runIn(settingAsLong('extendedPresentTime'), 'extendedPresentOn')
 }
 
 void processDeparted() {
@@ -139,30 +167,74 @@ void processDeparted() {
   sendEvent(name: 'presence', value: 'not present')
   sendEvent(name: 'switch', value: 'off')
   justDepartedOn()
-  runIn(settings.extendedAwayTime as Long, 'extendedAwayOn')
+  runIn(settingAsLong('extendedAwayTime'), 'extendedAwayOn')
 }
 
-void justArrivedOff() { sendEvent(name: 'justArrived', value: 'false') }
+// =============================================================================
+// "Just" State Management
+// =============================================================================
+
 void justArrivedOn() {
   sendEvent(name: 'justArrived', value: 'true')
-  runIn(settings.justArrivedTime as Long, 'justArrivedOff')
+  runIn(settingAsLong('justArrivedTime'), 'justArrivedOff')
 }
 
-void justDepartedOff() { sendEvent(name: 'justDeparted', value: 'false') }
+void justArrivedOff() {
+  sendEvent(name: 'justArrived', value: 'false')
+}
+
 void justDepartedOn() {
   sendEvent(name: 'justDeparted', value: 'true')
-  runIn(settings.justDepartedTime as Long, 'justDepartedOff')
+  runIn(settingAsLong('justDepartedTime'), 'justDepartedOff')
 }
 
-void extendedPresentOff() { sendEvent(name: 'extendedPresent', value: 'false') }
-void extendedPresentOn() { sendEvent(name: 'extendedPresent', value: 'true') }
+void justDepartedOff() {
+  sendEvent(name: 'justDeparted', value: 'false')
+}
 
-void extendedAwayOff() { sendEvent(name: 'extendedAway', value: 'false') }
-void extendedAwayOn() { sendEvent(name: 'extendedAway', value: 'true') }
+// =============================================================================
+// Extended Presence/Away Management
+// =============================================================================
+
+void extendedPresentOn() {
+  sendEvent(name: 'extendedPresent', value: 'true')
+}
+
+void extendedPresentOff() {
+  sendEvent(name: 'extendedPresent', value: 'false')
+}
+
+void extendedAwayOn() {
+  sendEvent(name: 'extendedAway', value: 'true')
+}
+
+void extendedAwayOff() {
+  sendEvent(name: 'extendedAway', value: 'false')
+}
 
 void extendedOff() {
+  // Reset both extended states and cancel any pending transitions to avoid stale flags.
   unschedule('extendedAwayOn')
   unschedule('extendedPresentOn')
   extendedAwayOff()
   extendedPresentOff()
+}
+
+// =============================================================================
+// Utility Helpers
+// =============================================================================
+
+private Long settingAsLong(String key) {
+  Object raw = settings[key]
+  if (raw == null) {
+    return 0L
+  }
+  if (raw instanceof Number) {
+    return ((Number) raw).longValue()
+  }
+  try {
+    return Long.parseLong(raw.toString())
+  } catch (NumberFormatException ignored) {
+    return 0L
+  }
 }
