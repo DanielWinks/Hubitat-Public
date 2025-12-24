@@ -133,24 +133,35 @@ void humidityEvent(Event event) {
   logDebug("Received humidity event: ${event.value}")
   ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
   BigDecimal value = new BigDecimal(event.value)
-  state.lastHumidity = value
   if (value > 0 && value < 100) {
+    state.currentHumidity = value.toString()
     child.logHumidityEvent(value)
   }
 }
 
 void childHumidityEvent(Event event) {
-  BigDecimal historicalHumidity = new BigDecimal(event.value)
-  logDebug("Humidity Mode: ${highHumMode}")
+  BigDecimal trackedHumValue = new BigDecimal(event.value)
+  BigDecimal currentHumidity = new BigDecimal(state.currentHumidity).setScale(1, BigDecimal.ROUND_HALF_UP)
   BigDecimal lastHumidity = (new BigDecimal(state.lastHumidity)).setScale(1, BigDecimal.ROUND_HALF_UP)
-  if (lastHumidity - changeLimit > historicalHumidity) {
+  logDebug("Tracked Humidity Value: ${trackedHumValue}")
+  logDebug("Current Humidity Value: ${currentHumidity}")
+  String isIncreasing = currentHumidity > lastHumidity ? 'true' : 'false'
+  String decreasingSuccessively = state.isIncreasing == 'false' && isIncreasing == 'false' ? 'true' : 'false'
+  state.isIncreasing = isIncreasing
+  logDebug("Is Increasing: ${isIncreasing}")
+  if ((currentHumidity - changeLimit) > trackedHumValue && isIncreasing == 'true') {
     fanSwitch.on()
     logDebug("Last Humidity Reading(${lastHumidity}) was great enough to trigger a fan event.")
-    logDebug("Historical Humidity(${historicalHumidity}) was outside change limit(${changeLimit}) of Last Humidity Reading(${lastHumidity})")
+    logDebug("Current Humidity(${currentHumidity}) was outside change limit(${changeLimit}) of Last Humidity Reading(${lastHumidity})")
   } else {
+    if (decreasingSuccessively == 'true') {
+      logDebug("Current Humidity(${currentHumidity}) has been decreasing successively. Turning off fan.")
+      fanSwitch.off()
+    }
     logDebug("Last Humidity Reading(${lastHumidity}) was not great enough to trigger a fan event.")
-    logDebug("Historical Humidity(${historicalHumidity}) was within change limit(${changeLimit}) of Last Humidity Reading(${lastHumidity})")
+    logDebug("Current Humidity(${currentHumidity}) was within change limit(${changeLimit}) of Last Humidity Reading(${lastHumidity})")
   }
+  state.lastHumidity = currentHumidity.toString()
 }
 
 // =============================================================================
