@@ -384,6 +384,9 @@ void configure() {
   logInfo('Configuring Gemini Text Rewriter')
   unsubscribe()
 
+  // Subscribe to location events for cross-app communication
+  subscribe(location, 'geminiRewriteRequest', 'handleRewriteRequestEvent')
+
   // Clean up global variables from previous config if name changed
   if (settings.storeInGlobalVar && settings.globalVarName) {
     try {
@@ -756,6 +759,65 @@ void appButtonHandler(String buttonId) {
 }
 
 // =============================================================================
+// LOCATION EVENT HANDLERS FOR CROSS-APP COMMUNICATION
+// =============================================================================
+
+/**
+ * handleRewriteRequestEvent() - Process rewrite requests from other apps via location events
+ * This allows other apps to request text rewriting without HTTP calls
+ *
+ * Expected event format:
+ *   name: 'geminiRewriteRequest'
+ *   value: text to rewrite (String)
+ *   data: Map with optional 'mode' and 'requestId'
+ */
+void handleRewriteRequestEvent(Event evt) {
+  try {
+    logDebug("Received rewrite request event: ${evt.value}")
+
+    String textToRewrite = evt.value
+    Map eventData = evt.data ? parseJson(evt.data) : [:]
+    String mode = eventData?.mode ?: settings.defaultMode ?: 'improve'
+    String requestId = eventData?.requestId ?: UUID.randomUUID().toString()
+
+    logDebug("Processing rewrite request ID: ${requestId}, mode: ${mode}")
+
+    // Call the main rewrite method
+    Map result = rewriteText(textToRewrite, mode)
+
+    // Send response back via location event
+    Map responseData = [
+      requestId: requestId,
+      success: result.success,
+      rewritten: result.text,
+      error: result.error,
+      mode: mode
+    ]
+
+    sendLocationEvent(
+      name: 'geminiRewriteResponse',
+      value: result.success ? result.text : textToRewrite,
+      data: JsonOutput.toJson(responseData)
+    )
+
+    logDebug("Sent rewrite response for request ID: ${requestId}")
+
+  } catch (Exception e) {
+    logError("Error handling rewrite request event: ${e.message}")
+    // Send error response
+    sendLocationEvent(
+      name: 'geminiRewriteResponse',
+      value: evt.value,
+      data: JsonOutput.toJson([
+        success: false,
+        error: e.message,
+        rewritten: evt.value
+      ])
+    )
+  }
+}
+
+// =============================================================================
 // CORE REWRITING LOGIC
 // =============================================================================
 
@@ -828,6 +890,19 @@ Map rewriteText(String text, String mode = null) {
         if (settings.keepHistory) {
           addToHistory(text, rewrittenText, mode)
         }
+
+        // Send location event for other apps to listen to
+        sendLocationEvent(
+          name: 'geminiTextRewritten',
+          value: rewrittenText,
+          data: JsonOutput.toJson([
+            success: true,
+            original: text,
+            rewritten: rewrittenText,
+            mode: mode,
+            timestamp: state.lastTimestamp
+          ])
+        )
 
         logInfo("Successfully rewrote text (mode: ${mode})")
         logDebug("Rewritten text: ${rewrittenText}")
