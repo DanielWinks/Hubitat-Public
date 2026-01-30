@@ -106,14 +106,23 @@ Map mainPage() {
       input 'customInstructions', 'text',
         title: 'Instructions for AI',
         required: true,
-        defaultValue: '''Create a warm, friendly morning announcement from the following information. Keep it natural and conversational, like a helpful assistant. Include:
-1. A cheerful greeting appropriate for the time of day
-2. Today's weather forecast in a brief, easy-to-understand way
-3. Any weather alerts (if present) with appropriate emphasis
-4. Today's calendar events (if any) in a helpful reminder format
-5. A positive closing thought or encouragement
-
-Keep the tone upbeat and informative. Make it feel personal and engaging, not robotic.''',
+        defaultValue: '''
+          Create a warm, friendly morning announcement from the following information.
+          Keep it natural and conversational, formatted like a news caster would be announcing.
+          Include:
+          1. A cheerful greeting appropriate for the time of day
+          2. Today's weather forecast in a brief, easy-to-understand way
+          3. Any weather alerts (if present) with appropriate emphasis
+          4. Today's calendar events (if any) in a helpful reminder format
+          5. A positive closing thought or encouragement
+          Keep the tone upbeat and informative.
+          Make it feel personal and engaging, not robotic.
+          The input text contains sections, named "WEATHER FORECAST:", "WEATHER ALERTS:", and "TODAY'S CALENDAR:"...
+          do not leave these in verbatim. Reword the announcement so it flows together nicely as if it were being announced by a news caster.
+          Pay special attention to weather forecasts, as these will be read aloud, so ensure temperature units and conditions are clear.
+          For things like temperature, include the word "degrees" after the number for clarity, such as "75 degrees" rather than just "75".
+          If any section is missing or empty, omit it gracefully from the announcement.
+          ''',
         description: 'This prompt guides the AI on how to structure and present your morning announcement.'
     }
 
@@ -284,6 +293,9 @@ Map getAnnouncementWebhook() {
 
 /**
  * generateAnnouncement() - Main method to generate morning announcement
+ * This method initiates the announcement generation process by gathering data
+ * and sending it to Gemini for enhancement. The actual storage happens when
+ * the response event is received.
  */
 void generateAnnouncement() {
   logInfo('Generating morning announcement...')
@@ -294,25 +306,25 @@ void generateAnnouncement() {
     String weatherAlerts = getDeviceAttributeValue(settings.weatherAlertsDevice, settings.weatherAlertsAttribute)
     String calendarEvents = getDeviceAttributeValue(settings.calendarEventsDevice, settings.calendarEventsAttribute)
 
-    // Build the input text for AI
+    // Build the input text for AI (with instructions)
     String combinedInput = buildCombinedInput(weatherReport, weatherAlerts, calendarEvents)
 
+    // Build fallback text (content only, no instructions)
+    String fallbackText = buildContentOnly(weatherReport, weatherAlerts, calendarEvents)
+
     logDebug("Combined input: ${combinedInput}")
+    logDebug("Fallback text: ${fallbackText}")
 
-    // Get AI-enhanced announcement
-    String announcement = enhanceWithAI(combinedInput)
-
-    // Store results
-    state.lastAnnouncement = announcement
-    state.lastGenerated = new Date().format('yyyy-MM-dd HH:mm:ss')
-
-    // Store in global variable
-    if (settings.globalVariableName) {
-      setGlobalVar(settings.globalVariableName, announcement)
-      logInfo("Stored announcement in global variable: ${settings.globalVariableName}")
+    // Check if Gemini enhancement is enabled
+    if (settings.useGeminiRewriter) {
+      // Send request to Gemini - response will be handled by event
+      sendGeminiRequest(combinedInput, fallbackText)
+      logInfo('Sent announcement to Gemini for enhancement - awaiting response event')
+    } else {
+      // No AI enhancement - store fallback directly
+      storeAnnouncement(fallbackText)
+      logInfo('Stored announcement without AI enhancement')
     }
-
-    logInfo('Morning announcement generated successfully')
 
   } catch (Exception e) {
     logError("Failed to generate announcement: ${e.message}")
@@ -378,15 +390,46 @@ private String buildCombinedInput(String weatherReport, String weatherAlerts, St
 }
 
 /**
- * enhanceWithAI() - Send text to Gemini for enhancement via location events
+ * buildContentOnly() - Build announcement content without instructions
+ * This creates a simple concatenation of the data for fallback use
  */
-private String enhanceWithAI(String inputText) {
-  // Check if Gemini enhancement is enabled
-  if (!settings.useGeminiRewriter) {
-    logWarn('Gemini Text Rewriter not enabled - returning raw text')
-    return inputText
+private String buildContentOnly(String weatherReport, String weatherAlerts, String calendarEvents) {
+  StringBuilder content = new StringBuilder()
+
+  // Add weather report
+  if (weatherReport) {
+    content.append('Weather Forecast: ')
+    content.append(weatherReport)
+    content.append('. ')
   }
 
+  // Add weather alerts
+  if (weatherAlerts) {
+    content.append('Weather Alerts: ')
+    content.append(weatherAlerts)
+    content.append('. ')
+  }
+
+  // Add calendar events
+  if (calendarEvents) {
+    content.append('Today\'s Calendar: ')
+    content.append(calendarEvents)
+    content.append('. ')
+  }
+
+  // If nothing to announce
+  if (!weatherReport && !weatherAlerts && !calendarEvents) {
+    return 'Good morning! No weather or calendar information is available today.'
+  }
+
+  return content.toString().trim()
+}
+
+/**
+ * sendGeminiRequest() - Send text to Gemini for enhancement via location events
+ * This is a fire-and-forget operation; the response will be handled by the event listener
+ */
+private void sendGeminiRequest(String inputText, String fallbackText) {
   try {
     // Generate unique request ID
     String requestId = UUID.randomUUID().toString()
@@ -397,13 +440,15 @@ private String enhanceWithAI(String inputText) {
     state.pendingGeminiRequest = [
       requestId: requestId,
       originalText: inputText,
+      fallbackText: fallbackText,
       timestamp: now()
     ]
 
-    // Prepare request data
+    // Prepare request data (include fallback text for error cases)
     Map requestData = [
       requestId: requestId,
-      mode: 'custom'
+      mode: 'custom',
+      fallbackText: fallbackText
     ]
 
     // Send location event to Gemini Text Rewriter app
@@ -415,49 +460,38 @@ private String enhanceWithAI(String inputText) {
 
     logDebug("Sent rewrite request via location event")
 
-    // Wait for response (with timeout)
-    Integer maxWaitSeconds = 30
-    Integer waitInterval = 100 // milliseconds
-    Integer totalWait = 0
+  } catch (Exception e) {
+    logError("Error sending Gemini request: ${e.message}")
+    // Fall back to storing fallback text if send fails
+    storeAnnouncement(fallbackText)
+  }
+}
 
-    while (totalWait < (maxWaitSeconds * 1000)) {
-      // Check if response has arrived
-      if (state.geminiResponse?.requestId == requestId) {
-        logDebug("Received response for request ID: ${requestId}")
-        Map response = state.geminiResponse
-        state.remove('geminiResponse')
-        state.remove('pendingGeminiRequest')
+/**
+ * storeAnnouncement() - Store the final announcement text
+ */
+private void storeAnnouncement(String announcement) {
+  try {
+    // Store results
+    state.lastAnnouncement = announcement
+    state.lastGenerated = new Date().format('yyyy-MM-dd HH:mm:ss')
 
-        if (response.success && response.rewritten) {
-          logInfo('AI enhancement successful')
-          return response.rewritten
-        } else {
-          logWarn("AI enhancement failed: ${response.error ?: 'Unknown error'}")
-          return inputText
-        }
-      }
-
-      // Wait a bit before checking again
-      pauseExecution(waitInterval)
-      totalWait += waitInterval
+    // Store in global variable
+    if (settings.globalVariableName) {
+      setGlobalVar(settings.globalVariableName, announcement)
+      logInfo("Stored announcement in global variable: ${settings.globalVariableName}")
     }
 
-    // Timeout - no response received
-    logWarn("Gemini response timeout after ${maxWaitSeconds} seconds")
-    state.remove('pendingGeminiRequest')
-    return inputText
+    logInfo('Morning announcement stored successfully')
 
   } catch (Exception e) {
-    logError("AI enhancement error: ${e.message}")
-    logError("Error type: ${e.class.name}")
-    logWarn("Returning raw concatenated text without AI enhancement")
-    state.remove('pendingGeminiRequest')
-    return inputText
+    logError("Failed to store announcement: ${e.message}")
   }
 }
 
 /**
  * handleGeminiResponseEvent() - Process responses from Gemini Text Rewriter app
+ * This event-driven handler completes the announcement workflow by storing the result
  */
 void handleGeminiResponseEvent(Event evt) {
   try {
@@ -470,20 +504,37 @@ void handleGeminiResponseEvent(Event evt) {
     if (state.pendingGeminiRequest?.requestId == requestId) {
       logDebug("Response matches pending request ID: ${requestId}")
 
-      // Store response for the waiting enhanceWithAI method
-      state.geminiResponse = [
-        requestId: requestId,
-        success: responseData.success,
-        rewritten: responseData.rewritten ?: evt.value,
-        error: responseData.error,
-        mode: responseData.mode
-      ]
+      // Get the enhanced text or fall back to content without instructions
+      String announcement = ''
+      if (responseData.success && responseData.rewritten) {
+        announcement = responseData.rewritten
+        logInfo('Received AI-enhanced announcement')
+      } else {
+        // Use fallback text (content only, no instructions) if enhancement failed
+        announcement = state.pendingGeminiRequest.fallbackText ?: state.pendingGeminiRequest.originalText
+        logWarn("AI enhancement failed: ${responseData.error ?: 'Unknown error'}, using fallback text")
+      }
+
+      // Store the announcement
+      storeAnnouncement(announcement)
+
+      // Clean up pending request
+      state.remove('pendingGeminiRequest')
+
     } else {
       logDebug("Response ID ${requestId} doesn't match pending request, ignoring")
     }
 
   } catch (Exception e) {
     logError("Error handling Gemini response event: ${e.message}")
+    // Try to fall back to fallback text or original text if we have it
+    if (state.pendingGeminiRequest?.fallbackText) {
+      storeAnnouncement(state.pendingGeminiRequest.fallbackText)
+      state.remove('pendingGeminiRequest')
+    } else if (state.pendingGeminiRequest?.originalText) {
+      storeAnnouncement(state.pendingGeminiRequest.originalText)
+      state.remove('pendingGeminiRequest')
+    }
   }
 }
 

@@ -157,7 +157,7 @@ Map mainPage() {
       input(
         'maxTokens',
         'number',
-        title: 'Maximum Output Tokens',
+        title: 'Maximum Output Tokens (50-8192)',
         required: false,
         defaultValue: 1000,
         range: '50..8192',
@@ -167,7 +167,7 @@ Map mainPage() {
       input(
         'temperature',
         'decimal',
-        title: 'Temperature (Creativity)',
+        title: 'Temperature (Creativity) (0.0 - 1.0)',
         required: false,
         defaultValue: 0.7,
         range: '0.0..1.0',
@@ -779,39 +779,50 @@ void handleRewriteRequestEvent(Event evt) {
     Map eventData = evt.data ? parseJson(evt.data) : [:]
     String mode = eventData?.mode ?: settings.defaultMode ?: 'improve'
     String requestId = eventData?.requestId ?: UUID.randomUUID().toString()
+    String fallbackText = eventData?.fallbackText ?: textToRewrite
 
     logDebug("Processing rewrite request ID: ${requestId}, mode: ${mode}")
 
     // Call the main rewrite method
     Map result = rewriteText(textToRewrite, mode)
 
+    // Determine what text to send back
+    String responseText = result.success ? result.text : fallbackText
+
     // Send response back via location event
     Map responseData = [
       requestId: requestId,
       success: result.success,
-      rewritten: result.text,
+      rewritten: responseText,
       error: result.error,
       mode: mode
     ]
 
     sendLocationEvent(
       name: 'geminiRewriteResponse',
-      value: result.success ? result.text : textToRewrite,
+      value: responseText,
       data: JsonOutput.toJson(responseData)
     )
 
-    logDebug("Sent rewrite response for request ID: ${requestId}")
+    if (result.success) {
+      logDebug("Sent successful rewrite response for request ID: ${requestId}")
+    } else {
+      logWarn("Sent fallback text response for request ID: ${requestId} due to error: ${result.error}")
+    }
 
   } catch (Exception e) {
     logError("Error handling rewrite request event: ${e.message}")
-    // Send error response
+    // Send error response with fallback text if available
+    Map eventData = evt.data ? parseJson(evt.data) : [:]
+    String fallbackText = eventData?.fallbackText ?: evt.value
+
     sendLocationEvent(
       name: 'geminiRewriteResponse',
-      value: evt.value,
+      value: fallbackText,
       data: JsonOutput.toJson([
         success: false,
         error: e.message,
-        rewritten: evt.value
+        rewritten: fallbackText
       ])
     )
   }
