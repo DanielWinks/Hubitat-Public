@@ -1,3 +1,0 @@
-dwinks
-UtilitiesAndLoggingLibrary
-library dwinks.UtilitiesAndLoggingLibrary.groovy

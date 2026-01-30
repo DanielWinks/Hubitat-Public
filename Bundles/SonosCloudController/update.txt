@@ -1,7 +1,0 @@
-dwinks
-Sonos Cloud Controller
-library dwinks.UtilitiesAndLoggingLibrary.groovy
-library dwinks.SMAPILibrary.groovy
-driver dwinks.SonosCloudGroup.groovy
-driver dwinks.SonosCloudPlayer.groovy
-app dwinks.SonosCloudController.groovy
