@@ -71,6 +71,14 @@ Typical runtime flow:
 - Do not introduce network calls to external services without an explicit test plan; these apps run on a private Hubitat hub.
 - Do not commit access tokens or secrets. Follow the existing `tryCreateAccessToken()` pattern.
 - Always use concrete types and avoid dynamic typing (e.g., `def`), as Hubitat Groovy is statically typed at runtime.
+- Always use parentheses for method calls, e.g., `logInfo("message")` not `logInfo "message"`.
+- Always use braces for control structures, e.g., `if (condition) { ... }` not `if (condition) ...`.
+- When modifying `preferences`, preserve existing keys and types to avoid breaking user configurations.
+- When modifying `state`, preserve existing keys to avoid breaking runtime state.
+- When modifying `mappings`, preserve existing paths to avoid breaking webhooks.
+- When modifying scheduling or subscriptions, preserve existing patterns to avoid breaking behavior.
+- Utilize @Field for static constants to improve performance and clarity.
+- Utilize @CompileStatic where possible to improve performance and catch type errors at compile time.
 
 ## What to update when adding a new package
 
@@ -85,4 +93,3 @@ Typical runtime flow:
 ---
 
 If you'd like, I can: (1) run a quick scan of all `Apps/` and `Libraries/` to auto-extract common `preferences` keys and logging patterns, or (2) include a short checklist template for adding a new App/Package.
-Z

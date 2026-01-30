@@ -447,13 +447,48 @@ void tryCreateAccessToken() {
 @Field static final Integer DEFAULT_MAX_HTTP_RETRY_ATTEMPTS = 3
 
 /**
+ * Attempts to normalize the HTTP status code from an AsyncResponse.
+ * Handles cases where status is a String or other non-Integer type.
+ *
+ * @param response The AsyncResponse object
+ * @return Integer HTTP status code, or null if not available/parseable
+ */
+Integer getHttpStatusCode(AsyncResponse response) {
+  if (response == null) return null
+  def statusObj = response.status
+  if (statusObj == null) return null
+
+  if (statusObj instanceof Number) {
+    return (statusObj as Number).intValue()
+  }
+
+  try {
+    String statusText = statusObj.toString()
+    // Try direct integer conversion first
+    try {
+      return statusText.toInteger()
+    } catch (Exception ignored) {
+      // Fallback: extract first 3-digit HTTP status code from text like "200 OK"
+      def matcher = (statusText =~ /(\d{3})/)
+      if (matcher.find()) {
+        return matcher.group(1).toInteger()
+      }
+      return null
+    }
+  } catch (Exception e) {
+    return null
+  }
+}
+
+/**
  * Checks if an async HTTP response indicates a failure (error or non-200 status).
  *
  * @param response The AsyncResponse object from an asynchttpGet/Post call
  * @return Boolean true if the response indicates a failure, false if successful
  */
 Boolean isHttpResponseFailure(AsyncResponse response) {
-  return response.hasError() || response.status != 200
+  Integer statusCode = getHttpStatusCode(response)
+  return response?.hasError() || statusCode == null || statusCode != 200
 }
 
 /**
@@ -502,19 +537,22 @@ Integer getHttpRetryCount(String stateKey = 'httpRetryAttemptCount') {
  * @return Boolean           true if a retry was scheduled, false if retries exhausted
  */
 Boolean handleAsyncHttpFailureWithRetry(
-    AsyncResponse response,
-    String retryMethodName,
-    String stateKey = 'httpRetryAttemptCount',
-    List<Integer> retryDelays = DEFAULT_HTTP_RETRY_DELAYS_SECONDS,
-    Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS
+  AsyncResponse response,
+  String retryMethodName,
+  String stateKey = 'httpRetryAttemptCount',
+  List<Integer> retryDelays = DEFAULT_HTTP_RETRY_DELAYS_SECONDS,
+  Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS,
+  String customErrorMessage = null
 ) {
   // Get the current retry attempt count
   Integer currentRetryCount = state[stateKey] ?: 0
 
   // Log the specific error with attempt information
-  String errorDetails = response.hasError() ?
-      "HTTP request error: ${response.getErrorMessage()}" :
-      "HTTP request returned status ${response.status} (expected 200 OK)"
+  Integer statusCode = getHttpStatusCode(response)
+  String errorDetails = customErrorMessage ?: (response?.hasError() ?
+    "HTTP request error: ${response.getErrorMessage()}" :
+    (statusCode != null ? "HTTP request returned status ${statusCode} (expected 200 OK)" :
+      "HTTP request returned no status code"))
   logError "${errorDetails} (attempt ${currentRetryCount + 1} of ${maxRetries + 1})"
 
   // Check if we have retries remaining
