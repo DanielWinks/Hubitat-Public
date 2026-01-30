@@ -8,6 +8,7 @@ This repository contains Hubitat apps, drivers, and libraries (Groovy) authored 
 - Drivers live in `Drivers/` and are grouped (e.g., `Drivers/HTTP`, `Drivers/Virtual`, `Drivers/ZigBee`).
 - Reusable code is in `Libraries/` (e.g., `UtilitiesAndLoggingLibrary.groovy`, `SMAPILibrary.groovy`).
 - Bundles and PackageManifests provide packaging for Hubitat Package Manager (HPM). The root `repository.json` and files under `PackageManifests/` define packages and raw URLs used by HPM.
+- Everything in the "Bundles" folder is auto-generated during packaging for HPM and should not be edited directly.
 
 Typical runtime flow:
 
