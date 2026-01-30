@@ -156,6 +156,15 @@ void logException(String message) {
 }
 
 /**
+ * Logs an exception with a message and exception details.
+ * @param message The message to log
+ * @param exception The exception object
+ */
+void logExceptionWithDetails(String message, Exception exception) {
+  logException("${message}: ${exception.message}")
+}
+
+/**
  * Logs an error message if logging is enabled.
  * @param message The error message to log.
  */
@@ -665,7 +674,112 @@ void executeHttpRetryGet(
 
   asynchttpGet(callbackMethodName, httpParams)
 }
+// =============================================================================
+// @CompileStatic Helper Methods
+// =============================================================================
+// These helper methods allow @CompileStatic methods to access dynamic properties
+// that the static compiler can't see (app, state, settings, device, etc.)
+// =============================================================================
 
+/**
+ * Gets the InstalledAppWrapper instance.
+ * @return The app instance
+ */
+Object getAppInstance() { return app }
+
+/**
+ * Gets a child device by its DNI.
+ * @param dni The device network ID
+ * @return The child device or null
+ */
+DeviceWrapper getAppChildDevice(String dni) { return app.getChildDevice(dni) }
+
+/**
+ * Adds a child device.
+ * @param namespace The namespace
+ * @param typeName The device type name
+ * @param dni The device network ID
+ * @param properties Additional properties map
+ * @return The created device
+ */
+DeviceWrapper createAppChildDevice(String namespace, String typeName, String dni, Map properties) {
+  return addChildDevice(namespace, typeName, dni, properties)
+}
+
+/**
+ * Gets the app label.
+ * @return The app label
+ */
+String getAppLabel() { return app.label }
+
+/**
+ * Gets a state variable.
+ * @param key The state key
+ * @return The state value
+ */
+Object getStateVar(String key) { return state[key] }
+
+/**
+ * Sets a state variable.
+ * @param key The state key
+ * @param value The value to set
+ */
+void setStateVar(String key, Object value) { state[key] = value }
+
+/**
+ * Removes a state variable.
+ * @param key The state key
+ */
+void removeStateVar(String key) {
+  if (app) app.getState().remove(key)
+  if (device) device.getState().remove(key)
+}
+
+/**
+ * Gets a setting value.
+ * @param key The setting key
+ * @return The setting value
+ */
+Object getSetting(String key) { return settings[key] }
+
+/**
+ * Gets the current timestamp in milliseconds.
+ * @return Current time in milliseconds
+ */
+Long getCurrentTime() { return now() }
+
+/**
+ * Schedules a method to run after a delay.
+ * @param seconds Number of seconds to delay
+ * @param methodName Name of the method to call
+ */
+void scheduleIn(Integer seconds, String methodName) { runIn(seconds, methodName) }
+
+/**
+ * Unschedules a method.
+ * @param methodName Name of the method to unschedule
+ */
+void unscheduleMethod(String methodName) { unschedule(methodName) }
+
+/**
+ * Calls a method on a device.
+ * @param device The device
+ * @param methodName The method name
+ * @param args Optional arguments
+ */
+void callDeviceMethod(DeviceWrapper device, String methodName, Object... args) {
+  device."${methodName}"(*args)
+}
+
+/**
+ * Gets a device property.
+ * @param device The device
+ * @param propertyName The property name
+ * @return The property value
+ */
+Object getDeviceProperty(DeviceWrapper device, String propertyName) {
+  return device."${propertyName}"
+}
 /**
  * Executes an HTTP retry by making an async POST request.
  * Call this from your retry method to re-attempt the HTTP request.
