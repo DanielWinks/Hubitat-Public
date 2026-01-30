@@ -164,6 +164,7 @@ metadata {
     command "initialize"                // Initializes/configures the driver
     command "refreshCurrentConditions"  // Updates detailed forecast only
     command "refreshHourlyForecasts"    // Updates hourly forecast data only
+    command "refreshAlerts"             // Updates active weather alerts only
   }
 
   // ---------------------------------------------------------------------------
@@ -784,12 +785,19 @@ private String buildAlertsFriendlyText(Map alertsData) {
     String headline = properties?.get('headline') as String
     String eventName = properties?.get('event') as String
 
+    String textToAdd = null
     if (nwsHeadline) {
-      summaries.add(nwsHeadline)
+      textToAdd = nwsHeadline
     } else if (headline) {
-      summaries.add(headline)
+      textToAdd = headline
     } else if (eventName) {
-      summaries.add(eventName)
+      textToAdd = eventName
+    }
+
+    if (textToAdd) {
+      // Replace newlines with spaces and remove double spaces
+      textToAdd = textToAdd.replaceAll(/\r?\n/, ' ').replaceAll(/ {2,}/, ' ').trim()
+      summaries.add(textToAdd)
     }
   }
 
@@ -823,6 +831,8 @@ private String buildAlertsInstructionText(Map alertsData) {
     Map properties = feature?.get('properties') as Map
     String instruction = properties?.get('instruction') as String
     if (instruction) {
+      // Replace newlines with spaces and remove double spaces
+      instruction = instruction.replaceAll(/\r?\n/, ' ').replaceAll(/ {2,}/, ' ').trim()
       instructions.add(instruction)
     }
   }
@@ -862,10 +872,25 @@ private Map buildReducedAlertsJson(Map alertsData) {
     Map properties = feature?.get('properties') as Map
     Map parameters = properties?.get('parameters') as Map
 
+    // Clean text fields: replace newlines with spaces and remove double spaces
+    String description = properties?.get('description') as String
+    String headline = properties?.get('headline') as String
+    String instruction = properties?.get('instruction') as String
+
+    if (description) {
+      description = description.replaceAll(/\r?\n/, ' ').replaceAll(/ {2,}/, ' ').trim()
+    }
+    if (headline) {
+      headline = headline.replaceAll(/\r?\n/, ' ').replaceAll(/ {2,}/, ' ').trim()
+    }
+    if (instruction) {
+      instruction = instruction.replaceAll(/\r?\n/, ' ').replaceAll(/ {2,}/, ' ').trim()
+    }
+
     Map reducedProps = [:]
-    reducedProps.put('description', properties?.get('description'))
-    reducedProps.put('headline', properties?.get('headline'))
-    reducedProps.put('instruction', properties?.get('instruction'))
+    reducedProps.put('description', description)
+    reducedProps.put('headline', headline)
+    reducedProps.put('instruction', instruction)
     reducedProps.put('severity', properties?.get('severity'))
     reducedProps.put('certainty', properties?.get('certainty'))
     reducedProps.put('response', properties?.get('response'))
@@ -1107,7 +1132,7 @@ private void updateDewpointAttribute(Map currentPeriod) {
   emitEvent(
     "dewpoint",
     dewpointResult?.get('value') ?: 0,
-    dewpointResult?.get('unit') ?: "°F",
+    (dewpointResult?.get('unit') ?: "°F") as String,
     "Updated dewpoint from NWS"
   )
 }
@@ -1304,7 +1329,8 @@ private void calculateAndUpdateHighLowFromHourlyData(List allHourlyPeriods) {
   // Get temperatures from the first 12 hourly periods
   // Filter for periods numbered 1-12, extract temperature values
   List next12HourTemperatures = []
-  for (Map period : allHourlyPeriods) {
+  for (Object periodObj : allHourlyPeriods) {
+    Map period = periodObj as Map
     Number numberValue = period?.get('number') as Number
     if (numberValue != null && numberValue.intValue() < 13) {
       Number tempValue = period?.get('temperature') as Number
