@@ -427,3 +427,164 @@ void tryCreateAccessToken() {
     }
   }
 }
+
+// =============================================================================
+// HTTP Retry Utilities
+// =============================================================================
+// These utilities provide automatic retry logic for failed HTTP requests.
+// Use these when making async HTTP calls that should retry on failure.
+
+/**
+ * Default retry delays in seconds: 1 minute, 3 minutes, 5 minutes.
+ * Each index corresponds to the retry attempt number (0-indexed).
+ * Customize by passing different values to the retry handler.
+ */
+@Field static final List<Integer> DEFAULT_HTTP_RETRY_DELAYS_SECONDS = [60, 180, 300]
+
+/**
+ * Default maximum number of retry attempts before giving up.
+ */
+@Field static final Integer DEFAULT_MAX_HTTP_RETRY_ATTEMPTS = 3
+
+/**
+ * Checks if an async HTTP response indicates a failure (error or non-200 status).
+ *
+ * @param response The AsyncResponse object from an asynchttpGet/Post call
+ * @return Boolean true if the response indicates a failure, false if successful
+ */
+Boolean isHttpResponseFailure(AsyncResponse response) {
+  return response.hasError() || response.status != 200
+}
+
+/**
+ * Resets the HTTP retry counter in state.
+ * Call this at the start of a fresh HTTP request (not a retry).
+ *
+ * @param stateKey The state key to use for tracking retries (default: 'httpRetryAttemptCount')
+ */
+void resetHttpRetryCounter(String stateKey = 'httpRetryAttemptCount') {
+  state[stateKey] = 0
+  logDebug "HTTP retry counter reset (${stateKey})"
+}
+
+/**
+ * Gets the current HTTP retry attempt count from state.
+ *
+ * @param stateKey The state key used for tracking retries (default: 'httpRetryAttemptCount')
+ * @return Integer The current retry count (0 if not set)
+ */
+Integer getHttpRetryCount(String stateKey = 'httpRetryAttemptCount') {
+  return state[stateKey] ?: 0
+}
+
+/**
+ * Handles an HTTP request failure by logging the error and scheduling a retry.
+ * This is a generic handler that can be used by any driver or app making HTTP requests.
+ *
+ * Usage example:
+ *   void myHttpCallback(AsyncResponse response, Map data) {
+ *     if (isHttpResponseFailure(response)) {
+ *       handleAsyncHttpFailureWithRetry(response, 'executeMyRetry')
+ *       return
+ *     }
+ *     // Process successful response...
+ *   }
+ *
+ *   void executeMyRetry() {
+ *     executeHttpRetry('myHttpCallback', myHttpParams, 'executeMyRetry')
+ *   }
+ *
+ * @param response           The failed AsyncResponse object
+ * @param retryMethodName    The name of the method to call for retry (must be a void method in your driver/app)
+ * @param stateKey           State key for tracking retry count (default: 'httpRetryAttemptCount')
+ * @param retryDelays        List of delays in seconds for each retry attempt (default: [60, 180, 300])
+ * @param maxRetries         Maximum number of retry attempts (default: 3)
+ * @return Boolean           true if a retry was scheduled, false if retries exhausted
+ */
+Boolean handleAsyncHttpFailureWithRetry(
+    AsyncResponse response,
+    String retryMethodName,
+    String stateKey = 'httpRetryAttemptCount',
+    List<Integer> retryDelays = DEFAULT_HTTP_RETRY_DELAYS_SECONDS,
+    Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS
+) {
+  // Get the current retry attempt count
+  Integer currentRetryCount = state[stateKey] ?: 0
+
+  // Log the specific error with attempt information
+  String errorDetails = response.hasError() ?
+      "HTTP request error: ${response.getErrorMessage()}" :
+      "HTTP request returned status ${response.status} (expected 200 OK)"
+  logError "${errorDetails} (attempt ${currentRetryCount + 1} of ${maxRetries + 1})"
+
+  // Check if we have retries remaining
+  if (currentRetryCount < maxRetries) {
+    // Get the delay for this retry attempt (0-indexed)
+    Integer retryDelaySeconds = retryDelays[currentRetryCount]
+
+    // Increment the retry counter for the next attempt
+    state[stateKey] = currentRetryCount + 1
+
+    // Calculate human-readable delay for logging
+    String delayDescription = retryDelaySeconds >= 60 ?
+        "${retryDelaySeconds / 60} minute(s)" :
+        "${retryDelaySeconds} second(s)"
+
+    logWarn "Scheduling retry attempt ${currentRetryCount + 1} of ${maxRetries} in ${delayDescription}"
+
+    // Schedule the retry attempt
+    runIn(retryDelaySeconds, retryMethodName)
+    return true
+  } else {
+    // All retries exhausted
+    logError "All ${maxRetries} retry attempts failed. Will retry at next scheduled refresh."
+    state[stateKey] = 0  // Reset for next scheduled refresh
+    return false
+  }
+}
+
+/**
+ * Executes an HTTP retry by making an async GET request.
+ * Call this from your retry method to re-attempt the HTTP request.
+ *
+ * @param callbackMethodName The name of the callback method to handle the response
+ * @param httpParams         The HTTP request parameters (uri, contentType, etc.)
+ * @param retryMethodName    The name of this retry method (for logging purposes)
+ * @param stateKey           State key for tracking retry count (default: 'httpRetryAttemptCount')
+ * @param maxRetries         Maximum retries for logging (default: 3)
+ */
+void executeHttpRetryGet(
+    String callbackMethodName,
+    Map httpParams,
+    String retryMethodName,
+    String stateKey = 'httpRetryAttemptCount',
+    Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS
+) {
+  Integer currentRetryCount = state[stateKey] ?: 0
+  logInfo "Executing HTTP GET retry attempt ${currentRetryCount} of ${maxRetries}"
+
+  asynchttpGet(callbackMethodName, httpParams)
+}
+
+/**
+ * Executes an HTTP retry by making an async POST request.
+ * Call this from your retry method to re-attempt the HTTP request.
+ *
+ * @param callbackMethodName The name of the callback method to handle the response
+ * @param httpParams         The HTTP request parameters (uri, contentType, body, etc.)
+ * @param retryMethodName    The name of this retry method (for logging purposes)
+ * @param stateKey           State key for tracking retry count (default: 'httpRetryAttemptCount')
+ * @param maxRetries         Maximum retries for logging (default: 3)
+ */
+void executeHttpRetryPost(
+    String callbackMethodName,
+    Map httpParams,
+    String retryMethodName,
+    String stateKey = 'httpRetryAttemptCount',
+    Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS
+) {
+  Integer currentRetryCount = state[stateKey] ?: 0
+  logInfo "Executing HTTP POST retry attempt ${currentRetryCount} of ${maxRetries}"
+
+  asynchttpPost(callbackMethodName, httpParams)
+}

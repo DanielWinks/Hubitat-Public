@@ -63,6 +63,9 @@ import java.time.format.DateTimeFormatter  // Formats dates/times into strings
 // Hubitat-specific imports
 import com.hubitat.app.DeviceWrapper  // Represents a Hubitat device
 
+// JSON serialization for complex objects
+import groovy.json.JsonOutput         // Converts Maps/Lists to JSON strings
+
 // Include shared utilities library (provides logging helpers: logDebug, logInfo, etc.)
 #include dwinks.UtilitiesAndLoggingLibrary
 
@@ -309,8 +312,18 @@ void refresh() {
 /**
  * Fetches the iCal data from the configured URL.
  * Uses asynchronous HTTP to avoid blocking the hub.
+ * This is the primary fetch method that resets the retry counter.
+ *
+ * @param isRetryAttempt If true, this is a retry attempt (don't reset counter)
  */
-void fetchCalendarEventsFromUrl() {
+void fetchCalendarEventsFromUrl(Boolean isRetryAttempt = false) {
+  // Reset retry counter for fresh fetch attempts (not retries)
+  // Uses the library's resetHttpRetryCounter() helper
+  if (!isRetryAttempt) {
+    resetHttpRetryCounter()
+    logDebug "Starting fresh calendar fetch"
+  }
+
   // Build the HTTP request parameters
   Map httpRequestParams = [
     uri: settings.iCalUri,                         // The calendar URL from settings
@@ -318,8 +331,8 @@ void fetchCalendarEventsFromUrl() {
     requestContentType: 'text/html; charset=UTF-8' // Request type
   ]
 
-  // Clear existing state before fetching new data
-  clearAllStates()
+  // Store params in state for retry attempts
+  state.lastHttpRequestParams = httpRequestParams
 
   // Make an asynchronous HTTP GET request
   // When complete, 'handleCalendarDataResponse' will be called with the response
@@ -390,13 +403,42 @@ void off() {
 /**
  * Callback method for the async HTTP response.
  * This is called when the calendar data has been fetched from the URL.
+ * Handles HTTP failures by scheduling retry attempts using library utilities.
  *
  * @param response The HTTP response object containing the iCal data
  * @param data     Additional data passed to the callback (unused here)
  */
 void handleCalendarDataResponse(AsyncResponse response, Map data) {
+  // Check if the HTTP request failed using the library helper
+  if (isHttpResponseFailure(response)) {
+    // Handle the failure and potentially schedule a retry using library utility
+    handleAsyncHttpFailureWithRetry(response, 'executeCalendarFetchRetry')
+    return
+  }
+
+  // Success! Reset retry counter and clear old data before processing
+  resetHttpRetryCounter()
+  clearAllStates()
+  resetHttpRetryCounter()  // Restore after clearAllStates
+
   // Delegate to the main processing method, passing current settings
   processCalendarData(response, data, settings)
+}
+
+/**
+ * Executes a retry attempt to fetch calendar data.
+ * This method is called by runIn() after the retry delay has elapsed.
+ * Uses library utilities for retry execution.
+ */
+void executeCalendarFetchRetry() {
+  // Retrieve stored HTTP params and execute retry using library helper
+  Map httpParams = state.lastHttpRequestParams ?: [
+    uri: settings.iCalUri,
+    contentType: 'text/html; charset=UTF-8',
+    requestContentType: 'text/html; charset=UTF-8'
+  ]
+
+  executeHttpRetryGet('handleCalendarDataResponse', httpParams, 'executeCalendarFetchRetry')
 }
 
 /**
@@ -408,22 +450,11 @@ void handleCalendarDataResponse(AsyncResponse response, Map data) {
  * @param userSettings   The current device settings (preferences)
  */
 void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHashMap userSettings) {
+  // Note: HTTP error handling and retries are managed by handleCalendarDataResponse()
+  // This method is only called when we have a valid HTTP 200 response.
 
   // ---------------------------------------------------------------------------
-  // STEP 1: Validate the HTTP response
-  // ---------------------------------------------------------------------------
-  if (httpResponse.hasError()) {
-    logError "HTTP request error: ${httpResponse.getErrorMessage()}"
-    return
-  }
-
-  if (httpResponse.status != 200) {
-    logError "HTTP request returned status ${httpResponse.status} (expected 200 OK)"
-    return
-  }
-
-  // ---------------------------------------------------------------------------
-  // STEP 2: Parse the iCal structure to find event boundaries
+  // STEP 1: Parse the iCal structure to find event boundaries
   // ---------------------------------------------------------------------------
   // iCal files are plain text with sections delimited by BEGIN/END markers.
   // Each event is wrapped in BEGIN:VEVENT and END:VEVENT tags.
@@ -437,7 +468,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
   List<Number> eventEndLineNumbers = allCalendarLines.findIndexValues { it == "END:VEVENT" }
 
   // ---------------------------------------------------------------------------
-  // STEP 3: Extract calendar metadata from the header
+  // STEP 2: Extract calendar metadata from the header
   // ---------------------------------------------------------------------------
   // The header (lines before the first event) contains calendar-level info
   // like the calendar name (X-WR-CALNAME property).
@@ -462,7 +493,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
   }
 
   // ---------------------------------------------------------------------------
-  // STEP 4: Parse each VEVENT block into a structured event map
+  // STEP 3: Parse each VEVENT block into a structured event map
   // ---------------------------------------------------------------------------
   List<Map> parsedEvents = []
 
@@ -545,7 +576,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
     }
 
     // -------------------------------------------------------------------------
-    // STEP 4a: Handle recurring events
+    // STEP 3a: Handle recurring events
     // -------------------------------------------------------------------------
     // For recurring events, calculate the next occurrence after today
     if (eventData.repeatRule) {
@@ -558,7 +589,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
     }
 
     // -------------------------------------------------------------------------
-    // STEP 4b: Calculate derived properties if we have a valid start date
+    // STEP 3b: Calculate derived properties if we have a valid start date
     // -------------------------------------------------------------------------
     if (eventData.startDate) {
       // Set end date to next day if not specified (common for all-day events)
@@ -588,7 +619,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
   }
 
   // ---------------------------------------------------------------------------
-  // STEP 5: Sort events by start date (earliest first)
+  // STEP 4: Sort events by start date (earliest first)
   // ---------------------------------------------------------------------------
   // Sort by startMillis in ascending order (soonest events first)
   parsedEvents = parsedEvents.sort { a, b -> a.startMillis <=> b.startMillis }
@@ -597,7 +628,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
   Integer numberOfEventsToDisplay = userSettings.numberOfEventsToShow as Integer
 
   // ---------------------------------------------------------------------------
-  // STEP 6: Build a summary of events occurring on the same day as the first event
+  // STEP 5: Build a summary of events occurring on the same day as the first event
   // ---------------------------------------------------------------------------
   // This is used to create announcements like "There are events for A, B, and C today"
   List<Map> eventsOnFirstEventDay = []
@@ -612,7 +643,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
   }
 
   // ---------------------------------------------------------------------------
-  // STEP 7: Generate the human-readable announcement string
+  // STEP 6: Generate the human-readable announcement string
   // ---------------------------------------------------------------------------
   // This creates a string suitable for TTS announcements or dashboard display
   String friendlyAnnouncementString = generateFriendlyAnnouncementString(
@@ -622,7 +653,7 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
   )
 
   // ---------------------------------------------------------------------------
-  // STEP 8: Update device attributes with event data
+  // STEP 7: Update device attributes with event data
   // ---------------------------------------------------------------------------
   if (parsedEvents.size() > 0 && isDateWithinDays(parsedEvents[0].startDate, userSettings.eventLookAheadDays as Integer)) {
     // We have upcoming events within the look-ahead window
@@ -630,17 +661,22 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
     // Update the friendly announcement string
     sendEvent(name: "nextEventFriendlyString", value: friendlyAnnouncementString)
 
+    // Convert the first event to a JSON-serializable format (no ZonedDateTime objects)
+    Map nextEventJsonData = convertEventToJsonSerializable(parsedEvents[0])
+
     // Update next event details
-    sendEvent(name: "nextEventJson", value: parsedEvents[0])
+    sendEvent(name: "nextEventJson", value: JsonOutput.toJson(nextEventJsonData))
     sendEvent(name: "nextEventStart", value: parsedEvents[0].startDate)
     sendEvent(name: "nextEventEnd", value: parsedEvents[0].endDate)
     sendEvent(name: "nextEventSummary", value: parsedEvents[0].summary)
     sendEvent(name: "startDateFriendly", value: parsedEvents[0].startDateFriendly)
 
     // Update individual event JSON attributes (event0Json, event1Json, etc.)
+    // Convert each event to JSON-serializable format before storing
     for (Integer i = 0; i < numberOfEventsToDisplay; i++) {
       if (i < parsedEvents.size()) {
-        sendEvent(name: "event${i}Json", value: parsedEvents[i])
+        Map eventJsonData = convertEventToJsonSerializable(parsedEvents[i])
+        sendEvent(name: "event${i}Json", value: JsonOutput.toJson(eventJsonData))
       }
     }
 
@@ -664,6 +700,42 @@ void processCalendarData(AsyncResponse httpResponse, Map callbackData, LinkedHas
 // FRIENDLY STRING GENERATION
 // =============================================================================
 // These methods create human-readable announcement strings for TTS and display.
+
+/**
+ * Converts an event Map to a JSON-serializable format.
+ * Removes ZonedDateTime objects and replaces them with strings and epoch milliseconds.
+ * This ensures the Map can be properly stored in Hubitat device attributes.
+ *
+ * @param event The event map containing potentially non-serializable objects
+ * @return A new Map with all values converted to JSON-serializable types
+ */
+Map convertEventToJsonSerializable(Map event) {
+  // Create a new map with only JSON-serializable values
+  Map jsonSerializable = [:]
+
+  // Copy simple string/number values directly
+  if (event.summary) jsonSerializable.summary = event.summary
+  if (event.description) jsonSerializable.description = event.description
+  if (event.location) jsonSerializable.location = event.location
+  if (event.repeatRule) jsonSerializable.repeatRule = event.repeatRule
+
+  // Convert ZonedDateTime objects to both string and epoch milliseconds
+  if (event.startDate) {
+    jsonSerializable.startDateString = event.startDateString ?: event.startDate.toString()
+    jsonSerializable.startDateFriendly = event.startDateFriendly
+    jsonSerializable.startMillis = event.startMillis
+  }
+
+  if (event.endDate) {
+    jsonSerializable.endDateString = event.endDateString ?: event.endDate.toString()
+    jsonSerializable.endMillis = event.endMillis
+  }
+
+  // Copy formatted time strings
+  if (event.startTime) jsonSerializable.startTime = event.startTime
+
+  return jsonSerializable
+}
 
 /**
  * Generates a human-readable announcement string describing upcoming events.
@@ -824,9 +896,14 @@ String addDateAndTimeSuffix(String baseAnnouncement, Map nextEvent, List<Map> ev
 /**
  * Parses an iCal date or datetime string into a ZonedDateTime object.
  *
- * iCal uses two date formats:
+ * iCal uses multiple date/time formats:
  * - Date only (all-day events): "20260130" (YYYYMMDD)
  * - Date with time: "20260130T090000" (YYYYMMDD'T'HHMMSS)
+ *
+ * Timezones can be provided as:
+ * - Timezone ID: "America/New_York"
+ * - GMT offset: "GMT-0400", "GMT+0530"
+ * - UTC indicator: "Z"
  *
  * @param iCalDateString The date string from the iCal file
  * @param timezone       The timezone to use (default: America/New_York)
@@ -834,18 +911,42 @@ String addDateAndTimeSuffix(String baseAnnouncement, Map nextEvent, List<Map> ev
  */
 @groovy.transform.CompileStatic
 ZonedDateTime parseICalDateString(String iCalDateString, String timezone = "America/New_York") {
-  // Define the expected format: YYYYMMDD'T'HHMMSS followed by timezone ID
-  DateTimeFormatter iCalDateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss VV")
-
-  // If the string is just a date (8 chars), append midnight time
+  // If the string is just a date (8 chars or less), append midnight time
   // Date-only format: "20260130" -> "20260130T000000"
   if (iCalDateString.size() <= 8) {
     iCalDateString = iCalDateString + "T000000"
   }
 
-  // Append the timezone and parse
-  // Result format: "20260130T090000 America/New_York"
-  ZonedDateTime parsedDateTime = ZonedDateTime.parse(iCalDateString + " " + timezone, iCalDateTimeFormatter)
+  // Handle UTC indicator (Z suffix in the date string itself)
+  // Example: "20260130T090000Z"
+  if (iCalDateString.endsWith('Z')) {
+    DateTimeFormatter utcFormatter = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
+    return ZonedDateTime.parse(iCalDateString, utcFormatter.withZone(ZoneId.of("UTC")))
+  }
+
+  // Try to determine the timezone format and parse accordingly
+  ZonedDateTime parsedDateTime
+
+  // Check if timezone is a GMT offset (e.g., "GMT-0400", "GMT+0530")
+  if (timezone.startsWith("GMT")) {
+    // Extract the offset part (e.g., "-0400" from "GMT-0400")
+    String offsetPart = timezone.substring(3)  // Remove "GMT" prefix
+
+    // Handle cases with no offset (just "GMT")
+    if (offsetPart.isEmpty()) {
+      offsetPart = "+0000"
+    }
+
+    // Format: "20260130T090000 -0400"
+    // Pattern: yyyyMMdd'T'HHmmss X (X handles offset like -0400, +0530, etc.)
+    DateTimeFormatter offsetFormatter = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss X")
+    parsedDateTime = ZonedDateTime.parse(iCalDateString + " " + offsetPart, offsetFormatter.withZone(ZoneId.systemDefault()))
+  } else {
+    // Timezone is a timezone ID (e.g., "America/New_York", "Europe/London")
+    // Pattern: yyyyMMdd'T'HHmmss VV (VV handles timezone IDs)
+    DateTimeFormatter idFormatter = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss VV")
+    parsedDateTime = ZonedDateTime.parse(iCalDateString + " " + timezone, idFormatter)
+  }
 
   return parsedDateTime
 }
