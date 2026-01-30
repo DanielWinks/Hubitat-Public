@@ -304,6 +304,68 @@ void traceLogsOff() {
 }
 
 // =============================================================================
+// Event Utilities
+// =============================================================================
+
+/**
+ * Emits a device/app event using a map of event properties.
+ * This wrapper allows @CompileStatic callers to safely send events.
+ *
+ * @param eventData Map containing event fields (name, value, unit, descriptionText, etc.)
+ */
+void emitEvent(Map eventData) {
+  if (eventData != null) {
+    sendEvent(eventData)
+  }
+}
+
+/**
+ * Emits a device/app event using common fields.
+ * This wrapper allows @CompileStatic callers to safely send events.
+ *
+ * @param name            Attribute name
+ * @param value           Attribute value
+ * @param unit            Optional unit
+ * @param descriptionText Optional description text
+ */
+void emitEvent(String name, Object value, String unit = null, String descriptionText = null) {
+  Map eventData = [name: name, value: value]
+  if (unit != null) {
+    eventData.unit = unit
+  }
+  if (descriptionText != null) {
+    eventData.descriptionText = descriptionText
+  }
+  sendEvent(eventData)
+}
+
+// =============================================================================
+// Date/Time Utilities
+// =============================================================================
+
+/**
+ * Parses an ISO-8601 date-time string into a Date.
+ * Falls back to Hubitat's toDateTime() when available.
+ *
+ * @param isoString The ISO date-time string
+ * @return Date or null if parsing fails
+ */
+Date parseIsoDateTime(String isoString) {
+  if (isoString == null) {
+    return null
+  }
+  try {
+    return Date.parse("yyyy-MM-dd'T'HH:mm:ssXXX", isoString)
+  } catch (Exception e) {
+    try {
+      return toDateTime(isoString)
+    } catch (Exception ignored) {
+      return null
+    }
+  }
+}
+
+// =============================================================================
 // JSON Utilities
 // =============================================================================
 

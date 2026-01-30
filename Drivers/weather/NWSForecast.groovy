@@ -110,6 +110,7 @@ metadata {
     attribute "zoneId", "STRING"                    // NWS zone ID for alerts (e.g., OHZ065)
     attribute "alertsJson", "JSON_OBJECT"           // Active alerts from NWS (JSON)
     attribute "alertsFriendlyText", "STRING"       // Human-friendly alert summary text
+    attribute "alertsInstructionText", "STRING"    // Human-friendly alert instruction text
 
     // ---------------------------------------------------------------------------
     // HOURLY FORECAST ATTRIBUTES
@@ -643,7 +644,7 @@ void handleNwsEndpointsResponse(AsyncResponse response, Map data) {
   String zoneId = extractZoneIdFromUrl(forecastZoneUrl)
   if (zoneId) {
     state.zoneId = zoneId
-    sendEvent(name: "zoneId", value: zoneId, descriptionText: "Updated zoneId from NWS")
+    emitEvent("zoneId", zoneId, null, "Updated zoneId from NWS")
   }
 
   if (!state.forecastUri || !state.forecastHourlyUri) {
@@ -726,13 +727,18 @@ void handleAlertsResponse(AsyncResponse response, Map data) {
   // Success - reset retry counter
   resetHttpRetryCounter('alertsRetryCount')
 
-  // Store the alerts JSON as a string to ensure attribute persistence
-  String alertsJson = JsonOutput.toJson(jsonData)
-  sendEvent(name: "alertsJson", value: alertsJson, descriptionText: "Updated alerts from NWS")
+  // Store a reduced alerts JSON payload to ensure attribute persistence
+  Map reducedAlerts = buildReducedAlertsJson(jsonData)
+  String alertsJson = JsonOutput.toJson(reducedAlerts)
+  emitEvent("alertsJson", alertsJson, null, "Updated alerts from NWS")
 
   // Build a human-friendly alert summary
   String friendlyText = buildAlertsFriendlyText(jsonData)
-  sendEvent(name: "alertsFriendlyText", value: friendlyText, descriptionText: "Updated alerts friendly text")
+  emitEvent("alertsFriendlyText", friendlyText, null, "Updated alerts friendly text")
+
+  // Build a human-friendly alert instructions summary
+  String instructionText = buildAlertsInstructionText(jsonData)
+  emitEvent("alertsInstructionText", instructionText, null, "Updated alerts instruction text")
 }
 
 /**
@@ -772,10 +778,15 @@ private String buildAlertsFriendlyText(Map alertsData) {
   for (Object featureObj : features) {
     Map feature = featureObj as Map
     Map properties = feature?.get('properties') as Map
-    String eventName = properties?.get('event') as String
+    Map parameters = properties?.get('parameters') as Map
+    List nwsHeadlines = parameters?.get('NWSheadline') as List
+    String nwsHeadline = (nwsHeadlines && !nwsHeadlines.isEmpty()) ? (nwsHeadlines.get(0) as String) : null
     String headline = properties?.get('headline') as String
+    String eventName = properties?.get('event') as String
 
-    if (headline) {
+    if (nwsHeadline) {
+      summaries.add(nwsHeadline)
+    } else if (headline) {
       summaries.add(headline)
     } else if (eventName) {
       summaries.add(eventName)
@@ -787,6 +798,84 @@ private String buildAlertsFriendlyText(Map alertsData) {
   }
 
   return summaries.join(" | ")
+}
+
+/**
+ * Builds a human-friendly alert instruction summary from the NWS alerts response.
+ *
+ * @param alertsData The parsed JSON alerts response
+ * @return A readable instruction string
+ */
+@CompileStatic
+private String buildAlertsInstructionText(Map alertsData) {
+  if (alertsData == null) {
+    return "No alerts data available"
+  }
+
+  List features = alertsData.get('features') as List
+  if (!features || features.isEmpty()) {
+    return "No active alerts"
+  }
+
+  List<String> instructions = []
+  for (Object featureObj : features) {
+    Map feature = featureObj as Map
+    Map properties = feature?.get('properties') as Map
+    String instruction = properties?.get('instruction') as String
+    if (instruction) {
+      instructions.add(instruction)
+    }
+  }
+
+  if (instructions.isEmpty()) {
+    return "No alert instructions provided"
+  }
+
+  return instructions.join(" | ")
+}
+
+/**
+ * Builds a reduced alerts JSON payload with only selected fields.
+ *
+ * @param alertsData The parsed JSON alerts response
+ * @return Map containing reduced alert data
+ */
+@CompileStatic
+private Map buildReducedAlertsJson(Map alertsData) {
+  Map reduced = [:]
+  if (alertsData == null) {
+    return reduced
+  }
+
+  reduced.put('title', alertsData.get('title'))
+  reduced.put('updated', alertsData.get('updated'))
+
+  List features = alertsData.get('features') as List
+  if (!features) {
+    reduced.put('features', [])
+    return reduced
+  }
+
+  List reducedFeatures = []
+  for (Object featureObj : features) {
+    Map feature = featureObj as Map
+    Map properties = feature?.get('properties') as Map
+    Map parameters = properties?.get('parameters') as Map
+
+    Map reducedProps = [:]
+    reducedProps.put('description', properties?.get('description'))
+    reducedProps.put('headline', properties?.get('headline'))
+    reducedProps.put('instruction', properties?.get('instruction'))
+    reducedProps.put('severity', properties?.get('severity'))
+    reducedProps.put('certainty', properties?.get('certainty'))
+    reducedProps.put('response', properties?.get('response'))
+    reducedProps.put('parameters', [NWSheadline: parameters?.get('NWSheadline')])
+
+    reducedFeatures.add([properties: reducedProps])
+  }
+
+  reduced.put('features', reducedFeatures)
+  return reduced
 }
 
 
@@ -915,20 +1004,17 @@ void executeDetailedForecastRetry() {
  *
  * @param jsonData The parsed JSON response from NWS
  */
+@CompileStatic
 private void updateForecastGeneratedTimestamp(Map jsonData) {
   // Extract the generation timestamp from the JSON
   Map properties = jsonData.get('properties') as Map
   String generatedTimestamp = properties?.get('generatedAt') as String
 
   // Convert ISO 8601 timestamp string to Date object
-  Date generatedDate = toDateTime(generatedTimestamp)
+  Date generatedDate = parseIsoDateTime(generatedTimestamp)
 
   // Update the device attribute
-  sendEvent(
-    name: "generatedAt",
-    value: generatedDate,
-    descriptionText: "Forecast generated by NWS at ${generatedDate}"
-  )
+  emitEvent("generatedAt", generatedDate, null, "Forecast generated by NWS at ${generatedDate}")
 }
 
 /**
@@ -937,14 +1023,11 @@ private void updateForecastGeneratedTimestamp(Map jsonData) {
  *
  * @param currentPeriod The current forecast period data
  */
+@CompileStatic
 private void updateDetailedForecastText(Map currentPeriod) {
   String forecastText = currentPeriod.get('detailedForecast') as String
 
-  sendEvent(
-    name: "detailedForecast",
-    value: forecastText,
-    descriptionText: "Updated detailed forecast from NWS"
-  )
+  emitEvent("detailedForecast", forecastText, null, "Updated detailed forecast from NWS")
 }
 
 /**
@@ -952,22 +1035,15 @@ private void updateDetailedForecastText(Map currentPeriod) {
  *
  * @param currentPeriod The current forecast period data
  */
+@CompileStatic
 private void updateWindAttributes(Map currentPeriod) {
   // Wind speed (e.g., "10 mph", "5 to 10 mph")
   String windSpeed = currentPeriod.get('windSpeed') as String
-  sendEvent(
-    name: "windSpeed",
-    value: windSpeed,
-    descriptionText: "Updated wind speed from NWS"
-  )
+  emitEvent("windSpeed", windSpeed, null, "Updated wind speed from NWS")
 
   // Wind direction (e.g., "NW", "SE", "Variable")
   String windDirection = currentPeriod.get('windDirection') as String
-  sendEvent(
-    name: "windDirection",
-    value: windDirection,
-    descriptionText: "Updated wind direction from NWS"
-  )
+  emitEvent("windDirection", windDirection, null, "Updated wind direction from NWS")
 }
 
 /**
@@ -976,17 +1052,13 @@ private void updateWindAttributes(Map currentPeriod) {
  *
  * @param currentPeriod The current forecast period data
  */
+@CompileStatic
 private void updateTemperatureAttribute(Map currentPeriod) {
   Number temperatureNumber = currentPeriod.get('temperature') as Number
   Integer temperature = temperatureNumber != null ? temperatureNumber.intValue() : 0
   String temperatureUnit = currentPeriod.get('temperatureUnit') as String
 
-  sendEvent(
-    name: "temperature",
-    value: temperature,
-    unit: "°${temperatureUnit}",
-    descriptionText: "Updated temperature from NWS"
-  )
+  emitEvent("temperature", temperature, "°${temperatureUnit}", "Updated temperature from NWS")
 }
 
 /**
@@ -995,18 +1067,14 @@ private void updateTemperatureAttribute(Map currentPeriod) {
  *
  * @param currentPeriod The current forecast period data
  */
+@CompileStatic
 private void updateHumidityAttribute(Map currentPeriod) {
   // Extract humidity data (may be null if not provided)
   Map humidityData = currentPeriod.get('relativeHumidity') as Map
   Number humidityNumber = humidityData?.get('value') as Number
   Integer humidityValue = humidityNumber != null ? humidityNumber.intValue() : 0
 
-  sendEvent(
-    name: "relativeHumidity",
-    value: humidityValue,
-    unit: "%",
-    descriptionText: "Updated relative humidity from NWS"
-  )
+  emitEvent("relativeHumidity", humidityValue, "%", "Updated relative humidity from NWS")
 }
 
 /**
@@ -1015,18 +1083,14 @@ private void updateHumidityAttribute(Map currentPeriod) {
  *
  * @param currentPeriod The current forecast period data
  */
+@CompileStatic
 private void updatePrecipitationProbabilityAttribute(Map currentPeriod) {
   // Extract precipitation probability data (may be null if not provided)
   Map precipData = currentPeriod.get('probabilityOfPrecipitation') as Map
   Number precipNumber = precipData?.get('value') as Number
   Integer precipValue = precipNumber != null ? precipNumber.intValue() : 0
 
-  sendEvent(
-    name: "probabilityOfPrecipitation",
-    value: precipValue,
-    unit: "%",
-    descriptionText: "Updated precipitation probability from NWS"
-  )
+  emitEvent("probabilityOfPrecipitation", precipValue, "%", "Updated precipitation probability from NWS")
 }
 
 /**
@@ -1035,15 +1099,16 @@ private void updatePrecipitationProbabilityAttribute(Map currentPeriod) {
  *
  * @param currentPeriod The current forecast period data
  */
+@CompileStatic
 private void updateDewpointAttribute(Map currentPeriod) {
   // Calculate dewpoint with proper unit conversion
   Map dewpointResult = calculateDewpointWithUnitConversion(currentPeriod)
 
-  sendEvent(
-    name: "dewpoint",
-    value: dewpointResult?.get('value') ?: 0,
-    unit: dewpointResult?.get('unit') ?: "°F",
-    descriptionText: "Updated dewpoint from NWS"
+  emitEvent(
+    "dewpoint",
+    dewpointResult?.get('value') ?: 0,
+    dewpointResult?.get('unit') ?: "°F",
+    "Updated dewpoint from NWS"
   )
 }
 
@@ -1157,11 +1222,7 @@ void handleHourlyForecastResponse(AsyncResponse response, Map data) {
       Map hourlyForecastData = buildHourlyForecastMap(hourPeriod)
 
       // Update the device attribute for this hour (e.g., "forecast12h")
-      sendEvent(
-        name: "forecast${hourNumber}h",
-        value: hourlyForecastData,
-        descriptionText: "Updated ${hourNumber}-hour forecast from NWS"
-      )
+      emitEvent("forecast${hourNumber}h", hourlyForecastData, null, "Updated ${hourNumber}-hour forecast from NWS")
     }
   }
 
@@ -1193,6 +1254,7 @@ void executeHourlyForecastRetry() {
  * @param hourPeriod The hourly forecast period data from NWS
  * @return Map containing organized forecast data for this hour
  */
+@CompileStatic
 private Map buildHourlyForecastMap(Map hourPeriod) {
   Map forecast = [:]
 
@@ -1237,6 +1299,7 @@ private Map buildHourlyForecastMap(Map hourPeriod) {
  *
  * @param allHourlyPeriods All hourly forecast periods from NWS
  */
+@CompileStatic
 private void calculateAndUpdateHighLowFromHourlyData(List allHourlyPeriods) {
   // Get temperatures from the first 12 hourly periods
   // Filter for periods numbered 1-12, extract temperature values
@@ -1261,8 +1324,8 @@ private void calculateAndUpdateHighLowFromHourlyData(List allHourlyPeriods) {
   Integer lowTemp = next12HourTemperatures.min()
 
   // Update the device attributes
-  sendEvent(name: "temperatureHi", value: highTemp)
-  sendEvent(name: "temperatureLo", value: lowTemp)
+  emitEvent("temperatureHi", highTemp)
+  emitEvent("temperatureLo", lowTemp)
 
   logDebug("Next 12-hour temperature range: ${lowTemp}° to ${highTemp}°")
 }
