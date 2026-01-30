@@ -780,7 +780,39 @@ void callDeviceMethod(DeviceWrapper device, String methodName, Object... args) {
 Object getDeviceProperty(DeviceWrapper device, String propertyName) {
   return device."${propertyName}"
 }
+
 /**
+ * Gets the device instance (for drivers).
+ * @return The device instance
+ */
+Object getDeviceInstance() { return device }
+
+/**
+ * Gets a device attribute's current value.
+ * @param attributeName The attribute name
+ * @return The current value
+ */
+Object getDeviceCurrentValue(String attributeName) {
+  return device.currentValue(attributeName)
+}
+
+/**
+ * Gets today's Date at a specific time.
+ * @param timeString Time in format "HH:mm"
+ * @return Date object for today at specified time
+ */
+Date getTodayAtTime(String timeString) {
+  return timeToday(timeString)
+}
+
+/**
+ * Deletes a device's current state for an attribute.
+ * @param attributeName The attribute name to delete
+ */
+void deleteDeviceCurrentState(String attributeName) {
+  device.deleteCurrentState(attributeName)
+}
+
  * Executes an HTTP retry by making an async POST request.
  * Call this from your retry method to re-attempt the HTTP request.
  *
