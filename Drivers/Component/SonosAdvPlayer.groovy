@@ -296,6 +296,8 @@ import java.util.concurrent.Semaphore
 @Field private final String MRGRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromMrGrcEventsCallback'
 @Field private final String MRGRC_EVENTS_DOMAIN  =  'MediaRenderer/GroupRenderingControl'
 
+@Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [2, 5, 10, 30]
+@Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
 
 // =============================================================================
 // End Fields
@@ -657,9 +659,15 @@ Integer getGroupVolumeAdjAmount() {
 @CompileStatic
 void play() { playerPlay() }
 @CompileStatic
-void stop() { playerStop() }
+void stop() { 
+  clearFavoriteRetryState()
+  playerStop() 
+}
 @CompileStatic
-void pause() { playerPause() }
+void pause() { 
+  clearFavoriteRetryState()
+  playerPause() 
+}
 @CompileStatic
 void nextTrack() { playerSkipToNextTrack() }
 @CompileStatic
@@ -729,13 +737,129 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   Boolean shuffle = shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
+    // Clear any existing retry state for this device
+    clearFavoriteRetryState()
+    
+    // Initialize retry state
+    String deviceId = device.getDeviceNetworkId()
+    favoriteRetryState.put(deviceId, [
+      favoriteId: favoriteId,
+      action: action,
+      repeat: repeat,
+      repeatOne: repeatOne,
+      shuffle: shuffle,
+      crossfade: crossfade,
+      playOnCompletion: playOnCompletion,
+      attemptNumber: 0,
+      repeatMode: repeatMode,
+      queueMode: queueMode,
+      shuffleMode: shuffleMode,
+      autoPlay: autoPlay,
+      crossfadeMode: crossfadeMode
+    ])
+    
+    // Execute the initial load
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+    
+    // Schedule the first retry check
+    if(playOnCompletion) {
+      scheduleNextFavoriteRetryCheck()
+    }
   } else if(isGroupedAndNotCoordinator() == true) {
     parent?.getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
 // =============================================================================
 // End Device Methods
+// =============================================================================
+
+
+
+// =============================================================================
+// Favorite Retry Mechanism
+// =============================================================================
+
+/**
+ * Clears the retry state for this device
+ */
+@CompileStatic
+void clearFavoriteRetryState() {
+  String deviceId = device.getDeviceNetworkId()
+  favoriteRetryState.remove(deviceId)
+  unschedule('checkFavoritePlaybackAndRetry')
+}
+
+/**
+ * Schedules the next retry check based on the current attempt number
+ */
+@CompileStatic
+void scheduleNextFavoriteRetryCheck() {
+  String deviceId = device.getDeviceNetworkId()
+  Map retryState = favoriteRetryState.get(deviceId)
+  
+  if(retryState == null) {
+    return
+  }
+  
+  Integer attemptNumber = retryState.attemptNumber as Integer
+  
+  if(attemptNumber >= FAVORITE_RETRY_INTERVALS.size()) {
+    // All retries exhausted
+    logWarn("Failed to play favorite '${retryState.favoriteId}' after ${FAVORITE_RETRY_INTERVALS.size()} retry attempts (waited up to 30 seconds). The favorite may not have loaded correctly.")
+    clearFavoriteRetryState()
+    return
+  }
+  
+  Integer delaySeconds = FAVORITE_RETRY_INTERVALS[attemptNumber]
+  logDebug("Scheduling favorite playback check in ${delaySeconds} seconds (attempt ${attemptNumber + 1}/${FAVORITE_RETRY_INTERVALS.size()})")
+  runIn(delaySeconds, 'checkFavoritePlaybackAndRetry', [overwrite: true])
+}
+
+/**
+ * Checks if the favorite is playing and retries if not
+ */
+void checkFavoritePlaybackAndRetry() {
+  String deviceId = device.getDeviceNetworkId()
+  Map retryState = favoriteRetryState.get(deviceId)
+  
+  if(retryState == null) {
+    logDebug("No retry state found, skipping playback check")
+    return
+  }
+  
+  String currentStatus = getTransportStatus()
+  logDebug("Checking favorite playback status: ${currentStatus}")
+  
+  if(currentStatus == 'playing') {
+    logInfo("Favorite '${retryState.favoriteId}' is now playing successfully")
+    clearFavoriteRetryState()
+    return
+  }
+  
+  // Not playing yet, retry
+  Integer attemptNumber = retryState.attemptNumber as Integer
+  attemptNumber++
+  retryState.attemptNumber = attemptNumber
+  
+  logInfo("Favorite '${retryState.favoriteId}' not playing yet, retrying (attempt ${attemptNumber}/${FAVORITE_RETRY_INTERVALS.size()})")
+  
+  // Retry loading the favorite
+  playerLoadFavorite(
+    retryState.favoriteId as String,
+    retryState.action as String,
+    retryState.repeat as Boolean,
+    retryState.repeatOne as Boolean,
+    retryState.shuffle as Boolean,
+    retryState.crossfade as Boolean,
+    retryState.playOnCompletion as Boolean
+  )
+  
+  // Schedule next check
+  scheduleNextFavoriteRetryCheck()
+}
+
+// =============================================================================
+// End Favorite Retry Mechanism
 // =============================================================================
 
 
