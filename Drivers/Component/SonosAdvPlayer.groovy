@@ -3611,8 +3611,8 @@ void processWebsocketMessage(String message) {
       if(coordinatorName != null && coordinatorName != '') {setGroupCoordinatorName(coordinatorName)}
 
       try {
-        List<String> playerNames = group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name}
-        List<String> groupMemberNames = (ArrayList<String>)(playerNames.findAll{it != null})
+        List<String> playerNames = (List<String>)group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name as String}
+        List<String> groupMemberNames = playerNames.findAll{it != null}
         setGroupMemberNames(groupMemberNames)
       } catch (Exception e) {logTrace('Could not get group member names, continuing on...')}
 
