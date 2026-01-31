@@ -102,7 +102,7 @@ void initialize() {
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
 }
 void configure() {}
-void on() { joinPlayersToCoordinator() }
+void on() { evictUnlistedPlayers() }
 void off() { removePlayersFromCoordinator() }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
 void clearState() { state.clear() }
