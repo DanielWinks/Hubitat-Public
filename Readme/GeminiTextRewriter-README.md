@@ -1,4 +1,4 @@
-# Gemini Text Rewriter
+# Gemini Text Rewriter - Comprehensive Documentation
 
 ## Table of Contents
 
