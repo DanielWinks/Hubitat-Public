@@ -298,6 +298,7 @@ import java.util.concurrent.Semaphore
 
 @Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [2, 5, 10, 30]
 @Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
+@Field private final String FAVORITE_RETRY_CALLBACK = 'checkFavoritePlaybackAndRetry'
 
 // =============================================================================
 // End Fields
@@ -786,7 +787,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 void clearFavoriteRetryState() {
   String deviceId = device.getDeviceNetworkId()
   favoriteRetryState.remove(deviceId)
-  unschedule('checkFavoritePlaybackAndRetry')
+  unschedule(FAVORITE_RETRY_CALLBACK)
 }
 
 /**
@@ -812,12 +813,13 @@ void scheduleNextFavoriteRetryCheck() {
   
   Integer delaySeconds = FAVORITE_RETRY_INTERVALS[attemptNumber]
   logDebug("Scheduling favorite playback check in ${delaySeconds} seconds (attempt ${attemptNumber + 1}/${FAVORITE_RETRY_INTERVALS.size()})")
-  runIn(delaySeconds, 'checkFavoritePlaybackAndRetry', [overwrite: true])
+  runIn(delaySeconds, FAVORITE_RETRY_CALLBACK, [overwrite: true])
 }
 
 /**
  * Checks if the favorite is playing and retries if not
  */
+@CompileStatic
 void checkFavoritePlaybackAndRetry() {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = favoriteRetryState.get(deviceId)
