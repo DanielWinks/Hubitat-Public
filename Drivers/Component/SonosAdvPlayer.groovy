@@ -741,29 +741,27 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
     // Clear any existing retry state for this device
     clearFavoriteRetryState()
     
-    // Initialize retry state
-    String deviceId = device.getDeviceNetworkId()
-    favoriteRetryState.put(deviceId, [
-      favoriteId: favoriteId,
-      action: action,
-      repeat: repeat,
-      repeatOne: repeatOne,
-      shuffle: shuffle,
-      crossfade: crossfade,
-      playOnCompletion: playOnCompletion,
-      attemptNumber: 0,
-      repeatMode: repeatMode,
-      queueMode: queueMode,
-      shuffleMode: shuffleMode,
-      autoPlay: autoPlay,
-      crossfadeMode: crossfadeMode
-    ])
-    
     // Execute the initial load
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
     
-    // Schedule the first retry check
+    // Initialize retry state and schedule checks only if autoplay is enabled
     if(playOnCompletion) {
+      String deviceId = device.getDeviceNetworkId()
+      favoriteRetryState.put(deviceId, [
+        favoriteId: favoriteId,
+        action: action,
+        repeat: repeat,
+        repeatOne: repeatOne,
+        shuffle: shuffle,
+        crossfade: crossfade,
+        playOnCompletion: playOnCompletion,
+        attemptNumber: 0,
+        repeatMode: repeatMode,
+        queueMode: queueMode,
+        shuffleMode: shuffleMode,
+        autoPlay: autoPlay,
+        crossfadeMode: crossfadeMode
+      ])
       scheduleNextFavoriteRetryCheck()
     }
   } else if(isGroupedAndNotCoordinator() == true) {
@@ -806,7 +804,8 @@ void scheduleNextFavoriteRetryCheck() {
   
   if(attemptNumber >= FAVORITE_RETRY_INTERVALS.size()) {
     // All retries exhausted
-    logWarn("Failed to play favorite '${retryState.favoriteId}' after ${FAVORITE_RETRY_INTERVALS.size()} retry attempts (waited up to 30 seconds). The favorite may not have loaded correctly.")
+    Integer totalWaitTime = FAVORITE_RETRY_INTERVALS.sum() as Integer
+    logWarn("Failed to play favorite '${retryState.favoriteId}' after ${FAVORITE_RETRY_INTERVALS.size()} retry attempts (waited up to ${totalWaitTime} seconds). The favorite may not have loaded correctly.")
     clearFavoriteRetryState()
     return
   }
