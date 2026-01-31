@@ -3431,7 +3431,7 @@ void processWebsocketMessage(String message) {
     // logDebug("Groups: ${prettyJson(eventData)}")
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
-      Map group = groups.find{ ((String)it?.playerIds).contains(getId()) }
+      Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
 
       String groupId = group?.id.toString()
       if(groupId != null && groupId != '') {setGroupId(groupId)}
@@ -3459,7 +3459,7 @@ void processWebsocketMessage(String message) {
           if(zInfo != null && zInfo.size() > 0) {
             ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
             if(members != null && members.size() > 0) {
-              String rightChannelId = members.find{((ArrayList<String>)it?.channelMap).contains('RF') }?.id
+              String rightChannelId = members.find{((ArrayList<String>)it?.channelMap)?.contains('RF') }?.id
               setRightChannelRincon(rightChannelId)
             }
           }
