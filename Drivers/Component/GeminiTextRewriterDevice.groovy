@@ -32,15 +32,9 @@ metadata {
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/GeminiTextRewriterDevice.groovy'
   ) {
     capability 'Actuator'
-    
-    command 'rewriteText', [
-      [
-        name: 'text',
-        type: 'STRING',
-        description: 'Text to rewrite using Gemini API'
-      ]
-    ]
-    
+
+    command 'rewriteText', [[name: 'text', type: 'STRING', description: 'Text to rewrite using Gemini API']]
+
     attribute 'lastRewrittenText', 'string'
     attribute 'lastOriginalText', 'string'
     attribute 'lastMode', 'string'
@@ -53,13 +47,6 @@ preferences {
   input name: 'debugLogEnable', type: 'bool', title: 'Enable debug logging', required: false, defaultValue: false
 }
 
-void updated() {
-  logInfo('Updated...')
-}
-
-void installed() {
-  logInfo('Installed...')
-}
 
 /**
  * rewriteText() - Command to rewrite text using parent app's Gemini API integration
@@ -69,16 +56,16 @@ void installed() {
  */
 void rewriteText(String text) {
   logDebug("rewriteText command called with text: ${text}")
-  
+
   if (!text) {
     logWarn('No text provided to rewrite')
     sendEvent(name: 'status', value: 'error: no text provided')
     return
   }
-  
+
   sendEvent(name: 'lastOriginalText', value: text)
   sendEvent(name: 'status', value: 'processing')
-  
+
   // Call parent app to perform the rewrite
-  parent?.componentRewriteText(this.device, text)
+  parent?.componentRewriteText(device, text)
 }
