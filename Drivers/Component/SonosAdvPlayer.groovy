@@ -562,7 +562,7 @@ void muteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(true)
   } else if(isGroupedAndNotCoordinator()) {
-    getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()
   }
   else { playerSetPlayerMute(true) }
 }
@@ -570,7 +570,7 @@ void unmuteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(false)
   } else if(isGroupedAndNotCoordinator()) {
-    getDeviceFromRincon(getGroupCoordinatorId()).unmuteGroup()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).unmuteGroup()
   }
   else { playerSetPlayerMute(false) }
 }
@@ -578,7 +578,7 @@ void setGroupVolume(BigDecimal level) {
   if(isGroupedAndCoordinator()) {
     playerSetGroupVolume(level)
   } else if(isGroupedAndNotCoordinator()) {
-    getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level)
   }
   else { playerSetPlayerVolume(level as Integer) }
 }
@@ -592,7 +592,7 @@ void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeUp()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeUp()
   }
   else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 }
@@ -600,7 +600,7 @@ void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeDown()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeDown()
   }
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
@@ -709,7 +709,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   if(getIsGroupCoordinator() == true) {
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
   } else if(isGroupedAndNotCoordinator() == true) {
-    getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
 // =============================================================================
