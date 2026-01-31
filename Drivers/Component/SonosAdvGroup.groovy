@@ -25,7 +25,7 @@
 
 // Delay in milliseconds to wait after ungrouping before regrouping players
 // This ensures the Sonos API has time to process the ungroup operation before creating a new group
-@Field static final Integer UNGROUP_DELAY_MS = 500
+@Field static final Integer UNGROUP_DELAY_MS = 2000
 
 metadata {
   definition(
