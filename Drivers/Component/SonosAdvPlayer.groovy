@@ -40,6 +40,7 @@ metadata {
   capability "MediaTransport" //attributes:  transportStatus - ENUM - ["playing", "paused", "stopped"]
   capability 'SpeechSynthesis'
   capability 'Initialize'
+  capability 'SwitchLevel' // Explicitly declare for WebCore compatibility - setLevel() command
 
   command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
   command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -122,6 +123,7 @@ metadata {
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
+  attribute 'lastError', 'string'
 
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
@@ -160,6 +162,7 @@ metadata {
         input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
         input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
       }
+      input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
     }
   }
 }
@@ -186,6 +189,7 @@ Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDe
 Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
 Boolean getChimeBeforeTTS() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
 Boolean getAlwaysUseLoadAudioClip() { return settings.alwaysUseLoadAudioClip != null ? settings.alwaysUseLoadAudioClip : true }
+Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
 
 Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
 Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
@@ -313,6 +317,7 @@ void initialize() {
 }
 void configure() {
   atomicState.audioClipPlaying = false
+  atomicState.wsRetryCount = 0
   migrationCleanup()
   runIn(5, 'secondaryConfiguration')
 }
@@ -332,6 +337,17 @@ void fullRenewSubscriptions() {
   unsubscribeFromMrRcEvents()
   unsubscribeFromZgtEvents()
   unsubscribeFromMrGrcEvents()
+
+  // Check if essential device data values exist before attempting subscriptions
+  // On fresh install, these won't be set yet - they're configured by the parent app
+  String localUpnpHost = device.getDataValue('localUpnpHost')
+  String websocketUrl = device.getDataValue('websocketUrl')
+
+  if(!localUpnpHost || !websocketUrl) {
+    logInfo('Device data not yet configured (fresh install). Subscriptions will be established after configuration by parent app.')
+    return
+  }
+
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
   runIn(7, 'subscribeToEvents', [overwrite: true])
 }
@@ -352,6 +368,20 @@ void secondaryConfiguration() {
   audioClipQueueInitialization()
   groupsRegistryInitialization()
   favoritesMapInitialization()
+
+  // After device data is configured, establish subscriptions if not already done
+  // This handles the fresh install case where fullRenewSubscriptions() exited early
+  String localUpnpHost = device.getDataValue('localUpnpHost')
+  String websocketUrl = device.getDataValue('websocketUrl')
+
+  if(localUpnpHost && websocketUrl) {
+    String wsPlaybackStatus = device.getDataValue('WS-playback') ?: 'Unsubscribed'
+    if(wsPlaybackStatus == 'Unsubscribed') {
+      logInfo('Device data now configured, establishing subscriptions...')
+      runIn(2, 'initializeWebsocketConnection', [overwrite: true])
+      runIn(7, 'subscribeToEvents', [overwrite: true])
+    }
+  }
 }
 
 void migrationCleanup() {
@@ -376,6 +406,8 @@ void migrationCleanup() {
   if(settings.createSpeechEnhancementChildDevice == null) { settings.createSpeechEnhancementChildDevice = false }
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
   if(settings.alwaysUseLoadAudioClip == null) { settings.alwaysUseLoadAudioClip = true }
+  if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
+  if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
 }
 
 void audioClipQueueInitialization() {
@@ -2261,7 +2293,7 @@ String getMuteState() {
 }
 void setMuteState(String muted) {
   String previousMutedState = getMuteState() != null ? getMuteState() : 'unmuted'
-  if(muted == 'unmuted' && previousMutedState == 'muted' && enableAirPlayUnmuteVolumeFix) {
+  if(muted == 'unmuted' && previousMutedState == 'muted' && getEnableAirPlayUnmuteVolumeFix()) {
     logDebug("Restoring volume after unmute event to level: ${state.restoreLevelAfterUnmute}")
     setLevel(state.restoreLevelAfterUnmute as Integer)
   }
@@ -2543,14 +2575,44 @@ List<Map> getCurrentPlayingStatesForGroup() {
 // Websocket Connection and Initialization
 // =============================================================================
 void webSocketStatus(String message) {
-  if(message == 'failure: null') { setWebSocketStatus('closed')}
-  else if(message == 'failure: connect timed out') { setWebSocketStatus('connect timed out')}
-  else if(message == 'status: open') { setWebSocketStatus('open')}
-  else if(message == 'status: closing') { setWebSocketStatus('closing')}
+  if(message == 'failure: null') {
+    setWebSocketStatus('closed')
+    scheduleWebSocketReconnect()
+  }
+  else if(message == 'failure: connect timed out') {
+    setWebSocketStatus('connect timed out')
+    scheduleWebSocketReconnect()
+  }
+  else if(message == 'status: open') {
+    setWebSocketStatus('open')
+    atomicState.wsRetryCount = 0 // Reset retry counter on successful connection
+  }
+  else if(message == 'status: closing') {
+    setWebSocketStatus('closing')
+  }
   else {
     setWebSocketStatus('unknown')
     logWarn("Websocket status: ${message}")
+    scheduleWebSocketReconnect()
   }
+}
+
+void scheduleWebSocketReconnect() {
+  Integer retryCount = atomicState.wsRetryCount ?: 0
+
+  // Exponential backoff: 5, 10, 20, 40, 60, 120, 300 seconds (capped at 300)
+  // After reaching 300s, continue retrying every 300s indefinitely
+  Integer delaySeconds = Math.min(5 * Math.pow(2, retryCount) as Integer, 300)
+  atomicState.wsRetryCount = retryCount + 1
+
+  logInfo("WebSocket connection failed. Retry ${retryCount + 1} in ${delaySeconds} seconds...")
+  Map opts = [overwrite: true]
+  runIn(delaySeconds, 'retryWebSocketConnection', opts)
+}
+
+void retryWebSocketConnection() {
+  logDebug("Attempting WebSocket reconnection...")
+  wsConnect()
 }
 
 void wsConnect() {
@@ -2913,6 +2975,20 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
   sendWsMessage(json)
+
+  // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
+  if(playOnCompletion) {
+    Map favorite = getFavoritesMap()?.get(favoriteId)
+    String serviceName = favorite?.service
+    if(serviceName?.toLowerCase()?.contains('amazon')) {
+      logDebug("Amazon Music favorite detected - scheduling auto-play in 3 seconds as workaround for service limitation")
+      scheduleAmazonMusicAutoPlay()
+    }
+  }
+}
+
+void scheduleAmazonMusicAutoPlay() {
+  runIn(3, 'playerPlay', [overwrite: true])
 }
 
 @CompileStatic
@@ -2928,12 +3004,14 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   if(volume) {args.volume = volume + getTTSBoostAmount()}
   else {args.volume = getPlayerVolume() + getTTSBoostAmount()}
   String json = JsonOutput.toJson([command,args])
-  Map audioClip = [ leftChannel: json ]
+  Map audioClip = [ leftChannel: json, priority: 'HIGH' ]
   if(loadAudioClipOnRightChannel()) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  sendAudioClipHighPriority(audioClip)
+  audioClip.uri = uri
+  // Queue high priority clips instead of sending directly to prevent interruption
+  enqueueAudioClip(audioClip)
 }
 
 void sendAudioClipHighPriority(Map clipMessage) {
@@ -3006,7 +3084,19 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
 
 void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
-  getAudioClipQueue().add(clipMessage)
+  ConcurrentLinkedQueue<Map> queue = getAudioClipQueue()
+
+  // High priority clips should be added to front of queue (after any currently playing clip)
+  if(clipMessage?.priority == 'HIGH') {
+    // Convert queue to list, add high priority at front, rebuild queue
+    List<Map> queueList = new ArrayList<Map>(queue)
+    queueList.add(0, clipMessage)
+    queue.clear()
+    queueList.each { queue.add(it) }
+  } else {
+    queue.add(clipMessage)
+  }
+
   if(atomicState.audioClipPlaying == false) {dequeueAudioClip()}
 }
 
@@ -3458,6 +3548,16 @@ void processWebsocketMessage(String message) {
       if(eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
         logTrace("Stop command unavailable for current stream, issuing pause command...")
         playerPause()
+      }
+    }
+    if(eventType?.namespace == 'groups' && (eventType?.response == 'createGroup' || eventType?.response == 'modifyGroupMembers')) {
+      String reason = eventData?.reason as String
+      if(eventData?.errorCode == 'ERROR_PLAYBACK_FAILED' && reason != null && reason.contains('musicContextGroupId')) {
+        logWarn("Cannot group/join while playing from this music service (likely Amazon Music). Use 'Join Players to Coordinator' or stop playback first. Reason: ${reason}")
+        getDevice().sendEvent(name: 'lastError', value: 'Cannot group: incompatible music service', descriptionText: reason)
+      } else {
+        logError("Group operation failed - Error: ${eventData?.errorCode}, Reason: ${reason}")
+        getDevice().sendEvent(name: 'lastError', value: "Group operation failed: ${eventData?.errorCode}", descriptionText: reason)
       }
     }
   }

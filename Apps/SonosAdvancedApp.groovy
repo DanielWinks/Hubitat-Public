@@ -195,7 +195,7 @@ Map localPlayerSelectionPage() {
         description: 'Click to show'
       )
       List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices.contains(p.getDeviceNetworkId()) )}
-      if(willBeRemoved.size() > 0 && !skipOrphanRemoval) {
+      if(willBeRemoved.size() > 0 && !settings.skipOrphanRemoval) {
         paragraph("The following devices will be removed: ${willBeRemoved.collect{it.getDataValue('name')}.join(', ')}")
       }
       List<String> willBeCreated = (settings.playerDevices - getCreatedPlayerDevices())
@@ -325,6 +325,16 @@ void initialize() { configure() }
 void configure() {
   logInfo("${app.name} updated")
   unsubscribe()
+  
+  // Initialize settings with defaults
+  if(settings.favMatching == null) { settings.favMatching = true }
+  if(settings.trackDataMetaData == null) { settings.trackDataMetaData = false }
+  if(settings.skipOrphanRemoval == null) { settings.skipOrphanRemoval = false }
+  if(settings.logEnable == null) { settings.logEnable = true }
+  if(settings.debugLogEnable == null) { settings.debugLogEnable = false }
+  if(settings.traceLogEnable == null) { settings.traceLogEnable = false }
+  if(settings.descriptionTextEnable == null) { settings.descriptionTextEnable = true }
+  
   try { createPlayerDevices() }
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
@@ -455,7 +465,7 @@ void createPlayerDevices() {
       logWarn("Skipping device configuration for ${dni} - no player info available")
     }
   }
-  if(!skipOrphanRemoval) {removeOrphans()}
+  if(!settings.skipOrphanRemoval) {removeOrphans()}
 }
 
 void removeOrphans() {
@@ -467,7 +477,7 @@ void removeOrphans() {
       app.deleteChildDevice(dni)
     }
   }
-  if(!skipOrphanRemoval) {
+  if(!settings.skipOrphanRemoval) {
     getCurrentPlayerDevices().each{ child ->
       String dni = child.getDeviceNetworkId()
       if(dni in settings.playerDevices) { return }
