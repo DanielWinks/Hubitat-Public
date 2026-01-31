@@ -144,6 +144,7 @@ metadata {
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
+      input 'createMuteChildDevice', 'bool', title: 'Create child device for mute control?', required: false, defaultValue: false
       if(deviceHasBattery() == true) {
         input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
       }
@@ -177,6 +178,7 @@ Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDe
 Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
 Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
 Boolean getCreateRepeatAllChildDevice() { return settings.createRepeatAllChildDevice != null ? settings.createRepeatAllChildDevice : false }
+Boolean getCreateMuteChildDevice() { return settings.createMuteChildDevice != null ? settings.createMuteChildDevice : false }
 Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
 Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
 Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
@@ -190,17 +192,25 @@ Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()
 
 
 String getCurrentTTSVoice() {
-  Map params = [uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false"]
-  params.contentType = 'application/json'
-  params.requestContentType = 'application/json'
-  String voice
-  httpGet(params) {resp ->
-    if(resp.status == 200) {
-      def json = resp.data
-      voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
+  try {
+    Map params = [
+      uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false",
+      contentType: 'application/json',
+      requestContentType: 'application/json',
+      timeout: 5
+    ]
+    String voice = 'Matthew'
+    httpGet(params) {resp ->
+      if(resp.status == 200) {
+        def json = resp.data
+        voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
+      }
     }
+    return voice
+  } catch (Exception e) {
+    logDebug("Could not retrieve current TTS voice: ${e.message}")
+    return 'Matthew'
   }
-  return voice
 }
 
 @CompileStatic
@@ -331,7 +341,7 @@ void secondaryConfiguration() {
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
   createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
   createRemoveRepeatAllChildDevice(getCreateRepeatAllChildDevice())
-  createRemoveMuteChildDevice(createMuteChildDevice)
+  createRemoveMuteChildDevice(getCreateMuteChildDevice())
   createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
   createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
@@ -914,6 +924,8 @@ void createRemoveMuteChildDevice(Boolean create) {
       child.updateDataValue('command', 'Mute')
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveMuteChildDevice', e)
+    } catch (Exception e) {
+      logException('createRemoveMuteChildDevice', e)
     }
   } else if(!create && child){ deleteChildDevice(dni) }
 }
@@ -941,14 +953,29 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
 }
 
 Boolean deviceHasBattery() {
-  if(device != null) {
-        Map params = [uri: "${getLocalUpnpUrl()}/status/batterystatus"]
+  if(device == null) { return false }
+
+  String deviceIp = getDeviceDataValue('deviceIp')
+  if(deviceIp == null || deviceIp == '') {
+    logTrace('deviceHasBattery: deviceIp not set')
+    return false
+  }
+
+  try {
+    Map params = [
+      uri: "${getLocalUpnpUrl()}/status/batterystatus",
+      timeout: 3
+    ]
     httpGet(params) {resp ->
       if(resp.status == 200) {
         return resp.data.children().find{it.name() == 'LocalBatteryStatus'}.size() > 0
       } else { return false }
     }
+  } catch(Exception e) {
+    logTrace("deviceHasBattery: Could not check battery status: ${e.message}")
+    return false
   }
+  return false
 }
 
 void createRemoveFavoritesChildDevice(Boolean create) {
@@ -1834,16 +1861,24 @@ void clearTrackDataEvent() {
 // Getters and Setters
 // =============================================================================
 String getLocalApiUrl(){
-  return "https://${getDeviceDataValue('deviceIp')}:1443/api/v1/"
+  String deviceIp = getDeviceDataValue('deviceIp')
+  if(deviceIp == null || deviceIp == '') { return null }
+  return "https://${deviceIp}:1443/api/v1/"
 }
 String getLocalUpnpHost(){
-  return "${getDeviceDataValue('deviceIp')}:1400"
+  String deviceIp = getDeviceDataValue('deviceIp')
+  if(deviceIp == null || deviceIp == '') { return null }
+  return "${deviceIp}:1400"
 }
 String getLocalUpnpUrl(){
-  return "http://${getDeviceDataValue('deviceIp')}:1400"
+  String deviceIp = getDeviceDataValue('deviceIp')
+  if(deviceIp == null || deviceIp == '') { return null }
+  return "http://${deviceIp}:1400"
 }
 String getLocalWsUrl(){
-  return "wss://${getDeviceDataValue('deviceIp')}:1443/websocket/api"
+  String deviceIp = getDeviceDataValue('deviceIp')
+  if(deviceIp == null || deviceIp == '') { return null }
+  return "wss://${deviceIp}:1443/websocket/api"
 }
 
 List<String> getLocalApiUrlSecondaries(){
@@ -3393,7 +3428,7 @@ void processWebsocketMessage(String message) {
               String accountId = id?.accountId
               if(objectId != null) {
                 List tok = objectId?.tokenize(':')
-                if(tok.size() >= 1) { objectId = tok[1] }
+                if(tok.size() >= 2) { objectId = tok[1] }
               }
               String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
               getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]

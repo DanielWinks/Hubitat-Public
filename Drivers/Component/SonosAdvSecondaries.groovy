@@ -71,10 +71,20 @@ void webSocketStatus(String message) {
 }
 
 void wsConnect() {
-  Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
-  interfaces.webSocket.connect(this.device.getDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
-  unschedule('renewWebsocketConnection')
-  runIn(RESUB_INTERVAL-100, 'renewWebsocketConnection')
+  try {
+    String websocketUrl = this.device.getDataValue('websocketUrl')
+    if(!websocketUrl) {
+      logWarn('Websocket URL not configured, cannot connect')
+      return
+    }
+    Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
+    interfaces.webSocket.connect(websocketUrl, headers: headers, ignoreSSLIssues: true)
+    unschedule('renewWebsocketConnection')
+    runIn(RESUB_INTERVAL-100, 'renewWebsocketConnection')
+  } catch (Exception e) {
+    logError("Failed to connect websocket: ${e.message}")
+    this.device.updateDataValue('websocketStatus', 'error')
+  }
 }
 
 void wsClose() { interfaces.webSocket.close() }
@@ -96,16 +106,24 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // Getters and Setters
 // =============================================================================
 String getLocalApiUrl(){
-  return "https://${this.device.getDataValue('deviceIp')}:1443/api/v1/"
+  String deviceIp = this.device.getDataValue('deviceIp')
+  if(!deviceIp) { return null }
+  return "https://${deviceIp}:1443/api/v1/"
 }
 String getLocalUpnpHost(){
-  return "${this.device.getDataValue('deviceIp')}:1400"
+  String deviceIp = this.device.getDataValue('deviceIp')
+  if(!deviceIp) { return null }
+  return "${deviceIp}:1400"
 }
 String getLocalUpnpUrl(){
-  return "http://${this.device.getDataValue('deviceIp')}:1400"
+  String deviceIp = this.device.getDataValue('deviceIp')
+  if(!deviceIp) { return null }
+  return "http://${deviceIp}:1400"
 }
 String getLocalWsUrl(){
-  return "wss://${this.device.getDataValue('deviceIp')}:1443/websocket/api"
+  String deviceIp = this.device.getDataValue('deviceIp')
+  if(!deviceIp) { return null }
+  return "wss://${deviceIp}:1443/websocket/api"
 }
 
 String getWebSocketStatus() {

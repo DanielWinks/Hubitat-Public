@@ -370,36 +370,90 @@ void createGroupDevices() {
 }
 
 void createPlayerDevices() {
+  // Safety check: ensure playerDevices setting exists
+  if(!settings.playerDevices) {
+    logWarn("No player devices selected, skipping device creation")
+    return
+  }
+
+  // Safety check: ensure discovery maps are initialized
+  if(discoveredSonoses == null) {
+    logError("discoveredSonoses is null, cannot create devices")
+    return
+  }
+  if(discoveredSonosSecondaries == null) {
+    discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
+    logDebug("Initialized empty discoveredSonosSecondaries map")
+  }
+
   settings.playerDevices.each{ dni ->
+    if(!dni) {
+      logWarn("Encountered null or empty DNI in playerDevices, skipping")
+      return
+    }
+
     ChildDeviceWrapper cd = app.getChildDevice(dni)
     Map playerInfo = discoveredSonoses[dni]
+
     if(cd) {
-      logDebug("Not creating ${cd.getDataValue('name')}, child already exists.")
+      String deviceName = cd.getDataValue('name')
+      logDebug("Not creating ${deviceName ?: dni}, child already exists.")
     } else {
       if(playerInfo) {
         logInfo("Creating Sonos Advanced Player device for ${playerInfo?.name}")
         try {
           cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
-        } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Player driver not found', e)}
+        } catch (UnknownDeviceTypeException e) {
+          logException('Sonos Advanced Player driver not found', e)
+        } catch (Exception e) {
+          logException("Failed to create device for ${dni}", e)
+        }
       } else {
         logWarn("Attempted to create child device for ${dni} but did not find playerInfo")
       }
     }
-    logInfo("Updating player info with latest info from discovery...")
-    playerInfo.each { key, value -> cd.updateDataValue(key, value as String) }
 
-    LinkedHashMap<String,String> macToRincon = discoveredSonoses.collectEntries{ k,v -> [k, v.id]}
-    String rincon = macToRincon[dni]
-    LinkedHashMap<String,Map> secondaries = discoveredSonosSecondaries.findAll{k,v -> v.primaryDeviceId == rincon}
-    if(secondaries){
-      List<String> secondaryDeviceIps = secondaries.collect{it.value.deviceIp}
-      List<String> secondaryIds = secondaries.collect{it.value.id}
-      if(secondaryDeviceIps && secondaryIds) {
-        cd.updateDataValue('secondaryDeviceIps', secondaryDeviceIps.join(','))
-        cd.updateDataValue('secondaryIds', secondaryIds.join(','))
+    // Only update device info if we have both a valid device and player info
+    if(cd && playerInfo) {
+      try {
+        logInfo("Updating player info with latest info from discovery...")
+        playerInfo.each { key, value ->
+          if(key != null && value != null) {
+            cd.updateDataValue(key as String, value as String)
+          }
+        }
+
+        LinkedHashMap<String,String> macToRincon = discoveredSonoses.collectEntries{ k,v ->
+          if(k != null && v != null && v.id != null) {
+            return [(k as String): (v.id as String)]
+          }
+          return [:]
+        }
+        String rincon = macToRincon[dni]
+
+        if(rincon) {
+          LinkedHashMap<String,Map> secondaries = discoveredSonosSecondaries.findAll{k,v ->
+            v != null && v.primaryDeviceId != null && v.primaryDeviceId == rincon
+          }
+          if(secondaries){
+            List<String> secondaryDeviceIps = secondaries.collect{it.value?.deviceIp}.findAll{it != null}
+            List<String> secondaryIds = secondaries.collect{it.value?.id}.findAll{it != null}
+            if(secondaryDeviceIps && secondaryIds) {
+              cd.updateDataValue('secondaryDeviceIps', secondaryDeviceIps.join(','))
+              cd.updateDataValue('secondaryIds', secondaryIds.join(','))
+            }
+          }
+        }
+
+        cd.secondaryConfiguration()
+      } catch (Exception e) {
+        logException("Failed to configure device ${dni}", e)
       }
+    } else if(!cd) {
+      logWarn("Skipping device configuration for ${dni} - device not created")
+    } else if(!playerInfo) {
+      logWarn("Skipping device configuration for ${dni} - no player info available")
     }
-    cd.secondaryConfiguration()
   }
   if(!skipOrphanRemoval) {removeOrphans()}
 }

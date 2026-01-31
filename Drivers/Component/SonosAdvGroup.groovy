@@ -72,17 +72,25 @@ Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? se
 
 
 String getCurrentTTSVoice() {
-  Map params = [uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false"]
-  params.contentType = 'application/json'
-  params.requestContentType = 'application/json'
-  String voice
-  httpGet(params) {resp ->
-    if(resp.status == 200) {
-      def json = resp.data
-      voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
+  try {
+    Map params = [
+      uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false",
+      contentType: 'application/json',
+      requestContentType: 'application/json',
+      timeout: 5
+    ]
+    String voice = 'Matthew'
+    httpGet(params) {resp ->
+      if(resp.status == 200) {
+        def json = resp.data
+        voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
+      }
     }
+    return voice
+  } catch (Exception e) {
+    logDebug("Could not retrieve current TTS voice: ${e.message}")
+    return 'Matthew'
   }
-  return voice
 }
 
 
@@ -97,51 +105,133 @@ void clearState() { state.clear() }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
+  if(!text) {
+    logWarn('No text provided to play')
+    return
+  }
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  if(!allDevs) {
+    logWarn('No player devices found in group')
+    return
+  }
   logDebug(allDevs)
-  allDevs.each{it.playerLoadAudioClip(textToSpeech(text, voice).uri, volume)}
+  try {
+    def ttsMap = textToSpeech(text, voice)
+    if(!ttsMap || !ttsMap.uri) {
+      logWarn('Failed to generate TTS URI')
+      return
+    }
+    allDevs.each{it.playerLoadAudioClip(ttsMap.uri, volume)}
+  } catch (Exception e) {
+    logError("Error playing text: ${e.message}")
+  }
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
+  if(!text) {
+    logWarn('No text provided to play')
+    return
+  }
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  allDevs.each{it.playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume)}
+  if(!allDevs) {
+    logWarn('No player devices found in group')
+    return
+  }
+  try {
+    def ttsMap = textToSpeech(text, voice)
+    if(!ttsMap || !ttsMap.uri) {
+      logWarn('Failed to generate TTS URI')
+      return
+    }
+    allDevs.each{it.playerLoadAudioClipHighPriority(ttsMap.uri, volume)}
+  } catch (Exception e) {
+    logError("Error playing high priority TTS: ${e.message}")
+  }
 }
 
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
+  if(!uri) {
+    logWarn('No URI provided to play')
+    return
+  }
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  if(!allDevs) {
+    logWarn('No player devices found in group')
+    return
+  }
   allDevs.each{it.playerLoadAudioClipHighPriority(uri, volume)}
 }
 
 void enqueueLowPriorityTrack(String uri, BigDecimal volume = null) {
+  if(!uri) {
+    logWarn('No URI provided to enqueue')
+    return
+  }
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  if(!allDevs) {
+    logWarn('No player devices found in group')
+    return
+  }
   allDevs.each{it.playerLoadAudioClip(uri, volume)}
 }
 
 void joinPlayersToCoordinator() {
   List<String> followers = getAllFollowersInGroupDevice()
+  if(!followers) {
+    logWarn('No followers found to join to coordinator')
+    return
+  }
   DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found')
+    return
+  }
   coordinator.playerModifyGroupMembers(followers)
 }
 
 void removePlayersFromCoordinator() {
   List<DeviceWrapper> allFollowers = getAllFollowerDevicesInGroupDevice()
+  if(!allFollowers) {
+    logDebug('No followers to remove from coordinator')
+    return
+  }
   allFollowers.each{it.playerCreateNewGroup()}
 }
 
 void groupPlayers() {
   List<String> allPlayers = getAllPlayersInGroupDevice()
+  if(!allPlayers) {
+    logWarn('No players found to group')
+    return
+  }
   DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found')
+    return
+  }
   coordinator.playerCreateGroup(allPlayers)
 }
 
 void ungroupPlayers() {
   List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  if(!allDevs) {
+    logDebug('No devices found to ungroup')
+    return
+  }
   allDevs.each{it.playerCreateNewGroup()}
 }
 
 void evictUnlistedPlayers() {
   List<String> allPlayers = getAllPlayersInGroupDevice()
+  if(!allPlayers) {
+    logWarn('No players found to manage')
+    return
+  }
   DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found')
+    return
+  }
   coordinator.playerCreateGroup(allPlayers)
 }
 
@@ -153,14 +243,25 @@ String getCoordinatorId() {
 }
 
 List<String> getAllPlayersInGroupDevice() {
-  List<String> players = [this.device.getDataValue('groupCoordinatorId')]
-  players.addAll(this.device.getDataValue('playerIds').tokenize(','))
+  String coordinatorId = this.device.getDataValue('groupCoordinatorId')
+  String playerIdsStr = this.device.getDataValue('playerIds')
+
+  List<String> players = []
+  if(coordinatorId) {
+    players.add(coordinatorId)
+  }
+  if(playerIdsStr) {
+    players.addAll(playerIdsStr.tokenize(','))
+  }
   return players
 }
 
 List<String> getAllFollowersInGroupDevice() {
-  List<String> players = this.device.getDataValue('playerIds').tokenize(',')
-  return players
+  String playerIdsStr = this.device.getDataValue('playerIds')
+  if(!playerIdsStr) {
+    return []
+  }
+  return playerIdsStr.tokenize(',')
 }
 
 List<DeviceWrapper> getAllPlayerDevicesInGroupDevice() {
