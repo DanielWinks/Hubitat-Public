@@ -1,0 +1,274 @@
+name: Release Gemini Text Rewriter
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_increment:
+        description: "Version increment type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+      release_notes:
+        description: "Release notes for this version (summarize changes)"
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Release Gemini Text Rewriter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Get current version and calculate new version
+        id: version
+        run: |
+          # Extract current version from packageManifest.json
+          CURRENT_VERSION=$(jq -r '.version' PackageManifests/GeminiTextRewriter/packageManifest.json)
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          # Parse version
+          IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
+
+          # Increment based on input
+          if [ "${{ github.event.inputs.version_increment }}" == "minor" ]; then
+            minor=$((minor + 1))
+            patch=0
+          else
+            patch=$((patch + 1))
+          fi
+
+          NEW_VERSION="${major}.${minor}.${patch}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Incrementing from $CURRENT_VERSION to $NEW_VERSION"
+
+      - name: Update version in Gemini Text Rewriter app
+        run: |
+          OLD_VERSION="${{ steps.version.outputs.current_version }}"
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+
+          echo "Updating version from $OLD_VERSION to $NEW_VERSION"
+
+          # Update App version
+          sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Apps/GeminiTextRewriter.groovy
+
+          echo "Version update complete"
+
+      - name: Update packageManifest.json
+        run: |
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+          RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
+          DATE=$(date +%Y-%m-%d)
+
+          # Create Python script to update JSON
+          cat > update_manifest.py << 'EOF'
+          import json
+          import sys
+
+          manifest_path = 'PackageManifests/GeminiTextRewriter/packageManifest.json'
+          new_version = sys.argv[1]
+          release_notes = sys.argv[2]
+          date_released = sys.argv[3]
+
+          with open(manifest_path, 'r') as f:
+              data = json.load(f)
+
+          # Update version
+          data['version'] = new_version
+
+          # Update date
+          data['dateReleased'] = date_released
+
+          # Prepend new release notes
+          new_notes = f"{new_version} {release_notes}"
+          if 'releaseNotes' in data and data['releaseNotes']:
+              data['releaseNotes'] = new_notes + "\\r\\n" + data['releaseNotes']
+          else:
+              data['releaseNotes'] = new_notes
+
+          with open(manifest_path, 'w') as f:
+              json.dump(data, f, indent=2)
+
+          print(f"Updated manifest to version {new_version}")
+          EOF
+
+          python3 update_manifest.py "$NEW_VERSION" "$RELEASE_NOTES" "$DATE"
+
+      - name: Generate changelog from git commits
+        id: changelog
+        run: |
+          OLD_VERSION="${{ steps.version.outputs.current_version }}"
+          NEW_VERSION="${{ steps.version.outputs.new_version }}"
+
+          # Try to find the last version tag for Gemini Text Rewriter
+          LAST_TAG=$(git tag -l "gemini-v${OLD_VERSION}" | head -n 1)
+
+          if [ -z "$LAST_TAG" ]; then
+            # If no tag exists, get commits from last 30 days
+            COMMIT_RANGE="--since='30 days ago'"
+            echo "No previous tag found, using commits from last 30 days"
+          else
+            COMMIT_RANGE="${LAST_TAG}..HEAD"
+            echo "Using commits since ${LAST_TAG}"
+          fi
+
+          # Generate changelog from commits
+          CHANGELOG=$(git log $COMMIT_RANGE --pretty=format:"- %s" --no-merges -- \
+            Apps/GeminiTextRewriter.groovy \
+            Libraries/UtilitiesAndLoggingLibrary.groovy || echo "- Initial release")
+
+          # Save to file for use in release
+          cat > changelog.md << EOF
+          ## Gemini Text Rewriter ${NEW_VERSION}
+
+          ### Release Notes
+          ${{ github.event.inputs.release_notes }}
+
+          ### Changes in this release
+          ${CHANGELOG}
+
+          ### Files Updated
+          - GeminiTextRewriter.groovy
+          - packageManifest.json
+          EOF
+
+          echo "Changelog generated"
+
+      - name: Commit version updates
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: |
+            Apps/GeminiTextRewriter.groovy
+            PackageManifests/GeminiTextRewriter/packageManifest.json
+          message: "Release Gemini Text Rewriter ${{ steps.version.outputs.new_version }}"
+          tag: "gemini-v${{ steps.version.outputs.new_version }}"
+          push: true
+
+      - name: Trigger UtilitiesAndLoggingLibrary workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'UtilitiesAndLoggingLibrary.yml',
+              ref: 'main'
+            });
+            console.log('Triggered UtilitiesAndLoggingLibrary workflow');
+
+      - name: Wait for bundle workflow to complete
+        run: |
+          echo "Waiting 60 seconds for bundle workflow to complete..."
+          sleep 60
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: gemini-v${{ steps.version.outputs.new_version }}
+          name: Gemini Text Rewriter ${{ steps.version.outputs.new_version }}
+          body_path: changelog.md
+          draft: false
+          prerelease: false
+          files: |
+            Bundles/UtilitiesAndLoggingLibrary.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Discussion Announcement
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const changelog = fs.readFileSync('changelog.md', 'utf8');
+
+            try {
+              // Get the "Announcements" category ID
+              const categories = await github.graphql(`
+                query($owner: String!, $repo: String!) {
+                  repository(owner: $owner, name: $repo) {
+                    discussionCategories(first: 10) {
+                      nodes {
+                        id
+                        name
+                      }
+                    }
+                  }
+                }
+              `, {
+                owner: context.repo.owner,
+                repo: context.repo.repo
+              });
+
+              const announcementCategory = categories.repository.discussionCategories.nodes.find(
+                cat => cat.name === 'Announcements'
+              );
+
+              if (!announcementCategory) {
+                console.log('Announcements category not found, skipping discussion creation');
+                return;
+              }
+
+              // Create discussion
+              await github.graphql(`
+                mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+                  createDiscussion(input: {
+                    repositoryId: $repositoryId,
+                    categoryId: $categoryId,
+                    title: $title,
+                    body: $body
+                  }) {
+                    discussion {
+                      url
+                    }
+                  }
+                }
+              `, {
+                repositoryId: context.payload.repository.node_id,
+                categoryId: announcementCategory.id,
+                title: `Gemini Text Rewriter ${{ steps.version.outputs.new_version }} Released`,
+                body: changelog
+              });
+
+              console.log('Discussion announcement created successfully');
+            } catch (error) {
+              console.log('Could not create discussion:', error.message);
+            }
+
+      - name: Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # Release Complete! 🎉
+
+          ## Version
+          - **From:** ${{ steps.version.outputs.current_version }}
+          - **To:** ${{ steps.version.outputs.new_version }}
+
+          ## What was done
+          1. ✅ Updated version number in GeminiTextRewriter.groovy
+          2. ✅ Updated packageManifest.json with new version and release notes
+          3. ✅ Triggered UtilitiesAndLoggingLibrary workflow
+          4. ✅ Created git tag: gemini-v${{ steps.version.outputs.new_version }}
+          5. ✅ Created GitHub Release with bundles
+          6. ✅ Created discussion announcement
+
+          ## Next Steps
+          - Verify the release at: https://github.com/${{ github.repository }}/releases/tag/gemini-v${{ steps.version.outputs.new_version }}
+          - Check that bundles were generated correctly
+          - Announce the release to the Hubitat community if desired
+          EOF
