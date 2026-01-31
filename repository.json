@@ -22,7 +22,7 @@
       "name": "Third Reality Smart Blind Drivers",
       "tags": [
         "Window Coverings",
-        "ZigBee"
+        "Zigbee"
       ]
     },
     {
@@ -42,9 +42,8 @@
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/GeminiTextRewriter/packageManifest.json",
       "name": "Gemini Text Rewriter",
       "tags": [
-        "Text",
-        "AI",
-        "Google Gemini"
+        "Tools & Utilities",
+        "Cloud"
       ]
     }
   ],
