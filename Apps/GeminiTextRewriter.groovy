@@ -251,6 +251,26 @@ paragraph('<b>Rewrite Text Endpoint (JSON Response):</b>')
     }
 
     // =========================================================================
+    // CHILD DEVICE SECTION
+    // =========================================================================
+    // Configure child device for command-based access
+    section('<h2>Child Device</h2>') {
+      input(
+        'createChildDevice',
+        'bool',
+        title: 'Create Child Device',
+        required: false,
+        defaultValue: false,
+        description: 'Create a virtual device with rewriteText command'
+      )
+
+      if (settings.createChildDevice) {
+        paragraph('A child device will be created that provides a <b>rewriteText</b> command for use in rules and automations.')
+        paragraph('The device will use the default rewriting mode configured above.')
+      }
+    }
+
+    // =========================================================================
     // TESTING SECTION
     // =========================================================================
     // Provide interface for testing the rewriting functionality
@@ -423,11 +443,107 @@ void initialize() {
     logWarn('No Gemini API key configured')
   }
 
+  // Manage child device
+  if (settings.createChildDevice) {
+    getRewriterDevice()
+  } else {
+    removeChildDevice()
+  }
+
   logInfo('Gemini Text Rewriter initialized')
 
   // Schedule logs to turn off after 30 minutes (if enabled)
   if (settings.logEnable) { runIn(1800, 'logsOff') }
   if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
+}
+
+// =============================================================================
+// CHILD DEVICE MANAGEMENT
+// =============================================================================
+
+/**
+ * getRewriterDevice() - Get or create the child rewriter device
+ * Creates a child device if it doesn't exist, allowing users to invoke
+ * rewriting via a device command.
+ *
+ * @return ChildDeviceWrapper - The child device instance
+ */
+ChildDeviceWrapper getRewriterDevice() {
+  String deviceId = getRewriterDeviceId()
+  ChildDeviceWrapper rewriterDevice = getChildDevice(deviceId)
+
+  if (!rewriterDevice) {
+    logInfo('Creating Gemini Text Rewriter child device')
+    rewriterDevice = addChildDevice(
+      'dwinks',
+      'Gemini Text Rewriter Device',
+      deviceId,
+      [label: "${app.label} - Rewriter", isComponent: true]
+    )
+  }
+
+  return rewriterDevice
+}
+
+/**
+ * getRewriterDeviceId() - Generate unique ID for the child device
+ *
+ * @return String - Unique device network ID
+ */
+String getRewriterDeviceId() {
+  return "${app.id}-TextRewriter"
+}
+
+/**
+ * removeChildDevice() - Remove the child device if it exists
+ * Called when user disables child device creation.
+ */
+void removeChildDevice() {
+  String deviceId = getRewriterDeviceId()
+  ChildDeviceWrapper device = getChildDevice(deviceId)
+
+  if (device) {
+    logInfo('Removing Gemini Text Rewriter child device')
+    deleteChildDevice(deviceId)
+  }
+}
+
+/**
+ * componentRewriteText() - Handler called by child device
+ * This method is invoked when the child device's rewriteText command is called.
+ * It performs the rewriting and updates the device's attributes with the result.
+ *
+ * @param device - The child device that called this method
+ * @param text - The text to rewrite
+ * @param mode - The rewrite mode to use (optional, defaults to device's default or 'improve')
+ * @param customInstructions - Custom instructions for rewriting (optional)
+ */
+void componentRewriteText(DeviceWrapper device, String text, String mode = null, String customInstructions = null) {
+  logDebug("componentRewriteText called from device ${device.label} with text: ${text}, mode: ${mode}, customInstructions: ${customInstructions}")
+
+  // Use provided mode, or fall back to device's default, or app's default
+  String rewriteMode = mode ?: settings.defaultMode ?: 'improve'
+
+  // If custom instructions provided and mode is 'custom', use them as system prompt
+  String systemPrompt = null
+  if (customInstructions && rewriteMode == 'custom') {
+    systemPrompt = customInstructions
+  }
+
+  // Perform the rewrite
+  Map result = rewriteText(text, rewriteMode, systemPrompt)
+
+  // Update device attributes with the result
+  if (result.success) {
+    device.sendEvent(name: 'lastRewrittenText', value: result.text)
+    device.sendEvent(name: 'lastMode', value: rewriteMode)
+    device.sendEvent(name: 'status', value: 'success')
+    logInfo("Successfully rewrote text via child device (mode: ${rewriteMode})")
+  } else {
+    device.sendEvent(name: 'lastRewrittenText', value: '')
+    device.sendEvent(name: 'status', value: "error: ${result.error}")
+    logWarn("Failed to rewrite text via child device: ${result.error}")
+  }
 }
 
 // =============================================================================
@@ -845,9 +961,10 @@ void handleRewriteRequestEvent(Event evt) {
  *
  * @param text - The text to rewrite
  * @param mode - The rewriting mode (improve, shorten, etc.)
+ * @param customSystemPrompt - Optional custom system prompt to use instead of mode-based prompt
  * @return Map - Result map with success flag and text or error
  */
-Map rewriteText(String text, String mode = null) {
+Map rewriteText(String text, String mode = null, String customSystemPrompt = null) {
   try {
     // Use default mode if none provided
     if (!mode) {
@@ -861,8 +978,8 @@ Map rewriteText(String text, String mode = null) {
       return [success: false, error: error]
     }
 
-    // Build the system prompt based on selected mode
-    String systemPrompt = buildSystemPrompt(mode)
+    // Build the system prompt - use custom if provided, otherwise build from mode
+    String systemPrompt = customSystemPrompt ?: buildSystemPrompt(mode)
 
     logDebug("Rewriting text with mode: ${mode}")
     logDebug("System prompt: ${systemPrompt}")
