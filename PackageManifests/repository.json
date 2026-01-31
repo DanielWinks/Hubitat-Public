@@ -3,11 +3,26 @@
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
   "packages": [
     {
-      "name": "Sonos Advanced Controller",
       "category": "Integrations",
-      "tags": ["Speakers", "Multimedia", "LAN"],
+      "description": "Advanced app and driver for Sonos speakers. Allows non-interrupting TTS, grouping control, and more.",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Package%20Manifests/SonosAdvancedController/packageManifest.json",
-      "description": "Advanced app and driver for Sonos speakers. Allows non-interrupting TTS, grouping control, and more."
+      "name": "Sonos Advanced Controller",
+      "tags": [
+        "Speakers",
+        "Multimedia",
+        "LAN"
+      ]
+    },
+    {
+      "category": "Utilities",
+      "description": "Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify).",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/GeminiTextRewriter/packageManifest.json",
+      "name": "Gemini Text Rewriter",
+      "tags": [
+        "Text",
+        "AI",
+        "Google Gemini"
+      ]
     }
   ]
 }
