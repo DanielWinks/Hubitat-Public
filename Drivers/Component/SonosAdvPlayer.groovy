@@ -3584,20 +3584,26 @@ void processWebsocketMessage(String message) {
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
+      if(group == null) {
+        logTrace("Player ${getId()} not found in any group")
+        return
+      }
 
-      String groupId = group?.id.toString()
+      String groupId = group?.id?.toString()
       if(groupId != null && groupId != '') {setGroupId(groupId)}
 
-      String groupName = group?.name.toString()
+      String groupName = group?.name?.toString()
       if(groupName != null && groupName != '') {setGroupName(groupName)}
 
       ArrayList<String> playerIds = (ArrayList<String>)group?.playerIds
       if(playerIds != null && playerIds.size() > 0) {setGroupPlayerIds(playerIds)}
-      setGroupCoordinatorId(group.coordinatorId.toString())
+
+      String coordinatorId = group?.coordinatorId?.toString()
+      if(coordinatorId != null && coordinatorId != '') {setGroupCoordinatorId(coordinatorId)}
 
       ArrayList<Map> players = (ArrayList<Map>)eventData?.players
-      String coordinatorName = players.find{it?.id == group.coordinatorId}?.name
-      setGroupCoordinatorName(coordinatorName.toString())
+      String coordinatorName = players?.find{it?.id == group?.coordinatorId}?.name?.toString()
+      if(coordinatorName != null && coordinatorName != '') {setGroupCoordinatorName(coordinatorName)}
 
       try {
         List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
@@ -3611,8 +3617,8 @@ void processWebsocketMessage(String message) {
           if(zInfo != null && zInfo.size() > 0) {
             ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
             if(members != null && members.size() > 0) {
-              String rightChannelId = members.find{((ArrayList<String>)it?.channelMap)?.contains('RF') }?.id
-              setRightChannelRincon(rightChannelId)
+              String rightChannelId = members.find{((ArrayList<String>)it?.channelMap)?.contains('RF') }?.id?.toString()
+              if(rightChannelId != null && rightChannelId != '') {setRightChannelRincon(rightChannelId)}
             }
           }
         }
