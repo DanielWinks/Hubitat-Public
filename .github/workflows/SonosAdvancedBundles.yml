@@ -1,4 +1,4 @@
-name: CI
+name: Create Sonos Advanced Controller Bundle
 on:
   push:
     branches: ["main"]
