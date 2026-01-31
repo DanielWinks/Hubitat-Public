@@ -47,6 +47,8 @@ preferences {
   input name: 'debugLogEnable', type: 'bool', title: 'Enable debug logging', required: false, defaultValue: false
 }
 
+void initialize() { configure() }
+void configure() { unschedule() }
 
 /**
  * rewriteText() - Command to rewrite text using parent app's Gemini API integration
