@@ -101,6 +101,8 @@ metadata {
   command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
   command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
   command 'setBalance', [[name:'Left/Right Balance*', type:"NUMBER", description:"Left/Right Balance (-20..20)", constraints:["NUMBER"]]]
+  command 'setNightMode', [[ name: 'Night Mode', type: 'ENUM', constraints: ['on', 'off']]]
+  command 'setSpeechEnhancement', [[ name: 'Speech Enhancement Mode', type: 'ENUM', constraints: ['on', 'off']]]
 
   command 'playHighPriorityTTS', [
     [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
@@ -557,6 +559,18 @@ void setTreble(BigDecimal level) { componentSetTrebleLocal(level)}
 void setBass(BigDecimal level) { componentSetBassLocal(level)}
 void setLoudness(String mode) { componentSetLoudnessLocal(mode == 'on')}
 void setBalance(BigDecimal level) { componentSetBalanceLocal(level)}
+void setNightMode(String mode) { 
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [EQType: 'NightMode', DesiredValue: mode == 'on' ? 1 : 0]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
+  httpPostAsync(params)
+}
+void setSpeechEnhancement(String mode) { 
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [EQType: 'DialogLevel', DesiredValue: mode == 'on' ? 1 : 0]
+  Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
+  httpPostAsync(params)
+}
 
 void muteGroup(){
   if(isGroupedAndCoordinator()) {
