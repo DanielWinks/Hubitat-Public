@@ -209,6 +209,10 @@ void groupPlayers() {
     logWarn('Coordinator device not found')
     return
   }
+  // Ungroup all players first to ensure the new coordinator is set correctly
+  // This prevents the Sonos API from keeping an existing coordinator
+  ungroupPlayers()
+  pauseExecution(500)
   coordinator.playerCreateGroup(allPlayers)
 }
 
