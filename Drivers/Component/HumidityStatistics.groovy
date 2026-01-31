@@ -468,7 +468,7 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // ============================================================================
 
   // Get the humidity value from the previous reading
-  BigDecimal humidityPrevious = getDeviceProperty(device, 'currentValue')('humidityCurrent') as BigDecimal
+  BigDecimal humidityPrevious = getDeviceCurrentValue('humidityCurrent') as BigDecimal
   if (humidityPrevious == null) {
     // First reading - no previous value exists
     // Initialize previous = current (no change)
