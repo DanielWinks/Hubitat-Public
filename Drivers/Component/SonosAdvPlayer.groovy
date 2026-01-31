@@ -660,14 +660,14 @@ Integer getGroupVolumeAdjAmount() {
 @CompileStatic
 void play() { playerPlay() }
 @CompileStatic
-void stop() { 
+void stop() {
   clearFavoriteRetryState()
-  playerStop() 
+  playerStop()
 }
 @CompileStatic
-void pause() { 
+void pause() {
   clearFavoriteRetryState()
-  playerPause() 
+  playerPause()
 }
 @CompileStatic
 void nextTrack() { playerSkipToNextTrack() }
@@ -740,10 +740,10 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   if(getIsGroupCoordinator() == true) {
     // Clear any existing retry state for this device
     clearFavoriteRetryState()
-    
+
     // Execute the initial load
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-    
+
     // Initialize retry state and schedule checks only if autoplay is enabled
     if(playOnCompletion) {
       String deviceId = device.getDeviceNetworkId()
@@ -793,13 +793,13 @@ void clearFavoriteRetryState() {
 void scheduleNextFavoriteRetryCheck() {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = favoriteRetryState.get(deviceId)
-  
+
   if(retryState == null) {
     return
   }
-  
+
   Integer attemptNumber = retryState.attemptNumber as Integer
-  
+
   if(attemptNumber >= FAVORITE_RETRY_INTERVALS.size()) {
     // All retries exhausted
     Integer totalWaitTime = FAVORITE_RETRY_INTERVALS.sum() as Integer
@@ -807,9 +807,13 @@ void scheduleNextFavoriteRetryCheck() {
     clearFavoriteRetryState()
     return
   }
-  
+
   Integer delaySeconds = FAVORITE_RETRY_INTERVALS[attemptNumber]
   logDebug("Scheduling favorite playback check in ${delaySeconds} seconds (attempt ${attemptNumber + 1}/${FAVORITE_RETRY_INTERVALS.size()})")
+  scheduleFavoriteRetryCallback(delaySeconds)
+}
+
+void scheduleFavoriteRetryCallback(Integer delaySeconds) {
   runIn(delaySeconds, FAVORITE_RETRY_CALLBACK, [overwrite: true])
 }
 
@@ -820,35 +824,35 @@ void scheduleNextFavoriteRetryCheck() {
 void checkFavoritePlaybackAndRetry() {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = favoriteRetryState.get(deviceId)
-  
+
   if(retryState == null) {
     logDebug("No retry state found, skipping playback check")
     return
   }
-  
+
   String currentStatus = getTransportStatus()
   logDebug("Checking favorite playback status: ${currentStatus}")
-  
+
   // Success if playing
   if(currentStatus == 'playing') {
     logInfo("Favorite '${retryState.favoriteId}' is now playing successfully")
     clearFavoriteRetryState()
     return
   }
-  
+
   // If status is null or empty, treat as not playing yet and continue retry
   if(currentStatus == null || currentStatus == '') {
     logDebug("Transport status is null/empty, will retry")
   }
-  
+
   // Not playing yet, retry
   // Note: This increment is safe because Hubitat device methods run single-threaded per device
   Integer attemptNumber = retryState.attemptNumber as Integer
   attemptNumber++
   retryState.attemptNumber = attemptNumber
-  
+
   logInfo("Favorite '${retryState.favoriteId}' not playing yet, retrying (attempt ${attemptNumber}/${FAVORITE_RETRY_INTERVALS.size()})")
-  
+
   // Retry loading the favorite
   playerLoadFavorite(
     retryState.favoriteId as String,
@@ -859,7 +863,7 @@ void checkFavoritePlaybackAndRetry() {
     retryState.crossfade as Boolean,
     retryState.playOnCompletion as Boolean
   )
-  
+
   // Schedule next check
   scheduleNextFavoriteRetryCheck()
 }
