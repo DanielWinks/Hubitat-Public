@@ -813,6 +813,7 @@ void deleteDeviceCurrentState(String attributeName) {
   device.deleteCurrentState(attributeName)
 }
 
+/**
  * Executes an HTTP retry by making an async POST request.
  * Call this from your retry method to re-attempt the HTTP request.
  *
