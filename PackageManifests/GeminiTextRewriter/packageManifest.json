@@ -1,0 +1,32 @@
+{
+  "apps": [
+    {
+      "id": "4d4f951c-913f-49a7-badb-0810e63aacea",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/GeminiTextRewriter.groovy",
+      "name": "Gemini Text Rewriter",
+      "namespace": "dwinks",
+      "oauth": true,
+      "required": true
+    }
+  ],
+  "author": "Daniel Winks",
+  "bundles": [
+    {
+      "id": "218f2298-f008-4252-b554-10a6fb91b01b",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/UtilitiesAndLoggingLibrary.zip",
+      "name": "DWinks Utilities and Logging Library",
+      "namespace": "dwinks",
+      "required": true
+    }
+  ],
+  "communityLink": "",
+  "dateReleased": "2026-01-31",
+  "documentationLink": "https://github.com/DanielWinks/Hubitat-Public/blob/main/Readme/GeminiTextRewriter-README.md",
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "licenseFile": "https://github.com/DanielWinks/Hubitat-Public/blob/main/license.txt",
+  "minimumHEVersion": "2.3.4",
+  "packageName": "Gemini Text Rewriter",
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
+  "releaseNotes": "1.0.0 Initial release - Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify)",
+  "version": "1.0.0"
+}
