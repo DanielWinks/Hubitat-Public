@@ -1259,6 +1259,7 @@ void parse(String raw) {
     logWarn("Ran into an issue parsing websocket: ${e}")
 
     logWarn("JSON from failed websocket parse: ${raw}")
+    return
     }
   try {
     LinkedHashMap message = getMapForRaw(raw)
@@ -3606,7 +3607,8 @@ void processWebsocketMessage(String message) {
       if(coordinatorName != null && coordinatorName != '') {setGroupCoordinatorName(coordinatorName)}
 
       try {
-        List<String> groupMemberNames = (ArrayList<String>)(group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name})
+        List<String> playerNames = group.playerIds.collect{pid -> players.find{player-> player?.id == pid}?.name}
+        List<String> groupMemberNames = (ArrayList<String>)(playerNames.findAll{it != null})
         setGroupMemberNames(groupMemberNames)
       } catch (Exception e) {logTrace('Could not get group member names, continuing on...')}
 
