@@ -829,13 +829,20 @@ void checkFavoritePlaybackAndRetry() {
   String currentStatus = getTransportStatus()
   logDebug("Checking favorite playback status: ${currentStatus}")
   
+  // Success if playing
   if(currentStatus == 'playing') {
     logInfo("Favorite '${retryState.favoriteId}' is now playing successfully")
     clearFavoriteRetryState()
     return
   }
   
+  // If status is null or empty, treat as not playing yet and continue retry
+  if(currentStatus == null || currentStatus == '') {
+    logDebug("Transport status is null/empty, will retry")
+  }
+  
   // Not playing yet, retry
+  // Note: This increment is safe because Hubitat device methods run single-threaded per device
   Integer attemptNumber = retryState.attemptNumber as Integer
   attemptNumber++
   retryState.attemptNumber = attemptNumber
