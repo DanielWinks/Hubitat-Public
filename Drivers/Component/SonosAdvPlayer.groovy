@@ -3454,7 +3454,10 @@ void processWebsocketMessage(String message) {
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
-      if(group == null) {return}
+      if(group == null) {
+        logTrace("Player ${getId()} not found in any group")
+        return
+      }
 
       String groupId = group?.id?.toString()
       if(groupId != null && groupId != '') {setGroupId(groupId)}
@@ -3464,7 +3467,7 @@ void processWebsocketMessage(String message) {
 
       ArrayList<String> playerIds = (ArrayList<String>)group?.playerIds
       if(playerIds != null && playerIds.size() > 0) {setGroupPlayerIds(playerIds)}
-      
+
       String coordinatorId = group?.coordinatorId?.toString()
       if(coordinatorId != null && coordinatorId != '') {setGroupCoordinatorId(coordinatorId)}
 
