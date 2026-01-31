@@ -563,13 +563,13 @@ void setNightMode(String mode) {
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [EQType: 'NightMode', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
-  httpPostAsync(params)
+  asynchttpPost('localControlCallback', params)
 }
 void setSpeechEnhancement(String mode) { 
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
-  httpPostAsync(params)
+  asynchttpPost('localControlCallback', params)
 }
 
 void muteGroup(){
