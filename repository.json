@@ -1,32 +1,52 @@
 {
   "author": "Daniel Winks",
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
-  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
   "packages": [
     {
-      "name": "Sonos Advanced Controller",
       "category": "Integrations",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json",
       "description": "Advanced app and driver for Sonos speakers. Allows non-interrupting TTS, grouping control, and more.",
-      "tags": ["Speakers", "Multimedia", "LAN"],
-      "id": "6cad9e9c-4b0b-423b-b0e1-1c5a3c0d1196"
+      "id": "6cad9e9c-4b0b-423b-b0e1-1c5a3c0d1196",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json",
+      "name": "Sonos Advanced Controller",
+      "tags": [
+        "Speakers",
+        "Multimedia",
+        "LAN"
+      ]
     },
     {
-      "name": "Third Reality Smart Blind Drivers",
       "category": "Window Coverings",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/ThirdReality/packageManifest.json",
       "description": "Improved driver for Third Reality Smart Blinds. Adds 'verfication' checks to ensure blinds always move to 'desired' position, eliminating issues where blinds might otherwise fail to respond to the first ZigBee command sent.",
-      "tags": ["Window Coverings", "ZigBee"],
-      "id": "0494570e-0fdd-4ea0-a8f4-7eba8e154ddd"
+      "id": "0494570e-0fdd-4ea0-a8f4-7eba8e154ddd",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/ThirdReality/packageManifest.json",
+      "name": "Third Reality Smart Blind Drivers",
+      "tags": [
+        "Window Coverings",
+        "ZigBee"
+      ]
     },
     {
-      "name": "HTTP Presence Helper",
       "category": "Presence & Location",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/PresenceHelpers/packageManifest.json",
       "description": "HTTP Presence Helper App. Provides local and cloud endpoints for present/not present updates of presence/",
-      "tags": ["Utility", "Presence & Location"],
-      "id": "5810284c-4abc-4e79-a9f4-fd21d9f90fb4"
+      "id": "5810284c-4abc-4e79-a9f4-fd21d9f90fb4",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/PresenceHelpers/packageManifest.json",
+      "name": "HTTP Presence Helper",
+      "tags": [
+        "Utility",
+        "Presence & Location"
+      ]
+    },
+    {
+      "category": "Utilities",
+      "description": "Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify).",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/GeminiTextRewriter/packageManifest.json",
+      "name": "Gemini Text Rewriter",
+      "tags": [
+        "Text",
+        "AI",
+        "Google Gemini"
+      ]
     }
-  ]
+  ],
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US"
 }
-
