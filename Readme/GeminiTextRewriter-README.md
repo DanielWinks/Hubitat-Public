@@ -6,19 +6,20 @@
 2. [Features](#features)
 3. [Requirements](#requirements)
 4. [Installation](#installation)
-5. [Initial Setup](#initial-setup)
-6. [Configuration Guide](#configuration-guide)
-7. [Rewriting Modes Explained](#rewriting-modes-explained)
-8. [HTTP API Endpoints](#http-api-endpoints)
-9. [Integration Methods](#integration-methods)
-10. [Advanced Usage Examples](#advanced-usage-examples)
-11. [Troubleshooting](#troubleshooting)
-12. [Performance and Cost Considerations](#performance-and-cost-considerations)
-13. [Best Practices](#best-practices)
-14. [FAQ](#faq)
-15. [Technical Architecture](#technical-architecture)
-16. [API Reference](#api-reference)
-17. [Version History](#version-history)
+5. [Child Device (Optional)](#child-device-optional)
+6. [Initial Setup](#initial-setup)
+7. [Configuration Guide](#configuration-guide)
+8. [Rewriting Modes Explained](#rewriting-modes-explained)
+9. [HTTP API Endpoints](#http-api-endpoints)
+10. [Integration Methods](#integration-methods)
+11. [Advanced Usage Examples](#advanced-usage-examples)
+12. [Troubleshooting](#troubleshooting)
+13. [Performance and Cost Considerations](#performance-and-cost-considerations)
+14. [Best Practices](#best-practices)
+15. [FAQ](#faq)
+16. [Technical Architecture](#technical-architecture)
+17. [API Reference](#api-reference)
+18. [Version History](#version-history)
 
 ---
 
@@ -143,6 +144,240 @@ The app acts as a bridge between your Hubitat hub and Google's Gemini AI service
    - Navigate to **Apps** → Click **Add User App**
    - Select **Gemini Text Rewriter** from the list
    - Click through to configuration page
+
+---
+
+## Child Device (Optional)
+
+The Gemini Text Rewriter app includes an optional **child device driver** that provides a simpler, device-based interface for rewriting text. This is particularly useful for Rule Machine users who prefer using device commands over HTTP endpoints.
+
+### What is the Child Device?
+
+The child device is a virtual device that acts as a convenient interface to the Gemini Text Rewriter app. Instead of making HTTP calls or using location events, you can simply call commands on the device like any other Hubitat device.
+
+**Key Benefits**:
+
+- ✅ **No HTTP endpoints needed** - Use device commands directly in Rule Machine
+- ✅ **Simpler configuration** - Set default modes and custom instructions in device preferences
+- ✅ **Multiple devices** - Create multiple child devices with different configurations
+- ✅ **One-step custom rewrites** - Use `rewriteTextWithPrompt` for custom instructions without pre-configuration
+- ✅ **Status tracking** - Device attributes show processing status and results
+- ✅ **Rule Machine friendly** - Easy to use in custom commands and actions
+
+### Installing the Child Device Driver
+
+**Via Hubitat Package Manager (HPM)**:
+
+1. The child device driver is automatically included when installing via HPM
+2. No additional steps needed
+
+**Manual Installation**:
+
+1. Navigate to **Drivers Code** → Click **New Driver**
+2. Copy code from: [GeminiTextRewriterDevice.groovy](https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/GeminiTextRewriterDevice.groovy)
+3. Paste into code editor and click **Save**
+
+### Creating a Child Device
+
+1. **Open the Gemini Text Rewriter app**
+2. Scroll to the **Child Devices** section (if available in your app version, or create manually)
+3. **Manual Creation** (if app doesn't have built-in UI):
+   - Navigate to **Devices** → Click **Add Virtual Device**
+   - **Device Name**: Choose descriptive name (e.g., "Gemini Rewriter - Announcements")
+   - **Device Network Id**: Enter unique ID (e.g., `gemini-rewriter-1`)
+   - **Type**: Select **Gemini Text Rewriter Device**
+   - **Parent App**: Select your Gemini Text Rewriter app instance
+   - Click **Save Device**
+
+### Configuring the Child Device
+
+1. **Navigate to the device page** (Devices → Your child device)
+2. **Configure preferences**:
+   - **Default Rewrite Mode**: Select the mode used when calling `rewriteText()` command
+     - Options: improve, shorten, lengthen, formalize, casual, simplify, custom
+   - **Enable Logging**: Turn on for debugging
+   - **Enable Debug Logging**: Turn on for detailed diagnostics
+3. Click **Save Preferences**
+
+### Using the Child Device - Basic Commands
+
+#### Command: `rewriteText`
+
+Rewrites text using the device's configured default mode.
+
+**Parameters**:
+
+- `text` (required): The text to rewrite
+
+**Example in Rule Machine**:
+
+```
+Action: Custom Command
+Device: [Your Gemini child device]
+Command: rewriteText
+Parameters:
+  - text: "Motion detected in living room"
+```
+
+**Result**: Text is rewritten using the device's default mode, result stored in `lastRewrittenText` attribute
+
+#### Command: `rewriteTextWithPrompt`
+
+Rewrites text with a directly specified custom prompt (one-step custom rewriting).
+
+**Parameters**:
+
+- `text` (required): The text to rewrite
+- `customPrompt` (required): Custom instructions for how to rewrite
+
+**Example in Rule Machine**:
+
+```
+Action: Custom Command
+Device: [Your Gemini child device]
+Command: rewriteTextWithPrompt
+Parameters:
+  - text: "Temperature is 85 degrees"
+  - customPrompt: "Make this sound urgent and include a suggestion to check the AC"
+```
+
+**Result**: Text is rewritten according to your custom prompt
+
+**Use Cases**:
+
+- Dynamic custom prompts based on conditions
+- Different rewrite styles for different triggers
+- Context-specific transformations without pre-configuration
+
+#### Command: `setCustomInstructions`
+
+Stores custom rewrite instructions in the device for later use with `custom` mode.
+
+**Parameters**:
+
+- `instructions` (required): Custom prompt/instructions
+
+**Example in Rule Machine**:
+
+```
+Action: Custom Command
+Device: [Your Gemini child device]
+Command: setCustomInstructions
+Parameters:
+  - instructions: "Rewrite as if explaining to a child, use simple words"
+```
+
+**Use Case**: Configure device for specific rewriting style, then use `rewriteText()` with `custom` mode
+
+#### Command: `clearCustomInstructions`
+
+Clears any stored custom instructions.
+
+**Parameters**: None
+
+**Example**: Simply select this command in Rule Machine to reset custom instructions
+
+### Device Attributes
+
+The child device exposes several attributes you can use in conditions and actions:
+
+- **`lastRewrittenText`**: The most recent rewritten text result
+- **`lastOriginalText`**: The original text that was rewritten
+- **`lastMode`**: The mode used for the last rewrite operation
+- **`status`**: Current status (processing, success, error, etc.)
+- **`customInstructions`**: Currently stored custom instructions
+- **`defaultMode`**: The configured default rewrite mode
+
+### Complete Rule Machine Example
+
+**Scenario**: Motion detected → Rewrite announcement → Speak on Alexa
+
+```
+Trigger:
+  Motion Sensor (Living Room) active
+
+Actions:
+  1. Custom Command:
+     Device: Gemini Rewriter - Announcements
+     Command: rewriteText
+     Parameters:
+       - text: "Motion detected in %device.label% at %time%"
+
+  2. Wait for Condition:
+     Condition: Gemini Rewriter status = "success"
+     Timeout: 5 seconds
+
+  3. Speak on Alexa:
+     Message: %Gemini Rewriter:lastRewrittenText%
+```
+
+### Advanced Rule Machine Example with Custom Prompt
+
+**Scenario**: Temperature alert with dynamic urgency based on temperature
+
+```
+Trigger:
+  Temperature Sensor > 78°F
+
+Actions:
+  IF (Temperature > 85) THEN
+    Custom Command:
+      Device: Gemini Rewriter
+      Command: rewriteTextWithPrompt
+      Parameters:
+        - text: "Temperature is %Temperature Sensor:temperature%"
+        - customPrompt: "Make this URGENT and suggest checking AC immediately"
+
+  ELSE IF (Temperature > 80) THEN
+    Custom Command:
+      Device: Gemini Rewriter
+      Command: rewriteTextWithPrompt
+      Parameters:
+        - text: "Temperature is %Temperature Sensor:temperature%"
+        - customPrompt: "Make this moderately concerning and suggest opening windows"
+
+  ELSE
+    Custom Command:
+      Device: Gemini Rewriter
+      Command: rewriteText
+      Parameters:
+        - text: "Temperature is %Temperature Sensor:temperature%"
+  END IF
+
+  Wait for Condition: Gemini Rewriter status = "success" (5 sec timeout)
+  Notify: %Gemini Rewriter:lastRewrittenText%
+```
+
+### Tips for Using Child Devices
+
+**Multiple Devices for Different Purposes**:
+Create separate child devices with different default modes:
+
+- "Gemini - Casual" (default mode: casual) for friendly announcements
+- "Gemini - Formal" (default mode: formalize) for guest-mode notifications
+- "Gemini - Short" (default mode: shorten) for SMS/text notifications
+- "Gemini - Custom" (default mode: custom) with specific instructions
+
+**Best Practices**:
+
+1. **Use `rewriteText`** when you want consistent, mode-based rewriting
+2. **Use `rewriteTextWithPrompt`** when you need dynamic, context-specific rewrites
+3. **Set custom instructions** once if you'll use the same custom prompt repeatedly
+4. **Wait for status** before using the result to ensure processing completed
+5. **Check status attribute** in conditionals to handle errors gracefully
+
+**Error Handling in Rules**:
+
+```
+Actions:
+  1. Custom Command: rewriteText [...]
+  2. Wait for Condition: status != "processing" (timeout 10 sec)
+  3. IF (status = "success") THEN
+       Use: %lastRewrittenText%
+     ELSE
+       Use fallback: "Alert from sensor"
+     END IF
+```
 
 ---
 
