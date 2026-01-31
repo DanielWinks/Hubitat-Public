@@ -23,6 +23,10 @@
 
 #include dwinks.UtilitiesAndLoggingLibrary
 
+// Delay in milliseconds to wait after ungrouping before regrouping players
+// This ensures the Sonos API has time to process the ungroup operation before creating a new group
+@Field static final Integer UNGROUP_DELAY_MS = 500
+
 metadata {
   definition(
     name: 'Sonos Advanced Group',
@@ -212,7 +216,7 @@ void groupPlayers() {
   // Ungroup all players first to ensure the new coordinator is set correctly
   // This prevents the Sonos API from keeping an existing coordinator
   ungroupPlayers()
-  pauseExecution(500)
+  pauseExecution(UNGROUP_DELAY_MS)
   coordinator.playerCreateGroup(allPlayers)
 }
 
