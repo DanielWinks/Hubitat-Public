@@ -755,12 +755,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
         shuffle: shuffle,
         crossfade: crossfade,
         playOnCompletion: playOnCompletion,
-        attemptNumber: 0,
-        repeatMode: repeatMode,
-        queueMode: queueMode,
-        shuffleMode: shuffleMode,
-        autoPlay: autoPlay,
-        crossfadeMode: crossfadeMode
+        attemptNumber: 0
       ])
       scheduleNextFavoriteRetryCheck()
     }
@@ -785,7 +780,10 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 void clearFavoriteRetryState() {
   String deviceId = device.getDeviceNetworkId()
   favoriteRetryState.remove(deviceId)
-  unschedule(FAVORITE_RETRY_CALLBACK)
+  // Note: We don't unschedule here because:
+  // 1. The callback will see no state and return early (safe no-op)
+  // 2. runIn with overwrite:true ensures only one callback is scheduled at a time
+  // 3. Hubitat scheduling is per-device, so no cross-device interference
 }
 
 /**
