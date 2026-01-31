@@ -46,11 +46,11 @@ metadata {
     attribute 'lastMode', 'string'
     attribute 'status', 'string'
   }
-  
-  preferences {
-    input name: 'logEnable', type: 'bool', title: 'Enable Logging', required: false, defaultValue: true
-    input name: 'debugLogEnable', type: 'bool', title: 'Enable debug logging', required: false, defaultValue: false
-  }
+}
+
+preferences {
+  input name: 'logEnable', type: 'bool', title: 'Enable Logging', required: false, defaultValue: true
+  input name: 'debugLogEnable', type: 'bool', title: 'Enable debug logging', required: false, defaultValue: false
 }
 
 void updated() {
