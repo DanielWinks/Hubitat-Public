@@ -251,6 +251,26 @@ paragraph('<b>Rewrite Text Endpoint (JSON Response):</b>')
     }
 
     // =========================================================================
+    // CHILD DEVICE SECTION
+    // =========================================================================
+    // Configure child device for command-based access
+    section('<h2>Child Device</h2>') {
+      input(
+        'createChildDevice',
+        'bool',
+        title: 'Create Child Device',
+        required: false,
+        defaultValue: false,
+        description: 'Create a virtual device with rewriteText command'
+      )
+      
+      if (settings.createChildDevice) {
+        paragraph('A child device will be created that provides a <b>rewriteText</b> command for use in rules and automations.')
+        paragraph('The device will use the default rewriting mode configured above.')
+      }
+    }
+
+    // =========================================================================
     // TESTING SECTION
     // =========================================================================
     // Provide interface for testing the rewriting functionality
@@ -423,11 +443,99 @@ void initialize() {
     logWarn('No Gemini API key configured')
   }
 
+  // Manage child device
+  if (settings.createChildDevice) {
+    getRewriterDevice()
+  } else {
+    removeChildDevice()
+  }
+
   logInfo('Gemini Text Rewriter initialized')
 
   // Schedule logs to turn off after 30 minutes (if enabled)
   if (settings.logEnable) { runIn(1800, 'logsOff') }
   if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
+}
+
+// =============================================================================
+// CHILD DEVICE MANAGEMENT
+// =============================================================================
+
+/**
+ * getRewriterDevice() - Get or create the child rewriter device
+ * Creates a child device if it doesn't exist, allowing users to invoke
+ * rewriting via a device command.
+ *
+ * @return ChildDeviceWrapper - The child device instance
+ */
+ChildDeviceWrapper getRewriterDevice() {
+  String deviceId = getRewriterDeviceId()
+  ChildDeviceWrapper rewriterDevice = getChildDevice(deviceId)
+  
+  if (!rewriterDevice) {
+    logInfo('Creating Gemini Text Rewriter child device')
+    rewriterDevice = addChildDevice(
+      'dwinks',
+      'Gemini Text Rewriter Device',
+      deviceId,
+      [label: "${app.label} - Rewriter", isComponent: true]
+    )
+  }
+  
+  return rewriterDevice
+}
+
+/**
+ * getRewriterDeviceId() - Generate unique ID for the child device
+ *
+ * @return String - Unique device network ID
+ */
+String getRewriterDeviceId() {
+  return "${app.id}-TextRewriter"
+}
+
+/**
+ * removeChildDevice() - Remove the child device if it exists
+ * Called when user disables child device creation.
+ */
+void removeChildDevice() {
+  String deviceId = getRewriterDeviceId()
+  ChildDeviceWrapper device = getChildDevice(deviceId)
+  
+  if (device) {
+    logInfo('Removing Gemini Text Rewriter child device')
+    deleteChildDevice(deviceId)
+  }
+}
+
+/**
+ * componentRewriteText() - Handler called by child device
+ * This method is invoked when the child device's rewriteText command is called.
+ * It performs the rewriting and updates the device's attributes with the result.
+ *
+ * @param device - The child device that called this method
+ * @param text - The text to rewrite
+ */
+void componentRewriteText(DeviceWrapper device, String text) {
+  logDebug("componentRewriteText called from device ${device.label} with text: ${text}")
+  
+  // Use the default mode from settings
+  String mode = settings.defaultMode ?: 'improve'
+  
+  // Perform the rewrite
+  Map result = rewriteText(text, mode)
+  
+  // Update device attributes with the result
+  if (result.success) {
+    device.sendEvent(name: 'lastRewrittenText', value: result.text)
+    device.sendEvent(name: 'lastMode', value: mode)
+    device.sendEvent(name: 'status', value: 'success')
+    logInfo("Successfully rewrote text via child device (mode: ${mode})")
+  } else {
+    device.sendEvent(name: 'lastRewrittenText', value: '')
+    device.sendEvent(name: 'status', value: "error: ${result.error}")
+    logWarn("Failed to rewrite text via child device: ${result.error}")
+  }
 }
 
 // =============================================================================
