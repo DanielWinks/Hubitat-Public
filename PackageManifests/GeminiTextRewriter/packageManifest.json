@@ -19,18 +19,18 @@
       "required": true
     }
   ],
-  "drivers": [
-    {
-      "id": "a1b2c3d4-e5f6-4789-a012-3456789abcde",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/GeminiTextRewriterDevice.groovy",
-      "name": "Gemini Text Rewriter Device",
-      "namespace": "dwinks",
-      "required": false
-    }
-  ],
   "communityLink": "",
   "dateReleased": "2026-01-31",
   "documentationLink": "https://github.com/DanielWinks/Hubitat-Public/blob/main/Readme/GeminiTextRewriter-README.md",
+  "drivers": [
+    {
+      "id": "5690920d-b88c-4533-84f0-c2788342eb9f",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/GeminiTextRewriterDevice.groovy",
+      "name": "Gemini Text Rewriter Device",
+      "namespace": "dwinks",
+      "required": true
+    }
+  ],
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
   "licenseFile": "https://github.com/DanielWinks/Hubitat-Public/blob/main/license.txt",
   "minimumHEVersion": "2.3.4",
