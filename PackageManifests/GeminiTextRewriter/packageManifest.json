@@ -36,6 +36,6 @@
   "minimumHEVersion": "2.3.4",
   "packageName": "Gemini Text Rewriter",
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
-  "releaseNotes": "1.0.1 Initial Release\\r\\n1.0.0 Initial release - Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify)",
-  "version": "1.0.1"
+  "releaseNotes": "1.1.0 Add child device functionality, enabling greatly simplified integration via Rule Machine\\r\\n1.0.1 Initial Release\\r\\n1.0.0 Initial release - Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify)",
+  "version": "1.1.0"
 }

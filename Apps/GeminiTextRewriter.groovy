@@ -54,7 +54,7 @@ import groovy.transform.Field
  */
 definition(
   name: 'Gemini Text Rewriter',
-  version: '1.0.1',
+  version: '1.1.0',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Use Google Gemini API to rewrite text snippets with various styles.',
