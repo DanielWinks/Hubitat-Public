@@ -76,6 +76,10 @@ jobs:
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvFavorites.groovy
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvSecondaries.groovy
 
+          # Update Library versions
+          sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Libraries/SMAPILibrary.groovy
+          sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Libraries/UtilitiesAndLoggingLibrary.groovy
+
           echo "Version update complete"
 
       - name: Update packageManifest.json
@@ -124,6 +128,12 @@ jobs:
               if 'location' in bundle:
                   filename = bundle['location'].split('/')[-1]
                   bundle['location'] = f'{base_release_url}/{filename}'
+
+          # Update file locations (for library files)
+          for file in data.get('files', []):
+              if 'location' in file:
+                  filename = file['location'].split('/')[-1]
+                  file['location'] = f'{base_release_url}/{filename}'
 
           # Prepend new release notes
           new_notes = f"{new_version} {release_notes}"
@@ -201,6 +211,8 @@ jobs:
             Drivers/Component/SonosAdvBatteryStats.groovy
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
+            Libraries/SMAPILibrary.groovy
+            Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
           message: "Release Sonos Advanced Controller ${{ steps.version.outputs.new_version }}"
           tag: "v${{ steps.version.outputs.new_version }}"
@@ -253,6 +265,8 @@ jobs:
             Drivers/Component/SonosAdvBatteryStats.groovy
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
+            Libraries/SMAPILibrary.groovy
+            Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
