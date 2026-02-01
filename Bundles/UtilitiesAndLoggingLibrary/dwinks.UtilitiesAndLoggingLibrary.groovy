@@ -46,8 +46,10 @@ library(
   name: 'UtilitiesAndLoggingLibrary',
   namespace: 'dwinks',
   author: 'Daniel Winks',
-  description: 'Utility and Logging Library',
+  description: 'Utilities and Logging Library',
+  version: '0.7.10',
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/UtilitiesAndLoggingLibrary.groovy'
+
 )
 
 // Preferences for device logging settings
