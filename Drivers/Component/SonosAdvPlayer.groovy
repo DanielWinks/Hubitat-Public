@@ -3652,20 +3652,125 @@ void processWebsocketMessage(String message) {
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
-      String html = '<!DOCTYPE html><html><body><ul>'
+
+      // Get device ID for command URLs
+      Long deviceId = device.getIdAsLong()
+      String hubIp = device.hub.localIP
+
+      // Build HTML with modern styling and click handlers
+      String html = """<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f5f5f5;
+      margin: 0;
+      padding: 20px;
+    }
+    .favorites-container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      max-width: 400px;
+      margin: 0 auto;
+    }
+    .favorite-card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      padding: 15px;
+      text-align: center;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .favorite-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    }
+    .favorite-image {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .favorite-image:hover {
+      opacity: 0.85;
+    }
+    .favorite-image:active {
+      opacity: 0.7;
+    }
+    .favorite-number {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 5px;
+      font-weight: 500;
+    }
+    .favorite-name {
+      font-size: 14px;
+      color: #333;
+      margin-top: 10px;
+      font-weight: 600;
+      line-height: 1.3;
+      min-height: 36px;
+    }
+    .no-image {
+      width: 100%;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 8px;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .no-image:hover {
+      opacity: 0.9;
+    }
+  </style>
+</head>
+<body>
+  <div class="favorites-container">
+"""
 
       formatted.each(){fav ->
         String albumArtURI = fav?.value?.imageUrl
-        String s = "Favorite #${fav?.key} ${fav?.value?.name}"
+        String favId = fav?.key
+        String favName = fav?.value?.name
+
+        html += """    <div class="favorite-card">
+      <div class="favorite-number">Favorite #${favId}</div>
+"""
+
         if(albumArtURI == null) {
-          html += "<li>${s}: No Image Art Available</li>"
+          html += """      <div class="no-image">
+        <span>♪ ${favName}</span>
+      </div>
+"""
         } else if(albumArtURI.startsWith('/')) {
-          html += "<li>${s}: <br><img src=\"${getDeviceDataValue('localUpnpUrl')}${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
+          html += """      <img class="favorite-image"
+           src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
+           alt="${favName}" />
+"""
         } else {
-          html += "<li>${s}: <br><img src=\"${albumArtURI}\" width=\"200\" height=\"200\" ></li>"
+          html += """      <img class="favorite-image"
+           src="${albumArtURI}"
+           alt="${favName}" />
+"""
         }
+
+        html += """      <div class="favorite-name">${favName}</div>
+    </div>
+"""
       }
-      html += '</ul></body></html>'
+
+      html += """  </div>
+</body>
+</html>"""
+
       setChildFavs(html)
 
 
