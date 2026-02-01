@@ -22,7 +22,7 @@
 */
 
 #include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.SMAPILibrary
+
 
 definition(
   name: 'Sonos Advanced Controller',
@@ -100,14 +100,12 @@ Map mainPage() {
   checkForUpdates()
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
-      label title: 'Sonos Advanced Controller',
-      required: false
       paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
 
       if(state.updateAvailable == true) {
         section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
           paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
-                    "Current version: ${getCurrentVersion()}<br/>" +
+                    "Current version: ${getActualInstalledAppVersion()}<br/>" +
                     "Released: ${state.latestReleaseDate}<br/><br/>" +
                     "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
           input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
@@ -156,6 +154,12 @@ Map mainPage() {
         paragraph "Last version check: ${new Date(state.lastVersionCheck).format('yyyy-MM-dd HH:mm:ss')}"
       }
 
+      // Show message if update was just completed
+      if(state.updateJustCompleted) {
+        paragraph "<span style='color:green'><b>✓ Update completed successfully!</b></span><br><i>Click 'Check Versions of Installed Files' to verify all files are at the correct version.</i>"
+        state.remove('updateJustCompleted')
+      }
+
       // Display installed file versions
       if(state.installedVersions && state.installedVersions.size() > 0) {
         paragraph "<b>Installed File Versions:</b>"
@@ -178,6 +182,28 @@ Map mainPage() {
         input 'btnFixVersionMismatches', 'button', title: 'Update All Mismatched Versions', submitOnChange: false
       } else if(state.lastVersionCheck && state.versionMismatches != null) {
         paragraph "<span style='color:green'><b>✓ All installed files are at the correct version</b></span>"
+      }
+
+      // Duplicate cleanup section
+      paragraph "<hr><b>Maintenance</b>"
+      input 'btnCleanupDuplicates', 'button', title: 'Check and Remove Duplicate Apps/Drivers', submitOnChange: false
+      if(state.duplicateCleanupResult) {
+        paragraph "<i>Last cleanup result: ${state.duplicateCleanupResult}</i>"
+      }
+
+      // Library management section
+      paragraph "<hr><b>Library Management</b>"
+      paragraph "<i>Enter the library IDs from your hub's Library Code section to enable library publishing. Find these by going to Apps Code → Libraries in the Hubitat interface.</i>"
+      input 'libraryIdSMAPI', 'number', title: 'SMAPILibrary ID', required: false, submitOnChange: true
+      input 'libraryIdUtilities', 'number', title: 'UtilitiesAndLoggingLibrary ID', required: false, submitOnChange: true
+
+      if(settings.libraryIdSMAPI && settings.libraryIdUtilities) {
+        input 'btnPublishLibraries', 'button', title: 'Publish Libraries to Hub', submitOnChange: false
+        if(state.lastLibraryPublish) {
+          paragraph "<i>Last publish: ${state.lastLibraryPublish}</i>"
+        }
+      } else {
+        paragraph "<i>⚠ Enter both library IDs above to enable library publishing.</i>"
       }
     }
 
@@ -351,6 +377,8 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'btnInstallUpdate') { installUpdate() }
   if(buttonName == 'btnCheckInstalledVersions') { checkInstalledVersions() }
   if(buttonName == 'btnFixVersionMismatches') { fixVersionMismatches() }
+  if(buttonName == 'btnCleanupDuplicates') { cleanupDuplicates() }
+  if(buttonName == 'btnPublishLibraries') { publishLibraries() }
   if(buttonName == 'btnDismissUpdate') {
     state.updateAvailable = false
     state.latestVersion = null
@@ -949,8 +977,14 @@ void checkInstalledVersions() {
   state.versionMismatches = []
   state.installedVersions = []
 
-  // Get package manifest to know which drivers to check
-  String manifestUrl = 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json'
+  // Get the ACTUAL version from the hub's app code, not the running instance
+  // This is critical after updates when the instance may have the old version
+  String appVersion = getActualInstalledAppVersion()
+  logDebug("Current app version from hub: ${appVersion}")
+
+  // Get package manifest for the CURRENT installed version (not main branch)
+  // This ensures we're comparing against the correct expected versions
+  String manifestUrl = "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/PackageManifests/SonosAdvancedController/packageManifest.json"
   Map manifest = null
 
   try {
@@ -966,8 +1000,25 @@ void checkInstalledVersions() {
       }
     }
   } catch(Exception e) {
-    logWarn("Failed to retrieve package manifest: ${e.message}")
-    return
+    logWarn("Failed to retrieve package manifest for v${appVersion}: ${e.message}")
+    logDebug("Trying main branch manifest as fallback...")
+
+    // Fallback to main branch if version-specific manifest not found
+    try {
+      manifestUrl = 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json'
+      Map fallbackParams = [
+        uri: manifestUrl,
+        contentType: 'application/json',
+        timeout: 15
+      ]
+      httpGet(fallbackParams) { resp ->
+        if(resp?.status == 200 && resp.data) {
+          manifest = resp.data
+        }
+      }
+    } catch(Exception e2) {
+      logWarn("Failed to retrieve fallback manifest: ${e2.message}")
+    }
   }
 
   if(!manifest) {
@@ -975,8 +1026,7 @@ void checkInstalledVersions() {
     return
   }
 
-  String appVersion = getCurrentVersion()
-  logDebug("Current app version: ${appVersion}")
+  logDebug("Using manifest version: ${manifest.version}")
 
   // Check each driver in the manifest
   manifest.drivers?.each { driver ->
@@ -994,7 +1044,8 @@ void checkInstalledVersions() {
         namespace: namespace,
         installedVersion: installedVersion,
         expectedVersion: expectedVersion,
-        location: driver.location
+        location: driver.location,
+        type: 'driver'
       ]
       state.installedVersions << [
         name: driverName,
@@ -1017,6 +1068,129 @@ void checkInstalledVersions() {
         installedVersion: 'Not Installed',
         expectedVersion: expectedVersion,
         status: 'Not Found'
+      ]
+    }
+  }
+
+  // Check library files
+  // Libraries can be checked if library IDs are configured
+  logInfo("Library checking: libraryIdSMAPI=${libraryIdSMAPI}, libraryIdUtilities=${libraryIdUtilities}, manifest.files count=${manifest.files?.size() ?: 0}")
+  logInfo("Settings check: libraryIdSMAPI=${settings.libraryIdSMAPI}, libraryIdUtilities=${settings.libraryIdUtilities}")
+
+  if(settings.libraryIdSMAPI && settings.libraryIdUtilities) {
+    logInfo("Checking library versions using configured IDs (SMAPI: ${settings.libraryIdSMAPI}, Utilities: ${settings.libraryIdUtilities})...")
+
+    if(!manifest.files || manifest.files.size() == 0) {
+      logWarn("No library files found in manifest!")
+    } else {
+      logInfo("Found ${manifest.files.size()} file(s) in manifest to check")
+    }
+
+    manifest.files?.each { file ->
+      String fileName = file.name
+      String expectedVersion = appVersion
+
+      logInfo("Processing file from manifest: ${fileName}")
+
+      // Determine which library ID to use based on filename
+      Integer libraryId = null
+      if(fileName.contains('SMAPILibrary')) {
+        libraryId = settings.libraryIdSMAPI as Integer
+      } else if(fileName.contains('UtilitiesAndLoggingLibrary')) {
+        libraryId = settings.libraryIdUtilities as Integer
+      }
+
+      if(libraryId) {
+        logInfo("Checking library ${fileName} (ID: ${libraryId})...")
+
+        // Determine expected library name and namespace
+        String expectedName = ''
+        String expectedNamespace = 'dwinks'
+        if(fileName.contains('SMAPILibrary')) {
+          expectedName = 'SMAPILibrary'
+        } else if(fileName.contains('UtilitiesAndLoggingLibrary')) {
+          expectedName = 'UtilitiesAndLoggingLibrary'
+        }
+
+        Map libraryResult = getInstalledLibraryVersionWithValidation(libraryId, expectedName, expectedNamespace)
+        String installedVersion = libraryResult.version
+        String error = libraryResult.error
+
+        logInfo("Library ${fileName} installed version: ${installedVersion ?: 'Not found'}, expected: ${expectedVersion}")
+
+        if(error) {
+          // Library ID is wrong or other error occurred
+          logWarn("Library check failed: ${error}")
+          state.installedVersions << [
+            name: fileName,
+            installedVersion: 'Error',
+            expectedVersion: expectedVersion,
+            status: error
+          ]
+        } else if(installedVersion && installedVersion != expectedVersion) {
+          logWarn("Version mismatch: ${fileName} - installed: ${installedVersion}, expected: ${expectedVersion}")
+          state.versionMismatches << [
+            name: expectedName,
+            fileName: fileName,
+            namespace: expectedNamespace,
+            installedVersion: installedVersion,
+            expectedVersion: expectedVersion,
+            libraryId: libraryId,
+            type: 'library'
+          ]
+          state.installedVersions << [
+            name: fileName,
+            installedVersion: installedVersion,
+            expectedVersion: expectedVersion,
+            status: 'Mismatch'
+          ]
+        } else if(installedVersion) {
+          logInfo("${fileName} version OK: ${installedVersion}")
+          state.installedVersions << [
+            name: fileName,
+            installedVersion: installedVersion,
+            expectedVersion: expectedVersion,
+            status: 'OK'
+          ]
+        } else {
+          logInfo("${fileName} not found or could not determine version")
+          state.installedVersions << [
+            name: fileName,
+            installedVersion: 'Not Installed',
+            expectedVersion: expectedVersion,
+            status: 'Not Found'
+          ]
+        }
+      } else {
+        // Determine which specific library ID is missing
+        String missingLibrary = ''
+        if(fileName.contains('SMAPILibrary')) {
+          missingLibrary = 'SMAPILibrary ID'
+        } else if(fileName.contains('UtilitiesAndLoggingLibrary')) {
+          missingLibrary = 'UtilitiesAndLoggingLibrary ID'
+        }
+        logDebug("Library file ${fileName} - no library ID configured for checking")
+        state.installedVersions << [
+          name: fileName,
+          installedVersion: 'N/A',
+          expectedVersion: expectedVersion,
+          status: "⚠ Configure ${missingLibrary} in settings"
+        ]
+      }
+    }
+  } else {
+    // No library IDs configured, skip library version checking
+    logInfo("Library IDs not configured - skipping library version checks")
+    manifest.files?.each { file ->
+      String fileName = file.name
+      String expectedVersion = appVersion
+
+      logDebug("Library file ${fileName} - version checking not available (configure library IDs in settings)")
+      state.installedVersions << [
+        name: fileName,
+        installedVersion: 'N/A',
+        expectedVersion: expectedVersion,
+        status: '⚠ Configure Library IDs in settings'
       ]
     }
   }
@@ -1103,6 +1277,68 @@ String getInstalledDriverVersion(String driverName, String namespace) {
   return foundVersion
 }
 
+/**
+ * Get the installed version of a library from the hub and validate its identity.
+ * @param libraryId The library ID on the hub
+ * @param expectedName The expected library name (e.g., 'SMAPILibrary')
+ * @param expectedNamespace The expected namespace (e.g., 'dwinks')
+ * @return Map with [version: String, error: String] - version is null if error occurred
+ */
+Map getInstalledLibraryVersionWithValidation(Integer libraryId, String expectedName, String expectedNamespace) {
+  Map result = [version: null, error: null]
+
+  try {
+    logInfo("Getting library version for ID ${libraryId}...")
+    // Get authentication cookie
+    String cookie = login()
+    if(!cookie) {
+      result.error = 'Failed to authenticate with hub'
+      logWarn(result.error)
+      return result
+    }
+
+    // Get library code using /library/ajax/code
+    logInfo("Fetching library code for ID ${libraryId}...")
+    Map libraryData = getLibraryCode(libraryId, cookie)
+    logInfo("Library data received: ${libraryData ? 'Yes' : 'No'}, has source: ${libraryData?.source ? 'Yes' : 'No'}")
+
+    if(!libraryData?.source) {
+      result.error = "Library ID ${libraryId} not found on hub"
+      logWarn(result.error)
+      return result
+    }
+
+    String source = libraryData.source
+
+    // Extract library name and namespace from source
+    def nameMatch = (source =~ /library\s*\([^)]*name\s*:\s*['"]([^'"]+)['"]/)
+    def namespaceMatch = (source =~ /library\s*\([^)]*namespace\s*:\s*['"]([^'"]+)['"]/)
+
+    String actualName = nameMatch ? nameMatch[0][1] : null
+    String actualNamespace = namespaceMatch ? namespaceMatch[0][1] : null
+
+    logInfo("Library ID ${libraryId} - Expected: ${expectedName}/${expectedNamespace}, Found: ${actualName}/${actualNamespace}")
+
+    // Validate library identity
+    if(actualName != expectedName || actualNamespace != expectedNamespace) {
+      result.error = "⚠ Library ID ${libraryId} is '${actualName}' (${actualNamespace}), not '${expectedName}' (${expectedNamespace})"
+      logWarn(result.error)
+      return result
+    }
+
+    // Extract version from library() definition
+    result.version = extractLibraryVersion(source)
+    logInfo("Extracted version ${result.version} from library ${actualName}")
+
+  } catch(Exception e) {
+    result.error = "Error: ${e.message}"
+    logWarn("Error getting library version for ID ${libraryId}: ${e.message}")
+    logError("Stack trace:", e)
+  }
+
+  return result
+}
+
 String getDriverVersionForUpdate(String driverName, String namespace) {
   String hubVersion = null
 
@@ -1154,28 +1390,398 @@ void fixVersionMismatches() {
 
   logInfo("Fixing ${state.versionMismatches.size()} version mismatch(es)...")
 
-  state.versionMismatches.each { mismatch ->
-    logInfo("Updating ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
+  // Process libraries FIRST, then drivers (since drivers depend on libraries)
+  def libraryMismatches = state.versionMismatches.findAll { it.type == 'library' }
+  def driverMismatches = state.versionMismatches.findAll { it.type == 'driver' }
 
-    // Download the correct version - location already contains the full URL
-    String sourceCode = downloadFile(mismatch.location)
+  // Step 1: Update libraries if any are out of date
+  if(libraryMismatches.size() > 0) {
+    logInfo("Updating ${libraryMismatches.size()} library/libraries first...")
 
-    if(sourceCode) {
-      // Update the driver - need to pass version parameter
-      Boolean success = updateDriver(mismatch.name, mismatch.namespace, sourceCode, mismatch.expectedVersion)
-      if(success) {
-        logInfo("Successfully updated ${mismatch.name}")
+    libraryMismatches.each { mismatch ->
+      logInfo("Updating library ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
+
+      // Get current app version to download correct library files
+      String appVersion = getActualInstalledAppVersion()
+      String libraryUrl = "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/Libraries/${mismatch.fileName}"
+
+      String sourceCode = downloadFile(libraryUrl)
+
+      if(sourceCode) {
+        String libraryVersion = extractLibraryVersion(sourceCode)
+        Boolean success = publishLibraryToHub(mismatch.libraryId, sourceCode, libraryVersion)
+        if(success) {
+          logInfo("Successfully updated library ${mismatch.name}")
+        } else {
+          logWarn("Failed to update library ${mismatch.name}")
+        }
       } else {
-        logWarn("Failed to update ${mismatch.name}")
+        logWarn("Failed to download source code for library ${mismatch.name} from ${libraryUrl}")
       }
-    } else {
-      logWarn("Failed to download source code for ${mismatch.name}")
+    }
+
+    // Pause to allow hub to process library updates
+    logInfo("Pausing to allow hub to process library updates...")
+    pauseExecution(3000)
+  }
+
+  // Step 2: Update drivers after libraries are updated
+  if(driverMismatches.size() > 0) {
+    logInfo("Updating ${driverMismatches.size()} driver(s)...")
+
+    driverMismatches.each { mismatch ->
+      logInfo("Updating driver ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
+
+      String sourceCode = downloadFile(mismatch.location)
+
+      if(sourceCode) {
+        Boolean success = updateDriver(mismatch.name, mismatch.namespace, sourceCode, mismatch.expectedVersion)
+        if(success) {
+          logInfo("Successfully updated ${mismatch.name}")
+        } else {
+          logWarn("Failed to update ${mismatch.name}")
+        }
+      } else {
+        logWarn("Failed to download source code for ${mismatch.name}")
+      }
     }
   }
 
   // Re-check versions after updates
   pauseExecution(2000)
   checkInstalledVersions()
+}
+
+void cleanupDuplicates() {
+  logInfo("Checking for duplicate apps and drivers...")
+
+  // Clear cached cookie to ensure fresh auth
+  state.remove('hubCookie')
+
+  Map results = findAndRemoveDuplicates()
+
+  if(results.appsRemoved > 0 || results.driversRemoved > 0) {
+    state.duplicateCleanupResult = "Removed ${results.appsRemoved} duplicate app(s) and ${results.driversRemoved} duplicate driver(s)"
+    logInfo(state.duplicateCleanupResult)
+  } else if(results.errors.size() > 0) {
+    state.duplicateCleanupResult = "Errors during cleanup: ${results.errors.join(', ')}"
+    logWarn(state.duplicateCleanupResult)
+  } else {
+    state.duplicateCleanupResult = "No duplicates found"
+    logInfo("No duplicate apps or drivers found")
+  }
+}
+
+/**
+ * Publish libraries to the hub using the configured library IDs.
+ * Downloads the latest library files from GitHub and publishes them to the hub.
+ */
+void publishLibraries() {
+  logInfo("Publishing libraries to hub...")
+
+  // Validate library IDs are configured
+  if(!settings.libraryIdSMAPI || !settings.libraryIdUtilities) {
+    logWarn("Library IDs not configured. Please enter both library IDs in settings.")
+    state.lastLibraryPublish = "Failed: Library IDs not configured"
+    return
+  }
+
+  // Get current app version to determine which files to publish
+  String appVersion = getActualInstalledAppVersion()
+  if(!appVersion) {
+    logWarn("Failed to determine app version")
+    state.lastLibraryPublish = "Failed: Could not determine app version"
+    return
+  }
+
+  logInfo("Publishing libraries for version ${appVersion}")
+
+  // Define libraries to publish
+  List libraries = [
+    [
+      id: settings.libraryIdSMAPI as Integer,
+      name: 'SMAPILibrary',
+      namespace: 'dwinks',
+      location: "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/Libraries/SMAPILibrary.groovy"
+    ],
+    [
+      id: settings.libraryIdUtilities as Integer,
+      name: 'UtilitiesAndLoggingLibrary',
+      namespace: 'dwinks',
+      location: "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/Libraries/UtilitiesAndLoggingLibrary.groovy"
+    ]
+  ]
+
+  Integer successCount = 0
+  Integer failCount = 0
+  List errors = []
+
+  libraries.each { library ->
+    logInfo("Publishing ${library.name}...")
+
+    try {
+      // Download library source code
+      String sourceCode = downloadFile(library.location)
+
+      if(!sourceCode) {
+        String error = "Failed to download ${library.name}"
+        logWarn(error)
+        errors << error
+        failCount++
+        return
+      }
+
+      // Extract version from library source
+      String libraryVersion = extractLibraryVersion(sourceCode)
+      logInfo("Library ${library.name} version: ${libraryVersion}")
+
+      // Publish library to hub
+      Boolean success = publishLibraryToHub(library.id, sourceCode, libraryVersion)
+
+      if(success) {
+        logInfo("Successfully published ${library.name} version ${libraryVersion}")
+        successCount++
+      } else {
+        String error = "Failed to publish ${library.name}"
+        logWarn(error)
+        errors << error
+        failCount++
+      }
+    } catch(Exception e) {
+      String error = "Error publishing ${library.name}: ${e.message}"
+      logError(error, e)
+      errors << error
+      failCount++
+    }
+  }
+
+  // Update status message
+  String timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
+  if(successCount == libraries.size()) {
+    state.lastLibraryPublish = "✓ ${timestamp}: Successfully published ${successCount} libraries"
+    logInfo("Library publish completed successfully: ${successCount} published")
+  } else if(successCount > 0) {
+    state.lastLibraryPublish = "⚠ ${timestamp}: Published ${successCount}, failed ${failCount} (${errors.join(', ')})"
+    logWarn("Library publish partially completed: ${successCount} published, ${failCount} failed")
+  } else {
+    state.lastLibraryPublish = "✗ ${timestamp}: Failed to publish any libraries (${errors.join(', ')})"
+    logWarn("Library publish failed: ${errors.join(', ')}")
+  }
+
+  // Re-check installed versions to reflect the published libraries
+  if(successCount > 0) {
+    pauseExecution(1000) // Brief pause to allow hub to process the updates
+    checkInstalledVersions()
+  }
+}
+
+/**
+ * Extract version from library source code by parsing the library() definition.
+ * @param sourceCode The library source code
+ * @return The version string, or '1.0.0' if not found
+ */
+String extractLibraryVersion(String sourceCode) {
+  logWarn("Extracting library version from source code...")
+  logWarn(sourceCode)
+  try {
+    // Look for version: 'x.x.x' or version: "x.x.x" in library() block
+    def versionMatch = (sourceCode =~ /library\s*\([^)]*version\s*:\s*['"]([\d.]+)['"]/)
+    if(versionMatch) {
+      return versionMatch[0][1]
+    }
+  } catch(Exception e) {
+    logWarn("Failed to extract library version: ${e.message}")
+  }
+  return '1.0.0' // Default version if not found
+}
+
+/**
+ * Publish a library to the hub using the library ID.
+ * Uses the same endpoint pattern as apps/drivers: /library/ajax/update
+ * @param libraryId The library ID on the hub
+ * @param sourceCode The library source code
+ * @param version The library version (for reference)
+ * @return true if successful, false otherwise
+ */
+Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version) {
+  try {
+    // Get authentication cookie
+    String cookie = login()
+    if(!cookie) {
+      logWarn("Failed to authenticate with hub for library publish")
+      return false
+    }
+
+    // First, check if library exists and get current version
+    Map currentLibrary = getLibraryCode(libraryId, cookie)
+
+    if(currentLibrary == null) {
+      logWarn("Library with ID ${libraryId} not found on hub. Please verify the library ID is correct.")
+      return false
+    }
+
+    logInfo("Current library version on hub: ${currentLibrary.version}")
+
+    // Prepare form body for update (same format as apps/drivers)
+    String body = "id=${libraryId}&version=${currentLibrary.version ?: 0}&source=${java.net.URLEncoder.encode(sourceCode, 'UTF-8')}"
+
+    // Post update to hub
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/library/ajax/update',
+      headers: [
+        'Cookie': cookie,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      ],
+      body: body,
+      timeout: 30,
+      ignoreSSLIssues: true
+    ]
+
+    Map result = null
+    httpPost(params) { resp ->
+      if(resp?.status == 200 && resp?.data) {
+        result = resp.data
+        logDebug("Library update response: ${result}")
+      } else {
+        logWarn("Unexpected response status: ${resp?.status}")
+        return false
+      }
+    }
+
+    // Check if update was successful
+    if(result?.status == 'success') {
+      logInfo("Library update successful")
+      return true
+    } else {
+      logWarn("Library update failed: ${result?.errorMessage ?: 'Unknown error'}")
+      return false
+    }
+
+  } catch(Exception e) {
+    logError("Error publishing library to hub: ${e.message}", e)
+    return false
+  }
+}
+
+/**
+ * Get library code from hub by ID.
+ * @param libraryId The library ID
+ * @param cookie Authentication cookie
+ * @return Map with id, version, source, or null if not found
+ */
+Map getLibraryCode(Integer libraryId, String cookie) {
+  try {
+    logInfo("Requesting library code for ID ${libraryId} from /library/ajax/code...")
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/library/ajax/code',
+      query: [id: libraryId.toString()],
+      headers: ['Cookie': cookie],
+      timeout: 15,
+      ignoreSSLIssues: true
+    ]
+
+    Map libraryData = null
+    httpGet(params) { resp ->
+      logInfo("Library code response status: ${resp?.status}")
+      if(resp?.status == 200 && resp?.data) {
+        libraryData = resp.data
+        logInfo("Library data ID: ${libraryData?.id}, has source: ${libraryData?.source ? 'Yes' : 'No'}")
+      } else {
+        logWarn("Unexpected response: status ${resp?.status}, data: ${resp?.data}")
+      }
+    }
+
+    // Verify the library ID matches (apps return 200 with empty payload when not found)
+    if(libraryData?.id == libraryId) {
+      logInfo("Library ID ${libraryId} found and verified")
+      return libraryData
+    } else {
+      logWarn("Library ID mismatch or not found. Requested: ${libraryId}, Received: ${libraryData?.id}")
+      return null
+    }
+
+  } catch(Exception e) {
+    logWarn("Error getting library code: ${e.message}")
+    logError("Stack trace:", e)
+    return null
+  }
+}
+
+void uploadBundle(Map bundle) {
+  try {
+    String cookie = login()
+    if(!cookie) {
+      logError('Failed to authenticate with hub')
+      return
+    }
+
+    logInfo("Uploading bundle: ${bundle.name}")
+
+    // Download the bundle ZIP file
+    byte[] zipData = null
+    Map params = [
+      uri: bundle.location,
+      contentType: 'application/zip',
+      timeout: 300,
+      ignoreSSLIssues: true
+    ]
+
+    httpGet(params) { resp ->
+      zipData = resp.data.bytes
+    }
+
+    if(!zipData) {
+      logWarn("Failed to download bundle ${bundle.name}")
+      return
+    }
+
+    // Upload using HPM's installFile pattern
+    String boundary = "----WebKitFormBoundaryDtoO2QfPwfhTjOuS"
+    String zipFilename = "${bundle.id}-${bundle.name.replaceAll(/[^a-zA-Z0-9]/, '')}.zip"
+
+    Map uploadParams = [
+      uri: "http://127.0.0.1:8080",
+      path: "/hub/fileManager/upload",
+      query: ['folder': '/'],
+      headers: [
+        'Cookie': cookie,
+        'Content-Type': "multipart/form-data; boundary=${boundary}"
+      ],
+      body: """--${boundary}\nContent-Disposition: form-data; name="uploadFile"; filename="${zipFilename}"\nContent-Type: application/zip\n\n${new String(zipData, 'ISO-8859-1')}\n\n--${boundary}\nContent-Disposition: form-data; name="folder"\n\n\n--${boundary}--""",
+      timeout: 300,
+      ignoreSSLIssues: true
+    ]
+
+    httpPost(uploadParams) { resp ->
+      if(resp?.status == 200) {
+        logInfo("Successfully uploaded bundle ${bundle.name}")
+      }
+    }
+  } catch(Exception e) {
+    logError("Failed to upload bundle ${bundle.name}: ${e.message}")
+  }
+}
+
+Map downloadManifest(String url) {
+  try {
+    Map params = [
+      uri: url,
+      contentType: 'application/json',
+      timeout: 15
+    ]
+    Map manifest = null
+    httpGet(params) { resp ->
+      if(resp?.status == 200 && resp.data) {
+        manifest = resp.data
+      }
+    }
+    return manifest
+  } catch(Exception e) {
+    logWarn("Failed to download manifest: ${e.message}")
+    return null
+  }
 }
 
 // =============================================================================
@@ -1301,6 +1907,59 @@ String getCurrentVersion() {
   return app.version ?: '0.7.10'
 }
 
+// Get the ACTUAL current version from the hub's app code (not the running instance)
+// This is important after updates, as the running instance may have the old version
+String getActualInstalledAppVersion() {
+  try {
+    String cookie = login()
+    if(!cookie) {
+      logWarn('Failed to authenticate to get app version')
+      return getCurrentVersion() // Fallback to instance version
+    }
+
+    // Find this app's code ID
+    List allApps = getAppCodeList()
+    Map targetApp = allApps.find { it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' }
+
+    if(!targetApp) {
+      logWarn('Could not find app code entry')
+      return getCurrentVersion() // Fallback to instance version
+    }
+
+    // Query the app code to get its version
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/app/ajax/code',
+      headers: ['Cookie': cookie],
+      query: [id: targetApp.id],
+      timeout: 15,
+      ignoreSSLIssues: true
+    ]
+
+    String version = null
+    httpGet(params) { resp ->
+      if(resp?.status == 200 && resp.data?.source) {
+        // Parse the version from the source code definition
+        def matcher = resp.data.source =~ /version:\s*['"]([^'"]+)['"]/
+        if(matcher) {
+          version = matcher[0][1]
+        }
+      }
+    }
+
+    if(version) {
+      logDebug("Got actual installed app version from hub: ${version}")
+      return version
+    } else {
+      logWarn('Could not parse version from app code')
+      return getCurrentVersion() // Fallback to instance version
+    }
+  } catch(Exception e) {
+    logError("Error getting actual app version: ${e.message}")
+    return getCurrentVersion() // Fallback to instance version
+  }
+}
+
 void checkForUpdates(Boolean manual = false) {
   // Check if auto-check is enabled or if this is a manual check
   if(!manual && autoCheckUpdates != true) { return }
@@ -1331,7 +1990,7 @@ void checkForUpdates(Boolean manual = false) {
         String latestVersion = manifest.version ?: null
 
         if(latestVersion) {
-          String currentVersion = getCurrentVersion()
+          String currentVersion = getActualInstalledAppVersion()
           Integer comparison = compareVersions(currentVersion, latestVersion)
 
           state.lastUpdateCheck = now()
@@ -1345,8 +2004,8 @@ void checkForUpdates(Boolean manual = false) {
             state.latestReleaseDate = manifest.releaseDate ?: 'Unknown'
             state.latestReleaseUrl = "https://github.com/DanielWinks/Hubitat-Public/releases/tag/v${latestVersion}"
 
-            // Update app label to show update available on main apps screen
-            app.updateLabel("Sonos Advanced Controller <span style='color:green'>Update Available</span>")
+            // Update app label - keep simple since updateLabel doesn't render HTML
+            app.updateLabel("Sonos Advanced Controller [Update Available]")
 
             logInfo("Update available: ${latestVersion} (current: ${currentVersion})")
 
@@ -1415,6 +2074,19 @@ void installUpdate() {
   }
 
   try {
+    // First, check for and remove any duplicate apps/drivers that may have been created
+    logDebug("Checking for duplicate app/driver entries...")
+    Map duplicateResults = findAndRemoveDuplicates()
+    if(duplicateResults.appsRemoved > 0 || duplicateResults.driversRemoved > 0) {
+      logInfo("Cleaned up ${duplicateResults.appsRemoved} duplicate apps and ${duplicateResults.driversRemoved} duplicate drivers")
+    }
+    if(duplicateResults.errors.size() > 0) {
+      logWarn("Some errors occurred during duplicate cleanup: ${duplicateResults.errors}")
+    }
+
+    // Clear cached cookie to ensure fresh auth for updates
+    state.remove('hubCookie')
+
     Map manifest = state.latestManifest
     String version = state.latestVersion
 
@@ -1436,18 +2108,22 @@ void installUpdate() {
       String appCode = downloadFile(appLocation)
 
       if(appCode) {
+        logDebug("Downloaded app code (${appCode.length()} bytes)")
         Boolean success = updateThisApp(appCode, version)
         updateStatus.app = success
 
         if(success) {
           logInfo("App updated successfully to version ${version}")
+          // Trigger page refresh after successful app update
+          runIn(2, 'refreshPage')
         } else {
           updateStatus.errors << "Failed to update app"
-          logError("Failed to update app")
+          logError("Failed to update app - check logs for details")
+          // Don't stop - continue with driver updates even if app fails
         }
       } else {
         updateStatus.errors << "Failed to download app code"
-        logError("Failed to download app code")
+        logError("Failed to download app code from ${appLocation}")
       }
     }
 
@@ -1462,6 +2138,7 @@ void installUpdate() {
         String driverCode = downloadFile(driverLocation)
 
         if(driverCode) {
+          logDebug("Downloaded driver ${driverName} code (${driverCode.length()} bytes)")
           Boolean success = updateDriver(driverName, driverNamespace, driverCode, version)
           updateStatus.drivers[driverName] = success
 
@@ -1469,11 +2146,11 @@ void installUpdate() {
             logInfo("Driver ${driverName} updated successfully")
           } else {
             updateStatus.errors << "Failed to update driver: ${driverName}"
-            logError("Failed to update driver: ${driverName}")
+            logError("Failed to update driver: ${driverName} - check logs for details")
           }
         } else {
           updateStatus.errors << "Failed to download driver: ${driverName}"
-          logError("Failed to download driver: ${driverName}")
+          logError("Failed to download driver: ${driverName} from ${driverLocation}")
         }
       }
     }
@@ -1486,15 +2163,31 @@ void installUpdate() {
       state.latestReleaseDate = null
       state.latestReleaseUrl = null
 
+      // Clear stale version check data - the page will refresh and new code will run
+      // User can re-run version check after refresh to see current state
+      state.remove('versionMismatches')
+      state.remove('installedVersions')
+      state.remove('lastVersionCheck')
+
+      // Set flag to show success message after page refresh
+      state.updateJustCompleted = true
+
       // Clear update label
       app.updateLabel("Sonos Advanced Controller")
 
       // Clear any scheduled auto-install
       unschedule('performScheduledInstall')
 
-      logInfo("Update completed successfully! Please refresh the page.")
+      logInfo("Update completed successfully! The app will refresh in 3 seconds...")
+      // Force page refresh to load new code
+      runIn(3, 'refreshPage')
     } else {
       logError("Update completed with errors: ${updateStatus.errors.join(', ')}")
+      // Even with errors, if drivers updated, recommend checking versions
+      if(updateStatus.drivers.any { it.value == true }) {
+        logInfo("Some drivers were updated successfully. The page will refresh in 3 seconds...")
+        runIn(3, 'refreshPage')
+      }
     }
 
   } catch(Exception e) {
@@ -1525,7 +2218,7 @@ String downloadFile(String uri) {
   }
 }
 
-Boolean updateThisApp(String sourceCode, String version) {
+Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
   try {
     String cookie = login()
     if(!cookie) {
@@ -1533,29 +2226,91 @@ Boolean updateThisApp(String sourceCode, String version) {
       return false
     }
 
+    // Find the app code ID by matching name and namespace
+    // Note: app.id is the INSTANCE id, not the CODE id. We need the code ID from /hub2/userAppTypes
+    List allApps = getAppCodeList()
+    String thisAppName = 'Sonos Advanced Controller'
+    String thisAppNamespace = 'dwinks'
+
+    Map targetApp = allApps.find { appEntry ->
+      appEntry.name == thisAppName && appEntry.namespace == thisAppNamespace
+    }
+
+    if(!targetApp) {
+      logError("Could not find app code for ${thisAppName} in namespace ${thisAppNamespace}")
+      logDebug("Available apps: ${allApps}")
+      return false
+    }
+
+    String appCodeId = targetApp.id
+    logDebug("Found app code ID: ${appCodeId} for ${thisAppName}")
+
+    // Get the app's current internal version from the hub (HPM uses this for updates)
+    Integer currentHubVersion = null
+    Map getAppParams = [
+      uri: "http://127.0.0.1:8080",
+      path: '/app/ajax/code',
+      requestContentType: 'application/x-www-form-urlencoded',
+      headers: ['Cookie': cookie],
+      query: [id: appCodeId],
+      timeout: 300,
+      ignoreSSLIssues: true
+    ]
+
+    try {
+      httpGet(getAppParams) { getResp ->
+        logDebug("App code response status: ${getResp?.status}")
+        logDebug("App code response data: ${getResp.data}")
+        if(getResp?.status == 200 && getResp.data?.version != null) {
+          currentHubVersion = getResp.data.version as Integer
+          logDebug("Got current app version from hub: ${currentHubVersion}")
+        } else {
+          logWarn("Could not get app version from hub - response: ${getResp.data}")
+        }
+      }
+    } catch(Exception e) {
+      logError("Error getting app version: ${e.message}")
+    }
+
+    // If we couldn't get the version, we cannot update
+    if(currentHubVersion == null) {
+      logError("Cannot update app: unable to retrieve current version from hub")
+      return false
+    }
+
+    logDebug("Updating app to version ${newVersionForLogging}, hub internal version: ${currentHubVersion}")
+
+    // HPM uses /app/ajax/update for existing apps with version parameter
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/app/ajax/update',
+      requestContentType: 'application/x-www-form-urlencoded',
       headers: [
+        'Connection': 'keep-alive',
         'Cookie': cookie
       ],
       body: [
-        id: app.id,
-        version: version,
+        id: appCodeId,
+        version: currentHubVersion,
         source: sourceCode
       ],
-      timeout: 30
+      timeout: 420,
+      ignoreSSLIssues: true
     ]
 
+    Boolean result = false
     httpPost(params) { resp ->
-      if(resp?.status == 200) {
-        logDebug("App update API call successful")
-        return true
+      logDebug("App update response: ${resp.data}")
+      // HPM checks for resp.data.status == "success"
+      if(resp.data?.status == 'success') {
+        logInfo("App updated successfully to version ${newVersionForLogging}")
+        result = true
       } else {
-        logError("App update API returned status: ${resp?.status}")
-        return false
+        logError("App update failed - response: ${resp.data}")
+        result = false
       }
     }
+    return result
   } catch(Exception e) {
     logError("Error updating app: ${e.message}")
     return false
@@ -1564,6 +2319,12 @@ Boolean updateThisApp(String sourceCode, String version) {
 
 Boolean updateDriver(String driverName, String namespace, String sourceCode, String newVersionForLogging) {
   try {
+    String cookie = login()
+    if(!cookie) {
+      logError('Failed to authenticate with hub')
+      return false
+    }
+
     // Find the driver by name and namespace
     List allDrivers = getDriverList()
     Map targetDriver = allDrivers.find { driver ->
@@ -1571,21 +2332,49 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
     }
 
     if(!targetDriver) {
-      logError("Driver not found: ${namespace}.${driverName}")
-      return false
+      // Driver doesn't exist - create it using /driver/save (HPM pattern)
+      logInfo("Driver not found, creating new driver: ${namespace}.${driverName}")
+
+      Map createParams = [
+        uri: "http://127.0.0.1:8080",
+        path: '/driver/save',
+        requestContentType: 'application/x-www-form-urlencoded',
+        headers: [
+          'Cookie': cookie
+        ],
+        body: [
+          id: '',
+          version: '',
+          create: '',
+          source: sourceCode
+        ],
+        timeout: 300,
+        ignoreSSLIssues: true
+      ]
+
+      Boolean result = false
+      httpPost(createParams) { resp ->
+        // HPM checks for Location header on successful create
+        if(resp.headers?.Location != null) {
+          String newId = resp.headers.Location.replaceAll("https?://127.0.0.1:(?:8080|8443)/driver/editor/", "")
+          logInfo("Successfully created driver ${driverName} with id ${newId}")
+          result = true
+        } else {
+          logError("Driver ${driverName} creation failed - no Location header")
+          result = false
+        }
+      }
+      return result
     }
 
-    String cookie = login()
-    if(!cookie) {
-      logError('Failed to authenticate with hub')
-      return false
-    }
+    // Driver exists - update it using /driver/ajax/update (HPM pattern)
+    logInfo("Updating existing driver ${driverName} (id: ${targetDriver.id})")
 
-    // Get the hub's internal version counter - this is what the update API expects
+    // Get driver's current version
     String currentHubVersion = getDriverVersionForUpdate(driverName, namespace) ?: ''
     logDebug("Updating driver ${driverName}: hub version=${currentHubVersion}, new version=${newVersionForLogging}")
 
-    Map params = [
+    Map updateParams = [
       uri: "http://127.0.0.1:8080",
       path: '/driver/ajax/update',
       requestContentType: 'application/x-www-form-urlencoded',
@@ -1594,7 +2383,7 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
       ],
       body: [
         id: targetDriver.id,
-        version: currentHubVersion,  // Must be hub's internal version, not semantic version
+        version: currentHubVersion,
         source: sourceCode
       ],
       timeout: 300,
@@ -1602,9 +2391,11 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
     ]
 
     Boolean result = false
-    httpPost(params) { resp ->
+    httpPost(updateParams) { resp ->
+      logDebug("Driver update response: ${resp.data}")
+      // HPM checks for resp.data.status == "success"
       if(resp.data?.status == 'success') {
-        logDebug("Successfully updated driver ${driverName}")
+        logInfo("Successfully updated driver ${driverName}")
         result = true
       } else {
         logError("Driver ${driverName} update failed - response: ${resp.data}")
@@ -1613,7 +2404,7 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
     }
     return result
   } catch(Exception e) {
-    logError("Error updating driver ${driverName}: ${e.message}")
+    logError("Error updating/creating driver ${driverName}: ${e.message}")
     return false
   }
 }
@@ -1625,7 +2416,7 @@ List getDriverList() {
 
     Map params = [
       uri: "http://127.0.0.1:8080",
-      path: '/driver/list/data',
+      path: '/device/drivers',
       headers: [
         'Cookie': cookie
       ],
@@ -1635,8 +2426,9 @@ List getDriverList() {
     List drivers = []
 
     httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data) {
-        drivers = resp.data
+      if(resp?.status == 200 && resp.data?.drivers) {
+        // Filter to only user drivers
+        drivers = resp.data.drivers.findAll { it.type == 'usr' }
       }
     }
 
@@ -1647,16 +2439,185 @@ List getDriverList() {
   }
 }
 
+// Get list of app code entries (not installed app instances)
+List getAppCodeList() {
+  try {
+    String cookie = login()
+    if(!cookie) { return [] }
+
+    // Use /hub2/userAppTypes endpoint like HPM does (requires 2.3.6+)
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/hub2/userAppTypes',
+      headers: [
+        'Cookie': cookie
+      ],
+      timeout: 15,
+      ignoreSSLIssues: true
+    ]
+
+    List apps = []
+
+    httpGet(params) { resp ->
+      if(resp?.status == 200 && resp.data) {
+        resp.data.each { appEntry ->
+          apps << [id: appEntry.id.toString(), name: appEntry.name, namespace: appEntry.namespace]
+        }
+      }
+    }
+
+    return apps
+  } catch(Exception e) {
+    logError("Error getting app code list: ${e.message}")
+    return []
+  }
+}
+
+// Find and remove duplicate app or driver entries (keeps the one with lowest ID, removes others)
+Map findAndRemoveDuplicates() {
+  Map results = [appsRemoved: 0, driversRemoved: 0, errors: []]
+
+  try {
+    String cookie = login()
+    if(!cookie) {
+      results.errors << "Failed to authenticate"
+      return results
+    }
+
+    // Check for duplicate apps
+    List allApps = getAppCodeList()
+    Map appsByNamespace = [:].withDefault { [] }
+    allApps.each { appEntry ->
+      String key = "${appEntry.namespace}:${appEntry.name}"
+      appsByNamespace[key] << appEntry
+    }
+
+    appsByNamespace.each { key, entries ->
+      if(entries.size() > 1) {
+        logWarn("Found ${entries.size()} duplicate apps for ${key}")
+        // Sort by ID (keep lowest, which is usually the original)
+        entries.sort { Integer.parseInt(it.id) }
+        // Remove all but the first (lowest ID)
+        entries.drop(1).each { duplicate ->
+          logInfo("Removing duplicate app: ${duplicate.name} (id: ${duplicate.id})")
+          if(uninstallAppCode(duplicate.id, cookie)) {
+            results.appsRemoved++
+          } else {
+            results.errors << "Failed to remove app ${duplicate.name} (id: ${duplicate.id})"
+          }
+        }
+      }
+    }
+
+    // Check for duplicate drivers
+    List allDrivers = getDriverList()
+    Map driversByNamespace = [:].withDefault { [] }
+    allDrivers.each { driverEntry ->
+      String key = "${driverEntry.namespace}:${driverEntry.name}"
+      driversByNamespace[key] << driverEntry
+    }
+
+    driversByNamespace.each { key, entries ->
+      if(entries.size() > 1) {
+        logWarn("Found ${entries.size()} duplicate drivers for ${key}")
+        // Sort by ID (keep lowest, which is usually the original)
+        entries.sort { it.id as Integer }
+        // Remove all but the first (lowest ID)
+        entries.drop(1).each { duplicate ->
+          logInfo("Removing duplicate driver: ${duplicate.name} (id: ${duplicate.id})")
+          if(uninstallDriverCode(duplicate.id.toString(), cookie)) {
+            results.driversRemoved++
+          } else {
+            results.errors << "Failed to remove driver ${duplicate.name} (id: ${duplicate.id})"
+          }
+        }
+      }
+    }
+
+  } catch(Exception e) {
+    logError("Error finding/removing duplicates: ${e.message}")
+    results.errors << e.message
+  }
+
+  if(results.appsRemoved > 0 || results.driversRemoved > 0) {
+    logInfo("Removed ${results.appsRemoved} duplicate apps and ${results.driversRemoved} duplicate drivers")
+  }
+
+  return results
+}
+
+// Uninstall app code (not app instance) - uses HPM-style endpoint
+Boolean uninstallAppCode(String appCodeId, String cookie) {
+  try {
+    // Use newer endpoint if available (2.3.8+), fallback to older method
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: "/app/edit/deleteJsonSafe/${appCodeId}",
+      headers: [
+        'Cookie': cookie
+      ],
+      timeout: 300,
+      ignoreSSLIssues: true
+    ]
+
+    Boolean result = false
+    httpGet(params) { resp ->
+      if(resp.data?.status == true) {
+        result = true
+      }
+    }
+    return result
+  } catch(Exception e) {
+    logError("Error uninstalling app code ${appCodeId}: ${e.message}")
+    return false
+  }
+}
+
+// Uninstall driver code - uses HPM-style endpoint
+Boolean uninstallDriverCode(String driverCodeId, String cookie) {
+  try {
+    // Use newer endpoint if available (2.3.7+)
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: "/driver/editor/deleteJson/${driverCodeId}",
+      headers: [
+        'Cookie': cookie
+      ],
+      timeout: 300,
+      ignoreSSLIssues: true
+    ]
+
+    Boolean result = false
+    httpGet(params) { resp ->
+      if(resp.data?.status == true) {
+        result = true
+      }
+    }
+    return result
+  } catch(Exception e) {
+    logError("Error uninstalling driver code ${driverCodeId}: ${e.message}")
+    return false
+  }
+}
+
 String login() {
+  // If we already have a valid cookie, try to reuse it
+  if(state.hubCookie) {
+    logDebug("Reusing existing cookie")
+    return state.hubCookie
+  }
+
   try {
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/login',
+      requestContentType: 'application/x-www-form-urlencoded',
       body: [
         username: '',
         password: '',
         submit: 'Login'
       ],
+      followRedirects: false,
       textParser: true,
       timeout: 15
     ]
@@ -1664,15 +2625,25 @@ String login() {
     String cookie = null
 
     httpPost(params) { resp ->
+      logDebug("Login response status: ${resp?.status}")
       if(resp?.status == 200 || resp?.status == 302) {
         def setCookieHeader = resp.headers['Set-Cookie']
         if(setCookieHeader) {
           String cookieValue = setCookieHeader.value ?: setCookieHeader.toString()
           cookie = cookieValue.split(';')[0]
+          state.hubCookie = cookie  // Store for reuse like HPM
+          logDebug("Got cookie: ${cookie?.take(20)}...")
+        } else {
+          logWarn("No Set-Cookie header in login response")
         }
+      } else {
+        logWarn("Unexpected login status: ${resp?.status}")
       }
     }
 
+    if(!cookie) {
+      logWarn("Failed to get authentication cookie")
+    }
     return cookie
   } catch(Exception e) {
     logError("Login error: ${e.message}")
