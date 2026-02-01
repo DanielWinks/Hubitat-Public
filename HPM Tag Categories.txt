@@ -1,0 +1,55 @@
+Alarm Systems
+Appliances
+Automations & Groups
+Bathroom
+Buttons
+Cameras
+Cleaning Devices
+Climate Control
+Cloud
+Control
+Convenience
+Dashboards
+Doors & Windows
+Energy Monitoring
+Garage Doors
+Health & Fitness
+IR & RF
+Integrations
+Irrigation
+LAN
+Lights & Switches
+Locks
+MQTT
+Matter
+Misc. Devices
+Monitoring
+Motion Control
+Multi Sensors
+Multimedia
+Notifications
+Pets & Animals
+Pools & Spas
+Presence & Location
+Relays
+Repeaters & Extenders
+Safety & Security
+Scales
+Security
+Shower
+Sleep
+Speakers
+Tasmota
+Temperature & Humidity
+Timers
+Tools & Utilities
+Utility
+Valves
+Vehicles & Transportation
+Voice Assistants
+Water
+Water Heater
+Weather
+Window Coverings
+ZWave
+Zigbee
