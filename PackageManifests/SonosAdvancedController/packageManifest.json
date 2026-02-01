@@ -13,7 +13,7 @@
   "bundles": [
     {
       "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/SonosAdvancedController.zip",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/UtilitiesAndLoggingLibrary.zip",
       "name": "Sonos Advanced Controller",
       "namespace": "dwinks",
       "required": true
@@ -64,21 +64,19 @@
       "required": true
     }
   ],
-  "files": [
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "libraries": [
     {
       "id": "smapi-library",
       "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/dwinks.SMAPILibrary.groovy",
-      "name": "dwinks.SMAPILibrary.groovy",
-      "required": true
+      "name": "dwinks.SMAPILibrary.groovy"
     },
     {
       "id": "utilities-logging-library",
       "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/dwinks.UtilitiesAndLoggingLibrary.groovy",
-      "name": "dwinks.UtilitiesAndLoggingLibrary.groovy",
-      "required": true
+      "name": "dwinks.UtilitiesAndLoggingLibrary.groovy"
     }
   ],
-  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
   "minimumHEVersion": "2.3.7.114",
   "packageName": "Sonos Advanced Controller",
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
