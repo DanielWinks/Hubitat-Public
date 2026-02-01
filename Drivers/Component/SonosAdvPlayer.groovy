@@ -3682,6 +3682,7 @@ void processWebsocketMessage(String message) {
       padding: 15px;
       text-align: center;
       transition: transform 0.2s, box-shadow 0.2s;
+      cursor: pointer;
     }
     .favorite-card:hover {
       transform: translateY(-4px);
@@ -3692,7 +3693,6 @@ void processWebsocketMessage(String message) {
       aspect-ratio: 1;
       object-fit: cover;
       border-radius: 8px;
-      cursor: pointer;
       transition: opacity 0.2s;
     }
     .favorite-image:hover {
@@ -3741,22 +3741,24 @@ void processWebsocketMessage(String message) {
         String favId = fav?.key
         String favName = fav?.value?.name
 
-        html += """    <div class="favorite-card">
-      <div class="favorite-number">Favorite #${favId}</div>
-"""
-
         if(albumArtURI == null) {
-          html += """      <div class="no-image">
+          html += """    <div class="favorite-card" onclick="(function(){var fd='id=${deviceId}&method=loadFavorite&argType.1=STRING&arg[1]=${favId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+      <div class="favorite-number">Favorite #${favId}</div>
+      <div class="no-image">
         <span>♪ ${favName}</span>
       </div>
 """
         } else if(albumArtURI.startsWith('/')) {
-          html += """      <img class="favorite-image"
+          html += """    <div class="favorite-card" onclick="(function(){var fd='id=${deviceId}&method=loadFavorite&argType.1=STRING&arg[1]=${favId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+      <div class="favorite-number">Favorite #${favId}</div>
+      <img class="favorite-image"
            src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
            alt="${favName}" />
 """
         } else {
-          html += """      <img class="favorite-image"
+          html += """    <div class="favorite-card" onclick="(function(){var fd='id=${deviceId}&method=loadFavorite&argType.1=STRING&arg[1]=${favId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+      <div class="favorite-number">Favorite #${favId}</div>
+      <img class="favorite-image"
            src="${albumArtURI}"
            alt="${favName}" />
 """
