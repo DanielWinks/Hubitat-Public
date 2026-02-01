@@ -1,73 +1,73 @@
 {
-  "packageName": "Sonos Advanced Controller",
-  "author": "Daniel Winks",
-  "version": "0.7.8",
-  "releaseNotes": "0.7.8 Enhance favorite card functionality with click events for loading favorites\\r\\n0.7.7 Updated the HTML generation for displaying Sonos favorites to use a modern card-based layout with improved CSS styling and better image handling.\\r\\n0.7.6 Fixed TTS queue interruptions with priority handling, added infinite WebSocket auto-reconnection with exponential backoff (5s-5min intervals), added exponential backoff retry for loadFavorite failures, fixed groupVolume sync on followers via MRRC subscription, added Night Mode and Speech Enhancement commands for soundbars, improved regrouping reliability by ungrouping before regrouping, enhanced WebSocket parsing with null safety checks, resolved multiple @CompileStatic compilation errors, and improved HTTP retry documentation in UtilitiesAndLoggingLibrary\\r\\n0.7.5 Fixed TTS queue interruptions with priority handling, added infinite WebSocket auto-reconnection with exponential backoff, resolved groupVolume sync on followers, and fixed @CompileStatic compilation errors\\r\\n0.7.4 Fix MRVAT_ should be MRRC_ copy/paste error.\r\n0.7.3 Remove debounce from WS events\r\n0.7.2 Fixes for looping subscriptions on initialize() for some users.\r\n0.7.1 Improved null checking in websocket parse method.\r\n0.7.0 Add Night Mode and Dialog Enhancement for Arc/Beam/Ray supported. To use enable the child device for them in preferences and toggle child device switch on/off. Many other fixes.\r\n0.6.2 Add semaphore locking around all updateDataValue/getDataValue calls to prevent concurrent access exceptions.\r\n0.6.1 Jsonify trackData for SharpTools/WebCoRE\r\n0.6.0 Use streamlined parent app call to send data to followers.",
-  "minimumHEVersion": "2.3.7.114",
-  "dateReleased": "2026-02-01",
-  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
-  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
-  "bundles": [
-    {
-      "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
-      "name": "Sonos Advanced Controller",
-      "namespace": "dwinks",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/SonosAdvancedController.zip",
-      "required": true
-    }
-  ],
   "apps": [
     {
       "id": "a5e66956-f81b-40e8-ac79-28f7a5530a9a",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy",
       "name": "Sonos Advanced Controller",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy",
-      "required": true,
-      "primary": true
+      "primary": true,
+      "required": true
     }
   ],
+  "author": "Daniel Winks",
+  "bundles": [
+    {
+      "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/refs/heads/main/Bundles/SonosAdvancedController.zip",
+      "name": "Sonos Advanced Controller",
+      "namespace": "dwinks",
+      "required": true
+    }
+  ],
+  "dateReleased": "2026-02-01",
   "drivers": [
     {
       "id": "60791fce-4431-40fe-823f-daba182cdd12",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy",
       "name": "Sonos Advanced Group",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy",
       "required": true
     },
     {
       "id": "35457105-655a-40f0-953a-5c32cb7b9d0e",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy",
       "name": "Sonos Advanced Player",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy",
       "required": true
     },
     {
       "id": "1e419d13-89bd-4709-8660-ba34e295236e",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy",
       "name": "Sonos Advanced Snapshot",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSnapshot.groovy",
       "required": true
     },
     {
       "id": "fb684879-f318-4fcd-859f-6a9266522214",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvBatteryStats.groovy",
       "name": "Sonos Advanced Battery Status",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvBatteryStats.groovy",
       "required": true
     },
     {
       "id": "0eee0121-1903-4f44-833e-c0243dee0c7e",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvFavorites.groovy",
       "name": "Sonos Advanced Favorites",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvFavorites.groovy",
       "required": true
     },
     {
       "id": "d8741cd4-2adf-4cc5-b429-cceba8a46a7a",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSecondaries.groovy",
       "name": "Sonos Advanced Secondaries",
       "namespace": "dwinks",
-      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvSecondaries.groovy",
       "required": true
     }
-  ]
+  ],
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "minimumHEVersion": "2.3.7.114",
+  "packageName": "Sonos Advanced Controller",
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
+  "releaseNotes": "0.7.8 Enhance favorite card functionality with click events for loading favorites\\r\\n0.7.7 Updated the HTML generation for displaying Sonos favorites to use a modern card-based layout with improved CSS styling and better image handling.\\r\\n0.7.6 Fixed TTS queue interruptions with priority handling, added infinite WebSocket auto-reconnection with exponential backoff (5s-5min intervals), added exponential backoff retry for loadFavorite failures, fixed groupVolume sync on followers via MRRC subscription, added Night Mode and Speech Enhancement commands for soundbars, improved regrouping reliability by ungrouping before regrouping, enhanced WebSocket parsing with null safety checks, resolved multiple @CompileStatic compilation errors, and improved HTTP retry documentation in UtilitiesAndLoggingLibrary\\r\\n0.7.5 Fixed TTS queue interruptions with priority handling, added infinite WebSocket auto-reconnection with exponential backoff, resolved groupVolume sync on followers, and fixed @CompileStatic compilation errors\\r\\n0.7.4 Fix MRVAT_ should be MRRC_ copy/paste error.\r\n0.7.3 Remove debounce from WS events\r\n0.7.2 Fixes for looping subscriptions on initialize() for some users.\r\n0.7.1 Improved null checking in websocket parse method.\r\n0.7.0 Add Night Mode and Dialog Enhancement for Arc/Beam/Ray supported. To use enable the child device for them in preferences and toggle child device switch on/off. Many other fixes.\r\n0.6.2 Add semaphore locking around all updateDataValue/getDataValue calls to prevent concurrent access exceptions.\r\n0.6.1 Jsonify trackData for SharpTools/WebCoRE\r\n0.6.0 Use streamlined parent app call to send data to followers.",
+  "version": "0.7.8"
 }
