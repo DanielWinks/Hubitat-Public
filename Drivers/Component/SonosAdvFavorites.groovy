@@ -26,7 +26,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Favorites',
-    version: '0.7.13',
+    version: '0.7.14',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
