@@ -29,6 +29,18 @@ jobs:
           mkdir -p Bundles/UtilitiesAndLoggingLibrary
           cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/UtilitiesAndLoggingLibrary/dwinks.UtilitiesAndLoggingLibrary.groovy
 
+      - name: Create install.txt
+        run: |
+          echo "dwinks" > Bundles/UtilitiesAndLoggingLibrary/install.txt
+          echo "UtilitiesAndLoggingLibrary" >> Bundles/UtilitiesAndLoggingLibrary/install.txt
+          echo "library dwinks.UtilitiesAndLoggingLibrary.groovy" >> Bundles/UtilitiesAndLoggingLibrary/install.txt
+
+      - name: Create update.txt
+        run: |
+          echo "dwinks" > Bundles/UtilitiesAndLoggingLibrary/update.txt
+          echo "UtilitiesAndLoggingLibrary" >> Bundles/UtilitiesAndLoggingLibrary/update.txt
+          echo "library dwinks.UtilitiesAndLoggingLibrary.groovy" >> Bundles/UtilitiesAndLoggingLibrary/update.txt
+
       - name: Zip Bundle
         uses: thedoctor0/zip-release@0.7.5
         with:

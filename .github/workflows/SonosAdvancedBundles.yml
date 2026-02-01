@@ -23,6 +23,18 @@ jobs:
           cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosAdvancedController/dwinks.UtilitiesAndLoggingLibrary.groovy
           cp Libraries/SMAPILibrary.groovy Bundles/SonosAdvancedController/dwinks.SMAPILibrary.groovy
 
+      - name: Create install.txt
+        run: |
+          echo "dwinks" > Bundles/SonosAdvancedController/install.txt
+          echo "SMAPILibrary" >> Bundles/SonosAdvancedController/install.txt
+          echo "library dwinks.SMAPILibrary.groovy" >> Bundles/SonosAdvancedController/install.txt
+
+      - name: Create update.txt
+        run: |
+          echo "dwinks" > Bundles/SonosAdvancedController/update.txt
+          echo "SMAPILibrary" >> Bundles/SonosAdvancedController/update.txt
+          echo "library dwinks.SMAPILibrary.groovy" >> Bundles/SonosAdvancedController/update.txt
+
       - name: Zip Bundle
         uses: thedoctor0/zip-release@0.7.5
         with:

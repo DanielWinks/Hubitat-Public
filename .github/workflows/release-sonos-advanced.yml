@@ -218,11 +218,12 @@ jobs:
           tag: "v${{ steps.version.outputs.new_version }}"
           push: true
 
-      - name: Trigger UtilitiesAndLoggingLibrary workflow
+      - name: Trigger and wait for UtilitiesAndLoggingLibrary workflow
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.actions.createWorkflowDispatch({
+            // Trigger the workflow
+            const utilWorkflow = await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'UtilitiesAndLoggingLibrary.yml',
@@ -230,11 +231,47 @@ jobs:
             });
             console.log('Triggered UtilitiesAndLoggingLibrary workflow');
 
-      - name: Trigger SonosAdvancedBundles workflow
+            // Wait for it to start and complete
+            let attempts = 0;
+            const maxAttempts = 60; // 5 minutes max
+
+            while (attempts < maxAttempts) {
+              await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'UtilitiesAndLoggingLibrary.yml',
+                branch: 'main',
+                per_page: 5
+              });
+
+              // Find the most recent run
+              const latestRun = runs.data.workflow_runs[0];
+
+              if (latestRun && latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('UtilitiesAndLoggingLibrary workflow completed successfully');
+                  break;
+                } else {
+                  throw new Error(`UtilitiesAndLoggingLibrary workflow failed with conclusion: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              console.log(`Waiting for UtilitiesAndLoggingLibrary workflow... (attempt ${attempts}/${maxAttempts})`);
+            }
+
+            if (attempts >= maxAttempts) {
+              throw new Error('UtilitiesAndLoggingLibrary workflow did not complete in time');
+            }
+
+      - name: Trigger and wait for SonosAdvancedBundles workflow
         uses: actions/github-script@v7
         with:
           script: |
-            await github.rest.actions.createWorkflowDispatch({
+            // Trigger the workflow
+            const bundleWorkflow = await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'SonosAdvancedBundles.yml',
@@ -242,10 +279,40 @@ jobs:
             });
             console.log('Triggered SonosAdvancedBundles workflow');
 
-      - name: Wait for bundle workflows to complete
-        run: |
-          echo "Waiting 60 seconds for bundle workflows to complete..."
-          sleep 60
+            // Wait for it to start and complete
+            let attempts = 0;
+            const maxAttempts = 60; // 5 minutes max
+
+            while (attempts < maxAttempts) {
+              await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'SonosAdvancedBundles.yml',
+                branch: 'main',
+                per_page: 5
+              });
+
+              // Find the most recent run
+              const latestRun = runs.data.workflow_runs[0];
+
+              if (latestRun && latestRun.status === 'completed') {
+                if (latestRun.conclusion === 'success') {
+                  console.log('SonosAdvancedBundles workflow completed successfully');
+                  break;
+                } else {
+                  throw new Error(`SonosAdvancedBundles workflow failed with conclusion: ${latestRun.conclusion}`);
+                }
+              }
+
+              attempts++;
+              console.log(`Waiting for SonosAdvancedBundles workflow... (attempt ${attempts}/${maxAttempts})`);
+            }
+
+            if (attempts >= maxAttempts) {
+              throw new Error('SonosAdvancedBundles workflow did not complete in time');
+            }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
