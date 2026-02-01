@@ -88,6 +88,7 @@ jobs:
           cat > update_manifest.py << 'EOF'
           import json
           import sys
+          import os
 
           manifest_path = 'PackageManifests/SonosAdvancedController/packageManifest.json'
           new_version = sys.argv[1]
@@ -103,6 +104,27 @@ jobs:
           # Update date
           data['dateReleased'] = date_released
 
+          # Update all location URLs to point to release downloads
+          base_release_url = f'https://github.com/DanielWinks/Hubitat-Public/releases/download/v{new_version}'
+
+          # Update app locations
+          for app in data.get('apps', []):
+              if 'location' in app:
+                  filename = app['location'].split('/')[-1]
+                  app['location'] = f'{base_release_url}/{filename}'
+
+          # Update driver locations
+          for driver in data.get('drivers', []):
+              if 'location' in driver:
+                  filename = driver['location'].split('/')[-1]
+                  driver['location'] = f'{base_release_url}/{filename}'
+
+          # Update bundle locations
+          for bundle in data.get('bundles', []):
+              if 'location' in bundle:
+                  filename = bundle['location'].split('/')[-1]
+                  bundle['location'] = f'{base_release_url}/{filename}'
+
           # Prepend new release notes
           new_notes = f"{new_version} {release_notes}"
           if 'releaseNotes' in data and data['releaseNotes']:
@@ -114,6 +136,7 @@ jobs:
               json.dump(data, f, indent=2)
 
           print(f"Updated manifest to version {new_version}")
+          print(f"Updated all URLs to point to release v{new_version}")
           EOF
 
           python3 update_manifest.py "$NEW_VERSION" "$RELEASE_NOTES" "$DATE"
@@ -223,6 +246,14 @@ jobs:
           files: |
             Bundles/SonosAdvancedController.zip
             Bundles/UtilitiesAndLoggingLibrary.zip
+            Apps/SonosAdvancedApp.groovy
+            Drivers/Component/SonosAdvPlayer.groovy
+            Drivers/Component/SonosAdvGroup.groovy
+            Drivers/Component/SonosAdvSnapshot.groovy
+            Drivers/Component/SonosAdvBatteryStats.groovy
+            Drivers/Component/SonosAdvFavorites.groovy
+            Drivers/Component/SonosAdvSecondaries.groovy
+            PackageManifests/SonosAdvancedController/packageManifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

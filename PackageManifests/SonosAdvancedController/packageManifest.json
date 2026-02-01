@@ -13,7 +13,7 @@
   "bundles": [
     {
       "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/refs/heads/main/Bundles/SonosAdvancedController.zip",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Bundles/SonosAdvancedController.zip",
       "name": "Sonos Advanced Controller",
       "namespace": "dwinks",
       "required": true
