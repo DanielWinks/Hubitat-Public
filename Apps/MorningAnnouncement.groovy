@@ -121,6 +121,8 @@ Map mainPage() {
           do not leave these in verbatim. Reword the announcement so it flows together nicely as if it were being announced by a news caster.
           Pay special attention to weather forecasts, as these will be read aloud, so ensure temperature units and conditions are clear.
           For things like temperature, include the word "degrees" after the number for clarity, such as "75 degrees" rather than just "75".
+          For times, reformat them for spoken TTS (e.g., "8 AM" rather than "08:00").
+          For dates, reformat them for spoken TTS (e.g., "January First" rather than "01/01", or January thirteenth rather than "13th").
           If any section is missing or empty, omit it gracefully from the announcement.
           ''',
         description: 'This prompt guides the AI on how to structure and present your morning announcement.'
