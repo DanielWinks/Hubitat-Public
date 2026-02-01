@@ -26,15 +26,15 @@ jobs:
       - name: Create install.txt
         run: |
           echo "dwinks" > Bundles/SonosAdvancedController/install.txt
-          echo "SMAPILibrary" >> Bundles/SonosAdvancedController/install.txt
-          echo "UtilitiesAndLoggingLibrary" >> Bundles/SonosAdvancedController/install.txt
+          echo "Sonos Advanced Controller" >> Bundles/SonosAdvancedController/install.txt
+          echo "library dwinks.UtilitiesAndLoggingLibrary.groovy" >> Bundles/SonosAdvancedController/install.txt
           echo "library dwinks.SMAPILibrary.groovy" >> Bundles/SonosAdvancedController/install.txt
 
       - name: Create update.txt
         run: |
           echo "dwinks" > Bundles/SonosAdvancedController/update.txt
-          echo "SMAPILibrary" >> Bundles/SonosAdvancedController/update.txt
-          echo "UtilitiesAndLoggingLibrary" >> Bundles/SonosAdvancedController/update.txt
+          echo "Sonos Advanced Controller" >> Bundles/SonosAdvancedController/update.txt
+          echo "library dwinks.UtilitiesAndLoggingLibrary.groovy" >> Bundles/SonosAdvancedController/update.txt
           echo "library dwinks.SMAPILibrary.groovy" >> Bundles/SonosAdvancedController/update.txt
 
       - name: Zip Bundle
