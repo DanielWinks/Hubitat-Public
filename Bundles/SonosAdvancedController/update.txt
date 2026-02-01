@@ -1,3 +1,4 @@
 dwinks
 SMAPILibrary
+UtilitiesAndLoggingLibrary
 library dwinks.SMAPILibrary.groovy
