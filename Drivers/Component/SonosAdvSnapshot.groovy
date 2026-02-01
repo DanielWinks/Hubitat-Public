@@ -26,7 +26,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Snapshot',
-    version: '0.7.12',
+    version: '0.7.13',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
