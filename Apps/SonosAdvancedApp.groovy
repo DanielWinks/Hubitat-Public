@@ -97,11 +97,23 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // =============================================================================
 Map mainPage() {
   state.remove("discoveryRunning")
+  checkForUpdates()
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
       label title: 'Sonos Advanced Controller',
       required: false
       paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
+
+      if(state.updateAvailable == true) {
+        section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
+          paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
+                    "Current version: ${getCurrentVersion()}<br/>" +
+                    "Released: ${state.latestReleaseDate}<br/><br/>" +
+                    "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
+          input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
+          input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
+        }
+      }
 
       href (
         page: 'localPlayerPage',
@@ -117,6 +129,56 @@ Map mainPage() {
     section('Optional Features (disable to reduce resource usage):', hideable: true) {
       input 'favMatching', 'bool', title: 'Enable "Current Favorite" status.', required: false, defaultValue: true
       input 'trackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
+    }
+
+    section('Update Settings:', hideable: true) {
+      input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
+      if(autoCheckUpdates) {
+        input 'updateCheckFrequency', 'enum', title: 'Check frequency', required: false, defaultValue: 'Daily',
+              options: ['Daily', 'Weekly', 'Manual']
+      }
+      input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false, submitOnChange: true
+      if(autoInstallUpdates) {
+        input 'autoInstallTime', 'time', title: 'Install updates at this time', required: true, defaultValue: '02:00'
+        input 'autoInstallNextOccurrence', 'bool', title: 'Install at next occurrence of selected time (regardless of day)', required: false, defaultValue: false, submitOnChange: true
+        if(!autoInstallNextOccurrence) {
+          input 'autoInstallDayOfWeek', 'enum', title: 'Install on this day of week', required: false, defaultValue: 'Sunday',
+                options: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+        }
+      }
+      input 'btnCheckForUpdates', 'button', title: 'Check for Updates Now', submitOnChange: false
+      if(state.lastUpdateCheckFormatted) {
+        paragraph "Last checked: ${state.lastUpdateCheckFormatted}"
+      }
+
+      input 'btnCheckInstalledVersions', 'button', title: 'Check Versions of Installed Files', submitOnChange: false
+      if(state.lastVersionCheck) {
+        paragraph "Last version check: ${new Date(state.lastVersionCheck).format('yyyy-MM-dd HH:mm:ss')}"
+      }
+
+      // Display installed file versions
+      if(state.installedVersions && state.installedVersions.size() > 0) {
+        paragraph "<b>Installed File Versions:</b>"
+        String versionList = "<ul>"
+        state.installedVersions.each { file ->
+          String statusColor = file.status == 'OK' ? 'green' : (file.status == 'Mismatch' ? 'red' : 'gray')
+          String statusIcon = file.status == 'OK' ? '✓' : (file.status == 'Mismatch' ? '✗' : '?')
+          versionList += "<li><span style='color:${statusColor}'><b>${statusIcon}</b></span> <b>${file.name}</b>: ${file.installedVersion}"
+          if(file.status == 'Mismatch') {
+            versionList += " <span style='color:red'>(expected ${file.expectedVersion})</span>"
+          }
+          versionList += "</li>"
+        }
+        versionList += "</ul>"
+        paragraph versionList
+      }
+
+      if(state.versionMismatches && state.versionMismatches.size() > 0) {
+        paragraph "<span style='color:red'><b>⚠ ${state.versionMismatches.size()} Version Mismatch(es) Found</b></span>"
+        input 'btnFixVersionMismatches', 'button', title: 'Update All Mismatched Versions', submitOnChange: false
+      } else if(state.lastVersionCheck && state.versionMismatches != null) {
+        paragraph "<span style='color:green'><b>✓ All installed files are at the correct version</b></span>"
+      }
     }
 
     section('Logging Settings:', hideable: true) {
@@ -283,6 +345,18 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'deleteGroup') { deleteGroup() }
   if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }
   if(buttonName == 'createPlayerDevices') { createPlayerDevices() }
+
+  // Update management buttons
+  if(buttonName == 'btnCheckForUpdates') { checkForUpdates(true) }
+  if(buttonName == 'btnInstallUpdate') { installUpdate() }
+  if(buttonName == 'btnCheckInstalledVersions') { checkInstalledVersions() }
+  if(buttonName == 'btnFixVersionMismatches') { fixVersionMismatches() }
+  if(buttonName == 'btnDismissUpdate') {
+    state.updateAvailable = false
+    state.latestVersion = null
+    state.latestReleaseDate = null
+    state.latestReleaseUrl = null
+  }
 }
 
 void applySettingsButton() { configure() }
@@ -325,7 +399,9 @@ void initialize() { configure() }
 void configure() {
   logInfo("${app.name} updated")
   unsubscribe()
-  
+  scheduleUpdateCheck()
+  checkForUpdates()
+
   // Initialize settings with defaults
   if(settings.favMatching == null) { settings.favMatching = true }
   if(settings.trackDataMetaData == null) { settings.trackDataMetaData = false }
@@ -334,7 +410,7 @@ void configure() {
   if(settings.debugLogEnable == null) { settings.debugLogEnable = false }
   if(settings.traceLogEnable == null) { settings.traceLogEnable = false }
   if(settings.descriptionTextEnable == null) { settings.descriptionTextEnable = true }
-  
+
   try { createPlayerDevices() }
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
@@ -863,6 +939,245 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     else { gd.sendEvent(name: 'switch', value: 'off') }
   }
 }
+
+// =============================================================================
+// Version Checking for Installed Files
+// =============================================================================
+void checkInstalledVersions() {
+  logInfo('Checking versions of all installed files...')
+  state.lastVersionCheck = now()
+  state.versionMismatches = []
+  state.installedVersions = []
+
+  // Get package manifest to know which drivers to check
+  String manifestUrl = 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json'
+  Map manifest = null
+
+  try {
+    Map params = [
+      uri: manifestUrl,
+      contentType: 'application/json',
+      timeout: 15
+    ]
+
+    httpGet(params) { resp ->
+      if(resp?.status == 200 && resp.data) {
+        manifest = resp.data
+      }
+    }
+  } catch(Exception e) {
+    logWarn("Failed to retrieve package manifest: ${e.message}")
+    return
+  }
+
+  if(!manifest) {
+    logWarn('Failed to retrieve package manifest for version checking')
+    return
+  }
+
+  String appVersion = getCurrentVersion()
+  logDebug("Current app version: ${appVersion}")
+
+  // Check each driver in the manifest
+  manifest.drivers?.each { driver ->
+    String driverName = driver.name
+    String namespace = driver.namespace ?: 'dwinks'
+    String expectedVersion = driver.version ?: appVersion
+
+    logDebug("Checking ${driverName} (${namespace})...")
+    String installedVersion = getInstalledDriverVersion(driverName, namespace)
+
+    if(installedVersion && installedVersion != expectedVersion) {
+      logWarn("Version mismatch: ${driverName} - installed: ${installedVersion}, expected: ${expectedVersion}")
+      state.versionMismatches << [
+        name: driverName,
+        namespace: namespace,
+        installedVersion: installedVersion,
+        expectedVersion: expectedVersion,
+        location: driver.location
+      ]
+      state.installedVersions << [
+        name: driverName,
+        installedVersion: installedVersion,
+        expectedVersion: expectedVersion,
+        status: 'Mismatch'
+      ]
+    } else if(installedVersion) {
+      logDebug("${driverName} version OK: ${installedVersion}")
+      state.installedVersions << [
+        name: driverName,
+        installedVersion: installedVersion,
+        expectedVersion: expectedVersion,
+        status: 'OK'
+      ]
+    } else {
+      logDebug("${driverName} not found or could not determine version")
+      state.installedVersions << [
+        name: driverName,
+        installedVersion: 'Not Installed',
+        expectedVersion: expectedVersion,
+        status: 'Not Found'
+      ]
+    }
+  }
+
+  if(state.versionMismatches.size() > 0) {
+    logInfo("Found ${state.versionMismatches.size()} version mismatch(es)")
+  } else {
+    logInfo('All installed files are up to date')
+  }
+}
+
+String getInstalledDriverVersion(String driverName, String namespace) {
+  String foundVersion = null
+
+  try {
+    // Get authentication cookie
+    String cookie = login()
+    if(!cookie) {
+      logWarn('Failed to authenticate with hub')
+      return null
+    }
+
+    // Get list of installed drivers - HPM uses /device/drivers
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/device/drivers',
+      headers: [Cookie: cookie]
+    ]
+
+    httpGet(params) { resp ->
+      if(resp?.status == 200) {
+        logDebug("Driver list response received, checking for ${driverName} in namespace ${namespace}")
+
+        // Log all user drivers for debugging
+        def userDrivers = resp.data?.drivers?.findAll { it.type == 'usr' }
+        logDebug("Found ${userDrivers?.size()} user drivers")
+        userDrivers?.each { d ->
+          logDebug("  - ${d.name} (${d.namespace})")
+        }
+
+        // Find driver by name and namespace
+        def driver = resp.data?.drivers?.find {
+          it.type == 'usr' && it?.name == driverName && it?.namespace == namespace
+        }
+
+        if(driver && driver.id) {
+          Integer driverId = driver.id
+          logDebug("Found driver ${driverName}, getting source code...")
+
+          // Get driver source code using /driver/ajax/code with query parameter
+          Map codeParams = [
+            uri: "http://127.0.0.1:8080",
+            path: '/driver/ajax/code',
+            headers: [Cookie: cookie],
+            query: [id: driverId]
+          ]
+
+          httpGet(codeParams) { codeResp ->
+            if(codeResp?.status == 200 && codeResp.data?.source) {
+              String source = codeResp.data.source
+              // Extract semantic version from source code for comparison
+              def matcher = (source =~ /version:\s*['"]([^'"]+)['"]/)
+              if(matcher.find()) {
+                foundVersion = matcher.group(1)
+                logDebug("Extracted version ${foundVersion} from ${driverName}")
+              } else {
+                logWarn("Could not find version pattern in source for ${driverName}")
+              }
+            } else {
+              logWarn("Failed to get source code for ${driverName}, status: ${codeResp?.status}")
+            }
+          }
+        } else if(!driver) {
+          logDebug("Driver not found in hub: ${driverName} (${namespace})")
+        }
+      } else {
+        logWarn("Failed to get driver list, status: ${resp?.status}")
+      }
+    }
+  } catch(Exception e) {
+    logWarn("Error getting version for ${driverName}: ${e.message}")
+  }
+
+  return foundVersion
+}
+
+String getDriverVersionForUpdate(String driverName, String namespace) {
+  String hubVersion = null
+
+  try {
+    String cookie = login()
+    if(!cookie) { return null }
+
+    // Get list of installed drivers
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/device/drivers',
+      headers: [Cookie: cookie]
+    ]
+
+    httpGet(params) { resp ->
+      def driver = resp.data?.drivers?.find {
+        it.type == 'usr' && it?.name == driverName && it?.namespace == namespace
+      }
+
+      if(driver?.id) {
+        // Get hub's internal version using /driver/ajax/code
+        Map codeParams = [
+          uri: "http://127.0.0.1:8080",
+          path: '/driver/ajax/code',
+          headers: [Cookie: cookie],
+          query: [id: driver.id]
+        ]
+
+        httpGet(codeParams) { codeResp ->
+          if(codeResp?.status == 200 && codeResp.data?.version) {
+            hubVersion = codeResp.data.version.toString()
+            logDebug("Got hub version ${hubVersion} for ${driverName}")
+          }
+        }
+      }
+    }
+  } catch(Exception e) {
+    logWarn("Error getting hub version for ${driverName}: ${e.message}")
+  }
+
+  return hubVersion
+}
+
+void fixVersionMismatches() {
+  if(!state.versionMismatches || state.versionMismatches.size() == 0) {
+    logInfo('No version mismatches to fix')
+    return
+  }
+
+  logInfo("Fixing ${state.versionMismatches.size()} version mismatch(es)...")
+
+  state.versionMismatches.each { mismatch ->
+    logInfo("Updating ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
+
+    // Download the correct version - location already contains the full URL
+    String sourceCode = downloadFile(mismatch.location)
+
+    if(sourceCode) {
+      // Update the driver - need to pass version parameter
+      Boolean success = updateDriver(mismatch.name, mismatch.namespace, sourceCode, mismatch.expectedVersion)
+      if(success) {
+        logInfo("Successfully updated ${mismatch.name}")
+      } else {
+        logWarn("Failed to update ${mismatch.name}")
+      }
+    } else {
+      logWarn("Failed to download source code for ${mismatch.name}")
+    }
+  }
+
+  // Re-check versions after updates
+  pauseExecution(2000)
+  checkInstalledVersions()
+}
+
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
@@ -977,6 +1292,456 @@ Boolean responseIsValid(AsyncResponse response, String requestName = null) {
   }
   if (response.hasError()) { return false } else { return true }
 }
+
 // =============================================================================
-// HTTP Helpers
+// Update Management
 // =============================================================================
+
+String getCurrentVersion() {
+  return app.version ?: '0.7.10'
+}
+
+void checkForUpdates(Boolean manual = false) {
+  // Check if auto-check is enabled or if this is a manual check
+  if(!manual && autoCheckUpdates != true) { return }
+
+  // Check frequency limits for automatic checks
+  if(!manual && state.lastUpdateCheck) {
+    Long lastCheck = state.lastUpdateCheck as Long
+    Long now = now()
+    Long dayInMs = 86400000L
+    Long weekInMs = dayInMs * 7
+
+    if(updateCheckFrequency == 'Daily' && (now - lastCheck) < dayInMs) { return }
+    if(updateCheckFrequency == 'Weekly' && (now - lastCheck) < weekInMs) { return }
+  }
+
+  try {
+    String manifestUrl = 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json'
+
+    Map params = [
+      uri: manifestUrl,
+      contentType: 'application/json',
+      timeout: 15
+    ]
+
+    httpGet(params) { resp ->
+      if(resp?.status == 200 && resp.data) {
+        Map manifest = resp.data
+        String latestVersion = manifest.version ?: null
+
+        if(latestVersion) {
+          String currentVersion = getCurrentVersion()
+          Integer comparison = compareVersions(currentVersion, latestVersion)
+
+          state.lastUpdateCheck = now()
+          state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
+
+          if(comparison < 0) {
+            // Update available
+            state.updateAvailable = true
+            state.latestVersion = latestVersion
+            state.latestManifest = manifest
+            state.latestReleaseDate = manifest.releaseDate ?: 'Unknown'
+            state.latestReleaseUrl = "https://github.com/DanielWinks/Hubitat-Public/releases/tag/v${latestVersion}"
+
+            // Update app label to show update available on main apps screen
+            app.updateLabel("Sonos Advanced Controller <span style='color:green'>Update Available</span>")
+
+            logInfo("Update available: ${latestVersion} (current: ${currentVersion})")
+
+            if(manual) {
+              // Force page refresh to show update notification
+              runIn(1, 'refreshPage')
+            }
+
+            // Auto-install if enabled
+            if(autoInstallUpdates == true && !manual) {
+              scheduleAutoInstall()
+            }
+          } else {
+            state.updateAvailable = false
+            state.latestVersion = null
+            state.latestManifest = null
+            state.latestReleaseDate = null
+            state.latestReleaseUrl = null
+
+            // Clear update label
+            app.updateLabel("Sonos Advanced Controller")
+
+            if(manual) {
+              logInfo("No updates available. Current version ${currentVersion} is up to date.")
+            }
+          }
+        }
+      }
+    }
+  } catch(Exception e) {
+    logError("Error checking for updates: ${e.message}")
+    state.lastUpdateCheck = now()
+    state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
+  }
+}
+
+void refreshPage() {
+  // Dummy method to trigger page refresh
+}
+
+Integer compareVersions(String version1, String version2) {
+  // Remove 'v' prefix if present
+  version1 = version1?.replaceAll(/^v/, '') ?: '0.0.0'
+  version2 = version2?.replaceAll(/^v/, '') ?: '0.0.0'
+
+  List parts1 = version1.tokenize('.')
+  List parts2 = version2.tokenize('.')
+
+  Integer maxLength = Math.max(parts1.size(), parts2.size())
+
+  for(Integer i = 0; i < maxLength; i++) {
+    Integer num1 = i < parts1.size() ? (parts1[i] as Integer) : 0
+    Integer num2 = i < parts2.size() ? (parts2[i] as Integer) : 0
+
+    if(num1 < num2) { return -1 }
+    if(num1 > num2) { return 1 }
+  }
+
+  return 0
+}
+
+void installUpdate() {
+  if(!state.updateAvailable || !state.latestManifest) {
+    logError('No update available to install')
+    return
+  }
+
+  try {
+    Map manifest = state.latestManifest
+    String version = state.latestVersion
+
+    logInfo("Starting update to version ${version}...")
+
+    // Track what needs updating
+    Map updateStatus = [
+      app: false,
+      drivers: [:],
+      errors: []
+    ]
+
+    // Update the main app
+    if(manifest.apps && manifest.apps.size() > 0) {
+      Map appInfo = manifest.apps[0]
+      String appLocation = appInfo.location
+
+      logDebug("Downloading app from: ${appLocation}")
+      String appCode = downloadFile(appLocation)
+
+      if(appCode) {
+        Boolean success = updateThisApp(appCode, version)
+        updateStatus.app = success
+
+        if(success) {
+          logInfo("App updated successfully to version ${version}")
+        } else {
+          updateStatus.errors << "Failed to update app"
+          logError("Failed to update app")
+        }
+      } else {
+        updateStatus.errors << "Failed to download app code"
+        logError("Failed to download app code")
+      }
+    }
+
+    // Update drivers
+    if(manifest.drivers) {
+      manifest.drivers.each { driverInfo ->
+        String driverName = driverInfo.name
+        String driverLocation = driverInfo.location
+        String driverNamespace = driverInfo.namespace ?: 'dwinks'
+
+        logDebug("Downloading driver ${driverName} from: ${driverLocation}")
+        String driverCode = downloadFile(driverLocation)
+
+        if(driverCode) {
+          Boolean success = updateDriver(driverName, driverNamespace, driverCode, version)
+          updateStatus.drivers[driverName] = success
+
+          if(success) {
+            logInfo("Driver ${driverName} updated successfully")
+          } else {
+            updateStatus.errors << "Failed to update driver: ${driverName}"
+            logError("Failed to update driver: ${driverName}")
+          }
+        } else {
+          updateStatus.errors << "Failed to download driver: ${driverName}"
+          logError("Failed to download driver: ${driverName}")
+        }
+      }
+    }
+
+    // Clear update notification if successful
+    if(updateStatus.errors.size() == 0) {
+      state.updateAvailable = false
+      state.latestVersion = null
+      state.latestManifest = null
+      state.latestReleaseDate = null
+      state.latestReleaseUrl = null
+
+      // Clear update label
+      app.updateLabel("Sonos Advanced Controller")
+
+      // Clear any scheduled auto-install
+      unschedule('performScheduledInstall')
+
+      logInfo("Update completed successfully! Please refresh the page.")
+    } else {
+      logError("Update completed with errors: ${updateStatus.errors.join(', ')}")
+    }
+
+  } catch(Exception e) {
+    logError("Error installing update: ${e.message}")
+  }
+}
+
+String downloadFile(String uri) {
+  try {
+    Map params = [
+      uri: uri,
+      contentType: 'text/plain',
+      timeout: 30
+    ]
+
+    String fileContent = null
+
+    httpGet(params) { resp ->
+      if(resp?.status == 200) {
+        fileContent = resp.data.text
+      }
+    }
+
+    return fileContent
+  } catch(Exception e) {
+    logError("Error downloading file from ${uri}: ${e.message}")
+    return null
+  }
+}
+
+Boolean updateThisApp(String sourceCode, String version) {
+  try {
+    String cookie = login()
+    if(!cookie) {
+      logError('Failed to authenticate with hub')
+      return false
+    }
+
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/app/ajax/update',
+      headers: [
+        'Cookie': cookie
+      ],
+      body: [
+        id: app.id,
+        version: version,
+        source: sourceCode
+      ],
+      timeout: 30
+    ]
+
+    httpPost(params) { resp ->
+      if(resp?.status == 200) {
+        logDebug("App update API call successful")
+        return true
+      } else {
+        logError("App update API returned status: ${resp?.status}")
+        return false
+      }
+    }
+  } catch(Exception e) {
+    logError("Error updating app: ${e.message}")
+    return false
+  }
+}
+
+Boolean updateDriver(String driverName, String namespace, String sourceCode, String newVersionForLogging) {
+  try {
+    // Find the driver by name and namespace
+    List allDrivers = getDriverList()
+    Map targetDriver = allDrivers.find { driver ->
+      driver.name == driverName && driver.namespace == namespace
+    }
+
+    if(!targetDriver) {
+      logError("Driver not found: ${namespace}.${driverName}")
+      return false
+    }
+
+    String cookie = login()
+    if(!cookie) {
+      logError('Failed to authenticate with hub')
+      return false
+    }
+
+    // Get the hub's internal version counter - this is what the update API expects
+    String currentHubVersion = getDriverVersionForUpdate(driverName, namespace) ?: ''
+    logDebug("Updating driver ${driverName}: hub version=${currentHubVersion}, new version=${newVersionForLogging}")
+
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/driver/ajax/update',
+      requestContentType: 'application/x-www-form-urlencoded',
+      headers: [
+        'Cookie': cookie
+      ],
+      body: [
+        id: targetDriver.id,
+        version: currentHubVersion,  // Must be hub's internal version, not semantic version
+        source: sourceCode
+      ],
+      timeout: 300,
+      ignoreSSLIssues: true
+    ]
+
+    Boolean result = false
+    httpPost(params) { resp ->
+      if(resp.data?.status == 'success') {
+        logDebug("Successfully updated driver ${driverName}")
+        result = true
+      } else {
+        logError("Driver ${driverName} update failed - response: ${resp.data}")
+        result = false
+      }
+    }
+    return result
+  } catch(Exception e) {
+    logError("Error updating driver ${driverName}: ${e.message}")
+    return false
+  }
+}
+
+List getDriverList() {
+  try {
+    String cookie = login()
+    if(!cookie) { return [] }
+
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/driver/list/data',
+      headers: [
+        'Cookie': cookie
+      ],
+      timeout: 15
+    ]
+
+    List drivers = []
+
+    httpGet(params) { resp ->
+      if(resp?.status == 200 && resp.data) {
+        drivers = resp.data
+      }
+    }
+
+    return drivers
+  } catch(Exception e) {
+    logError("Error getting driver list: ${e.message}")
+    return []
+  }
+}
+
+String login() {
+  try {
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/login',
+      body: [
+        username: '',
+        password: '',
+        submit: 'Login'
+      ],
+      textParser: true,
+      timeout: 15
+    ]
+
+    String cookie = null
+
+    httpPost(params) { resp ->
+      if(resp?.status == 200 || resp?.status == 302) {
+        def setCookieHeader = resp.headers['Set-Cookie']
+        if(setCookieHeader) {
+          String cookieValue = setCookieHeader.value ?: setCookieHeader.toString()
+          cookie = cookieValue.split(';')[0]
+        }
+      }
+    }
+
+    return cookie
+  } catch(Exception e) {
+    logError("Login error: ${e.message}")
+    return null
+  }
+}
+
+void scheduleUpdateCheck() {
+  unschedule('checkForUpdates')
+
+  if(autoCheckUpdates == true) {
+    if(updateCheckFrequency == 'Daily') {
+      schedule('0 0 2 * * ?', 'checkForUpdates')  // 2 AM daily
+    } else if(updateCheckFrequency == 'Weekly') {
+      schedule('0 0 2 ? * MON', 'checkForUpdates')  // 2 AM Monday
+    }
+  }
+}
+
+void scheduleAutoInstall() {
+  if(!autoInstallUpdates || !autoInstallTime || !state.updateAvailable) {
+    unschedule('performScheduledInstall')
+    return
+  }
+
+  try {
+    Date installTime = timeToday(autoInstallTime, location.timeZone)
+    String cronExpression
+
+    if(autoInstallNextOccurrence == true) {
+      // Install at next occurrence of time, regardless of day
+      cronExpression = "0 ${installTime.minutes} ${installTime.hours} * * ?"
+
+      Date now = new Date()
+      if(installTime.before(now)) {
+        logDebug("Auto-install time has passed today, will install tomorrow at ${autoInstallTime}")
+      } else {
+        logDebug("Auto-install scheduled for today at ${autoInstallTime}")
+      }
+    } else {
+      // Install on specific day of week
+      String dayOfWeek = autoInstallDayOfWeek ?: 'Sunday'
+      Map dayMap = [
+        'Sunday': 'SUN',
+        'Monday': 'MON',
+        'Tuesday': 'TUE',
+        'Wednesday': 'WED',
+        'Thursday': 'THU',
+        'Friday': 'FRI',
+        'Saturday': 'SAT'
+      ]
+      String cronDay = dayMap[dayOfWeek]
+      cronExpression = "0 ${installTime.minutes} ${installTime.hours} ? * ${cronDay}"
+
+      logDebug("Auto-install scheduled for ${dayOfWeek}s at ${autoInstallTime}")
+    }
+
+    schedule(cronExpression, 'performScheduledInstall')
+  } catch(Exception e) {
+    logError("Error scheduling auto-install: ${e.message}")
+  }
+}
+
+void performScheduledInstall() {
+  if(!state.updateAvailable) {
+    logInfo("Scheduled install called but no update available")
+    return
+  }
+
+  logInfo("Performing scheduled automatic update installation...")
+  installUpdate()
+}
