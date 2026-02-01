@@ -26,7 +26,7 @@
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.7.10',
+  version: '0.7.11',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
