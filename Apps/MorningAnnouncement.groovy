@@ -79,25 +79,19 @@ Map mainPage() {
     section('<b>Input Devices</b>') {
       paragraph 'Select devices and their attributes that contain the information for your morning announcement.'
 
-      input 'weatherReportDevice', 'capability.sensor', title: '<b>Weather Report Device</b>', required: false, multiple: false, submitOnChange: true
-      if (weatherReportDevice) {
-        input 'weatherReportAttribute', 'text', title: 'Weather Report Attribute Name', required: true, defaultValue: 'detailedForecast'
-      }
+      input 'weatherReportDevice', 'capability.sensor', title: '<b>Weather Report Device</b>', required: false, multiple: false
 
-      input 'weatherAlertsDevice', 'capability.sensor', title: '<b>Weather Alerts Device</b>', required: false, multiple: false, submitOnChange: true
-      if (weatherAlertsDevice) {
-        input 'weatherAlertsAttribute', 'text', title: 'Weather Alerts Attribute Name', required: true, defaultValue: 'alertsFriendlyText'
-      }
+      input 'weatherAlertsDevice', 'capability.sensor', title: '<b>Weather Alerts Device</b>', required: false, multiple: false
 
-      input 'calendarEventsDevice', 'capability.sensor', title: '<b>Calendar Events Device</b>', required: false, multiple: false, submitOnChange: true
-      if (calendarEventsDevice) {
-        input 'calendarEventsAttribute', 'text', title: 'Calendar Events Attribute Name', required: true, defaultValue: 'nextEventFriendlyString'
-      }
+      input 'calendarEventsDevice', 'capability.sensor', title: '<b>Calendar Events Device</b>', required: false, multiple: false
     }
 
     section('<b>Gemini Text Rewriter Integration</b>') {
       paragraph 'Enable AI enhancement using your Gemini Text Rewriter app (must be installed).'
-      input 'useGeminiRewriter', 'bool', title: 'Enable AI Enhancement', defaultValue: true
+      input 'useGeminiRewriter', 'bool', title: 'Enable AI Enhancement', defaultValue: true, submitOnChange: true
+      if (settings.useGeminiRewriter) {
+        input 'maxTokens', 'number', title: 'Max Tokens for AI Response', required: false, defaultValue: 2048, description: 'Maximum number of tokens to allow for the AI-generated announcement (default: 2048)'
+      }
       paragraph '''<small>When enabled, this app will communicate with your Gemini Text Rewriter app via location events to enhance the announcement text. Make sure you have the Gemini Text Rewriter app installed and configured.</small>'''
     }
 
@@ -117,13 +111,21 @@ Map mainPage() {
           5. A positive closing thought or encouragement
           Keep the tone upbeat and informative.
           Make it feel personal and engaging, not robotic.
-          The input text contains sections, named "WEATHER FORECAST:", "WEATHER ALERTS:", and "TODAY'S CALENDAR:"...
+          The input text contains sections, named "WEATHER FORECAST:", "WEATHER ALERTS:", and "UPCOMING CALENDAR EVENTS:"...
           do not leave these in verbatim. Reword the announcement so it flows together nicely as if it were being announced by a news caster.
           Pay special attention to weather forecasts, as these will be read aloud, so ensure temperature units and conditions are clear.
           For things like temperature, include the word "degrees" after the number for clarity, such as "75 degrees" rather than just "75".
           For times, reformat them for spoken TTS (e.g., "8 AM" rather than "08:00").
           For dates, reformat them for spoken TTS (e.g., "January First" rather than "01/01", or January thirteenth rather than "13th").
           If any section is missing or empty, omit it gracefully from the announcement.
+          There are calendar events at the end; summarize them briefly and clearly.
+          Do not assume the date of the calendar event is today—read the event details carefully.
+          You will be provided with today's date implicitly (formatted like "Today's date is..."); use it to contextualize calendar events.
+          Do not announce the date explicitly unless it is part of a calendar event, except to say "today is..."
+          Make sure not to confuse today's date with any dates mentioned in calendar events.
+          Again, you will be provided with today's date implicitly. Do not confuse it with dates mentioned in calendar events. This is extremely important.
+          Ensure the entire announcement is concise, ideally under 2 minutes when spoken aloud.
+          This will be a text-to-speech announcement, so clarity and natural phrasing are key, as well as spelling out any acronyms, numbers, or abbreviations for proper pronunciation.
           ''',
         description: 'This prompt guides the AI on how to structure and present your morning announcement.'
     }
@@ -304,15 +306,18 @@ void generateAnnouncement() {
 
   try {
     // Gather input data from devices
-    String weatherReport = getDeviceAttributeValue(settings.weatherReportDevice, settings.weatherReportAttribute)
-    String weatherAlerts = getDeviceAttributeValue(settings.weatherAlertsDevice, settings.weatherAlertsAttribute)
-    String calendarEvents = getDeviceAttributeValue(settings.calendarEventsDevice, settings.calendarEventsAttribute)
+    String now = new Date().format('MMMM dd, yyyy')
+    String todayDate = "Today is ${now}."
+    logDebug("Today's date: ${todayDate}")
+    String weatherReport = getDeviceAttributeValue(settings.weatherReportDevice, 'detailedForecast')
+    String weatherAlerts = getDeviceAttributeValue(settings.weatherAlertsDevice, 'alertsFriendlyText')
+    String calendarEvents = getDeviceAttributeValue(settings.calendarEventsDevice, 'nextEventFriendlyString')
 
     // Build the input text for AI (with instructions)
-    String combinedInput = buildCombinedInput(weatherReport, weatherAlerts, calendarEvents)
+    String combinedInput = buildCombinedInput(todayDate, weatherReport, weatherAlerts, calendarEvents)
 
     // Build fallback text (content only, no instructions)
-    String fallbackText = buildContentOnly(weatherReport, weatherAlerts, calendarEvents)
+    String fallbackText = buildContentOnly(todayDate, weatherReport, weatherAlerts, calendarEvents)
 
     logDebug("Combined input: ${combinedInput}")
     logDebug("Fallback text: ${fallbackText}")
@@ -354,13 +359,20 @@ private String getDeviceAttributeValue(DeviceWrapper device, String attributeNam
 
 /**
  * buildCombinedInput() - Combine all inputs with instructions for AI
+ * Parameters: todayDate, weatherReport, weatherAlerts, calendarEvents
  */
-private String buildCombinedInput(String weatherReport, String weatherAlerts, String calendarEvents) {
+private String buildCombinedInput(String todayDate, String weatherReport, String weatherAlerts, String calendarEvents) {
   StringBuilder input = new StringBuilder()
 
   // Add custom instructions
   input.append(settings.customInstructions ?: 'Create a morning announcement from the following:')
   input.append('\n\n')
+
+  // Add today's date (provided implicitly)
+  if (todayDate) {
+    input.append(todayDate)
+    input.append('\n\n')
+  }
 
   // Add weather report
   if (weatherReport) {
@@ -378,7 +390,7 @@ private String buildCombinedInput(String weatherReport, String weatherAlerts, St
 
   // Add calendar events
   if (calendarEvents) {
-    input.append('TODAY\'S CALENDAR:\n')
+    input.append('UPCOMING CALENDAR EVENTS:\n')
     input.append(calendarEvents)
     input.append('\n\n')
   }
@@ -393,10 +405,17 @@ private String buildCombinedInput(String weatherReport, String weatherAlerts, St
 
 /**
  * buildContentOnly() - Build announcement content without instructions
+ * Parameters: todayDate, weatherReport, weatherAlerts, calendarEvents
  * This creates a simple concatenation of the data for fallback use
  */
-private String buildContentOnly(String weatherReport, String weatherAlerts, String calendarEvents) {
+private String buildContentOnly(String todayDate, String weatherReport, String weatherAlerts, String calendarEvents) {
   StringBuilder content = new StringBuilder()
+
+  // Add today's date
+  if (todayDate) {
+    content.append(todayDate)
+    content.append(' ')
+  }
 
   // Add weather report
   if (weatherReport) {
@@ -421,6 +440,9 @@ private String buildContentOnly(String weatherReport, String weatherAlerts, Stri
 
   // If nothing to announce
   if (!weatherReport && !weatherAlerts && !calendarEvents) {
+    if (todayDate) {
+      return "Good morning! ${todayDate} No weather or calendar information is available today."
+    }
     return 'Good morning! No weather or calendar information is available today.'
   }
 
@@ -452,6 +474,11 @@ private void sendGeminiRequest(String inputText, String fallbackText) {
       mode: 'custom',
       fallbackText: fallbackText
     ]
+
+    // Add maxTokens if specified
+    if (settings.maxTokens) {
+      requestData.maxTokens = settings.maxTokens
+    }
 
     // Send location event to Gemini Text Rewriter app
     sendLocationEvent(
