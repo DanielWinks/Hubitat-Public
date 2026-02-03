@@ -70,6 +70,47 @@ jobs:
 
           echo "Version update complete"
 
+      - name: Create merged app file with embedded library
+        run: |
+          echo "Creating merged app file for release..."
+
+          # Create Python script to merge library into app
+          cat > merge_library.py << 'EOF'
+          import re
+
+          # Read the library file
+          with open('Libraries/UtilitiesAndLoggingLibrary.groovy', 'r') as f:
+              library_content = f.read()
+
+          # Remove the library(...) section from the library content
+          # This regex matches the library block including its parentheses
+          library_content = re.sub(
+              r'library\s*\([^)]*\)\s*\n*',
+              '',
+              library_content,
+              flags=re.DOTALL
+          )
+
+          # Read the app file
+          with open('Apps/GeminiTextRewriter.groovy', 'r') as f:
+              app_content = f.read()
+
+          # Replace the #include line with the library content
+          merged_content = re.sub(
+              r'#include\s+dwinks\.UtilitiesAndLoggingLibrary\s*\n',
+              library_content + '\n',
+              app_content
+          )
+
+          # Write the merged file
+          with open('GeminiTextRewriter-merged.groovy', 'w') as f:
+              f.write(merged_content)
+
+          print("Merged app file created successfully")
+          EOF
+
+          python3 merge_library.py
+
       - name: Update packageManifest.json
         run: |
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
@@ -128,10 +169,10 @@ jobs:
             echo "Using commits since ${LAST_TAG}"
           fi
 
-          # Generate changelog from commits
+          # Generate changelog from commits (only for Gemini Text Rewriter specific files)
           CHANGELOG=$(git log $COMMIT_RANGE --pretty=format:"- %s" --no-merges -- \
             Apps/GeminiTextRewriter.groovy \
-            Libraries/UtilitiesAndLoggingLibrary.groovy || echo "- Initial release")
+            PackageManifests/GeminiTextRewriter/ || echo "- Initial release")
 
           # Save to file for use in release
           cat > changelog.md << EOF
@@ -144,7 +185,7 @@ jobs:
           ${CHANGELOG}
 
           ### Files Updated
-          - GeminiTextRewriter.groovy
+          - GeminiTextRewriter-merged.groovy (standalone version with embedded library)
           - packageManifest.json
           EOF
 
@@ -160,23 +201,6 @@ jobs:
           tag: "gemini-v${{ steps.version.outputs.new_version }}"
           push: true
 
-      - name: Trigger UtilitiesAndLoggingLibrary workflow
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'UtilitiesAndLoggingLibrary.yml',
-              ref: 'main'
-            });
-            console.log('Triggered UtilitiesAndLoggingLibrary workflow');
-
-      - name: Wait for bundle workflow to complete
-        run: |
-          echo "Waiting 60 seconds for bundle workflow to complete..."
-          sleep 60
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -186,7 +210,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            Bundles/UtilitiesAndLoggingLibrary.zip
+            GeminiTextRewriter-merged.groovy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -261,14 +285,14 @@ jobs:
 
           ## What was done
           1. ✅ Updated version number in GeminiTextRewriter.groovy
-          2. ✅ Updated packageManifest.json with new version and release notes
-          3. ✅ Triggered UtilitiesAndLoggingLibrary workflow
+          2. ✅ Created merged standalone file with embedded library
+          3. ✅ Updated packageManifest.json with new version and release notes
           4. ✅ Created git tag: gemini-v${{ steps.version.outputs.new_version }}
-          5. ✅ Created GitHub Release with bundles
+          5. ✅ Created GitHub Release with merged file
           6. ✅ Created discussion announcement
 
           ## Next Steps
           - Verify the release at: https://github.com/${{ github.repository }}/releases/tag/gemini-v${{ steps.version.outputs.new_version }}
-          - Check that bundles were generated correctly
+          - Check that the merged file was generated correctly
           - Announce the release to the Hubitat community if desired
           EOF
