@@ -20,7 +20,7 @@
     }
   ],
   "communityLink": "",
-  "dateReleased": "2026-01-31",
+  "dateReleased": "2026-02-03",
   "documentationLink": "https://github.com/DanielWinks/Hubitat-Public/blob/main/Readme/GeminiTextRewriter-README.md",
   "drivers": [
     {
@@ -36,6 +36,6 @@
   "minimumHEVersion": "2.3.4",
   "packageName": "Gemini Text Rewriter",
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
-  "releaseNotes": "1.1.0 Add child device functionality, enabling greatly simplified integration via Rule Machine\\r\\n1.0.1 Initial Release\\r\\n1.0.0 Initial release - Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify)",
-  "version": "1.1.0"
+  "releaseNotes": "1.1.1 A few fixes, reworked the app config to be a bit more streamlined.\\r\\n1.1.0 Add child device functionality, enabling greatly simplified integration via Rule Machine\\r\\n1.0.1 Initial Release\\r\\n1.0.0 Initial release - Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify)",
+  "version": "1.1.1"
 }
