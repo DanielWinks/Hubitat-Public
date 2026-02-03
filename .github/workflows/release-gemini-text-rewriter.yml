@@ -95,12 +95,14 @@ jobs:
           with open('Apps/GeminiTextRewriter.groovy', 'r') as f:
               app_content = f.read()
 
-          # Replace the #include line with the library content
-          merged_app_content = re.sub(
-              r'#include\s+dwinks\.UtilitiesAndLoggingLibrary\s*\n',
-              library_content + '\n',
-              app_content
-          )
+          # Replace the #include line with the library content (using string replace to avoid regex escape issues)
+          include_line = '#include dwinks.UtilitiesAndLoggingLibrary\n'
+          if include_line in app_content:
+              merged_app_content = app_content.replace(include_line, library_content + '\n')
+          else:
+              # Try without newline
+              include_line_no_newline = '#include dwinks.UtilitiesAndLoggingLibrary'
+              merged_app_content = app_content.replace(include_line_no_newline, library_content)
 
           # Write the merged app file (overwrite in root, won't be committed)
           with open('GeminiTextRewriter.groovy', 'w') as f:
@@ -112,12 +114,11 @@ jobs:
           with open('Drivers/Component/GeminiTextRewriterDevice.groovy', 'r') as f:
               device_content = f.read()
 
-          # Replace the #include line with the library content
-          merged_device_content = re.sub(
-              r'#include\s+dwinks\.UtilitiesAndLoggingLibrary\s*\n',
-              library_content + '\n',
-              device_content
-          )
+          # Replace the #include line with the library content (using string replace to avoid regex escape issues)
+          if include_line in device_content:
+              merged_device_content = device_content.replace(include_line, library_content + '\n')
+          else:
+              merged_device_content = device_content.replace(include_line_no_newline, library_content)
 
           # Write the merged device file (overwrite in root, won't be committed)
           with open('GeminiTextRewriterDevice.groovy', 'w') as f:
