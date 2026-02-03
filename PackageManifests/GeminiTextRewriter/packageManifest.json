@@ -10,15 +10,6 @@
     }
   ],
   "author": "Daniel Winks",
-  "bundles": [
-    {
-      "id": "218f2298-f008-4252-b554-10a6fb91b01b",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/raw/main/Bundles/UtilitiesAndLoggingLibrary.zip",
-      "name": "DWinks Utilities and Logging Library",
-      "namespace": "dwinks",
-      "required": true
-    }
-  ],
   "communityLink": "",
   "dateReleased": "2026-01-31",
   "documentationLink": "https://github.com/DanielWinks/Hubitat-Public/blob/main/Readme/GeminiTextRewriter-README.md",
