@@ -81,6 +81,10 @@ metadata {
   attribute 'currentTrackDuration', 'string'
   attribute 'currentArtistName', 'string'
   attribute 'albumArtURI', 'string'
+  attribute 'albumArtSmall', 'string'
+  attribute 'albumArtMedium', 'string'
+  attribute 'albumArtLarge', 'string'
+  attribute 'audioSource', 'string'
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
   attribute 'currentFavorite', 'string'
@@ -1440,6 +1444,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
     setCurrentTrackNumber(trackNumber as Integer)
     setTrackDescription(trackDescription)
     setAlbumArtURI(albumArtURI, isPlayingLocalTrack)
+    setAudioSource(trackUri, isPlayingLocalTrack)
 
   } else {
     setCurrentArtistName('Not Available')
@@ -1555,6 +1560,10 @@ void clearCurrentPlayingStates() {
   setNextAlbumName('Not Available')
   setNextTrackName('Not Available')
   sendDeviceEvent('albumArtURI' ,'Not Available')
+  sendDeviceEvent('albumArtSmall' ,'Not Available')
+  sendDeviceEvent('albumArtMedium' ,'Not Available')
+  sendDeviceEvent('albumArtLarge' ,'Not Available')
+  sendDeviceEvent('audioSource' ,'Not Available')
   sendDeviceEvent('currentFavorite','Not Available')
   sendDeviceEvent('trackDescription','Not Available')
 }
@@ -2408,13 +2417,50 @@ void setGroupMemberNames(List<String> groupPlayerNames) {
 @CompileStatic
 void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
   String uri = '<br>'
+  String smallUri = ''
+  String mediumUri = ''
+  String largeUri = ''
+
   if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
-    uri += "<img src=\"${getLocalUpnpUrl()}${albumArtURI}\" width=\"200\" height=\"200\" >"
-  } else if(!isPlayingLocalTrack) {
+    String baseUrl = "${getLocalUpnpUrl()}${albumArtURI}"
+    uri += "<img src=\"${baseUrl}\" width=\"200\" height=\"200\" >"
+    // Generate URLs for different sizes based on Sonos conventions
+    smallUri = baseUrl.contains('?') ? "${baseUrl}&x=60&y=60" : "${baseUrl}?x=60&y=60"
+    mediumUri = baseUrl.contains('?') ? "${baseUrl}&x=200&y=200" : "${baseUrl}?x=200&y=200"
+    largeUri = baseUrl.contains('?') ? "${baseUrl}&x=600&y=600" : "${baseUrl}?x=600&y=600"
+  } else if(!isPlayingLocalTrack && albumArtURI) {
     uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
+    // For external URLs, use as-is (they typically come pre-sized)
+    smallUri = albumArtURI
+    mediumUri = albumArtURI
+    largeUri = albumArtURI
   }
+
   sendDeviceEvent('albumArtURI', uri)
+  sendDeviceEvent('albumArtSmall', smallUri)
+  sendDeviceEvent('albumArtMedium', mediumUri)
+  sendDeviceEvent('albumArtLarge', largeUri)
   sendGroupEvents()
+}
+
+@CompileStatic
+void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
+  String audioSourceUrl = ''
+
+  if(trackUri && trackUri.startsWith('http') && !isPlayingLocalTrack) {
+    // Direct HTTP URL - this is the actual audio source
+    audioSourceUrl = trackUri
+  } else if(trackUri && trackUri.startsWith('/') && !isPlayingLocalTrack) {
+    // Local path on Sonos device
+    audioSourceUrl = "${getLocalUpnpUrl()}${trackUri}"
+  } else if(trackUri && !isPlayingLocalTrack) {
+    // Other protocols (x-rincon-stream, x-sonosapi, etc.) - store as-is for reference
+    audioSourceUrl = trackUri
+  } else {
+    audioSourceUrl = 'Not Available'
+  }
+
+  sendDeviceEvent('audioSource', audioSourceUrl)
 }
 
 String getAlbumArtURI() {
