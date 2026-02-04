@@ -2248,6 +2248,14 @@ String getChildDeviceDataValue(DeviceWrapper child, String name) {
 
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
+Object getAtomicStateValue(String name) {
+  return atomicState[name]
+}
+
+void setAtomicStateValue(String name, Object value) {
+  atomicState[name] = value
+}
+
 @CompileStatic
 String getId() { return getDeviceDataValue('id')
 }
@@ -3363,25 +3371,17 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
     // Clear regular queue
     getAudioClipQueue().clear()
     // Reset playback state to interrupt current clip
-    atomicState.audioClipPlaying = false
+    setAtomicStateValue('audioClipPlaying', false)
   }
 
   // Add to high-priority queue
   highPriorityQueue.add(audioClip)
 
   // If first high-priority or nothing playing, start immediately
-  if(isFirstHighPriority || atomicState.audioClipPlaying == false) {
+  Boolean audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
+  if(isFirstHighPriority || audioClipPlaying == false) {
     dequeueAudioClip()
   }
-  if(!clipMessage) {return}
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(clipMessage.rightChannel) {
-    sendWsMessage(clipMessage.leftChannel)
-    rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
-  } else {
-    sendWsMessage(clipMessage.leftChannel)
-  }
-  atomicState.audioClipPlaying = true
 }
 
 @CompileStatic
