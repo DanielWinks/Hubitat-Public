@@ -248,6 +248,8 @@ import java.util.concurrent.Semaphore
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static Semaphore deviceDataMutex = new Semaphore(1)
 @Field static Semaphore avtSubscribeMutex = new Semaphore(1)
@@ -443,6 +445,14 @@ void audioClipQueueInitialization() {
   if(audioClipQueue == null) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueue.containsKey(getId())) {
     audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
+  }
+  if(audioClipQueueHighPriority == null) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!audioClipQueueHighPriority.containsKey(getId())) {
+    audioClipQueueHighPriority[getId()] = new ConcurrentLinkedQueue<Map>()
+  }
+  if(audioClipQueueSaved == null) { audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!audioClipQueueSaved.containsKey(getId())) {
+    audioClipQueueSaved[getId()] = new ConcurrentLinkedQueue<Map>()
   }
   if(audioClipQueueTimers == null) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
   if(!audioClipQueueTimers.containsKey(getId())) {
@@ -2680,6 +2690,18 @@ ConcurrentLinkedQueue<Map> getAudioClipQueue() {
 }
 
 @CompileStatic
+ConcurrentLinkedQueue<Map> getAudioClipQueueHighPriority() {
+  audioClipQueueInitialization()
+  return audioClipQueueHighPriority[getId()]
+}
+
+@CompileStatic
+ConcurrentLinkedQueue<Map> getAudioClipQueueSaved() {
+  audioClipQueueInitialization()
+  return audioClipQueueSaved[getId()]
+}
+
+@CompileStatic
 LinkedHashMap getAudioClipQueueTimers() {
   audioClipQueueInitialization()
   return audioClipQueueTimers[getId()]
@@ -2702,6 +2724,45 @@ Integer getAudioClipQueueLength() {
 Boolean getAudioClipQueueIsEmpty() {
   audioClipQueueInitialization()
   return getAudioClipQueue().size() == 0
+}
+
+void saveRegularAudioClipQueue() {
+  logTrace('saveRegularAudioClipQueue')
+  ConcurrentLinkedQueue<Map> regularQueue = getAudioClipQueue()
+  ConcurrentLinkedQueue<Map> savedQueue = getAudioClipQueueSaved()
+
+  // Save all queued regular priority clips
+  savedQueue.clear()
+
+  // First, save the currently playing clip if there is one
+  Map currentlyPlayingClip = atomicState.currentlyPlayingClip as Map
+  if(currentlyPlayingClip) {
+    savedQueue.add(currentlyPlayingClip)
+    logDebug('Saved currently playing clip to be restarted')
+  }
+
+  // Then save all queued clips
+  List<Map> queueList = new ArrayList<Map>(regularQueue)
+  queueList.each { clip ->
+    savedQueue.add(clip)
+  }
+
+  logDebug("Saved ${savedQueue.size()} total clips (including currently playing)")
+}
+
+void restoreRegularAudioClipQueue() {
+  logTrace('restoreRegularAudioClipQueue')
+  ConcurrentLinkedQueue<Map> regularQueue = getAudioClipQueue()
+  ConcurrentLinkedQueue<Map> savedQueue = getAudioClipQueueSaved()
+
+  // Restore saved clips to regular queue
+  List<Map> savedList = new ArrayList<Map>(savedQueue)
+  savedList.each { clip ->
+    regularQueue.add(clip)
+  }
+
+  savedQueue.clear()
+  logDebug("Restored ${savedList.size()} regular priority clips to queue")
 }
 
 @CompileStatic
@@ -3217,6 +3278,7 @@ void scheduleAmazonMusicAutoPlay() {
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null) {
   logTrace('playerLoadAudioClipHighPriority')
+
   Map<String,String> command = [
     'namespace':'audioClip',
     'command':'loadAudioClip',
@@ -3233,11 +3295,27 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
   audioClip.uri = uri
-  // Queue high priority clips instead of sending directly to prevent interruption
-  enqueueAudioClip(audioClip)
-}
 
-void sendAudioClipHighPriority(Map clipMessage) {
+  // Check if this is the first high-priority clip
+  ConcurrentLinkedQueue<Map> highPriorityQueue = getAudioClipQueueHighPriority()
+  Boolean isFirstHighPriority = highPriorityQueue.isEmpty()
+
+  if(isFirstHighPriority) {
+    // Save currently playing + all queued regular priority clips
+    saveRegularAudioClipQueue()
+    // Clear regular queue
+    getAudioClipQueue().clear()
+    // Reset playback state to interrupt current clip
+    atomicState.audioClipPlaying = false
+  }
+
+  // Add to high-priority queue
+  highPriorityQueue.add(audioClip)
+
+  // If first high-priority or nothing playing, start immediately
+  if(isFirstHighPriority || atomicState.audioClipPlaying == false) {
+    dequeueAudioClip()
+  }
   if(!clipMessage) {return}
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   if(clipMessage.rightChannel) {
@@ -3309,16 +3387,9 @@ void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
   ConcurrentLinkedQueue<Map> queue = getAudioClipQueue()
 
-  // High priority clips should be added to front of queue (after any currently playing clip)
-  if(clipMessage?.priority == 'HIGH') {
-    // Convert queue to list, add high priority at front, rebuild queue
-    List<Map> queueList = new ArrayList<Map>(queue)
-    queueList.add(0, clipMessage)
-    queue.clear()
-    queueList.each { queue.add(it) }
-  } else {
-    queue.add(clipMessage)
-  }
+  // Regular priority clips go to regular queue
+  // High priority clips are now handled separately via playerLoadAudioClipHighPriority
+  queue.add(clipMessage)
 
   if(atomicState.audioClipPlaying == false) {dequeueAudioClip()}
 }
@@ -3326,11 +3397,35 @@ void enqueueAudioClip(Map clipMessage) {
 void dequeueAudioClip() {
   logTrace('dequeueAudioClip')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
-  Map clipMessage = getAudioClipQueue().poll()
+
+  // Check high-priority queue first
+  ConcurrentLinkedQueue<Map> highPriorityQueue = getAudioClipQueueHighPriority()
+  Map clipMessage = highPriorityQueue.poll()
+
+  // If no high-priority clips, check if we should restore saved queue
   if(!clipMessage) {
-    return
-    logTrace('No more audio clips to dequeue.')
+    // If high-priority queue is empty and saved queue has items, restore them
+    if(!getAudioClipQueueSaved().isEmpty()) {
+      restoreRegularAudioClipQueue()
+    }
+    // Now get from regular queue
+    clipMessage = getAudioClipQueue().poll()
   }
+
+  if(!clipMessage) {
+    logTrace('No more audio clips to dequeue.')
+    atomicState.currentlyPlayingClip = null
+    return
+  }
+
+  // Save currently playing clip (only if it's NOT high priority)
+  // High priority clips shouldn't be saved for replay
+  if(clipMessage?.priority != 'HIGH') {
+    atomicState.currentlyPlayingClip = clipMessage
+  } else {
+    atomicState.currentlyPlayingClip = null
+  }
+
   atomicState.audioClipPlaying = true
   // if(clipMessage?.duration != null && clipMessage?.duration > 0) {
   //   addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
@@ -3939,7 +4034,11 @@ void setChildFavs(String html) {
 
 void setAudioClipPlaying(Boolean s) {
   atomicState.audioClipPlaying = s
-  if(s == false) {dequeueAudioClip()}
+  if(s == false) {
+    // Clear currently playing clip when playback finishes successfully
+    atomicState.currentlyPlayingClip = null
+    dequeueAudioClip()
+  }
 }
 
 @CompileStatic
