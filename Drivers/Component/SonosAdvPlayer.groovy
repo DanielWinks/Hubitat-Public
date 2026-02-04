@@ -2445,9 +2445,9 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
       // Format: http://IP:PORT/AArl/file.jpghttp://IP:PORT/AArm/file.jpghttp://IP:PORT/AArs/file.jpg
       List<String> urls = parseJRiverAlbumArtUrls(albumArtURI)
       if(urls.size() >= 3) {
-        largeUri = urls[0]   // /AArl/ = large
-        mediumUri = urls[1]  // /AArm/ = medium
-        smallUri = urls[2]   // /AArs/ = small
+        largeUri = urls.find { it.contains('/AArl/') } ?: albumArtURI
+        mediumUri = urls.find { it.contains('/AArm/') } ?: albumArtURI
+        smallUri = urls.find { it.contains('/AArs/') } ?: albumArtURI
         uri += "<img src=\"${mediumUri}\" width=\"200\" height=\"200\" >"
       } else {
         // Fallback if parsing fails
@@ -2477,17 +2477,17 @@ List<String> parseJRiverAlbumArtUrls(String concatenatedUrls) {
   // Parse J River's concatenated album art URLs
   // Format: http://IP:PORT/AArl/file.jpghttp://IP:PORT/AArm/file.jpghttp://IP:PORT/AArs/file.jpg
   List<String> urls = []
-  
+
   // Split by finding 'http://' or 'https://' after the first character
   Integer startIdx = 0
   while(startIdx < concatenatedUrls.length()) {
     // Check if current URL starts with https:// (8 chars) or http:// (7 chars)
     Integer offset = concatenatedUrls.substring(startIdx).startsWith('https://') ? 8 : 7
-    
+
     // Find next occurrence of either protocol
     Integer nextHttpIdx = concatenatedUrls.indexOf('http://', startIdx + offset)
     Integer nextHttpsIdx = concatenatedUrls.indexOf('https://', startIdx + offset)
-    
+
     // Use whichever comes first (and exists)
     Integer nextIdx = -1
     if(nextHttpIdx > 0 && nextHttpsIdx > 0) {
@@ -2497,7 +2497,7 @@ List<String> parseJRiverAlbumArtUrls(String concatenatedUrls) {
     } else if(nextHttpsIdx > 0) {
       nextIdx = nextHttpsIdx
     }
-    
+
     if(nextIdx > 0) {
       urls.add(concatenatedUrls.substring(startIdx, nextIdx))
       startIdx = nextIdx
@@ -2506,7 +2506,7 @@ List<String> parseJRiverAlbumArtUrls(String concatenatedUrls) {
       break
     }
   }
-  
+
   return urls
 }
 
