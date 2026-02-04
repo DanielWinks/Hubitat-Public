@@ -2439,11 +2439,30 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
     mediumUri = baseUrl.contains('?') ? "${baseUrl}&x=200&y=200" : "${baseUrl}?x=200&y=200"
     largeUri = baseUrl.contains('?') ? "${baseUrl}&x=600&y=600" : "${baseUrl}?x=600&y=600"
   } else if(!isPlayingLocalTrack && albumArtURI) {
-    uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
-    // For external URLs, use as-is (they typically come pre-sized)
-    smallUri = albumArtURI
-    mediumUri = albumArtURI
-    largeUri = albumArtURI
+    // Check if this is J River format with multiple concatenated URLs
+    if(albumArtURI.contains('http://') && albumArtURI.indexOf('http://', 7) > 0) {
+      // J River style: multiple URLs concatenated together
+      // Format: http://IP:PORT/AArl/file.jpghttp://IP:PORT/AArm/file.jpghttp://IP:PORT/AArs/file.jpg
+      List<String> urls = parseJRiverAlbumArtUrls(albumArtURI)
+      if(urls.size() >= 3) {
+        largeUri = urls[0]   // /AArl/ = large
+        mediumUri = urls[1]  // /AArm/ = medium
+        smallUri = urls[2]   // /AArs/ = small
+        uri += "<img src=\"${mediumUri}\" width=\"200\" height=\"200\" >"
+      } else {
+        // Fallback if parsing fails
+        uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
+        smallUri = albumArtURI
+        mediumUri = albumArtURI
+        largeUri = albumArtURI
+      }
+    } else {
+      // Single URL format (Spotify, etc.) - use as-is for all sizes
+      uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
+      smallUri = albumArtURI
+      mediumUri = albumArtURI
+      largeUri = albumArtURI
+    }
   }
 
   sendDeviceEvent('albumArtURI', uri)
@@ -2451,6 +2470,44 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
   sendDeviceEvent('albumArtMedium', mediumUri)
   sendDeviceEvent('albumArtLarge', largeUri)
   sendGroupEvents()
+}
+
+@CompileStatic
+List<String> parseJRiverAlbumArtUrls(String concatenatedUrls) {
+  // Parse J River's concatenated album art URLs
+  // Format: http://IP:PORT/AArl/file.jpghttp://IP:PORT/AArm/file.jpghttp://IP:PORT/AArs/file.jpg
+  List<String> urls = []
+  
+  // Split by finding 'http://' or 'https://' after the first character
+  Integer startIdx = 0
+  while(startIdx < concatenatedUrls.length()) {
+    // Check if current URL starts with https:// (8 chars) or http:// (7 chars)
+    Integer offset = concatenatedUrls.substring(startIdx).startsWith('https://') ? 8 : 7
+    
+    // Find next occurrence of either protocol
+    Integer nextHttpIdx = concatenatedUrls.indexOf('http://', startIdx + offset)
+    Integer nextHttpsIdx = concatenatedUrls.indexOf('https://', startIdx + offset)
+    
+    // Use whichever comes first (and exists)
+    Integer nextIdx = -1
+    if(nextHttpIdx > 0 && nextHttpsIdx > 0) {
+      nextIdx = Math.min(nextHttpIdx, nextHttpsIdx)
+    } else if(nextHttpIdx > 0) {
+      nextIdx = nextHttpIdx
+    } else if(nextHttpsIdx > 0) {
+      nextIdx = nextHttpsIdx
+    }
+    
+    if(nextIdx > 0) {
+      urls.add(concatenatedUrls.substring(startIdx, nextIdx))
+      startIdx = nextIdx
+    } else {
+      urls.add(concatenatedUrls.substring(startIdx))
+      break
+    }
+  }
+  
+  return urls
 }
 
 @CompileStatic
