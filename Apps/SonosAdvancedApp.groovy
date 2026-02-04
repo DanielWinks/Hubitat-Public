@@ -232,7 +232,7 @@ Map localPlayerPage() {
 		install: false,
 		uninstall: false
   ) {
-    section("Please wait while we discover your Sonos. Click Next when all your devices have been discovered.") {
+    section("Please wait while we discover your Sonos devices. Using both SSDP and mDNS discovery methods. Click Next when all your devices have been discovered.") {
       paragraph (
         "<span class='app-state-${app.id}-discoveryInProgress'></span>"
       )
@@ -248,11 +248,39 @@ Map localPlayerSelectionPage() {
   state.remove("discoveryRunning")
 	unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
 	unsubscribe(location, 'sdpTerm.ssdp:all')
+
+  // Unregister mDNS listeners as discovery is complete
+  try {
+    unregisterMDNSListener('_sonos._tcp')
+    unregisterMDNSListener('_http._tcp')
+    logDebug("Unregistered mDNS listeners")
+  } catch(Exception e) {
+    logTrace("Could not unregister mDNS listeners: ${e.message}")
+  }
+
   LinkedHashMap newlyDiscovered = discoveredSonoses.collectEntries{id, player -> [(id.toString()): player.name]}
   LinkedHashMap previouslyCreated = getCurrentPlayerDevices().collectEntries{[(it.getDeviceNetworkId().toString()): it.getDataValue('name')]}
+
+  // Additional duplicate check: ensure no device appears twice with different MACs
+  // This can happen if a device changes IP or MAC spoofing occurs
+  Set<String> seenPlayerIds = [] as Set
+  LinkedHashMap deduplicatedDiscovered = [:]
+  newlyDiscovered.each { mac, name ->
+    Map deviceInfo = discoveredSonoses[mac]
+    String playerId = deviceInfo?.id
+    if(playerId && !seenPlayerIds.contains(playerId)) {
+      deduplicatedDiscovered[mac] = name
+      seenPlayerIds.add(playerId)
+    } else if(playerId) {
+      logWarn("Duplicate device detected: ${name} (${mac}) has same playerId as another device. Skipping.")
+    } else {
+      deduplicatedDiscovered[mac] = name
+    }
+  }
+
   LinkedHashMap selectionOptions = previouslyCreated
   Integer newlyFoundCount = 0
-  newlyDiscovered.each{ k,v ->
+  deduplicatedDiscovered.each{ k,v ->
     if(!selectionOptions.containsKey(k)) {
       selectionOptions[k] = v
       newlyFoundCount++
@@ -531,12 +559,15 @@ void createPlayerDevices() {
     if(cd && playerInfo) {
       try {
         logInfo("Updating player info with latest info from discovery...")
+
+        // First, update all basic player info
         playerInfo.each { key, value ->
           if(key != null && value != null) {
             cd.updateDataValue(key as String, value as String)
           }
         }
 
+        // Then handle secondaries
         LinkedHashMap<String,String> macToRincon = discoveredSonoses.collectEntries{ k,v ->
           if(k != null && v != null && v.id != null) {
             return [(k as String): (v.id as String)]
@@ -559,6 +590,25 @@ void createPlayerDevices() {
           }
         }
 
+        // Validate critical device data fields are populated
+        List<String> criticalFields = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+        List<String> missingFields = []
+        criticalFields.each { field ->
+          String value = cd.getDataValue(field)
+          if(!value || value == 'null') {
+            missingFields << field
+          }
+        }
+
+        if(missingFields.size() > 0) {
+          logWarn("Device ${cd.label} is missing critical data fields: ${missingFields.join(', ')}. This may cause issues.")
+          logWarn("Player info available: ${playerInfo.keySet().join(', ')}")
+          // Schedule a retry of secondaryConfiguration in case data gets populated later
+          runIn(10, 'retryDeviceConfiguration', [data: [dni: dni]])
+        }
+
+        // Small delay to ensure all data values are committed before secondaryConfiguration
+        pauseExecution(500)
         cd.secondaryConfiguration()
       } catch (Exception e) {
         logException("Failed to configure device ${dni}", e)
@@ -570,6 +620,58 @@ void createPlayerDevices() {
     }
   }
   if(!settings.skipOrphanRemoval) {removeOrphans()}
+}
+
+void retryDeviceConfiguration(Map data) {
+  String dni = data?.dni
+  if(!dni) {
+    logWarn('retryDeviceConfiguration called without DNI')
+    return
+  }
+
+  ChildDeviceWrapper cd = app.getChildDevice(dni)
+  if(!cd) {
+    logWarn("Cannot retry configuration for ${dni} - device not found")
+    return
+  }
+
+  Map playerInfo = discoveredSonoses[dni]
+  if(!playerInfo) {
+    logWarn("Cannot retry configuration for ${dni} - no player info available")
+    return
+  }
+
+  logInfo("Retrying device configuration for ${cd.label}...")
+
+  // Re-apply all device data
+  playerInfo.each { key, value ->
+    if(key != null && value != null) {
+      String currentValue = cd.getDataValue(key as String)
+      if(!currentValue || currentValue == 'null') {
+        logDebug("Setting missing field ${key} = ${value}")
+        cd.updateDataValue(key as String, value as String)
+      }
+    }
+  }
+
+  // Validate again
+  List<String> criticalFields = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+  List<String> stillMissing = []
+  criticalFields.each { field ->
+    String value = cd.getDataValue(field)
+    if(!value || value == 'null') {
+      stillMissing << field
+    }
+  }
+
+  if(stillMissing.size() > 0) {
+    logError("Device ${cd.label} still missing critical fields after retry: ${stillMissing.join(', ')}")
+    logError("This device may not function correctly. Try deleting and re-discovering it.")
+  } else {
+    logInfo("Device ${cd.label} configuration completed successfully on retry")
+    pauseExecution(500)
+    cd.secondaryConfiguration()
+  }
 }
 
 void removeOrphans() {
@@ -600,6 +702,15 @@ void removeOrphans() {
 
 // =============================================================================
 // Local Discovery
+//
+// This section implements dual discovery methods for Sonos devices:
+// 1. SSDP (Simple Service Discovery Protocol) - Legacy method, works on most networks
+// 2. mDNS (Multicast DNS) - Modern method added in Hubitat 2.4.1+, more reliable
+//
+// Duplicate Prevention:
+// - Devices are keyed by MAC address (primary identifier)
+// - Additional checks prevent duplicates by playerId and IP address
+// - Selection page deduplicates by playerId to handle edge cases
 // =============================================================================
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
@@ -608,6 +719,93 @@ void ssdpDiscover() {
   discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
+
+  // Also start mDNS discovery
+  startMdnsDiscovery()
+}
+
+void startMdnsDiscovery() {
+  try {
+    // Register mDNS listener for Sonos devices
+    // Sonos uses _sonos._tcp for its mDNS service
+    registerMDNSListener('_sonos._tcp')
+    logDebug("Registered mDNS listener for Sonos devices (_sonos._tcp)")
+
+    // Also listen for general device services that Sonos might broadcast
+    registerMDNSListener('_http._tcp')
+    logDebug("Registered mDNS listener for HTTP services (_http._tcp)")
+
+    // Schedule processing of mDNS entries after a delay to allow discovery
+    runIn(5, 'processMdnsDiscovery')
+  } catch(Exception e) {
+    logWarn("mDNS discovery not available or failed: ${e.message}")
+  }
+}
+
+void processMdnsDiscovery() {
+  try {
+    logDebug("Processing mDNS discovered devices...")
+
+    // Get all mDNS entries
+    def mdnsEntries = getMDNSEntries()
+    if(!mdnsEntries) {
+      logDebug("No mDNS entries found")
+      return
+    }
+
+    logDebug("Found ${mdnsEntries.size()} mDNS entries")
+
+    mdnsEntries.each { entry ->
+      // Filter for Sonos devices - they typically have 'Sonos' in the name or specific service types
+      String serviceName = entry.name ?: ''
+      String serviceType = entry.type ?: ''
+      String ipAddress = entry.ipAddress ?: ''
+      Integer port = entry.port ?: 0
+
+      logTrace("mDNS entry: name=${serviceName}, type=${serviceType}, ip=${ipAddress}, port=${port}")
+
+      // Check if this looks like a Sonos device
+      if(serviceName.toLowerCase().contains('sonos') || serviceType == '_sonos._tcp') {
+        logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}")
+        processDiscoveredSonosDevice(ipAddress)
+      } else if(ipAddress && port == 1400) {
+        // Port 1400 is Sonos UPnP port - worth checking
+        logTrace("Found device on Sonos UPnP port 1400: ${ipAddress}")
+        processDiscoveredSonosDevice(ipAddress)
+      }
+    }
+
+    sendFoundSonosEvents()
+  } catch(Exception e) {
+    logWarn("Error processing mDNS discovery: ${e.message}")
+  }
+}
+
+void processDiscoveredSonosDevice(String ipAddress) {
+  if(!ipAddress) { return }
+
+  // Check if we already discovered this IP
+  boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
+  if(alreadyDiscovered) {
+    logTrace("Device at ${ipAddress} already discovered, skipping")
+    return
+  }
+
+  // Try to get player info
+  LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
+  if(!playerInfo) {
+    logTrace("Could not get player info for ${ipAddress}")
+    return
+  }
+
+  GPathResult deviceDescription = getDeviceDescriptionLocalSync("${ipAddress}")
+  if(!deviceDescription) {
+    logTrace("Could not get device description for ${ipAddress}")
+    return
+  }
+
+  // Process using the same logic as SSDP
+  processSonosDeviceInfo(playerInfo, deviceDescription, ipAddress)
 }
 
 @CompileStatic
@@ -643,10 +841,14 @@ void processParsedSsdpEvent(LinkedHashMap event) {
     return
   }
 
+  processSonosDeviceInfo(playerInfo, deviceDescription, ipAddress)
+}
+
+@CompileStatic
+void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescription, String ipAddress) {
   LinkedHashMap playerInfoDevice = playerInfo?.device as LinkedHashMap
 
   String modelName = deviceDescription['device']['modelName']
-	String ssdpPath = event?.ssdpPath
 	String mac = (deviceDescription['device']['MACAddress']).toString().replace(':','')
   String playerName = playerInfoDevice?.name
   String playerDni = mac
@@ -658,8 +860,28 @@ void processParsedSsdpEvent(LinkedHashMap event) {
   List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
 
   if(mac && playerInfoDevice?.name) {
-    logTrace("Received SSDP event response for MAC: ${mac}, device name: ${playerInfoDevice?.name}")
+    logTrace("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
   }
+
+  // Use MAC as primary key, but also check for duplicate IPs to prevent same device listed multiple times
+  // Check if this device is already discovered by MAC or playerId
+  boolean isDuplicate = false
+  discoveredSonoses.each { key, value ->
+    LinkedHashMap existingDevice = value as LinkedHashMap
+    if(key == mac || existingDevice.id == playerId || existingDevice.deviceIp == ipAddress) {
+      logTrace("Device already discovered - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}")
+      isDuplicate = true
+      // Update the existing entry with latest info to keep it fresh
+      if(key == mac) {
+        existingDevice.deviceIp = ipAddress
+        existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
+        existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
+        existingDevice.localUpnpHost = "${ipAddress}:1400"
+      }
+    }
+  }
+
+  if(isDuplicate) { return }
 
   LinkedHashMap discoveredSonos = [
     name: playerName,
@@ -688,14 +910,22 @@ void processParsedSsdpEvent(LinkedHashMap event) {
       localUpnpUrl: "http://${ipAddress}:1400",
       localUpnpHost: "${ipAddress}:1400"
     ]
-    discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-    logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+    // Check for duplicate secondaries
+    boolean secondaryExists = discoveredSonosSecondaries.values().any { secondaryDevice ->
+      LinkedHashMap secondary = secondaryDevice as LinkedHashMap
+      return secondary.id == playerId
+    }
+    if(!secondaryExists) {
+      discoveredSonosSecondaries[mac] = discoveredSonosSecondary
+      logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+    }
   }
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
+    logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
     sendFoundSonosEvents()
   } else {
-    logTrace("Device id:${discoveredSonos?.id} responded to SSDP discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
+    logTrace("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
 }
 

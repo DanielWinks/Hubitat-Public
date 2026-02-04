@@ -358,6 +358,24 @@ void fullRenewSubscriptions() {
 }
 
 void secondaryConfiguration() {
+  // Validate critical device data before proceeding
+  List<String> criticalFields = ['id', 'deviceIp', 'localUpnpHost', 'websocketUrl']
+  List<String> missingFields = []
+  criticalFields.each { field ->
+    String value = device.getDataValue(field)
+    if(!value || value == 'null') {
+      missingFields << field
+    }
+  }
+
+  if(missingFields.size() > 0) {
+    logWarn("Cannot complete secondaryConfiguration - missing critical data: ${missingFields.join(', ')}")
+    logWarn("This usually indicates the parent app hasn't finished configuring the device yet.")
+    // Schedule retry
+    runIn(10, 'secondaryConfiguration')
+    return
+  }
+
   createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
   createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
@@ -386,6 +404,8 @@ void secondaryConfiguration() {
       runIn(2, 'initializeWebsocketConnection', [overwrite: true])
       runIn(7, 'subscribeToEvents', [overwrite: true])
     }
+  } else {
+    logWarn('Device data still incomplete after validation - subscriptions not established')
   }
 }
 
