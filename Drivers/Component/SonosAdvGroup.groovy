@@ -118,7 +118,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     logWarn('No player devices found in group')
     return
   }
-  logDebug(allDevs)
+  logDebug("All Devices In Group: ${allDevs}")
   try {
     def ttsMap = textToSpeech(text, voice)
     if(!ttsMap || !ttsMap.uri) {
