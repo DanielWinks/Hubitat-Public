@@ -2451,14 +2451,19 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
     if(albumArtURI.contains('http://') && albumArtURI.indexOf('http://', 7) > 0) {
       // J River style: multiple URLs concatenated together
       // Format: http://IP:PORT/AArl/file.jpghttp://IP:PORT/AArm/file.jpghttp://IP:PORT/AArs/file.jpg
+      // May also include /AArt/ (tiny) which we explicitly ignore
       List<String> urls = parseJRiverAlbumArtUrls(albumArtURI)
-      if(urls.size() >= 3) {
-        largeUri = urls.find { it.contains('/AArl/') } ?: albumArtURI
-        mediumUri = urls.find { it.contains('/AArm/') } ?: albumArtURI
-        smallUri = urls.find { it.contains('/AArs/') } ?: albumArtURI
+      // Filter out tiny artwork (/AArt/)
+      urls = urls.findAll { !it.contains('/AArt/') }
+
+      if(urls.size() > 0) {
+        // Find URLs by size preference: large, medium, small
+        largeUri = urls.find { it.contains('/AArl/') } ?: urls[0]
+        mediumUri = urls.find { it.contains('/AArm/') } ?: urls.find { it.contains('/AArl/') } ?: urls[0]
+        smallUri = urls.find { it.contains('/AArs/') } ?: urls.find { it.contains('/AArm/') } ?: urls[0]
         uri += "<img src=\"${mediumUri}\" width=\"200\" height=\"200\" >"
       } else {
-        // Fallback if parsing fails
+        // Fallback if all URLs were filtered out
         uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
         smallUri = albumArtURI
         mediumUri = albumArtURI
