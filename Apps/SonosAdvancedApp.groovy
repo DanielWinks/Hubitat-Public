@@ -1255,6 +1255,28 @@ void updateGroupDeviceMusicPlayerState(String coordinatorId, String status, Stri
   }
 }
 
+/**
+ * Forward extended playback attributes to all group devices that use this coordinator
+ * Called by the coordinator player when playback metadata changes
+ * @param coordinatorId The RINCON ID of the coordinator
+ * @param attributes Map of attribute names to values to forward
+ */
+void updateGroupDeviceExtendedPlaybackState(String coordinatorId, Map attributes) {
+  if(!coordinatorId || !attributes) { return }
+
+  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
+    it.getDataValue('groupCoordinatorId') == coordinatorId
+  }
+
+  groupsForCoord.each { gd ->
+    attributes.each { attrName, attrValue ->
+      if(attrValue != null) {
+        gd.sendEvent(name: attrName, value: attrValue)
+      }
+    }
+  }
+}
+
 // =============================================================================
 // Version Checking for Installed Files
 // =============================================================================

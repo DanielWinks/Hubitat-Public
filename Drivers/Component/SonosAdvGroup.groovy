@@ -68,6 +68,28 @@ metadata {
 
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
+
+    // Extended playback attributes forwarded from coordinator
+    attribute 'currentTrackDuration', 'string'
+    attribute 'currentArtistName', 'string'
+    attribute 'albumArtURI', 'string'
+    attribute 'albumArtSmall', 'string'
+    attribute 'albumArtMedium', 'string'
+    attribute 'albumArtLarge', 'string'
+    attribute 'audioSource', 'string'
+    attribute 'currentAlbumName', 'string'
+    attribute 'currentTrackName', 'string'
+    attribute 'currentFavorite', 'string'
+    attribute 'currentTrackNumber', 'number'
+    attribute 'nextArtistName', 'string'
+    attribute 'nextAlbumName', 'string'
+    attribute 'nextTrackName', 'string'
+    attribute 'queueTrackTotal', 'string'
+    attribute 'queueTrackPosition', 'string'
+    attribute 'currentRepeatOneMode', 'enum', ['on', 'off']
+    attribute 'currentRepeatAllMode', 'enum', ['on', 'off']
+    attribute 'currentCrossfadeMode', 'enum', ['on', 'off']
+    attribute 'currentShuffleMode', 'enum', ['on', 'off']
   }
   preferences {
     section('Device Settings') {
@@ -611,6 +633,49 @@ void refresh() {
   if(trackDescription != null) {
     sendEvent(name: 'trackDescription', value: trackDescription)
   }
+
+  // Refresh extended playback attributes from coordinator
+  String currentTrackDuration = coordinator.currentValue('currentTrackDuration', true)
+  String currentArtistName = coordinator.currentValue('currentArtistName', true)
+  String albumArtURI = coordinator.currentValue('albumArtURI', true)
+  String albumArtSmall = coordinator.currentValue('albumArtSmall', true)
+  String albumArtMedium = coordinator.currentValue('albumArtMedium', true)
+  String albumArtLarge = coordinator.currentValue('albumArtLarge', true)
+  String audioSource = coordinator.currentValue('audioSource', true)
+  String currentAlbumName = coordinator.currentValue('currentAlbumName', true)
+  String currentTrackName = coordinator.currentValue('currentTrackName', true)
+  String currentFavorite = coordinator.currentValue('currentFavorite', true)
+  Integer currentTrackNumber = coordinator.currentValue('currentTrackNumber', true) as Integer
+  String nextArtistName = coordinator.currentValue('nextArtistName', true)
+  String nextAlbumName = coordinator.currentValue('nextAlbumName', true)
+  String nextTrackName = coordinator.currentValue('nextTrackName', true)
+  String queueTrackTotal = coordinator.currentValue('queueTrackTotal', true)
+  String queueTrackPosition = coordinator.currentValue('queueTrackPosition', true)
+  String currentRepeatOneMode = coordinator.currentValue('currentRepeatOneMode', true)
+  String currentRepeatAllMode = coordinator.currentValue('currentRepeatAllMode', true)
+  String currentCrossfadeMode = coordinator.currentValue('currentCrossfadeMode', true)
+  String currentShuffleMode = coordinator.currentValue('currentShuffleMode', true)
+
+  if(currentTrackDuration != null) sendEvent(name: 'currentTrackDuration', value: currentTrackDuration)
+  if(currentArtistName != null) sendEvent(name: 'currentArtistName', value: currentArtistName)
+  if(albumArtURI != null) sendEvent(name: 'albumArtURI', value: albumArtURI)
+  if(albumArtSmall != null) sendEvent(name: 'albumArtSmall', value: albumArtSmall)
+  if(albumArtMedium != null) sendEvent(name: 'albumArtMedium', value: albumArtMedium)
+  if(albumArtLarge != null) sendEvent(name: 'albumArtLarge', value: albumArtLarge)
+  if(audioSource != null) sendEvent(name: 'audioSource', value: audioSource)
+  if(currentAlbumName != null) sendEvent(name: 'currentAlbumName', value: currentAlbumName)
+  if(currentTrackName != null) sendEvent(name: 'currentTrackName', value: currentTrackName)
+  if(currentFavorite != null) sendEvent(name: 'currentFavorite', value: currentFavorite)
+  if(currentTrackNumber != null) sendEvent(name: 'currentTrackNumber', value: currentTrackNumber)
+  if(nextArtistName != null) sendEvent(name: 'nextArtistName', value: nextArtistName)
+  if(nextAlbumName != null) sendEvent(name: 'nextAlbumName', value: nextAlbumName)
+  if(nextTrackName != null) sendEvent(name: 'nextTrackName', value: nextTrackName)
+  if(queueTrackTotal != null) sendEvent(name: 'queueTrackTotal', value: queueTrackTotal)
+  if(queueTrackPosition != null) sendEvent(name: 'queueTrackPosition', value: queueTrackPosition)
+  if(currentRepeatOneMode != null) sendEvent(name: 'currentRepeatOneMode', value: currentRepeatOneMode)
+  if(currentRepeatAllMode != null) sendEvent(name: 'currentRepeatAllMode', value: currentRepeatAllMode)
+  if(currentCrossfadeMode != null) sendEvent(name: 'currentCrossfadeMode', value: currentCrossfadeMode)
+  if(currentShuffleMode != null) sendEvent(name: 'currentShuffleMode', value: currentShuffleMode)
 }
 
 /**

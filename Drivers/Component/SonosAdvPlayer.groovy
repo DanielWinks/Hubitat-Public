@@ -1632,6 +1632,18 @@ void parentUpdateGroupDeviceMusicPlayerState(String status = null, String trackD
   parent?.updateGroupDeviceMusicPlayerState(coordinatorId, stat, data, desc)
 }
 
+/**
+ * Forward extended playback attributes to group devices via parent app
+ * Accepts a Map of attribute names to values for flexible batch updates
+ * @param attributes Map of attribute names to values (e.g., ['currentTrackName': 'Song Title', 'currentArtistName': 'Artist'])
+ */
+void parentUpdateGroupDeviceExtendedPlaybackState(Map attributes) {
+  if(!attributes) { return }
+  String coordinatorId = getId()
+  logDebug("parentUpdateGroupDeviceExtendedPlaybackState: Forwarding ${attributes.size()} attributes to group devices")
+  parent?.updateGroupDeviceExtendedPlaybackState(coordinatorId, attributes)
+}
+
 @CompileStatic
 void updateZoneGroupName(String groupName) {
   sendDeviceEvent('groupName', groupName)
@@ -2534,6 +2546,13 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
   sendDeviceEvent('albumArtMedium', mediumUri)
   sendDeviceEvent('albumArtLarge', largeUri)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([
+    albumArtURI: uri,
+    albumArtSmall: smallUri,
+    albumArtMedium: mediumUri,
+    albumArtLarge: largeUri
+  ])
 }
 
 @CompileStatic
@@ -2592,6 +2611,9 @@ void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
   }
 
   sendDeviceEvent('audioSource', audioSourceUrl)
+  sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([audioSource: audioSourceUrl])
 }
 
 String getAlbumArtURI() {
@@ -2613,6 +2635,8 @@ void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String found
 void setCurrentFavorite(String uri) {
   sendDeviceEvent('currentFavorite', uri)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentFavorite: uri])
 }
 String getCurrentFavorite() {
   return this.device.currentValue('currentFavorite', true)
@@ -2719,6 +2743,12 @@ void setPlayMode(String playMode){
     break
   }
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([
+    currentRepeatOneMode: getCurrentRepeatOneMode(),
+    currentRepeatAllMode: getCurrentRepeatAllMode(),
+    currentShuffleMode: getCurrentShuffleMode()
+  ])
 }
 
 String getCurrentRepeatOneMode() { return this.device.currentValue('currentRepeatOneMode') }
@@ -2730,6 +2760,8 @@ void setCrossfadeMode(String currentCrossfadeMode) {
   sendDeviceEvent('currentCrossfadeMode', currentCrossfadeMode)
   sendGroupEvents()
   sendChildEvent(getCrossfadeControlChild(), 'switch', currentCrossfadeMode)
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentCrossfadeMode: currentCrossfadeMode])
 }
 String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMode') }
 
@@ -2737,6 +2769,8 @@ String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMod
 void setCurrentTrackDuration(String currentTrackDuration){
   sendDeviceEvent('currentTrackDuration', currentTrackDuration)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentTrackDuration: currentTrackDuration])
 }
 String getCurrentTrackDuration() { return this.device.currentValue('currentTrackDuration') }
 
@@ -2744,6 +2778,8 @@ String getCurrentTrackDuration() { return this.device.currentValue('currentTrack
 void setCurrentArtistName(String currentArtistName) {
   sendDeviceEvent('currentArtistName', currentArtistName ?: 'Not Available')
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentArtistName: currentArtistName ?: 'Not Available'])
 }
 String getCurrentArtistName() { return this.device.currentValue('currentArtistName') }
 
@@ -2751,6 +2787,8 @@ String getCurrentArtistName() { return this.device.currentValue('currentArtistNa
 void setCurrentAlbumName(String currentAlbumName) {
   sendDeviceEvent('currentAlbumName', currentAlbumName ?: 'Not Available')
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentAlbumName: currentAlbumName ?: 'Not Available'])
 }
 String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName') }
 
@@ -2758,6 +2796,8 @@ String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName
 void setCurrentTrackName(String currentTrackName) {
   sendDeviceEvent('currentTrackName', currentTrackName ?: 'Not Available')
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentTrackName: currentTrackName ?: 'Not Available'])
 }
 String getCurrentTrackName() { return this.device.currentValue('currentTrackName') }
 
@@ -2765,6 +2805,8 @@ String getCurrentTrackName() { return this.device.currentValue('currentTrackName
 void setCurrentTrackNumber(Integer currentTrackNumber) {
   sendDeviceEvent('currentTrackNumber', currentTrackNumber ?: 0)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentTrackNumber: currentTrackNumber ?: 0])
 }
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
 
@@ -2794,6 +2836,8 @@ String getTrackDataEvents() {return this.device.currentValue('trackData')}
 void setNextArtistName(String nextArtistName) {
   sendDeviceEvent('nextArtistName', nextArtistName ?: 'Not Available')
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([nextArtistName: nextArtistName ?: 'Not Available'])
 }
 String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 
@@ -2801,6 +2845,8 @@ String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 void setNextAlbumName(String nextAlbumName) {
   sendDeviceEvent('nextAlbumName', nextAlbumName ?: 'Not Available')
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([nextAlbumName: nextAlbumName ?: 'Not Available'])
 }
 String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 
@@ -2808,6 +2854,8 @@ String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 void setNextTrackName(String nextTrackName) {
   sendDeviceEvent('nextTrackName', nextTrackName ?: 'Not Available')
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([nextTrackName: nextTrackName ?: 'Not Available'])
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 
