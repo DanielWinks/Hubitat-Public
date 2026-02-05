@@ -251,11 +251,24 @@ Map localPlayerSelectionPage() {
 
   // Unregister mDNS listeners as discovery is complete
   try {
-    unregisterMDNSListener('_sonos._tcp')
-    unregisterMDNSListener('_http._tcp')
-    logDebug("Unregistered mDNS listeners")
+    // Check if mDNS methods exist (requires Hubitat 2.4.1+)
+    if(this.respondsTo('unregisterMDNSListener')) {
+      unregisterMDNSListener('_sonos._tcp')
+      unregisterMDNSListener('_http._tcp')
+      logDebug("Unregistered mDNS listeners")
+    }
   } catch(Exception e) {
     logTrace("Could not unregister mDNS listeners: ${e.message}")
+  }
+
+  // Clear feedback when entering page fresh (not from button click)
+  if(state.playerCreationFeedback && state.playerCreationTimestamp) {
+    Long timeSinceCreation = now() - (state.playerCreationTimestamp as Long)
+    if(timeSinceCreation > 2000) { state.remove('playerCreationFeedback') }
+  }
+  if(state.playerRemovalFeedback && state.playerRemovalTimestamp) {
+    Long timeSinceRemoval = now() - (state.playerRemovalTimestamp as Long)
+    if(timeSinceRemoval > 2000) { state.remove('playerRemovalFeedback') }
   }
 
   LinkedHashMap newlyDiscovered = discoveredSonoses.collectEntries{id, player -> [(id.toString()): player.name]}
@@ -398,7 +411,8 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'saveGroup') { saveGroup() }
   if(buttonName == 'deleteGroup') { deleteGroup() }
   if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }
-  if(buttonName == 'createPlayerDevices') { createPlayerDevices() }
+  if(buttonName == 'createPlayerDevices') { createPlayerDevicesWithFeedback() }
+  if(buttonName == 'removePlayerDevices') { removePlayerDevicesWithFeedback() }
 
   // Update management buttons
   if(buttonName == 'btnCheckForUpdates') { checkForUpdates(true) }
@@ -496,7 +510,7 @@ void createGroupDevices() {
         device = addChildDevice('dwinks', 'Sonos Advanced Group', dni, [name: 'Sonos Group', label: "Sonos Group: ${it.key}"])
 
 
-      } catch (UnknownDeviceTypeException e) {logException('Sonos Advanced Group driver not found', e)}
+      } catch (UnknownDeviceTypeException e) {logError("Sonos Advanced Group driver not found: ${e.message}")}
     }
     String groupCoordinatorId = it.value.groupCoordinatorId as String
     String playerIds =  it.value.playerIds.join(',')
@@ -509,6 +523,44 @@ void createGroupDevices() {
   app.removeSetting('groupDevices')
   app.updateSetting('groupDevices', [type: 'enum', value: getCreatedGroupDevices()])
   removeOrphans()
+}
+
+void createPlayerDevicesWithFeedback() {
+  List<String> willBeCreated = settings.playerDevices ? (settings.playerDevices - getCreatedPlayerDevices()) : []
+  if(willBeCreated.size() == 0) {
+    state.playerCreationFeedback = "No new players to create"
+    state.playerCreationTimestamp = now()
+    return
+  }
+  
+  createPlayerDevices()
+  
+  state.playerCreationFeedback = "Successfully created ${willBeCreated.size()} player(s)"
+  state.playerCreationTimestamp = now()
+}
+
+void removePlayerDevicesWithFeedback() {
+  List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices?.contains(p.getDeviceNetworkId())) }
+  if(willBeRemoved.size() == 0) {
+    state.playerRemovalFeedback = "No players to remove"
+    state.playerRemovalTimestamp = now()
+    return
+  }
+  
+  Integer removedCount = 0
+  willBeRemoved.each { child ->
+    try {
+      String dni = child.getDeviceNetworkId()
+      logInfo("Removing player device: ${child.label}")
+      app.deleteChildDevice(dni)
+      removedCount++
+    } catch(Exception e) {
+      logError("Failed to remove device ${child.label}: ${e.message}")
+    }
+  }
+  
+  state.playerRemovalFeedback = "Successfully removed ${removedCount} player(s)"
+  state.playerRemovalTimestamp = now()
 }
 
 void createPlayerDevices() {
@@ -546,9 +598,9 @@ void createPlayerDevices() {
         try {
           cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
         } catch (UnknownDeviceTypeException e) {
-          logException('Sonos Advanced Player driver not found', e)
+          logError("Sonos Advanced Player driver not found: ${e.message}")
         } catch (Exception e) {
-          logException("Failed to create device for ${dni}", e)
+          logError("Failed to create device for ${dni}: ${e.message}")
         }
       } else {
         logWarn("Attempted to create child device for ${dni} but did not find playerInfo")
@@ -611,7 +663,7 @@ void createPlayerDevices() {
         pauseExecution(500)
         cd.secondaryConfiguration()
       } catch (Exception e) {
-        logException("Failed to configure device ${dni}", e)
+        logError("Failed to configure device ${dni}: ${e.message}")
       }
     } else if(!cd) {
       logWarn("Skipping device configuration for ${dni} - device not created")
@@ -619,7 +671,7 @@ void createPlayerDevices() {
       logWarn("Skipping device configuration for ${dni} - no player info available")
     }
   }
-  if(!settings.skipOrphanRemoval) {removeOrphans()}
+  // Note: removeOrphans() is now handled by the explicit Remove Players button
 }
 
 void retryDeviceConfiguration(Map data) {
@@ -726,6 +778,12 @@ void ssdpDiscover() {
 
 void startMdnsDiscovery() {
   try {
+    // Check if mDNS methods exist (requires Hubitat 2.4.1+)
+    if(!this.respondsTo('registerMDNSListener')) {
+      logDebug("mDNS not available on this hub firmware version")
+      return
+    }
+    
     // Register mDNS listener for Sonos devices
     // Sonos uses _sonos._tcp for its mDNS service
     registerMDNSListener('_sonos._tcp')
@@ -784,9 +842,10 @@ void processMdnsDiscovery() {
 void processDiscoveredSonosDevice(String ipAddress) {
   if(!ipAddress) { return }
 
-  // Check if we already discovered this IP
+  // Check if we already discovered this IP (in primaries or secondaries)
   boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
-  if(alreadyDiscovered) {
+  boolean alreadyDiscoveredSecondary = discoveredSonosSecondaries.values().any { it.deviceIp == ipAddress }
+  if(alreadyDiscovered || alreadyDiscoveredSecondary) {
     logTrace("Device at ${ipAddress} already discovered, skipping")
     return
   }
@@ -863,13 +922,13 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     logTrace("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
   }
 
-  // Use MAC as primary key, but also check for duplicate IPs to prevent same device listed multiple times
-  // Check if this device is already discovered by MAC or playerId
+  // Use MAC as primary key, but also check for duplicate IPs/playerIds to prevent same device listed multiple times
+  // Check against both primary and secondary maps
   boolean isDuplicate = false
   discoveredSonoses.each { key, value ->
     LinkedHashMap existingDevice = value as LinkedHashMap
     if(key == mac || existingDevice.id == playerId || existingDevice.deviceIp == ipAddress) {
-      logTrace("Device already discovered - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}")
+      logTrace("Device already discovered in primaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}")
       isDuplicate = true
       // Update the existing entry with latest info to keep it fresh
       if(key == mac) {
@@ -877,6 +936,15 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
         existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
         existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
         existingDevice.localUpnpHost = "${ipAddress}:1400"
+      }
+    }
+  }
+  if(!isDuplicate) {
+    discoveredSonosSecondaries.each { key, value ->
+      LinkedHashMap existingDevice = value as LinkedHashMap
+      if(key == mac || existingDevice.id == playerId || existingDevice.deviceIp == ipAddress) {
+        logTrace("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}")
+        isDuplicate = true
       }
     }
   }
@@ -896,7 +964,8 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     localUpnpUrl: "http://${ipAddress}:1400",
     localUpnpHost: "${ipAddress}:1400"
   ]
-  if(playerInfoDevice?.primaryDeviceId && deviceCapabilities.contains('AUDIO_CLIP')) {
+  // Handle secondary/satellite devices (subs, surrounds, right channel in stereo pair)
+  if(playerInfoDevice?.primaryDeviceId) {
     LinkedHashMap discoveredSonosSecondary = [
       primaryDeviceId: playerInfoDevice?.primaryDeviceId,
       id: playerId,
@@ -917,9 +986,14 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     }
     if(!secondaryExists) {
       discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-      logTrace("Found secondary for ${playerInfoDevice?.primaryDeviceId}")
+      logTrace("Found secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
     }
+    // Secondary devices should never appear in the main discovered list
+    sendFoundSonosEvents()
+    return
   }
+
+  // Only primary (standalone) devices reach here
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
     logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
@@ -933,12 +1007,16 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
 String getFoundSonoses() {
   String foundDevices = ''
   List<String> discoveredSonosesNames = discoveredSonoses.collect{Object k, Object v -> ((LinkedHashMap)v)?.name as String }
-  List<String> discoveredSonosesSecondaryPrimaryIds = discoveredSonosSecondaries.collect{Object k, Object v -> ((LinkedHashMap)v)?.primaryDeviceId as String }
-  discoveredSonosesSecondaryPrimaryIds.each{
-    String primaryDNI = getDNIFromRincon(it)
-    if(discoveredSonoses.containsKey(primaryDNI)) {
-      LinkedHashMap primary = (LinkedHashMap)discoveredSonoses[primaryDNI]
-      discoveredSonosesNames.add("${primary?.name as String} Right Channel".toString())
+  discoveredSonosSecondaries.each{ Object k, Object v ->
+    LinkedHashMap secondary = (LinkedHashMap)v
+    String primaryDeviceId = secondary?.primaryDeviceId as String
+    String modelName = secondary?.modelDisplayName ?: secondary?.modelName ?: 'Secondary'
+    if(primaryDeviceId) {
+      String primaryDNI = getDNIFromRincon(primaryDeviceId)
+      if(discoveredSonoses.containsKey(primaryDNI)) {
+        LinkedHashMap primary = (LinkedHashMap)discoveredSonoses[primaryDNI]
+        discoveredSonosesNames.add("${primary?.name as String} (${modelName})".toString())
+      }
     }
   }
   discoveredSonosesNames.sort()

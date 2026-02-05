@@ -2199,11 +2199,23 @@ String getRightChannelRincon() {
 void setRightChannelRincon(String rincon) {
   logTrace("Setting right channel RINCON to ${rincon}")
   setDeviceDataValue('rightChannelId', rincon)
-  if(getSecondaryIds()) {
-    Long secondaryIndex = getSecondaryIds().findIndexValues{it == rincon}[0]
-    String rightChannelIpAddress = getSecondaryDeviceIps()[secondaryIndex as Integer]
-    setRightChannelDeviceIp(rightChannelIpAddress)
+  List<String> secondaryIds = getSecondaryIds()
+  if(secondaryIds == null || secondaryIds.size() == 0) { return }
+
+  Integer secondaryIndex = secondaryIds.indexOf(rincon)
+  if(secondaryIndex == null || secondaryIndex < 0) {
+    logTrace("Right channel RINCON ${rincon} not found in secondaryIds: ${secondaryIds}")
+    return
   }
+
+  List<String> secondaryIps = getSecondaryDeviceIps()
+  if(secondaryIps == null || secondaryIndex >= secondaryIps.size()) {
+    logTrace("Right channel index ${secondaryIndex} out of range for secondary IPs")
+    return
+  }
+
+  String rightChannelIpAddress = secondaryIps[secondaryIndex]
+  setRightChannelDeviceIp(rightChannelIpAddress)
 }
 
 String getRightChannelDeviceIp() {
