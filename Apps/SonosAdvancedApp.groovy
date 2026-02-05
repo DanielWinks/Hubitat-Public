@@ -1198,6 +1198,35 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   }
 }
 
+/**
+ * Forward group volume, mute state, and switch state to all group devices that use this coordinator
+ * Called by the coordinator player when groupVolume, groupMute, or grouping state changes
+ * @param coordinatorId The RINCON ID of the coordinator
+ * @param groupVolume The current group volume (0-100)
+ * @param groupMute The current group mute state ('muted' or 'unmuted')
+ * @param isGroupedWithFollowers Whether speakers are actually grouped (coordinator has followers)
+ */
+void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, String groupMute, Boolean isGroupedWithFollowers = null) {
+  if(!coordinatorId) { return }
+
+  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
+    it.getDataValue('groupCoordinatorId') == coordinatorId
+  }
+
+  groupsForCoord.each { gd ->
+    if(groupVolume != null) {
+      gd.sendEvent(name: 'volume', value: groupVolume, unit: '%')
+    }
+    if(groupMute != null) {
+      gd.sendEvent(name: 'mute', value: groupMute)
+    }
+    if(isGroupedWithFollowers != null) {
+      // Update switch state: 'on' when grouped with followers, 'off' when standalone
+      gd.sendEvent(name: 'switch', value: isGroupedWithFollowers ? 'on' : 'off')
+    }
+  }
+}
+
 // =============================================================================
 // Version Checking for Installed Files
 // =============================================================================

@@ -40,12 +40,14 @@ metadata {
     capability 'Actuator'
     capability 'Switch'
     capability 'SpeechSynthesis'
+    capability 'AudioVolume'
 
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
     command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
     command 'evictUnlistedPlayers'
+    command 'refresh'
 
     command 'playHighPriorityTTS', [
       [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
@@ -70,9 +72,21 @@ metadata {
     section('Device Settings') {
       input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
     }
+    section('Volume Control Settings') {
+      input 'controlUngroupedIndividually', 'bool',
+        title: 'Control ungrouped speakers individually',
+        description: 'When speakers are not grouped in Sonos, control each speaker\'s volume instead of just the coordinator',
+        required: false, defaultValue: false
+      input 'useProportionalVolume', 'bool',
+        title: 'Use proportional volume control (Sonos group volume API)',
+        description: 'When speakers are grouped, use Sonos native group volume API which maintains relative volume ratios between speakers. When disabled, sets the same volume on each speaker directly.',
+        required: false, defaultValue: true
+    }
   }
 }
 Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
+Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }
+Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 
 
 String getCurrentTTSVoice() {
@@ -100,6 +114,8 @@ String getCurrentTTSVoice() {
 
 void initialize() {
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
+  // Initialize volume/mute state from coordinator
+  runIn(5, 'refresh')
 }
 void configure() {}
 void on() { evictUnlistedPlayers() }
@@ -284,4 +300,337 @@ List<DeviceWrapper> getAllFollowerDevicesInGroupDevice() {
 
 DeviceWrapper getCoordinatorDevice() {
   return parent?.getDeviceFromRincon(getCoordinatorId())
+}
+
+// =============================================================================
+// AudioVolume Capability Implementation
+// =============================================================================
+
+/**
+ * Check if the speakers are actually grouped in Sonos with this coordinator.
+ * This is different from being members of this "group device" - the speakers
+ * must be actively grouped in Sonos for native group volume commands to work.
+ */
+Boolean isActuallySonosGrouped() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) { return false }
+  // Note: isGroupCoordinator attribute is an ENUM with values 'on'/'off', not boolean
+  Boolean isGrouped = coordinator.currentValue('isGrouped', true) == 'on'
+  Boolean isCoordinator = coordinator.currentValue('isGroupCoordinator', true) == 'on'
+  logDebug("isActuallySonosGrouped() - isGrouped: ${isGrouped}, isGroupCoordinator: ${isCoordinator}")
+  return isGrouped && isCoordinator
+}
+
+/**
+ * Set volume level (0-100)
+ * Behavior depends on settings and whether speakers are grouped in Sonos:
+ *
+ * When GROUPED in Sonos:
+ *   - useProportionalVolume ON: Uses Sonos group volume API (maintains relative ratios)
+ *   - useProportionalVolume OFF: Sets same volume on each speaker directly
+ *
+ * When NOT GROUPED in Sonos:
+ *   - controlUngroupedIndividually ON: Sets volume on each speaker
+ *   - controlUngroupedIndividually OFF: Only controls the coordinator
+ */
+void setVolume(BigDecimal level) {
+  if(level == null) {
+    logWarn('No volume level provided')
+    return
+  }
+  Integer volumeLevel = Math.max(0, Math.min(100, level.intValue()))
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  Boolean isGrouped = isActuallySonosGrouped()
+  logDebug("setVolume(${volumeLevel}) - isGrouped: ${isGrouped}, useProportional: ${getUseProportionalVolumeSetting()}, controlIndividually: ${getControlUngroupedIndividuallySetting()}")
+
+  if(isGrouped) {
+    // Speakers ARE grouped in Sonos
+    if(getUseProportionalVolumeSetting()) {
+      // Use Sonos native group volume API (proportional adjustment)
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot set group volume')
+        return
+      }
+      logDebug("Using Sonos group volume API (proportional)")
+      coordinator.setGroupVolume(volumeLevel)
+      // State will be updated via event from coordinator through parent app
+    } else {
+      // Set same volume on each speaker directly
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot set volume')
+        return
+      }
+      logDebug("Setting volume on each speaker directly (grouped, non-proportional)")
+      allDevs.each { it.setVolume(volumeLevel) }
+      sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+    }
+  } else {
+    // Speakers are NOT grouped in Sonos
+    if(getControlUngroupedIndividuallySetting()) {
+      // Control each speaker individually
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot set volume')
+        return
+      }
+      logDebug("Setting volume on each speaker individually (ungrouped)")
+      allDevs.each { it.setVolume(volumeLevel) }
+      sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+    } else {
+      // Only control the coordinator
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot set volume')
+        return
+      }
+      logDebug("Setting volume on coordinator only (ungrouped)")
+      coordinator.setVolume(volumeLevel)
+      logDebug("Sending volume event: ${volumeLevel}")
+      sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+    }
+  }
+}
+
+/**
+ * Increase volume
+ */
+void volumeUp() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+
+  if(isActuallySonosGrouped()) {
+    if(getUseProportionalVolumeSetting()) {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot increase volume')
+        return
+      }
+      coordinator.groupVolumeUp()
+    } else {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot increase volume')
+        return
+      }
+      allDevs.each { it.volumeUp() }
+      runIn(1, 'refreshAverageVolume', [overwrite: true])
+    }
+  } else {
+    if(getControlUngroupedIndividuallySetting()) {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot increase volume')
+        return
+      }
+      allDevs.each { it.volumeUp() }
+      runIn(1, 'refreshAverageVolume', [overwrite: true])
+    } else {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot increase volume')
+        return
+      }
+      coordinator.volumeUp()
+      runIn(1, 'refresh', [overwrite: true])
+    }
+  }
+}
+
+/**
+ * Decrease volume
+ */
+void volumeDown() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+
+  if(isActuallySonosGrouped()) {
+    if(getUseProportionalVolumeSetting()) {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot decrease volume')
+        return
+      }
+      coordinator.groupVolumeDown()
+    } else {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot decrease volume')
+        return
+      }
+      allDevs.each { it.volumeDown() }
+      runIn(1, 'refreshAverageVolume', [overwrite: true])
+    }
+  } else {
+    if(getControlUngroupedIndividuallySetting()) {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot decrease volume')
+        return
+      }
+      allDevs.each { it.volumeDown() }
+      runIn(1, 'refreshAverageVolume', [overwrite: true])
+    } else {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot decrease volume')
+        return
+      }
+      coordinator.volumeDown()
+      runIn(1, 'refresh', [overwrite: true])
+    }
+  }
+}
+
+/**
+ * Mute all players in the group
+ */
+void mute() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+
+  if(isActuallySonosGrouped()) {
+    if(getUseProportionalVolumeSetting()) {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot mute')
+        return
+      }
+      coordinator.muteGroup()
+    } else {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot mute')
+        return
+      }
+      allDevs.each { it.mute() }
+      sendEvent(name: 'mute', value: 'muted')
+    }
+  } else {
+    if(getControlUngroupedIndividuallySetting()) {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot mute')
+        return
+      }
+      allDevs.each { it.mute() }
+      sendEvent(name: 'mute', value: 'muted')
+    } else {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot mute')
+        return
+      }
+      coordinator.mute()
+      sendEvent(name: 'mute', value: 'muted')
+    }
+  }
+}
+
+/**
+ * Unmute all players in the group
+ */
+void unmute() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+
+  if(isActuallySonosGrouped()) {
+    if(getUseProportionalVolumeSetting()) {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot unmute')
+        return
+      }
+      coordinator.unmuteGroup()
+    } else {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot unmute')
+        return
+      }
+      allDevs.each { it.unmute() }
+      sendEvent(name: 'mute', value: 'unmuted')
+    }
+  } else {
+    if(getControlUngroupedIndividuallySetting()) {
+      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+      if(!allDevs) {
+        logWarn('No player devices found in group - cannot unmute')
+        return
+      }
+      allDevs.each { it.unmute() }
+      sendEvent(name: 'mute', value: 'unmuted')
+    } else {
+      if(!coordinator) {
+        logWarn('Coordinator device not found - cannot unmute')
+        return
+      }
+      coordinator.unmute()
+      sendEvent(name: 'mute', value: 'unmuted')
+    }
+  }
+}
+
+// =============================================================================
+// State Management
+// =============================================================================
+
+/**
+ * Refresh volume/mute state
+ * Uses Sonos group volume when speakers are grouped AND proportional volume is enabled,
+ * otherwise calculates average from individual player volumes
+ */
+void refresh() {
+  Boolean isGrouped = isActuallySonosGrouped()
+  Boolean useProportional = getUseProportionalVolumeSetting()
+  logDebug("refresh() - isGrouped: ${isGrouped}, useProportional: ${useProportional}")
+
+  if(isGrouped && useProportional) {
+    // Use Sonos group volume (which is already an average)
+    DeviceWrapper coordinator = getCoordinatorDevice()
+    if(!coordinator) {
+      logDebug('Coordinator not found for state refresh')
+      return
+    }
+    Integer volume = coordinator.currentValue('groupVolume', true) as Integer
+    String muteState = coordinator.currentValue('groupMute', true)
+    logDebug("refresh() - Reading from coordinator: groupVolume=${volume}, groupMute=${muteState}")
+
+    if(volume != null) {
+      sendEvent(name: 'volume', value: volume, unit: '%')
+    }
+    if(muteState != null) {
+      sendEvent(name: 'mute', value: muteState)
+    }
+  } else {
+    // Calculate average from individual players
+    refreshAverageVolume()
+  }
+}
+
+/**
+ * Calculate and update volume as average of all player volumes
+ */
+void refreshAverageVolume() {
+  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
+  if(!allDevs || allDevs.size() == 0) {
+    logDebug('No player devices found for average volume calculation')
+    return
+  }
+
+  // Calculate average volume
+  Integer totalVolume = 0
+  Integer count = 0
+  Boolean anyMuted = false
+  Boolean allMuted = true
+
+  allDevs.each { dev ->
+    Integer vol = dev.currentValue('volume', true) as Integer
+    if(vol != null) {
+      totalVolume += vol
+      count++
+    }
+    String muteState = dev.currentValue('mute', true)
+    if(muteState == 'muted') {
+      anyMuted = true
+    } else {
+      allMuted = false
+    }
+  }
+
+  if(count > 0) {
+    Integer avgVolume = Math.round(totalVolume / count) as Integer
+    sendEvent(name: 'volume', value: avgVolume, unit: '%')
+  }
+
+  // Mute state: muted if all players are muted
+  sendEvent(name: 'mute', value: allMuted ? 'muted' : 'unmuted')
 }

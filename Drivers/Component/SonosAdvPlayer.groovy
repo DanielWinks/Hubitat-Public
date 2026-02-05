@@ -634,12 +634,20 @@ void unmuteGroup(){
   else { playerSetPlayerMute(false) }
 }
 void setGroupVolume(BigDecimal level) {
-  if(isGroupedAndCoordinator()) {
-    playerSetGroupVolume(level)
-  } else if(isGroupedAndNotCoordinator()) {
+  Boolean isCoord = isGroupedAndCoordinator()
+  Boolean isFollower = isGroupedAndNotCoordinator()
+  logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGroupedAndNotCoordinator: ${isFollower}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
+  if(isCoord) {
+    logDebug("setGroupVolume: Using playerSetGroupVolume (Sonos group API)")
+    playerSetGroupVolume(level as Integer)
+  } else if(isFollower) {
+    logDebug("setGroupVolume: Delegating to coordinator")
     parent?.getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level)
   }
-  else { playerSetPlayerVolume(level as Integer) }
+  else {
+    logDebug("setGroupVolume: Falling back to playerSetPlayerVolume (individual)")
+    playerSetPlayerVolume(level as Integer)
+  }
 }
 void setGroupLevel(BigDecimal level) { setGroupVolume(level as Integer) }
 void setGroupMute(String mode) {
@@ -1584,6 +1592,28 @@ void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup)
   parent?.updateGroupDevices(coordinatorId, playersInGroup)
 }
 
+/**
+ * Notify parent app to update group devices with current volume/mute state and switch state
+ * Forwards events whenever this player is designated as coordinator for any group device.
+ * The parent app filters by coordinatorId to only update relevant group devices.
+ * @param groupVolume Optional - pass directly to avoid reading stale attribute
+ * @param groupMute Optional - pass directly to avoid reading stale attribute
+ */
+void parentUpdateGroupDeviceVolumeState(Integer groupVolume = null, String groupMute = null) {
+  String coordinatorId = getId()
+  // Use passed values if available, otherwise read from attributes
+  Integer vol = groupVolume != null ? groupVolume : getGroupVolumeState()
+  String mute = groupMute != null ? groupMute : getGroupMuteState()
+  Boolean isGrouped = getIsGrouped()
+  Boolean isCoordinator = getIsGroupCoordinator()
+  logDebug("parentUpdateGroupDeviceVolumeState: Forwarding groupVolume=${vol}, groupMute=${mute}, isGrouped=${isGrouped}, isCoordinator=${isCoordinator} to group devices")
+  // Sonos iOS consistently shows volume one level higher than actual volume, so we add 1 here to match user expectations
+  // But only when grouped. If ungrouped, we want to send actual volume
+  vol = isGrouped ? vol + 1 : vol
+  // Pass whether speakers are actually grouped with followers (isGrouped AND isCoordinator)
+  parent?.updateGroupDeviceVolumeState(coordinatorId, vol, mute, isGrouped && isCoordinator)
+}
+
 @CompileStatic
 void updateZoneGroupName(String groupName) {
   sendDeviceEvent('groupName', groupName)
@@ -1601,6 +1631,9 @@ void processGroupRenderingControlMessages(String xmlString) {
   setGroupVolumeState(groupVolume)
   setGroupMuteState(groupMute)
   sendGroupEvents()
+  // Forward volume/mute state to group devices via parent app
+  // Pass values directly to avoid reading stale attributes
+  parentUpdateGroupDeviceVolumeState(groupVolume, groupMute)
 }
 
 @CompileStatic
@@ -3792,7 +3825,7 @@ void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
   ArrayList json = (ArrayList)slurper.parseText(message)
   if(json.size() < 2) {return}
-  // logTrace(JsonOutput.prettyPrint(message))
+  logTrace(JsonOutput.prettyPrint(message))
 
   Map eventType = (json as List)[0]
   Map eventData = (json as List)[1]
