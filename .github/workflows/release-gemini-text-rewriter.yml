@@ -130,9 +130,10 @@ jobs:
           python3 merge_library.py
 
       - name: Update packageManifest.json
+        env:
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
         run: |
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
-          RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
           DATE=$(date +%Y-%m-%d)
 
           # Create Python script to update JSON
