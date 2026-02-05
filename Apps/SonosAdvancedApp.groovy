@@ -310,29 +310,53 @@ Map localPlayerSelectionPage() {
     section("Select your device(s) below.") {
       input (
         name: 'playerDevices',
-        title: "Select Sonos (${newlyFoundCount} newly found primaries, ${getCurrentPlayerDevices().size()} previously created):",
+        title: "<b>Available Devices (${selectionOptions.size()}):</b> <i>${newlyFoundCount > 0 ? "${newlyFoundCount} newly discovered" : 'No new devices found'}</i>",
         type: 'enum',
         options: selectionOptions,
         multiple: true,
-        submitOnChange: true,
-        offerAll: false
+        required: false,
+        submitOnChange: true
       )
-      input 'createPlayerDevices', 'button', title: 'Create Players'
-      href (
-        page: 'localPlayerPage',
-        title: 'Continue Search',
-        description: 'Click to show'
-      )
-      List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices.contains(p.getDeviceNetworkId()) )}
-      if(willBeRemoved.size() > 0 && !settings.skipOrphanRemoval) {
-        paragraph("The following devices will be removed: ${willBeRemoved.collect{it.getDataValue('name')}.join(', ')}")
+
+      // Show feedback messages
+      if(state.playerCreationFeedback) {
+        paragraph "<div style='background-color:#90EE90;padding:10px;border-radius:5px;margin:10px 0;'><b>✓ ${state.playerCreationFeedback}</b></div>"
       }
-      List<String> willBeCreated = (settings.playerDevices - getCreatedPlayerDevices())
+      if(state.playerRemovalFeedback) {
+        paragraph "<div style='background-color:#FFB6C1;padding:10px;border-radius:5px;margin:10px 0;'><b>✓ ${state.playerRemovalFeedback}</b></div>"
+      }
+
+      // Action buttons
+      List<String> willBeCreated = settings.playerDevices ? (settings.playerDevices - getCreatedPlayerDevices()) : []
+      List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices?.contains(p.getDeviceNetworkId())) }
+
       if(willBeCreated.size() > 0) {
-        String s = willBeCreated.collect{p -> selectionOptions.get(p)}.join(', ')
-        paragraph("The following devices will be created: ${s}")
+        input 'createPlayerDevices', 'button', title: "Create ${willBeCreated.size()} Player(s)", submitOnChange: true, width: 6
+        String createList = willBeCreated.collect{ selectionOptions[it] }.join('\n')
+        paragraph "<b>Will create:</b>\n${createList}"
       }
-      input 'skipOrphanRemoval', 'bool', title: 'Add devices only/skip removal', required: false, defaultValue: false, submitOnChange: true
+
+      if(willBeRemoved.size() > 0) {
+        input 'removePlayerDevices', 'button', title: "Remove ${willBeRemoved.size()} Player(s)", submitOnChange: true, width: 6
+        String removeList = willBeRemoved.collect{ it.label }.join('\n')
+        paragraph "<b>Will remove:</b>\n${removeList}"
+      }
+
+      // Only show "all in sync" message if:
+      // 1. Current selection has no pending creates or removes AND
+      // 2. There are no newly discovered devices available to select
+      if(willBeCreated.size() == 0 && willBeRemoved.size() == 0 && newlyFoundCount == 0) {
+        paragraph "<i>All discovered devices are already created. Select or deselect devices above to create or remove players.</i>"
+      } else if(willBeCreated.size() == 0 && willBeRemoved.size() == 0 && newlyFoundCount > 0) {
+        paragraph "<i>Select newly discovered devices above to create them, or deselect existing devices to remove them.</i>"
+      }
+
+      href (
+        name: 'localPlayerPageRefresh',
+        title: 'Re-discover Devices',
+        description: 'Run discovery again to find new devices',
+        page: 'localPlayerPage'
+      )
     }
   }
 }
@@ -532,9 +556,15 @@ void createPlayerDevicesWithFeedback() {
     state.playerCreationTimestamp = now()
     return
   }
-  
+
   createPlayerDevices()
-  
+
+  // Allow time for Hubitat to register new child devices
+  pauseExecution(2500)
+
+  // Update the setting to reflect current state
+  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+
   state.playerCreationFeedback = "Successfully created ${willBeCreated.size()} player(s)"
   state.playerCreationTimestamp = now()
 }
@@ -546,7 +576,7 @@ void removePlayerDevicesWithFeedback() {
     state.playerRemovalTimestamp = now()
     return
   }
-  
+
   Integer removedCount = 0
   willBeRemoved.each { child ->
     try {
@@ -558,7 +588,13 @@ void removePlayerDevicesWithFeedback() {
       logError("Failed to remove device ${child.label}: ${e.message}")
     }
   }
-  
+
+  // Allow time for Hubitat to unregister deleted child devices
+  pauseExecution(2500)
+
+  // Update the setting to reflect current state
+  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+
   state.playerRemovalFeedback = "Successfully removed ${removedCount} player(s)"
   state.playerRemovalTimestamp = now()
 }
@@ -783,7 +819,7 @@ void startMdnsDiscovery() {
       logDebug("mDNS not available on this hub firmware version")
       return
     }
-    
+
     // Register mDNS listener for Sonos devices
     // Sonos uses _sonos._tcp for its mDNS service
     registerMDNSListener('_sonos._tcp')
