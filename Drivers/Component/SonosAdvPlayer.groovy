@@ -92,6 +92,7 @@ metadata {
   attribute 'nextArtistName', 'string'
   attribute 'nextAlbumName', 'string'
   attribute 'nextTrackName', 'string'
+  attribute 'nextTrackAlbumArtURI', 'string'
   attribute 'queueTrackTotal', 'string'
   attribute 'queueTrackPosition', 'string'
 
@@ -1488,11 +1489,17 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
       if(nextTrackName != null && nextTrackName != '') { setNextTrackName(nextTrackName) }
       else { setNextTrackName('Not Available') }
 
+      String nextAlbumArtURI = (((GPathResult)nextTrackMetaDataXML['item']['albumArtURI']).text()).toString()
+      while(nextAlbumArtURI.contains('&amp;')) { nextAlbumArtURI = nextAlbumArtURI.replace('&amp;','&') }
+      if(nextAlbumArtURI != null && nextAlbumArtURI != '') { setNextTrackAlbumArtURI(nextAlbumArtURI, isPlayingLocalTrack) }
+      else { setNextTrackAlbumArtURI('Not Available', isPlayingLocalTrack) }
+
     }
   } else {
     setNextArtistName('Not Available')
     setNextAlbumName('Not Available')
     setNextTrackName('Not Available')
+    setNextTrackAlbumArtURI('Not Available', isPlayingLocalTrack)
   }
 }
 
@@ -1577,6 +1584,7 @@ void clearCurrentPlayingStates() {
   setNextArtistName('Not Available')
   setNextAlbumName('Not Available')
   setNextTrackName('Not Available')
+  setNextTrackAlbumArtURI('Not Available', false)
   sendDeviceEvent('albumArtURI' ,'Not Available')
   sendDeviceEvent('albumArtSmall' ,'Not Available')
   sendDeviceEvent('albumArtMedium' ,'Not Available')
@@ -2858,6 +2866,29 @@ void setNextTrackName(String nextTrackName) {
   parentUpdateGroupDeviceExtendedPlaybackState([nextTrackName: nextTrackName ?: 'Not Available'])
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
+
+@CompileStatic
+void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocalTrack) {
+  String formattedUri = '<br>'
+
+  if(nextTrackAlbumArtURI.startsWith('/') && !isPlayingLocalTrack) {
+    // Local Sonos path - prepend base URL and wrap in HTML
+    String baseUrl = "${getLocalUpnpUrl()}${nextTrackAlbumArtURI}"
+    formattedUri += "<img src=\"${baseUrl}\" width=\"200\" height=\"200\" >"
+  } else if(!isPlayingLocalTrack && nextTrackAlbumArtURI && nextTrackAlbumArtURI != 'Not Available') {
+    // External URL - wrap in HTML
+    formattedUri += "<img src=\"${nextTrackAlbumArtURI}\" width=\"200\" height=\"200\" >"
+  } else {
+    // No album art available
+    formattedUri = 'Not Available'
+  }
+
+  sendDeviceEvent('nextTrackAlbumArtURI', formattedUri)
+  sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([nextTrackAlbumArtURI: formattedUri])
+}
+String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
 
 @CompileStatic
 ConcurrentLinkedQueue<Map> getAudioClipQueue() {

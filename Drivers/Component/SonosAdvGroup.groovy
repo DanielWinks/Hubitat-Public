@@ -104,6 +104,7 @@ metadata {
     attribute 'nextArtistName', 'string'
     attribute 'nextAlbumName', 'string'
     attribute 'nextTrackName', 'string'
+    attribute 'nextTrackAlbumArtURI', 'string'
     attribute 'queueTrackTotal', 'string'
     attribute 'queueTrackPosition', 'string'
     attribute 'currentRepeatOneMode', 'enum', ['on', 'off']
@@ -669,6 +670,7 @@ void refresh() {
   String nextArtistName = coordinator.currentValue('nextArtistName', true)
   String nextAlbumName = coordinator.currentValue('nextAlbumName', true)
   String nextTrackName = coordinator.currentValue('nextTrackName', true)
+  String nextTrackAlbumArtURI = coordinator.currentValue('nextTrackAlbumArtURI', true)
   String queueTrackTotal = coordinator.currentValue('queueTrackTotal', true)
   String queueTrackPosition = coordinator.currentValue('queueTrackPosition', true)
   String currentRepeatOneMode = coordinator.currentValue('currentRepeatOneMode', true)
@@ -690,6 +692,7 @@ void refresh() {
   if(nextArtistName != null) sendEvent(name: 'nextArtistName', value: nextArtistName)
   if(nextAlbumName != null) sendEvent(name: 'nextAlbumName', value: nextAlbumName)
   if(nextTrackName != null) sendEvent(name: 'nextTrackName', value: nextTrackName)
+  if(nextTrackAlbumArtURI != null) sendEvent(name: 'nextTrackAlbumArtURI', value: nextTrackAlbumArtURI)
   if(queueTrackTotal != null) sendEvent(name: 'queueTrackTotal', value: queueTrackTotal)
   if(queueTrackPosition != null) sendEvent(name: 'queueTrackPosition', value: queueTrackPosition)
   if(currentRepeatOneMode != null) sendEvent(name: 'currentRepeatOneMode', value: currentRepeatOneMode)
