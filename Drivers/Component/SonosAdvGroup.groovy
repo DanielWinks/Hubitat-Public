@@ -66,6 +66,26 @@ metadata {
       [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
     ]
 
+    // Playback control commands
+    command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
+    command 'repeatOne'
+    command 'repeatAll'
+    command 'repeatNone'
+    command 'setShuffle', [[ name: 'Shuffle Mode', type: 'ENUM', constraints: ['on', 'off']]]
+    command 'shuffleOn'
+    command 'shuffleOff'
+    command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
+    command 'enableCrossfade'
+    command 'disableCrossfade'
+    command 'getFavorites'
+    command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteFull', [
+      [name: 'favoriteId', type: 'STRING'],
+      [name: 'playMode', type: 'ENUM', constraints: ['NORMAL', 'REPEAT_ALL', 'REPEAT_ONE', 'SHUFFLE_NOREPEAT', 'SHUFFLE', 'SHUFFLE_REPEAT_ONE']],
+      [name: 'startTrack', type: 'NUMBER'],
+      [name: 'startTime', type: 'NUMBER']
+    ]
+
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
 
@@ -818,4 +838,172 @@ void setTrack(String uri) {
     return
   }
   coordinator.setTrack(uri)
+}
+
+// =============================================================================
+// Playback Control Commands
+// =============================================================================
+
+/**
+ * Set repeat mode
+ */
+void setRepeatMode(String mode) {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot set repeat mode')
+    return
+  }
+  coordinator.setRepeatMode(mode)
+}
+
+/**
+ * Repeat one track
+ */
+void repeatOne() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot set repeat one')
+    return
+  }
+  coordinator.repeatOne()
+}
+
+/**
+ * Repeat all tracks
+ */
+void repeatAll() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot set repeat all')
+    return
+  }
+  coordinator.repeatAll()
+}
+
+/**
+ * Disable repeat
+ */
+void repeatNone() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot disable repeat')
+    return
+  }
+  coordinator.repeatNone()
+}
+
+/**
+ * Set shuffle mode
+ */
+void setShuffle(String mode) {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot set shuffle mode')
+    return
+  }
+  coordinator.setShuffle(mode)
+}
+
+/**
+ * Enable shuffle
+ */
+void shuffleOn() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot enable shuffle')
+    return
+  }
+  coordinator.shuffleOn()
+}
+
+/**
+ * Disable shuffle
+ */
+void shuffleOff() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot disable shuffle')
+    return
+  }
+  coordinator.shuffleOff()
+}
+
+/**
+ * Set crossfade mode
+ */
+void setCrossfade(String mode) {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot set crossfade mode')
+    return
+  }
+  coordinator.setCrossfade(mode)
+}
+
+/**
+ * Enable crossfade
+ */
+void enableCrossfade() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot enable crossfade')
+    return
+  }
+  coordinator.enableCrossfade()
+}
+
+/**
+ * Disable crossfade
+ */
+void disableCrossfade() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot disable crossfade')
+    return
+  }
+  coordinator.disableCrossfade()
+}
+
+/**
+ * Get list of favorites
+ */
+void getFavorites() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot get favorites')
+    return
+  }
+  coordinator.getFavorites()
+}
+
+/**
+ * Load a favorite by ID
+ */
+void loadFavorite(String favoriteId) {
+  if(!favoriteId) {
+    logWarn('No favorite ID provided')
+    return
+  }
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot load favorite')
+    return
+  }
+  coordinator.loadFavorite(favoriteId)
+}
+
+/**
+ * Load a favorite with full options
+ */
+void loadFavoriteFull(String favoriteId, String playMode = 'NORMAL', BigDecimal startTrack = 1, BigDecimal startTime = 0) {
+  if(!favoriteId) {
+    logWarn('No favorite ID provided')
+    return
+  }
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot load favorite')
+    return
+  }
+  coordinator.loadFavoriteFull(favoriteId, playMode, startTrack, startTime)
 }
