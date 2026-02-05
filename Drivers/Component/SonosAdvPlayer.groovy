@@ -1893,10 +1893,24 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
   if(acquired == true) {
     unlockUnsubscribeMutexAfterTimeout()
     try {
-      if(evtSub != null && subId != null && callback != null && resub != null) {
-        sonosEventUnsubscribe(evtSub, getlocalUpnpHost(), getDNI(), getSid(subId), callback)
+      // Verify all required parameters are present before attempting unsubscribe
+      String localUpnpHost = getlocalUpnpHost()
+      String sid = getSid(subId)
+      String dni = getDNI()
+
+      if(evtSub != null && subId != null && callback != null && resub != null &&
+         localUpnpHost != null && localUpnpHost != '' &&
+         sid != null && sid != '' &&
+         dni != null && dni != '') {
+        sonosEventUnsubscribe(evtSub, localUpnpHost, dni, sid, callback)
         deleteSid(subId)
         removeResub(resub)
+      } else {
+        // Log which values are missing to help with debugging
+        logTrace("${unsub} skipped - missing required data: host=${localUpnpHost != null && localUpnpHost != ''}, sid=${sid != null && sid != ''}, dni=${dni != null && dni != ''}")
+        // Clean up anyway since we can't unsubscribe
+        if(subId != null) { deleteSid(subId) }
+        if(resub != null) { removeResub(resub) }
       }
     } catch(Exception e) {
       logInfo("${unsub} failed due to ${e}")
