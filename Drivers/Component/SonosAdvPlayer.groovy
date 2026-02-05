@@ -1614,6 +1614,24 @@ void parentUpdateGroupDeviceVolumeState(Integer groupVolume = null, String group
   parent?.updateGroupDeviceVolumeState(coordinatorId, vol, mute, isGrouped && isCoordinator)
 }
 
+/**
+ * Forward MusicPlayer state to group devices via parent app
+ * Called when status, trackData, or trackDescription changes
+ * @param status Optional - pass directly to avoid reading stale attribute
+ * @param trackData Optional - pass directly to avoid reading stale attribute
+ * @param trackDescription Optional - pass directly to avoid reading stale attribute
+ */
+void parentUpdateGroupDeviceMusicPlayerState(String status = null, String trackData = null, String trackDescription = null) {
+  String coordinatorId = getId()
+  // Use passed values if available, otherwise read from attributes
+  String stat = status != null ? status : getTransportStatus()
+  String data = trackData != null ? trackData : getTrackDataEvents()
+  String desc = trackDescription != null ? trackDescription : getTrackDescription()
+
+  logDebug("parentUpdateGroupDeviceMusicPlayerState: Forwarding status=${stat}, trackDescription=${desc} to group devices")
+  parent?.updateGroupDeviceMusicPlayerState(coordinatorId, stat, data, desc)
+}
+
 @CompileStatic
 void updateZoneGroupName(String groupName) {
   sendDeviceEvent('groupName', groupName)
@@ -2605,6 +2623,8 @@ void setStatusTransportStatus(String status) {
   sendDeviceEvent('status', status)
   sendDeviceEvent('transportStatus', status)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceMusicPlayerState(status, null, null)
 }
 String getTransportStatus() {
   return this.device.currentValue('transportStatus')
@@ -2753,6 +2773,8 @@ void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
   sendDeviceEvent('trackDescription', trackDescription)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceMusicPlayerState(null, null, trackDescription)
 
   if(getIsGroupCoordinator() && prevTrackDescription != trackDescription) {getPlaybackMetadataStatusIn()}
 }
@@ -2760,8 +2782,11 @@ String getTrackDescription() { return this.device.currentValue('trackDescription
 
 @CompileStatic
 void setTrackDataEvents(Map trackData) {
-  sendDeviceEvent('trackData', JsonOutput.toJson(trackData))
+  String trackDataJson = JsonOutput.toJson(trackData)
+  sendDeviceEvent('trackData', trackDataJson)
   sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceMusicPlayerState(null, trackDataJson, null)
 }
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
 

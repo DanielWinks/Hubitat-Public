@@ -41,6 +41,7 @@ metadata {
     capability 'Switch'
     capability 'SpeechSynthesis'
     capability 'AudioVolume'
+    capability 'MusicPlayer'
 
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
@@ -573,13 +574,14 @@ void refresh() {
   Boolean useProportional = getUseProportionalVolumeSetting()
   logDebug("refresh() - isGrouped: ${isGrouped}, useProportional: ${useProportional}")
 
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logDebug('Coordinator not found for state refresh')
+    return
+  }
+
   if(isGrouped && useProportional) {
     // Use Sonos group volume (which is already an average)
-    DeviceWrapper coordinator = getCoordinatorDevice()
-    if(!coordinator) {
-      logDebug('Coordinator not found for state refresh')
-      return
-    }
     Integer volume = coordinator.currentValue('groupVolume', true) as Integer
     String muteState = coordinator.currentValue('groupMute', true)
     logDebug("refresh() - Reading from coordinator: groupVolume=${volume}, groupMute=${muteState}")
@@ -593,6 +595,21 @@ void refresh() {
   } else {
     // Calculate average from individual players
     refreshAverageVolume()
+  }
+
+  // Refresh MusicPlayer attributes from coordinator
+  String status = coordinator.currentValue('status', true)
+  String trackData = coordinator.currentValue('trackData', true)
+  String trackDescription = coordinator.currentValue('trackDescription', true)
+
+  if(status != null) {
+    sendEvent(name: 'status', value: status)
+  }
+  if(trackData != null) {
+    sendEvent(name: 'trackData', value: trackData)
+  }
+  if(trackDescription != null) {
+    sendEvent(name: 'trackDescription', value: trackDescription)
   }
 }
 
@@ -633,4 +650,107 @@ void refreshAverageVolume() {
 
   // Mute state: muted if all players are muted
   sendEvent(name: 'mute', value: allMuted ? 'muted' : 'unmuted')
+}
+
+// =============================================================================
+// MusicPlayer Capability Implementation
+// =============================================================================
+
+/**
+ * Play - forwards to coordinator
+ */
+void play() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot play')
+    return
+  }
+  coordinator.play()
+}
+
+/**
+ * Pause - forwards to coordinator
+ */
+void pause() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot pause')
+    return
+  }
+  coordinator.pause()
+}
+
+/**
+ * Stop - forwards to coordinator
+ */
+void stop() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot stop')
+    return
+  }
+  coordinator.stop()
+}
+
+/**
+ * Next track - forwards to coordinator
+ */
+void nextTrack() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot skip track')
+    return
+  }
+  coordinator.nextTrack()
+}
+
+/**
+ * Previous track - forwards to coordinator
+ */
+void previousTrack() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot go to previous track')
+    return
+  }
+  coordinator.previousTrack()
+}
+
+/**
+ * Set level (same as setVolume for MusicPlayer compatibility)
+ */
+void setLevel(BigDecimal level) {
+  setVolume(level)
+}
+
+/**
+ * Play track - forwards to coordinator
+ */
+void playTrack(String uri, BigDecimal volume = null) {
+  if(!uri) {
+    logWarn('No URI provided to play')
+    return
+  }
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot play track')
+    return
+  }
+  coordinator.playTrack(uri, volume)
+}
+
+/**
+ * Set track - forwards to coordinator
+ */
+void setTrack(String uri) {
+  if(!uri) {
+    logWarn('No URI provided to set')
+    return
+  }
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot set track')
+    return
+  }
+  coordinator.setTrack(uri)
 }

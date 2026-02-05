@@ -1227,6 +1227,34 @@ void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, Str
   }
 }
 
+/**
+ * Forward MusicPlayer attributes to all group devices that use this coordinator
+ * Called by the coordinator player when playback status or track info changes
+ * @param coordinatorId The RINCON ID of the coordinator
+ * @param status The current playback status ('playing', 'paused', 'stopped')
+ * @param trackData The current track data JSON string
+ * @param trackDescription The current track description string
+ */
+void updateGroupDeviceMusicPlayerState(String coordinatorId, String status, String trackData, String trackDescription) {
+  if(!coordinatorId) { return }
+
+  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
+    it.getDataValue('groupCoordinatorId') == coordinatorId
+  }
+
+  groupsForCoord.each { gd ->
+    if(status != null) {
+      gd.sendEvent(name: 'status', value: status)
+    }
+    if(trackData != null) {
+      gd.sendEvent(name: 'trackData', value: trackData)
+    }
+    if(trackDescription != null) {
+      gd.sendEvent(name: 'trackDescription', value: trackDescription)
+    }
+  }
+}
+
 // =============================================================================
 // Version Checking for Installed Files
 // =============================================================================
