@@ -96,7 +96,7 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // App Pages
 // =============================================================================
 Map mainPage() {
-  state.remove("discoveryRunning")
+  if(state.discoveryRunning) { stopDiscovery() }
   checkForUpdates()
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
@@ -222,8 +222,13 @@ Map localPlayerPage() {
     subscribeToSsdpEvents(location)
     ssdpDiscover()
     state.discoveryRunning = true
+    state.discoveryEndTime = now() + 60000
     app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+    runIn(60, 'stopDiscovery')
+    runIn(1, 'updateDiscoveryTimer')
   }
+
+  Integer remainingSecs = Math.max(0, (Integer)(((state.discoveryEndTime as Long) - now()) / 1000))
 
   dynamicPage(
 		name: "localPlayerPage",
@@ -233,33 +238,25 @@ Map localPlayerPage() {
 		uninstall: false
   ) {
     section("Please wait while we discover your Sonos devices. Using both SSDP and mDNS discovery methods. Click Next when all your devices have been discovered.") {
+      if(state.discoveryRunning) {
+        paragraph "<b><span class='app-state-${app.id}-discoveryTimer'>Discovery time remaining: ${remainingSecs} seconds</span></b>"
+      } else {
+        paragraph "<b>Discovery has stopped.</b> Click Next to proceed or extend to continue."
+      }
+      input 'btnExtend60', 'button', title: 'Extend 60 Seconds', submitOnChange: true
+      input 'btnExtend300', 'button', title: 'Extend 5 Minutes', submitOnChange: true
       paragraph (
-        "<span class='app-state-${app.id}-discoveryInProgress'></span>"
-      )
-      paragraph (
-        "<span class='app-state-${app.id}-sonosDiscoveredCount'>Found Devices (0): </span>" +
-        "<span class='app-state-${app.id}-sonosDiscovered'></span>"
+        "<div id='discoveryStatus'>" +
+        "<span class='app-state-${app.id}-sonosDiscoveredCount'>Found Devices (${discoveredSonoses.size()} primary, ${discoveredSonosSecondaries.size()} secondary): </span>" +
+        "<span class='app-state-${app.id}-sonosDiscovered'>${getFoundSonoses()}</span>" +
+        "</div>"
       )
     }
   }
 }
 
 Map localPlayerSelectionPage() {
-  state.remove("discoveryRunning")
-	unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
-	unsubscribe(location, 'sdpTerm.ssdp:all')
-
-  // Unregister mDNS listeners as discovery is complete
-  try {
-    // Check if mDNS methods exist (requires Hubitat 2.4.1+)
-    if(this.respondsTo('unregisterMDNSListener')) {
-      unregisterMDNSListener('_sonos._tcp')
-      unregisterMDNSListener('_http._tcp')
-      logDebug("Unregistered mDNS listeners")
-    }
-  } catch(Exception e) {
-    logTrace("Could not unregister mDNS listeners: ${e.message}")
-  }
+  stopDiscovery()
 
   // Clear feedback when entering page fresh (not from button click)
   if(state.playerCreationFeedback && state.playerCreationTimestamp) {
@@ -302,7 +299,7 @@ Map localPlayerSelectionPage() {
 
   dynamicPage(
 		name: "localPlayerSelectionPage",
-		title: "Select Sonos Devices",
+		title: "",
 		nextPage: 'mainPage',
 		install: false,
 		uninstall: false
@@ -451,6 +448,8 @@ void appButtonHandler(String buttonName) {
     state.latestReleaseDate = null
     state.latestReleaseUrl = null
   }
+  if(buttonName == 'btnExtend60') { extendDiscovery(60) }
+  if(buttonName == 'btnExtend300') { extendDiscovery(300) }
 }
 
 void applySettingsButton() { configure() }
@@ -512,6 +511,7 @@ void configure() {
 
   state.remove('favs')
   unschedule('appGetFavoritesLocal')
+  stopDiscovery()
 }
 // =============================================================================
 // End Initialize() and Configure()
@@ -800,6 +800,61 @@ void removeOrphans() {
 // - Additional checks prevent duplicates by playerId and IP address
 // - Selection page deduplicates by playerId to handle edge cases
 // =============================================================================
+void stopDiscovery() {
+  logInfo('Stopping discovery...')
+  state.remove('discoveryRunning')
+  state.remove('discoveryEndTime')
+  unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
+  unsubscribe(location, 'sdpTerm.ssdp:all')
+  unschedule('sendFoundSonosEvents')
+  unschedule('processMdnsDiscovery')
+  unschedule('stopDiscovery')
+  unschedule('updateDiscoveryTimer')
+  try {
+    if(this.respondsTo('unregisterMDNSListener')) {
+      unregisterMDNSListener('_sonos._tcp')
+      unregisterMDNSListener('_http._tcp')
+    }
+  } catch(Exception e) { logTrace("Could not unregister mDNS listeners: ${e.message}") }
+}
+
+void updateDiscoveryTimer() {
+  if(!state.discoveryRunning || !state.discoveryEndTime) {
+    logDebug("updateDiscoveryTimer: stopping - discoveryRunning=${state.discoveryRunning}, discoveryEndTime=${state.discoveryEndTime}")
+    return
+  }
+
+  Integer remainingSecs = Math.max(0, (Integer)(((state.discoveryEndTime as Long) - now()) / 1000))
+  logTrace("updateDiscoveryTimer: sending event with ${remainingSecs} seconds remaining")
+  app.sendEvent(name: 'discoveryTimer', value: "Discovery time remaining: ${remainingSecs} seconds")
+
+  if(remainingSecs > 0) {
+    runIn(1, 'updateDiscoveryTimer')
+  } else {
+    logDebug("updateDiscoveryTimer: timer reached 0, stopping updates")
+  }
+}
+
+void extendDiscovery(Integer seconds) {
+  logInfo("Extending discovery by ${seconds} seconds")
+  if(!state.discoveryRunning) {
+    // Restart discovery without clearing already-discovered devices
+    subscribeToSsdpEvents(location)
+    sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
+    sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
+    startMdnsDiscovery()
+    state.discoveryRunning = true
+    runIn(1, 'updateDiscoveryTimer')
+  }
+  // Add seconds to current remaining time (or from now if already expired)
+  Long currentEnd = state.discoveryEndTime ? (state.discoveryEndTime as Long) : now()
+  Long newEnd = Math.max(currentEnd, now()) + (seconds * 1000L)
+  state.discoveryEndTime = newEnd
+  Integer totalRemaining = (Integer)(((newEnd) - now()) / 1000)
+  unschedule('stopDiscovery')
+  runIn(totalRemaining, 'stopDiscovery')
+}
+
 void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
@@ -869,7 +924,7 @@ void processMdnsDiscovery() {
       }
     }
 
-    sendFoundSonosEvents()
+    runIn(2, 'sendFoundSonosEvents')
   } catch(Exception e) {
     logWarn("Error processing mDNS discovery: ${e.message}")
   }
@@ -911,6 +966,7 @@ void subscribeToSsdpEvents(Location location) {
 }
 
 void ssdpEventHandler(Event event) {
+  if(!state.discoveryRunning) { return }
   LinkedHashMap parsedEvent = parseLanMessage(event?.description)
   processParsedSsdpEvent(parsedEvent)
 }
@@ -1025,7 +1081,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
       logTrace("Found secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
     }
     // Secondary devices should never appear in the main discovered list
-    sendFoundSonosEvents()
+    scheduleMethod(2, 'sendFoundSonosEvents')
     return
   }
 
@@ -1033,7 +1089,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
     logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
-    sendFoundSonosEvents()
+    scheduleMethod(2, 'sendFoundSonosEvents')
   } else {
     logTrace("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
@@ -1073,6 +1129,15 @@ void sendFoundSonosEvents() {
 // =============================================================================
 // Helper methods
 // =============================================================================
+
+/**
+ * Wrapper for runIn() to allow calls from @CompileStatic methods.
+ * The dynamic method lookup for runIn() is incompatible with static compilation.
+ */
+void scheduleMethod(Integer seconds, String methodName) {
+  runIn(seconds, methodName)
+}
+
 @CompileStatic
 String getDNIFromRincon(String rincon) {
   return rincon.tokenize('_')[1][0..-6]
