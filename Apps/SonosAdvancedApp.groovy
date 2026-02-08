@@ -129,7 +129,8 @@ Map mainPage() {
       input 'trackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
     }
 
-    section('Update Settings:', hideable: true) {
+    section('Update Settings:', hideable: true, hidden: true) {
+      paragraph "<span style='color: #ff6b6b;'><b>⚠ Warning:</b> The built-in auto-update functionality should not be used if you manage this app through Hubitat Package Manager (HPM). Using both may cause conflicts, or version mismatches. If you installed via HPM, use HPM to manage updates.</span>"
       input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
       if(autoCheckUpdates) {
         input 'updateCheckFrequency', 'enum', title: 'Check frequency', required: false, defaultValue: 'Daily',
