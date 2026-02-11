@@ -81,10 +81,39 @@ Map mainPage() {
       input('doorContactSensor', 'capability.contactSensor', title: 'Door contact sensor', required: false, multiple: false)
     }
 
+    section('<h2>Door Left Open Warning</h2>') {
+      paragraph '<i>Send a notification if the door contact sensor stays open for too long.</i>'
+      input('doorLeftOpenEnabled', 'bool', title: 'Enable door left open warning', required: false, defaultValue: false, submitOnChange: true)
+      if (settings.doorLeftOpenEnabled) {
+        input('doorLeftOpenMinutes', 'number', title: 'Warn after door is open for (minutes)', required: true, defaultValue: 5, range: '1..60')
+      }
+    }
+
     section('<h2>Auto Re-Lock</h2>') {
       input('autoReLockEnabled', 'bool', title: 'Enable auto re-lock after unlock', required: false, defaultValue: false, submitOnChange: true)
       if (settings.autoReLockEnabled) {
         input('autoReLockDelay', 'number', title: 'Re-lock delay (seconds)', required: true, defaultValue: 300, range: '5..3600')
+      }
+    }
+
+    section('<h2>Lock Confirmation</h2>') {
+      paragraph '<i>After a lock command is sent, verify the lock actually reports "locked". Sends a notification if it does not.</i>'
+      input('lockConfirmEnabled', 'bool', title: 'Enable lock confirmation check', required: false, defaultValue: false, submitOnChange: true)
+      if (settings.lockConfirmEnabled) {
+        input('lockConfirmDelay', 'number', title: 'Check lock state after (seconds)', required: true, defaultValue: 15, range: '5..120')
+      }
+    }
+
+    section('<h2>Temporary Disable</h2>') {
+      paragraph '<i>When this switch is ON, all automatic locking and unlocking is suppressed.</i>'
+      input('disableSwitch', 'capability.switch', title: 'Disable switch (optional)', required: false, multiple: false)
+    }
+
+    section('<h2>Battery Monitoring</h2>') {
+      paragraph '<i>Send a notification when any controlled lock\'s battery drops below a threshold.</i>'
+      input('batteryAlertEnabled', 'bool', title: 'Enable low battery alert', required: false, defaultValue: false, submitOnChange: true)
+      if (settings.batteryAlertEnabled) {
+        input('batteryThreshold', 'number', title: 'Alert when battery below (%)', required: true, defaultValue: 20, range: '5..50')
       }
     }
 
@@ -94,6 +123,10 @@ Map mainPage() {
         input('notifyOnLock', 'bool', title: 'Notify when locked', required: false, defaultValue: true)
         input('notifyOnUnlock', 'bool', title: 'Notify when unlocked', required: false, defaultValue: true)
         input('notifyOnSafetyBlock', 'bool', title: 'Notify when lock is blocked (door open)', required: false, defaultValue: true)
+        input('notifyOnConfirmFail', 'bool', title: 'Notify when lock confirmation fails', required: false, defaultValue: true)
+        input('notifyOnJammed', 'bool', title: 'Notify when lock reports jammed/unknown', required: false, defaultValue: true)
+        input('notifyOnDoorLeftOpen', 'bool', title: 'Notify when door is left open', required: false, defaultValue: true)
+        input('notifyOnBatteryLow', 'bool', title: 'Notify when lock battery is low', required: false, defaultValue: true)
       }
     }
 
@@ -175,6 +208,14 @@ Map meansToLockPage() {
         input('lockSwitchState', 'enum', title: 'Lock when switch turns', options: ['on', 'off'], required: true, defaultValue: 'on')
       }
     }
+
+    // --- HSM ---
+    section('<h2>Hubitat Safety Monitor (HSM)</h2>') {
+      input('lockHsmEnabled', 'bool', title: 'Enable lock on HSM arm', required: false, defaultValue: false, submitOnChange: true)
+      if (settings.lockHsmEnabled) {
+        input('lockHsmStates', 'enum', title: 'Lock when HSM enters these states', options: ['armedAway', 'armedHome', 'armedNight'], required: true, multiple: true)
+      }
+    }
   }
 }
 
@@ -241,6 +282,14 @@ Map meansToUnlockPage() {
         input('unlockSwitchState', 'enum', title: 'Unlock when switch turns', options: ['on', 'off'], required: true, defaultValue: 'on')
       }
     }
+
+    // --- HSM ---
+    section('<h2>Hubitat Safety Monitor (HSM)</h2>') {
+      input('unlockHsmEnabled', 'bool', title: 'Enable unlock on HSM disarm', required: false, defaultValue: false, submitOnChange: true)
+      if (settings.unlockHsmEnabled) {
+        input('unlockHsmDisarm', 'bool', title: 'Unlock when HSM is disarmed (allDisarmed)', required: true, defaultValue: true)
+      }
+    }
   }
 }
 
@@ -254,13 +303,22 @@ void configure() {
   initialize()
 }
 
+void uninstalled() {
+  unsubscribe()
+  unschedule()
+}
+
 void initialize() {
   state.pendingLock = false
   state.pendingReLock = false
 
   subscribeLockTriggers()
   subscribeUnlockTriggers()
+  subscribeModeHandler()
+  subscribeHsmHandler()
   subscribeLockEvents()
+  subscribeLockMonitoring()
+  subscribeDoorLeftOpen()
   scheduleTriggers()
 }
 
@@ -274,10 +332,7 @@ private void subscribeLockTriggers() {
     subscribe(settings.lockPresenceSensors, 'presence', 'lockPresenceHandler')
   }
 
-  // Mode
-  if (settings.lockModeEnabled && settings.lockModes) {
-    subscribe(location, 'mode', 'lockModeHandler')
-  }
+  // Mode -- handled by consolidated modeChangeHandler (see below)
 
   // Contact sensors: lock when closed
   if (settings.lockContactEnabled && settings.lockContactSensors) {
@@ -310,10 +365,7 @@ private void subscribeUnlockTriggers() {
     subscribe(settings.unlockPresenceSensors, 'presence.present', 'unlockPresenceHandler')
   }
 
-  // Mode
-  if (settings.unlockModeEnabled && settings.unlockModes) {
-    subscribe(location, 'mode', 'unlockModeHandler')
-  }
+  // Mode -- handled by consolidated modeChangeHandler (see below)
 
   // Contact sensors: unlock when opened
   if (settings.unlockContactEnabled && settings.unlockContactSensors) {
@@ -330,12 +382,57 @@ private void subscribeUnlockTriggers() {
     String eventValue = "switch.${settings.unlockSwitchState}"
     subscribe(settings.unlockSwitches, eventValue, 'unlockSwitchHandler')
   }
+
+  // Time range: check if we are currently outside the unlock time range at startup
+  // (i.e., unlock time range has ended and we should have unlocked)
+  if (settings.unlockTimeRangeEnabled && settings.unlockTimeRangeStart && settings.unlockTimeRangeEnd) {
+    if (!timeOfDayIsBetween(toDateTime(settings.unlockTimeRangeStart), toDateTime(settings.unlockTimeRangeEnd), new Date(), location.timeZone)) {
+      logDebug('Currently outside unlock time range at startup -- unlocking')
+      performUnlock('unlock time range (startup)')
+    }
+  }
+}
+
+private void subscribeModeHandler() {
+  // Use a single subscription to location.mode to avoid race conditions
+  // when the same mode appears in both lock and unlock mode lists
+  Boolean needsMode = (settings.lockModeEnabled && settings.lockModes) ||
+                      (settings.unlockModeEnabled && settings.unlockModes)
+  if (needsMode) {
+    subscribe(location, 'mode', 'modeChangeHandler')
+  }
+}
+
+private void subscribeHsmHandler() {
+  Boolean needsHsm = (settings.lockHsmEnabled && settings.lockHsmStates) ||
+                     (settings.unlockHsmEnabled && settings.unlockHsmDisarm)
+  if (needsHsm) {
+    subscribe(location, 'hsmStatus', 'hsmStatusHandler')
+  }
 }
 
 private void subscribeLockEvents() {
   // Monitor lock state changes for auto re-lock
   if (settings.autoReLockEnabled && settings.locks) {
     subscribe(settings.locks, 'lock.unlocked', 'lockUnlockedHandler')
+  }
+}
+
+private void subscribeLockMonitoring() {
+  if (!settings.locks) { return }
+
+  // Jammed / unknown state monitoring
+  subscribe(settings.locks, 'lock', 'lockStateMonitorHandler')
+
+  // Battery monitoring
+  if (settings.batteryAlertEnabled && settings.batteryThreshold) {
+    subscribe(settings.locks, 'battery', 'batteryHandler')
+  }
+}
+
+private void subscribeDoorLeftOpen() {
+  if (settings.doorLeftOpenEnabled && settings.doorContactSensor && settings.doorLeftOpenMinutes) {
+    subscribe(settings.doorContactSensor, 'contact', 'doorLeftOpenContactHandler')
   }
 }
 
@@ -406,9 +503,22 @@ void delayedLockPresence() {
   }
 }
 
-void lockModeHandler(Event event) {
-  logDebug("Lock mode event: ${event.value}")
-  if (settings.lockModes && (event.value in settings.lockModes)) {
+/**
+ * Consolidated mode change handler.
+ * Unlock is checked first -- if the mode triggers an unlock, the lock branch is skipped.
+ * This avoids a lock-then-unlock race when a mode appears in both lists.
+ */
+void modeChangeHandler(Event event) {
+  logDebug("Mode change event: ${event.value}")
+
+  // Unlock takes priority
+  if (settings.unlockModeEnabled && settings.unlockModes && (event.value in settings.unlockModes)) {
+    cancelPendingLock()
+    performUnlock("mode changed to ${event.value}")
+    return
+  }
+
+  if (settings.lockModeEnabled && settings.lockModes && (event.value in settings.lockModes)) {
     lockWithSafetyCheck("mode changed to ${event.value}")
   }
 }
@@ -482,14 +592,6 @@ void unlockPresenceHandler(Event event) {
   performUnlock("${event.displayName} arrived")
 }
 
-void unlockModeHandler(Event event) {
-  logDebug("Unlock mode event: ${event.value}")
-  if (settings.unlockModes && (event.value in settings.unlockModes)) {
-    cancelPendingLock()
-    performUnlock("mode changed to ${event.value}")
-  }
-}
-
 void unlockContactOpenHandler(Event event) {
   logDebug("Unlock contact open event: ${event.displayName}")
   cancelPendingLock()
@@ -516,6 +618,70 @@ void scheduledUnlock() {
 void scheduledUnlockTimeRangeEnd() {
   cancelPendingLock()
   performUnlock('unlock time range end')
+}
+
+// =============================================================================
+// HSM Handler
+// =============================================================================
+
+void hsmStatusHandler(Event event) {
+  logDebug("HSM status event: ${event.value}")
+
+  // Unlock takes priority (same pattern as mode handler)
+  if (settings.unlockHsmEnabled && settings.unlockHsmDisarm && event.value == 'allDisarmed') {
+    cancelPendingLock()
+    performUnlock('HSM disarmed')
+    return
+  }
+
+  if (settings.lockHsmEnabled && settings.lockHsmStates && (event.value in settings.lockHsmStates)) {
+    lockWithSafetyCheck("HSM ${event.value}")
+  }
+}
+
+// =============================================================================
+// Door Left Open Warning
+// =============================================================================
+
+void doorLeftOpenContactHandler(Event event) {
+  if (event.value == 'open') {
+    Integer minutes = (settings.doorLeftOpenMinutes ?: 5) as Integer
+    logDebug("Door opened -- scheduling left-open warning in ${minutes} minutes")
+    runIn(minutes * 60, 'doorLeftOpenWarning')
+  } else {
+    logDebug('Door closed -- cancelling left-open warning')
+    unschedule('doorLeftOpenWarning')
+  }
+}
+
+void doorLeftOpenWarning() {
+  // Verify door is still open
+  String contactState = settings.doorContactSensor?.currentValue('contact')
+  if (contactState == 'open') {
+    logWarn("Door has been left open for ${settings.doorLeftOpenMinutes} minutes")
+    sendNotification("Door has been left open for ${settings.doorLeftOpenMinutes} minutes", 'doorLeftOpen')
+  }
+}
+
+// =============================================================================
+// Lock State & Battery Monitoring
+// =============================================================================
+
+void lockStateMonitorHandler(Event event) {
+  String val = event.value
+  if (val == 'unknown' || val == 'jammed') {
+    logWarn("Lock ${event.displayName} reported: ${val}")
+    sendNotification("Lock ${event.displayName} reported: ${val}", 'jammed')
+  }
+}
+
+void batteryHandler(Event event) {
+  Integer level = event.integerValue
+  Integer threshold = (settings.batteryThreshold ?: 20) as Integer
+  if (level <= threshold) {
+    logWarn("Lock ${event.displayName} battery low: ${level}%")
+    sendNotification("Lock ${event.displayName} battery low: ${level}%", 'batteryLow')
+  }
 }
 
 // =============================================================================
@@ -548,6 +714,12 @@ void autoReLock() {
  * @param reason A description of why the lock is being triggered.
  */
 private void lockWithSafetyCheck(String reason) {
+  // Temporary disable check
+  if (isDisabled()) {
+    logDebug("Lock suppressed (${reason}): disable switch is on")
+    return
+  }
+
   // Safety check: never lock if door is open or state is unavailable
   if (settings.doorContactSensor) {
     String contactState = settings.doorContactSensor.currentValue('contact')
@@ -571,6 +743,12 @@ private void lockWithSafetyCheck(String reason) {
   }
   sendNotification("Door locked (${reason})", 'lock')
 
+  // Schedule lock confirmation check
+  if (settings.lockConfirmEnabled) {
+    Integer confirmDelay = (settings.lockConfirmDelay ?: 15) as Integer
+    runIn(confirmDelay, 'verifyLockConfirmation')
+  }
+
   // Cancel any pending re-lock since we just locked
   state.pendingReLock = false
   unschedule('autoReLock')
@@ -582,6 +760,12 @@ private void lockWithSafetyCheck(String reason) {
  * @param reason A description of why the unlock is being triggered.
  */
 private void performUnlock(String reason) {
+  // Temporary disable check
+  if (isDisabled()) {
+    logDebug("Unlock suppressed (${reason}): disable switch is on")
+    return
+  }
+
   logInfo("Unlocking (${reason})")
   settings.locks?.each { DeviceWrapper lock ->
     if (lock.currentValue('lock') != 'unlocked') {
@@ -600,16 +784,42 @@ private void performUnlock(String reason) {
 // =============================================================================
 
 /**
+ * Returns true if the disable switch is configured and currently ON.
+ */
+private Boolean isDisabled() {
+  return settings.disableSwitch && settings.disableSwitch.currentValue('switch') == 'on'
+}
+
+/**
+ * Verifies that all locks actually report "locked" after a lock command.
+ * Sends a notification if any lock failed to confirm.
+ */
+void verifyLockConfirmation() {
+  List<String> failedLocks = []
+  settings.locks?.each { DeviceWrapper lock ->
+    String lockState = lock.currentValue('lock')
+    if (lockState != 'locked') {
+      failedLocks.add("${lock.displayName} (${lockState ?: 'unknown'})")
+    }
+  }
+  if (failedLocks) {
+    String msg = "Lock confirmation failed: ${failedLocks.join(', ')}"
+    logWarn(msg)
+    sendNotification(msg, 'confirmFail')
+  } else {
+    logDebug('Lock confirmation: all locks confirmed locked')
+  }
+}
+
+/**
  * Cancels any pending delayed lock operations.
  */
 private void cancelPendingLock() {
-  if (state.pendingLock) {
-    logDebug('Cancelling pending lock')
-    state.pendingLock = false
-    unschedule('delayedLockPresence')
-    unschedule('delayedLockContact')
-    unschedule('delayedLockMotion')
-  }
+  logDebug('Cancelling all pending lock operations')
+  state.pendingLock = false
+  unschedule('delayedLockPresence')
+  unschedule('delayedLockContact')
+  unschedule('delayedLockMotion')
 }
 
 /**
@@ -631,6 +841,18 @@ private void sendNotification(String message, String type) {
       break
     case 'safetyBlock':
       shouldNotify = settings.notifyOnSafetyBlock != false
+      break
+    case 'confirmFail':
+      shouldNotify = settings.notifyOnConfirmFail != false
+      break
+    case 'jammed':
+      shouldNotify = settings.notifyOnJammed != false
+      break
+    case 'doorLeftOpen':
+      shouldNotify = settings.notifyOnDoorLeftOpen != false
+      break
+    case 'batteryLow':
+      shouldNotify = settings.notifyOnBatteryLow != false
       break
   }
 
