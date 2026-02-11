@@ -283,13 +283,6 @@ Map meansToUnlockPage() {
       }
     }
 
-    // --- HSM ---
-    section('<h2>Hubitat Safety Monitor (HSM)</h2>') {
-      input('unlockHsmEnabled', 'bool', title: 'Enable unlock on HSM disarm', required: false, defaultValue: false, submitOnChange: true)
-      if (settings.unlockHsmEnabled) {
-        input('unlockHsmDisarm', 'bool', title: 'Unlock when HSM is disarmed (allDisarmed)', required: true, defaultValue: true)
-      }
-    }
   }
 }
 
@@ -404,9 +397,7 @@ private void subscribeModeHandler() {
 }
 
 private void subscribeHsmHandler() {
-  Boolean needsHsm = (settings.lockHsmEnabled && settings.lockHsmStates) ||
-                     (settings.unlockHsmEnabled && settings.unlockHsmDisarm)
-  if (needsHsm) {
+  if (settings.lockHsmEnabled && settings.lockHsmStates) {
     subscribe(location, 'hsmStatus', 'hsmStatusHandler')
   }
 }
@@ -626,14 +617,6 @@ void scheduledUnlockTimeRangeEnd() {
 
 void hsmStatusHandler(Event event) {
   logDebug("HSM status event: ${event.value}")
-
-  // Unlock takes priority (same pattern as mode handler)
-  if (settings.unlockHsmEnabled && settings.unlockHsmDisarm && event.value == 'allDisarmed') {
-    cancelPendingLock()
-    performUnlock('HSM disarmed')
-    return
-  }
-
   if (settings.lockHsmEnabled && settings.lockHsmStates && (event.value in settings.lockHsmStates)) {
     lockWithSafetyCheck("HSM ${event.value}")
   }
