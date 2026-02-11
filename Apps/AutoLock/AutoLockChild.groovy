@@ -41,7 +41,6 @@
 
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.hub.domain.Event
-import groovy.transform.Field
 
 definition(
   name: 'Auto Lock Child',
@@ -86,6 +85,7 @@ Map mainPage() {
       input('doorLeftOpenEnabled', 'bool', title: 'Enable door left open warning', required: false, defaultValue: false, submitOnChange: true)
       if (settings.doorLeftOpenEnabled) {
         input('doorLeftOpenMinutes', 'number', title: 'Warn after door is open for (minutes)', required: true, defaultValue: 5, range: '1..60')
+        input('doorLeftOpenRepeatMinutes', 'number', title: 'Repeat warning every (minutes, 0 = no repeat)', required: false, defaultValue: 0, range: '0..60')
       }
     }
 
@@ -110,10 +110,11 @@ Map mainPage() {
     }
 
     section('<h2>Battery Monitoring</h2>') {
-      paragraph '<i>Send a notification when any controlled lock\'s battery drops below a threshold.</i>'
+      paragraph '<i>Check lock battery levels once daily at the configured time and notify if below threshold.</i>'
       input('batteryAlertEnabled', 'bool', title: 'Enable low battery alert', required: false, defaultValue: false, submitOnChange: true)
       if (settings.batteryAlertEnabled) {
         input('batteryThreshold', 'number', title: 'Alert when battery below (%)', required: true, defaultValue: 20, range: '5..50')
+        input('batteryAlertTime', 'time', title: 'Check battery at this time daily', required: true)
       }
     }
 
@@ -410,15 +411,10 @@ private void subscribeLockEvents() {
 }
 
 private void subscribeLockMonitoring() {
-  if (!settings.locks) { return }
+  if (!settings.locks || !settings.notificationDevices) { return }
 
   // Jammed / unknown state monitoring
   subscribe(settings.locks, 'lock', 'lockStateMonitorHandler')
-
-  // Battery monitoring
-  if (settings.batteryAlertEnabled && settings.batteryThreshold) {
-    subscribe(settings.locks, 'battery', 'batteryHandler')
-  }
 }
 
 private void subscribeDoorLeftOpen() {
@@ -450,6 +446,12 @@ private void scheduleTriggers() {
   if (settings.unlockTimeRangeEnabled && settings.unlockTimeRangeEnd) {
     schedule(settings.unlockTimeRangeEnd, 'scheduledUnlockTimeRangeEnd')
     logDebug("Unlock time range end scheduled at ${settings.unlockTimeRangeEnd}")
+  }
+
+  // Battery check
+  if (settings.batteryAlertEnabled && settings.batteryAlertTime) {
+    schedule(settings.batteryAlertTime, 'scheduledBatteryCheck')
+    logDebug("Battery check scheduled daily at ${settings.batteryAlertTime}")
   }
 }
 
@@ -641,8 +643,15 @@ void doorLeftOpenWarning() {
   // Verify door is still open
   String contactState = settings.doorContactSensor?.currentValue('contact')
   if (contactState == 'open') {
-    logWarn("Door has been left open for ${settings.doorLeftOpenMinutes} minutes")
-    sendNotification("Door has been left open for ${settings.doorLeftOpenMinutes} minutes", 'doorLeftOpen')
+    logWarn('Door is still open')
+    sendNotification('Door has been left open', 'doorLeftOpen')
+
+    // Schedule repeat warning if configured
+    Integer repeatMinutes = (settings.doorLeftOpenRepeatMinutes ?: 0) as Integer
+    if (repeatMinutes > 0) {
+      logDebug("Scheduling repeat door-left-open warning in ${repeatMinutes} minutes")
+      runIn(repeatMinutes * 60, 'doorLeftOpenWarning')
+    }
   }
 }
 
@@ -658,12 +667,21 @@ void lockStateMonitorHandler(Event event) {
   }
 }
 
-void batteryHandler(Event event) {
-  Integer level = event.integerValue
+void scheduledBatteryCheck() {
   Integer threshold = (settings.batteryThreshold ?: 20) as Integer
-  if (level <= threshold) {
-    logWarn("Lock ${event.displayName} battery low: ${level}%")
-    sendNotification("Lock ${event.displayName} battery low: ${level}%", 'batteryLow')
+  List<String> lowBatteryLocks = []
+  settings.locks?.each { DeviceWrapper lock ->
+    Integer level = lock.currentValue('battery') as Integer
+    if (level != null && level <= threshold) {
+      lowBatteryLocks.add("${lock.displayName} (${level}%)")
+    }
+  }
+  if (lowBatteryLocks) {
+    String msg = "Low battery: ${lowBatteryLocks.join(', ')}"
+    logWarn(msg)
+    sendNotification(msg, 'batteryLow')
+  } else {
+    logDebug('Battery check: all locks above threshold')
   }
 }
 
