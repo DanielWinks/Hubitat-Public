@@ -47,7 +47,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Utilities and Logging Library',
-  version: '0.9.1',
+  version: '0.9.3',
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/UtilitiesAndLoggingLibrary.groovy'
 
 )
@@ -301,16 +301,15 @@ void debugLogsOff() {
 
 /**
  * Disables trace logging after a timeout period.
- * Note: The code incorrectly updates 'debugLogEnable' instead of 'traceLogEnable'.
  */
 void traceLogsOff() {
   if (device) {
     logWarn("Trace logging disabled for ${device}")
-    device.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
+    device.updateSetting('traceLogEnable', [value: 'false', type: 'bool'] )
   }
   if (app) {
     logWarn("Trace logging disabled for ${app}")
-    device.updateSetting('debugLogEnable', [value: 'false', type: 'bool'] )
+    app.updateSetting('traceLogEnable', [value: 'false', type: 'bool'] )
   }
 }
 
@@ -401,6 +400,17 @@ String prettyJson(Map jsonInput) {
 String nowFormatted() {
   if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
   else                  return new Date().format('yyyy-MMM-dd h:mm:ss a')
+}
+
+/**
+ * Formats an epoch-second timestamp into a local-timezone string.
+ * Used by drivers that need a human-readable timestamp without exposing the
+ * raw epoch value in device data.
+ */
+String formatEpoch(Long epochSeconds) {
+  Date d = new Date((long)epochSeconds * 1000)
+  if(location?.timeZone) return d.format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
+  return d.format('yyyy-MMM-dd h:mm:ss a')
 }
 
 /**
