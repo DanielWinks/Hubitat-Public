@@ -26,6 +26,7 @@
 // Delay in milliseconds to wait after ungrouping before regrouping players
 // This ensures the Sonos API has time to process the ungroup operation before creating a new group
 @Field static final Integer UNGROUP_DELAY_MS = 2000
+@Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
 
 metadata {
   definition(
@@ -42,6 +43,7 @@ metadata {
     capability 'SpeechSynthesis'
     capability 'AudioVolume'
     capability 'MusicPlayer'
+    capability 'SwitchLevel'
 
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
@@ -378,29 +380,73 @@ Boolean isActuallySonosGrouped() {
  *   - controlUngroupedIndividually ON: Sets volume on each speaker
  *   - controlUngroupedIndividually OFF: Only controls the coordinator
  */
-void setVolume(BigDecimal level) {
+void setVolume(BigDecimal level, BigDecimal duration = null) {
   if(level == null) {
     logWarn('No volume level provided')
     return
   }
-  Integer volumeLevel = Math.max(0, Math.min(100, level.intValue()))
+  Integer targetVolume = Math.max(0, Math.min(100, level.intValue()))
+
+  // If no fade duration, use immediate volume set
+  if(duration == null || duration <= 0) {
+    cancelGroupDeviceVolumeFade()
+    setVolumeImmediate(targetVolume)
+    return
+  }
+
+  Integer currentVolume = (this.device.currentValue('volume', true) as Integer) ?: 0
+  Integer delta = Math.abs(targetVolume - currentVolume)
+  if(delta == 0) { return }
+  Integer durationSeconds = duration as Integer
+
+  // If duration too short or delta too small, just send a single command
+  if(durationSeconds < 2 || delta <= 1) {
+    cancelGroupDeviceVolumeFade()
+    setVolumeImmediate(targetVolume)
+    return
+  }
+
+  // Calculate step interval: at least 1 second between commands
+  Integer steps = Math.min(delta, durationSeconds)
+  Integer intervalMs = (Integer)((durationSeconds * 1000) / steps)
+  if(intervalMs < 1000) { intervalMs = 1000 }
+  steps = (Integer)(durationSeconds * 1000 / intervalMs)
+  if(steps < 1) { steps = 1 }
+  BigDecimal volumeStep = (BigDecimal)(targetVolume - currentVolume) / steps
+
+  // Cancel any existing fade and start new one
+  cancelGroupDeviceVolumeFade()
+  String deviceId = device.getDeviceNetworkId()
+  Map fadeState = [
+    targetVolume: targetVolume,
+    startVolume: currentVolume,
+    volumeStep: volumeStep,
+    currentStep: 0,
+    totalSteps: steps,
+    intervalMs: intervalMs
+  ]
+  groupDeviceVolumeFadeState.put(deviceId, fadeState)
+  logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
+  runInMillis(intervalMs, 'groupDeviceVolumeFadeStep')
+}
+
+/**
+ * Internal: set volume immediately without fade (original setVolume logic)
+ */
+private void setVolumeImmediate(Integer volumeLevel) {
   DeviceWrapper coordinator = getCoordinatorDevice()
   Boolean isGrouped = isActuallySonosGrouped()
-  logDebug("setVolume(${volumeLevel}) - isGrouped: ${isGrouped}, useProportional: ${getUseProportionalVolumeSetting()}, controlIndividually: ${getControlUngroupedIndividuallySetting()}")
+  logDebug("setVolumeImmediate(${volumeLevel}) - isGrouped: ${isGrouped}, useProportional: ${getUseProportionalVolumeSetting()}, controlIndividually: ${getControlUngroupedIndividuallySetting()}")
 
   if(isGrouped) {
-    // Speakers ARE grouped in Sonos
     if(getUseProportionalVolumeSetting()) {
-      // Use Sonos native group volume API (proportional adjustment)
       if(!coordinator) {
         logWarn('Coordinator device not found - cannot set group volume')
         return
       }
       logDebug("Using Sonos group volume API (proportional)")
       coordinator.setGroupVolume(volumeLevel)
-      // State will be updated via event from coordinator through parent app
     } else {
-      // Set same volume on each speaker directly
       List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
       if(!allDevs) {
         logWarn('No player devices found in group - cannot set volume')
@@ -411,9 +457,7 @@ void setVolume(BigDecimal level) {
       sendEvent(name: 'volume', value: volumeLevel, unit: '%')
     }
   } else {
-    // Speakers are NOT grouped in Sonos
     if(getControlUngroupedIndividuallySetting()) {
-      // Control each speaker individually
       List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
       if(!allDevs) {
         logWarn('No player devices found in group - cannot set volume')
@@ -423,7 +467,6 @@ void setVolume(BigDecimal level) {
       allDevs.each { it.setVolume(volumeLevel) }
       sendEvent(name: 'volume', value: volumeLevel, unit: '%')
     } else {
-      // Only control the coordinator
       if(!coordinator) {
         logWarn('Coordinator device not found - cannot set volume')
         return
@@ -433,6 +476,39 @@ void setVolume(BigDecimal level) {
       logDebug("Sending volume event: ${volumeLevel}")
       sendEvent(name: 'volume', value: volumeLevel, unit: '%')
     }
+  }
+}
+
+void groupDeviceVolumeFadeStep() {
+  String deviceId = device.getDeviceNetworkId()
+  Map fadeState = groupDeviceVolumeFadeState.get(deviceId)
+  if(fadeState == null) { return }
+  Integer currentStep = (fadeState.currentStep as Integer) + 1
+  Integer totalSteps = fadeState.totalSteps as Integer
+  Integer targetVolume = fadeState.targetVolume as Integer
+  if(currentStep >= totalSteps) {
+    setVolumeImmediate(targetVolume)
+    groupDeviceVolumeFadeState.remove(deviceId)
+    logInfo("Volume fade complete: volume set to ${targetVolume}")
+    return
+  }
+  Integer startVolume = fadeState.startVolume as Integer
+  BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
+  Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
+  newVolume = Math.max(0, Math.min(100, newVolume))
+  setVolumeImmediate(newVolume)
+  fadeState.currentStep = currentStep
+  groupDeviceVolumeFadeState.put(deviceId, fadeState)
+  Integer intervalMs = fadeState.intervalMs as Integer
+  runInMillis(intervalMs, 'groupDeviceVolumeFadeStep')
+}
+
+void cancelGroupDeviceVolumeFade() {
+  String deviceId = device.getDeviceNetworkId()
+  if(groupDeviceVolumeFadeState.containsKey(deviceId)) {
+    groupDeviceVolumeFadeState.remove(deviceId)
+    unschedule('groupDeviceVolumeFadeStep')
+    logDebug('Cancelled in-progress volume fade')
   }
 }
 
@@ -816,9 +892,10 @@ void previousTrack() {
 
 /**
  * Set level (same as setVolume for MusicPlayer compatibility)
+ * Supports optional duration parameter for volume fade (seconds)
  */
-void setLevel(BigDecimal level) {
-  setVolume(level)
+void setLevel(BigDecimal level, BigDecimal duration = null) {
+  setVolume(level, duration)
 }
 
 /**

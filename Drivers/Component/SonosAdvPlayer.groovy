@@ -50,7 +50,7 @@ metadata {
   command 'ungroupPlayer'
 
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
-  command 'setGroupVolume', [[name: 'Group Volume', type: 'NUMBER']]
+  command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
   command 'groupVolumeUp'
   command 'groupVolumeDown'
   command 'muteGroup'
@@ -308,6 +308,9 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
 @Field private final String FAVORITE_RETRY_CALLBACK = 'checkFavoritePlaybackAndRetry'
 
+@Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
+
 // =============================================================================
 // End Fields
 // =============================================================================
@@ -324,7 +327,10 @@ void initialize() {
   mrgrcSubscribeMutex.release()
   unsubscribeMutex.release(4)
   configure()
-  fullRenewSubscriptions()
+  // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
+  Integer staggerDelay = getRandomLockRetry(3, 20)
+  logDebug("Scheduling full subscription renewal in ${staggerDelay} seconds")
+  runIn(staggerDelay, 'fullRenewSubscriptions', [overwrite: true])
   // runEvery3Hours('fullRenewSubscriptions')
 }
 void configure() {
@@ -436,7 +442,17 @@ void migrationCleanup() {
   if(settings.alwaysUseLoadAudioClip == null) { settings.alwaysUseLoadAudioClip = true }
   if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
   if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
+  // Remove debug-only device data keys when debug logging is off
+  if(!isDebugLoggingEnabled()) {
+    removeWsDeviceDataKeys()
+    removeEventTimestampDeviceDataKeys()
+  }
+  // Remove stale sid-expiresFormatted keys (replaced by human-readable sid-expires)
+  ['sid1', 'sid2', 'sid3', 'sid4'].each { String sid ->
+    if(device.getDataValue("${sid}-expiresFormatted") != null) { device.removeDataValue("${sid}-expiresFormatted") }
+  }
 }
+
 
 void audioClipQueueInitialization() {
   if(audioClipQueue == null) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
@@ -586,7 +602,87 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
 void mute(){ playerSetPlayerMute(true) }
 @CompileStatic
 void unmute(){ playerSetPlayerMute(false) }
-void setLevel(BigDecimal level) { playerSetPlayerVolume(level as Integer) }
+void setLevel(BigDecimal level, BigDecimal duration = null) {
+  Integer targetVolume = Math.max(0, Math.min(100, level as Integer))
+  if(duration == null || duration <= 0) {
+    cancelVolumeFade()
+    playerSetPlayerVolume(targetVolume)
+    return
+  }
+  Integer currentVolume = getPlayerVolume() ?: 0
+  Integer delta = Math.abs(targetVolume - currentVolume)
+  if(delta == 0) { return }
+  Integer durationSeconds = duration as Integer
+  // If the duration is too short for the delta, just send a single command
+  if(durationSeconds < 2 || delta <= 1) {
+    cancelVolumeFade()
+    playerSetPlayerVolume(targetVolume)
+    return
+  }
+  // Calculate step interval: at least 1 second between commands
+  Integer steps = Math.min(delta, durationSeconds)
+  Integer intervalMs = (Integer)((durationSeconds * 1000) / steps)
+  if(intervalMs < 1000) { intervalMs = 1000 }
+  // Recalculate steps based on actual interval
+  steps = (Integer)(durationSeconds * 1000 / intervalMs)
+  if(steps < 1) { steps = 1 }
+  BigDecimal volumeStep = (BigDecimal)(targetVolume - currentVolume) / steps
+  // Cancel any existing fade and start new one
+  cancelVolumeFade()
+  String deviceId = getId()
+  Map fadeState = [
+    targetVolume: targetVolume,
+    startVolume: currentVolume,
+    volumeStep: volumeStep,
+    currentStep: 0,
+    totalSteps: steps,
+    intervalMs: intervalMs
+  ]
+  volumeFadeState.put(deviceId, fadeState)
+  logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
+  runInMillis(intervalMs, 'volumeFadeStep')
+}
+
+void volumeFadeStep() {
+  String deviceId = getId()
+  Map fadeState = volumeFadeState.get(deviceId)
+  if(fadeState == null) { return }
+  Integer currentStep = (fadeState.currentStep as Integer) + 1
+  Integer totalSteps = fadeState.totalSteps as Integer
+  Integer targetVolume = fadeState.targetVolume as Integer
+  if(currentStep >= totalSteps) {
+    // Final step: set exact target volume and clean up
+    playerSetPlayerVolume(targetVolume)
+    volumeFadeState.remove(deviceId)
+    logInfo("Volume fade complete: volume set to ${targetVolume}")
+    return
+  }
+  // Calculate intermediate volume
+  Integer startVolume = fadeState.startVolume as Integer
+  BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
+  Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
+  newVolume = Math.max(0, Math.min(100, newVolume))
+  playerSetPlayerVolume(newVolume)
+  // Update step counter and schedule next
+  fadeState.currentStep = currentStep
+  volumeFadeState.put(deviceId, fadeState)
+  Integer intervalMs = fadeState.intervalMs as Integer
+  runInMillis(intervalMs, 'volumeFadeStep')
+}
+
+void cancelVolumeFade() {
+  String deviceId = getId()
+  if(volumeFadeState.containsKey(deviceId)) {
+    volumeFadeState.remove(deviceId)
+    unschedule('volumeFadeStep')
+    logDebug('Cancelled in-progress volume fade')
+  }
+}
+
+Boolean isVolumeFadeInProgress() {
+  return volumeFadeState.containsKey(getId())
+}
+
 @CompileStatic
 void setVolume(BigDecimal level) { setLevel(level) }
 void setTreble(BigDecimal level) { componentSetTrebleLocal(level)}
@@ -630,23 +726,101 @@ void unmuteGroup(){
   }
   else { playerSetPlayerMute(false) }
 }
-void setGroupVolume(BigDecimal level) {
+void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   Boolean isCoord = isGroupedAndCoordinator()
   Boolean isFollower = isGroupedAndNotCoordinator()
   logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGroupedAndNotCoordinator: ${isFollower}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
-  if(isCoord) {
-    logDebug("setGroupVolume: Using playerSetGroupVolume (Sonos group API)")
-    playerSetGroupVolume(level as Integer)
-  } else if(isFollower) {
+  if(isFollower) {
     logDebug("setGroupVolume: Delegating to coordinator")
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level, duration)
+    return
   }
-  else {
-    logDebug("setGroupVolume: Falling back to playerSetPlayerVolume (individual)")
-    playerSetPlayerVolume(level as Integer)
+  Integer targetVolume = Math.max(0, Math.min(100, level as Integer))
+  Boolean useGroupApi = isCoord
+  if(duration == null || duration <= 0) {
+    cancelGroupVolumeFade()
+    if(useGroupApi) {
+      logDebug("setGroupVolume: Using playerSetGroupVolume (Sonos group API)")
+      playerSetGroupVolume(targetVolume)
+    } else {
+      logDebug("setGroupVolume: Falling back to playerSetPlayerVolume (individual)")
+      playerSetPlayerVolume(targetVolume)
+    }
+    return
+  }
+  Integer currentVolume = useGroupApi ? (this.device.currentValue('groupVolume', true) as Integer ?: 0) : (getPlayerVolume() ?: 0)
+  Integer delta = Math.abs(targetVolume - currentVolume)
+  if(delta == 0) { return }
+  Integer durationSeconds = duration as Integer
+  if(durationSeconds < 2 || delta <= 1) {
+    cancelGroupVolumeFade()
+    if(useGroupApi) { playerSetGroupVolume(targetVolume) }
+    else { playerSetPlayerVolume(targetVolume) }
+    return
+  }
+  Integer steps = Math.min(delta, durationSeconds)
+  Integer intervalMs = (Integer)((durationSeconds * 1000) / steps)
+  if(intervalMs < 1000) { intervalMs = 1000 }
+  steps = (Integer)(durationSeconds * 1000 / intervalMs)
+  if(steps < 1) { steps = 1 }
+  BigDecimal volumeStep = (BigDecimal)(targetVolume - currentVolume) / steps
+  cancelGroupVolumeFade()
+  String deviceId = getId()
+  Map fadeState = [
+    targetVolume: targetVolume,
+    startVolume: currentVolume,
+    volumeStep: volumeStep,
+    currentStep: 0,
+    totalSteps: steps,
+    intervalMs: intervalMs,
+    useGroupApi: useGroupApi
+  ]
+  groupVolumeFadeState.put(deviceId, fadeState)
+  logInfo("Starting group volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
+  runInMillis(intervalMs, 'groupVolumeFadeStep')
+}
+
+void groupVolumeFadeStep() {
+  String deviceId = getId()
+  Map fadeState = groupVolumeFadeState.get(deviceId)
+  if(fadeState == null) { return }
+  Integer currentStep = (fadeState.currentStep as Integer) + 1
+  Integer totalSteps = fadeState.totalSteps as Integer
+  Integer targetVolume = fadeState.targetVolume as Integer
+  Boolean useGroupApi = fadeState.useGroupApi as Boolean
+  if(currentStep >= totalSteps) {
+    if(useGroupApi) { playerSetGroupVolume(targetVolume) }
+    else { playerSetPlayerVolume(targetVolume) }
+    groupVolumeFadeState.remove(deviceId)
+    logInfo("Group volume fade complete: volume set to ${targetVolume}")
+    return
+  }
+  Integer startVolume = fadeState.startVolume as Integer
+  BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
+  Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
+  newVolume = Math.max(0, Math.min(100, newVolume))
+  if(useGroupApi) { playerSetGroupVolume(newVolume) }
+  else { playerSetPlayerVolume(newVolume) }
+  fadeState.currentStep = currentStep
+  groupVolumeFadeState.put(deviceId, fadeState)
+  Integer intervalMs = fadeState.intervalMs as Integer
+  runInMillis(intervalMs, 'groupVolumeFadeStep')
+}
+
+void cancelGroupVolumeFade() {
+  String deviceId = getId()
+  if(groupVolumeFadeState.containsKey(deviceId)) {
+    groupVolumeFadeState.remove(deviceId)
+    unschedule('groupVolumeFadeStep')
+    logDebug('Cancelled in-progress group volume fade')
   }
 }
-void setGroupLevel(BigDecimal level) { setGroupVolume(level as Integer) }
+
+Boolean isGroupVolumeFadeInProgress() {
+  return groupVolumeFadeState.containsKey(getId())
+}
+
+void setGroupLevel(BigDecimal level, BigDecimal duration = null) { setGroupVolume(level, duration) }
 void setGroupMute(String mode) {
   logDebug("Setting group mute to ${mode}")
   if(mode == 'muted') { muteGroup() }
@@ -1798,10 +1972,14 @@ void deleteSid(String sid) {
   logTrace("Removing SID for ${sid}")
   device.removeDataValue(sid)
   device.removeDataValue("${sid}-expires")
+  // Clean up in-memory expiry
+  String expiryKey = "${getDeviceDNI()}-${sid}-expires"
+  eventTimestamps.remove(expiryKey)
 }
 @CompileStatic
 Boolean subValid(String sid) {
-  Long exp = getDeviceDataValue("${sid}-expires") as Long
+  String expiryKey = "${getDeviceDNI()}-${sid}-expires"
+  Long exp = eventTimestamps.get(expiryKey)
   if(exp == null) { return false }
   if((exp - RESUB_INTERVAL / 2) > Instant.now().getEpochSecond() && hasSid(sid) == true) {
     return true
@@ -1811,7 +1989,13 @@ Boolean subValid(String sid) {
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
-  setDeviceDataValue("${sid}-expires", (Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)).toString())
+  Long expiresEpoch = Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)
+  // Store expiry in-memory for subValid() checks
+  String expiryKey = "${getDeviceDNI()}-${sid}-expires"
+  eventTimestamps.put(expiryKey, expiresEpoch)
+  // Write human-readable expiry to device data for visibility
+  String formatted = formatEpoch(expiresEpoch)
+  setDeviceDataValue("${sid}-expires", formatted)
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
 }
@@ -2260,6 +2444,23 @@ void setHouseholdId(String householdId) {
   setDeviceDataValue('householdId', householdId)
 }
 
+String getFormattedLocalTimestamp() {
+  if(location.timeZone) { return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone) }
+  return new Date().format('yyyy-MMM-dd h:mm:ss a')
+}
+
+void updateEventTimestampDeviceData(String key) {
+  if(isDebugLoggingEnabled()) {
+    setDeviceDataValue(key, getFormattedLocalTimestamp())
+  }
+}
+
+void removeEventTimestampDeviceDataKeys() {
+  EVENT_TIMESTAMP_KEYS.each { String key ->
+    if(device.getDataValue(key) != null) { device.removeDataValue(key) }
+  }
+}
+
 @CompileStatic
 Long getLastInboundMrRcEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastMrRcEvent" as String)
@@ -2268,6 +2469,7 @@ Long getLastInboundMrRcEventEpoch() {
 @CompileStatic
 void setLastInboundMrRcEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastMrRcEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastMrRcEvent')
 }
 @CompileStatic
 Boolean lastMrRcEventWithin(Long seconds) {
@@ -2285,6 +2487,7 @@ Long getLastInboundZgtEventEpoch() {
 @CompileStatic
 void setLastInboundZgtEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastZgtEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastZgtEvent')
 }
 @CompileStatic
 Boolean lastZgtEventWithin(Integer seconds) {
@@ -2302,6 +2505,7 @@ Long getLastInboundMrGrcEventEpoch() {
 @CompileStatic
 void setLastInboundMrGrcEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastMrGrcEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastMrGrcEvent')
 }
 @CompileStatic
 Boolean lastMrGrcEventWithin(Integer seconds) {
@@ -2319,6 +2523,7 @@ Long getLastWebsocketEventEpoch() {
 @CompileStatic
 void setLastWebsocketEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastWebsocketEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastWebsocketEvent')
 }
 @CompileStatic
 Boolean lastWebsocketEventWithin(Integer seconds) {
@@ -2351,7 +2556,14 @@ Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
 
 void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
 
-// WS subscription status helpers — in-memory to avoid DB writes for runtime state
+// WS subscription status helpers — in-memory by default, also written to device data when debug logging is on
+Boolean isDebugLoggingEnabled() {
+  return settings.logEnable && settings.debugLogEnable
+}
+
+@Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastWebsocketEvent']
+
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
   return wsSubscriptionStatus.getOrDefault(key, 'Unsubscribed')
@@ -2359,10 +2571,23 @@ String getWsSubscriptionValue(String namespace) {
 void setWsSubscriptionValue(String namespace, String value) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
   wsSubscriptionStatus.put(key, value)
+  // Also persist to device data for visibility when debug logging is enabled
+  if(isDebugLoggingEnabled()) {
+    setDeviceDataValue("WS-${namespace}", value)
+  }
 }
 void clearWsSubscriptionStatus() {
   String prefix = "${this.device?.getDeviceNetworkId()}-WS-"
   wsSubscriptionStatus.keySet().removeAll { String k -> k.startsWith(prefix) }
+  // Also clear device data entries
+  WS_NAMESPACES.each { String ns ->
+    if(device.getDataValue("WS-${ns}") != null) { device.removeDataValue("WS-${ns}") }
+  }
+}
+void removeWsDeviceDataKeys() {
+  WS_NAMESPACES.each { String ns ->
+    if(device.getDataValue("WS-${ns}") != null) { device.removeDataValue("WS-${ns}") }
+  }
 }
 
 void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
@@ -3420,7 +3645,7 @@ void playerSetPlayerVolume(Integer volume) {
     'playerId':"${getId()}"
   ]
   Map args = [
-    'volume': volume
+    'volume': volume,
   ]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
