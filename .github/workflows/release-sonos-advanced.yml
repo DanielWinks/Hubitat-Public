@@ -315,6 +315,16 @@ jobs:
               throw new Error('SonosAdvancedBundles workflow did not complete in time');
             }
 
+      - name: Pull latest changes from sub-workflows
+        run: |
+          # The UtilitiesAndLoggingLibrary and SonosAdvancedBundles workflows
+          # each committed updated bundle files to main. Our local checkout is
+          # stale and still has the OLD bundles/libraries from before those
+          # workflows ran. We must pull so the release uploads the freshly-built
+          # bundle zips and library files.
+          git pull --rebase --autostash origin main
+          echo "Local checkout updated with latest bundle artifacts"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
