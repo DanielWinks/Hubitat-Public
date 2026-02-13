@@ -27,7 +27,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Sonos Music API Library',
-  version: '0.9.0',
+  version: '0.9.1',
   importUrl: ''
 )
 
