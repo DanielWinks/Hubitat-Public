@@ -50,6 +50,9 @@ metadata {
     command 'loadPlaylistRepeatOne', [[ name: 'playlistId', type: 'STRING']]
     command 'loadPlaylistNoRepeat', [[ name: 'playlistId', type: 'STRING']]
     command 'loadPlaylistNoShuffle', [[ name: 'playlistId', type: 'STRING']]
+    command 'loadPlaylistNoCrossfade', [[ name: 'playlistId', type: 'STRING']]
+    command 'loadPlaylistAppendAndPlay', [[ name: 'playlistId', type: 'STRING']]
+    command 'loadPlaylistShuffleNoRepeat', [[ name: 'playlistId', type: 'STRING']]
   }
 }
 
@@ -114,4 +117,16 @@ void loadPlaylistNoRepeat(String playlistId) {
 
 void loadPlaylistNoShuffle(String playlistId) {
   parent?.loadPlaylistFull(playlistId, 'repeat all', 'replace', 'off', 'true', 'on')
+}
+
+void loadPlaylistNoCrossfade(String playlistId) {
+  parent?.loadPlaylistFull(playlistId, 'off', 'replace', 'off', 'true', 'off')
+}
+
+void loadPlaylistAppendAndPlay(String playlistId) {
+  parent?.loadPlaylistFull(playlistId, 'repeat all', 'append', 'off', 'true', 'on')
+}
+
+void loadPlaylistShuffleNoRepeat(String playlistId) {
+  parent?.loadPlaylistFull(playlistId, 'off', 'replace', 'on', 'true', 'on')
 }

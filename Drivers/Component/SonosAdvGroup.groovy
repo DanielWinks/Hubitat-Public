@@ -88,6 +88,17 @@ metadata {
       [name: 'startTime', type: 'NUMBER']
     ]
 
+    command 'getPlaylists'
+    command 'loadPlaylist', [[ name: 'playlistId', type: 'STRING']]
+    command 'loadPlaylistFull', [
+      [ name: 'playlistId', type: 'STRING'],
+      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+      [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
+      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+      [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
+      [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
+    ]
+
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
@@ -1099,4 +1110,48 @@ void loadFavoriteFull(String favoriteId, String playMode = 'NORMAL', BigDecimal 
     return
   }
   coordinator.loadFavoriteFull(favoriteId, playMode, startTrack, startTime)
+}
+
+/**
+ * Get playlists
+ */
+void getPlaylists() {
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot get playlists')
+    return
+  }
+  coordinator.getPlaylists()
+}
+
+/**
+ * Load a playlist by ID
+ */
+void loadPlaylist(String playlistId) {
+  if(!playlistId) {
+    logWarn('No playlist ID provided')
+    return
+  }
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot load playlist')
+    return
+  }
+  coordinator.loadPlaylist(playlistId)
+}
+
+/**
+ * Load a playlist with full options
+ */
+void loadPlaylistFull(String playlistId, String repeatMode = 'repeat all', String queueMode = 'replace', String shuffleMode = 'off', String autoPlay = 'true', String crossfadeMode = 'on') {
+  if(!playlistId) {
+    logWarn('No playlist ID provided')
+    return
+  }
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found - cannot load playlist')
+    return
+  }
+  coordinator.loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }

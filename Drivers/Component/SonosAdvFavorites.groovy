@@ -50,6 +50,9 @@ metadata {
     command 'loadFavoriteRepeatOne', [[ name: 'favoriteId', type: 'STRING']]
     command 'loadFavoriteNoRepeat', [[ name: 'favoriteId', type: 'STRING']]
     command 'loadFavoriteNoShuffle', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteNoCrossfade', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteAppendAndPlay', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteShuffleNoRepeat', [[ name: 'favoriteId', type: 'STRING']]
   }
 }
 
@@ -114,4 +117,16 @@ void loadFavoriteNoRepeat(String favoriteId) {
 
 void loadFavoriteNoShuffle(String favoriteId) {
   parent?.loadFavoriteFull(favoriteId, 'repeat all', 'replace', 'off', 'true', 'on')
+}
+
+void loadFavoriteNoCrossfade(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'off', 'replace', 'off', 'true', 'off')
+}
+
+void loadFavoriteAppendAndPlay(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat all', 'append', 'off', 'true', 'on')
+}
+
+void loadFavoriteShuffleNoRepeat(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'off', 'replace', 'on', 'true', 'on')
 }
