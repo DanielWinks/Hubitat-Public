@@ -1364,8 +1364,20 @@ String unEscapeMetaData(String text) {
 @CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
-  // Update group device with current on/off state
+  // Update group device with current on/off state and currently joined players
   List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll{it.getDataValue('groupCoordinatorId') == coordinatorId }
+
+  // Resolve RINCON IDs to friendly player names for the currentlyJoinedPlayers attribute
+  List<String> joinedPlayerNames = []
+  playersInGroup.each { String rincon ->
+    ChildDeviceWrapper playerDev = getDeviceFromRincon(rincon)
+    if(playerDev != null) {
+      String name = playerDev.getDataValue('name')
+      if(name != null && name != '') { joinedPlayerNames.add(name) }
+    }
+  }
+  String joinedPlayersValue = joinedPlayerNames.join(', ')
+
   groupsForCoord.each{gd ->
     List<String> playerIds = gd.getDataValue('playerIds').tokenize(',')
     HashSet<String> list1 = new  HashSet<String>(playerIds)
@@ -1375,6 +1387,7 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     Boolean allPlayersAreGrouped = list1.equals(list2)
     if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
+    gd.sendEvent(name: 'currentlyJoinedPlayers', value: joinedPlayersValue)
   }
 }
 

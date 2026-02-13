@@ -88,6 +88,7 @@ metadata {
 
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
+    attribute 'currentlyJoinedPlayers', 'string'
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
@@ -699,6 +700,15 @@ void refresh() {
   if(currentRepeatAllMode != null) sendEvent(name: 'currentRepeatAllMode', value: currentRepeatAllMode)
   if(currentCrossfadeMode != null) sendEvent(name: 'currentCrossfadeMode', value: currentCrossfadeMode)
   if(currentShuffleMode != null) sendEvent(name: 'currentShuffleMode', value: currentShuffleMode)
+
+  // Refresh currently joined players from coordinator's group member names
+  String groupMemberNames = coordinator.currentValue('groupMemberNames', true)
+  if(groupMemberNames != null) {
+    // groupMemberNames is stored as a list toString(), e.g. "[Kitchen Player, Office Player]"
+    // Clean it up to a comma-separated string
+    String cleaned = groupMemberNames.replaceAll(/^\[|\]$/, '').trim()
+    sendEvent(name: 'currentlyJoinedPlayers', value: cleaned)
+  }
 }
 
 /**

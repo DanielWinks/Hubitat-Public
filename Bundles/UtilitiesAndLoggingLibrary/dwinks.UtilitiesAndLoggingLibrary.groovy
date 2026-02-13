@@ -126,8 +126,9 @@ void installed() {
  */
 void uninstalled() {
   logDebug('Uninstalled...')
-  unschedule()
-  deleteChildDevices()
+  try { unconfigure() } catch(e) { logWarn("No unconfigure() method defined or unconfigure() resulted in error: ${e}") }
+  try { unschedule() } catch(e) { logWarn("Error during unschedule() in uninstalled(): ${e}") }
+  try { deleteChildDevices() } catch(e) { logWarn("Error during deleteChildDevices() in uninstalled(): ${e}") }
 }
 
 /**
