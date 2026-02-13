@@ -67,6 +67,17 @@ metadata {
   ]
   command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
 
+  command 'getPlaylists'
+  command 'loadPlaylistFull', [
+    [ name: 'playlistId', type: 'STRING'],
+    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+    [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
+    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+    [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
+    [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
+  ]
+  command 'loadPlaylist', [[ name: 'playlistId', type: 'STRING']]
+
   command 'enableCrossfade'
   command 'disableCrossfade'
 
@@ -158,6 +169,7 @@ metadata {
         input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
       }
       input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
+      input 'createPlaylistChildDevice', 'bool', title: 'Create child device for playlists?', required: false, defaultValue: false
       if(getRightChannelRincon() != null && getRightChannelRincon() != '') {
         input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
       }
@@ -191,6 +203,7 @@ Boolean getCreateRepeatAllChildDevice() { return settings.createRepeatAllChildDe
 Boolean getCreateMuteChildDevice() { return settings.createMuteChildDevice != null ? settings.createMuteChildDevice : false }
 Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
 Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
+Boolean getCreatePlaylistChildDevice() { return settings.createPlaylistChildDevice != null ? settings.createPlaylistChildDevice : false }
 Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
 Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
 Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
@@ -260,6 +273,7 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
+@Field static ConcurrentHashMap<String, LinkedHashMap> playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, Long> eventTimestamps = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, String> wsSubscriptionStatus = new ConcurrentHashMap<String, String>()
 @Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
@@ -306,7 +320,11 @@ import java.util.concurrent.Semaphore
 
 @Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [2, 5, 10, 30]
 @Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Map> playlistRetryState = new ConcurrentHashMap<String, Map>()
 @Field private final String FAVORITE_RETRY_CALLBACK = 'checkFavoritePlaybackAndRetry'
+
+@Field static final List<Integer> PLAYLIST_RETRY_INTERVALS = [2, 5, 10, 30]
+@Field private final String PLAYLIST_RETRY_CALLBACK = 'checkPlaylistPlaybackAndRetry'
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
@@ -392,6 +410,7 @@ void secondaryConfiguration() {
   createRemoveMuteChildDevice(getCreateMuteChildDevice())
   createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
   createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
+  createRemovePlaylistChildDevice(getCreatePlaylistChildDevice())
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
@@ -435,6 +454,7 @@ void migrationCleanup() {
   if(settings.createRepeatAllChildDevice == null) { settings.createRepeatAllChildDevice = false }
   if(settings.createBatteryStatusChildDevice == null) { settings.createBatteryStatusChildDevice = false }
   if(settings.createFavoritesChildDevice == null) { settings.createFavoritesChildDevice = false }
+  if(settings.createPlaylistChildDevice == null) { settings.createPlaylistChildDevice = false }
   if(settings.createRightChannelChildDevice == null) { settings.createRightChannelChildDevice = false }
   if(settings.createNightModeChildDevice == null) { settings.createNightModeChildDevice = false }
   if(settings.createSpeechEnhancementChildDevice == null) { settings.createSpeechEnhancementChildDevice = false }
@@ -976,6 +996,92 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
     parent?.getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
+
+// Playlist Methods
+@CompileStatic
+void loadPlaylist(String playlistId) {
+  String queueMode = "REPLACE"
+  String autoPlay = 'true'
+  String repeatMode = 'repeat all'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
+  loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+@CompileStatic
+void loadPlaylistFull(String playlistId) {
+  String queueMode = "REPLACE"
+  String autoPlay = 'true'
+  String repeatMode = 'repeat all'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
+  loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+@CompileStatic
+void loadPlaylistFull(String playlistId, String repeatMode) {
+  String queueMode = "REPLACE"
+  String autoPlay = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
+  loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+@CompileStatic
+void loadPlaylistFull(String playlistId, String repeatMode, String queueMode) {
+  String autoPlay = 'true'
+  String shuffleMode = 'false'
+  String crossfadeMode = 'true'
+  loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+@CompileStatic
+void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode) {
+  String autoPlay = 'true'
+  String crossfadeMode = 'true'
+  loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+@CompileStatic
+void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
+  String crossfadeMode = 'true'
+  loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = autoPlay == 'true'
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'on'
+  Boolean crossfade = crossfadeMode == 'on'
+  if(getIsGroupCoordinator() == true) {
+    // Clear any existing retry state for this device
+    clearPlaylistRetryState()
+
+    // Execute the initial load
+    playerLoadPlaylist(playlistId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+
+    // Initialize retry state and schedule checks only if autoplay is enabled
+    if(playOnCompletion) {
+      String deviceId = device.getDeviceNetworkId()
+      playlistRetryState.put(deviceId, [
+        playlistId: playlistId,
+        action: action,
+        repeat: repeat,
+        repeatOne: repeatOne,
+        shuffle: shuffle,
+        crossfade: crossfade,
+        playOnCompletion: playOnCompletion,
+        attemptNumber: 0
+      ])
+      scheduleNextPlaylistRetryCheck()
+    }
+  } else if(isGroupedAndNotCoordinator() == true) {
+    parent?.getDeviceFromRincon(getGroupCoordinatorId()).loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+  }
+}
+
 // =============================================================================
 // End Device Methods
 // =============================================================================
@@ -1088,6 +1194,111 @@ void checkFavoritePlaybackAndRetry() {
 
 
 // =============================================================================
+// Playlist Retry Mechanism
+// =============================================================================
+
+/**
+ * Clears the retry state for this device
+ */
+@CompileStatic
+void clearPlaylistRetryState() {
+  String deviceId = device.getDeviceNetworkId()
+  playlistRetryState.remove(deviceId)
+  // Note: We don't unschedule here because:
+  // 1. The callback will see no state and return early (safe no-op)
+  // 2. runIn with overwrite:true ensures only one callback is scheduled at a time
+  // 3. Hubitat scheduling is per-device, so no cross-device interference
+}
+
+/**
+ * Schedules the next retry check based on the current attempt number
+ */
+@CompileStatic
+void scheduleNextPlaylistRetryCheck() {
+  String deviceId = device.getDeviceNetworkId()
+  Map retryState = playlistRetryState.get(deviceId)
+
+  if(retryState == null) {
+    return
+  }
+
+  Integer attemptNumber = retryState.attemptNumber as Integer
+
+  if(attemptNumber >= PLAYLIST_RETRY_INTERVALS.size()) {
+    // All retries exhausted
+    Integer totalWaitTime = PLAYLIST_RETRY_INTERVALS.sum() as Integer
+    logWarn("Failed to play playlist '${retryState.playlistId}' after ${PLAYLIST_RETRY_INTERVALS.size()} retry attempts (waited up to ${totalWaitTime} seconds). The playlist may not have loaded correctly.")
+    clearPlaylistRetryState()
+    return
+  }
+
+  Integer delaySeconds = PLAYLIST_RETRY_INTERVALS[attemptNumber]
+  logDebug("Scheduling playlist playback check in ${delaySeconds} seconds (attempt ${attemptNumber + 1}/${PLAYLIST_RETRY_INTERVALS.size()})")
+  schedulePlaylistRetryCallback(delaySeconds)
+}
+
+void schedulePlaylistRetryCallback(Integer delaySeconds) {
+  runIn(delaySeconds, PLAYLIST_RETRY_CALLBACK, [overwrite: true])
+}
+
+/**
+ * Checks if the playlist is playing and retries if not
+ */
+@CompileStatic
+void checkPlaylistPlaybackAndRetry() {
+  String deviceId = device.getDeviceNetworkId()
+  Map retryState = playlistRetryState.get(deviceId)
+
+  if(retryState == null) {
+    logDebug("No retry state found, skipping playback check")
+    return
+  }
+
+  String currentStatus = getTransportStatus()
+  logDebug("Checking playlist playback status: ${currentStatus}")
+
+  // Success if playing
+  if(currentStatus == 'playing') {
+    logInfo("Playlist '${retryState.playlistId}' is now playing successfully")
+    clearPlaylistRetryState()
+    return
+  }
+
+  // If status is null or empty, treat as not playing yet and continue retry
+  if(currentStatus == null || currentStatus == '') {
+    logDebug("Transport status is null/empty, will retry")
+  }
+
+  // Not playing yet, retry
+  // Note: This increment is safe because Hubitat device methods run single-threaded per device
+  Integer attemptNumber = retryState.attemptNumber as Integer
+  attemptNumber++
+  retryState.attemptNumber = attemptNumber
+
+  logInfo("Playlist '${retryState.playlistId}' not playing yet, retrying (attempt ${attemptNumber}/${PLAYLIST_RETRY_INTERVALS.size()})")
+
+  // Retry loading the playlist
+  playerLoadPlaylist(
+    retryState.playlistId as String,
+    retryState.action as String,
+    retryState.repeat as Boolean,
+    retryState.repeatOne as Boolean,
+    retryState.shuffle as Boolean,
+    retryState.crossfade as Boolean,
+    retryState.playOnCompletion as Boolean
+  )
+
+  // Schedule next check
+  scheduleNextPlaylistRetryCheck()
+}
+
+// =============================================================================
+// End Playlist Retry Mechanism
+// =============================================================================
+
+
+
+// =============================================================================
 // Child device methods
 // =============================================================================
 String getChildCommandFromDNI(DeviceWrapper dev) {
@@ -1098,6 +1309,7 @@ String getChildCommandFromDNI(DeviceWrapper dev) {
   if(dev.getDeviceNetworkId() == getMuteControlChildDNI()) {return 'Mute'}
   if(dev.getDeviceNetworkId() == getBatteryStatusChildDNI()) {return 'BatteryStatus'}
   if(dev.getDeviceNetworkId() == getFavoritesChildDNI()) {return 'Favorites'}
+  if(dev.getDeviceNetworkId() == getPlaylistChildDNI()) {return 'Playlist'}
   if(dev.getDeviceNetworkId() == getRightChannelChildDNI()) {return 'RightChannel'}
   if(dev.getDeviceNetworkId() == getNightModeChildDNI()) {return 'NightMode'}
   if(dev.getDeviceNetworkId() == getSpeechEnhancementChildDNI()) {return 'SpeechEnhancement'}
@@ -1221,6 +1433,7 @@ String getRepeatAllControlChildDNI() { return "${device.getDeviceNetworkId()}-Re
 String getMuteControlChildDNI() { return "${device.getDeviceNetworkId()}-MuteControl" }
 String getBatteryStatusChildDNI() { return "${device.getDeviceNetworkId()}-BatteryStatus" }
 String getFavoritesChildDNI() { return "${device.getDeviceNetworkId()}-Favorites" }
+String getPlaylistChildDNI() { return "${device.getDeviceNetworkId()}-Playlist" }
 String getRightChannelChildDNI() { return "${device.getDeviceNetworkId()}-RightChannel" }
 String getNightModeChildDNI() { return "${device.getDeviceNetworkId()}-NightMode" }
 String getSpeechEnhancementChildDNI() { return "${device.getDeviceNetworkId()}-SpeechEnhancement" }
@@ -1231,6 +1444,7 @@ ChildDeviceWrapper getRepeatAllControlChild() { return getChildDevice(getRepeatA
 ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlChildDNI()) }
 ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatteryStatusChildDNI()) }
 ChildDeviceWrapper getFavoritesChild() { return getChildDevice(getFavoritesChildDNI()) }
+ChildDeviceWrapper getPlaylistChild() { return getChildDevice(getPlaylistChildDNI()) }
 ChildDeviceWrapper getRightChannelChild() { return getChildDevice(getRightChannelChildDNI()) }
 ChildDeviceWrapper getNightModeChild() { return getChildDevice(getNightModeChildDNI()) }
 ChildDeviceWrapper getSpeechEnhancementChild() { return getChildDevice(getSpeechEnhancementChildDNI()) }
@@ -1391,6 +1605,22 @@ void createRemoveFavoritesChildDevice(Boolean create) {
       )
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveFavoritesChildDevice', e)
+    }
+  } else if(!create && child){ deleteChildDevice(dni) }
+}
+
+void createRemovePlaylistChildDevice(Boolean create) {
+  String dni = getPlaylistChildDNI()
+  ChildDeviceWrapper child = getPlaylistChild()
+  if(!child && create) {
+    try {
+      logDebug("Creating Playlist device")
+      child = addChildDevice('dwinks', 'Sonos Advanced Playlist', dni,
+        [ name: 'Sonos Playlist',
+          label: "Sonos Playlist - ${this.getDataValue('name')}"]
+      )
+    } catch (UnknownDeviceTypeException e) {
+      logException('createRemovePlaylistChildDevice', e)
     }
   } else if(!create && child){ deleteChildDevice(dni) }
 }
@@ -3326,6 +3556,14 @@ void clearFavoritesMap() {
   favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 }
 
+ConcurrentHashMap<String, LinkedHashMap> getPlaylistsMap() {
+  return playlistsMap
+}
+
+void clearPlaylistsMap() {
+  playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
+}
+
 @CompileStatic
 List<Map> getCurrentPlayingStatesForGroup() {
   List currentStates = []
@@ -3740,6 +3978,18 @@ void getFavorites() {
   sendWsMessage(json)
 }
 
+void getPlaylists() {
+  Map command = [
+    'namespace':'playlists',
+    'command':'getPlaylists',
+    'householdId':"${getHouseholdId()}"
+  ]
+  Map args = [:]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+}
+
 @CompileStatic
 void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
   Map command = [
@@ -3775,6 +4025,38 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
 
 void scheduleAmazonMusicAutoPlay() {
   runIn(3, 'playerPlay', [overwrite: true])
+}
+
+void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
+  Map command = [
+    'namespace':'playlists',
+    'command':'loadPlaylist',
+    'groupId':"${getGroupId()}"
+  ]
+  Map args = [
+    'playlistId': playlistId,
+    'action': action,
+    'playModes': [
+      'repeat': repeat,
+      'repeatOne': repeatOne,
+      'shuffle': shuffle,
+      'crossfade': crossfade
+    ],
+    'playOnCompletion': playOnCompletion
+  ]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+
+  // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
+  if(playOnCompletion) {
+    Map playlist = getPlaylistsMap()?.get(playlistId)
+    String serviceName = playlist?.service
+    if(serviceName?.toLowerCase()?.contains('amazon')) {
+      logDebug("Amazon Music playlist detected - scheduling auto-play in 3 seconds as workaround for service limitation")
+      scheduleAmazonMusicAutoPlay()
+    }
+  }
 }
 
 @CompileStatic
@@ -4316,6 +4598,7 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
     getFavorites()
+    getPlaylists()
   }
 
   if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
@@ -4473,6 +4756,148 @@ void processWebsocketMessage(String message) {
     }
   }
 
+  if(eventType?.type == 'playlistsList' && eventType?.response == 'getPlaylists' && eventType?.success == true) {
+    ArrayList<Map> respData = (ArrayList<Map>)eventData?.playlists
+    if(respData != null && respData.size() > 0) {
+      Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
+
+      // Get device ID for command URLs
+      Long deviceId = device.getIdAsLong()
+      String hubIp = device.hub.localIP
+
+      // Build HTML with modern styling and click handlers
+      String html = """<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f5f5f5;
+      margin: 0;
+      padding: 20px;
+    }
+    .playlists-container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      max-width: 400px;
+      margin: 0 auto;
+    }
+    .playlist-card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      padding: 15px;
+      text-align: center;
+      transition: transform 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+    }
+    .playlist-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    }
+    .playlist-image {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 8px;
+      transition: opacity 0.2s;
+    }
+    .playlist-image:hover {
+      opacity: 0.85;
+    }
+    .playlist-image:active {
+      opacity: 0.7;
+    }
+    .playlist-number {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 5px;
+      font-weight: 500;
+    }
+    .playlist-name {
+      font-size: 14px;
+      color: #333;
+      margin-top: 10px;
+      font-weight: 600;
+      line-height: 1.3;
+      min-height: 36px;
+    }
+    .no-image {
+      width: 100%;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      border-radius: 8px;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .no-image:hover {
+      opacity: 0.9;
+    }
+  </style>
+</head>
+<body>
+  <div class="playlists-container">
+"""
+
+      formatted.each(){playlist ->
+        String albumArtURI = playlist?.value?.imageUrl
+        String playlistId = playlist?.key
+        String playlistName = playlist?.value?.name
+
+        if(albumArtURI == null) {
+          html += """    <div class="playlist-card" onclick="(function(){var fd='id=${deviceId}&method=loadPlaylist&argType.1=STRING&arg[1]=${playlistId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+      <div class="playlist-number">Playlist #${playlistId}</div>
+      <div class="no-image">
+        <span>♪ ${playlistName}</span>
+      </div>
+"""
+        } else if(albumArtURI.startsWith('/')) {
+          html += """    <div class="playlist-card" onclick="(function(){var fd='id=${deviceId}&method=loadPlaylist&argType.1=STRING&arg[1]=${playlistId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+      <div class="playlist-number">Playlist #${playlistId}</div>
+      <img class="playlist-image"
+           src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
+           alt="${playlistName}" />
+"""
+        } else {
+          html += """    <div class="playlist-card" onclick="(function(){var fd='id=${deviceId}&method=loadPlaylist&argType.1=STRING&arg[1]=${playlistId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+      <div class="playlist-number">Playlist #${playlistId}</div>
+      <img class="playlist-image"
+           src="${albumArtURI}"
+           alt="${playlistName}" />
+"""
+        }
+
+        html += """      <div class="playlist-name">${playlistName}</div>
+    </div>
+"""
+      }
+
+      html += """  </div>
+</body>
+</html>"""
+
+      setChildPlaylists(html)
+
+
+      clearPlaylistsMap()
+      respData.each{
+        Map item = (Map)it
+        if(item != null && item.size() > 0) {
+          String playlistId = (String)item?.id
+          String playlistName = (String)item?.name
+          if(playlistId != null) {
+            getPlaylistsMap()[playlistId] = [id: playlistId, name: playlistName, service: 'Sonos']
+          }
+        }
+      }
+    }
+  }
+
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
     // logTrace(JsonOutput.prettyPrint(message))
@@ -4534,6 +4959,13 @@ void setChildFavs(String html) {
   if(getCreateFavoritesChildDevice()) {
     ChildDeviceWrapper favDev = getFavoritesChild()
     favDev.setFavorites(html)
+  }
+}
+
+void setChildPlaylists(String html) {
+  if(getCreatePlaylistChildDevice()) {
+    ChildDeviceWrapper playlistDev = getPlaylistChild()
+    playlistDev.setPlaylists(html)
   }
 }
 
