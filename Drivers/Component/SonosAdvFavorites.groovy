@@ -34,6 +34,22 @@ metadata {
   ) {
     capability 'Actuator'
     command 'getFavorites'
+    command 'loadFavoriteFull', [
+      [ name: 'favoriteId', type: 'STRING'],
+      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+      [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
+      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+      [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
+      [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
+    ]
+    command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteAndAppend', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteNext', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteAndShuffle', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteQueued', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteRepeatOne', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteNoRepeat', [[ name: 'favoriteId', type: 'STRING']]
+    command 'loadFavoriteNoShuffle', [[ name: 'favoriteId', type: 'STRING']]
   }
 }
 
@@ -41,3 +57,61 @@ void initialize() {configure()}
 void configure() {getFavorites()}
 void getFavorites() {parent?.getFavorites()}
 void setFavorites(String favorites) {state.favorites = favorites}
+
+// Load Favorite Commands - Full Control
+void loadFavorite(String favoriteId) {
+  parent?.loadFavorite(favoriteId)
+}
+
+void loadFavoriteFull(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode) {
+  parent?.loadFavoriteFull(favoriteId, repeatMode)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
+  parent?.loadFavoriteFull(favoriteId, repeatMode, queueMode)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
+  parent?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
+  parent?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay)
+}
+
+void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
+  parent?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+}
+
+// Load Favorite Shortcuts - Preconfigured Options
+void loadFavoriteAndAppend(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat all', 'append', 'off', 'false', 'on')
+}
+
+void loadFavoriteNext(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat all', 'insert_next', 'off', 'false', 'on')
+}
+
+void loadFavoriteAndShuffle(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat all', 'replace', 'on', 'true', 'on')
+}
+
+void loadFavoriteQueued(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat all', 'replace', 'off', 'false', 'on')
+}
+
+void loadFavoriteRepeatOne(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat one', 'replace', 'off', 'true', 'on')
+}
+
+void loadFavoriteNoRepeat(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'off', 'replace', 'off', 'true', 'on')
+}
+
+void loadFavoriteNoShuffle(String favoriteId) {
+  parent?.loadFavoriteFull(favoriteId, 'repeat all', 'replace', 'off', 'true', 'on')
+}
