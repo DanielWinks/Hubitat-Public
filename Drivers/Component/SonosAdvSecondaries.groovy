@@ -26,7 +26,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Secondaries',
-    version: '0.9.2',
+    version: '0.9.3',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
