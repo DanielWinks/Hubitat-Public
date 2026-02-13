@@ -47,7 +47,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Utilities and Logging Library',
-  version: '0.8.4',
+  version: '0.9.0',
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/UtilitiesAndLoggingLibrary.groovy'
 
 )
@@ -126,9 +126,8 @@ void installed() {
  */
 void uninstalled() {
   logDebug('Uninstalled...')
-  try { unconfigure() } catch(e) { logWarn("No unconfigure() method defined or unconfigure() resulted in error: ${e}") }
-  try { unschedule() } catch(e) { logWarn("Error during unschedule() in uninstalled(): ${e}") }
-  try { deleteChildDevices() } catch(e) { logWarn("Error during deleteChildDevices() in uninstalled(): ${e}") }
+  unschedule()
+  deleteChildDevices()
 }
 
 /**
