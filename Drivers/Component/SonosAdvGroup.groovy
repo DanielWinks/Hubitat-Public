@@ -103,6 +103,7 @@ metadata {
     attribute 'currentAlbumName', 'string'
     attribute 'currentTrackName', 'string'
     attribute 'currentFavorite', 'string'
+    attribute 'currentPlaylist', 'string'
     attribute 'currentTrackNumber', 'number'
     attribute 'nextArtistName', 'string'
     attribute 'nextAlbumName', 'string'
@@ -743,6 +744,7 @@ void refresh() {
   String currentAlbumName = coordinator.currentValue('currentAlbumName', true)
   String currentTrackName = coordinator.currentValue('currentTrackName', true)
   String currentFavorite = coordinator.currentValue('currentFavorite', true)
+  String currentPlaylist = coordinator.currentValue('currentPlaylist', true)
   Integer currentTrackNumber = coordinator.currentValue('currentTrackNumber', true) as Integer
   String nextArtistName = coordinator.currentValue('nextArtistName', true)
   String nextAlbumName = coordinator.currentValue('nextAlbumName', true)
@@ -765,6 +767,7 @@ void refresh() {
   if(currentAlbumName != null) sendEvent(name: 'currentAlbumName', value: currentAlbumName)
   if(currentTrackName != null) sendEvent(name: 'currentTrackName', value: currentTrackName)
   if(currentFavorite != null) sendEvent(name: 'currentFavorite', value: currentFavorite)
+  if(currentPlaylist != null) sendEvent(name: 'currentPlaylist', value: currentPlaylist)
   if(currentTrackNumber != null) sendEvent(name: 'currentTrackNumber', value: currentTrackNumber)
   if(nextArtistName != null) sendEvent(name: 'nextArtistName', value: nextArtistName)
   if(nextAlbumName != null) sendEvent(name: 'nextAlbumName', value: nextAlbumName)

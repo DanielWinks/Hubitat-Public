@@ -99,6 +99,7 @@ metadata {
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
   attribute 'currentFavorite', 'string'
+  attribute 'currentPlaylist', 'string'
   attribute 'currentTrackNumber', 'number'
   attribute 'nextArtistName', 'string'
   attribute 'nextAlbumName', 'string'
@@ -3180,6 +3181,27 @@ String getCurrentFavorite() {
   return this.device.currentValue('currentFavorite', true)
 }
 
+void setCurrentPlaylist(String foundPlaylistId, String foundPlaylistName, Boolean isPlaylist) {
+  String value = 'No playlist playing'
+  if(isPlaylist && foundPlaylistName) {
+    value = "Playlist #${foundPlaylistId} ${foundPlaylistName}"
+  }
+  setCurrentPlaylist(value)
+}
+
+@CompileStatic
+void setCurrentPlaylist(String uri) {
+  if(uri == getCurrentPlaylist()) { return }
+  sendDeviceEvent('currentPlaylist', uri)
+  sendGroupEvents()
+  // Forward to group devices via parent app
+  parentUpdateGroupDeviceExtendedPlaybackState([currentPlaylist: uri])
+}
+
+String getCurrentPlaylist() {
+  return this.device.currentValue('currentPlaylist', true)
+}
+
 @CompileStatic
 void setStatusTransportStatus(String status) {
   if(status == getTransportStatus()) { return }
@@ -3581,6 +3603,7 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'trackDescription',      value: getTrackDescription()])
   currentStates.add([name: 'trackData',             value: getTrackDataEvents()])
   currentStates.add([name: 'currentFavorite',       value: getCurrentFavorite()])
+  currentStates.add([name: 'currentPlaylist',       value: getCurrentPlaylist()])
   currentStates.add([name: 'nextAlbumName',         value: getNextAlbumName()])
   currentStates.add([name: 'nextArtistName',        value: getNextArtistName()])
   currentStates.add([name: 'nextTrackName',         value: getNextTrackName()])
@@ -4937,6 +4960,8 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
     updateFavsIn(2, eventData)
     updateFavsIn(5, eventData)
+    updatePlaylistsIn(2, eventData)
+    updatePlaylistsIn(5, eventData)
   }
 }
 
@@ -4952,6 +4977,17 @@ void updateFavsIn(Integer time, Map data) {
     runIn(time + 7, 'isFavoritePlaying', [overwrite: true, data: data ])
   } else {
     runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
+  }
+}
+
+void updatePlaylistsIn(Integer time, Map data) {
+  logTrace('Getting currently playing playlist...')
+  if(playlistsMap == null || playlistsMap.size() < 1) {
+    logTrace('Playlists map is empty, requesting playlists...')
+    getPlaylists()
+    runIn(time + 7, 'isPlaylistPlaying', [overwrite: true, data: data ])
+  } else {
+    runIn(time, 'isPlaylistPlaying', [overwrite: true, data: data ])
   }
 }
 
@@ -5003,6 +5039,39 @@ void isFavoritePlaying(Map json) {
 
   setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
+
+void isPlaylistPlaying(Map json) {
+  LinkedHashMap container = (LinkedHashMap)json?.container
+  LinkedHashMap id = (LinkedHashMap)container?.id
+  String objectId = id?.objectId
+  if(objectId != null && objectId != '') {
+    List tok = objectId.tokenize(':')
+    if(tok.size() >= 2) { objectId = tok[1] }
+  }
+
+  // For playlists, check container type and name
+  String containerType = container?.type
+  String containerName = container?.name
+
+  // Playlists use simple ID matching since they don't have complex service IDs
+  Boolean isPlaylist = false
+  String foundPlaylistId = null
+  String foundPlaylistName = null
+
+  if(containerType == 'playlist' || containerType == 'PLAYLIST') {
+    // Try to match by container name in the playlists map
+    playlistsMap.each { key, value ->
+      if(value?.name == containerName || value?.id == objectId) {
+        isPlaylist = true
+        foundPlaylistId = value?.id
+        foundPlaylistName = value?.name
+      }
+    }
+  }
+
+  setCurrentPlaylist(foundPlaylistId, foundPlaylistName, isPlaylist)
+}
+
 // =============================================================================
 // End Websocket Incoming Data Processing
 // =============================================================================
