@@ -41,6 +41,9 @@
 
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.hub.domain.Event
+import groovy.transform.Field
+
+@Field static final Integer IN_PROGRESS_TIMEOUT = 30 // seconds (fallback clear of in-progress gate)
 
 definition(
   name: 'Auto Lock Child',
@@ -70,7 +73,7 @@ preferences {
 // =============================================================================
 
 Map mainPage() {
-  return dynamicPage(name: 'mainPage', title: '<h1>Auto Lock</h1>', nextPage: 'meansToLockPage', install: false, uninstall: true) {
+  return dynamicPage(name: 'mainPage', title: '<h1>Auto Lock</h1>', install: true, uninstall: true) {
     section('<h2>Lock Selection</h2>') {
       input('locks', 'capability.lock', title: 'Lock(s) to control', required: true, multiple: true)
     }
@@ -118,11 +121,20 @@ Map mainPage() {
       }
     }
 
+    // Compact summaries for Means to Lock / Unlock
+    String lockSummary = getMeansToLockSummary()
+    String unlockSummary = getMeansToUnlockSummary()
+    section('<h2>Means to Lock / Unlock</h2>') {
+      href 'meansToLockPage', title: 'Means to Lock', description: lockSummary, state: (lockSummary != 'No triggers configured' ? 'complete' : 'incomplete')
+      href 'meansToUnlockPage', title: 'Means to Unlock', description: unlockSummary, state: (unlockSummary != 'No triggers configured' ? 'complete' : 'incomplete')
+    }
+
     section('<h2>Notifications</h2>') {
       input('notificationDevices', 'capability.notification', title: 'Notification devices', required: false, multiple: true)
       if (settings.notificationDevices) {
         input('notifyOnLock', 'bool', title: 'Notify when locked', required: false, defaultValue: true)
         input('notifyOnUnlock', 'bool', title: 'Notify when unlocked', required: false, defaultValue: true)
+        input('unlockPresenceNotifyOnTimeout', 'bool', title: 'Notify when pending unlock canceled due to no approach', required: false, defaultValue: false)
         input('notifyOnSafetyBlock', 'bool', title: 'Notify when lock is blocked (door open)', required: false, defaultValue: true)
         input('notifyOnConfirmFail', 'bool', title: 'Notify when lock confirmation fails', required: false, defaultValue: true)
         input('notifyOnJammed', 'bool', title: 'Notify when lock reports jammed/unknown', required: false, defaultValue: true)
@@ -148,7 +160,7 @@ Map mainPage() {
 // =============================================================================
 
 Map meansToLockPage() {
-  return dynamicPage(name: 'meansToLockPage', title: '<h1>Means to Lock</h1>', nextPage: 'meansToUnlockPage', install: false, uninstall: false) {
+  return dynamicPage(name: 'meansToLockPage', title: '<h1>Means to Lock</h1>', install: false, uninstall: false) {
     section() {
       paragraph '<i>Configure one or more triggers that will cause the lock(s) to lock. Any single trigger firing will lock the door (OR logic).</i>'
     }
@@ -166,7 +178,8 @@ Map meansToLockPage() {
     section('<h2>Hubitat Mode</h2>') {
       input('lockModeEnabled', 'bool', title: 'Enable lock on mode change', required: false, defaultValue: false, submitOnChange: true)
       if (settings.lockModeEnabled) {
-        input('lockModes', 'mode', title: 'Lock when hub enters these modes', required: true, multiple: true)
+        input('lockModesEnter', 'mode', title: 'Lock when hub enters these modes', required: false, multiple: true)
+        input('lockModesLeave', 'mode', title: 'Lock when hub leaves these modes', required: false, multiple: true)
       }
     }
 
@@ -225,7 +238,7 @@ Map meansToLockPage() {
 // =============================================================================
 
 Map meansToUnlockPage() {
-  return dynamicPage(name: 'meansToUnlockPage', title: '<h1>Means to Unlock</h1>', install: true, uninstall: false) {
+  return dynamicPage(name: 'meansToUnlockPage', title: '<h1>Means to Unlock</h1>', install: false, uninstall: false) {
     section() {
       paragraph '<i>Configure one or more triggers that will cause the lock(s) to unlock. Any single trigger firing will unlock the door (OR logic).</i>'
     }
@@ -235,14 +248,23 @@ Map meansToUnlockPage() {
       input('unlockPresenceEnabled', 'bool', title: 'Enable unlock on anyone arriving', required: false, defaultValue: false, submitOnChange: true)
       if (settings.unlockPresenceEnabled) {
         input('unlockPresenceSensors', 'capability.presenceSensor', title: 'Presence sensors to monitor', required: true, multiple: true)
+
+        // Optional: wait for motion sensors near the door before unlocking (useful for geofence-based arrivals)
+        input('unlockPresenceWaitForMotion', 'bool', title: 'Wait for motion sensors before unlocking (approach detection)', required: false, defaultValue: false, submitOnChange: true)
+
+        if (settings.unlockPresenceWaitForMotion) {
+          input('unlockPresenceMotionSensors', 'capability.motionSensor', title: 'Motion sensors to detect approach', required: true, multiple: true)
+          input('unlockPresenceMotionCondition', 'enum', title: 'Require', options: ['any':'Any sensor active', 'all':'All sensors active'], defaultValue: 'any')
+          input('unlockPresenceMotionTimeout', 'number', title: 'Maximum wait time (seconds, 0 = wait indefinitely)', required: false, defaultValue: 300, range: '0..3600')
+        }
       }
     }
-
     // --- Mode ---
     section('<h2>Hubitat Mode</h2>') {
       input('unlockModeEnabled', 'bool', title: 'Enable unlock on mode change', required: false, defaultValue: false, submitOnChange: true)
       if (settings.unlockModeEnabled) {
-        input('unlockModes', 'mode', title: 'Unlock when hub enters these modes', required: true, multiple: true)
+        input('unlockModesEnter', 'mode', title: 'Unlock when hub enters these modes', required: false, multiple: true)
+        input('unlockModesLeave', 'mode', title: 'Unlock when hub leaves these modes', required: false, multiple: true)
       }
     }
 
@@ -292,14 +314,16 @@ Map meansToUnlockPage() {
 // =============================================================================
 
 void configure() {
+  // Clear any transient waiting state to avoid dangling waits across updates
+  clearWaitingForUnlockByPresence()
+
+  // Clear any stale in-progress gates (avoid stuck atomic state on updates)
+  try { atomicState.lockInProgress = false } catch (e) { /* ignore */ }
+  try { atomicState.unlockInProgress = false } catch (e) { /* ignore */ }
+
   unsubscribe()
   unschedule()
   initialize()
-}
-
-void uninstalled() {
-  unsubscribe()
-  unschedule()
 }
 
 void initialize() {
@@ -390,10 +414,13 @@ private void subscribeUnlockTriggers() {
 private void subscribeModeHandler() {
   // Use a single subscription to location.mode to avoid race conditions
   // when the same mode appears in both lock and unlock mode lists
-  Boolean needsMode = (settings.lockModeEnabled && settings.lockModes) ||
-                      (settings.unlockModeEnabled && settings.unlockModes)
+  Boolean needsMode = (settings.lockModeEnabled && (settings.lockModesEnter || settings.lockModesLeave)) ||
+                      (settings.unlockModeEnabled && (settings.unlockModesEnter || settings.unlockModesLeave))
   if (needsMode) {
     subscribe(location, 'mode', 'modeChangeHandler')
+    if (state.lastMode == null) {
+      state.lastMode = (location.mode ?: '')
+    }
   }
 }
 
@@ -455,6 +482,55 @@ private void scheduleTriggers() {
   }
 }
 
+private int countSettingVal(def val) {
+  if (!val) { return 0 }
+  if (val instanceof Collection) { return val.size() }
+  return 1
+}
+
+String getMeansToLockSummary() {
+  List parts = []
+  if (settings.lockPresenceEnabled) parts << 'Presence'
+  if (settings.lockContactEnabled) parts << 'Contact'
+  if (settings.lockModeEnabled) {
+    int enterCount = countSettingVal(settings.lockModesEnter)
+    int leaveCount = countSettingVal(settings.lockModesLeave)
+    if (enterCount > 0) parts << "Modes enter(${enterCount})"
+    if (leaveCount > 0) parts << "Modes leave(${leaveCount})"
+  }
+  if (settings.lockTimeEnabled) parts << 'Time'
+  if (settings.lockTimeRangeEnabled) parts << 'Time range'
+  if (settings.lockMotionEnabled) parts << 'Motion'
+  if (settings.lockSwitchEnabled) parts << 'Switches'
+  if (settings.lockHsmEnabled) parts << 'HSM'
+  return parts ? parts.join(', ') : 'No triggers configured'
+}
+
+String getMeansToUnlockSummary() {
+  List parts = []
+  if (settings.unlockPresenceEnabled) {
+    if (settings.unlockPresenceWaitForMotion) {
+      int count = countSettingVal(settings.unlockPresenceMotionSensors)
+      String cond = settings.unlockPresenceMotionCondition ?: 'any'
+      parts << "Presence(wait ${cond} ${count})"
+    } else {
+      parts << 'Presence'
+    }
+  }
+  if (settings.unlockContactEnabled) parts << 'Contact'
+  if (settings.unlockModeEnabled) {
+    int enterCount = countSettingVal(settings.unlockModesEnter)
+    int leaveCount = countSettingVal(settings.unlockModesLeave)
+    if (enterCount > 0) parts << "Modes enter(${enterCount})"
+    if (leaveCount > 0) parts << "Modes leave(${leaveCount})"
+  }
+  if (settings.unlockTimeEnabled) parts << 'Time'
+  if (settings.unlockTimeRangeEnabled) parts << 'Time range'
+  if (settings.unlockMotionEnabled) parts << 'Motion'
+  if (settings.unlockSwitchEnabled) parts << 'Switches'
+  return parts ? parts.join(', ') : 'No triggers configured'
+}
+
 // =============================================================================
 // Lock Trigger Handlers
 // =============================================================================
@@ -504,16 +580,48 @@ void delayedLockPresence() {
 void modeChangeHandler(Event event) {
   logDebug("Mode change event: ${event.value}")
 
-  // Unlock takes priority
-  if (settings.unlockModeEnabled && settings.unlockModes && (event.value in settings.unlockModes)) {
-    cancelPendingLock()
-    performUnlock("mode changed to ${event.value}")
-    return
+  String newMode = event.value as String
+  String oldMode = state.lastMode as String
+
+  // Normalize mode selections to collections to avoid type issues with single selections
+  def unlockEnterModes = (settings.unlockModesEnter instanceof Collection) ? settings.unlockModesEnter : (settings.unlockModesEnter ? [settings.unlockModesEnter] : [])
+  def unlockLeaveModes = (settings.unlockModesLeave instanceof Collection) ? settings.unlockModesLeave : (settings.unlockModesLeave ? [settings.unlockModesLeave] : [])
+  def lockEnterModes = (settings.lockModesEnter instanceof Collection) ? settings.lockModesEnter : (settings.lockModesEnter ? [settings.lockModesEnter] : [])
+  def lockLeaveModes = (settings.lockModesLeave instanceof Collection) ? settings.lockModesLeave : (settings.lockModesLeave ? [settings.lockModesLeave] : [])
+
+  // Unlock takes priority - entering modes
+  if (settings.unlockModeEnabled) {
+    if (unlockEnterModes && (newMode in unlockEnterModes)) {
+      cancelPendingLock()
+      performUnlock("mode changed to ${newMode}")
+      state.lastMode = newMode
+      return
+    }
+    // Leaving modes
+    if (oldMode && unlockLeaveModes && (oldMode in unlockLeaveModes)) {
+      cancelPendingLock()
+      performUnlock("mode left ${oldMode}")
+      state.lastMode = newMode
+      return
+    }
   }
 
-  if (settings.lockModeEnabled && settings.lockModes && (event.value in settings.lockModes)) {
-    lockWithSafetyCheck("mode changed to ${event.value}")
+  // Lock checks - entering
+  if (settings.lockModeEnabled) {
+    if (lockEnterModes && (newMode in lockEnterModes)) {
+      lockWithSafetyCheck("mode changed to ${newMode}")
+      state.lastMode = newMode
+      return
+    }
+    // Leaving
+    if (oldMode && lockLeaveModes && (oldMode in lockLeaveModes)) {
+      lockWithSafetyCheck("mode left ${oldMode}")
+      state.lastMode = newMode
+      return
+    }
   }
+
+  state.lastMode = newMode
 }
 
 void lockContactClosedHandler(Event event) {
@@ -582,13 +690,201 @@ void scheduledLockTimeRangeStart() {
 void unlockPresenceHandler(Event event) {
   logDebug("Unlock presence event: ${event.displayName} arrived")
   cancelPendingLock()
+
+  // If configured, wait for approach (motion) before unlocking
+  if (settings.unlockPresenceWaitForMotion && settings.unlockPresenceMotionSensors) {
+    def motionSensors = settings.unlockPresenceMotionSensors as List
+    String condition = (settings.unlockPresenceMotionCondition ?: 'any') as String
+
+    boolean conditionMet = false
+    if (condition == 'all') {
+      conditionMet = motionSensors.every { it.currentValue('motion') == 'active' }
+    } else {
+      conditionMet = motionSensors.any { it.currentValue('motion') == 'active' }
+    }
+
+    if (conditionMet) {
+      logDebug("Motion condition already met, unlocking immediately")
+      clearWaitingForUnlockByPresence()
+      performUnlock("${event.displayName} arrived")
+      return
+    }
+
+    // If already waiting, reset the timeout or restart wait if sensors changed
+    if (state.waitingForUnlockByPresence) {
+      def prevDNIs = state.waitingUnlockSubscribedDNIs ?: []
+      def currentDNIs = motionSensors.collect { s -> s.getDeviceNetworkId() }
+      if (prevDNIs && (prevDNIs.sort() == currentDNIs.sort())) {
+        int timeout = (settings.unlockPresenceMotionTimeout ?: 300) as Integer
+        if (timeout > 0) {
+          unschedule('unlockPresenceMotionTimeout')
+          runIn(timeout, 'unlockPresenceMotionTimeout')
+        }
+        state.waitingUnlockArrivalName = event.displayName
+        logDebug("Already waiting for motion; resetting timeout due to new arrival")
+        return
+      } else {
+        // sensors changed - restart wait using new sensor list
+        clearWaitingForUnlockByPresence()
+      }
+    }
+
+    // Start waiting for approach
+    state.waitingForUnlockByPresence = true
+    state.waitingUnlockArrivalName = event.displayName
+    state.waitingUnlockCondition = condition
+    int timeout = (settings.unlockPresenceMotionTimeout ?: 300) as Integer
+    if (timeout > 0) {
+      runIn(timeout, 'unlockPresenceMotionTimeout')
+      state.waitingUnlockTimeout = timeout
+    } else {
+      state.waitingUnlockTimeout = 0
+    }
+
+    // Record the exact devices we subscribed to (deviceNetworkIds) so we can unsubscribe reliably
+    state.waitingUnlockSubscribedDNIs = motionSensors.collect { s ->
+      try { s.getDeviceNetworkId() } catch (e) { null }
+    }.findAll { it != null }
+
+    motionSensors.each { s -> subscribe(s, 'motion', 'unlockPresenceMotionHandler') }
+    logInfo("Unlock pending: waiting for motion sensors to meet condition (${condition}). Timeout: ${state.waitingUnlockTimeout ?: 'none'} seconds")
+    return
+  }
+
+  // Default behavior: unlock immediately
+  clearWaitingForUnlockByPresence()
   performUnlock("${event.displayName} arrived")
 }
 
 void unlockContactOpenHandler(Event event) {
   logDebug("Unlock contact open event: ${event.displayName}")
   cancelPendingLock()
+  clearWaitingForUnlockByPresence()
   performUnlock("contact sensor ${event.displayName} opened")
+}
+
+void unlockPresenceMotionHandler(Event event) {
+  logDebug("Motion event during unlock wait: ${event.displayName} ${event.value}")
+  if (!state.waitingForUnlockByPresence) { return }
+
+  def motionSensors = settings.unlockPresenceMotionSensors as List
+  String condition = state.waitingUnlockCondition ?: (settings.unlockPresenceMotionCondition ?: 'any')
+  boolean conditionMet = false
+  if (condition == 'all') {
+    conditionMet = motionSensors.every { it.currentValue('motion') == 'active' }
+  } else {
+    conditionMet = motionSensors.any { it.currentValue('motion') == 'active' }
+  }
+
+  if (conditionMet) {
+    logInfo("Approach detected: unlocking (arrived: ${state.waitingUnlockArrivalName})")
+    clearWaitingForUnlockByPresence()
+    performUnlock("approach detected (${event.displayName})")
+  }
+}
+
+void unlockPresenceMotionTimeout() {
+  if (!state.waitingForUnlockByPresence) { return }
+  String arrival = state.waitingUnlockArrivalName ?: 'presence arrival'
+
+  // Determine brief sensor names for the notification (keep short for smart watches)
+  List<String> sensorNames = []
+  if (settings.unlockPresenceMotionSensors) {
+    sensorNames = (settings.unlockPresenceMotionSensors as List).collect { it.displayName ?: it.toString() }
+  } else if (state.waitingUnlockSubscribedDNIs) {
+    sensorNames = (state.waitingUnlockSubscribedDNIs as List)
+  }
+
+  // Create a concise representation (up to 2 names, abbreviate long names)
+  String namesBrief
+  if (!sensorNames || sensorNames.isEmpty()) {
+    namesBrief = 'motion sensor'
+  } else {
+    List<String> brief = sensorNames.collect {
+      String n = it as String
+      n.length() > 18 ? (n.substring(0, 15) + '...') : n
+    }
+    if (brief.size() <= 2) {
+      namesBrief = brief.join(',')
+    } else {
+      namesBrief = brief[0..1].join(',') + " (+${brief.size()-2})"
+    }
+  }
+
+  int timeout = (state.waitingUnlockTimeout ?: settings.unlockPresenceMotionTimeout ?: 0) as Integer
+  String timeoutStr = timeout > 0 ? "${timeout}s" : 'no timeout'
+
+  // Shorten presence arrival for compact notification
+  String arrivalBrief = (arrival ?: '') as String
+  arrivalBrief = arrivalBrief.length() > 12 ? (arrivalBrief.substring(0,9) + '...') : arrivalBrief
+
+  String msg = "Unlock canceled: no approach from ${namesBrief} (arr:${arrivalBrief}, ${timeoutStr})"
+  logWarn("${msg} for ${arrival}")
+
+  // Optional notification for this event (explicit opt-in required)
+  try {
+    if (settings.unlockPresenceNotifyOnTimeout == true) {
+      sendNotification(msg, 'unlockTimeout')
+    }
+  } catch (Exception e) {
+    logWarn("Failed to send unlock timeout notification: ${e}")
+  }
+
+  // Cancel unlock per user preference (do not unlock without approach)
+  clearWaitingForUnlockByPresence()
+}
+
+private void clearWaitingForUnlockByPresence() {
+  if (!state.waitingForUnlockByPresence) { return }
+  try {
+    def subscribedDNIs = state.waitingUnlockSubscribedDNIs ?: []
+    List missing = []
+    subscribedDNIs.each { dni ->
+      def d = null
+      if (settings.unlockPresenceMotionSensors) {
+        d = settings.unlockPresenceMotionSensors.find { it.getDeviceNetworkId() == dni }
+      }
+      if (d) {
+        unsubscribe(d, 'motion', 'unlockPresenceMotionHandler')
+      } else {
+        missing << dni
+      }
+    }
+
+    if (missing) {
+      // If we couldn't find previously subscribed devices (they may have been removed), perform a global unsubscribe and reinitialize
+      logWarn("Could not find subscribed motion sensors to unsubscribe: ${missing}. Performing global unsubscribe and reinitialize to ensure no dangling subscriptions.")
+      unsubscribe()
+      initialize()
+    }
+  } catch (Exception e) {
+    logWarn("Error unsubscribing motion sensors: ${e}")
+  }
+
+  unschedule('unlockPresenceMotionTimeout')
+  state.waitingForUnlockByPresence = false
+  state.waitingUnlockArrivalName = null
+  state.waitingUnlockTimeout = null
+  state.waitingUnlockCondition = null
+  state.waitingUnlockSubscribedDNIs = null
+}
+
+// =============================================================================
+// Atomic in-progress gate helpers (prevent duplicate/overlapping lock commands)
+// =============================================================================
+
+private void clearLockInProgress() {
+  if (atomicState.lockInProgress == true) {
+    logWarn('Clearing stale lockInProgress flag (timeout)')
+    atomicState.lockInProgress = false
+  }
+}
+
+private void clearUnlockInProgress() {
+  if (atomicState.unlockInProgress == true) {
+    logWarn('Clearing stale unlockInProgress flag (timeout)')
+    atomicState.unlockInProgress = false
+  }
 }
 
 void unlockMotionActiveHandler(Event event) {
@@ -664,6 +960,34 @@ void lockStateMonitorHandler(Event event) {
   if (val == 'unknown' || val == 'jammed') {
     logWarn("Lock ${event.displayName} reported: ${val}")
     sendNotification("Lock ${event.displayName} reported: ${val}", 'jammed')
+
+    // Clear any in-progress gates to allow retries after a failure
+    if (atomicState.lockInProgress == true) {
+      atomicState.lockInProgress = false
+      unschedule('clearLockInProgress')
+      logDebug('Cleared lockInProgress due to lock error')
+    }
+    if (atomicState.unlockInProgress == true) {
+      atomicState.unlockInProgress = false
+      unschedule('clearUnlockInProgress')
+      logDebug('Cleared unlockInProgress due to lock error')
+    }
+    return
+  }
+
+  // Clear in-progress flags when we observe the expected final states
+  if (val == 'locked') {
+    if (atomicState.lockInProgress == true) {
+      atomicState.lockInProgress = false
+      unschedule('clearLockInProgress')
+      logDebug('Lock confirmed: cleared lockInProgress')
+    }
+  } else if (val == 'unlocked') {
+    if (atomicState.unlockInProgress == true) {
+      atomicState.unlockInProgress = false
+      unschedule('clearUnlockInProgress')
+      logDebug('Unlock confirmed: cleared unlockInProgress')
+    }
   }
 }
 
@@ -736,11 +1060,27 @@ private void lockWithSafetyCheck(String reason) {
     }
   }
 
+  // Determine locks that actually need locking
+  List<DeviceWrapper> locksToLock = settings.locks?.findAll { it.currentValue('lock') != 'locked' } ?: []
+  if (!locksToLock) {
+    logDebug("No locks need locking (${reason})")
+    return
+  }
+
+  // Gate: prevent simultaneous lock operations
+  if (atomicState.lockInProgress == true) {
+    logDebug("Lock command skipped (${reason}): another lock operation already in progress")
+    return
+  }
+
+  // Set in-progress gate and schedule fallback clear
+  atomicState.lockInProgress = true
+  logDebug("lockInProgress set (timeout ${IN_PROGRESS_TIMEOUT}s)")
+  runIn(IN_PROGRESS_TIMEOUT, 'clearLockInProgress')
+
   logInfo("Locking (${reason})")
-  settings.locks?.each { DeviceWrapper lock ->
-    if (lock.currentValue('lock') != 'locked') {
-      lock.lock()
-    }
+  locksToLock.each { DeviceWrapper lock ->
+    lock.lock()
   }
   sendNotification("Door locked (${reason})", 'lock')
 
@@ -761,17 +1101,36 @@ private void lockWithSafetyCheck(String reason) {
  * @param reason A description of why the unlock is being triggered.
  */
 private void performUnlock(String reason) {
+  // Clear any pending approach wait if present
+  clearWaitingForUnlockByPresence()
+
   // Temporary disable check
   if (isDisabled()) {
     logDebug("Unlock suppressed (${reason}): disable switch is on")
     return
   }
 
+  // Determine locks that actually need unlocking
+  List<DeviceWrapper> locksToUnlock = settings.locks?.findAll { it.currentValue('lock') != 'unlocked' } ?: []
+  if (!locksToUnlock) {
+    logDebug("No locks need unlocking (${reason})")
+    return
+  }
+
+  // Gate: prevent simultaneous unlock operations
+  if (atomicState.unlockInProgress == true) {
+    logDebug("Unlock command skipped (${reason}): another unlock operation already in progress")
+    return
+  }
+
+  // Set in-progress gate and schedule fallback clear
+  atomicState.unlockInProgress = true
+  logDebug("unlockInProgress set (timeout ${IN_PROGRESS_TIMEOUT}s)")
+  runIn(IN_PROGRESS_TIMEOUT, 'clearUnlockInProgress')
+
   logInfo("Unlocking (${reason})")
-  settings.locks?.each { DeviceWrapper lock ->
-    if (lock.currentValue('lock') != 'unlocked') {
-      lock.unlock()
-    }
+  locksToUnlock.each { DeviceWrapper lock ->
+    lock.unlock()
   }
   sendNotification("Door unlocked (${reason})", 'unlock')
 
@@ -854,6 +1213,11 @@ private void sendNotification(String message, String type) {
       break
     case 'batteryLow':
       shouldNotify = settings.notifyOnBatteryLow != false
+      break
+    case 'unlockTimeout':
+      // Notification for pending unlock canceled due to no approach detected.
+      // Only notify if explicitly enabled by user.
+      shouldNotify = settings.unlockPresenceNotifyOnTimeout == true
       break
   }
 
