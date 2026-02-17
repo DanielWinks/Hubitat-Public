@@ -558,7 +558,7 @@ void createPlayerDevicesWithFeedback() {
     return
   }
 
-  createPlayerDevices()
+  Integer createdCount = createPlayerDevices()
 
   // Allow time for Hubitat to register new child devices
   pauseExecution(2500)
@@ -566,7 +566,11 @@ void createPlayerDevicesWithFeedback() {
   // Update the setting to reflect current state
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
 
-  state.playerCreationFeedback = "Successfully created ${willBeCreated.size()} player(s)"
+  if(createdCount == willBeCreated.size()) {
+    state.playerCreationFeedback = "Successfully created ${createdCount} player(s)"
+  } else {
+    state.playerCreationFeedback = "Created ${createdCount} of ${willBeCreated.size()} player(s) - check logs for errors"
+  }
   state.playerCreationTimestamp = now()
 }
 
@@ -600,17 +604,18 @@ void removePlayerDevicesWithFeedback() {
   state.playerRemovalTimestamp = now()
 }
 
-void createPlayerDevices() {
+Integer createPlayerDevices() {
+  Integer createdCount = 0
   // Safety check: ensure playerDevices setting exists
   if(!settings.playerDevices) {
     logWarn("No player devices selected, skipping device creation")
-    return
+    return createdCount
   }
 
   // Safety check: ensure discovery maps are initialized
   if(discoveredSonoses == null) {
     logError("discoveredSonoses is null, cannot create devices")
-    return
+    return createdCount
   }
   if(discoveredSonosSecondaries == null) {
     discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
@@ -634,10 +639,17 @@ void createPlayerDevices() {
         logInfo("Creating Sonos Advanced Player device for ${playerInfo?.name}")
         try {
           cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
+          if(cd) { createdCount++ }
         } catch (UnknownDeviceTypeException e) {
           logError("Sonos Advanced Player driver not found: ${e.message}")
         } catch (Exception e) {
           logError("Failed to create device for ${dni}: ${e.message}")
+          // Device may have been persisted before the lifecycle exception — re-check
+          cd = app.getChildDevice(dni)
+          if(cd) {
+            logWarn("Device '${playerInfo?.name}' (${dni}) was created despite lifecycle error - will attempt configuration")
+            createdCount++
+          }
         }
       } else {
         logWarn("Attempted to create child device for ${dni} but did not find playerInfo")
@@ -709,6 +721,7 @@ void createPlayerDevices() {
     }
   }
   // Note: removeOrphans() is now handled by the explicit Remove Players button
+  return createdCount
 }
 
 void retryDeviceConfiguration(Map data) {

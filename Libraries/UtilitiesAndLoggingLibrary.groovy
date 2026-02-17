@@ -115,9 +115,9 @@ void installed() {
     logWarn("No initialize() method defined or initialize() resulted in error: ${e}")
   }
 
-  if (settings.logEnable) { runIn(1800, 'logsOff') }
-  if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
-  if (settings.traceLogEnable) { runIn(1800, 'traceLogsOff') }
+  if (settings.logEnable != false) { runIn(1800, 'logsOff') }
+  if (settings.debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
+  if (settings.traceLogEnable != false) { runIn(1800, 'traceLogsOff') }
 }
 
 /**
@@ -151,10 +151,19 @@ void updated() {
  * @param message The exception message to log.
  */
 void logException(String message) {
-  if (settings.logEnable) {
+  if (settings.logEnable != false) {
     if(device) log.exception "${device.label ?: device.name }: ${message}"
     if(app) log.exception "${app.label ?: app.name }: ${message}"
   }
+}
+
+/**
+ * Logs an exception with a context label and exception details.
+ * @param context The context label (e.g. method name)
+ * @param exception The exception object
+ */
+void logException(String context, Exception exception) {
+  logError("${context}: ${exception.message}")
 }
 
 /**
@@ -171,7 +180,7 @@ void logExceptionWithDetails(String message, Exception exception) {
  * @param message The error message to log.
  */
 void logError(String message) {
-  if (settings.logEnable) {
+  if (settings.logEnable != false) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
     if(app) log.error "${app.label ?: app.name }: ${message}"
   }
@@ -182,7 +191,7 @@ void logError(String message) {
  * @param message The warning message to log.
  */
 void logWarn(String message) {
-  if (settings.logEnable) {
+  if (settings.logEnable != false) {
     if(device) log.warn "${device.label ?: device.name }: ${message}"
     if(app) log.warn "${app.label ?: app.name }: ${message}"
   }
@@ -193,7 +202,7 @@ void logWarn(String message) {
  * @param message The info message to log.
  */
 void logInfo(String message) {
-  if (settings.logEnable) {
+  if (settings.logEnable != false) {
     if(device) log.info "${device.label ?: device.name }: ${message}"
     if(app) log.info "${app.label ?: app.name }: ${message}"
   }
@@ -204,7 +213,7 @@ void logInfo(String message) {
  * @param message The debug message to log.
  */
 void logDebug(String message) {
-  if (settings.logEnable && settings.debugLogEnable) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
     if(device) log.debug "${device.label ?: device.name }: ${message}"
     if(app) log.debug "${app.label ?: app.name }: ${message}"
   }
@@ -215,7 +224,7 @@ void logDebug(String message) {
  * @param message The trace message to log.
  */
 void logTrace(String message) {
-  if (settings.logEnable && settings.traceLogEnable) {
+  if (settings.logEnable != false && settings.traceLogEnable != false) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
     if(app) log.trace "${app.label ?: app.name }: ${message}"
   }

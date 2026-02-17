@@ -241,14 +241,16 @@ String getCurrentTTSVoice() {
 @CompileStatic
 Boolean hasHTPlaybackCapability() {
   if(device != null) {
-    return getDeviceDataValue('capabilities').contains('HT_PLAYBACK')
+    String caps = getDeviceDataValue('capabilities')
+    return caps != null && caps.contains('HT_PLAYBACK')
   } else {return false}
 }
 
 @CompileStatic
 Boolean hasAudioClipCapability() {
   if(device != null) {
-    return getDeviceDataValue('capabilities').contains('AUDIO_CLIP')
+    String caps = getDeviceDataValue('capabilities')
+    return caps != null && caps.contains('AUDIO_CLIP')
   } else {return false}
 }
 // =============================================================================
@@ -2789,7 +2791,7 @@ void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:nam
 
 // WS subscription status helpers — in-memory by default, also written to device data when debug logging is on
 Boolean isDebugLoggingEnabled() {
-  return settings.logEnable && settings.debugLogEnable
+  return settings.logEnable != false && settings.debugLogEnable != false
 }
 
 @Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites']
@@ -4530,7 +4532,7 @@ void processWebsocketMessage(String message) {
   ArrayList json = (ArrayList)slurper.parseText(message)
   if(json.size() < 2) {return}
   LinkedHashMap deviceSettings = getDeviceSettings()
-  if(deviceSettings.logEnable && deviceSettings.traceLogEnable) { logTrace(JsonOutput.prettyPrint(message)) }
+  if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) { logTrace(JsonOutput.prettyPrint(message)) }
 
   Map eventType = (json as List)[0]
   Map eventData = (json as List)[1]
