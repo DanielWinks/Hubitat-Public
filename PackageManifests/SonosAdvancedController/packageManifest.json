@@ -62,6 +62,13 @@
       "name": "Sonos Advanced Secondaries",
       "namespace": "dwinks",
       "required": true
+    },
+    {
+      "id": "d79681d8-aea1-4f42-a9c5-8e4afa81cb6c",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.10.0/SonosAdvPlaylist.groovy",
+      "name": "Sonos Advanced Playlist",
+      "namespace": "dwinks",
+      "required": true
     }
   ],
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
