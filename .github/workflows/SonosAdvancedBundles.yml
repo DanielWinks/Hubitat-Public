@@ -7,6 +7,10 @@ on:
       - Libraries/UtilitiesAndLoggingLibrary.groovy
   workflow_dispatch:
 
+concurrency:
+  group: bundle-commit-to-main
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Copy Sonos Advanced Controller Files To Bundle Directory
@@ -16,6 +20,8 @@ jobs:
     steps:
       - name: Checkout 🛎️
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Make copy of files
         run: |

@@ -14,6 +14,10 @@ on:
   workflow_dispatch:
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
+concurrency:
+  group: bundle-commit-to-main
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Copy UtilitiesAndLoggingLibrary Files To Bundle Directory
@@ -23,6 +27,8 @@ jobs:
     steps:
       - name: Checkout 🛎️
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Make copy of files
         run: |
