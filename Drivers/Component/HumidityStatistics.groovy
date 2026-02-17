@@ -126,6 +126,36 @@ metadata {
 
     // Trend Detection
     attribute 'isIncreasing', 'ENUM', ['true', 'false']          // Is humidity rising or falling?
+
+    // Rate of Change
+    attribute 'rateOfChange', 'NUMBER'                           // Humidity change rate (%/min)
+
+    // Baseline Freeze (prevents rolling averages from updating during fan runs)
+    attribute 'baselineFrozen', 'ENUM', ['true', 'false']
+
+    // Fan Run Tracking (recorded by parent app via commands)
+    attribute 'lastFanRunDurationMinutes', 'NUMBER'
+    attribute 'lastFanHumidityDrop', 'NUMBER'
+    attribute 'lastFanStartHumidity', 'NUMBER'
+    attribute 'lastFanEndHumidity', 'NUMBER'
+
+    // Advanced Statistics
+    attribute 'smoothedRateOfChange', 'NUMBER'          // EMA-filtered rate of change (%/min)
+    attribute 'humidityStdDev', 'NUMBER'                // Running standard deviation of humidity
+    attribute 'emaVariance', 'NUMBER'                   // EMA-tracked variance (internal, used for stddev)
+    attribute 'dailyMinHumidity', 'NUMBER'              // Today's minimum humidity reading
+    attribute 'dailyMaxHumidity', 'NUMBER'              // Today's maximum humidity reading
+    attribute 'rateOfChangeAcceleration', 'NUMBER'      // Second derivative — is rise speeding up? (%/min²)
+    attribute 'currentSpikePeak', 'NUMBER'              // Peak humidity during current fan run
+    attribute 'dailyMinutesAboveThreshold', 'NUMBER'    // Minutes today above configured threshold
+    attribute 'householdHumidity', 'NUMBER'             // Last received household sensor reading
+    attribute 'bathroomDifferential', 'NUMBER'          // Bathroom humidity minus household humidity
+
+    // Commands for baseline freeze control and fan run tracking
+    command 'setBaselineFreeze', [[name: 'frozen', type: 'ENUM', constraints: ['true', 'false']]]
+    command 'recordFanStart', [[name: 'humidity', type: 'NUMBER']]
+    command 'recordFanStop', [[name: 'humidity', type: 'NUMBER'], [name: 'durationMinutes', type: 'NUMBER']]
+    command 'setHouseholdHumidity', [[name: 'humidity', type: 'NUMBER']]
   }
 }
 
@@ -133,14 +163,26 @@ metadata {
 // USER PREFERENCES - Configuration options shown in device settings
 // ============================================================================
 preferences {
-  // Number of samples for fast-moving average
-  // Lower numbers = more responsive to changes but more sensitive to noise
-  // Higher numbers = more stable but slower to react to changes
-  input name: 'numSamplesFast', title: 'Fast Moving Average Samples', type: 'NUMBER', required: true, defaultValue: 10, range: 10..50
+  // Legacy sample-count preferences (kept for backward compatibility, no longer used)
+  input name: 'numSamplesFast', title: 'Fast Moving Average Samples (legacy, not used)', type: 'NUMBER', required: true, defaultValue: 10, range: 10..50
 
-  // Number of samples for slow-moving average
-  // This creates a very stable baseline that ignores short-term fluctuations
-  input name: 'numSamplesSlow', title: 'Slow Moving Average Samples', type: 'NUMBER', required: true, defaultValue: 50, range: 50..200
+  input name: 'numSamplesSlow', title: 'Slow Moving Average Samples (legacy, not used)', type: 'NUMBER', required: true, defaultValue: 50, range: 50..200
+
+  // Time constants for time-weighted EMA (replaces sample-count averages)
+  // tauFast: Time constant in minutes for the fast-moving EMA
+  // Lower = more responsive, higher = more stable
+  input name: 'tauFastMinutes', title: 'Fast EMA Time Constant (minutes)', type: 'NUMBER', required: true, defaultValue: 30, range: 5..120
+
+  // tauSlow: Time constant in minutes for the slow-moving EMA
+  input name: 'tauSlowMinutes', title: 'Slow EMA Time Constant (minutes)', type: 'NUMBER', required: true, defaultValue: 120, range: 30..480
+
+  // tauRoc: Time constant in minutes for the smoothed rate-of-change EMA
+  // Shorter = more responsive to rapid changes, longer = more stable trend signal
+  input name: 'tauRocMinutes', title: 'Rate of Change EMA Time Constant (minutes)', type: 'NUMBER', required: true, defaultValue: 5, range: 1..30
+
+  // humidityThreshold: Humidity level above which "time above threshold" accumulates (mold risk metric)
+  // 0 to disable tracking
+  input name: 'humidityThreshold', title: 'High Humidity Threshold for Daily Accumulator (%)', type: 'NUMBER', required: true, defaultValue: 60, range: 0..90
 }
 
 // =============================================================================
@@ -244,6 +286,21 @@ void resetTimeWeightedStatistics() {
     'humidityPrevious',
     'unixTimePrevious',
     'unixTimeCurrent',
+    'rateOfChange',
+    'smoothedRateOfChange',
+    'rateOfChangeAcceleration',
+    'humidityStdDev',
+    'emaVariance',
+    'dailyMinHumidity',
+    'dailyMaxHumidity',
+    'currentSpikePeak',
+    'dailyMinutesAboveThreshold',
+    'bathroomDifferential',
+    'baselineFrozen',
+    'lastFanRunDurationMinutes',
+    'lastFanHumidityDrop',
+    'lastFanStartHumidity',
+    'lastFanEndHumidity',
   ].each {
     // Delete each attribute's current value from the device
     // device.deleteCurrentState() removes the stored value for that attribute
@@ -276,6 +333,11 @@ void resetDailyTWAverages() {
   // Send an event setting the daily start time to right now
   // This marks the beginning of a new day for tracking purposes
   emitEvent('dailyTimeWeightedAverageStartTime', getCurrentTime(), null, null)
+
+  // Reset daily min/max and time above threshold
+  deleteDeviceCurrentState('dailyMinHumidity')
+  deleteDeviceCurrentState('dailyMaxHumidity')
+  deleteDeviceCurrentState('dailyMinutesAboveThreshold')
 }
 
 /**
@@ -301,6 +363,64 @@ void resetWeeklyTWAverages() {
   // Send an event setting the weekly start time to right now
   // This marks the beginning of a new week for tracking purposes
   emitEvent('weeklyTimeWeightedAverageStartTime', getCurrentTime(), null, null)
+}
+
+// =============================================================================
+// BASELINE FREEZE AND FAN RUN TRACKING COMMANDS
+// =============================================================================
+
+/**
+ * Freezes or unfreezes the rolling average baseline.
+ * When frozen, rolling averages (fast and slow) stop updating so that
+ * a humidity spike during a fan run does not contaminate the baseline.
+ *
+ * @param frozen 'true' to freeze, 'false' to unfreeze
+ */
+void setBaselineFreeze(String frozen) {
+  emitEvent('baselineFrozen', frozen, null, null)
+}
+
+/**
+ * Records the start of a fan run for tracking purposes.
+ * Called by the parent app when the fan is turned on.
+ * Also resets the spike peak tracker to the starting humidity.
+ *
+ * @param humidity The humidity reading at the time the fan was turned on
+ */
+void recordFanStart(BigDecimal humidity) {
+  emitEvent('lastFanStartHumidity', humidity, null, null)
+  emitEvent('currentSpikePeak', humidity, null, null)
+}
+
+/**
+ * Records the end of a fan run for tracking purposes.
+ * Called by the parent app when the fan is turned off.
+ *
+ * @param humidity The humidity reading at the time the fan was turned off
+ * @param durationMinutes How long the fan ran in minutes
+ */
+void recordFanStop(BigDecimal humidity, BigDecimal durationMinutes) {
+  BigDecimal startHumidity = getDeviceCurrentValue('lastFanStartHumidity') as BigDecimal
+  emitEvent('lastFanEndHumidity', humidity, null, null)
+  emitEvent('lastFanRunDurationMinutes', durationMinutes, null, null)
+  if (startHumidity != null) {
+    emitEvent('lastFanHumidityDrop', startHumidity - humidity, null, null)
+  }
+}
+
+/**
+ * Stores the household humidity reading for differential calculation.
+ * Called by the parent app when the household sensor reports.
+ *
+ * @param humidity The household sensor humidity reading
+ */
+void setHouseholdHumidity(BigDecimal humidity) {
+  emitEvent('householdHumidity', humidity, null, null)
+  // Recompute differential if we have a current bathroom reading
+  BigDecimal current = getDeviceCurrentValue('humidityCurrent') as BigDecimal
+  if (current != null) {
+    emitEvent('bathroomDifferential', (current - humidity).setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+  }
 }
 
 // =============================================================================
@@ -448,20 +568,6 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   emitEvent('weeklyTimeWeightedAverageStartTime', twWeeklyStart, null, null)
 
   // ============================================================================
-  // GET USER CONFIGURATION
-  // ============================================================================
-  // Retrieve how many samples to use for rolling averages from user preferences.
-  // ============================================================================
-
-  // Number of samples for fast-moving average (default: 10)
-  // Lower = more responsive but less stable
-  Integer nFast = getSetting('numSamplesFast') as Integer
-
-  // Number of samples for slow-moving average (default: 50)
-  // Higher = more stable but less responsive
-  Integer nSlow = getSetting('numSamplesSlow') as Integer
-
-  // ============================================================================
   // PHASE 2: HUMIDITY VALUE TRACKING
   // ============================================================================
   // Store current and previous humidity values for comparison and calculations.
@@ -498,12 +604,13 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // This is more accurate than (50+80)/2 = 65% because 50% lasted longer!
   // ============================================================================
 
-  // Calculate the time-weighted humidity component for this reading
-  // This is: (current humidity) × (how long since last reading)
-  // If no time elapsed, just use the humidity value itself
+  // Calculate the time-weighted humidity component for this interval
+  // The elapsed interval had the PREVIOUS humidity (not current), because
+  // the previous reading was in effect during the time between readings.
+  // If no time elapsed (first reading), contribute nothing to the TWA numerator.
   BigDecimal timeWeightedHumidity = elapsedTimeSinceLastUpdate != 0 ?
-    elapsedTimeSinceLastUpdate * humidityCurrent :
-    humidityCurrent
+    elapsedTimeSinceLastUpdate * humidityPrevious :
+    0
 
   // Get the accumulated total of all time-weighted humidity components
   // This is the sum of (humidity × duration) for all readings
@@ -530,119 +637,180 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // ROUND_HALF_UP means 45.65 → 45.7 and 45.64 → 45.6
   emitEvent('timeWeightedAverage', timeWeightedAverage.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
 
+  // Capture pre-update slow average for variance/stddev calculation (needed before EMA update)
+  BigDecimal preUpdateSlowAvg = getDeviceCurrentValue('slowRollingAverage') as BigDecimal
+
   // ============================================================================
-  // PHASE 4: ROLLING TIME-WEIGHTED AVERAGES (Experimental)
+  // PHASE 4+5: TIME-WEIGHTED EXPONENTIAL MOVING AVERAGES (EMA)
   // ============================================================================
-  // These combine the time-weighted concept with rolling averages.
-  // Note: There appears to be a bug in the original code (twSlow uses twFast values)
-  // This is preserved as-is but documented for future correction.
+  // Replaces old sample-count based rolling averages with time-weighted EMAs.
+  // This fixes bias from irregular sensor reporting intervals.
+  //
+  // FORMULA:  α = 1 - exp(-elapsedMs / tauMs)
+  //           newAvg = oldAvg * (1 - α) + currentHumidity * α
+  //
+  // The time constant (tau) controls how fast the EMA responds:
+  // - After one tau of elapsed time, the average is ~63% of the way to the new value
+  // - Irregularly spaced readings are handled correctly because α adapts to elapsed time
+  //
+  // When baseline is frozen (fan running), averages do NOT update so that
+  // humidity spikes don't contaminate the baseline.
   // ============================================================================
 
-  // Calculate fast rolling time-weighted average
-  BigDecimal twFast = getDeviceCurrentValue('timeWeightedHumidityRollingAverageFast') as BigDecimal
-  if (twFast == null) {
-    // First reading - initialize with current humidity
-    twFast = humidityCurrent
-  } else {
-    // Exponential smoothing formula:
-    // new = old - old/N + current/N
-    // This gives (N-1)/N weight to history and 1/N weight to new value
-    twFast -= twFast / nFast
-    twFast += humidityCurrent / nFast
+  String baselineFrozen = getDeviceCurrentValue('baselineFrozen') as String
+
+  if (baselineFrozen != 'true' && elapsedTimeSinceLastUpdate > 0) {
+    // Get tau values from preferences (in minutes), convert to milliseconds
+    BigDecimal tauFastMs = ((getSetting('tauFastMinutes') ?: 30) as BigDecimal) * 60000
+    BigDecimal tauSlowMs = ((getSetting('tauSlowMinutes') ?: 120) as BigDecimal) * 60000
+
+    // Calculate alpha for fast EMA
+    double alphaFast = 1.0d - Math.exp(-elapsedTimeSinceLastUpdate.doubleValue() / tauFastMs.doubleValue())
+    // Calculate alpha for slow EMA
+    double alphaSlow = 1.0d - Math.exp(-elapsedTimeSinceLastUpdate.doubleValue() / tauSlowMs.doubleValue())
+
+    // FAST ROLLING AVERAGE (time-weighted EMA)
+    BigDecimal pAvgFast = getDeviceCurrentValue('fastRollingAverage') as BigDecimal
+    if (pAvgFast == null) {
+      pAvgFast = humidityCurrent
+    } else {
+      pAvgFast = pAvgFast * (1.0 - alphaFast) + humidityCurrent * alphaFast
+    }
+    emitEvent('fastRollingAverage', pAvgFast.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+
+    // SLOW ROLLING AVERAGE (time-weighted EMA)
+    BigDecimal pAvgSlow = getDeviceCurrentValue('slowRollingAverage') as BigDecimal
+    if (pAvgSlow == null) {
+      pAvgSlow = humidityCurrent
+    } else {
+      pAvgSlow = pAvgSlow * (1.0 - alphaSlow) + humidityCurrent * alphaSlow
+    }
+    emitEvent('slowRollingAverage', pAvgSlow.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+  } else if (elapsedTimeSinceLastUpdate == 0) {
+    // First reading - initialize both averages
+    emitEvent('fastRollingAverage', humidityCurrent.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+    emitEvent('slowRollingAverage', humidityCurrent.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
   }
-  emitEvent('timeWeightedHumidityRollingAverageFast', twFast.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
 
-  // Calculate slow rolling time-weighted average
-  // NOTE: Original code has a bug - uses twFast instead of twSlow
-  // Preserving for compatibility but this should be fixed
-  BigDecimal twSlow = getDeviceCurrentValue('timeWeightedHumidityRollingAverageSlow') as BigDecimal
-  if (twSlow == null) {
-    twSlow = humidityCurrent
-  } else {
-    twSlow -= twSlow / nSlow
-    twSlow += humidityCurrent / nSlow
+  // ============================================================================
+  // PHASE 6: RATE OF CHANGE AND TREND DETECTION
+  // ============================================================================
+  // Calculate how fast humidity is changing (%/min) and whether it's rising.
+  // ============================================================================
+
+  // Capture previous rate of change BEFORE emitting the new one (for acceleration calc)
+  BigDecimal previousRoc = getDeviceCurrentValue('rateOfChange') as BigDecimal
+
+  // Rate of change in %/min (positive = rising, negative = falling)
+  BigDecimal currentRoc = null
+  if (elapsedTimeSinceLastUpdate > 0) {
+    BigDecimal elapsedMinutes = elapsedTimeSinceLastUpdate / 60000
+    currentRoc = (humidityCurrent - humidityPrevious) / elapsedMinutes
+    emitEvent('rateOfChange', currentRoc.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
   }
-  emitEvent('timeWeightedHumidityRollingAverageSlow', twSlow.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
-
-  // ============================================================================
-  // PHASE 5: STANDARD ROLLING AVERAGES
-  // ============================================================================
-  // Calculate fast and slow rolling averages using exponential smoothing.
-  // These are the primary statistics used by most apps.
-  //
-  // EXPONENTIAL SMOOTHING FORMULA:
-  // new_average = old_average - old_average/N + new_value/N
-  //
-  // This can be rewritten as:
-  // new_average = old_average × (N-1)/N + new_value × 1/N
-  //
-  // WHAT THIS MEANS:
-  // - Give (N-1)/N weight to the historical average
-  // - Give 1/N weight to the new reading
-  //
-  // EXAMPLE with N=10:
-  // - Historical average gets 90% weight
-  // - New reading gets 10% weight
-  // - If old avg = 50 and new value = 60:
-  //   new = 50 × 0.9 + 60 × 0.1 = 45 + 6 = 51
-  //
-  // WHY THIS WORKS:
-  // - Automatically adapts to trends
-  // - No need to store all N previous values
-  // - Computationally very efficient
-  // - More recent values gradually have more influence
-  // ============================================================================
-
-  // FAST ROLLING AVERAGE (10-50 samples)
-  // More responsive to changes, less stable
-  BigDecimal pAvgFast = getDeviceCurrentValue('fastRollingAverage') as BigDecimal
-  if (pAvgFast == null) {
-    // First reading - initialize average with current value
-    pAvgFast = humidityCurrent
-  } else {
-    // Apply exponential smoothing
-    // Subtract old/N from old (reduces old's contribution)
-    pAvgFast -= pAvgFast / nFast
-    // Add current/N (adds new reading's contribution)
-    pAvgFast += humidityCurrent / nFast
-  }
-  // Round to 1 decimal and send event
-  emitEvent('fastRollingAverage', pAvgFast.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
-
-  // SLOW ROLLING AVERAGE (50-200 samples)
-  // More stable, less responsive to short-term changes
-  BigDecimal pAvgSlow = getDeviceCurrentValue('slowRollingAverage') as BigDecimal
-  if (pAvgSlow == null) {
-    // First reading - initialize average with current value
-    pAvgSlow = humidityCurrent
-  } else {
-    // Apply exponential smoothing with larger N (slower adjustment)
-    pAvgSlow -= pAvgSlow / nSlow
-    pAvgSlow += humidityCurrent / nSlow
-  }
-  // Round to 1 decimal and send event
-  emitEvent('slowRollingAverage', pAvgSlow.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
-
-  // ============================================================================
-  // PHASE 6: TREND DETECTION
-  // ============================================================================
-  // Determine if humidity is increasing or decreasing by comparing current
-  // reading to previous reading. This helps apps detect trends.
-  // ============================================================================
 
   // Compare current to previous humidity
-  // Result is a string 'true' or 'false' (not boolean) for ENUM attribute
   String isIncreasing = humidityCurrent > humidityPrevious ? 'true' : 'false'
-
-  // Send the trend direction as an event
-  // Apps can monitor this to know if humidity is rising or falling
   emitEvent('isIncreasing', isIncreasing, null, null)
 
   // ============================================================================
-  // CALCULATION COMPLETE
+  // PHASE 7: ADVANCED STATISTICS
   // ============================================================================
-  // At this point, all statistics have been calculated and all events have
-  // been sent. Apps subscribed to these attributes will receive notifications
-  // and can make decisions based on the updated statistics.
+
+  // --- 7a: Smoothed Rate of Change (EMA-filtered derivative) ---
+  // Filters out noise from the raw single-sample RoC, giving a reliable
+  // "humidity is rapidly rising/falling" signal.
+  if (elapsedTimeSinceLastUpdate > 0 && currentRoc != null) {
+    BigDecimal tauRocMs = ((getSetting('tauRocMinutes') ?: 5) as BigDecimal) * 60000
+    double alphaRoc = 1.0d - Math.exp(-elapsedTimeSinceLastUpdate.doubleValue() / tauRocMs.doubleValue())
+
+    BigDecimal smoothedRoc = getDeviceCurrentValue('smoothedRateOfChange') as BigDecimal
+    if (smoothedRoc == null) {
+      smoothedRoc = currentRoc
+    } else {
+      smoothedRoc = smoothedRoc * (1.0 - alphaRoc) + currentRoc * alphaRoc
+    }
+    emitEvent('smoothedRateOfChange', smoothedRoc.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
+
+    // --- 7b: Rate of Change Acceleration (second derivative) ---
+    // Detects the very beginning of a shower spike — humidity isn't just
+    // rising, it's rising *faster*. Units: %/min²
+    if (previousRoc != null) {
+      BigDecimal elapsedMin = elapsedTimeSinceLastUpdate / 60000
+      BigDecimal acceleration = (currentRoc - previousRoc) / elapsedMin
+      emitEvent('rateOfChangeAcceleration', acceleration.setScale(3, BigDecimal.ROUND_HALF_UP), null, null)
+    }
+  }
+
+  // --- 7c: Running Standard Deviation (EMA-based variance) ---
+  // Tracks how much humidity typically varies from the slow average.
+  // Enables adaptive thresholds (e.g., "trigger at 2 standard deviations").
+  // Uses the same tau as the slow EMA for stability.
+  // Only updates when baseline is NOT frozen (same as rolling averages).
+  if (baselineFrozen != 'true' && elapsedTimeSinceLastUpdate > 0 && preUpdateSlowAvg != null) {
+    BigDecimal tauSlowMs = ((getSetting('tauSlowMinutes') ?: 120) as BigDecimal) * 60000
+    double alphaVar = 1.0d - Math.exp(-elapsedTimeSinceLastUpdate.doubleValue() / tauSlowMs.doubleValue())
+
+    BigDecimal diff = humidityCurrent - preUpdateSlowAvg
+    BigDecimal emaVar = getDeviceCurrentValue('emaVariance') as BigDecimal
+    if (emaVar == null) {
+      emaVar = diff * diff
+    } else {
+      emaVar = emaVar * (1.0 - alphaVar) + (diff * diff) * alphaVar
+    }
+    emitEvent('emaVariance', emaVar.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
+
+    BigDecimal stdDev = new BigDecimal(Math.sqrt(emaVar.doubleValue()))
+    emitEvent('humidityStdDev', stdDev.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
+  }
+
+  // --- 7d: Daily Min / Max ---
+  // Simple tracking of today's humidity range. Useful for detecting baseline
+  // drift over time (e.g., steadily climbing = possible ventilation problem).
+  // Reset at midnight by resetDailyTWAverages().
+  BigDecimal dailyMin = getDeviceCurrentValue('dailyMinHumidity') as BigDecimal
+  BigDecimal dailyMax = getDeviceCurrentValue('dailyMaxHumidity') as BigDecimal
+  if (dailyMin == null || humidityCurrent < dailyMin) {
+    emitEvent('dailyMinHumidity', humidityCurrent, null, null)
+  }
+  if (dailyMax == null || humidityCurrent > dailyMax) {
+    emitEvent('dailyMaxHumidity', humidityCurrent, null, null)
+  }
+
+  // --- 7e: Current Spike Peak ---
+  // Tracks the highest humidity reached during a fan run (when baseline is frozen).
+  // Reset when recordFanStart() is called.
+  if (baselineFrozen == 'true') {
+    BigDecimal currentPeak = getDeviceCurrentValue('currentSpikePeak') as BigDecimal
+    if (currentPeak == null || humidityCurrent > currentPeak) {
+      emitEvent('currentSpikePeak', humidityCurrent, null, null)
+    }
+  }
+
+  // --- 7f: Time Above Threshold (daily mold-risk accumulator) ---
+  // Accumulates minutes per day that humidity exceeds the configured threshold.
+  // Uses the PREVIOUS humidity for the interval (same principle as TWA).
+  Integer threshold = getSetting('humidityThreshold') as Integer
+  if (threshold != null && threshold > 0 && elapsedTimeSinceLastUpdate > 0) {
+    if (humidityPrevious >= threshold) {
+      BigDecimal minutesAbove = getDeviceCurrentValue('dailyMinutesAboveThreshold') as BigDecimal
+      BigDecimal elapsedMin = elapsedTimeSinceLastUpdate / 60000
+      if (minutesAbove == null) { minutesAbove = 0 }
+      minutesAbove += elapsedMin
+      emitEvent('dailyMinutesAboveThreshold', minutesAbove.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+    }
+  }
+
+  // --- 7g: Bathroom Differential ---
+  // How much higher the bathroom humidity is vs. the household sensor.
+  // Positive = bathroom is more humid than rest of house.
+  BigDecimal householdHum = getDeviceCurrentValue('householdHumidity') as BigDecimal
+  if (householdHum != null) {
+    BigDecimal differential = humidityCurrent - householdHum
+    emitEvent('bathroomDifferential', differential.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+  }
+
+  // ============================================================================
+  // CALCULATION COMPLETE
   // ============================================================================
 }
