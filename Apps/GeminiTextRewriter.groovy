@@ -453,8 +453,8 @@ void initialize() {
   logInfo('Gemini Text Rewriter initialized')
 
   // Schedule logs to turn off after 30 minutes (if enabled)
-  if (settings.logEnable) { runIn(1800, 'logsOff') }
-  if (settings.debugLogEnable) { runIn(1800, 'debugLogsOff') }
+  if (settings.logEnable != false) { runIn(1800, 'logsOff') }
+  if (settings.debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
 }
 
 // =============================================================================
