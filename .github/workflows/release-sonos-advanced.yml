@@ -75,6 +75,7 @@ jobs:
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvBatteryStats.groovy
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvFavorites.groovy
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvSecondaries.groovy
+          sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvPlaylist.groovy
 
           # Update Library versions
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Libraries/SMAPILibrary.groovy
@@ -196,6 +197,7 @@ jobs:
           - SonosAdvBatteryStats.groovy
           - SonosAdvFavorites.groovy
           - SonosAdvSecondaries.groovy
+          - SonosAdvPlaylist.groovy
           - packageManifest.json
           EOF
 
@@ -212,6 +214,7 @@ jobs:
             Drivers/Component/SonosAdvBatteryStats.groovy
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
+            Drivers/Component/SonosAdvPlaylist.groovy
             Libraries/SMAPILibrary.groovy
             Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
@@ -343,6 +346,7 @@ jobs:
             Drivers/Component/SonosAdvBatteryStats.groovy
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
+            Drivers/Component/SonosAdvPlaylist.groovy
             Libraries/SMAPILibrary.groovy
             Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
