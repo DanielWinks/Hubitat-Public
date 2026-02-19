@@ -406,15 +406,31 @@ void secondaryConfiguration() {
     return
   }
 
+  // Phase 1: First batch of child devices
   createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
   createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
+  runIn(1, 'secondaryConfigurationPhase2')
+}
+
+void secondaryConfigurationPhase2() {
+  // Phase 2: Second batch of child devices
   createRemoveRepeatAllChildDevice(getCreateRepeatAllChildDevice())
   createRemoveMuteChildDevice(getCreateMuteChildDevice())
   createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
+  runIn(1, 'secondaryConfigurationPhase3')
+}
+
+void secondaryConfigurationPhase3() {
+  // Phase 3: Third batch of child devices
   createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
   createRemovePlaylistChildDevice(getCreatePlaylistChildDevice())
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
+  runIn(1, 'secondaryConfigurationPhase4')
+}
+
+void secondaryConfigurationPhase4() {
+  // Phase 4: Final child devices, initialization, and subscription setup
   createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
