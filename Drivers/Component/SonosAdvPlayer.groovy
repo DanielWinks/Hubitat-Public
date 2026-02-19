@@ -183,6 +183,7 @@ metadata {
         input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
       }
       input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
+      input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
     }
   }
 }
@@ -211,6 +212,7 @@ Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEn
 Boolean getChimeBeforeTTS() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
 Boolean getAlwaysUseLoadAudioClip() { return settings.alwaysUseLoadAudioClip != null ? settings.alwaysUseLoadAudioClip : true }
 Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
+Boolean getEnableRawWebsocketLogging() { return settings.enableRawWebsocketLogging != null ? settings.enableRawWebsocketLogging : false }
 
 Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
 Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
@@ -272,7 +274,7 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, LinkedHashMap> playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, Long> eventTimestamps = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, String> wsSubscriptionStatus = new ConcurrentHashMap<String, String>()
-@Field static groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
+@Field static ConcurrentHashMap<String, groovy.json.JsonSlurper> jsonSlurpers = new ConcurrentHashMap<String, groovy.json.JsonSlurper>()
 @Field static java.util.Random rand = new java.util.Random()
 @Field static Map SOURCES = [
   "\$": "None",
@@ -495,6 +497,7 @@ void migrationCleanup() {
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
   if(settings.alwaysUseLoadAudioClip == null) { settings.alwaysUseLoadAudioClip = true }
   if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
+  if(settings.enableRawWebsocketLogging == null) { settings.enableRawWebsocketLogging = false }
   if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
   // Remove debug-only device data keys when debug logging is off
   if(!isDebugLoggingEnabled()) {
@@ -4611,14 +4614,25 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 @CompileStatic
 void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
-  ArrayList json = (ArrayList)slurper.parseText(message)
+  String dni = device.getDeviceNetworkId()
+  groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.get(dni)
+  if(deviceSlurper == null) {
+    deviceSlurper = new groovy.json.JsonSlurper()
+    groovy.json.JsonSlurper existing = jsonSlurpers.putIfAbsent(dni, deviceSlurper)
+    if(existing != null) { deviceSlurper = existing }
+  }
+  ArrayList json = (ArrayList)deviceSlurper.parseText(message)
   if(json.size() < 2) {return}
   LinkedHashMap deviceSettings = getDeviceSettings()
-  if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) { logTrace(message) }
 
   Map eventType = (json as List)[0]
   Map eventData = (json as List)[1]
   if(eventType == null || eventData == null) {return}
+
+  if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) {
+    logTrace("WS event: ${eventType}")
+    if(deviceSettings.enableRawWebsocketLogging == true) { logTrace("WS raw: ${message}") }
+  }
 
   //Process subscriptions
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
@@ -5044,7 +5058,6 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    String dni = device.getDeviceNetworkId()
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
     if(containerKey == lastKey) { return }
