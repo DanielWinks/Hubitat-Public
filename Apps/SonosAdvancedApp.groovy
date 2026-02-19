@@ -523,6 +523,10 @@ void configure() {
   unschedule('refreshTTSVoiceCache')
   runIn(30, 'refreshTTSVoiceCache')
   schedule('0 0 3 * * ?', 'refreshTTSVoiceCache')
+
+  // Schedule daily favorites/playlists refresh at 3:05 AM
+  unschedule('refreshFavoritesAndPlaylists')
+  schedule('0 5 3 * * ?', 'refreshFavoritesAndPlaylists')
 }
 
 void refreshTTSVoiceCache() {
@@ -563,6 +567,22 @@ void refreshTTSVoiceCache() {
     logError("Error refreshing TTS voice cache: ${e.message}")
   }
 }
+void refreshFavoritesAndPlaylists() {
+  logDebug('Refreshing favorites and playlists...')
+  try {
+    ChildDeviceWrapper player = getCurrentPlayerDevices().find { it.getDataValue('websocketUrl') }
+    if(player) {
+      player.getFavorites()
+      player.getPlaylists()
+      logInfo("Favorites/playlists refresh triggered via ${player.label}")
+    } else {
+      logWarn('No player device available for favorites/playlists refresh')
+    }
+  } catch (Exception e) {
+    logError("Error refreshing favorites/playlists: ${e.message}")
+  }
+}
+
 // =============================================================================
 // End Initialize() and Configure()
 // =============================================================================

@@ -3778,9 +3778,6 @@ void subscribeToWsEvents() {
   if(isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
   if(isCurrentlySubcribedToGroupsWS() == false) { subscribeToGroups() }
   if(isCurrentlySubcribedToFavoritesWS() == false) { subscribeToFavorites() }
-  // Fetch current favorites/playlists now that WebSocket is connected
-  runIn(3, 'getFavorites', [overwrite: true])
-  runIn(4, 'getPlaylists', [overwrite: true])
 }
 
 @CompileStatic
