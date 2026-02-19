@@ -22,8 +22,9 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.httpLibrary
+import groovy.json.JsonOutput
+import groovy.transform.Field
+import hubitat.scheduling.AsyncResponse
 import groovy.util.slurpersupport.GPathResult
 
 metadata {
@@ -41,8 +42,57 @@ metadata {
       input 'ip', 'string', title:'IP Address', description: '', required: true, displayDuringSetup: true
       input 'port', 'string', title:'Port', description: '', required: true, displayDuringSetup: true, defaultValue: '80'
     }
+    input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
+    input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
   }
 }
+
+// =============================================================================
+// Logging
+// =============================================================================
+
+void logError(String message) { if(logEnable != false) { log.error("${device.displayName}: ${message}") } }
+void logWarn(String message) { if(logEnable != false) { log.warn("${device.displayName}: ${message}") } }
+void logInfo(String message) { if(logEnable != false) { log.info("${device.displayName}: ${message}") } }
+void logDebug(String message) { if(logEnable != false && debugLogEnable != false) { log.debug("${device.displayName}: ${message}") } }
+void logTrace(String message) { if(logEnable != false && traceLogEnable != false) { log.trace("${device.displayName}: ${message}") } }
+
+void logsOff() { logWarn("Logging disabled"); device.updateSetting('logEnable', [value:'false', type:'bool']) }
+void debugLogsOff() { logWarn("Debug logging disabled"); device.updateSetting('debugLogEnable', [value:'false', type:'bool']) }
+void traceLogsOff() { logWarn("Trace logging disabled"); device.updateSetting('traceLogEnable', [value:'false', type:'bool']) }
+
+// =============================================================================
+// Lifecycle
+// =============================================================================
+
+void installed() {
+  logDebug('Installed...')
+  try { initialize() } catch(e) { logWarn("No initialize() method or error: ${e}") }
+  if(logEnable != false) { runIn(1800, 'logsOff') }
+  if(debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
+  if(traceLogEnable != false) { runIn(1800, 'traceLogsOff') }
+}
+
+void updated() {
+  logDebug('Updated...')
+  try { configure() } catch(e) { logWarn("No configure() method or error: ${e}") }
+}
+
+void uninstalled() {
+  logDebug('Uninstalled...')
+  unschedule()
+}
+
+// =============================================================================
+// JSON Utilities
+// =============================================================================
+
+String prettyJson(Map jsonInput) { return JsonOutput.prettyPrint(JsonOutput.toJson(jsonInput)) }
+
+// =============================================================================
+// Driver
+// =============================================================================
 
 @Field static final String CHECK = '/win'
 @Field static final String ON = '/win&T=1'

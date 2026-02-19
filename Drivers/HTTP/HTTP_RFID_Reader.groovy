@@ -22,8 +22,10 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.httpLibrary
+import com.hubitat.app.ChildDeviceWrapper
+import groovy.json.JsonOutput
+import groovy.transform.Field
+import hubitat.scheduling.AsyncResponse
 
 metadata {
   definition (name: 'HTTP RFID Reader', namespace: 'dwinks', author: 'Daniel Winks', importUrl:'') {
@@ -66,8 +68,128 @@ metadata {
       input(name: 'sonName', type: 'string', title:'Son Name', description: '', required: true, displayDuringSetup: true)
       input(name: 'reminderInterval', type:'number', title:'Reminder Interval', description: '', required: true, displayDuringSetup: true, defaultValue: 10)
     }
+    input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
+    input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
   }
 }
+
+// =============================================================================
+// Logging
+// =============================================================================
+
+void logError(String message) { if(logEnable != false) { log.error("${device.displayName}: ${message}") } }
+void logWarn(String message) { if(logEnable != false) { log.warn("${device.displayName}: ${message}") } }
+void logInfo(String message) { if(logEnable != false) { log.info("${device.displayName}: ${message}") } }
+void logDebug(String message) { if(logEnable != false && debugLogEnable != false) { log.debug("${device.displayName}: ${message}") } }
+void logTrace(String message) { if(logEnable != false && traceLogEnable != false) { log.trace("${device.displayName}: ${message}") } }
+
+void logsOff() { logWarn("Logging disabled"); device.updateSetting('logEnable', [value:'false', type:'bool']) }
+void debugLogsOff() { logWarn("Debug logging disabled"); device.updateSetting('debugLogEnable', [value:'false', type:'bool']) }
+void traceLogsOff() { logWarn("Trace logging disabled"); device.updateSetting('traceLogEnable', [value:'false', type:'bool']) }
+
+// =============================================================================
+// Lifecycle
+// =============================================================================
+
+void installed() {
+  logDebug('Installed...')
+  try { initialize() } catch(e) { logWarn("No initialize() method or error: ${e}") }
+  if(logEnable != false) { runIn(1800, 'logsOff') }
+  if(debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
+  if(traceLogEnable != false) { runIn(1800, 'traceLogsOff') }
+}
+
+void updated() {
+  logDebug('Updated...')
+  try { configure() } catch(e) { logWarn("No configure() method or error: ${e}") }
+}
+
+void uninstalled() {
+  logDebug('Uninstalled...')
+  unschedule()
+  deleteChildDevices()
+}
+
+void deleteChildDevices() {
+  List<ChildDeviceWrapper> children = getChildDevices()
+  children.each { ChildDeviceWrapper child ->
+    deleteChildDevice(child.getDeviceNetworkId())
+  }
+}
+
+// =============================================================================
+// JSON Utilities
+// =============================================================================
+
+String prettyJson(Map jsonInput) { return JsonOutput.prettyPrint(JsonOutput.toJson(jsonInput)) }
+
+// =============================================================================
+// Time Utilities
+// =============================================================================
+
+double nowDays() {
+  return (now() / 86400000)
+}
+
+// =============================================================================
+// ESPHome HTTP
+// =============================================================================
+
+@Field static final String UPTIME_STATE = '/sensor/uptime'
+@Field static final String RESTART_ESP = '/button/restart/press'
+
+void initialize() { configure() }
+void configure() {
+  if (!settings.ip) { logWarn('IP address not configured'); return }
+  String newDni = getMACFromIP(settings.ip)
+  device.setDeviceNetworkId(newDni)
+  checkConnection()
+  refresh()
+  unschedule()
+  runEvery3Hours('checkConnection')
+  runEvery30Minutes('refresh')
+  try { createChildDevices() } catch(e) { logWarn("Error creating child devices: ${e}") }
+}
+
+void restartESP() { sendCommandAsync(RESTART_ESP, null, null) }
+void checkConnection() { sendQueryAsync(UPTIME_STATE, 'checkConnectionCallback') }
+void checkConnectionCallback(AsyncResponse response, Map data = null) {
+  logDebug("response.status = ${response.status}")
+  if(response.hasError()) {
+    sendEvent(name: 'status', value: 'offline')
+  } else {
+    Map responseData = parseJson(response.getData())
+    logDebug("response.getData() = ${responseData}")
+    sendEvent(name: 'status', value: 'online')
+    sendEvent(name: 'uptime', value: "${responseData.value.toInteger()}")
+  }
+}
+
+void sendCommandAsync(String path, String callbackMethod, Map data = null) {
+  try {
+    Map params = [uri: "http://${settings.ip}:${settings.port}${path}"]
+    logDebug("${params.uri}")
+    asynchttpPost(callbackMethod, params, data)
+  } catch(Exception e) {
+    if(e.message.toString() != 'OK') { logError(e.message) }
+  }
+  runInMillis(500, 'refresh')
+}
+
+void sendQueryAsync(String path, String callback, Map data = null) {
+  Map params = [uri: "http://${settings.ip}:${settings.port}${path}"]
+  logDebug("${params.uri}")
+  try {
+    asynchttpGet(callback, params, data)
+  } catch(Exception e) {
+    logDebug("Call failed: ${e.message}")
+  }
+}
+
+// =============================================================================
+// Driver
+// =============================================================================
 
 void refresh() {}
 void refreshCallback(AsyncResponse response, Map data = null){}

@@ -22,8 +22,9 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.httpLibrary
+import groovy.json.JsonOutput
+import groovy.transform.Field
+import hubitat.scheduling.AsyncResponse
 
 metadata {
   definition (name: 'HTTP Switch', namespace: 'dwinks', author: 'Daniel Winks', importUrl:'') {
@@ -31,38 +32,141 @@ metadata {
     capability 'Refresh'
 
     command 'restartESP'
+    command 'checkConnection'
     command 'initialize'
 
     attribute 'status', 'ENUM', ['online', 'offline']
     attribute 'uptime', 'NUMBER'
   }
 
-    preferences {
+  preferences {
     section('Device Settings') {
       input 'ip', 'string', title:'IP Address', description: '', required: true, displayDuringSetup: true
       input 'port', 'string', title:'Port', description: '', required: true, displayDuringSetup: true, defaultValue: '80'
     }
+    input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
+    input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
   }
 }
 
-@Field static final String RELAY = 'relay'
+// =============================================================================
+// Logging
+// =============================================================================
+
+void logError(String message) { if(logEnable != false) { log.error("${device.displayName}: ${message}") } }
+void logWarn(String message) { if(logEnable != false) { log.warn("${device.displayName}: ${message}") } }
+void logInfo(String message) { if(logEnable != false) { log.info("${device.displayName}: ${message}") } }
+void logDebug(String message) { if(logEnable != false && debugLogEnable != false) { log.debug("${device.displayName}: ${message}") } }
+void logTrace(String message) { if(logEnable != false && traceLogEnable != false) { log.trace("${device.displayName}: ${message}") } }
+
+void logsOff() { logWarn("Logging disabled"); device.updateSetting('logEnable', [value:'false', type:'bool']) }
+void debugLogsOff() { logWarn("Debug logging disabled"); device.updateSetting('debugLogEnable', [value:'false', type:'bool']) }
+void traceLogsOff() { logWarn("Trace logging disabled"); device.updateSetting('traceLogEnable', [value:'false', type:'bool']) }
+
+// =============================================================================
+// Lifecycle
+// =============================================================================
+
+void installed() {
+  logDebug('Installed...')
+  try { initialize() } catch(e) { logWarn("No initialize() method or error: ${e}") }
+  if(logEnable != false) { runIn(1800, 'logsOff') }
+  if(debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
+  if(traceLogEnable != false) { runIn(1800, 'traceLogsOff') }
+}
+
+void updated() {
+  logDebug('Updated...')
+  try { configure() } catch(e) { logWarn("No configure() method or error: ${e}") }
+}
+
+void uninstalled() {
+  logDebug('Uninstalled...')
+  unschedule()
+}
+
+// =============================================================================
+// JSON Utilities
+// =============================================================================
+
+String prettyJson(Map jsonInput) { return JsonOutput.prettyPrint(JsonOutput.toJson(jsonInput)) }
+
+// =============================================================================
+// ESPHome HTTP
+// =============================================================================
+
+@Field static final String UPTIME_STATE = '/sensor/uptime'
+@Field static final String RESTART_ESP = '/button/restart/press'
+
+void initialize() { configure() }
+void configure() {
+  if (!settings.ip) { logWarn('IP address not configured'); return }
+  String newDni = getMACFromIP(settings.ip)
+  device.setDeviceNetworkId(newDni)
+  checkConnection()
+  refresh()
+  unschedule()
+  runEvery3Hours('checkConnection')
+  runEvery30Minutes('refresh')
+  try { createChildDevices() } catch(e) { logWarn("Error creating child devices: ${e}") }
+}
+
+void restartESP() { sendCommandAsync(RESTART_ESP, null, null) }
+void checkConnection() { sendQueryAsync(UPTIME_STATE, 'checkConnectionCallback') }
+void checkConnectionCallback(AsyncResponse response, Map data = null) {
+  logDebug("response.status = ${response.status}")
+  if(response.hasError()) {
+    sendEvent(name: 'status', value: 'offline')
+  } else {
+    Map responseData = parseJson(response.getData())
+    logDebug("response.getData() = ${responseData}")
+    sendEvent(name: 'status', value: 'online')
+    sendEvent(name: 'uptime', value: "${responseData.value.toInteger()}")
+  }
+}
+
+void sendCommandAsync(String path, String callbackMethod, Map data = null) {
+  try {
+    Map params = [uri: "http://${settings.ip}:${settings.port}${path}"]
+    logDebug("${params.uri}")
+    asynchttpPost(callbackMethod, params, data)
+  } catch(Exception e) {
+    if(e.message.toString() != 'OK') { logError(e.message) }
+  }
+  runInMillis(500, 'refresh')
+}
+
+void sendQueryAsync(String path, String callback, Map data = null) {
+  Map params = [uri: "http://${settings.ip}:${settings.port}${path}"]
+  logDebug("${params.uri}")
+  try {
+    asynchttpGet(callback, params, data)
+  } catch(Exception e) {
+    logDebug("Call failed: ${e.message}")
+  }
+}
+
+// =============================================================================
+// Driver
+// =============================================================================
+
+@Field static final String RELAY = 'switch-relay'
 @Field static final String RELAY_STATE = '/switch/relay'
 
 String turnOnRelayCommandTopic() { return "${RELAY_STATE}/turn_on" }
 String turnOffRelayCommandTopic() { return "${RELAY_STATE}/turn_off" }
 
-void refresh() { sendQueryAsync(RELAY_STATE, 'switchStateCallback', [switch:RELAY]) }
+void refresh() { sendQueryAsync(RELAY_STATE, 'refreshCallback', null) }
 
-void switchStateCallback(AsyncResponse response, Map data = null){
-  logDebug("response.status = ${response.status}")
+void refreshCallback(AsyncResponse response, Map data = null) {
   if(response.hasError()) {
     logDebug("${response.getErrorData()}")
     return
   }
 
-  Map responseJson = parseJson(response.getData())
-  String val = responseJson.state.toLowerCase()
-  sendEvent(name:'switch', value:val, descriptionText:"Relay is now ${val}", isStateChange:true)
+  Map jsonData = parseJson(response.getData())
+  if(jsonData != null) { processJson(jsonData) }
 }
 
 void on() { sendCommandAsync(turnOnRelayCommandTopic(), null, null) }
@@ -70,6 +174,14 @@ void off() { sendCommandAsync(turnOffRelayCommandTopic(), null, null) }
 
 void parse(message) {
   Map parsedMessage = parseLanMessage(message)
-  Map jsonBody = parseJson(parsedMessage.body)
-  if(jsonBody?.switch != null) { sendEvent(name:'switch', value:jsonBody?.switch, descriptionText:"Relay is now ${jsonBody?.switch}", isStateChange:true) }
+  Map jsonData = parseJson(parsedMessage.body)
+  if(jsonData != null) { processJson(jsonData) }
+}
+
+void processJson(Map jsonData) {
+  logDebug(prettyJson(jsonData))
+  if(jsonData?.id == RELAY) {
+    String val = jsonData?.value ? 'on' : 'off'
+    sendEvent(name: 'switch', value: val, descriptionText: "Relay is now ${val}")
+  }
 }

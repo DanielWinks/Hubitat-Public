@@ -21,8 +21,9 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLoggingLibrary
-
+import groovy.json.JsonOutput
+import groovy.transform.Field
+import hubitat.scheduling.AsyncResponse
 import hubitat.helper.NetworkUtils
 import hubitat.helper.NetworkUtils.PingData
 
@@ -58,8 +59,57 @@ metadata {
       input 'printingTimer', 'number', title:'Update interval when printing', description: 'in seconds', required: true, displayDuringSetup: true, defaultValue: '15', range:'5..300'
       input 'offlineTimer', 'number', title:'Update interval when offline', description: 'in minutes', required: true, displayDuringSetup: true, defaultValue: '1', range:'1..59'
     }
+    input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
+    input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: true
+    input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
   }
 }
+
+// =============================================================================
+// Logging
+// =============================================================================
+
+void logError(String message) { if(logEnable != false) { log.error("${device.displayName}: ${message}") } }
+void logWarn(String message) { if(logEnable != false) { log.warn("${device.displayName}: ${message}") } }
+void logInfo(String message) { if(logEnable != false) { log.info("${device.displayName}: ${message}") } }
+void logDebug(String message) { if(logEnable != false && debugLogEnable != false) { log.debug("${device.displayName}: ${message}") } }
+void logTrace(String message) { if(logEnable != false && traceLogEnable != false) { log.trace("${device.displayName}: ${message}") } }
+
+void logsOff() { logWarn("Logging disabled"); device.updateSetting('logEnable', [value:'false', type:'bool']) }
+void debugLogsOff() { logWarn("Debug logging disabled"); device.updateSetting('debugLogEnable', [value:'false', type:'bool']) }
+void traceLogsOff() { logWarn("Trace logging disabled"); device.updateSetting('traceLogEnable', [value:'false', type:'bool']) }
+
+// =============================================================================
+// Lifecycle
+// =============================================================================
+
+void installed() {
+  logDebug('Installed...')
+  try { initialize() } catch(e) { logWarn("No initialize() method or error: ${e}") }
+  if(logEnable != false) { runIn(1800, 'logsOff') }
+  if(debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
+  if(traceLogEnable != false) { runIn(1800, 'traceLogsOff') }
+}
+
+void updated() {
+  logDebug('Updated...')
+  try { configure() } catch(e) { logWarn("No configure() method or error: ${e}") }
+}
+
+void uninstalled() {
+  logDebug('Uninstalled...')
+  unschedule()
+}
+
+// =============================================================================
+// JSON Utilities
+// =============================================================================
+
+String prettyJson(Map jsonInput) { return JsonOutput.prettyPrint(JsonOutput.toJson(jsonInput)) }
+
+// =============================================================================
+// Driver
+// =============================================================================
 
 void initialize() { configure() }
 void configure() { getStatus() }
@@ -173,4 +223,3 @@ void printerOff() {
   sendEvent(name:'hostState', value:'off', isStateChange: true)
   scheduleOffline()
 }
-
