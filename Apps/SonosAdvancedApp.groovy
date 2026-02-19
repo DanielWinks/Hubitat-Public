@@ -1431,6 +1431,9 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     if(allPlayersAreGrouped && !wasActive) {
       notifyGroupDeviceActivated(gd)
     }
+    if(!allPlayersAreGrouped && wasActive) {
+      notifyGroupDeviceDeactivated(gd)
+    }
   }
 }
 
@@ -1441,6 +1444,15 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
  */
 void notifyGroupDeviceActivated(ChildDeviceWrapper gd) {
   gd.replayHeldState()
+}
+
+/**
+ * Notify a group device that it just became inactive so it can reset playback attributes.
+ * This method is intentionally NOT @CompileStatic so that onGroupDeactivated() resolves
+ * dynamically against the actual driver instance.
+ */
+void notifyGroupDeviceDeactivated(ChildDeviceWrapper gd) {
+  gd.onGroupDeactivated()
 }
 
 /**

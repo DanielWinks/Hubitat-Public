@@ -148,6 +148,10 @@ metadata {
         title: 'Only update state when group is active',
         description: 'When enabled, playback state updates are skipped when the group\'s configured speakers are not all grouped together in Sonos. Reduces hub load when many groups share a coordinator.',
         required: false, defaultValue: true
+      input 'resetAttributesWhenInactive', 'bool',
+        title: 'Reset attributes when group becomes inactive',
+        description: 'When enabled, playback attributes (track name, artist, album art, etc.) are cleared when the group\'s speakers are no longer grouped together. Shows a clean state on dashboards.',
+        required: false, defaultValue: true
     }
   }
 }
@@ -155,6 +159,7 @@ Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? se
 Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
+Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
 
 
 String getCurrentTTSVoice() {
@@ -183,6 +188,7 @@ String getCurrentTTSVoice() {
 void initialize() {
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
   if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
+  if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
   // Initialize volume/mute state from coordinator
   runIn(5, 'refresh')
 }
@@ -856,6 +862,15 @@ void updateBatchPlaybackState(String jsonAttributes) {
     return
   }
 
+  // If group just became inactive, reset playback attributes and hold new ones
+  if(wasActive && !isActive) {
+    if(getResetAttributesWhenInactiveSetting()) {
+      resetPlaybackAttributes()
+    }
+    holdPlaybackState(playbackAttrs)
+    return
+  }
+
   // If group just became active, replay held state merged with new attributes
   if(isActive && !wasActive) {
     replayHeldState(playbackAttrs)
@@ -922,6 +937,48 @@ void replayHeldState(Map additionalAttrs = null) {
 private void clearHeldState() {
   String dni = device.getDeviceNetworkId()
   heldPlaybackState.remove(dni)
+}
+
+private void resetPlaybackAttributes() {
+  logDebug('Resetting playback attributes for inactive group')
+  sendEvent(name: 'status', value: 'inactive')
+  sendEvent(name: 'trackData', value: '{}')
+  sendEvent(name: 'trackDescription', value: '')
+  sendEvent(name: 'currentTrackDuration', value: '')
+  sendEvent(name: 'currentArtistName', value: '')
+  sendEvent(name: 'currentAlbumName', value: '')
+  sendEvent(name: 'currentTrackName', value: '')
+  sendEvent(name: 'albumArtURI', value: '')
+  sendEvent(name: 'albumArtSmall', value: '')
+  sendEvent(name: 'albumArtMedium', value: '')
+  sendEvent(name: 'albumArtLarge', value: '')
+  sendEvent(name: 'audioSource', value: '')
+  sendEvent(name: 'currentFavorite', value: '')
+  sendEvent(name: 'currentPlaylist', value: '')
+  sendEvent(name: 'currentTrackNumber', value: 0)
+  sendEvent(name: 'nextArtistName', value: '')
+  sendEvent(name: 'nextAlbumName', value: '')
+  sendEvent(name: 'nextTrackName', value: '')
+  sendEvent(name: 'nextTrackAlbumArtURI', value: '')
+  sendEvent(name: 'queueTrackTotal', value: '0')
+  sendEvent(name: 'queueTrackPosition', value: '0')
+  sendEvent(name: 'currentRepeatOneMode', value: 'off')
+  sendEvent(name: 'currentRepeatAllMode', value: 'off')
+  sendEvent(name: 'currentCrossfadeMode', value: 'off')
+  sendEvent(name: 'currentShuffleMode', value: 'off')
+}
+
+/**
+ * Called by the app when this group device transitions from active to inactive.
+ * Resets playback attributes to a clean "inactive" state if configured to do so.
+ * Only resets when both resetAttributesWhenInactive and onlyUpdateWhenActive are enabled,
+ * because when the guard is off, playback attributes flow through unconditionally and
+ * resetting would cause a brief flash of empty data immediately overwritten.
+ */
+void onGroupDeactivated() {
+  if(getResetAttributesWhenInactiveSetting() && getOnlyUpdateWhenActiveSetting()) {
+    resetPlaybackAttributes()
+  }
 }
 
 /**
