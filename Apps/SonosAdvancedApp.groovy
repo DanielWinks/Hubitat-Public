@@ -83,8 +83,8 @@ String getLocalApiPrefix(String ipAddress) {
 }
 
 String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
-  String localUpnpHost = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId }.getDataValue('localUpnpHost')
-  return localUpnpHost
+  ChildDeviceWrapper dev = getDeviceFromRincon(groupCoordinatorId)
+  return dev?.getDataValue('localUpnpHost')
 }
 
 
@@ -164,18 +164,18 @@ Map mainPage() {
       // Display installed file versions
       if(state.installedVersions && state.installedVersions.size() > 0) {
         paragraph "<b>Installed File Versions:</b>"
-        String versionList = "<ul>"
+        StringBuilder versionList = new StringBuilder('<ul>')
         state.installedVersions.each { file ->
           String statusColor = file.status == 'OK' ? 'green' : (file.status == 'Mismatch' ? 'red' : 'gray')
           String statusIcon = file.status == 'OK' ? '✓' : (file.status == 'Mismatch' ? '✗' : '?')
-          versionList += "<li><span style='color:${statusColor}'><b>${statusIcon}</b></span> <b>${file.name}</b>: ${file.installedVersion}"
+          versionList.append("<li><span style='color:${statusColor}'><b>${statusIcon}</b></span> <b>${file.name}</b>: ${file.installedVersion}")
           if(file.status == 'Mismatch') {
-            versionList += " <span style='color:red'>(expected ${file.expectedVersion})</span>"
+            versionList.append(" <span style='color:red'>(expected ${file.expectedVersion})</span>")
           }
-          versionList += "</li>"
+          versionList.append('</li>')
         }
-        versionList += "</ul>"
-        paragraph versionList
+        versionList.append('</ul>')
+        paragraph versionList.toString()
       }
 
       if(state.versionMismatches && state.versionMismatches.size() > 0) {
@@ -362,11 +362,15 @@ Map localPlayerSelectionPage() {
 
 Map groupPage() {
   if(!state.userGroups) { state.userGroups = [:] }
-  Map coordinatorSelectionOptions = getCurrentPlayerDevices().collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('name')] }
-  Boolean coordIsS1 = (newGroupCoordinator && getDeviceFromRincon(newGroupCoordinator)?.getDataValue('swGen') == '1')
+  // Build player data in a single pass — collect ID, name, and swGen together
+  // Avoids N separate getDeviceFromRincon() calls for S1/S2 filtering
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  Map coordinatorSelectionOptions = players.collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('name')] }
+  Map<String, String> playerSwGenMap = players.collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('swGen')] }
+  Boolean coordIsS1 = (newGroupCoordinator && playerSwGenMap[newGroupCoordinator] == '1')
   logDebug("Selected group coordinator is S1: ${coordIsS1}")
-  Map playerSelectionOptionsS1 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && getDeviceFromRincon(it.key).getDataValue('swGen') =='1' }
-  Map playerSelectionOptionsS2 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && getDeviceFromRincon(it.key).getDataValue('swGen') =='2'}
+  Map playerSelectionOptionsS1 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && playerSwGenMap[it.key] == '1' }
+  Map playerSelectionOptionsS2 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && playerSwGenMap[it.key] == '2' }
   Map playerSelectionOptions = [:]
   if(!newGroupCoordinator) {playerSelectionOptions = playerSelectionOptionsS1 + playerSelectionOptionsS2}
   else if(newGroupCoordinator && coordIsS1) {playerSelectionOptions = playerSelectionOptionsS1}
@@ -778,19 +782,20 @@ void retryDeviceConfiguration(Map data) {
 }
 
 void removeOrphans() {
-  getCurrentGroupDevices().each{ child ->
+  // Single getChildDevices() call partitioned into groups and players
+  List<ChildDeviceWrapper> allChildren = app.getChildDevices()
+  allChildren.each { child ->
+    String id = child.getDataValue('id')
     String dni = child.getDeviceNetworkId()
-    if(dni in settings.groupDevices) { return }
-    else {
-      logInfo("Removing group device not found in selected devices list: ${child}")
-      app.deleteChildDevice(dni)
-    }
-  }
-  if(!settings.skipOrphanRemoval) {
-    getCurrentPlayerDevices().each{ child ->
-      String dni = child.getDeviceNetworkId()
-      if(dni in settings.playerDevices) { return }
-      else {
+    if(id == null) {
+      // Group device
+      if(!(dni in settings.groupDevices)) {
+        logInfo("Removing group device not found in selected devices list: ${child}")
+        app.deleteChildDevice(dni)
+      }
+    } else if(!settings.skipOrphanRemoval) {
+      // Player device
+      if(!(dni in settings.playerDevices)) {
         logInfo("Removing player device not found in selected devices list: ${child}")
         app.deleteChildDevice(dni)
       }
@@ -1052,29 +1057,31 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
 
   // Use MAC as primary key, but also check for duplicate IPs/playerIds to prevent same device listed multiple times
   // Check against both primary and secondary maps
+  // O(1) MAC check first (most common case), then .any{} for early exit on IP/playerId match
   boolean isDuplicate = false
-  discoveredSonoses.each { key, value ->
-    LinkedHashMap existingDevice = value as LinkedHashMap
-    if(key == mac || existingDevice.id == playerId || existingDevice.deviceIp == ipAddress) {
-      logTrace("Device already discovered in primaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}")
-      isDuplicate = true
-      // Update the existing entry with latest info to keep it fresh
-      if(key == mac) {
-        existingDevice.deviceIp = ipAddress
-        existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
-        existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
-        existingDevice.localUpnpHost = "${ipAddress}:1400"
-      }
-    }
+  if(discoveredSonoses.containsKey(mac)) {
+    isDuplicate = true
+    // Update the existing entry with latest info to keep it fresh
+    LinkedHashMap existingDevice = discoveredSonoses[mac] as LinkedHashMap
+    existingDevice.deviceIp = ipAddress
+    existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
+    existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
+    existingDevice.localUpnpHost = "${ipAddress}:1400"
+    logTrace("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
   }
   if(!isDuplicate) {
-    discoveredSonosSecondaries.each { key, value ->
+    isDuplicate = discoveredSonoses.any { key, value ->
       LinkedHashMap existingDevice = value as LinkedHashMap
-      if(key == mac || existingDevice.id == playerId || existingDevice.deviceIp == ipAddress) {
-        logTrace("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}")
-        isDuplicate = true
-      }
+      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
     }
+    if(isDuplicate) { logTrace("Device already discovered in primaries (IP/ID match) - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
+  }
+  if(!isDuplicate) {
+    isDuplicate = discoveredSonosSecondaries.containsKey(mac) || discoveredSonosSecondaries.any { key, value ->
+      LinkedHashMap existingDevice = value as LinkedHashMap
+      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
+    }
+    if(isDuplicate) { logTrace("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
   }
 
   if(isDuplicate) { return }
@@ -1183,22 +1190,47 @@ String getDNIFromRincon(String rincon) {
   return rincon.tokenize('_')[1][0..-6]
 }
 
-ChildDeviceWrapper getDeviceFromRincon(String rincon) {
-  List<ChildDeviceWrapper> childDevices = app.getCurrentPlayerDevices()
-  ChildDeviceWrapper dev = childDevices.find{ it.getDataValue('id') == rincon}
-  return dev
+/**
+ * Build a Map of RINCON ID to ChildDeviceWrapper for O(1) lookups.
+ * Single traversal of child devices instead of per-lookup traversal.
+ */
+Map<String, ChildDeviceWrapper> buildRinconMap() {
+  Map<String, ChildDeviceWrapper> rinconMap = [:]
+  app.getChildDevices().each { child ->
+    String id = child.getDataValue('id')
+    if(id) { rinconMap[id] = child }
+  }
+  return rinconMap
 }
 
+/**
+ * Single-call RINCON lookup. Uses find() with early exit instead of
+ * building a full player list then searching it.
+ */
+ChildDeviceWrapper getDeviceFromRincon(String rincon) {
+  return app.getChildDevices().find { it.getDataValue('id') == rincon }
+}
 
+/**
+ * Batch RINCON lookup — single pass over child devices, O(1) per rincon.
+ */
 List<ChildDeviceWrapper> getDevicesFromRincons(LinkedHashSet<String> rincons) {
-  List<ChildDeviceWrapper> children = rincons.collect{ player -> getDeviceFromRincon(player)  }
-  children.removeAll([null])
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<ChildDeviceWrapper> children = []
+  rincons.each { String player ->
+    ChildDeviceWrapper dev = rinconMap[player]
+    if(dev != null) { children.add(dev) }
+  }
   return children
 }
 
 List<ChildDeviceWrapper> getDevicesFromRincons(List<String> rincons) {
-  List<ChildDeviceWrapper> children = rincons.collect{ player -> getDeviceFromRincon(player)  }
-  children.removeAll([null])
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<ChildDeviceWrapper> children = []
+  rincons.each { String player ->
+    ChildDeviceWrapper dev = rinconMap[player]
+    if(dev != null) { children.add(dev) }
+  }
   return children
 }
 
@@ -1236,6 +1268,41 @@ List<ChildDeviceWrapper> getCurrentGroupDevices() {
   List<ChildDeviceWrapper> currentGroupDevs = []
   app.getChildDevices().each{child -> if(child.getDataValue('id') == null) { currentGroupDevs.add(child)}}
   return currentGroupDevs
+}
+
+/**
+ * Get all group devices whose coordinator matches the given RINCON ID.
+ * Shared helper used by all forwarding methods to avoid repeated traversals.
+ * NOT @CompileStatic — requires dynamic access to app.getChildDevices().
+ */
+List<ChildDeviceWrapper> getGroupDevicesForCoordinator(String coordinatorId) {
+  List<ChildDeviceWrapper> result = []
+  app.getChildDevices().each { child ->
+    if(child.getDataValue('id') == null && child.getDataValue('groupCoordinatorId') == coordinatorId) {
+      result.add(child)
+    }
+  }
+  return result
+}
+
+/**
+ * Single-pass partition of all child devices into group devices (for a coordinator)
+ * and a RINCON lookup map (for player name resolution).
+ * Returns [groupDevices: List<ChildDeviceWrapper>, rinconMap: Map<String, ChildDeviceWrapper>]
+ * NOT @CompileStatic — requires dynamic access to app.getChildDevices().
+ */
+Map getGroupDevicesAndRinconMap(String coordinatorId) {
+  List<ChildDeviceWrapper> groupsForCoord = []
+  Map<String, ChildDeviceWrapper> rinconMap = [:]
+  app.getChildDevices().each { child ->
+    String id = child.getDataValue('id')
+    if(id) {
+      rinconMap[id] = child
+    } else if(child.getDataValue('groupCoordinatorId') == coordinatorId) {
+      groupsForCoord.add(child)
+    }
+  }
+  return [groupDevices: groupsForCoord, rinconMap: rinconMap]
 }
 
 List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
@@ -1403,13 +1470,16 @@ String unEscapeMetaData(String text) {
 @CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
-  // Update group device with current on/off state and currently joined players
-  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll{it.getDataValue('groupCoordinatorId') == coordinatorId }
+  // Single pass over all children: partition into group devices (for this coordinator)
+  // and a RINCON lookup map (for player name resolution). Avoids two separate getChildDevices() calls.
+  Map partitioned = getGroupDevicesAndRinconMap(coordinatorId)
+  List<ChildDeviceWrapper> groupsForCoord = (List<ChildDeviceWrapper>)partitioned['groupDevices']
+  Map<String, ChildDeviceWrapper> rinconMap = (Map<String, ChildDeviceWrapper>)partitioned['rinconMap']
 
   // Resolve RINCON IDs to friendly player names for the currentlyJoinedPlayers attribute
   List<String> joinedPlayerNames = []
   playersInGroup.each { String rincon ->
-    ChildDeviceWrapper playerDev = getDeviceFromRincon(rincon)
+    ChildDeviceWrapper playerDev = rinconMap[rincon]
     if(playerDev != null) {
       String name = playerDev.getDataValue('name')
       if(name != null && name != '') { joinedPlayerNames.add(name) }
@@ -1466,16 +1536,13 @@ void notifyGroupDeviceDeactivated(ChildDeviceWrapper gd) {
 void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, String groupMute, Boolean isGroupedWithFollowers = null) {
   if(!coordinatorId) { return }
 
-  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
-    it.getDataValue('groupCoordinatorId') == coordinatorId
-  }
-
   Map attrs = [:]
   if(groupVolume != null) { attrs.volume = groupVolume }
   if(groupMute != null) { attrs.mute = groupMute }
   if(isGroupedWithFollowers != null) { attrs.switch = isGroupedWithFollowers ? 'on' : 'off' }
   if(attrs.isEmpty()) { return }
 
+  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
   String jsonAttrs = JsonOutput.toJson(attrs)
   groupsForCoord.each { gd ->
     gd.updateBatchPlaybackState(jsonAttrs)
@@ -1499,10 +1566,7 @@ void updateGroupDeviceMusicPlayerState(String coordinatorId, String status, Stri
   if(trackDescription != null) { attrs.trackDescription = trackDescription }
   if(attrs.isEmpty()) { return }
 
-  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
-    it.getDataValue('groupCoordinatorId') == coordinatorId
-  }
-
+  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
   String jsonAttrs = JsonOutput.toJson(attrs)
   groupsForCoord.each { gd ->
     gd.updateBatchPlaybackState(jsonAttrs)
@@ -1518,11 +1582,34 @@ void updateGroupDeviceMusicPlayerState(String coordinatorId, String status, Stri
 void updateGroupDeviceExtendedPlaybackState(String coordinatorId, Map attributes) {
   if(!coordinatorId || !attributes) { return }
 
-  List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
-    it.getDataValue('groupCoordinatorId') == coordinatorId
-  }
-
+  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
   String jsonAttrs = JsonOutput.toJson(attributes)
+  groupsForCoord.each { gd ->
+    gd.updateBatchPlaybackState(jsonAttrs)
+  }
+}
+
+/**
+ * Combined flush method: resolves group devices ONCE for both volume and playback attributes.
+ * Called by the player driver's flushPendingGroupDeviceUpdates() to avoid two separate
+ * child device traversals.
+ * @param coordinatorId The RINCON ID of the coordinator
+ * @param volumeAttrs Map of volume/mute/switch attributes (may be null)
+ * @param playbackAttrs Map of extended playback attributes (may be null/empty)
+ */
+void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAttrs) {
+  if(!coordinatorId) { return }
+
+  // Invariant: volumeAttrs keys (volume, mute, switch) must not overlap with playbackAttrs keys.
+  // The caller (flushPendingGroupDeviceUpdates) guarantees this by stripping _groupVolume/_groupMute
+  // from the pending map before passing the remainder as playbackAttrs.
+  Map combined = [:]
+  if(volumeAttrs) { combined.putAll(volumeAttrs) }
+  if(playbackAttrs) { combined.putAll(playbackAttrs) }
+  if(combined.isEmpty()) { return }
+
+  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
+  String jsonAttrs = JsonOutput.toJson(combined)
   groupsForCoord.each { gd ->
     gd.updateBatchPlaybackState(jsonAttrs)
   }
@@ -1951,8 +2038,10 @@ void fixVersionMismatches() {
   logInfo("Fixing ${state.versionMismatches.size()} version mismatch(es)...")
 
   // Process libraries FIRST, then drivers (since drivers depend on libraries)
-  def libraryMismatches = state.versionMismatches.findAll { it.type == 'library' }
-  def driverMismatches = state.versionMismatches.findAll { it.type == 'driver' }
+  // Single-pass partition instead of two findAll traversals
+  Map grouped = state.versionMismatches.groupBy { it.type }
+  List libraryMismatches = grouped['library'] ?: []
+  List driverMismatches = grouped['driver'] ?: []
 
   // Step 1: Update libraries if any are out of date
   if(libraryMismatches.size() > 0) {

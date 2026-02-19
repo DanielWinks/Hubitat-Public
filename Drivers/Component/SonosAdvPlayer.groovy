@@ -3572,7 +3572,8 @@ void queueGroupDeviceUpdate(Map attributes) {
 }
 
 /**
- * Flush all pending group device updates in one or two batched parent calls.
+ * Flush all pending group device updates in a single combined parent call.
+ * Resolves group devices once instead of twice (volume + playback were separate traversals).
  * Called automatically after the 1-second debounce window expires.
  */
 void flushPendingGroupDeviceUpdates() {
@@ -3587,7 +3588,8 @@ void flushPendingGroupDeviceUpdates() {
   String coordinatorId = getId()
   logDebug("flushPendingGroupDeviceUpdates: Forwarding ${pending.size()} attributes to group devices")
 
-  // Extract volume-specific keys (prefixed with _ to avoid attribute name collision)
+  // Extract volume-specific keys and build volume attrs map
+  Map volumeAttrs = null
   try {
     Object rawVol = pending.remove('_groupVolume')
     Object rawMute = pending.remove('_groupMute')
@@ -3596,16 +3598,15 @@ void flushPendingGroupDeviceUpdates() {
       String mute = rawMute != null ? rawMute as String : getGroupMuteState()
       Boolean isGrouped = getIsGrouped()
       vol = isGrouped ? vol + 1 : vol
-      parent?.updateGroupDeviceVolumeState(coordinatorId, vol, mute, isGrouped && isCoordinator)
+      volumeAttrs = [volume: vol, mute: mute, switch: (isGrouped && isCoordinator) ? 'on' : 'off']
     }
-  } catch(Exception e) { logWarn("Error flushing volume state to group devices: ${e.message}") }
+  } catch(Exception e) { logWarn("Error preparing volume state for group devices: ${e.message}") }
 
-  // Flush all remaining playback/metadata attributes in one batch
+  // Send everything in one combined call — resolves group devices once
   try {
-    if(!pending.isEmpty()) {
-      parent?.updateGroupDeviceExtendedPlaybackState(coordinatorId, pending as Map)
-    }
-  } catch(Exception e) { logWarn("Error flushing playback state to group devices: ${e.message}") }
+    Map playbackAttrs = pending.isEmpty() ? null : (pending as Map)
+    parent?.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrs)
+  } catch(Exception e) { logWarn("Error flushing state to group devices: ${e.message}") }
 }
 
 @CompileStatic
@@ -4599,7 +4600,7 @@ void processWebsocketMessage(String message) {
   ArrayList json = (ArrayList)slurper.parseText(message)
   if(json.size() < 2) {return}
   LinkedHashMap deviceSettings = getDeviceSettings()
-  if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) { logTrace(JsonOutput.prettyPrint(message)) }
+  if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) { logTrace(message) }
 
   Map eventType = (json as List)[0]
   Map eventData = (json as List)[1]
@@ -5027,10 +5028,13 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    updateFavsIn(2, eventData)
-    updateFavsIn(5, eventData)
-    updatePlaylistsIn(2, eventData)
-    updatePlaylistsIn(5, eventData)
+    // Schedule checks at 2s (quick) and 5s (delayed). overwrite:true inside each
+    // method means only the last scheduled runIn per callback name actually fires.
+    // We call twice to get both a fast check and a reliable delayed check.
+    updateFavsIn(2, eventData, false)
+    updateFavsIn(5, eventData, true)
+    updatePlaylistsIn(2, eventData, false)
+    updatePlaylistsIn(5, eventData, true)
   }
 }
 
@@ -5038,8 +5042,8 @@ void getPlaybackMetadataStatusIn(Integer time = 2) {
   runIn(time, 'getPlaybackMetadataStatus', [overwrite: true])
 }
 
-void updateFavsIn(Integer time, Map data) {
-  logTrace('Getting currently playing favorite...')
+void updateFavsIn(Integer time, Map data, Boolean doLog = true) {
+  if(doLog) { logTrace('Getting currently playing favorite...') }
   if(favoritesMap == null || favoritesMap.size() < 1) {
     logTrace('Favorites map is empty, requesting favorites...')
     getFavorites()
@@ -5049,8 +5053,8 @@ void updateFavsIn(Integer time, Map data) {
   }
 }
 
-void updatePlaylistsIn(Integer time, Map data) {
-  logTrace('Getting currently playing playlist...')
+void updatePlaylistsIn(Integer time, Map data, Boolean doLog = true) {
+  if(doLog) { logTrace('Getting currently playing playlist...') }
   if(playlistsMap == null || playlistsMap.size() < 1) {
     logTrace('Playlists map is empty, requesting playlists...')
     getPlaylists()
