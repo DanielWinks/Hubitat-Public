@@ -332,6 +332,7 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+@Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 
 // =============================================================================
 // End Fields
@@ -5023,18 +5024,19 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     if(eventData?.playbackState == 'PLAYBACK_STATE_PLAYING') {
-      if(getIsGroupCoordinator()) {getPlaybackMetadataStatusIn()}
+      if(getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
+    } else if(eventData?.playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
+      lastMetadataContainerId.remove(device.getDeviceNetworkId())
     }
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    // Schedule checks at 2s (quick) and 5s (delayed). overwrite:true inside each
-    // method means only the last scheduled runIn per callback name actually fires.
-    // We call twice to get both a fast check and a reliable delayed check.
-    updateFavsIn(2, eventData, false)
-    updateFavsIn(5, eventData, true)
-    updatePlaylistsIn(2, eventData, false)
-    updatePlaylistsIn(5, eventData, true)
+    String dni = device.getDeviceNetworkId()
+    String containerKey = extractContainerKey(eventData)
+    String lastKey = lastMetadataContainerId.get(dni)
+    if(containerKey == lastKey) { return }
+    lastMetadataContainerId.put(dni, containerKey)
+    checkFavAndPlaylist(eventData)
   }
 }
 
@@ -5042,26 +5044,31 @@ void getPlaybackMetadataStatusIn(Integer time = 2) {
   runIn(time, 'getPlaybackMetadataStatus', [overwrite: true])
 }
 
-void updateFavsIn(Integer time, Map data, Boolean doLog = true) {
-  if(doLog) { logTrace('Getting currently playing favorite...') }
+@CompileStatic
+static String extractContainerKey(Map eventData) {
+  if(!eventData) { return '' }
+  Map container = (Map)eventData.container
+  if(!container) { return '' }
+  Map id = (Map)container.id
+  if(!id) { return '' }
+  return "${id.objectId}:${id.serviceId}:${id.accountId}".toString()
+}
+
+void checkFavAndPlaylist(Map data) {
+  logTrace('Checking currently playing favorite and playlist...')
+  Integer delay = 5
   if(favoritesMap == null || favoritesMap.size() < 1) {
     logTrace('Favorites map is empty, requesting favorites...')
     getFavorites()
-    runIn(time + 7, 'isFavoritePlaying', [overwrite: true, data: data ])
-  } else {
-    runIn(time, 'isFavoritePlaying', [overwrite: true, data: data ])
+    delay = 12
   }
-}
-
-void updatePlaylistsIn(Integer time, Map data, Boolean doLog = true) {
-  if(doLog) { logTrace('Getting currently playing playlist...') }
   if(playlistsMap == null || playlistsMap.size() < 1) {
     logTrace('Playlists map is empty, requesting playlists...')
     getPlaylists()
-    runIn(time + 7, 'isPlaylistPlaying', [overwrite: true, data: data ])
-  } else {
-    runIn(time, 'isPlaylistPlaying', [overwrite: true, data: data ])
+    delay = 12
   }
+  runIn(delay, 'isFavoritePlaying', [overwrite: true, data: data])
+  runIn(delay, 'isPlaylistPlaying', [overwrite: true, data: data])
 }
 
 void setChildFavs(String html) {
