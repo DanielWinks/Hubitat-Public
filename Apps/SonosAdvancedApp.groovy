@@ -1445,17 +1445,15 @@ void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, Str
     it.getDataValue('groupCoordinatorId') == coordinatorId
   }
 
+  Map attrs = [:]
+  if(groupVolume != null) { attrs.volume = groupVolume }
+  if(groupMute != null) { attrs.mute = groupMute }
+  if(isGroupedWithFollowers != null) { attrs.switch = isGroupedWithFollowers ? 'on' : 'off' }
+  if(attrs.isEmpty()) { return }
+
+  String jsonAttrs = JsonOutput.toJson(attrs)
   groupsForCoord.each { gd ->
-    if(groupVolume != null) {
-      gd.sendEvent(name: 'volume', value: groupVolume, unit: '%')
-    }
-    if(groupMute != null) {
-      gd.sendEvent(name: 'mute', value: groupMute)
-    }
-    if(isGroupedWithFollowers != null) {
-      // Update switch state: 'on' when grouped with followers, 'off' when standalone
-      gd.sendEvent(name: 'switch', value: isGroupedWithFollowers ? 'on' : 'off')
-    }
+    gd.updateBatchPlaybackState(jsonAttrs)
   }
 }
 
@@ -1500,12 +1498,9 @@ void updateGroupDeviceExtendedPlaybackState(String coordinatorId, Map attributes
     it.getDataValue('groupCoordinatorId') == coordinatorId
   }
 
+  String jsonAttrs = JsonOutput.toJson(attributes)
   groupsForCoord.each { gd ->
-    attributes.each { attrName, attrValue ->
-      if(attrValue != null) {
-        gd.sendEvent(name: attrName, value: attrValue)
-      }
-    }
+    gd.updateBatchPlaybackState(jsonAttrs)
   }
 }
 

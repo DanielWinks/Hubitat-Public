@@ -802,6 +802,24 @@ void refresh() {
 }
 
 /**
+ * Receive a batch of attribute updates as a JSON string from the parent app.
+ * Processes all attributes in a single method call instead of individual sendEvent() calls.
+ * @param jsonAttributes JSON string of attribute name-value pairs
+ */
+void updateBatchPlaybackState(String jsonAttributes) {
+  Map attributes = (Map)parseJson(jsonAttributes)
+  attributes.each { String attrName, Object attrValue ->
+    if(attrValue != null) {
+      if(attrName == 'volume') {
+        sendEvent(name: 'volume', value: attrValue, unit: '%')
+      } else {
+        sendEvent(name: attrName, value: attrValue)
+      }
+    }
+  }
+}
+
+/**
  * Calculate and update volume as average of all player volumes
  */
 void refreshAverageVolume() {
