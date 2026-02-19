@@ -96,7 +96,7 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // App Pages
 // =============================================================================
 Map mainPage() {
-  if(state.discoveryRunning) { stopDiscovery() }
+  stopDiscovery()
   checkForUpdates()
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
@@ -219,17 +219,18 @@ Map mainPage() {
 }
 
 Map localPlayerPage() {
-  if(!state.discoveryRunning) {
+  if(atomicState.discoveryRunning != true) {
     subscribeToSsdpEvents(location)
     ssdpDiscover()
-    state.discoveryRunning = true
-    state.discoveryEndTime = now() + 60000
+    atomicState.discoveryRunning = true
+    atomicState.discoveryEndTime = now() + 60000
     app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
     runIn(60, 'stopDiscovery')
     runIn(1, 'updateDiscoveryTimer')
   }
 
-  Integer remainingSecs = Math.max(0, (Integer)(((state.discoveryEndTime as Long) - now()) / 1000))
+  Long endTime = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
+  Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
 
   dynamicPage(
 		name: "localPlayerPage",
@@ -239,7 +240,7 @@ Map localPlayerPage() {
 		uninstall: false
   ) {
     section("Please wait while we discover your Sonos devices. Using both SSDP and mDNS discovery methods. Click Next when all your devices have been discovered.") {
-      if(state.discoveryRunning) {
+      if(atomicState.discoveryRunning == true) {
         paragraph "<b><span class='app-state-${app.id}-discoveryTimer'>Discovery time remaining: ${remainingSecs} seconds</span></b>"
       } else {
         paragraph "<b>Discovery has stopped.</b> Click Next to proceed or extend to continue."
@@ -815,15 +816,28 @@ void removeOrphans() {
 // - Selection page deduplicates by playerId to handle edge cases
 // =============================================================================
 void stopDiscovery() {
-  logInfo('Stopping discovery...')
+  if(atomicState.discoveryRunning == true) {
+    logInfo('Stopping discovery...')
+  }
+  // Set flags FIRST so all guard checks see the stop immediately
+  atomicState.discoveryRunning = false
+  atomicState.discoveryEndTime = null
+  // Clean up legacy state keys (migration from state → atomicState)
   state.remove('discoveryRunning')
   state.remove('discoveryEndTime')
-  unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
-  unsubscribe(location, 'sdpTerm.ssdp:all')
-  unschedule('sendFoundSonosEvents')
-  unschedule('processMdnsDiscovery')
-  unschedule('stopDiscovery')
-  unschedule('updateDiscoveryTimer')
+
+  try {
+    unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
+    unsubscribe(location, 'sdpTerm.ssdp:all')
+  } catch(Exception e) { logWarn("Error unsubscribing SSDP: ${e.message}") }
+
+  try {
+    unschedule('sendFoundSonosEvents')
+    unschedule('processMdnsDiscovery')
+    unschedule('stopDiscovery')
+    unschedule('updateDiscoveryTimer')
+  } catch(Exception e) { logWarn("Error unscheduling discovery tasks: ${e.message}") }
+
   try {
     if(this.respondsTo('unregisterMDNSListener')) {
       unregisterMDNSListener('_sonos._tcp')
@@ -833,12 +847,12 @@ void stopDiscovery() {
 }
 
 void updateDiscoveryTimer() {
-  if(!state.discoveryRunning || !state.discoveryEndTime) {
-    logDebug("updateDiscoveryTimer: stopping - discoveryRunning=${state.discoveryRunning}, discoveryEndTime=${state.discoveryEndTime}")
+  if(atomicState.discoveryRunning != true || !atomicState.discoveryEndTime) {
+    logDebug("updateDiscoveryTimer: stopping - discoveryRunning=${atomicState.discoveryRunning}, discoveryEndTime=${atomicState.discoveryEndTime}")
     return
   }
 
-  Integer remainingSecs = Math.max(0, (Integer)(((state.discoveryEndTime as Long) - now()) / 1000))
+  Integer remainingSecs = Math.max(0, (Integer)(((atomicState.discoveryEndTime as Long) - now()) / 1000))
   logTrace("updateDiscoveryTimer: sending event with ${remainingSecs} seconds remaining")
   app.sendEvent(name: 'discoveryTimer', value: "Discovery time remaining: ${remainingSecs} seconds")
 
@@ -851,19 +865,19 @@ void updateDiscoveryTimer() {
 
 void extendDiscovery(Integer seconds) {
   logInfo("Extending discovery by ${seconds} seconds")
-  if(!state.discoveryRunning) {
+  if(atomicState.discoveryRunning != true) {
     // Restart discovery without clearing already-discovered devices
     subscribeToSsdpEvents(location)
     sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
     sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
     startMdnsDiscovery()
-    state.discoveryRunning = true
+    atomicState.discoveryRunning = true
     runIn(1, 'updateDiscoveryTimer')
   }
   // Add seconds to current remaining time (or from now if already expired)
-  Long currentEnd = state.discoveryEndTime ? (state.discoveryEndTime as Long) : now()
+  Long currentEnd = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
   Long newEnd = Math.max(currentEnd, now()) + (seconds * 1000L)
-  state.discoveryEndTime = newEnd
+  atomicState.discoveryEndTime = newEnd
   Integer totalRemaining = (Integer)(((newEnd) - now()) / 1000)
   unschedule('stopDiscovery')
   runIn(totalRemaining, 'stopDiscovery')
@@ -906,6 +920,10 @@ void startMdnsDiscovery() {
 }
 
 void processMdnsDiscovery() {
+  if(atomicState.discoveryRunning != true) {
+    logDebug("processMdnsDiscovery: discovery not running, skipping")
+    return
+  }
   try {
     logDebug("Processing mDNS discovered devices...")
 
@@ -946,6 +964,10 @@ void processMdnsDiscovery() {
 
 void processDiscoveredSonosDevice(String ipAddress) {
   if(!ipAddress) { return }
+  if(atomicState.discoveryRunning != true) {
+    logDebug("processDiscoveredSonosDevice: discovery not running, skipping")
+    return
+  }
 
   // Check if we already discovered this IP (in primaries or secondaries)
   boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
@@ -980,7 +1002,7 @@ void subscribeToSsdpEvents(Location location) {
 }
 
 void ssdpEventHandler(Event event) {
-  if(!state.discoveryRunning) { return }
+  if(atomicState.discoveryRunning != true) { return }
   LinkedHashMap parsedEvent = parseLanMessage(event?.description)
   processParsedSsdpEvent(parsedEvent)
 }
@@ -1131,6 +1153,10 @@ String getFoundSonoses() {
 }
 
 void sendFoundSonosEvents() {
+  if(atomicState.discoveryRunning != true) {
+    logDebug("sendFoundSonosEvents: discovery not running, skipping")
+    return
+  }
   app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()} primary, ${discoveredSonosSecondaries.size()} secondary): ")
   app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
 }
