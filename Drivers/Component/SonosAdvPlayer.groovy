@@ -124,7 +124,7 @@ metadata {
   command 'playHighPriorityTTS', [
     [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
     [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]],
-    [name: 'Voice name', type: "ENUM", constraints: getTTSVoices().collect{it.name}.sort(), defaultValue: getCurrentTTSVoice()]
+    [name: 'Voice name', type: "ENUM", constraints: getCachedTTSVoiceNames(), defaultValue: getCurrentTTSVoice()]
   ]
 
   command 'playHighPriorityTrack', [
@@ -217,25 +217,18 @@ Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()
 
 
 String getCurrentTTSVoice() {
-  try {
-    Map params = [
-      uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false",
-      contentType: 'application/json',
-      requestContentType: 'application/json',
-      timeout: 5
-    ]
-    String voice = 'Matthew'
-    httpGet(params) {resp ->
-      if(resp.status == 200) {
-        def json = resp.data
-        voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
-      }
-    }
-    return voice
-  } catch (Exception e) {
-    logDebug("Could not retrieve current TTS voice: ${e.message}")
-    return 'Matthew'
-  }
+  return cachedTTSDefaultVoice != null ? cachedTTSDefaultVoice : 'Matthew'
+}
+
+List<String> getCachedTTSVoiceNames() {
+  if(cachedTTSVoiceNames != null && cachedTTSVoiceNames.size() > 0) { return cachedTTSVoiceNames }
+  return ['Matthew']
+}
+
+void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
+  cachedTTSVoiceNames = voiceNames
+  cachedTTSDefaultVoice = defaultVoice
+  logTrace("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
 }
 
 @CompileStatic
@@ -333,6 +326,8 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
+@Field static volatile List<String> cachedTTSVoiceNames = null
+@Field static volatile String cachedTTSDefaultVoice = null
 
 // =============================================================================
 // End Fields
@@ -360,7 +355,25 @@ void configure() {
   atomicState.audioClipPlaying = false
   atomicState.wsRetryCount = 0
   migrationCleanup()
-  runIn(5, 'secondaryConfiguration')
+  // Apply child device preferences synchronously (no-ops when devices already exist)
+  createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
+  createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
+  createRemoveRepeatOneChildDevice(getCreateRepeatOneChildDevice())
+  createRemoveRepeatAllChildDevice(getCreateRepeatAllChildDevice())
+  createRemoveMuteChildDevice(getCreateMuteChildDevice())
+  createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
+  createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
+  createRemovePlaylistChildDevice(getCreatePlaylistChildDevice())
+  createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
+  createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
+  createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
+  // Clear event attributes per preference
+  if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
+  if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
+  // Re-initialize in-memory data structures (static fields cleared on JVM restart)
+  audioClipQueueInitialization()
+  groupsRegistryInitialization()
+  favoritesMapInitialization()
 }
 
 void registerRinconId() {
@@ -521,8 +534,8 @@ void groupsRegistryInitialization() {
 }
 
 void favoritesMapInitialization() {
-  if(favoritesMap == null) {favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()}
-  runIn(6, 'getFavorites')
+  if(favoritesMap == null) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
+  // getFavorites() is now triggered by subscribeToWsEvents() after WebSocket connects
 }
 
 @CompileStatic
@@ -3761,10 +3774,13 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // Websocket Subscriptions and polling
 // =============================================================================
 void subscribeToWsEvents() {
-  if(isCurrentlySubcribedToPlaylistWS() == false ) { subscribeToPlaylists() }
-  if(isCurrentlySubcribedToAudioClipWS() == false ) { subscribeToAudioClip() }
-  if(isCurrentlySubcribedToGroupsWS() == false ) { subscribeToGroups() }
-  if(isCurrentlySubcribedToFavoritesWS() == false ) { subscribeToFavorites() }
+  if(isCurrentlySubcribedToPlaylistWS() == false) { subscribeToPlaylists() }
+  if(isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
+  if(isCurrentlySubcribedToGroupsWS() == false) { subscribeToGroups() }
+  if(isCurrentlySubcribedToFavoritesWS() == false) { subscribeToFavorites() }
+  // Fetch current favorites/playlists now that WebSocket is connected
+  runIn(3, 'getFavorites', [overwrite: true])
+  runIn(4, 'getPlaylists', [overwrite: true])
 }
 
 @CompileStatic

@@ -29,6 +29,8 @@
 @Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map<String, Object>> heldPlaybackState = new ConcurrentHashMap<String, Map<String, Object>>()
 @Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
+@Field static volatile List<String> cachedTTSVoiceNames = null
+@Field static volatile String cachedTTSDefaultVoice = null
 
 metadata {
   definition(
@@ -57,7 +59,7 @@ metadata {
     command 'playHighPriorityTTS', [
       [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
       [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]],
-      [name: 'Voice name', type: "ENUM", constraints: getTTSVoices().collect{it.name}.sort(), defaultValue: getCurrentTTSVoice()]
+      [name: 'Voice name', type: "ENUM", constraints: getCachedTTSVoiceNames(), defaultValue: getCurrentTTSVoice()]
     ]
 
     command 'playHighPriorityTrack', [
@@ -163,25 +165,18 @@ Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttribute
 
 
 String getCurrentTTSVoice() {
-  try {
-    Map params = [
-      uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false",
-      contentType: 'application/json',
-      requestContentType: 'application/json',
-      timeout: 5
-    ]
-    String voice = 'Matthew'
-    httpGet(params) {resp ->
-      if(resp.status == 200) {
-        def json = resp.data
-        voice = json?.ttsCurrent ? json?.ttsCurrent : 'Matthew'
-      }
-    }
-    return voice
-  } catch (Exception e) {
-    logDebug("Could not retrieve current TTS voice: ${e.message}")
-    return 'Matthew'
-  }
+  return cachedTTSDefaultVoice != null ? cachedTTSDefaultVoice : 'Matthew'
+}
+
+List<String> getCachedTTSVoiceNames() {
+  if(cachedTTSVoiceNames != null && cachedTTSVoiceNames.size() > 0) { return cachedTTSVoiceNames }
+  return ['Matthew']
+}
+
+void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
+  cachedTTSVoiceNames = voiceNames
+  cachedTTSDefaultVoice = defaultVoice
+  logTrace("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
 }
 
 

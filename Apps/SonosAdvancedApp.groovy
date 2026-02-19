@@ -518,6 +518,50 @@ void configure() {
   state.remove('favs')
   unschedule('appGetFavoritesLocal')
   stopDiscovery()
+
+  // Schedule TTS voice cache refresh: 30s delay for hub readiness, then daily at 3 AM
+  unschedule('refreshTTSVoiceCache')
+  runIn(30, 'refreshTTSVoiceCache')
+  schedule('0 0 3 * * ?', 'refreshTTSVoiceCache')
+}
+
+void refreshTTSVoiceCache() {
+  logDebug('Refreshing TTS voice cache for all devices...')
+  try {
+    List<String> voiceNames = getTTSVoices().collect { it.name }.sort()
+    if(!voiceNames || voiceNames.size() == 0) {
+      logWarn('getTTSVoices() returned empty list, skipping cache refresh')
+      return
+    }
+    String defaultVoice = 'Matthew'
+    try {
+      Map params = [
+        uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false",
+        contentType: 'application/json',
+        requestContentType: 'application/json',
+        timeout: 10
+      ]
+      httpGet(params) { resp ->
+        if(resp.status == 200) {
+          Map json = resp.data
+          defaultVoice = json?.ttsCurrent ? json.ttsCurrent : 'Matthew'
+        }
+      }
+    } catch (Exception e) {
+      logWarn("Could not retrieve current TTS voice from hub: ${e.message}")
+    }
+    getCurrentPlayerDevices().each { ChildDeviceWrapper cd ->
+      try { cd.updateTTSVoiceCache(voiceNames, defaultVoice) }
+      catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
+    }
+    getCurrentGroupDevices().each { ChildDeviceWrapper cd ->
+      try { cd.updateTTSVoiceCache(voiceNames, defaultVoice) }
+      catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
+    }
+    logInfo("TTS voice cache refreshed: ${voiceNames.size()} voices, default: ${defaultVoice}")
+  } catch (Exception e) {
+    logError("Error refreshing TTS voice cache: ${e.message}")
+  }
 }
 // =============================================================================
 // End Initialize() and Configure()
