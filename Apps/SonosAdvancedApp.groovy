@@ -1424,10 +1424,23 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     list1.add(coordinatorId)
     list2.add(coordinatorId)
     Boolean allPlayersAreGrouped = list1.equals(list2)
+    Boolean wasActive = gd.currentValue('switch') == 'on'
     if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
     gd.sendEvent(name: 'currentlyJoinedPlayers', value: joinedPlayersValue)
+    if(allPlayersAreGrouped && !wasActive) {
+      notifyGroupDeviceActivated(gd)
+    }
   }
+}
+
+/**
+ * Notify a group device that it just became active so it can replay any held playback state.
+ * This method is intentionally NOT @CompileStatic so that replayHeldState() resolves
+ * dynamically against the actual driver instance.
+ */
+void notifyGroupDeviceActivated(ChildDeviceWrapper gd) {
+  gd.replayHeldState()
 }
 
 /**
@@ -1468,20 +1481,19 @@ void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, Str
 void updateGroupDeviceMusicPlayerState(String coordinatorId, String status, String trackData, String trackDescription) {
   if(!coordinatorId) { return }
 
+  Map attrs = [:]
+  if(status != null) { attrs.status = status }
+  if(trackData != null) { attrs.trackData = trackData }
+  if(trackDescription != null) { attrs.trackDescription = trackDescription }
+  if(attrs.isEmpty()) { return }
+
   List<ChildDeviceWrapper> groupsForCoord = getCurrentGroupDevices().findAll {
     it.getDataValue('groupCoordinatorId') == coordinatorId
   }
 
+  String jsonAttrs = JsonOutput.toJson(attrs)
   groupsForCoord.each { gd ->
-    if(status != null) {
-      gd.sendEvent(name: 'status', value: status)
-    }
-    if(trackData != null) {
-      gd.sendEvent(name: 'trackData', value: trackData)
-    }
-    if(trackDescription != null) {
-      gd.sendEvent(name: 'trackDescription', value: trackDescription)
-    }
+    gd.updateBatchPlaybackState(jsonAttrs)
   }
 }
 

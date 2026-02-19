@@ -27,6 +27,8 @@
 // This ensures the Sonos API has time to process the ungroup operation before creating a new group
 @Field static final Integer UNGROUP_DELAY_MS = 2000
 @Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Map<String, Object>> heldPlaybackState = new ConcurrentHashMap<String, Map<String, Object>>()
+@Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
 
 metadata {
   definition(
@@ -141,11 +143,18 @@ metadata {
         description: 'When speakers are grouped, use Sonos native group volume API which maintains relative volume ratios between speakers. When disabled, sets the same volume on each speaker directly.',
         required: false, defaultValue: true
     }
+    section('State Update Settings') {
+      input 'onlyUpdateWhenActive', 'bool',
+        title: 'Only update state when group is active',
+        description: 'When enabled, playback state updates are skipped when the group\'s configured speakers are not all grouped together in Sonos. Reduces hub load when many groups share a coordinator.',
+        required: false, defaultValue: true
+    }
   }
 }
 Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
 Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
+Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
 
 
 String getCurrentTTSVoice() {
@@ -173,10 +182,20 @@ String getCurrentTTSVoice() {
 
 void initialize() {
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
+  if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
   // Initialize volume/mute state from coordinator
   runIn(5, 'refresh')
 }
-void configure() {}
+void configure() {
+  Boolean wasGuarded = state.lastOnlyUpdateWhenActive != false
+  Boolean isGuarded = getOnlyUpdateWhenActiveSetting()
+  state.lastOnlyUpdateWhenActive = isGuarded
+  if(!isGuarded && wasGuarded) {
+    // Guard just disabled — clear held state and refresh to populate skipped attributes
+    clearHeldState()
+    runIn(2, 'refresh')
+  }
+}
 void on() { evictUnlistedPlayers() }
 void off() { removePlayersFromCoordinator() }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
@@ -803,12 +822,59 @@ void refresh() {
 
 /**
  * Receive a batch of attribute updates as a JSON string from the parent app.
- * Processes all attributes in a single method call instead of individual sendEvent() calls.
+ * Separates membership attributes (always processed) from playback attributes (guarded).
+ * When the group is inactive and guarding is enabled, playback attributes are held in memory
+ * and replayed when the group transitions to active.
  * @param jsonAttributes JSON string of attribute name-value pairs
  */
 void updateBatchPlaybackState(String jsonAttributes) {
   Map attributes = (Map)parseJson(jsonAttributes)
+
+  // Separate membership keys (always processed) from playback keys (guarded)
+  Map membershipAttrs = [:]
+  Map playbackAttrs = [:]
   attributes.each { String attrName, Object attrValue ->
+    if(attrValue == null) { return }
+    if(MEMBERSHIP_ATTRIBUTES.contains(attrName)) {
+      membershipAttrs[attrName] = attrValue
+    } else {
+      playbackAttrs[attrName] = attrValue
+    }
+  }
+
+  // Always apply membership attributes first
+  Boolean wasActive = this.device.currentValue('switch') == 'on'
+  membershipAttrs.each { String attrName, Object attrValue ->
+    sendEvent(name: attrName, value: attrValue)
+  }
+  Boolean isActive = this.device.currentValue('switch') == 'on'
+
+  // If guard is off, always apply playback state
+  if(!getOnlyUpdateWhenActiveSetting()) {
+    applyPlaybackAttributes(playbackAttrs)
+    clearHeldState()
+    return
+  }
+
+  // If group just became active, replay held state merged with new attributes
+  if(isActive && !wasActive) {
+    replayHeldState(playbackAttrs)
+    return
+  }
+
+  // If group is active, apply playback attributes directly
+  if(isActive) {
+    applyPlaybackAttributes(playbackAttrs)
+    return
+  }
+
+  // Group is not active — hold the playback attributes for later
+  holdPlaybackState(playbackAttrs)
+}
+
+private void applyPlaybackAttributes(Map attrs) {
+  if(!attrs) { return }
+  attrs.each { String attrName, Object attrValue ->
     if(attrValue != null) {
       if(attrName == 'volume') {
         sendEvent(name: 'volume', value: attrValue, unit: '%')
@@ -817,6 +883,45 @@ void updateBatchPlaybackState(String jsonAttributes) {
       }
     }
   }
+}
+
+private void holdPlaybackState(Map newAttrs) {
+  if(!newAttrs || newAttrs.isEmpty()) { return }
+  String dni = device.getDeviceNetworkId()
+  Map<String, Object> existing = heldPlaybackState.get(dni)
+  if(existing == null) {
+    heldPlaybackState[dni] = new LinkedHashMap<String, Object>(newAttrs)
+  } else {
+    existing.putAll(newAttrs)
+  }
+}
+
+/**
+ * Replay any held playback attributes that were accumulated while the group was inactive.
+ * Merges held state with optional additional attributes (current batch wins on collision).
+ * Called from the app via notifyGroupDeviceActivated() on off→on transition, and also
+ * internally from updateBatchPlaybackState() when a batch includes switch:'on'.
+ * Both paths are safe: the first caller consumes held state via atomic remove(),
+ * subsequent calls find null and replay only additionalAttrs (or return early).
+ * @param additionalAttrs Optional map of new attributes to merge on top of held state
+ */
+void replayHeldState(Map additionalAttrs = null) {
+  String dni = device.getDeviceNetworkId()
+  Map<String, Object> held = heldPlaybackState.remove(dni)
+  if(held == null && (additionalAttrs == null || additionalAttrs.isEmpty())) { return }
+
+  // Merge: held state first, then current batch on top (current wins on collision)
+  Map merged = [:]
+  if(held) { merged.putAll(held) }
+  if(additionalAttrs) { merged.putAll(additionalAttrs) }
+
+  logDebug("Replaying ${merged.size()} held attributes after group became active")
+  applyPlaybackAttributes(merged)
+}
+
+private void clearHeldState() {
+  String dni = device.getDeviceNetworkId()
+  heldPlaybackState.remove(dni)
 }
 
 /**
