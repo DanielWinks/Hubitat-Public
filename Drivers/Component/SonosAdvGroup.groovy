@@ -941,31 +941,34 @@ private void clearHeldState() {
 
 private void resetPlaybackAttributes() {
   logDebug('Resetting playback attributes for inactive group')
-  sendEvent(name: 'status', value: 'inactive')
-  sendEvent(name: 'trackData', value: '{}')
-  sendEvent(name: 'trackDescription', value: '')
-  sendEvent(name: 'currentTrackDuration', value: '')
-  sendEvent(name: 'currentArtistName', value: '')
-  sendEvent(name: 'currentAlbumName', value: '')
-  sendEvent(name: 'currentTrackName', value: '')
-  sendEvent(name: 'albumArtURI', value: '')
-  sendEvent(name: 'albumArtSmall', value: '')
-  sendEvent(name: 'albumArtMedium', value: '')
-  sendEvent(name: 'albumArtLarge', value: '')
-  sendEvent(name: 'audioSource', value: '')
-  sendEvent(name: 'currentFavorite', value: '')
-  sendEvent(name: 'currentPlaylist', value: '')
-  sendEvent(name: 'currentTrackNumber', value: 0)
-  sendEvent(name: 'nextArtistName', value: '')
-  sendEvent(name: 'nextAlbumName', value: '')
-  sendEvent(name: 'nextTrackName', value: '')
-  sendEvent(name: 'nextTrackAlbumArtURI', value: '')
-  sendEvent(name: 'queueTrackTotal', value: '0')
-  sendEvent(name: 'queueTrackPosition', value: '0')
-  sendEvent(name: 'currentRepeatOneMode', value: 'off')
-  sendEvent(name: 'currentRepeatAllMode', value: 'off')
-  sendEvent(name: 'currentCrossfadeMode', value: 'off')
-  sendEvent(name: 'currentShuffleMode', value: 'off')
+  Map resetAttrs = [
+    status: 'inactive',
+    trackData: '{}',
+    trackDescription: 'n/a',
+    currentTrackDuration: 'n/a',
+    currentArtistName: 'n/a',
+    currentAlbumName: 'n/a',
+    currentTrackName: 'n/a',
+    albumArtURI: 'n/a',
+    albumArtSmall: 'n/a',
+    albumArtMedium: 'n/a',
+    albumArtLarge: 'n/a',
+    audioSource: 'n/a',
+    currentFavorite: 'n/a',
+    currentPlaylist: 'n/a',
+    currentTrackNumber: 0,
+    nextArtistName: 'n/a',
+    nextAlbumName: 'n/a',
+    nextTrackName: 'n/a',
+    nextTrackAlbumArtURI: 'n/a',
+    queueTrackTotal: '0',
+    queueTrackPosition: '0',
+    currentRepeatOneMode: 'off',
+    currentRepeatAllMode: 'off',
+    currentCrossfadeMode: 'off',
+    currentShuffleMode: 'off'
+  ]
+  applyPlaybackAttributes(resetAttrs)
 }
 
 /**
