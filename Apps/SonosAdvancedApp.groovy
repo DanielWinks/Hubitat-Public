@@ -1641,20 +1641,19 @@ void notifyGroupDeviceDeactivated(ChildDeviceWrapper gd) {
 }
 
 /**
- * Forward group volume, mute state, and switch state to all group devices that use this coordinator
- * Called by the coordinator player when groupVolume, groupMute, or grouping state changes
+ * Forward group volume and mute state to all group devices that use this coordinator.
+ * Does NOT send switch — only updateGroupDevices() manages switch state
+ * because it checks exact configured membership.
  * @param coordinatorId The RINCON ID of the coordinator
  * @param groupVolume The current group volume (0-100)
  * @param groupMute The current group mute state ('muted' or 'unmuted')
- * @param isGroupedWithFollowers Whether speakers are actually grouped (coordinator has followers)
  */
-void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, String groupMute, Boolean isGroupedWithFollowers = null) {
+void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, String groupMute) {
   if(!coordinatorId) { return }
 
   Map attrs = [:]
   if(groupVolume != null) { attrs.volume = groupVolume }
   if(groupMute != null) { attrs.mute = groupMute }
-  if(isGroupedWithFollowers != null) { attrs.switch = isGroupedWithFollowers ? 'on' : 'off' }
   if(attrs.isEmpty()) { return }
 
   List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
@@ -1709,15 +1708,16 @@ void updateGroupDeviceExtendedPlaybackState(String coordinatorId, Map attributes
  * Called by the player driver's flushPendingGroupDeviceUpdates() to avoid two separate
  * child device traversals.
  * @param coordinatorId The RINCON ID of the coordinator
- * @param volumeAttrs Map of volume/mute/switch attributes (may be null)
+ * @param volumeAttrs Map of volume/mute attributes (may be null)
  * @param playbackAttrs Map of extended playback attributes (may be null/empty)
  */
 void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAttrs) {
   if(!coordinatorId) { return }
 
-  // Invariant: volumeAttrs keys (volume, mute, switch) must not overlap with playbackAttrs keys.
+  // Invariant: volumeAttrs keys (volume, mute) must not overlap with playbackAttrs keys.
   // The caller (flushPendingGroupDeviceUpdates) guarantees this by stripping _groupVolume/_groupMute
   // from the pending map before passing the remainder as playbackAttrs.
+  // Note: switch is NOT included in volumeAttrs — only updateGroupDevices() manages switch state.
   Map combined = [:]
   if(volumeAttrs) { combined.putAll(volumeAttrs) }
   if(playbackAttrs) { combined.putAll(playbackAttrs) }

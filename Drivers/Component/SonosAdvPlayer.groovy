@@ -2112,28 +2112,6 @@ void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup)
 }
 
 /**
- * Notify parent app to update group devices with current volume/mute state and switch state
- * Forwards events whenever this player is designated as coordinator for any group device.
- * The parent app filters by coordinatorId to only update relevant group devices.
- * @param groupVolume Optional - pass directly to avoid reading stale attribute
- * @param groupMute Optional - pass directly to avoid reading stale attribute
- */
-void parentUpdateGroupDeviceVolumeState(Integer groupVolume = null, String groupMute = null) {
-  String coordinatorId = getId()
-  // Use passed values if available, otherwise read from attributes
-  Integer vol = groupVolume != null ? groupVolume : getGroupVolumeState()
-  String mute = groupMute != null ? groupMute : getGroupMuteState()
-  Boolean isGrouped = getIsGrouped()
-  Boolean isCoordinator = getIsGroupCoordinator()
-  logDebug("parentUpdateGroupDeviceVolumeState: Forwarding groupVolume=${vol}, groupMute=${mute}, isGrouped=${isGrouped}, isCoordinator=${isCoordinator} to group devices")
-  // Sonos iOS consistently shows volume one level higher than actual volume, so we add 1 here to match user expectations
-  // But only when grouped. If ungrouped, we want to send actual volume
-  vol = isGrouped ? vol + 1 : vol
-  // Pass whether speakers are actually grouped with followers (isGrouped AND isCoordinator)
-  parent?.updateGroupDeviceVolumeState(coordinatorId, vol, mute, isGrouped && isCoordinator)
-}
-
-/**
  * Forward MusicPlayer state to group devices via parent app
  * Called when status, trackData, or trackDescription changes
  * @param status Optional - pass directly to avoid reading stale attribute
@@ -3737,7 +3715,12 @@ void flushPendingGroupDeviceUpdates() {
       String mute = rawMute != null ? rawMute as String : getGroupMuteState()
       Boolean isGrouped = getIsGrouped()
       vol = isGrouped ? vol + 1 : vol
-      volumeAttrs = [volume: vol, mute: mute, switch: (isGrouped && isCoordinator) ? 'on' : 'off']
+      // Do not include 'switch' here — the parent app's updateGroupDevices() is the
+      // sole authority on group device switch state because it checks exact membership.
+      // Including switch here caused the player's broad "isGrouped" check to override
+      // the parent's more precise determination, leaking playback attributes through
+      // the guard when the group device should be inactive.
+      volumeAttrs = [volume: vol, mute: mute]
     }
   } catch(Exception e) { logWarn("Error preparing volume state for group devices: ${e.message}") }
 
