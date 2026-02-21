@@ -272,6 +272,7 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
+@Field static ConcurrentHashMap<String, String> favPlaylistDelegate = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Long> eventTimestamps = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, String> wsSubscriptionStatus = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, groovy.json.JsonSlurper> jsonSlurpers = new ConcurrentHashMap<String, groovy.json.JsonSlurper>()
@@ -388,6 +389,7 @@ void registerRinconId() {
 }
 
 void fullRenewSubscriptions() {
+  releaseFavPlaylistDelegate()
   clearWsSubscriptionStatus()
   unsubscribeFromAVTransport()
   unsubscribeFromMrRcEvents()
@@ -977,7 +979,7 @@ void previousTrack() { playerSkipToPreviousTrack() }
 @CompileStatic
 void subscribeToEvents() {
   subscribeToZgtEvents()
-  subscribeToMrGrcEvents()
+  if(getIsGrouped()) { subscribeToMrGrcEvents() } // sid4 only needed when grouped; setGroupPlayerIds() handles transitions
   subscribeToMrRcEvents()
 }
 
@@ -2853,6 +2855,28 @@ Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
 
 void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
 
+// Favorites/playlists WS delegate helpers — only one player per household subscribes
+// NOTE: isFavPlaylistDelegate() has a side effect — claims the delegate slot on first call.
+// For read-only checks use: favPlaylistDelegate.get(getHouseholdId()) == device.getDeviceNetworkId()
+Boolean isFavPlaylistDelegate() {
+  String householdId = getHouseholdId()
+  if(!householdId) {
+    logWarn('isFavPlaylistDelegate: householdId not yet set, acting as delegate (expected on fresh install only)')
+    return true
+  }
+  String myDni = this.device?.getDeviceNetworkId()
+  if(!myDni) { return false }
+  String current = favPlaylistDelegate.putIfAbsent(householdId, myDni)
+  return current == null || current == myDni
+}
+
+void releaseFavPlaylistDelegate() {
+  String householdId = getHouseholdId()
+  if(!householdId) { return }
+  String myDni = this.device?.getDeviceNetworkId()
+  if(myDni) { favPlaylistDelegate.remove(householdId, myDni) }
+}
+
 // WS subscription status helpers — in-memory by default, also written to device data when debug logging is on
 Boolean isDebugLoggingEnabled() {
   return settings.logEnable != false && settings.debugLogEnable != false
@@ -3069,9 +3093,17 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   String newValue = groupPlayerIds.join(',')
   String oldValue = getDeviceDataValue('groupPlayerIds')
   if(newValue == oldValue) { return }
+  Boolean wasGrouped = oldValue ? oldValue.tokenize(',').size() > 1 : false
+  Boolean isNowGrouped = groupPlayerIds.size() > 1
   setDeviceDataValue('groupPlayerIds', newValue)
-  this.device.sendEvent(name: 'isGrouped', value: groupPlayerIds.size() > 1 ? 'on' : 'off')
+  this.device.sendEvent(name: 'isGrouped', value: isNowGrouped ? 'on' : 'off')
   this.device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
+  // Subscribe/unsubscribe sid4 (GroupRenderingControl) on group transitions
+  if(isNowGrouped && !wasGrouped) {
+    subscribeToMrGrcEvents()
+  } else if(!isNowGrouped && wasGrouped) {
+    unsubscribeFromMrGrcEvents()
+  }
   logTrace('Updating group device with new group membership information')
   parentUpdateGroupDevices(getId(), groupPlayerIds)
 }
@@ -3601,6 +3633,7 @@ void setWebSocketStatus(String status) {
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') { subscribeToWsEvents() }
   else {
+    releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
   }
 }
@@ -3810,10 +3843,13 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // Websocket Subscriptions and polling
 // =============================================================================
 void subscribeToWsEvents() {
-  if(isCurrentlySubcribedToPlaylistWS() == false) { subscribeToPlaylists() }
-  if(isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
+  // Favorites and playlists are household-scoped — only one player per household needs to subscribe
+  if(isFavPlaylistDelegate()) {
+    if(isCurrentlySubcribedToPlaylistWS() == false) { subscribeToPlaylists() }
+    if(isCurrentlySubcribedToFavoritesWS() == false) { subscribeToFavorites() }
+  }
+  if(hasAudioClipCapability() && isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
   if(isCurrentlySubcribedToGroupsWS() == false) { subscribeToGroups() }
-  if(isCurrentlySubcribedToFavoritesWS() == false) { subscribeToFavorites() }
   // Re-establish coordinator-specific subscriptions if this player is the group
   // coordinator and the subscriptions have been lost (e.g., after WS reconnect).
   // These are group-scoped and require a valid groupId.
@@ -4771,8 +4807,10 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
-    getFavorites()
-    getPlaylists()
+    if(isFavPlaylistDelegate()) {
+      getFavorites()
+      getPlaylists()
+    }
   }
 
   if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
