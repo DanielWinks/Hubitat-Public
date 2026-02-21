@@ -42,11 +42,11 @@ metadata {
     singleThreaded: true,
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy'
   ) {
+    capability 'MusicPlayer'
     capability 'Actuator'
     capability 'Switch'
     capability 'SpeechSynthesis'
     capability 'AudioVolume'
-    capability 'MusicPlayer'
     capability 'SwitchLevel'
 
     command 'groupPlayers'

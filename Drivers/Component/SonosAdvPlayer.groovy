@@ -33,10 +33,10 @@ metadata {
     singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
+  capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
 
   capability 'AudioNotification'
   capability "AudioVolume" //mute - ENUM ["unmuted", "muted"] volume - NUMBER, unit:%  //commands: volumeDown() volumeUp()
-  capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
   capability "MediaTransport" //attributes:  transportStatus - ENUM - ["playing", "paused", "stopped"]
   capability 'SpeechSynthesis'
   capability 'Initialize'
@@ -406,6 +406,33 @@ void fullRenewSubscriptions() {
 
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
   runIn(7, 'subscribeToEvents', [overwrite: true])
+  // Re-establish WebSocket and coordinator-specific subscriptions directly.
+  // The normal event-driven chain (setGroupCoordinatorId/setGroupId) won't trigger
+  // re-subscription because deduplication guards skip processing when the coordinator
+  // and group data haven't changed — which is the common case after renewal.
+  runIn(9, 'resubscribeAfterRenewal', [overwrite: true])
+}
+
+/**
+ * Re-establishes all WebSocket and coordinator-specific subscriptions after a
+ * fullRenewSubscriptions() cycle. Called via runIn to allow WebSocket and base
+ * UPnP subscriptions to be established first.
+ */
+void resubscribeAfterRenewal() {
+  // Base WebSocket namespace subscriptions (groups, favorites, playlists, audioClip)
+  subscribeToWsEvents()
+
+  // Coordinator-specific subscriptions
+  if(getIsGroupCoordinator()) {
+    subscribeToAVTransport()
+    getPlaybackMetadataStatus()
+    // Playback and playbackMetadata WS subscriptions are group-scoped
+    String groupId = getGroupId()
+    if(groupId) {
+      subscribeToPlayback(groupId)
+      subscribeToPlaybackMetadata(groupId)
+    }
+  }
 }
 
 void secondaryConfiguration() {
@@ -5056,6 +5083,10 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     if(eventData?.playbackState == 'PLAYBACK_STATE_PLAYING') {
       if(getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
+      // Clear favorite/playlist retry state — WebSocket confirms playback started
+      // This is critical when UPnP subscriptions are stale and transportStatus isn't updated
+      clearFavoriteRetryState()
+      clearPlaylistRetryState()
     } else if(eventData?.playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
       lastMetadataContainerId.remove(device.getDeviceNetworkId())
     }
