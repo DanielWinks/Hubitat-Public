@@ -329,6 +329,9 @@ import java.util.concurrent.Semaphore
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, Integer> lastZgtXmlHash = new ConcurrentHashMap<String, Integer>()
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
 
@@ -1799,6 +1802,11 @@ void parse(String raw) {
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
       try {
         if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
+        // Skip expensive XML parsing if the ZGT content hasn't changed
+        String zgtDni = device.getDeviceNetworkId()
+        Integer xmlHash = xmlBody.hashCode()
+        Integer prevHash = lastZgtXmlHash.put(zgtDni, xmlHash)
+        if(prevHash != null && prevHash == xmlHash) { return }
         LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
         if(getGroupPlayerIds() != null) {
           oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
@@ -2866,8 +2874,12 @@ Boolean isFavPlaylistDelegate() {
   }
   String myDni = this.device?.getDeviceNetworkId()
   if(!myDni) { return false }
-  String current = favPlaylistDelegate.putIfAbsent(householdId, myDni)
-  return current == null || current == myDni
+  // Fast path: already registered as delegate
+  String current = favPlaylistDelegate.get(householdId)
+  if(current == myDni) { return true }
+  // Attempt to claim the delegate slot (atomic, only succeeds if unclaimed)
+  String claimed = favPlaylistDelegate.putIfAbsent(householdId, myDni)
+  return claimed == null
 }
 
 void releaseFavPlaylistDelegate() {
@@ -4719,7 +4731,12 @@ void processWebsocketMessage(String message) {
   if(eventType == null || eventData == null) {return}
 
   if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) {
-    logTrace("WS event: ${eventType}")
+    // Suppress consecutive duplicate WS event log messages to reduce logging load
+    String eventSig = eventType.toString()
+    String lastSig = lastWsEventLog.put(dni, eventSig)
+    if(eventSig != lastSig) {
+      logTrace("WS event: ${eventType}")
+    }
     if(deviceSettings.enableRawWebsocketLogging == true) { logTrace("WS raw: ${message}") }
   }
 
@@ -5141,14 +5158,20 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
-    if(eventData?.playbackState == 'PLAYBACK_STATE_PLAYING') {
+    String currentState = eventData?.playbackState?.toString()
+    String previousState = lastPlaybackState.put(dni, currentState)
+    // Dedup: skip repeated same-state events (common as periodic heartbeats).
+    // If state rapidly transitions A -> B -> A, the second A is suppressed — acceptable because
+    // clearFavoriteRetryState/clearPlaylistRetryState will already have been called on the first A.
+    if(currentState == previousState) { return }
+    if(currentState == 'PLAYBACK_STATE_PLAYING') {
       if(getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
       // Clear favorite/playlist retry state — WebSocket confirms playback started
       // This is critical when UPnP subscriptions are stale and transportStatus isn't updated
       clearFavoriteRetryState()
       clearPlaylistRetryState()
-    } else if(eventData?.playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
-      lastMetadataContainerId.remove(device.getDeviceNetworkId())
+    } else if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
+      lastMetadataContainerId.remove(dni)
     }
   }
 
