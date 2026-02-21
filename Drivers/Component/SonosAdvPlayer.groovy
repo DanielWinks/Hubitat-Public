@@ -2673,7 +2673,10 @@ void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
 // Misc helpers
 // =============================================================================
 void clearCurrentNextArtistAlbumTrackData() {
-  setCurrentArtistAlbumTrack(null, null, null, 0)
+  setCurrentArtistName(null)
+  setCurrentAlbumName(null)
+  setCurrentTrackName(null)
+  setCurrentTrackNumber(0)
   setNextArtistAlbumTrack(null, null, null)
 }
 
