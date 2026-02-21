@@ -43,10 +43,10 @@ metadata {
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy'
   ) {
     capability 'MusicPlayer'
+    capability 'AudioVolume'
+    capability 'SpeechSynthesis'
     capability 'Actuator'
     capability 'Switch'
-    capability 'SpeechSynthesis'
-    capability 'AudioVolume'
     capability 'SwitchLevel'
 
     command 'groupPlayers'
