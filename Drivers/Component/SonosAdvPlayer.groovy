@@ -161,6 +161,7 @@ metadata {
       input name: 'ttsBoostAmount', title: 'TTS Volume boost/cut default:(+10%)', type: 'enum', required: false, defaultValue: 10,
       options: [(-10):'-10%', (-5):'-5%', 0:'No Change', 5:'+5%', 10:'+10%', 15:'+15%', 20:'+20%']
       input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
+      input 'disableAlbumArtEvents', 'bool', title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)', required: false, defaultValue: true
       input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
@@ -198,6 +199,7 @@ Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != nu
 Integer getVolumeAdjustAmount() { return settings.volumeAdjustAmount != null ? settings.volumeAdjustAmount as Integer : 5 }
 Integer getTTSBoostAmount() { return settings.ttsBoostAmount != null ? settings.ttsBoostAmount as Integer : 10 }
 Boolean getDisableArtistAlbumTrackEvents() { return settings.disableArtistAlbumTrackEvents != null ? settings.disableArtistAlbumTrackEvents : false }
+Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
 Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDevice != null ? settings.createCrossfadeChildDevice : false }
 Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
 Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
@@ -376,6 +378,7 @@ void configure() {
   // Clear event attributes per preference
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
+  if(getDisableAlbumArtEvents()) { clearAlbumArtEvents() }
   // Re-initialize in-memory data structures (static fields cleared on JVM restart)
   // Guard: these methods use getId() as a ConcurrentHashMap key, which throws NPE if null.
   // On fresh install, device data isn't set yet — secondaryConfigurationPhase4() will handle this.
@@ -488,6 +491,7 @@ void secondaryConfigurationPhase4() {
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
+  if(getDisableAlbumArtEvents()) { clearAlbumArtEvents() }
   audioClipQueueInitialization()
   groupsRegistryInitialization()
   favoritesMapInitialization()
@@ -520,6 +524,7 @@ void migrationCleanup() {
   if(settings.volumeAdjustAmount == null) { settings.volumeAdjustAmount = 5 }
   if(settings.ttsBoostAmount == null) { settings.ttsBoostAmount = 10 }
   if(settings.disableArtistAlbumTrackEvents == null) { settings.disableArtistAlbumTrackEvents = false }
+  if(settings.disableAlbumArtEvents == null) { settings.disableAlbumArtEvents = true }
   if(settings.createCrossfadeChildDevice == null) { settings.createCrossfadeChildDevice = false }
   if(settings.createShuffleChildDevice == null) { settings.createShuffleChildDevice = false }
   if(settings.createRepeatOneChildDevice == null) { settings.createRepeatOneChildDevice = false }
@@ -2090,9 +2095,11 @@ void clearCurrentPlayingStates() {
   setNextTrackAlbumArtURI('Not Available', false)
   // Guard direct sendDeviceEvent calls to avoid redundant events
   if(this.device.currentValue('albumArtURI') != 'Not Available') { sendDeviceEvent('albumArtURI', 'Not Available') }
-  if(this.device.currentValue('albumArtSmall') != 'Not Available') { sendDeviceEvent('albumArtSmall', 'Not Available') }
-  if(this.device.currentValue('albumArtMedium') != 'Not Available') { sendDeviceEvent('albumArtMedium', 'Not Available') }
-  if(this.device.currentValue('albumArtLarge') != 'Not Available') { sendDeviceEvent('albumArtLarge', 'Not Available') }
+  if(!getDisableAlbumArtEvents()) {
+    if(this.device.currentValue('albumArtSmall') != 'Not Available') { sendDeviceEvent('albumArtSmall', 'Not Available') }
+    if(this.device.currentValue('albumArtMedium') != 'Not Available') { sendDeviceEvent('albumArtMedium', 'Not Available') }
+    if(this.device.currentValue('albumArtLarge') != 'Not Available') { sendDeviceEvent('albumArtLarge', 'Not Available') }
+  }
   if(this.device.currentValue('audioSource') != 'Not Available') { sendDeviceEvent('audioSource', 'Not Available') }
   if(this.device.currentValue('currentFavorite') != 'Not Available') { sendDeviceEvent('currentFavorite', 'Not Available') }
   if(this.device.currentValue('trackDescription') != 'Not Available') { sendDeviceEvent('trackDescription', 'Not Available') }
@@ -2680,6 +2687,13 @@ void clearCurrentNextArtistAlbumTrackData() {
   setNextArtistAlbumTrack(null, null, null)
 }
 
+void clearAlbumArtEvents() {
+  String disabled = 'Disabled in preferences'
+  sendDeviceEvent('albumArtSmall', disabled)
+  sendDeviceEvent('albumArtMedium', disabled)
+  sendDeviceEvent('albumArtLarge', disabled)
+}
+
 void clearTrackDataEvent() {
   sendEvent(name: 'trackData', value: '{}')
 }
@@ -3159,6 +3173,7 @@ void setGroupMemberNames(List<String> groupPlayerNames) {
 
 @CompileStatic
 void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
+  Boolean artEventsDisabled = getDisableAlbumArtEvents()
   String uri = '<br>'
   String smallUri = ''
   String mediumUri = ''
@@ -3167,10 +3182,12 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
   if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
     String baseUrl = "${getLocalUpnpUrl()}${albumArtURI}"
     uri += "<img src=\"${baseUrl}\" width=\"200\" height=\"200\" >"
-    // Generate URLs for different sizes based on Sonos conventions
-    smallUri = baseUrl.contains('?') ? "${baseUrl}&x=60&y=60" : "${baseUrl}?x=60&y=60"
-    mediumUri = baseUrl.contains('?') ? "${baseUrl}&x=200&y=200" : "${baseUrl}?x=200&y=200"
-    largeUri = baseUrl.contains('?') ? "${baseUrl}&x=600&y=600" : "${baseUrl}?x=600&y=600"
+    if(!artEventsDisabled) {
+      // Generate URLs for different sizes based on Sonos conventions
+      smallUri = baseUrl.contains('?') ? "${baseUrl}&x=60&y=60" : "${baseUrl}?x=60&y=60"
+      mediumUri = baseUrl.contains('?') ? "${baseUrl}&x=200&y=200" : "${baseUrl}?x=200&y=200"
+      largeUri = baseUrl.contains('?') ? "${baseUrl}&x=600&y=600" : "${baseUrl}?x=600&y=600"
+    }
   } else if(!isPlayingLocalTrack && albumArtURI) {
     // Check if this is J River format with multiple concatenated URLs
     if(albumArtURI.contains('http://') && albumArtURI.indexOf('http://', 7) > 0) {
@@ -3182,41 +3199,53 @@ void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
       urls = urls.findAll { !it.contains('/AArt/') }
 
       if(urls.size() > 0) {
-        // Find URLs by size preference: large, medium, small
-        largeUri = urls.find { it.contains('/AArl/') } ?: urls[0]
-        mediumUri = urls.find { it.contains('/AArm/') } ?: urls.find { it.contains('/AArl/') } ?: urls[0]
-        smallUri = urls.find { it.contains('/AArs/') } ?: urls.find { it.contains('/AArm/') } ?: urls[0]
-        uri += "<img src=\"${mediumUri}\" width=\"200\" height=\"200\" >"
+        if(!artEventsDisabled) {
+          // Find URLs by size preference: large, medium, small
+          largeUri = urls.find { it.contains('/AArl/') } ?: urls[0]
+          mediumUri = urls.find { it.contains('/AArm/') } ?: urls.find { it.contains('/AArl/') } ?: urls[0]
+          smallUri = urls.find { it.contains('/AArs/') } ?: urls.find { it.contains('/AArm/') } ?: urls[0]
+        }
+        String imgUrl = urls.find { it.contains('/AArm/') } ?: urls[0]
+        uri += "<img src=\"${imgUrl}\" width=\"200\" height=\"200\" >"
       } else {
         // Fallback if all URLs were filtered out
         uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
-        smallUri = albumArtURI
-        mediumUri = albumArtURI
-        largeUri = albumArtURI
+        if(!artEventsDisabled) {
+          smallUri = albumArtURI
+          mediumUri = albumArtURI
+          largeUri = albumArtURI
+        }
       }
     } else {
       // Single URL format (Spotify, etc.) - use as-is for all sizes
       uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
-      smallUri = albumArtURI
-      mediumUri = albumArtURI
-      largeUri = albumArtURI
+      if(!artEventsDisabled) {
+        smallUri = albumArtURI
+        mediumUri = albumArtURI
+        largeUri = albumArtURI
+      }
     }
   }
 
-  // Skip if nothing changed
-  if(uri == this.device.currentValue('albumArtURI') && smallUri == this.device.currentValue('albumArtSmall') && mediumUri == this.device.currentValue('albumArtMedium') && largeUri == this.device.currentValue('albumArtLarge')) { return }
-  sendDeviceEvent('albumArtURI', uri)
-  sendDeviceEvent('albumArtSmall', smallUri)
-  sendDeviceEvent('albumArtMedium', mediumUri)
-  sendDeviceEvent('albumArtLarge', largeUri)
+  // Skip albumArtURI if nothing changed
+  if(uri != this.device.currentValue('albumArtURI')) {
+    sendDeviceEvent('albumArtURI', uri)
+  }
+  if(!artEventsDisabled) {
+    if(smallUri == this.device.currentValue('albumArtSmall') && mediumUri == this.device.currentValue('albumArtMedium') && largeUri == this.device.currentValue('albumArtLarge')) { return }
+    sendDeviceEvent('albumArtSmall', smallUri)
+    sendDeviceEvent('albumArtMedium', mediumUri)
+    sendDeviceEvent('albumArtLarge', largeUri)
+  }
   sendGroupEvents()
   // Queue for batched group device update
-  queueGroupDeviceUpdate([
-    albumArtURI: uri,
-    albumArtSmall: smallUri,
-    albumArtMedium: mediumUri,
-    albumArtLarge: largeUri
-  ])
+  Map groupUpdate = [albumArtURI: uri]
+  if(!artEventsDisabled) {
+    groupUpdate.albumArtSmall = smallUri
+    groupUpdate.albumArtMedium = mediumUri
+    groupUpdate.albumArtLarge = largeUri
+  }
+  queueGroupDeviceUpdate(groupUpdate)
 }
 
 @CompileStatic
