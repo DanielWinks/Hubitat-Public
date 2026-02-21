@@ -298,8 +298,8 @@ private void subscribeToDevices() {
   List<String> mirrorable = getMirrorableAttributes()
   mirrorable.each { String attrName ->
     if (settings["mirror_${attrName}"] != false) {
-      subscribe(settings.primaryDevice, attrName, 'mirrorEventHandler')
-      subscribe(settings.secondaryDevice, attrName, 'mirrorEventHandler')
+      subscribe(settings.primaryDevice, attrName, 'primaryEventHandler')
+      subscribe(settings.secondaryDevice, attrName, 'secondaryEventHandler')
       logDebug("Subscribed to '${attrName}' on both devices")
     }
   }
@@ -330,51 +330,61 @@ private void cleanupStaleEntries() {
 // =============================================================================
 
 /**
- * Single handler for all subscribed device attribute events.
- * Determines source/target, runs echo detection, and forwards if appropriate.
+ * Backward-compatible shim: stale subscriptions from before the handler
+ * rename will call this method. Re-subscribes with the correct handler
+ * names so subsequent events route properly. The triggering event is
+ * dropped (one-time cost during transition).
  */
 void mirrorEventHandler(Event evt) {
-  DeviceWrapper primary = settings.primaryDevice
-  DeviceWrapper secondary = settings.secondaryDevice
+  logWarn('Legacy subscription detected — re-subscribing with updated handlers')
+  configure()
+}
 
-  // Determine source and target.
-  // evt.deviceId returns Integer, DeviceWrapper.id returns Long —
-  // compare as Long to avoid Integer.equals(Long) returning false.
-  DeviceWrapper sourceDevice
-  DeviceWrapper targetDevice
-  Long eventDeviceId = evt.deviceId as Long
-  if (eventDeviceId == primary.id) {
-    sourceDevice = primary
-    targetDevice = secondary
-  } else if (eventDeviceId == secondary.id) {
-    sourceDevice = secondary
-    targetDevice = primary
-  } else {
-    logWarn("Received event from unknown device: ${evt.deviceId}")
-    return
-  }
+/**
+ * Event handler for the primary device. Hubitat's subscribe() mechanism
+ * guarantees this only fires for primaryDevice events, so no device ID
+ * comparison is needed.
+ */
+void primaryEventHandler(Event evt) {
+  if (!settings.primaryDevice || !settings.secondaryDevice) { return }
+  handleMirrorEvent(evt, settings.primaryDevice, settings.secondaryDevice)
+}
 
+/**
+ * Event handler for the secondary device.
+ */
+void secondaryEventHandler(Event evt) {
+  if (!settings.primaryDevice || !settings.secondaryDevice) { return }
+  handleMirrorEvent(evt, settings.secondaryDevice, settings.primaryDevice)
+}
+
+/**
+ * Shared mirror logic: runs echo detection and forwards if appropriate.
+ * Source and target are determined by the calling handler, eliminating the
+ * need for device ID comparison (which is unreliable on Hubitat's runtime).
+ */
+private void handleMirrorEvent(Event evt, DeviceWrapper source, DeviceWrapper target) {
   String attrName = evt.name
   String eventValue = evt.value
 
-  logDebug("Event: ${sourceDevice.displayName} → ${attrName} = ${eventValue}")
+  logDebug("Event: ${source.displayName} → ${attrName} = ${eventValue}")
 
   // Step 1: Echo detection — is this an echo of a command we sent?
-  String echoKey = buildKey(sourceDevice.id, attrName)
+  String echoKey = buildKey(source.id, attrName)
   if (isEcho(echoKey, eventValue)) {
-    logDebug("Suppressed echo: ${sourceDevice.displayName} ${attrName} = ${eventValue}")
+    logDebug("Suppressed echo: ${source.displayName} ${attrName} = ${eventValue}")
     return
   }
 
   // Step 2: Check minimum re-forward interval
-  String forwardKey = buildKey(targetDevice.id, attrName)
+  String forwardKey = buildKey(target.id, attrName)
   if (!hasMinIntervalElapsed(forwardKey)) {
-    logDebug("Skipped (min interval): ${attrName} → ${targetDevice.displayName}")
+    logDebug("Skipped (min interval): ${attrName} → ${target.displayName}")
     return
   }
 
   // Step 3: Forward to target device
-  forwardAttributeToDevice(sourceDevice, targetDevice, attrName, eventValue)
+  forwardAttributeToDevice(source, target, attrName, eventValue)
 }
 
 // =============================================================================
@@ -385,7 +395,7 @@ void mirrorEventHandler(Event evt) {
  * Builds a unique key for echo detection maps.
  * Format: "${appId}-${deviceId}-${attributeName}"
  */
-private String buildKey(Long deviceId, String attrName) {
+private String buildKey(Object deviceId, String attrName) {
   return "${app.id}-${deviceId}-${attrName}"
 }
 
@@ -440,7 +450,7 @@ private Boolean valuesMatch(String expected, String actual) {
  * Records a pending echo for a device+attribute combination.
  * Called just before sending a command to the target device.
  */
-private void recordPendingEcho(Long deviceId, String attrName, String value) {
+private void recordPendingEcho(Object deviceId, String attrName, String value) {
   String key = buildKey(deviceId, attrName)
   pendingEchos.put(key, [value: value, timestamp: now()])
 }
