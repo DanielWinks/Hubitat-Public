@@ -78,6 +78,11 @@ Map mainPage() {
       input('locks', 'capability.lock', title: 'Lock(s) to control', required: true, multiple: true)
     }
 
+    section('<h2>Hubitat Safety Monitor (HSM)</h2>') {
+      input('disarmHsmOnUnlock', 'bool', title: 'Disarm HSM when unlocking', required: false, defaultValue: false)
+      paragraph '<i>When enabled, HSM will be disarmed every time this app unlocks the door, including automated triggers (presence, motion, schedules, etc.).</i>'
+    }
+
     section('<h2>Door Contact Sensor (Safety)</h2>') {
       paragraph '<i>The app will <b>never</b> lock if the door contact sensor reports "open" or if the state is unavailable. This prevents locking while the door is ajar.</i>'
       input('doorContactSensor', 'capability.contactSensor', title: 'Door contact sensor', required: false, multiple: false)
@@ -1131,6 +1136,10 @@ private void performUnlock(String reason) {
   logInfo("Unlocking (${reason})")
   locksToUnlock.each { DeviceWrapper lock ->
     lock.unlock()
+  }
+  if (settings.disarmHsmOnUnlock) {
+    logInfo("Disarming HSM (${reason})")
+    sendLocationEvent(name: 'hsmSetArm', value: 'disarm')
   }
   sendNotification("Door unlocked (${reason})", 'unlock')
 
