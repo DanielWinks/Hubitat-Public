@@ -1617,17 +1617,24 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
  * This method is intentionally NOT @CompileStatic so that driver methods resolve dynamically.
  */
 void notifyGroupDeviceActivated(ChildDeviceWrapper gd, ChildDeviceWrapper coordinator) {
-  gd.replayHeldState()
   if(coordinator) {
     List<Map> currentStates = coordinator.getCurrentPlayingStatesForGroup()
-    Map attrs = [:]
+    // Include switch:'on' so updateBatchPlaybackState() guard detects the off→on
+    // transition atomically. Parent-to-child sendEvent may not be visible to the
+    // driver's currentValue() yet, but including switch in the batch ensures the
+    // guard processes it via the driver's own sendEvent before checking state.
+    Map attrs = [switch: 'on']
     currentStates.each { Map entry ->
       if(entry.value != null) { attrs[(String)entry.name] = entry.value }
     }
-    if(!attrs.isEmpty()) {
-      String jsonAttrs = JsonOutput.toJson(attrs)
-      gd.updateBatchPlaybackState(jsonAttrs)
-    }
+    String jsonAttrs = JsonOutput.toJson(attrs)
+    gd.updateBatchPlaybackState(jsonAttrs)
+  } else {
+    // No coordinator available; replay any held state directly.
+    // When coordinator IS present, replayHeldState() is called internally
+    // by updateBatchPlaybackState() via the isActive && !wasActive branch,
+    // triggered by the switch:'on' we include in the batch.
+    gd.replayHeldState()
   }
 }
 

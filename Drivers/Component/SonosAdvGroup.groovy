@@ -865,7 +865,11 @@ void updateBatchPlaybackState(String jsonAttributes) {
   membershipAttrs.each { String attrName, Object attrValue ->
     sendEvent(name: attrName, value: attrValue)
   }
-  Boolean isActive = this.device.currentValue('switch') == 'on'
+  // Determine isActive from the batch value if switch was included, since
+  // sendEvent() may not propagate to currentValue() synchronously.
+  Boolean isActive = membershipAttrs.containsKey('switch')
+      ? membershipAttrs['switch'] == 'on'
+      : wasActive
 
   // If guard is off, always apply playback state
   if(!getOnlyUpdateWhenActiveSetting()) {
