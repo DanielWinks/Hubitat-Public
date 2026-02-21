@@ -373,9 +373,13 @@ void configure() {
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
   // Re-initialize in-memory data structures (static fields cleared on JVM restart)
-  audioClipQueueInitialization()
-  groupsRegistryInitialization()
-  favoritesMapInitialization()
+  // Guard: these methods use getId() as a ConcurrentHashMap key, which throws NPE if null.
+  // On fresh install, device data isn't set yet — secondaryConfigurationPhase4() will handle this.
+  if(getId()) {
+    audioClipQueueInitialization()
+    groupsRegistryInitialization()
+    favoritesMapInitialization()
+  }
 }
 
 void registerRinconId() {

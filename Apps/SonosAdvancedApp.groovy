@@ -103,13 +103,26 @@ Map mainPage() {
       paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
 
       if(state.updateAvailable == true) {
-        section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
-          paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
-                    "Current version: ${getActualInstalledAppVersion()}<br/>" +
-                    "Released: ${state.latestReleaseDate}<br/><br/>" +
-                    "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
-          input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
-          input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
+        // Validate that the "available" version is actually newer than what's installed
+        // This handles the case where the user updated via HPM or manual paste, bypassing installUpdate()
+        String currentVer = getActualInstalledAppVersion()
+        if(state.latestVersion && compareVersions(currentVer, state.latestVersion as String) < 0) {
+          section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
+            paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
+                      "Current version: ${currentVer}<br/>" +
+                      "Released: ${state.latestReleaseDate}<br/><br/>" +
+                      "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
+            input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
+            input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
+          }
+        } else {
+          // Stale update notification — installed version is already current or newer
+          state.updateAvailable = false
+          state.latestVersion = null
+          state.latestManifest = null
+          state.latestReleaseDate = null
+          state.latestReleaseUrl = null
+          app.updateLabel('Sonos Advanced Controller')
         }
       }
 
