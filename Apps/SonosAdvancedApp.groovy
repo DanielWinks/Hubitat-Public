@@ -488,7 +488,10 @@ void deleteGroup() {
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
   app.removeSetting('newGroupCoordinator')
+  app.removeSetting('editDeleteGroup')
   state.refreshGroupPage = true
+  // Update groupDevices setting to match remaining groups so removeOrphans() can detect the orphaned device
+  app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
   removeOrphans()
 }
 
