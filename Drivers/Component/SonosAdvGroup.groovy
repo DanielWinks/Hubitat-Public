@@ -40,7 +40,10 @@ metadata {
     author: 'Daniel Winks',
     component: true,
     singleThreaded: true,
-    importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy'
+    importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy',
+    dashboardTypes: [
+      "MusicPlayer"
+    ]
   ) {
     capability 'MusicPlayer'
     capability 'AudioVolume'
