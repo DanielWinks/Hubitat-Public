@@ -2950,7 +2950,9 @@ void setGroupId(String groupId) {
   if(oldGroupId == groupId) { return }
   setDeviceDataValue('groupId', groupId)
   this.device.sendEvent(name: 'groupId', value: groupId)
-  if(getIsGroupCoordinator() == true && isCurrentlySubcribedToCoodinatorWS() == false) {
+  // Always re-subscribe when groupId changes — playback/playbackMetadata subscriptions
+  // are group-scoped, so the old subscription is stale for the new group.
+  if(getIsGroupCoordinator() == true) {
     runIn(1, 'subscribeToPlaybackDebounce', [data:[groupId:groupId], overwrite:true])
   }
 }
@@ -4108,6 +4110,11 @@ void playerSetGroupRelativeVolume(Integer volumeDelta) {
 
 @CompileStatic
 void getFavorites() {
+  if(!getFavoritesChild()) {
+    this.device.updateSetting('createFavoritesChildDevice', true)
+    createRemoveFavoritesChildDevice(true)
+    return // Child's installed() -> initialize() -> configure() will call parent?.getFavorites()
+  }
   Map command = [
     'namespace':'favorites',
     'command':'getFavorites',
@@ -4120,6 +4127,11 @@ void getFavorites() {
 }
 
 void getPlaylists() {
+  if(!getPlaylistChild()) {
+    this.device.updateSetting('createPlaylistChildDevice', true)
+    createRemovePlaylistChildDevice(true)
+    return // Child's installed() -> initialize() -> configure() will call parent?.getPlaylists()
+  }
   Map command = [
     'namespace':'playlists',
     'command':'getPlaylists',

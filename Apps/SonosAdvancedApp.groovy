@@ -1579,7 +1579,8 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     else { gd.sendEvent(name: 'switch', value: 'off') }
     gd.sendEvent(name: 'currentlyJoinedPlayers', value: joinedPlayersValue)
     if(allPlayersAreGrouped && !wasActive) {
-      notifyGroupDeviceActivated(gd)
+      ChildDeviceWrapper coordinator = rinconMap[coordinatorId]
+      notifyGroupDeviceActivated(gd, coordinator)
     }
     if(!allPlayersAreGrouped && wasActive) {
       notifyGroupDeviceDeactivated(gd)
@@ -1588,12 +1589,23 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
 }
 
 /**
- * Notify a group device that it just became active so it can replay any held playback state.
- * This method is intentionally NOT @CompileStatic so that replayHeldState() resolves
- * dynamically against the actual driver instance.
+ * Notify a group device that it just became active so it can replay any held playback state,
+ * then push the coordinator's current playback state to ensure the group device is fully up-to-date.
+ * This method is intentionally NOT @CompileStatic so that driver methods resolve dynamically.
  */
-void notifyGroupDeviceActivated(ChildDeviceWrapper gd) {
+void notifyGroupDeviceActivated(ChildDeviceWrapper gd, ChildDeviceWrapper coordinator) {
   gd.replayHeldState()
+  if(coordinator) {
+    List<Map> currentStates = coordinator.getCurrentPlayingStatesForGroup()
+    Map attrs = [:]
+    currentStates.each { Map entry ->
+      if(entry.value != null) { attrs[(String)entry.name] = entry.value }
+    }
+    if(!attrs.isEmpty()) {
+      String jsonAttrs = JsonOutput.toJson(attrs)
+      gd.updateBatchPlaybackState(jsonAttrs)
+    }
+  }
 }
 
 /**

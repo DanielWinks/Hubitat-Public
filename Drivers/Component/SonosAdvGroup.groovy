@@ -289,12 +289,20 @@ void joinPlayersToCoordinator() {
 }
 
 void removePlayersFromCoordinator() {
-  List<DeviceWrapper> allFollowers = getAllFollowerDevicesInGroupDevice()
-  if(!allFollowers) {
+  List<String> allFollowerIds = getAllFollowersInGroupDevice()
+  if(!allFollowerIds) {
     logDebug('No followers to remove from coordinator')
     return
   }
-  allFollowers.each{it.playerCreateNewGroup()}
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logWarn('Coordinator device not found, cannot remove followers')
+    return
+  }
+  // Single atomic API call to remove all followers at once.
+  // This avoids N intermediate group topology changes that cause latency
+  // and can trigger unexpected playback on the coordinator.
+  coordinator.playerModifyGroupMembers([], allFollowerIds)
 }
 
 void groupPlayers() {
@@ -316,12 +324,18 @@ void groupPlayers() {
 }
 
 void ungroupPlayers() {
-  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  if(!allDevs) {
-    logDebug('No devices found to ungroup')
+  List<String> allFollowerIds = getAllFollowersInGroupDevice()
+  if(!allFollowerIds) {
+    logDebug('No followers to ungroup')
     return
   }
-  allDevs.each{it.playerCreateNewGroup()}
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator) {
+    logDebug('No coordinator found to ungroup')
+    return
+  }
+  // Single atomic call to remove all followers from the coordinator's group
+  coordinator.playerModifyGroupMembers([], allFollowerIds)
 }
 
 void evictUnlistedPlayers() {
