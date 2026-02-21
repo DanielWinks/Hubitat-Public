@@ -1053,6 +1053,8 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
     // Initialize retry state and schedule checks only if autoplay is enabled
     if(playOnCompletion) {
       String deviceId = device.getDeviceNetworkId()
+      // Clear playback state dedup so the retry poll's response is not suppressed
+      lastPlaybackState.remove(deviceId)
       favoriteRetryState.put(deviceId, [
         favoriteId: favoriteId,
         action: action,
@@ -1138,6 +1140,8 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
     // Initialize retry state and schedule checks only if autoplay is enabled
     if(playOnCompletion) {
       String deviceId = device.getDeviceNetworkId()
+      // Clear playback state dedup so the retry poll's response is not suppressed
+      lastPlaybackState.remove(deviceId)
       playlistRetryState.put(deviceId, [
         playlistId: playlistId,
         action: action,
@@ -1236,6 +1240,10 @@ void checkFavoritePlaybackAndRetry() {
   if(currentStatus == null || currentStatus == '') {
     logDebug("Transport status is null/empty, will retry")
   }
+
+  // Active poll: if WS subscription lapsed, this one-off command will trigger a playbackStatus
+  // response that flows through the existing handler and clears retry state if playing
+  getPlaybackStatus()
 
   // Not playing yet, retry
   // Note: This increment is safe because Hubitat device methods run single-threaded per device
@@ -1341,6 +1349,10 @@ void checkPlaylistPlaybackAndRetry() {
   if(currentStatus == null || currentStatus == '') {
     logDebug("Transport status is null/empty, will retry")
   }
+
+  // Active poll: if WS subscription lapsed, this one-off command will trigger a playbackStatus
+  // response that flows through the existing handler and clears retry state if playing
+  getPlaybackStatus()
 
   // Not playing yet, retry
   // Note: This increment is safe because Hubitat device methods run single-threaded per device
@@ -3958,6 +3970,19 @@ void getPlaybackMetadataStatus() {
   Map command = [
     'namespace':'playbackMetadata',
     'command':'getMetadataStatus',
+    'groupId':"${getGroupId()}"
+  ]
+  Map args = [:]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+}
+
+@CompileStatic
+void getPlaybackStatus() {
+  Map command = [
+    'namespace':'playback',
+    'command':'getPlayback',
     'groupId':"${getGroupId()}"
   ]
   Map args = [:]
