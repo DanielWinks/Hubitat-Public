@@ -3817,7 +3817,7 @@ void subscribeToWsEvents() {
   // Re-establish coordinator-specific subscriptions if this player is the group
   // coordinator and the subscriptions have been lost (e.g., after WS reconnect).
   // These are group-scoped and require a valid groupId.
-  if(getIsGroupCoordinator() && isCurrentlySubcribedToCoodinatorWS() == false) {
+  if(getIsGroupCoordinator() == true && isCurrentlySubcribedToCoodinatorWS() == false) {
     String groupId = getGroupId()
     if(groupId) {
       subscribeToPlayback(groupId)

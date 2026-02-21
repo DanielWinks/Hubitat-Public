@@ -474,7 +474,30 @@ void appButtonHandler(String buttonName) {
 void applySettingsButton() { configure() }
 
 void saveGroup() {
-  state.userGroups[app.getSetting('newGroupName')] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
+  if(!state.userGroups) { state.userGroups = [:] }
+  String editingGroup = app.getSetting('editDeleteGroup')
+  String newName = app.getSetting('newGroupName')
+
+  // If editing and name changed, rename the existing device in place
+  // This preserves dashboard tiles, rules, and automations that reference the device
+  if(editingGroup && editingGroup != newName) {
+    if(state.userGroups.containsKey(newName)) {
+      logWarn("Cannot rename group '${editingGroup}' to '${newName}': a group with that name already exists")
+      return
+    }
+    String oldDni = "${app.id}-SonosGroupDevice-${editingGroup}"
+    String newDni = "${app.id}-SonosGroupDevice-${newName}"
+    // Update state first so it stays consistent if the device rename call fails
+    state.userGroups.remove(editingGroup)
+    DeviceWrapper existingDevice = getChildDevice(oldDni)
+    if(existingDevice) {
+      existingDevice.setDeviceNetworkId(newDni)
+      existingDevice.setLabel("Sonos Group: ${newName}")
+      logInfo("Renamed group device from '${editingGroup}' to '${newName}'")
+    }
+  }
+
+  state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
   app.removeSetting('newGroupCoordinator')
@@ -631,7 +654,7 @@ void createGroupDevices() {
     device.updateDataValue('householdId', householdId)
   }
   app.removeSetting('groupDevices')
-  app.updateSetting('groupDevices', [type: 'enum', value: getCreatedGroupDevices()])
+  app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
   removeOrphans()
 }
 
