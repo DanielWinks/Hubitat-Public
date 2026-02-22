@@ -1648,69 +1648,6 @@ void notifyGroupDeviceDeactivated(ChildDeviceWrapper gd) {
 }
 
 /**
- * Forward group volume and mute state to all group devices that use this coordinator.
- * Does NOT send switch — only updateGroupDevices() manages switch state
- * because it checks exact configured membership.
- * @param coordinatorId The RINCON ID of the coordinator
- * @param groupVolume The current group volume (0-100)
- * @param groupMute The current group mute state ('muted' or 'unmuted')
- */
-void updateGroupDeviceVolumeState(String coordinatorId, Integer groupVolume, String groupMute) {
-  if(!coordinatorId) { return }
-
-  Map attrs = [:]
-  if(groupVolume != null) { attrs.volume = groupVolume }
-  if(groupMute != null) { attrs.mute = groupMute }
-  if(attrs.isEmpty()) { return }
-
-  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
-  String jsonAttrs = JsonOutput.toJson(attrs)
-  groupsForCoord.each { gd ->
-    gd.updateBatchPlaybackState(jsonAttrs)
-  }
-}
-
-/**
- * Forward MusicPlayer attributes to all group devices that use this coordinator
- * Called by the coordinator player when playback status or track info changes
- * @param coordinatorId The RINCON ID of the coordinator
- * @param status The current playback status ('playing', 'paused', 'stopped')
- * @param trackData The current track data JSON string
- * @param trackDescription The current track description string
- */
-void updateGroupDeviceMusicPlayerState(String coordinatorId, String status, String trackData, String trackDescription) {
-  if(!coordinatorId) { return }
-
-  Map attrs = [:]
-  if(status != null) { attrs.status = status }
-  if(trackData != null) { attrs.trackData = trackData }
-  if(trackDescription != null) { attrs.trackDescription = trackDescription }
-  if(attrs.isEmpty()) { return }
-
-  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
-  String jsonAttrs = JsonOutput.toJson(attrs)
-  groupsForCoord.each { gd ->
-    gd.updateBatchPlaybackState(jsonAttrs)
-  }
-}
-
-/**
- * Forward extended playback attributes to all group devices that use this coordinator
- * Called by the coordinator player when playback metadata changes
- * @param coordinatorId The RINCON ID of the coordinator
- * @param attributes Map of attribute names to values to forward
- */
-void updateGroupDeviceExtendedPlaybackState(String coordinatorId, Map attributes) {
-  if(!coordinatorId || !attributes) { return }
-
-  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
-  String jsonAttrs = JsonOutput.toJson(attributes)
-  groupsForCoord.each { gd ->
-    gd.updateBatchPlaybackState(jsonAttrs)
-  }
-}
-
-/**
  * Combined flush method: resolves group devices ONCE for both volume and playback attributes.
  * Called by the player driver's flushPendingGroupDeviceUpdates() to avoid two separate
  * child device traversals.

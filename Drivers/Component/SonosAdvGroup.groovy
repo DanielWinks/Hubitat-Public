@@ -760,9 +760,11 @@ void refresh() {
 
     if(volume != null) {
       sendEvent(name: 'volume', value: volume, unit: '%')
+      sendEvent(name: 'groupVolume', value: volume)
     }
     if(muteState != null) {
       sendEvent(name: 'mute', value: muteState)
+      sendEvent(name: 'groupMute', value: muteState)
     }
   } else {
     // Calculate average from individual players
@@ -776,6 +778,10 @@ void refresh() {
 
   if(status != null) {
     sendEvent(name: 'status', value: status)
+  }
+  String transportStatus = coordinator.currentValue('transportStatus', true)
+  if(transportStatus != null) {
+    sendEvent(name: 'transportStatus', value: transportStatus)
   }
   if(trackData != null) {
     sendEvent(name: 'trackData', value: trackData)
