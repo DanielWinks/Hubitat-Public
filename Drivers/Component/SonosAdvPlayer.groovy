@@ -4165,11 +4165,6 @@ void playerSetGroupRelativeVolume(Integer volumeDelta) {
 
 @CompileStatic
 void getFavorites() {
-  if(!getFavoritesChild()) {
-    this.device.updateSetting('createFavoritesChildDevice', true)
-    createRemoveFavoritesChildDevice(true)
-    return // Child's installed() -> initialize() -> configure() will call parent?.getFavorites()
-  }
   Map command = [
     'namespace':'favorites',
     'command':'getFavorites',
@@ -4181,12 +4176,8 @@ void getFavorites() {
   sendWsMessage(json)
 }
 
+@CompileStatic
 void getPlaylists() {
-  if(!getPlaylistChild()) {
-    this.device.updateSetting('createPlaylistChildDevice', true)
-    createRemovePlaylistChildDevice(true)
-    return // Child's installed() -> initialize() -> configure() will call parent?.getPlaylists()
-  }
   Map command = [
     'namespace':'playlists',
     'command':'getPlaylists',
@@ -5222,14 +5213,14 @@ void checkFavAndPlaylist(Map data) {
 void setChildFavs(String html) {
   if(getCreateFavoritesChildDevice()) {
     ChildDeviceWrapper favDev = getFavoritesChild()
-    favDev.setFavorites(html)
+    if(favDev) { favDev.setFavorites(html) }
   }
 }
 
 void setChildPlaylists(String html) {
   if(getCreatePlaylistChildDevice()) {
     ChildDeviceWrapper playlistDev = getPlaylistChild()
-    playlistDev.setPlaylists(html)
+    if(playlistDev) { playlistDev.setPlaylists(html) }
   }
 }
 
