@@ -48,6 +48,7 @@ All files use the `dwinks` namespace. Preserve this for backward compatibility.
 ### Library Inclusion
 
 Libraries are included via `#include` directives at the top of files:
+
 ```groovy
 #include dwinks.UtilitiesAndLoggingLibrary
 #include dwinks.SMAPILibrary
@@ -55,18 +56,19 @@ Libraries are included via `#include` directives at the top of files:
 
 ### Key Libraries
 
-| Library | Purpose |
-|---------|---------|
+| Library                             | Purpose                                                                |
+| ----------------------------------- | ---------------------------------------------------------------------- |
 | `UtilitiesAndLoggingLibrary.groovy` | Core logging, lifecycle hooks, HTTP retry, OAuth, scheduling utilities |
-| `SMAPILibrary.groovy` | Sonos Music API integration |
-| `SunPositionLibrary.groovy` | Solar position calculations |
-| `httpLibrary.groovy` | HTTP helper functions |
-| `genericComponentLibrary.groovy` | Component device patterns |
-| `childDeviceLibrary.groovy` | Child device helpers |
+| `SMAPILibrary.groovy`               | Sonos Music API integration                                            |
+| `SunPositionLibrary.groovy`         | Solar position calculations                                            |
+| `httpLibrary.groovy`                | HTTP helper functions                                                  |
+| `genericComponentLibrary.groovy`    | Component device patterns                                              |
+| `childDeviceLibrary.groovy`         | Child device helpers                                                   |
 
 ### Logging
 
 Use the logging methods from `UtilitiesAndLoggingLibrary` -- never use `System.out` or raw `log.*` calls:
+
 - `logDebug(message)`, `logInfo(message)`, `logWarn(message)`, `logError(message)`, `logTrace(message)`
 
 Apps and drivers expose boolean preferences: `logEnable`, `debugLogEnable`, `descriptionTextEnable`. Logs auto-disable after 30 minutes via `logsOff()`.
@@ -95,6 +97,7 @@ sendEvent(name: 'attribute', value: data)
 ### HTTP Endpoints / Webhooks
 
 Follow the established pattern:
+
 ```groovy
 mappings { path("/endpoint") { action: [GET: "handlerMethod"] } }
 
@@ -107,6 +110,7 @@ Always use `tryCreateAccessToken()` for OAuth -- never hardcode tokens.
 ### Async HTTP with Retry
 
 Use the retry utilities from `UtilitiesAndLoggingLibrary`:
+
 ```groovy
 resetHttpRetryCounter()
 asynchttpGet('callbackMethod', [uri: '...'])
@@ -153,6 +157,7 @@ There is no automated test framework. Code must be tested by deploying to an act
 ## CI/CD Workflows
 
 GitHub Actions in `.github/workflows/`:
+
 - `release-sonos-advanced.yml` -- Automated version bump and release for Sonos Advanced
 - `release-gemini-text-rewriter.yml` -- Automated release for Gemini Text Rewriter
 - `SonosAdvancedBundles.yml` -- HPM bundle creation for Sonos
@@ -173,3 +178,8 @@ Release process: version increment via workflow input (patch/minor) -> update ve
 - `Apps/SunriseSimulation.groovy` -- Good example of webhooks, scheduling, state, and settings patterns
 - `Libraries/UtilitiesAndLoggingLibrary.groovy` -- Core utilities used across all apps and drivers
 - `.github/copilot-instructions.md` -- Additional AI coding assistant guidance
+
+## Documentation
+
+Always use the `llms-txt-mcp` (or `mcpdoc`) tools to look up library APIs
+before writing code. Do not rely on training data for framework-specific APIs.
