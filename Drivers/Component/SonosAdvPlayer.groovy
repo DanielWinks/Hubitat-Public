@@ -5197,19 +5197,26 @@ static String extractContainerKey(Map eventData) {
 
 void checkFavAndPlaylist(Map data) {
   logTrace('Checking currently playing favorite and playlist...')
-  Integer delay = 5
+  Boolean mapsPopulated = true
   if(favoritesMap == null || favoritesMap.size() < 1) {
     logTrace('Favorites map is empty, requesting favorites...')
     getFavorites()
-    delay = 12
+    mapsPopulated = false
   }
   if(playlistsMap == null || playlistsMap.size() < 1) {
     logTrace('Playlists map is empty, requesting playlists...')
     getPlaylists()
-    delay = 12
+    mapsPopulated = false
   }
-  runIn(delay, 'isFavoritePlaying', [overwrite: true, data: data])
-  runIn(delay, 'isPlaylistPlaying', [overwrite: true, data: data])
+  if(mapsPopulated) {
+    // Maps are already populated — check immediately
+    isFavoritePlaying(data)
+    isPlaylistPlaying(data)
+  } else {
+    // Cold start: wait for async map population
+    runIn(12, 'isFavoritePlaying', [overwrite: true, data: data])
+    runIn(12, 'isPlaylistPlaying', [overwrite: true, data: data])
+  }
 }
 
 void setChildFavs(String html) {
