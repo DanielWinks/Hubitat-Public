@@ -129,6 +129,9 @@ metadata {
     attribute 'nextTrackAlbumArtURI', 'string'
     attribute 'queueTrackTotal', 'string'
     attribute 'queueTrackPosition', 'string'
+    attribute 'transportStatus', 'enum', ['playing', 'paused', 'stopped']
+    attribute 'groupVolume', 'number'
+    attribute 'groupMute', 'string'
     attribute 'currentRepeatOneMode', 'enum', ['on', 'off']
     attribute 'currentRepeatAllMode', 'enum', ['on', 'off']
     attribute 'currentCrossfadeMode', 'enum', ['on', 'off']
@@ -959,6 +962,7 @@ private void resetPlaybackAttributes() {
   logDebug('Resetting playback attributes for inactive group')
   Map resetAttrs = [
     status: 'inactive',
+    transportStatus: 'stopped',
     trackData: '{}',
     trackDescription: 'n/a',
     currentTrackDuration: 'n/a',
@@ -979,6 +983,8 @@ private void resetPlaybackAttributes() {
     nextTrackAlbumArtURI: 'n/a',
     queueTrackTotal: '0',
     queueTrackPosition: '0',
+    groupVolume: 0,
+    groupMute: 'unmuted',
     currentRepeatOneMode: 'off',
     currentRepeatAllMode: 'off',
     currentCrossfadeMode: 'off',
