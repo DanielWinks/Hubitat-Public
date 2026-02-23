@@ -137,11 +137,6 @@ Map mainPage() {
         description: 'Select to create/delete Sonos group devices'
       )
     }
-    section('Optional Features (disable to reduce resource usage):', hideable: true) {
-      input 'favMatching', 'bool', title: 'Enable "Current Favorite" status.', required: false, defaultValue: true
-      input 'trackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
-    }
-
     section('Update Settings:', hideable: true, hidden: true) {
       paragraph "<span style='color: #ff6b6b;'><b>⚠ Warning:</b> The built-in auto-update functionality should not be used if you manage this app through Hubitat Package Manager (HPM). Using both may cause conflicts, or version mismatches. If you installed via HPM, use HPM to manage updates.</span>"
       input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
@@ -541,8 +536,6 @@ void configure() {
   checkForUpdates()
 
   // Initialize settings with defaults
-  if(settings.favMatching == null) { settings.favMatching = true }
-  if(settings.trackDataMetaData == null) { settings.trackDataMetaData = false }
   if(settings.skipOrphanRemoval == null) { settings.skipOrphanRemoval = false }
   if(settings.logEnable == null) { settings.logEnable = true }
   if(settings.debugLogEnable == null) { settings.debugLogEnable = false }
