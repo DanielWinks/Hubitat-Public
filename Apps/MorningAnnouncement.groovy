@@ -126,6 +126,8 @@ Map mainPage() {
           Again, you will be provided with today's date implicitly. Do not confuse it with dates mentioned in calendar events. This is extremely important.
           Ensure the entire announcement is concise, ideally under 2 minutes when spoken aloud.
           This will be a text-to-speech announcement, so clarity and natural phrasing are key, as well as spelling out any acronyms, numbers, or abbreviations for proper pronunciation.
+          If there is a weather alert, make sure it stands out in the announcement and is clearly communicated, as this is critical information for the listener.
+          Do not omit weather alerts if they are present, even if they are long. Summarize them as best as possible while ensuring the critical information is conveyed.
           ''',
         description: 'This prompt guides the AI on how to structure and present your morning announcement.'
     }
