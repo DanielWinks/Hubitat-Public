@@ -948,7 +948,7 @@ void volumeUp() { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 void volumeDown() { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 
 Integer getPlayerVolumeAdjAmount() {
-  Integer currentVolume = (this.device.currentValue('volume', true) as Integer)
+  Integer currentVolume = (this.device.currentValue('volume', true) as Integer) ?: 0
   if(currentVolume < 11) {
     return getVolumeAdjustAmountLow()
   } else if(currentVolume >= 11 && currentVolume < 21) {
@@ -959,7 +959,7 @@ Integer getPlayerVolumeAdjAmount() {
 }
 
 Integer getGroupVolumeAdjAmount() {
-  Integer currentVolume = (this.device.currentValue('groupVolume', true) as Integer)
+  Integer currentVolume = (this.device.currentValue('groupVolume', true) as Integer) ?: 0
   if(currentVolume < 11) {
     return getVolumeAdjustAmountLow()
   } else if(currentVolume >= 11 && currentVolume < 21) {
@@ -2121,14 +2121,18 @@ void updateZoneGroupName(String groupName) {
 void processGroupRenderingControlMessages(String xmlString) {
   GPathResult propertyset = new XmlSlurper().parseText(xmlString)
   GPathResult gVol = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupVolume'}
-  Integer groupVolume = Integer.parseInt(gVol.text())
   GPathResult gMute = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupMute'}
-  String groupMute = Integer.parseInt(gMute.text()) == 1 ? 'muted' : 'unmuted'
 
-  setGroupVolumeState(groupVolume)
-  setGroupMuteState(groupMute)
-  // Queue volume/mute for batched group device update
-  queueGroupDeviceUpdate([_groupVolume: groupVolume, _groupMute: groupMute])
+  if(gVol != null && gVol.size() > 0) {
+    Integer groupVolume = Integer.parseInt(gVol.text())
+    setGroupVolumeState(groupVolume)
+    queueGroupDeviceUpdate([_groupVolume: groupVolume])
+  }
+  if(gMute != null && gMute.size() > 0) {
+    String groupMute = Integer.parseInt(gMute.text()) == 1 ? 'muted' : 'unmuted'
+    setGroupMuteState(groupMute)
+    queueGroupDeviceUpdate([_groupMute: groupMute])
+  }
 }
 
 @CompileStatic
@@ -2138,7 +2142,8 @@ void setGroupVolumeState(Integer groupVolume) {
 }
 @CompileStatic
 Integer getGroupVolumeState() {
-  return getDevice().currentValue('groupVolume',true) as Integer
+  Object raw = getDevice().currentValue('groupVolume', true)
+  return raw != null ? raw as Integer : null
 }
 
 @CompileStatic
@@ -2148,7 +2153,8 @@ void setGroupMuteState(String groupMute) {
 }
 @CompileStatic
 String getGroupMuteState() {
-  return getDevice().currentValue('groupMute',true).toString()
+  Object raw = getDevice().currentValue('groupMute', true)
+  return raw != null ? raw.toString() : 'unmuted'
 }
 
 @CompileStatic
@@ -2897,7 +2903,7 @@ Boolean isDebugLoggingEnabled() {
   return settings.logEnable != false && settings.debugLogEnable != false
 }
 
-@Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites']
+@Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
 @Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
@@ -3001,11 +3007,12 @@ void subscribeToPlaybackDebounce(Map data = null) {
   if(groupId != null && groupId != '') {
     subscribeToPlayback(groupId)
     subscribeToPlaybackMetadata(groupId)
+    subscribeToGroupVolume(groupId)
   }
 }
 @CompileStatic
 Boolean isCurrentlySubcribedToCoodinatorWS() {
-  return getWsSubscriptionValue('playback') == 'Subscribed' && getWsSubscriptionValue('playbackMetadata') == 'Subscribed'
+  return getWsSubscriptionValue('playback') == 'Subscribed' && getWsSubscriptionValue('playbackMetadata') == 'Subscribed' && getWsSubscriptionValue('groupVolume') == 'Subscribed'
 }
 @CompileStatic
 Boolean isCurrentlySubcribedToPlaylistWS() { return getWsSubscriptionValue('playlists') == 'Subscribed' }
@@ -3015,6 +3022,10 @@ Boolean isCurrentlySubcribedToAudioClipWS() { return getWsSubscriptionValue('aud
 Boolean isCurrentlySubcribedToGroupsWS() { return getWsSubscriptionValue('groups') == 'Subscribed' }
 @CompileStatic
 Boolean isCurrentlySubcribedToFavoritesWS() { return getWsSubscriptionValue('favorites') == 'Subscribed' }
+@CompileStatic
+Boolean isCurrentlySubcribedToPlayerVolumeWS() { return getWsSubscriptionValue('playerVolume') == 'Subscribed' }
+@CompileStatic
+Boolean isCurrentlySubcribedToGroupVolumeWS() { return getWsSubscriptionValue('groupVolume') == 'Subscribed' }
 
 String getGroupName() {
   return this.device.currentValue('groupName',true)
@@ -3703,10 +3714,8 @@ void flushPendingGroupDeviceUpdates() {
     Object rawVol = pending.remove('_groupVolume')
     Object rawMute = pending.remove('_groupMute')
     if(rawVol != null || rawMute != null) {
-      Integer vol = rawVol != null ? rawVol as Integer : getGroupVolumeState()
+      Integer vol = rawVol != null ? rawVol as Integer : (getGroupVolumeState() ?: 0)
       String mute = rawMute != null ? rawMute as String : getGroupMuteState()
-      Boolean isGrouped = getIsGrouped()
-      vol = isGrouped ? vol + 1 : vol
       // Do not include 'switch' here — the parent app's updateGroupDevices() is the
       // sole authority on group device switch state because it checks exact membership.
       // Including switch here caused the player's broad "isGrouped" check to override
@@ -3874,6 +3883,7 @@ void subscribeToWsEvents() {
   }
   if(hasAudioClipCapability() && isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
   if(isCurrentlySubcribedToGroupsWS() == false) { subscribeToGroups() }
+  if(isCurrentlySubcribedToPlayerVolumeWS() == false) { subscribeToPlayerVolume() }
   // Re-establish coordinator-specific subscriptions if this player is the group
   // coordinator and the subscriptions have been lost (e.g., after WS reconnect).
   // These are group-scoped and require a valid groupId.
@@ -3882,6 +3892,7 @@ void subscribeToWsEvents() {
     if(groupId) {
       subscribeToPlayback(groupId)
       subscribeToPlaybackMetadata(groupId)
+      subscribeToGroupVolume(groupId)
     }
   }
 }
@@ -3956,6 +3967,32 @@ void subscribeToPlayback(String groupId) {
 void subscribeToPlaybackMetadata(String groupId) {
   Map command = [
     'namespace':'playbackMetadata',
+    'command':'subscribe',
+    'groupId':"${groupId}"
+  ]
+  Map args = [:]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+}
+
+@CompileStatic
+void subscribeToPlayerVolume() {
+  Map command = [
+    'namespace':'playerVolume',
+    'command':'subscribe',
+    'playerId':"${getId()}"
+  ]
+  Map args = [:]
+  String json = JsonOutput.toJson([command,args])
+  logTrace(json)
+  sendWsMessage(json)
+}
+
+@CompileStatic
+void subscribeToGroupVolume(String groupId) {
+  Map command = [
+    'namespace':'groupVolume',
     'command':'subscribe',
     'groupId':"${groupId}"
   ]
@@ -5197,6 +5234,32 @@ void processWebsocketMessage(String message) {
     if(containerKey == lastKey) { return }
     lastMetadataContainerId.put(dni, containerKey)
     checkFavAndPlaylist(eventData)
+  }
+
+  //Process playerVolume events
+  if(eventType?.type == 'playerVolume' && eventType?.namespace == 'playerVolume') {
+    if(eventData?.volume != null) {
+      Integer vol = eventData.volume as Integer
+      setPlayerVolume(vol)
+    }
+    if(eventData?.muted != null) {
+      String muteState = eventData.muted == true ? 'muted' : 'unmuted'
+      setMuteState(muteState)
+    }
+  }
+
+  //Process groupVolume events
+  if(eventType?.type == 'groupVolume' && eventType?.namespace == 'groupVolume') {
+    if(eventData?.volume != null) {
+      Integer groupVol = eventData.volume as Integer
+      setGroupVolumeState(groupVol)
+      queueGroupDeviceUpdate([_groupVolume: groupVol])
+    }
+    if(eventData?.muted != null) {
+      String groupMuteState = eventData.muted == true ? 'muted' : 'unmuted'
+      setGroupMuteState(groupMuteState)
+      queueGroupDeviceUpdate([_groupMute: groupMuteState])
+    }
   }
 }
 
