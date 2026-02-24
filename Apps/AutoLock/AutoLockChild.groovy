@@ -140,6 +140,7 @@ Map mainPage() {
         input('notifyOnLock', 'bool', title: 'Notify when locked', required: false, defaultValue: true)
         input('notifyOnUnlock', 'bool', title: 'Notify when unlocked', required: false, defaultValue: true)
         input('unlockPresenceNotifyOnTimeout', 'bool', title: 'Notify when pending unlock canceled due to no approach', required: false, defaultValue: false)
+        input('notifyOnExtendedAwayBlock', 'bool', title: 'Notify when unlock blocked (not returning from extended away)', required: false, defaultValue: false)
         input('notifyOnSafetyBlock', 'bool', title: 'Notify when lock is blocked (door open)', required: false, defaultValue: true)
         input('notifyOnConfirmFail', 'bool', title: 'Notify when lock confirmation fails', required: false, defaultValue: true)
         input('notifyOnJammed', 'bool', title: 'Notify when lock reports jammed/unknown', required: false, defaultValue: true)
@@ -253,6 +254,9 @@ Map meansToUnlockPage() {
       input('unlockPresenceEnabled', 'bool', title: 'Enable unlock on anyone arriving', required: false, defaultValue: false, submitOnChange: true)
       if (settings.unlockPresenceEnabled) {
         input('unlockPresenceSensors', 'capability.presenceSensor', title: 'Presence sensors to monitor', required: true, multiple: true)
+        input('unlockPresenceRequireExtendedAway', 'bool',
+          title: 'Only unlock on return from extended away (filters brief pass-bys)',
+          required: false, defaultValue: false)
 
         // Optional: wait for motion sensors near the door before unlocking (useful for geofence-based arrivals)
         input('unlockPresenceWaitForMotion', 'bool', title: 'Wait for motion sensors before unlocking (approach detection)', required: false, defaultValue: false, submitOnChange: true)
@@ -514,13 +518,14 @@ String getMeansToLockSummary() {
 String getMeansToUnlockSummary() {
   List parts = []
   if (settings.unlockPresenceEnabled) {
+    List<String> modifiers = []
+    if (settings.unlockPresenceRequireExtendedAway) { modifiers << 'ext-away' }
     if (settings.unlockPresenceWaitForMotion) {
       int count = countSettingVal(settings.unlockPresenceMotionSensors)
       String cond = settings.unlockPresenceMotionCondition ?: 'any'
-      parts << "Presence(wait ${cond} ${count})"
-    } else {
-      parts << 'Presence'
+      modifiers << "wait ${cond} ${count}"
     }
+    parts << (modifiers ? "Presence(${modifiers.join(', ')})" : 'Presence')
   }
   if (settings.unlockContactEnabled) parts << 'Contact'
   if (settings.unlockModeEnabled) {
@@ -695,6 +700,18 @@ void scheduledLockTimeRangeStart() {
 void unlockPresenceHandler(Event event) {
   logDebug("Unlock presence event: ${event.displayName} arrived")
   cancelPendingLock()
+
+  // Gate: Extended away check
+  if (settings.unlockPresenceRequireExtendedAway) {
+    DeviceWrapper arrivingDevice = event.getDevice()
+    String extAwayStatus = arrivingDevice?.currentValue('justArrivedFromExtendedAway')
+    if (extAwayStatus != 'true') {
+      logInfo("Unlock skipped: ${event.displayName} not returning from extended away (${extAwayStatus ?: 'unavailable'})")
+      sendNotification("Unlock skipped: ${event.displayName} not returning from extended away", 'extendedAwayBlock')
+      return
+    }
+    logDebug("Extended away gate passed: ${event.displayName} returning from extended absence")
+  }
 
   // If configured, wait for approach (motion) before unlocking
   if (settings.unlockPresenceWaitForMotion && settings.unlockPresenceMotionSensors) {
@@ -1195,7 +1212,7 @@ private void cancelPendingLock() {
  * Sends a notification to configured notification devices.
  *
  * @param message The notification message.
- * @param type The notification type: 'lock', 'unlock', or 'safetyBlock'.
+ * @param type The notification type (e.g. 'lock', 'unlock', 'safetyBlock', 'extendedAwayBlock', 'unlockTimeout', etc.).
  */
 private void sendNotification(String message, String type) {
   if (!settings.notificationDevices) { return }
@@ -1222,6 +1239,9 @@ private void sendNotification(String message, String type) {
       break
     case 'batteryLow':
       shouldNotify = settings.notifyOnBatteryLow != false
+      break
+    case 'extendedAwayBlock':
+      shouldNotify = settings.notifyOnExtendedAwayBlock == true
       break
     case 'unlockTimeout':
       // Notification for pending unlock canceled due to no approach detected.

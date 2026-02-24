@@ -36,6 +36,7 @@ metadata {
     attribute 'justDeparted', 'ENUM', ['true','false']
     attribute 'extendedPresent', 'ENUM', ['true','false']
     attribute 'extendedAway', 'ENUM', ['true','false']
+    attribute 'justArrivedFromExtendedAway', 'ENUM', ['true','false']
   }
   preferences() {
     section(){
@@ -155,7 +156,16 @@ void off() {
 // =============================================================================
 
 void processArrived() {
+  Boolean wasExtendedAway = device.currentValue('extendedAway') == 'true'
   extendedOff()
+
+  // Set flag BEFORE presence event so downstream handlers can read it
+  if (wasExtendedAway) {
+    justArrivedFromExtendedAwayOn()
+  } else {
+    justArrivedFromExtendedAwayOff()
+  }
+
   sendEvent(name: 'presence', value: 'present')
   sendEvent(name: 'switch', value: 'on')
   justArrivedOn()
@@ -164,6 +174,8 @@ void processArrived() {
 
 void processDeparted() {
   extendedOff()
+  unschedule('justArrivedFromExtendedAwayOff')
+  justArrivedFromExtendedAwayOff()
   sendEvent(name: 'presence', value: 'not present')
   sendEvent(name: 'switch', value: 'off')
   justDepartedOn()
@@ -192,6 +204,15 @@ void justDepartedOff() {
   sendEvent(name: 'justDeparted', value: 'false')
 }
 
+void justArrivedFromExtendedAwayOn() {
+  sendEvent(name: 'justArrivedFromExtendedAway', value: 'true')
+  runIn(settingAsLong('justArrivedTime'), 'justArrivedFromExtendedAwayOff')
+}
+
+void justArrivedFromExtendedAwayOff() {
+  sendEvent(name: 'justArrivedFromExtendedAway', value: 'false')
+}
+
 // =============================================================================
 // Extended Presence/Away Management
 // =============================================================================
@@ -214,6 +235,8 @@ void extendedAwayOff() {
 
 void extendedOff() {
   // Reset both extended states and cancel any pending transitions to avoid stale flags.
+  // NOTE: justArrivedFromExtendedAwayOff timer intentionally NOT cancelled here --
+  // callers that need it cleared do so explicitly.
   unschedule('extendedAwayOn')
   unschedule('extendedPresentOn')
   extendedAwayOff()
