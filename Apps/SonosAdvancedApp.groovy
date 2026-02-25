@@ -661,16 +661,18 @@ void createPlayerDevicesWithFeedback() {
 
   Integer createdCount = createPlayerDevices()
 
-  // Allow time for Hubitat to register new child devices
-  pauseExecution(2500)
+  // Defer settings update to allow Hubitat to register new child devices
+  runIn(3, 'finalizePlayerCreation', [data: [createdCount: createdCount, expectedCount: willBeCreated.size()]])
+}
 
-  // Update the setting to reflect current state
+void finalizePlayerCreation(Map data) {
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-
-  if(createdCount == willBeCreated.size()) {
+  Integer createdCount = data.createdCount as Integer
+  Integer expectedCount = data.expectedCount as Integer
+  if(createdCount == expectedCount) {
     state.playerCreationFeedback = "Successfully created ${createdCount} player(s)"
   } else {
-    state.playerCreationFeedback = "Created ${createdCount} of ${willBeCreated.size()} player(s) - check logs for errors"
+    state.playerCreationFeedback = "Created ${createdCount} of ${expectedCount} player(s) - check logs for errors"
   }
   state.playerCreationTimestamp = now()
 }
@@ -695,12 +697,13 @@ void removePlayerDevicesWithFeedback() {
     }
   }
 
-  // Allow time for Hubitat to unregister deleted child devices
-  pauseExecution(2500)
+  // Defer settings update to allow Hubitat to unregister deleted child devices
+  runIn(3, 'finalizePlayerRemoval', [data: [removedCount: removedCount]])
+}
 
-  // Update the setting to reflect current state
+void finalizePlayerRemoval(Map data) {
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-
+  Integer removedCount = data.removedCount as Integer
   state.playerRemovalFeedback = "Successfully removed ${removedCount} player(s)"
   state.playerRemovalTimestamp = now()
 }
@@ -807,11 +810,10 @@ Integer createPlayerDevices() {
           logWarn("Player info available: ${playerInfo.keySet().join(', ')}")
           // Schedule a retry of secondaryConfiguration in case data gets populated later
           runIn(10, 'retryDeviceConfiguration', [data: [dni: dni]])
+        } else {
+          // Defer secondaryConfiguration to ensure all data values are committed
+          runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
         }
-
-        // Small delay to ensure all data values are committed before secondaryConfiguration
-        pauseExecution(500)
-        cd.secondaryConfiguration()
       } catch (Exception e) {
         logError("Failed to configure device ${dni}: ${e.message}")
       }
@@ -872,9 +874,15 @@ void retryDeviceConfiguration(Map data) {
     logError("This device may not function correctly. Try deleting and re-discovering it.")
   } else {
     logInfo("Device ${cd.label} configuration completed successfully on retry")
-    pauseExecution(500)
-    cd.secondaryConfiguration()
+    runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
   }
+}
+
+void runSecondaryConfiguration(Map data) {
+  String dni = data?.dni
+  if(!dni) { return }
+  ChildDeviceWrapper cd = app.getChildDevice(dni)
+  if(cd) { cd.secondaryConfiguration() }
 }
 
 void removeOrphans() {
@@ -2121,36 +2129,42 @@ void fixVersionMismatches() {
       }
     }
 
-    // Pause to allow hub to process library updates
-    logInfo("Pausing to allow hub to process library updates...")
-    pauseExecution(3000)
   }
 
-  // Step 2: Update drivers after libraries are updated
+  // Store driver mismatches for deferred processing
+  if(driverMismatches.size() > 0) {
+    state.pendingDriverMismatches = driverMismatches
+  }
+
+  // Defer driver phase to allow hub to process library updates
+  if(libraryMismatches.size() > 0) {
+    runIn(3, 'fixDriverMismatches')
+  } else {
+    fixDriverMismatches()
+  }
+}
+
+void fixDriverMismatches() {
+  List driverMismatches = state.pendingDriverMismatches ?: []
+  state.remove('pendingDriverMismatches')
+
   if(driverMismatches.size() > 0) {
     logInfo("Updating ${driverMismatches.size()} driver(s)...")
-
     driverMismatches.each { mismatch ->
       logInfo("Updating driver ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
-
       String sourceCode = downloadFile(mismatch.location)
-
       if(sourceCode) {
         Boolean success = updateDriver(mismatch.name, mismatch.namespace, sourceCode, mismatch.expectedVersion)
-        if(success) {
-          logInfo("Successfully updated ${mismatch.name}")
-        } else {
-          logWarn("Failed to update ${mismatch.name}")
-        }
+        if(success) { logInfo("Successfully updated ${mismatch.name}") }
+        else { logWarn("Failed to update ${mismatch.name}") }
       } else {
         logWarn("Failed to download source code for ${mismatch.name}")
       }
     }
+    runIn(2, 'checkInstalledVersions')
+  } else {
+    checkInstalledVersions()
   }
-
-  // Re-check versions after updates
-  pauseExecution(2000)
-  checkInstalledVersions()
 }
 
 void cleanupDuplicates() {
@@ -2271,8 +2285,7 @@ void publishLibraries() {
 
   // Re-check installed versions to reflect the published libraries
   if(successCount > 0) {
-    pauseExecution(1000) // Brief pause to allow hub to process the updates
-    checkInstalledVersions()
+    runIn(1, 'checkInstalledVersions')
   }
 }
 

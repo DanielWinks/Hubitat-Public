@@ -23,9 +23,6 @@
 
 #include dwinks.UtilitiesAndLoggingLibrary
 
-// Delay in milliseconds to wait after ungrouping before regrouping players
-// This ensures the Sonos API has time to process the ungroup operation before creating a new group
-@Field static final Integer UNGROUP_DELAY_MS = 2000
 @Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map<String, Object>> heldPlaybackState = new ConcurrentHashMap<String, Map<String, Object>>()
 @Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
@@ -325,7 +322,16 @@ void groupPlayers() {
   // Ungroup all players first to ensure the new coordinator is set correctly
   // This prevents the Sonos API from keeping an existing coordinator
   ungroupPlayers()
-  pauseExecution(UNGROUP_DELAY_MS)
+  runIn(2, 'createGroupAfterUngroup', [overwrite: true])
+}
+
+void createGroupAfterUngroup() {
+  List<String> allPlayers = getAllPlayersInGroupDevice()
+  DeviceWrapper coordinator = getCoordinatorDevice()
+  if(!coordinator || !allPlayers) {
+    logWarn('Cannot create group after ungroup - coordinator or players not found')
+    return
+  }
   coordinator.playerCreateGroup(allPlayers)
 }
 
