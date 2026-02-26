@@ -24,6 +24,7 @@
 #include dwinks.UtilitiesAndLoggingLibrary
 
 @Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Long> lastGroupDeviceVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Map<String, Object>> heldPlaybackState = new ConcurrentHashMap<String, Map<String, Object>>()
 @Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
 @Field static volatile List<String> cachedTTSVoiceNames = null
@@ -460,10 +461,21 @@ void setVolume(BigDecimal level, BigDecimal duration = null) {
     logWarn('No volume level provided')
     return
   }
+  String deviceId = device.getDeviceNetworkId()
   Integer targetVolume = Math.max(0, Math.min(100, level.intValue()))
 
   // If no fade duration, use immediate volume set
   if(duration == null || duration <= 0) {
+    cancelGroupDeviceVolumeFade()
+    setVolumeImmediate(targetVolume)
+    return
+  }
+
+  // Rapid-call detection: if an external app is managing the fade by calling setVolume in a loop
+  Long now = now()
+  Long lastCall = lastGroupDeviceVolumeFadeCallTime.put(deviceId, now)
+  if(lastCall != null && (now - lastCall) < 2000) {
+    logDebug("Rapid setVolume calls detected (${now - lastCall}ms apart) — setting volume directly to ${targetVolume}")
     cancelGroupDeviceVolumeFade()
     setVolumeImmediate(targetVolume)
     return
@@ -491,7 +503,6 @@ void setVolume(BigDecimal level, BigDecimal duration = null) {
 
   // Cancel any existing fade and start new one
   cancelGroupDeviceVolumeFade()
-  String deviceId = device.getDeviceNetworkId()
   Map fadeState = [
     targetVolume: targetVolume,
     startVolume: currentVolume,
@@ -502,7 +513,7 @@ void setVolume(BigDecimal level, BigDecimal duration = null) {
   ]
   groupDeviceVolumeFadeState.put(deviceId, fadeState)
   logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
-  runInMillis(intervalMs, 'groupDeviceVolumeFadeStep')
+  runInMillis(intervalMs, 'groupDeviceVolumeFadeStep', [overwrite: true])
 }
 
 /**
@@ -564,6 +575,7 @@ void groupDeviceVolumeFadeStep() {
   if(currentStep >= totalSteps) {
     setVolumeImmediate(targetVolume)
     groupDeviceVolumeFadeState.remove(deviceId)
+    lastGroupDeviceVolumeFadeCallTime.remove(deviceId)
     logInfo("Volume fade complete: volume set to ${targetVolume}")
     return
   }
@@ -575,16 +587,13 @@ void groupDeviceVolumeFadeStep() {
   fadeState.currentStep = currentStep
   groupDeviceVolumeFadeState.put(deviceId, fadeState)
   Integer intervalMs = fadeState.intervalMs as Integer
-  runInMillis(intervalMs, 'groupDeviceVolumeFadeStep')
+  runInMillis(intervalMs, 'groupDeviceVolumeFadeStep', [overwrite: true])
 }
 
 void cancelGroupDeviceVolumeFade() {
   String deviceId = device.getDeviceNetworkId()
-  if(groupDeviceVolumeFadeState.containsKey(deviceId)) {
-    groupDeviceVolumeFadeState.remove(deviceId)
-    unschedule('groupDeviceVolumeFadeStep')
-    logDebug('Cancelled in-progress volume fade')
-  }
+  groupDeviceVolumeFadeState.remove(deviceId)
+  unschedule('groupDeviceVolumeFadeStep')
 }
 
 /**
