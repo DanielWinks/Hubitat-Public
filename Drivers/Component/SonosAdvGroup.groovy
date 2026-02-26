@@ -319,10 +319,20 @@ void groupPlayers() {
     logWarn('Coordinator device not found')
     return
   }
-  // Ungroup all players first to ensure the new coordinator is set correctly
-  // This prevents the Sonos API from keeping an existing coordinator
+
+  String currentSwitch = device.currentValue('switch')
+  if(currentSwitch != 'on') {
+    // Group is already inactive — no need to ungroup first, just create the group directly
+    coordinator.playerCreateGroup(allPlayers)
+    return
+  }
+
+  // Group is active — ungroup first to ensure the new coordinator is set correctly.
+  // The regroup will be triggered by onGroupDeactivated() when the WebSocket event confirms the ungroup.
+  state.pendingRegroup = true
   ungroupPlayers()
-  runIn(2, 'createGroupAfterUngroup', [overwrite: true])
+  // Safety timeout in case the WebSocket event never arrives
+  runIn(10, 'regroupSafetyTimeout', [overwrite: true])
 }
 
 void createGroupAfterUngroup() {
@@ -333,6 +343,13 @@ void createGroupAfterUngroup() {
     return
   }
   coordinator.playerCreateGroup(allPlayers)
+}
+
+void regroupSafetyTimeout() {
+  if(!state.pendingRegroup) { return }
+  state.remove('pendingRegroup')
+  logWarn('Regroup safety timeout reached — WebSocket group event did not arrive within 10 seconds. Attempting regroup anyway.')
+  createGroupAfterUngroup()
 }
 
 void ungroupPlayers() {
@@ -1013,6 +1030,11 @@ private void resetPlaybackAttributes() {
  * resetting would cause a brief flash of empty data immediately overwritten.
  */
 void onGroupDeactivated() {
+  if(state.pendingRegroup) {
+    state.remove('pendingRegroup')
+    unschedule('regroupSafetyTimeout')
+    createGroupAfterUngroup()
+  }
   if(getResetAttributesWhenInactiveSetting() && getOnlyUpdateWhenActiveSetting()) {
     resetPlaybackAttributes()
   }
