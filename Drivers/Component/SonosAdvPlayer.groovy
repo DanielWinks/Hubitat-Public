@@ -713,6 +713,10 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   // Rapid-call detection: if an external app (e.g. webCoRE) is managing the fade
   // by calling setLevel(level, duration) in a loop, skip our internal fade and set volume directly
   String deviceId = getId()
+  if(!deviceId) {
+    playerSetPlayerVolume(targetVolume)
+    return
+  }
   Long now = now()
   Long lastCall = lastVolumeFadeCallTime.put(deviceId, now)
   if(lastCall != null && (now - lastCall) < 2000) {
@@ -721,7 +725,7 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
     playerSetPlayerVolume(targetVolume)
     return
   }
-  Integer currentVolume = getPlayerVolume() ?: 0
+  Integer currentVolume = getPlayerVolume()
   Integer delta = Math.abs(targetVolume - currentVolume)
   if(delta == 0) { return }
   Integer durationSeconds = duration as Integer
@@ -756,6 +760,7 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
 
 void volumeFadeStep() {
   String deviceId = getId()
+  if(!deviceId) { return }
   Map fadeState = volumeFadeState.get(deviceId)
   if(fadeState == null) { return }
   Integer currentStep = (fadeState.currentStep as Integer) + 1
@@ -784,12 +789,13 @@ void volumeFadeStep() {
 
 void cancelVolumeFade() {
   String deviceId = getId()
-  volumeFadeState.remove(deviceId)
+  if(deviceId) { volumeFadeState.remove(deviceId) }
   unschedule('volumeFadeStep')
 }
 
 Boolean isVolumeFadeInProgress() {
-  return volumeFadeState.containsKey(getId())
+  String deviceId = getId()
+  return deviceId ? volumeFadeState.containsKey(deviceId) : false
 }
 
 @CompileStatic
@@ -858,6 +864,11 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
     }
     return
   }
+  if(!deviceId) {
+    if(useGroupApi) { playerSetGroupVolume(targetVolume) }
+    else { playerSetPlayerVolume(targetVolume) }
+    return
+  }
   // Rapid-call detection: if an external app is managing the fade by calling setGroupVolume in a loop
   Long now = now()
   Long lastCall = lastGroupVolumeFadeCallTime.put(deviceId, now)
@@ -868,7 +879,7 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
     else { playerSetPlayerVolume(targetVolume) }
     return
   }
-  Integer currentVolume = useGroupApi ? (this.device.currentValue('groupVolume', true) as Integer ?: 0) : (getPlayerVolume() ?: 0)
+  Integer currentVolume = useGroupApi ? (this.device.currentValue('groupVolume', true) as Integer ?: 0) : getPlayerVolume()
   Integer delta = Math.abs(targetVolume - currentVolume)
   if(delta == 0) { return }
   Integer durationSeconds = duration as Integer
@@ -901,6 +912,7 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
 
 void groupVolumeFadeStep() {
   String deviceId = getId()
+  if(!deviceId) { return }
   Map fadeState = groupVolumeFadeState.get(deviceId)
   if(fadeState == null) { return }
   Integer currentStep = (fadeState.currentStep as Integer) + 1
@@ -929,12 +941,13 @@ void groupVolumeFadeStep() {
 
 void cancelGroupVolumeFade() {
   String deviceId = getId()
-  groupVolumeFadeState.remove(deviceId)
+  if(deviceId) { groupVolumeFadeState.remove(deviceId) }
   unschedule('groupVolumeFadeStep')
 }
 
 Boolean isGroupVolumeFadeInProgress() {
-  return groupVolumeFadeState.containsKey(getId())
+  String deviceId = getId()
+  return deviceId ? groupVolumeFadeState.containsKey(deviceId) : false
 }
 
 void setGroupLevel(BigDecimal level, BigDecimal duration = null) { setGroupVolume(level, duration) }
@@ -3370,7 +3383,7 @@ String getTransportStatus() {
 }
 
 Integer getPlayerVolume() {
-  return this.device.currentValue('volume') as Integer
+  return (this.device.currentValue('volume') as Integer) ?: 0
 }
 void setPlayerVolume(Integer volume) {
   Integer oldVolume = getPlayerVolume()
