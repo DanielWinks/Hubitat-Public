@@ -121,6 +121,9 @@ metadata {
   command 'setNightMode', [[ name: 'Night Mode (Soundbar only)*', type: 'ENUM', description: 'Toggle Night Mode on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
   command 'setSpeechEnhancement', [[ name: 'Speech Enhancement (Soundbar only)*', type: 'ENUM', description: 'Toggle Speech Enhancement on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
 
+  command 'selectLineIn'
+  command 'selectTV'
+
   command 'playHighPriorityTTS', [
     [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
     [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]],
@@ -249,6 +252,14 @@ Boolean hasAudioClipCapability() {
     String caps = getDeviceDataValue('capabilities')
     return caps != null && caps.contains('AUDIO_CLIP')
   } else {return false}
+}
+
+@CompileStatic
+Boolean hasLineInCapability() {
+  if(device != null) {
+    String caps = getDeviceDataValue('capabilities')
+    return caps != null && caps.contains('LINE_IN')
+  } else { return false }
 }
 // =============================================================================
 // End Preference Getters And Passthrough Renames For Clarity
@@ -823,6 +834,28 @@ void setSpeechEnhancement(String mode) {
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
   asynchttpPost('localControlCallback', params)
+}
+
+void selectLineIn() {
+  if(!hasLineInCapability()) {
+    logWarn("Line-In is not supported on this Sonos device")
+    return
+  }
+  String rinconId = getId()
+  String lineInURI = "x-rincon-stream:${rinconId}"
+  logInfo("Switching to Line-In source: ${lineInURI}")
+  setAVTransportURIAndPlay(lineInURI)
+}
+
+void selectTV() {
+  if(!hasHTPlaybackCapability()) {
+    logWarn("TV input is only supported on Sonos home theater speakers")
+    return
+  }
+  String rinconId = getId()
+  String tvURI = "x-sonos-htastream:${rinconId}:spdif"
+  logInfo("Switching to TV source: ${tvURI}")
+  setAVTransportURIAndPlay(tvURI)
 }
 
 void muteGroup(){
