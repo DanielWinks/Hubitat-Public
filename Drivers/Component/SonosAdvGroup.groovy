@@ -167,6 +167,54 @@ Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolum
 Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
 Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
 
+private void sendVolumeStateEvents(Integer volumeLevel) {
+  sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+  sendEvent(name: 'groupVolume', value: volumeLevel)
+}
+
+private void sendMuteStateEvents(String muteState) {
+  sendEvent(name: 'mute', value: muteState)
+  sendEvent(name: 'groupMute', value: muteState)
+}
+
+private Map getFavoriteLoadOptionsFromPlayMode(String playMode) {
+  String normalizedPlayMode = playMode != null ? playMode.toUpperCase() : 'NORMAL'
+  String repeatMode = 'off'
+  String shuffleMode = 'off'
+
+  switch(normalizedPlayMode) {
+    case 'REPEAT_ALL':
+      repeatMode = 'repeat all'
+      break
+    case 'REPEAT_ONE':
+      repeatMode = 'repeat one'
+      break
+    case 'SHUFFLE_NOREPEAT':
+      shuffleMode = 'on'
+      break
+    case 'SHUFFLE':
+      repeatMode = 'repeat all'
+      shuffleMode = 'on'
+      break
+    case 'SHUFFLE_REPEAT_ONE':
+      repeatMode = 'repeat one'
+      shuffleMode = 'on'
+      break
+    case 'NORMAL':
+      break
+    default:
+      logWarn("Unknown favorite play mode '${playMode}', defaulting to NORMAL")
+  }
+
+  return [
+    repeatMode: repeatMode,
+    queueMode: 'replace',
+    shuffleMode: shuffleMode,
+    autoPlay: 'true',
+    crossfadeMode: 'on'
+  ]
+}
+
 
 String getCurrentTTSVoice() {
   return cachedTTSDefaultVoice != null ? cachedTTSDefaultVoice : 'Matthew'
@@ -540,7 +588,7 @@ private void setVolumeImmediate(Integer volumeLevel) {
       }
       logDebug("Setting volume on each speaker directly (grouped, non-proportional)")
       allDevs.each { it.setVolume(volumeLevel) }
-      sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+      sendVolumeStateEvents(volumeLevel)
     }
   } else {
     if(getControlUngroupedIndividuallySetting()) {
@@ -551,7 +599,7 @@ private void setVolumeImmediate(Integer volumeLevel) {
       }
       logDebug("Setting volume on each speaker individually (ungrouped)")
       allDevs.each { it.setVolume(volumeLevel) }
-      sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+      sendVolumeStateEvents(volumeLevel)
     } else {
       if(!coordinator) {
         logWarn('Coordinator device not found - cannot set volume')
@@ -560,7 +608,7 @@ private void setVolumeImmediate(Integer volumeLevel) {
       logDebug("Setting volume on coordinator only (ungrouped)")
       coordinator.setVolume(volumeLevel)
       logDebug("Sending volume event: ${volumeLevel}")
-      sendEvent(name: 'volume', value: volumeLevel, unit: '%')
+      sendVolumeStateEvents(volumeLevel)
     }
   }
 }
@@ -700,7 +748,7 @@ void mute() {
         return
       }
       allDevs.each { it.mute() }
-      sendEvent(name: 'mute', value: 'muted')
+      sendMuteStateEvents('muted')
     }
   } else {
     if(getControlUngroupedIndividuallySetting()) {
@@ -710,14 +758,14 @@ void mute() {
         return
       }
       allDevs.each { it.mute() }
-      sendEvent(name: 'mute', value: 'muted')
+      sendMuteStateEvents('muted')
     } else {
       if(!coordinator) {
         logWarn('Coordinator device not found - cannot mute')
         return
       }
       coordinator.mute()
-      sendEvent(name: 'mute', value: 'muted')
+      sendMuteStateEvents('muted')
     }
   }
 }
@@ -742,7 +790,7 @@ void unmute() {
         return
       }
       allDevs.each { it.unmute() }
-      sendEvent(name: 'mute', value: 'unmuted')
+      sendMuteStateEvents('unmuted')
     }
   } else {
     if(getControlUngroupedIndividuallySetting()) {
@@ -752,14 +800,14 @@ void unmute() {
         return
       }
       allDevs.each { it.unmute() }
-      sendEvent(name: 'mute', value: 'unmuted')
+      sendMuteStateEvents('unmuted')
     } else {
       if(!coordinator) {
         logWarn('Coordinator device not found - cannot unmute')
         return
       }
       coordinator.unmute()
-      sendEvent(name: 'mute', value: 'unmuted')
+      sendMuteStateEvents('unmuted')
     }
   }
 }
@@ -949,7 +997,9 @@ private void applyPlaybackAttributes(Map attrs) {
   attrs.each { String attrName, Object attrValue ->
     if(attrValue != null) {
       if(attrName == 'volume') {
-        sendEvent(name: 'volume', value: attrValue, unit: '%')
+        sendVolumeStateEvents(attrValue as Integer)
+      } else if(attrName == 'mute') {
+        sendMuteStateEvents(attrValue as String)
       } else {
         sendEvent(name: attrName, value: attrValue)
       }
@@ -1081,11 +1131,11 @@ void refreshAverageVolume() {
 
   if(count > 0) {
     Integer avgVolume = Math.round(totalVolume / count) as Integer
-    sendEvent(name: 'volume', value: avgVolume, unit: '%')
+    sendVolumeStateEvents(avgVolume)
   }
 
   // Mute state: muted if all players are muted
-  sendEvent(name: 'mute', value: allMuted ? 'muted' : 'unmuted')
+  sendMuteStateEvents(allMuted ? 'muted' : 'unmuted')
 }
 
 // =============================================================================
@@ -1357,7 +1407,18 @@ void loadFavoriteFull(String favoriteId, String playMode = 'NORMAL', BigDecimal 
     logWarn('Coordinator device not found - cannot load favorite')
     return
   }
-  coordinator.loadFavoriteFull(favoriteId, playMode, startTrack, startTime)
+  if((startTrack != null && startTrack.compareTo(BigDecimal.ONE) != 0) || (startTime != null && startTime.compareTo(BigDecimal.ZERO) != 0)) {
+    logWarn("Group favorite load ignores startTrack/startTime; using play mode '${playMode}' only")
+  }
+  Map options = getFavoriteLoadOptionsFromPlayMode(playMode)
+  coordinator.loadFavoriteFull(
+    favoriteId,
+    options.repeatMode as String,
+    options.queueMode as String,
+    options.shuffleMode as String,
+    options.autoPlay as String,
+    options.crossfadeMode as String
+  )
 }
 
 /**

@@ -899,7 +899,7 @@ void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(t
 @CompileStatic
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
-void setTrack(String uri) { componentSetStreamUrlLocal(uri, volume) }
+void setTrack(String uri) { componentSetStreamUrlLocal(uri) }
 void playTrack(String uri, BigDecimal volume = null) {
   if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
   else{ componentLoadStreamUrlLocal(uri, volume) }

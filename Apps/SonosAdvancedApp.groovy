@@ -513,7 +513,15 @@ void saveGroup() {
 }
 
 void deleteGroup() {
-  state.userGroups.remove(app.getSetting('newGroupName'))
+  String groupName = app.getSetting('editDeleteGroup') ?: app.getSetting('newGroupName')
+  if(!groupName) {
+    logWarn('No group selected to delete')
+    return
+  }
+  if(!state.userGroups?.containsKey(groupName)) {
+    logWarn("Group '${groupName}' not found, nothing to delete")
+  }
+  state.userGroups.remove(groupName)
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
   app.removeSetting('newGroupCoordinator')
@@ -649,13 +657,25 @@ void createGroupDevices() {
 
       } catch (UnknownDeviceTypeException e) {logError("Sonos Advanced Group driver not found: ${e.message}")}
     }
-    String groupCoordinatorId = it.value.groupCoordinatorId as String
-    String playerIds =  it.value.playerIds.join(',')
-    ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
-    String householdId = coordDev.getDataValue('householdId')
-    device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
-    device.updateDataValue('playerIds', playerIds)
-    device.updateDataValue('householdId', householdId)
+    if(device == null) {
+      logWarn("Skipping group '${it.key}' because the child device could not be created")
+    } else {
+      String groupCoordinatorId = it.value.groupCoordinatorId as String
+      String playerIds =  it.value.playerIds.join(',')
+      ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
+      device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
+      device.updateDataValue('playerIds', playerIds)
+      if(coordDev == null) {
+        logWarn("Skipping household ID update for group '${it.key}': coordinator '${groupCoordinatorId}' was not found")
+      } else {
+        String householdId = coordDev.getDataValue('householdId')
+        if(householdId != null && householdId != '') {
+          device.updateDataValue('householdId', householdId)
+        } else {
+          logWarn("Skipping household ID update for group '${it.key}': coordinator '${groupCoordinatorId}' has no householdId")
+        }
+      }
+    }
   }
   app.removeSetting('groupDevices')
   app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
