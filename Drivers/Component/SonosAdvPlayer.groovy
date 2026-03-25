@@ -4542,11 +4542,11 @@ void dequeueAudioClip() {
   // if(clipMessage?.duration != null && clipMessage?.duration > 0) {
   //   addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
   // }
-  if(clipMessage.rightChannel) {
-    sendWsMessage(clipMessage.leftChannel)
+  sendWsMessage(clipMessage.leftChannel)
+  if(clipMessage.rightChannel && rightChannel) {
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
-  } else {
-    sendWsMessage(clipMessage.leftChannel)
+  } else if(clipMessage.rightChannel) {
+    logWarn('Right channel audio clip requested but no right channel child device is available. Playing clip on left channel only.')
   }
 }
 // =============================================================================
