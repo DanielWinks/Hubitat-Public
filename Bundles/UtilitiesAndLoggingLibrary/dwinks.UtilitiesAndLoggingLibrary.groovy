@@ -122,11 +122,16 @@ void installed() {
 
 /**
  * Called when the app or driver is uninstalled.
- * Unschedules all tasks and deletes child devices.
+ * Unschedules all tasks, runs optional custom uninstall cleanup, and deletes child devices.
  */
 void uninstalled() {
   logDebug('Uninstalled...')
   unschedule()
+  try { onUninstalled() }
+  catch(MissingMethodException ignored) {}
+  catch(e) {
+    logWarn("onUninstalled() resulted in error: ${e}")
+  }
   deleteChildDevices()
 }
 
