@@ -671,6 +671,7 @@ void cleanupStaticDriverState() {
   }
 }
 
+@CompileStatic
 Integer clearStaticMap(Map map) {
   if(map == null || map.isEmpty()) { return 0 }
   Integer removedEntries = map.size()
@@ -678,6 +679,7 @@ Integer clearStaticMap(Map map) {
   return removedEntries
 }
 
+@CompileStatic
 Integer pruneStaticMapKeys(ConcurrentHashMap map, Set<String> activeKeys, String prefixDelimiter = null) {
   if(map == null || map.isEmpty() || activeKeys == null || activeKeys.isEmpty()) { return 0 }
 
@@ -694,6 +696,7 @@ Integer pruneStaticMapKeys(ConcurrentHashMap map, Set<String> activeKeys, String
   return removedEntries
 }
 
+@CompileStatic
 Integer pruneEventTimestampKeys(Set<String> activePlayerDnis) {
   if(eventTimestamps == null || eventTimestamps.isEmpty() || activePlayerDnis == null || activePlayerDnis.isEmpty()) { return 0 }
 
@@ -710,6 +713,7 @@ Integer pruneEventTimestampKeys(Set<String> activePlayerDnis) {
   return removedEntries
 }
 
+@CompileStatic
 Integer pruneFavPlaylistDelegates(Set<String> activePlayerDnis) {
   if(favPlaylistDelegate == null || favPlaylistDelegate.isEmpty() || activePlayerDnis == null || activePlayerDnis.isEmpty()) { return 0 }
 
@@ -726,6 +730,7 @@ Integer pruneFavPlaylistDelegates(Set<String> activePlayerDnis) {
   return removedEntries
 }
 
+@CompileStatic
 String extractKeyPrefix(String key, String delimiter) {
   if(key == null || delimiter == null) { return null }
   Integer delimiterIndex = key.indexOf(delimiter)
@@ -734,6 +739,7 @@ String extractKeyPrefix(String key, String delimiter) {
   return key.substring(0, delimiterIndex)
 }
 
+@CompileStatic
 String extractEventTimestampDni(String key) {
   String dni = extractKeyPrefix(key, '-last')
   if(dni == null || dni == key) {
@@ -1035,6 +1041,7 @@ void cancelVolumeFade() {
   unschedule('volumeFadeStep')
 }
 
+@CompileStatic
 Boolean isVolumeFadeInProgress() {
   String deviceId = getId()
   return deviceId ? volumeFadeState.containsKey(deviceId) : false
@@ -1217,6 +1224,7 @@ void cancelGroupVolumeFade() {
   unschedule('groupVolumeFadeStep')
 }
 
+@CompileStatic
 Boolean isGroupVolumeFadeInProgress() {
   String deviceId = getId()
   return deviceId ? groupVolumeFadeState.containsKey(deviceId) : false
@@ -1250,6 +1258,7 @@ void volumeUp() { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 @CompileStatic
 void volumeDown() { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 
+@CompileStatic
 Integer getPlayerVolumeAdjAmount() {
   Integer currentVolume = (this.device.currentValue('volume', true) as Integer) ?: 0
   if(currentVolume < 11) {
@@ -1261,6 +1270,7 @@ Integer getPlayerVolumeAdjAmount() {
   }
 }
 
+@CompileStatic
 Integer getGroupVolumeAdjAmount() {
   Integer currentVolume = (this.device.currentValue('groupVolume', true) as Integer) ?: 0
   if(currentVolume < 11) {
