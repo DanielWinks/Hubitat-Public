@@ -753,7 +753,7 @@ void clearStaticDriverStateForCurrentDevice() {
   try {
     cleanupMutexAcquired = staticStateCleanupMutex.tryAcquire(100, TimeUnit.MILLISECONDS)
   } catch(InterruptedException e) {
-    Thread.currentThread().interrupt()
+    logWarn("Interrupted while acquiring static state cleanup mutex: ${e.message}")
   }
 
   String playerId = getId()
@@ -2631,7 +2631,6 @@ Boolean tryAcquireMutexWithTimeout(Semaphore mutex, Integer timeoutSeconds, Stri
   try {
     return mutex.tryAcquire(timeoutSeconds.toLong(), TimeUnit.SECONDS)
   } catch(InterruptedException e) {
-    Thread.currentThread().interrupt()
     logWarn("Interrupted while waiting for ${lockName}: ${e.message}")
     return false
   }
