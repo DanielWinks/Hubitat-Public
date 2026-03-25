@@ -76,11 +76,12 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Issue:** Static ConcurrentHashMaps for `audioClipQueue`, `eventTimestamps`, `lastPlaybackState`, `lastWsEventLog`, `lastZgtXmlHash` grow unbounded. With many devices or long uptime, these consume memory without cleanup.
 - **Fix:** Add periodic eviction of stale entries (e.g., remove entries older than 1 hour from timestamp maps).
 
-### 12. Mutex deadlock risk in WebSocket subscription management
+### 12. Mutex deadlock risk in WebSocket subscription management [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:2350-2432`
 - **Issue:** Semaphore uses `tryAcquire()` without timeout parameter. If the thread holding the lock dies between acquire and release, subsequent operations are permanently blocked.
 - **Fix:** Use `tryAcquire(timeout, TimeUnit)` variant and ensure `finally` blocks always release.
+- **Status:** Fixed by switching the subscribe/unsubscribe mutexes to bounded `tryAcquire(..., TimeUnit.SECONDS)` waits, releasing them through guarded `finally` paths in the async callbacks, and preventing timeout fallback releases from over-incrementing permit counts.
 
 ### 13. `pendingGroupDeviceUpdates` lost on flush failure
 

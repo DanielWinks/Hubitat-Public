@@ -269,6 +269,7 @@ Boolean hasLineInCapability() {
 
 import java.util.Random
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 // =============================================================================
 // Fields
 // =============================================================================
@@ -281,6 +282,10 @@ import java.util.concurrent.Semaphore
 @Field static Semaphore mrrcSubscribeMutex = new Semaphore(1)
 @Field static Semaphore mrgrcSubscribeMutex = new Semaphore(1)
 @Field static Semaphore unsubscribeMutex = new Semaphore(4)
+@Field static final Integer SUBSCRIBE_MUTEX_MAX_PERMITS = 1
+@Field static final Integer UNSUBSCRIBE_MUTEX_MAX_PERMITS = 4
+@Field static final Integer SUBSCRIBE_MUTEX_WAIT_SECONDS = 2
+@Field static final Integer SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS = 5
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -361,11 +366,11 @@ import java.util.concurrent.Semaphore
 // Initialize and Configure
 // =============================================================================
 void initialize() {
-  avtSubscribeMutex.release()
-  zgtSubscribeMutex.release()
-  mrrcSubscribeMutex.release()
-  mrgrcSubscribeMutex.release()
-  unsubscribeMutex.release(4)
+  resetSemaphorePermits(avtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  resetSemaphorePermits(zgtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  resetSemaphorePermits(mrrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  resetSemaphorePermits(mrgrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  resetSemaphorePermits(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS)
   configure()
   // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
   Integer staggerDelay = getRandomLockRetry(3, 20)
@@ -2366,6 +2371,43 @@ Integer getRandomLockRetry(Integer low = 8, Integer high = 30) {
 }
 
 @CompileStatic
+void resetSemaphorePermits(Semaphore mutex, Integer permits) {
+  if(mutex == null) { return }
+  synchronized(mutex) {
+    mutex.drainPermits()
+    mutex.release(permits)
+  }
+}
+
+@CompileStatic
+Boolean tryAcquireMutexWithTimeout(Semaphore mutex, Integer timeoutSeconds, String lockName) {
+  if(mutex == null) {
+    logWarn("Cannot acquire ${lockName}; mutex was null")
+    return false
+  }
+
+  try {
+    return mutex.tryAcquire(timeoutSeconds.toLong(), TimeUnit.SECONDS)
+  } catch(InterruptedException e) {
+    logWarn("Interrupted while waiting for ${lockName}: ${e.message}")
+    return false
+  }
+}
+
+@CompileStatic
+void releaseMutexIfHeld(Semaphore mutex, Integer maxPermits, String lockName) {
+  if(mutex == null) { return }
+
+  synchronized(mutex) {
+    if(mutex.availablePermits() < maxPermits) {
+      mutex.release()
+    } else {
+      logTrace("Skipped extra release for ${lockName}")
+    }
+  }
+}
+
+@CompileStatic
 Semaphore getMutexForSid(String sid) {
   if(sid == 'sid1') {return avtSubscribeMutex}
   if(sid == 'sid2') {return mrrcSubscribeMutex}
@@ -2374,35 +2416,42 @@ Semaphore getMutexForSid(String sid) {
 }
 
 void unlockSubscribeMutexAfterTimeout(String sid) {
-  logTrace("Scheduling unlock of subscribeMutex in 5 seconds...")
-  runIn(5, 'unlockSubscribeMutexAfterTimeoutCallback', [overwrite: true, data:['sid':sid]])
+  logTrace("Scheduling unlock of subscribeMutex in ${SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS} seconds...")
+  runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSubscribeMutexAfterTimeoutCallback', [overwrite: true, data:['sid':sid]])
 }
 void unlockSubscribeMutexAfterTimeoutCallback(Map data) {
   Semaphore mutex = getMutexForSid(data['sid'])
-  mutex.release()
-  }
+  releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${data['sid']}")
+}
 
 void unlockUnsubscribeMutexAfterTimeout() {
-  logTrace("Scheduling unlock of unsubscribeMutex in 5 seconds...")
-  runIn(5, 'unlockUnsubscribeMutexAfterTimeoutCallback', [overwrite: true])
+  logTrace("Scheduling unlock of unsubscribeMutex in ${SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS} seconds...")
+  runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockUnsubscribeMutexAfterTimeoutCallback', [overwrite: true])
 }
-void unlockUnsubscribeMutexAfterTimeoutCallback() {unsubscribeMutex.release()}
+void unlockUnsubscribeMutexAfterTimeoutCallback() {
+  releaseMutexIfHeld(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
+}
 
 @CompileStatic
 void upnpSubscribeGeneric(String sub, String subId, String subPath, String callback, String evtSub) {
   Semaphore mutex = getMutexForSid(subId)
-  Boolean acquired = mutex.tryAcquire()
+  Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${sub} (${subId})")
   if(acquired == true) {
     logTrace('Acquired lock, proceeding to subscribe...')
     unlockSubscribeMutexAfterTimeout(subId)
+    Boolean releaseMutex = true
     try {
       if(subValid(subId) != true) {
         sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
+        releaseMutex = false
       }
     } catch(Exception e) {
       logInfo("Subscription to ${evtSub} failed due to ${e}")
       logInfo("Values used for attempt: sub:${sub} subId:${subId} subPath:${subPath} callback:${callback} evtSub:${evtSub}")
-      mutex.release()
+    } finally {
+      if(releaseMutex == true) {
+        releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${subId}")
+      }
     }
   } else {
     Integer timeout = getRandomLockRetry()
@@ -2414,20 +2463,25 @@ void upnpSubscribeGeneric(String sub, String subId, String subPath, String callb
 @CompileStatic
 void upnpResubscribeGeneric(String resub, String subId, String subPath, String callback, String evtSub) {
   Semaphore mutex = getMutexForSid(subId)
-  Boolean acquired = mutex.tryAcquire()
+  Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${resub} (${subId})")
   if(acquired == true) {
     logTrace('Acquired lock, proceeding to resubscribe...')
     unlockSubscribeMutexAfterTimeout(subId)
+    Boolean releaseMutex = true
     try {
       if(subValid(subId)) {
         sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
       } else {
         sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
       }
+      releaseMutex = false
     } catch(Exception e) {
       logInfo("Subscription to ${evtSub} failed due to ${e}")
       logInfo("Values used for attempt: resub:${resub} subId:${subId} callback:${callback} evtSub:${evtSub}")
-      mutex.release()
+    } finally {
+      if(releaseMutex == true) {
+        releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${subId}")
+      }
     }
   } else {
     Integer timeout = getRandomLockRetry()
@@ -2438,9 +2492,10 @@ void upnpResubscribeGeneric(String resub, String subId, String subPath, String c
 
 @CompileStatic
 void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evtSub, String callback) {
-  Boolean acquired = unsubscribeMutex.tryAcquire()
+  Boolean acquired = tryAcquireMutexWithTimeout(unsubscribeMutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${unsub} (${subId})")
   if(acquired == true) {
     unlockUnsubscribeMutexAfterTimeout()
+    Boolean releaseMutex = true
     try {
       // Verify all required parameters are present before attempting unsubscribe
       String localUpnpHost = getlocalUpnpHost()
@@ -2454,6 +2509,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
         sonosEventUnsubscribe(evtSub, localUpnpHost, dni, sid, callback)
         deleteSid(subId)
         removeResub(resub)
+        releaseMutex = false
       } else {
         // Log which values are missing to help with debugging
         logTrace("${unsub} skipped - missing required data: host=${localUpnpHost != null && localUpnpHost != ''}, sid=${sid != null && sid != ''}, dni=${dni != null && dni != ''}")
@@ -2463,7 +2519,10 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
       }
     } catch(Exception e) {
       logInfo("${unsub} failed due to ${e}")
-      unsubscribeMutex.release()
+    } finally {
+      if(releaseMutex == true) {
+        releaseMutexIfHeld(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
+      }
     }
   } else {
     Integer timeout = getRandomLockRetry()
@@ -2475,33 +2534,39 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 @CompileStatic
 void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {
   Semaphore mutex = getMutexForSid(subId)
-  if(response?.status == 412){
-    if(hasSid(subId)) {
-      logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
-      deleteSid(subId)
-      retrySubscription(sub, 5)
-    } else {
-      logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
-      logInfo("Values used for attempt: sub:${sub} subId:${subId} resub:${resub} domain:${domain}")
-      retrySubscription(sub, 60)
+  try {
+    if(response?.status == 412){
+      if(hasSid(subId)) {
+        logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
+        deleteSid(subId)
+        retrySubscription(sub, 5)
+      } else {
+        logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
+        logInfo("Values used for attempt: sub:${sub} subId:${subId} resub:${resub} domain:${domain}")
+        retrySubscription(sub, 60)
+      }
+    } else if(response?.status == 200) {
+      logTrace("Sucessfully subscribed to ${domain}")
+      updateSid(subId, response.headers)
+      scheduleResubscriptionToEvents(resub)
     }
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully subscribed to ${domain}")
-    updateSid(subId, response.headers)
-    scheduleResubscriptionToEvents(resub)
+  } finally {
+    releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${subId}")
   }
-  mutex.release()
 }
 
 @CompileStatic
 void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse response) {
-  if(response?.status == 412){
-    logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
-  } else if(response?.status == 200) {
-    logTrace("Sucessfully unsubscribed to ${domain}")
+  try {
+    if(response?.status == 412){
+      logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
+    } else if(response?.status == 200) {
+      logTrace("Sucessfully unsubscribed to ${domain}")
+    }
+    deleteSid(subId)
+  } finally {
+    releaseMutexIfHeld(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
   }
-  deleteSid(subId)
-  unsubscribeMutex.release()
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
