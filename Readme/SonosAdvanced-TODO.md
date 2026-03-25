@@ -52,17 +52,19 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Issue:** Empty catch blocks `catch(Exception e){}` hide failures in error reporting itself. At minimum, these should log at trace level.
 - **Fix:** Add `logTrace("Could not read error details: ${e.message}")` in catch blocks.
 
-### 8. `localControlCallback()` logs errors but never retries
+### 8. `localControlCallback()` logs errors but never retries [DONE]
 
 - **File:** `Apps/SonosAdvancedApp.groovy:2581-2592`
 - **Issue:** Failed SOAP/HTTP commands are only logged, never retried. For transient network issues, this means commands are silently lost.
 - **Fix:** Add retry logic using the existing `handleAsyncHttpFailureWithRetry()` pattern from UtilitiesAndLoggingLibrary, at least for idempotent operations.
+- **Status:** Fixed in the working tree by adding request-aware retry metadata for `localControlCallback()`, automatically retrying idempotent local GET requests, and allowing POST retries only when explicitly marked `retryable`.
 
-### 9. State updated before device operation in group rename
+### 9. State updated before device operation in group rename [DONE]
 
 - **File:** `Apps/SonosAdvancedApp.groovy:485-489`
 - **Issue:** `state.userGroups.remove(editingGroup)` runs before `setDeviceNetworkId()`. If the device op fails, state is corrupted.
 - **Fix:** Reorder to perform device operation first, then update state on success.
+- **Status:** Fixed in the working tree by keeping the old group entry until `setDeviceNetworkId()` succeeds, returning early on rename failure, and treating a label update failure as non-fatal.
 
 ### 10. Static discovery maps shared across all app instances
 
@@ -83,11 +85,11 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Fix:** Use `tryAcquire(timeout, TimeUnit)` variant and ensure `finally` blocks always release.
 - **Status:** Fixed by switching the subscribe/unsubscribe mutexes to bounded `tryAcquire(..., TimeUnit.SECONDS)` waits, releasing them through guarded `finally` paths in the async callbacks, and preventing timeout fallback releases from over-incrementing permit counts.
 
-### 13. `pendingGroupDeviceUpdates` lost on flush failure
+### 13. `pendingGroupDeviceUpdates` lost on flush failure [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:3715-3763`
 - **Issue:** `pendingGroupDeviceUpdates.remove(dni)` happens before processing. If flush fails midway, queued updates are permanently lost.
-- **Fix:** Only remove from map after successful processing, or re-insert on failure.
+- **Status:** Fixed in working tree by snapshotting pending updates before flush, clearing only successfully-forwarded values from the live queue, and rescheduling the flush when a forwarding attempt throws.
 
 ---
 

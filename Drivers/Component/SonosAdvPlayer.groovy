@@ -608,6 +608,36 @@ void cleanupStaticDriverState() {
     }
   }
 
+  if(activePlayerIds.isEmpty() && activePlayerDnis.isEmpty()) {
+    Integer clearedEntries = clearStaticMap(audioClipQueue)
+    clearedEntries += clearStaticMap(audioClipQueueHighPriority)
+    clearedEntries += clearStaticMap(audioClipQueueSaved)
+    clearedEntries += clearStaticMap(audioClipQueueTimers)
+    clearedEntries += clearStaticMap(groupsRegistry)
+    clearedEntries += clearStaticMap(statesRegistry)
+    clearedEntries += clearStaticMap(favoritesMap)
+    clearedEntries += clearStaticMap(playlistsMap)
+    clearedEntries += clearStaticMap(volumeFadeState)
+    clearedEntries += clearStaticMap(groupVolumeFadeState)
+    clearedEntries += clearStaticMap(lastVolumeFadeCallTime)
+    clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
+    clearedEntries += clearStaticMap(favoriteRetryState)
+    clearedEntries += clearStaticMap(playlistRetryState)
+    clearedEntries += clearStaticMap(pendingGroupDeviceUpdates)
+    clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
+    clearedEntries += clearStaticMap(lastMetadataContainerId)
+    clearedEntries += clearStaticMap(lastPlaybackState)
+    clearedEntries += clearStaticMap(lastWsEventLog)
+    clearedEntries += clearStaticMap(lastZgtXmlHash)
+    clearedEntries += clearStaticMap(wsSubscriptionStatus)
+    clearedEntries += clearStaticMap(jsonSlurpers)
+    clearedEntries += clearStaticMap(eventTimestamps)
+    clearedEntries += clearStaticMap(favPlaylistDelegate)
+    if(clearedEntries > 0) {
+      logDebug("Cleared ${clearedEntries} orphaned static Sonos Advanced Player cache entries with no active players present")
+    }
+    return
+  }
   if(activePlayerIds.isEmpty() || activePlayerDnis.isEmpty()) { return }
 
   Integer removedEntries = 0
@@ -639,6 +669,13 @@ void cleanupStaticDriverState() {
   if(removedEntries > 0) {
     logDebug("Cleaned ${removedEntries} orphaned static Sonos Advanced Player cache entries")
   }
+}
+
+Integer clearStaticMap(Map map) {
+  if(map == null || map.isEmpty()) { return 0 }
+  Integer removedEntries = map.size()
+  map.clear()
+  return removedEntries
 }
 
 Integer pruneStaticMapKeys(ConcurrentHashMap map, Set<String> activeKeys, String prefixDelimiter = null) {
@@ -692,7 +729,8 @@ Integer pruneFavPlaylistDelegates(Set<String> activePlayerDnis) {
 String extractKeyPrefix(String key, String delimiter) {
   if(key == null || delimiter == null) { return null }
   Integer delimiterIndex = key.indexOf(delimiter)
-  if(delimiterIndex <= 0) { return key }
+  if(delimiterIndex < 0) { return key }
+  if(delimiterIndex == 0) { return null }
   return key.substring(0, delimiterIndex)
 }
 
@@ -705,39 +743,52 @@ String extractEventTimestampDni(String key) {
 }
 
 void clearStaticDriverStateForCurrentDevice() {
+  Boolean cleanupMutexAcquired = false
+  try {
+    cleanupMutexAcquired = staticStateCleanupMutex.tryAcquire(100, TimeUnit.MILLISECONDS)
+  } catch(InterruptedException e) {
+    Thread.currentThread().interrupt()
+  }
+
   String playerId = getId()
   String dni = getDeviceDNI()
 
-  if(playerId != null && playerId != '') {
-    audioClipQueue?.remove(playerId)
-    audioClipQueueHighPriority?.remove(playerId)
-    audioClipQueueSaved?.remove(playerId)
-    audioClipQueueTimers?.remove(playerId)
-    groupsRegistry?.remove(playerId)
-    statesRegistry?.remove(playerId)
-    favoritesMap?.remove(playerId)
-    playlistsMap?.remove(playerId)
-    volumeFadeState?.remove(playerId)
-    groupVolumeFadeState?.remove(playerId)
-    lastVolumeFadeCallTime?.remove(playerId)
-    lastGroupVolumeFadeCallTime?.remove(playerId)
-  }
+  try {
+    if(playerId != null && playerId != '') {
+      audioClipQueue?.remove(playerId)
+      audioClipQueueHighPriority?.remove(playerId)
+      audioClipQueueSaved?.remove(playerId)
+      audioClipQueueTimers?.remove(playerId)
+      groupsRegistry?.remove(playerId)
+      statesRegistry?.remove(playerId)
+      favoritesMap?.remove(playerId)
+      playlistsMap?.remove(playerId)
+      volumeFadeState?.remove(playerId)
+      groupVolumeFadeState?.remove(playerId)
+      lastVolumeFadeCallTime?.remove(playerId)
+      lastGroupVolumeFadeCallTime?.remove(playerId)
+    }
 
-  if(dni != null && dni != '') {
-    favoriteRetryState?.remove(dni)
-    playlistRetryState?.remove(dni)
-    pendingGroupDeviceUpdates?.remove(dni)
-    pendingLocalDeviceEvents?.remove(dni)
-    lastMetadataContainerId?.remove(dni)
-    lastPlaybackState?.remove(dni)
-    lastWsEventLog?.remove(dni)
-    lastZgtXmlHash?.remove(dni)
-    jsonSlurpers?.remove(dni)
-    wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
-    eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
-  }
+    if(dni != null && dni != '') {
+      favoriteRetryState?.remove(dni)
+      playlistRetryState?.remove(dni)
+      pendingGroupDeviceUpdates?.remove(dni)
+      pendingLocalDeviceEvents?.remove(dni)
+      lastMetadataContainerId?.remove(dni)
+      lastPlaybackState?.remove(dni)
+      lastWsEventLog?.remove(dni)
+      lastZgtXmlHash?.remove(dni)
+      jsonSlurpers?.remove(dni)
+      wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
+      eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+    }
 
-  releaseFavPlaylistDelegate()
+    releaseFavPlaylistDelegate()
+  } finally {
+    if(cleanupMutexAcquired) {
+      staticStateCleanupMutex.release()
+    }
+  }
 }
 
 void uninstalled() {
@@ -2520,6 +2571,7 @@ Boolean subValid(String sid) {
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
+  maybeCleanupStaticDriverState()
   Long expiresEpoch = Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)
   // Store expiry in-memory for subValid() checks
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
@@ -2545,12 +2597,14 @@ Integer getRandomLockRetry(Integer low = 8, Integer high = 30) {
   return Math.abs( rand.nextInt() % (high - low) ) + low
 }
 
+@CompileStatic
 void normalizeSemaphorePermits(Semaphore mutex, Integer permits) {
   if(mutex == null) { return }
 
   synchronized(mutex) {
     Integer availablePermits = mutex.availablePermits()
     if(availablePermits > permits) {
+      logTrace("Normalizing semaphore permits from ${availablePermits} to ${permits}")
       mutex.drainPermits()
       mutex.release(permits)
     }
@@ -3993,6 +4047,27 @@ void queueGroupDeviceUpdate(Map attributes) {
   runIn(1, 'flushPendingGroupDeviceUpdates', [overwrite: true])
 }
 
+Map<String, Object> getPendingGroupDeviceUpdateSnapshot(String dni) {
+  ConcurrentHashMap<String, Object> pending = pendingGroupDeviceUpdates[dni]
+  if(pending == null || pending.isEmpty()) {
+    return [:]
+  }
+  return new LinkedHashMap<String, Object>(pending)
+}
+
+void clearFlushedGroupDeviceUpdates(String dni, Map<String, Object> flushedAttributes) {
+  if(flushedAttributes == null || flushedAttributes.isEmpty()) { return }
+
+  ConcurrentHashMap<String, Object> pending = pendingGroupDeviceUpdates[dni]
+  if(pending == null || pending.isEmpty()) { return }
+
+  flushedAttributes.each { String attrName, Object attrValue ->
+    if(pending[attrName] == attrValue) {
+      pending.remove(attrName)
+    }
+  }
+}
+
 /**
  * Flush all pending group device updates in a single consolidated path.
  * Forwards queued attributes to BOTH follower player devices AND group devices,
@@ -4006,48 +4081,55 @@ void flushPendingGroupDeviceUpdates() {
     pendingGroupDeviceUpdates.remove(dni)
     return
   }
-  ConcurrentHashMap<String, Object> pending = pendingGroupDeviceUpdates.remove(dni)
-  if(!pending || pending.isEmpty()) { return }
+  Map<String, Object> pendingSnapshot = getPendingGroupDeviceUpdateSnapshot(dni)
+  if(!pendingSnapshot || pendingSnapshot.isEmpty()) { return }
   String coordinatorId = getId()
-  logDebug("flushPendingGroupDeviceUpdates: Forwarding ${pending.size()} attributes to followers and group devices")
+  logDebug("flushPendingGroupDeviceUpdates: Forwarding ${pendingSnapshot.size()} attributes to followers and group devices")
 
-  // Forward to follower player devices (consolidated from former sendEventsToGroupMembers)
-  List<String> followerDNIs = getGroupFollowerDNIs()
-  if(followerDNIs) {
-    pending.each { String attrName, Object attrValue ->
-      if(attrValue == null) { return }
-      // Map internal queue keys to public attribute names for follower players
-      String eventName = attrName
-      if(attrName == '_groupVolume') { eventName = 'groupVolume' }
-      else if(attrName == '_groupMute') { eventName = 'groupMute' }
-      followerDNIs.each { String followerDNI ->
-        parentSendEventToDNI(followerDNI, eventName, attrValue)
+  try {
+    // Forward to follower player devices (consolidated from former sendEventsToGroupMembers)
+    List<String> followerDNIs = getGroupFollowerDNIs()
+    if(followerDNIs) {
+      pendingSnapshot.each { String attrName, Object attrValue ->
+        if(attrValue == null) { return }
+        // Map internal queue keys to public attribute names for follower players
+        String eventName = attrName
+        if(attrName == '_groupVolume') { eventName = 'groupVolume' }
+        else if(attrName == '_groupMute') { eventName = 'groupMute' }
+        followerDNIs.each { String followerDNI ->
+          parentSendEventToDNI(followerDNI, eventName, attrValue)
+        }
       }
     }
-  }
 
-  // Extract volume-specific keys and build volume attrs map for group devices
-  Map volumeAttrs = null
-  try {
-    Object rawVol = pending.remove('_groupVolume')
-    Object rawMute = pending.remove('_groupMute')
-    if(rawVol != null || rawMute != null) {
-      Integer vol = rawVol != null ? rawVol as Integer : (getGroupVolumeState() ?: 0)
-      String mute = rawMute != null ? rawMute as String : getGroupMuteState()
-      // Do not include 'switch' here — the parent app's updateGroupDevices() is the
-      // sole authority on group device switch state because it checks exact membership.
-      // Including switch here caused the player's broad "isGrouped" check to override
-      // the parent's more precise determination, leaking playback attributes through
-      // the guard when the group device should be inactive.
-      volumeAttrs = [volume: vol, mute: mute]
+    // Extract volume-specific keys and build volume attrs map for group devices
+    Map<String, Object> playbackAttrs = new LinkedHashMap<String, Object>(pendingSnapshot)
+    Map volumeAttrs = null
+    try {
+      Object rawVol = playbackAttrs.remove('_groupVolume')
+      Object rawMute = playbackAttrs.remove('_groupMute')
+      if(rawVol != null || rawMute != null) {
+        Integer vol = rawVol != null ? rawVol as Integer : (getGroupVolumeState() ?: 0)
+        String mute = rawMute != null ? rawMute as String : getGroupMuteState()
+        // Do not include 'switch' here — the parent app's updateGroupDevices() is the
+        // sole authority on group device switch state because it checks exact membership.
+        // Including switch here caused the player's broad "isGrouped" check to override
+        // the parent's more precise determination, leaking playback attributes through
+        // the guard when the group device should be inactive.
+        volumeAttrs = [volume: vol, mute: mute]
+      }
+    } catch(Exception e) {
+      logWarn("Error preparing volume state for group devices: ${e.message}")
     }
-  } catch(Exception e) { logWarn("Error preparing volume state for group devices: ${e.message}") }
 
-  // Send everything in one combined call — resolves group devices once
-  try {
-    Map playbackAttrs = pending.isEmpty() ? null : (pending as Map)
-    parent?.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrs)
-  } catch(Exception e) { logWarn("Error flushing state to group devices: ${e.message}") }
+    // Send everything in one combined call — resolves group devices once
+    Map playbackAttrsForParent = playbackAttrs.isEmpty() ? null : playbackAttrs
+    parent?.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrsForParent)
+    clearFlushedGroupDeviceUpdates(dni, pendingSnapshot)
+  } catch(Exception e) {
+    logWarn("Error flushing pending group device updates for ${device.displayName}: ${e.message}")
+    runIn(1, 'flushPendingGroupDeviceUpdates', [overwrite: true])
+  }
 }
 
 @CompileStatic
@@ -5098,7 +5180,6 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 @CompileStatic
 void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
-  maybeCleanupStaticDriverState()
   String dni = device.getDeviceNetworkId()
   groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.computeIfAbsent(dni, { String ignored ->
     new groovy.json.JsonSlurper()

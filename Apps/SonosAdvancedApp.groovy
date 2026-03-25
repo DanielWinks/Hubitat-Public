@@ -487,20 +487,20 @@ void saveGroup() {
     String newDni = "${app.id}-SonosGroupDevice-${newName}"
     DeviceWrapper existingDevice = getChildDevice(oldDni)
     if(existingDevice) {
-        try {
-          existingDevice.setDeviceNetworkId(newDni)
-        } catch (Exception e) {
-          logError("Failed to rename group device from '${editingGroup}' to '${newName}': ${e.message}")
-          return
-        }
-        try {
-          existingDevice.setLabel("Sonos Group: ${newName}")
-        } catch (Exception e) {
-          logWarn("Renamed group device DNI for '${editingGroup}', but could not update the label: ${e.message}")
-        }
+      try {
+        existingDevice.setDeviceNetworkId(newDni)
+      } catch (Exception e) {
+        logError("Failed to rename group device from '${editingGroup}' to '${newName}': ${e.message}")
+        return
+      }
+      try {
+        existingDevice.setLabel("Sonos Group: ${newName}")
+      } catch (Exception e) {
+        logWarn("Renamed group device DNI for '${editingGroup}', but could not update the label: ${e.message}")
+      }
       logInfo("Renamed group device from '${editingGroup}' to '${newName}'")
     }
-      state.userGroups.remove(editingGroup)
+    state.userGroups.remove(editingGroup)
   }
 
   state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
@@ -2652,6 +2652,7 @@ void sendLocalJsonAsync(Map args) {
 void localControlCallback(AsyncResponse response, Map data) {
   Map retryRequest = data?.get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map ? data[LOCAL_CONTROL_RETRY_DATA_KEY] as Map : null
   Map scheduledRetryRequest = state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] instanceof Map ? state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] as Map : null
+  Boolean requestMatchesScheduledRetry = retryRequest?.requestId != null && scheduledRetryRequest?.requestId == retryRequest?.requestId
   if (response?.status != 200 || response.hasError()) {
     logError("Request returned HTTP status ${response.status}")
     logError("Request error message: ${response.getErrorMessage()}")
@@ -2660,10 +2661,14 @@ void localControlCallback(AsyncResponse response, Map data) {
     try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
     Boolean retryScheduled = false
     if(retryRequest?.retryable == true) {
-      state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] = retryRequest
-      retryScheduled = handleAsyncHttpFailureWithRetry(response, 'executeLocalControlRetry', LOCAL_CONTROL_RETRY_STATE_KEY)
+      if(scheduledRetryRequest == null || requestMatchesScheduledRetry) {
+        state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] = retryRequest
+        retryScheduled = handleAsyncHttpFailureWithRetry(response, 'executeLocalControlRetry', LOCAL_CONTROL_RETRY_STATE_KEY)
+      } else {
+        logWarn("Skipping local control auto-retry for ${retryRequest.method} ${retryRequest?.params?.uri} because another retry is already pending")
+      }
     }
-    if(retryScheduled == false) {
+    if(retryScheduled == false && (scheduledRetryRequest == null || requestMatchesScheduledRetry)) {
       state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
       resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
     }
