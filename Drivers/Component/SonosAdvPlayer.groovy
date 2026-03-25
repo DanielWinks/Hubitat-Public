@@ -797,7 +797,7 @@ void clearStaticDriverStateForCurrentDevice() {
   }
 }
 
-void uninstalled() {
+void onUninstalled() {
   clearStaticDriverStateForCurrentDevice()
 }
 
