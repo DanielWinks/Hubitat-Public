@@ -57,14 +57,14 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **File:** `Apps/SonosAdvancedApp.groovy:2581-2592`
 - **Issue:** Failed SOAP/HTTP commands are only logged, never retried. For transient network issues, this means commands are silently lost.
 - **Fix:** Add retry logic using the existing `handleAsyncHttpFailureWithRetry()` pattern from UtilitiesAndLoggingLibrary, at least for idempotent operations.
-- **Status:** Fixed in the working tree by adding request-aware retry metadata for `localControlCallback()`, automatically retrying idempotent local GET requests, and allowing POST retries only when explicitly marked `retryable`.
+- **Status:** Fixed across commits `a01d35e` and `95ad2fb` by adding request-aware retry metadata for `localControlCallback()`, automatically retrying idempotent local GET requests, allowing POST retries only when explicitly marked `retryable`, and preventing overlapping retries from replaying or clearing the wrong request state.
 
 ### 9. State updated before device operation in group rename [DONE]
 
 - **File:** `Apps/SonosAdvancedApp.groovy:485-489`
 - **Issue:** `state.userGroups.remove(editingGroup)` runs before `setDeviceNetworkId()`. If the device op fails, state is corrupted.
 - **Fix:** Reorder to perform device operation first, then update state on success.
-- **Status:** Fixed in the working tree by keeping the old group entry until `setDeviceNetworkId()` succeeds, returning early on rename failure, and treating a label update failure as non-fatal.
+- **Status:** Fixed in commit `7786b2b` by keeping the old group entry until `setDeviceNetworkId()` succeeds, returning early on rename failure, and treating a label update failure as non-fatal.
 
 ### 10. Static discovery maps shared across all app instances
 
@@ -76,20 +76,20 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:264-280`
 - **Issue:** Static ConcurrentHashMaps for `audioClipQueue`, `eventTimestamps`, `lastPlaybackState`, `lastWsEventLog`, `lastZgtXmlHash` grow unbounded. With many devices or long uptime, these consume memory without cleanup.
-- **Status:** Fixed in the working tree by adding a rate-limited cleanup pass that prunes orphaned static cache entries against the parent app's active Sonos player registry, plus explicit per-device cleanup on driver uninstall.
+- **Status:** Fixed across commits `7786b2b` and `92460d5` by adding a rate-limited cleanup pass that prunes orphaned static cache entries against the parent app's active Sonos player registry, clearing all static caches when no players remain, and wiring per-device cleanup through `onUninstalled()` so the shared library uninstall flow runs it reliably.
 
 ### 12. Mutex deadlock risk in WebSocket subscription management [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:2350-2432`
 - **Issue:** Semaphore uses `tryAcquire()` without timeout parameter. If the thread holding the lock dies between acquire and release, subsequent operations are permanently blocked.
 - **Fix:** Use `tryAcquire(timeout, TimeUnit)` variant and ensure `finally` blocks always release.
-- **Status:** Fixed by switching the subscribe/unsubscribe mutexes to bounded `tryAcquire(..., TimeUnit.SECONDS)` waits, releasing them through guarded `finally` paths in the async callbacks, and preventing timeout fallback releases from over-incrementing permit counts.
+- **Status:** Fixed in commit `d177eb0`, with follow-up hardening in `db12764` and `7ded071`, by switching the subscribe/unsubscribe mutexes to bounded `tryAcquire(..., TimeUnit.SECONDS)` waits, releasing them through guarded `finally` paths in the async callbacks, preventing timeout fallback releases from over-incrementing permit counts, and improving interruption handling/logging for Hubitat's runtime constraints.
 
 ### 13. `pendingGroupDeviceUpdates` lost on flush failure [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:3715-3763`
 - **Issue:** `pendingGroupDeviceUpdates.remove(dni)` happens before processing. If flush fails midway, queued updates are permanently lost.
-- **Status:** Fixed in working tree by snapshotting pending updates before flush, clearing only successfully-forwarded values from the live queue, and rescheduling the flush when a forwarding attempt throws.
+- **Status:** Fixed in commit `95ad2fb` by snapshotting pending updates before flush, clearing only successfully-forwarded values from the live queue, and rescheduling the flush when a forwarding attempt throws.
 
 ---
 
@@ -118,13 +118,14 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:4799-4810`
 - **Issue:** `putIfAbsent()` creates object before check. Use `computeIfAbsent()` instead for lazy initialization.
 - **Fix:** Replace `putIfAbsent` pattern with `computeIfAbsent`.
-- **Status:** Fixed in the working tree by switching the per-device `JsonSlurper` cache to `ConcurrentHashMap.computeIfAbsent(...)`, which avoids allocating a new parser when one is already cached.
+- **Status:** Fixed in commit `7786b2b` by switching the per-device `JsonSlurper` cache to `ConcurrentHashMap.computeIfAbsent(...)`, which avoids allocating a new parser when one is already cached.
 
 ### 18. More methods should use `@CompileStatic`
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy` (throughout)
 - **Issue:** Only a few methods use `@CompileStatic`. Adding it to more pure-logic methods would improve performance and catch type errors at compile time.
 - **Fix:** Add `@CompileStatic` to methods that don't rely on dynamic dispatch.
+- **Status:** Partially addressed in commit `7a9a737`, which added `@CompileStatic` to 10 helper methods involved in static map cleanup, volume fade state checks, and volume adjustment calculations. Additional pure-logic methods may still be candidates.
 
 ---
 
