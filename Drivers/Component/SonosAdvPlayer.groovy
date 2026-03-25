@@ -369,11 +369,11 @@ import java.util.concurrent.TimeUnit
 // Initialize and Configure
 // =============================================================================
 void initialize() {
-  resetSemaphorePermits(avtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  resetSemaphorePermits(zgtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  resetSemaphorePermits(mrrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  resetSemaphorePermits(mrgrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  resetSemaphorePermits(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS)
+  normalizeSemaphorePermits(avtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  normalizeSemaphorePermits(zgtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  normalizeSemaphorePermits(mrrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  normalizeSemaphorePermits(mrgrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
+  normalizeSemaphorePermits(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS)
   maybeCleanupStaticDriverState()
   configure()
   // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
@@ -2545,12 +2545,15 @@ Integer getRandomLockRetry(Integer low = 8, Integer high = 30) {
   return Math.abs( rand.nextInt() % (high - low) ) + low
 }
 
-@CompileStatic
-void resetSemaphorePermits(Semaphore mutex, Integer permits) {
+void normalizeSemaphorePermits(Semaphore mutex, Integer permits) {
   if(mutex == null) { return }
+
   synchronized(mutex) {
-    mutex.drainPermits()
-    mutex.release(permits)
+    Integer availablePermits = mutex.availablePermits()
+    if(availablePermits > permits) {
+      mutex.drainPermits()
+      mutex.release(permits)
+    }
   }
 }
 
@@ -2564,6 +2567,7 @@ Boolean tryAcquireMutexWithTimeout(Semaphore mutex, Integer timeoutSeconds, Stri
   try {
     return mutex.tryAcquire(timeoutSeconds.toLong(), TimeUnit.SECONDS)
   } catch(InterruptedException e) {
+    Thread.currentThread().interrupt()
     logWarn("Interrupted while waiting for ${lockName}: ${e.message}")
     return false
   }
@@ -2588,6 +2592,8 @@ Semaphore getMutexForSid(String sid) {
   if(sid == 'sid2') {return mrrcSubscribeMutex}
   if(sid == 'sid3') {return zgtSubscribeMutex}
   if(sid == 'sid4') {return mrgrcSubscribeMutex}
+  logWarn("Unknown subscription sid '${sid}'")
+  return null
 }
 
 void unlockSubscribeMutexAfterTimeout(String sid) {

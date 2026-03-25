@@ -70,11 +70,11 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Issue:** `discoveredSonoses` and `discoveredSonosSecondaries` are `@Field static` — shared across ALL instances of the app. Multiple Sonos Advanced installs will overwrite each other's discovery data.
 - **Fix:** Key the maps by app instance ID, or use instance-scoped state instead of static fields.
 
-### 11. Unbounded growth of static maps in SonosAdvPlayer
+### 11. Unbounded growth of static maps in SonosAdvPlayer [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:264-280`
 - **Issue:** Static ConcurrentHashMaps for `audioClipQueue`, `eventTimestamps`, `lastPlaybackState`, `lastWsEventLog`, `lastZgtXmlHash` grow unbounded. With many devices or long uptime, these consume memory without cleanup.
-- **Fix:** Add periodic eviction of stale entries (e.g., remove entries older than 1 hour from timestamp maps).
+- **Status:** Fixed in the working tree by adding a rate-limited cleanup pass that prunes orphaned static cache entries against the parent app's active Sonos player registry, plus explicit per-device cleanup on driver uninstall.
 
 ### 12. Mutex deadlock risk in WebSocket subscription management [DONE]
 
