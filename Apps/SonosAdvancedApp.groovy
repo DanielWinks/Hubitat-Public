@@ -1443,7 +1443,7 @@ LinkedHashMap getPlayerInfoLocalSync(String ipAddress) {
 GPathResult getDeviceDescriptionLocalSync(String ipAddress) {
   if(!ipAddress.contains(':')) { ipAddress = "${ipAddress}:1400"}
   Map params = [
-    uri:  "http://${ipAddress}/xml/device_description.xml",,
+    uri:  "http://${ipAddress}/xml/device_description.xml",
     requestContentType: 'application/xml',
     contentType: 'application/xml'
   ]
