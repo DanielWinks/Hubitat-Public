@@ -844,7 +844,11 @@ void selectLineIn() {
   String rinconId = getId()
   String lineInURI = "x-rincon-stream:${rinconId}"
   logInfo("Switching to Line-In source: ${lineInURI}")
-  setAVTransportURIAndPlay(lineInURI)
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [CurrentURI: lineInURI]
+  Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
+  asynchttpPost('localControlCallback', params)
+  play()
 }
 
 void selectTV() {
@@ -855,7 +859,11 @@ void selectTV() {
   String rinconId = getId()
   String tvURI = "x-sonos-htastream:${rinconId}:spdif"
   logInfo("Switching to TV source: ${tvURI}")
-  setAVTransportURIAndPlay(tvURI)
+  String ip = getDeviceDataValue('localUpnpHost')
+  Map controlValues = [CurrentURI: tvURI]
+  Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
+  asynchttpPost('localControlCallback', params)
+  play()
 }
 
 void muteGroup(){
