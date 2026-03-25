@@ -22,10 +22,10 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Issue:** Pattern `parent?.getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()` uses safe-nav on `parent` but not on the return value of `getDeviceFromRincon()` which can return null.
 - **Fix:** Change to `parent?.getDeviceFromRincon(getGroupCoordinatorId())?.muteGroup()` (and similar for all chained calls).
 
-### 4. Null `getDataValue('playerIds')` in `getAllPlayersForGroupDevice()`
-- **File:** `Apps/SonosAdvancedApp.groovy:1414`
-- **Issue:** `device.getDataValue('playerIds').split(',')` will NPE if the data value is null.
-- **Fix:** Add null guard before `.split()`.
+### 4. Resolved: Null `getDataValue('playerIds')` in group device player parsing
+- **Files:** `Apps/SonosAdvancedApp.groovy`
+- **Issue:** `device.getDataValue('playerIds').split(',')` could NPE if the data value was null.
+- **Resolution:** `getAllPlayersForGroupDevice()` now guards both `groupCoordinatorId` and `playerIds`, and `updateGroupDevices()` reuses that helper instead of tokenizing `playerIds` directly.
 
 ### 5. Null coordinator in `updateGroupDevices()` passed to `notifyGroupDeviceActivated()`
 - **Status:** Addressed

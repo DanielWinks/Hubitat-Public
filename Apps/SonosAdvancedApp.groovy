@@ -1410,8 +1410,15 @@ Map getGroupDevicesAndRinconMap(String coordinatorId) {
 }
 
 List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
-  List<String> playerIds = [device.getDataValue('groupCoordinatorId')]
-  playerIds.addAll(device.getDataValue('playerIds').split(','))
+  String coordinatorId = device.getDataValue('groupCoordinatorId')
+  String playerIdsStr = device.getDataValue('playerIds')
+  List<String> playerIds = []
+  if(coordinatorId) {
+    playerIds.add(coordinatorId)
+  }
+  if(playerIdsStr) {
+    playerIds.addAll(playerIdsStr.tokenize(','))
+  }
   return playerIds
 }
 
@@ -1607,10 +1614,8 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   String joinedPlayersValue = joinedPlayerNames.join(', ')
 
   groupsForCoord.each{gd ->
-    List<String> playerIds = gd.getDataValue('playerIds').tokenize(',')
-    HashSet<String> list1 = new  HashSet<String>(playerIds)
+    HashSet<String> list1 = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> list2 = new  HashSet<String>(playersInGroup)
-    list1.add(coordinatorId)
     list2.add(coordinatorId)
     Boolean allPlayersAreGrouped = list1.equals(list2)
     Boolean wasActive = gd.currentValue('switch') == 'on'
