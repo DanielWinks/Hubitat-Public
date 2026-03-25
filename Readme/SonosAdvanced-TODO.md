@@ -12,37 +12,37 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 
 - **File:** `Apps/SonosAdvancedApp.groovy:1439`
 - **Issue:** `uri: "http://${ipAddress}/xml/device_description.xml",,` has a trailing double comma in the map literal. Groovy may treat this as a null entry or fail at parse time.
-- **Status:** Fixed in branch `fix/issue-1-double-comma-syntax` by removing the extra comma from the map literal.
+- **Status:** Fixed in commit `72c5ff9` by removing the extra comma from the map literal. The TODO status was refreshed in `938d675`.
 
-### 2. Null pointer in `dequeueAudioClip()` when rightChannel is null
+### 2. Null pointer in `dequeueAudioClip()` when rightChannel is null [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:4504-4506`
 - **Issue:** `rightChannel` (line 4470) can be null if no right channel child device exists. Line 4504 checks `clipMessage.rightChannel` (the message data), but line 4506 calls `rightChannel.playerLoadAudioClip()` on the potentially-null device wrapper.
-- **Fix:** Add null guard: `if(clipMessage.rightChannel && rightChannel) {`
+- **Status:** Fixed in commit `442a1a3` by always sending the left-channel clip first, guarding the right-channel playback call with `rightChannel`, and logging a warning when a right-channel clip is requested but no child device is available.
 
-### 3. Unsafe chained calls after `getDeviceFromRincon()` - multiple locations
+### 3. Unsafe chained calls after `getDeviceFromRincon()` - multiple locations [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:832, 840, 850`
 - **Issue:** Pattern `parent?.getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()` uses safe-nav on `parent` but not on the return value of `getDeviceFromRincon()` which can return null.
-- **Fix:** Change to `parent?.getDeviceFromRincon(getGroupCoordinatorId())?.muteGroup()` (and similar for all chained calls).
+- **Status:** Fixed in commit `809ff19` by adding safe navigation to the coordinator lookup result across the affected group-control delegation paths.
 
-### 4. Resolved: Null `getDataValue('playerIds')` in group device player parsing
-- **Files:** `Apps/SonosAdvancedApp.groovy`
-- **Issue:** `device.getDataValue('playerIds').split(',')` could NPE if the data value was null.
-- **Resolution:** `getAllPlayersForGroupDevice()` now guards both `groupCoordinatorId` and `playerIds`, and `updateGroupDevices()` reuses that helper instead of tokenizing `playerIds` directly.
+### 4. Null `getDataValue('playerIds')` in `getAllPlayersForGroupDevice()` [DONE]
 
-### 5. Null coordinator in `updateGroupDevices()` passed to `notifyGroupDeviceActivated()`
-- **Status:** Addressed
-- **File:** `Apps/SonosAdvancedApp.groovy`
-- **Resolution:** The activation path now makes the null-coordinator case explicit by logging a warning and replaying the group device's held state when the coordinator cannot be resolved.
+- **File:** `Apps/SonosAdvancedApp.groovy:1414`
+- **Issue:** `device.getDataValue('playerIds').split(',')` will NPE if the data value is null.
+- **Status:** Fixed in commit `227a147` by guarding both `groupCoordinatorId` and `playerIds`, and by reusing `getAllPlayersForGroupDevice()` from `updateGroupDevices()` instead of tokenizing `playerIds` directly.
 
-### 6. Null `groupId` in `getGroupCoordinatorForPlayerDeviceLocal()`
+### 5. Null coordinator in `updateGroupDevices()` passed to `notifyGroupDeviceActivated()` [DONE]
+
+- **File:** `Apps/SonosAdvancedApp.groovy:1606-1607`
+- **Issue:** `rinconMap[coordinatorId]` can be null. It's passed directly to `notifyGroupDeviceActivated(gd, coordinator)` without null check.
+- **Status:** Addressed across commits `c8103fd` and `3d32971`. The activation path now tolerates a missing coordinator by logging a warning and replaying held state instead of assuming the coordinator exists.
+
+### 6. Null `groupId` in `getGroupCoordinatorForPlayerDeviceLocal()` [DONE]
 
 - **File:** `Apps/SonosAdvancedApp.groovy:1528`
 - **Issue:** If the httpPost callback fails or device is unreachable, `groupId` remains null. `groupId.tokenize(':')[0]` will NPE.
-- **Fix:** Add null check on `groupId` before tokenizing.
-
----
+- **Status:** Fixed in commit `c8103fd` by guarding missing `localUpnpHost`, returning early when `groupId` is null or empty, validating the tokenized result, and only resolving the coordinator when a usable group ID is present.
 
 ## MEDIUM Priority - Reliability & Error Handling
 
