@@ -111,11 +111,12 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Issue:** `getRightChannelRincon()` called twice in the same conditional check.
 - **Fix:** Cache result in a local variable.
 
-### 17. JsonSlurper caching creates unnecessary garbage
+### 17. JsonSlurper caching creates unnecessary garbage [DONE]
 
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:4799-4810`
 - **Issue:** `putIfAbsent()` creates object before check. Use `computeIfAbsent()` instead for lazy initialization.
 - **Fix:** Replace `putIfAbsent` pattern with `computeIfAbsent`.
+- **Status:** Fixed in the working tree by switching the per-device `JsonSlurper` cache to `ConcurrentHashMap.computeIfAbsent(...)`, which avoids allocating a new parser when one is already cached.
 
 ### 18. More methods should use `@CompileStatic`
 

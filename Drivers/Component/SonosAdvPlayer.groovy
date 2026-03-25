@@ -313,6 +313,9 @@ import java.util.concurrent.TimeUnit
   "x-rincon-queue": "Sonos Q"
 ]
 @Field final Integer RESUB_INTERVAL = 3600
+@Field private final Integer STATIC_STATE_CLEANUP_INTERVAL_SECONDS = 900
+@Field static volatile Long lastStaticStateCleanupEpoch = 0L
+@Field static Semaphore staticStateCleanupMutex = new Semaphore(1)
 
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
 @Field private final String MRAVT_EVENTS_CALLBACK =  'subscribeResubscribeToMrAvTCallback'
@@ -371,6 +374,7 @@ void initialize() {
   resetSemaphorePermits(mrrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
   resetSemaphorePermits(mrgrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
   resetSemaphorePermits(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS)
+  maybeCleanupStaticDriverState()
   configure()
   // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
   Integer staggerDelay = getRandomLockRetry(3, 20)
@@ -570,8 +574,179 @@ void migrationCleanup() {
   }
 }
 
+void maybeCleanupStaticDriverState() {
+  Long nowEpoch = Instant.now().getEpochSecond()
+  Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
+  if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
+  if(!staticStateCleanupMutex.tryAcquire()) { return }
+
+  try {
+    lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
+    if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
+    cleanupStaticDriverState()
+    lastStaticStateCleanupEpoch = nowEpoch
+  } finally {
+    staticStateCleanupMutex.release()
+  }
+}
+
+void cleanupStaticDriverState() {
+  InstalledAppWrapper parentApp = getParentApp()
+  if(parentApp == null) { return }
+
+  List<ChildDeviceWrapper> childDevices = parentApp.getChildDevices()
+  if(childDevices == null || childDevices.isEmpty()) { return }
+
+  Set<String> activePlayerIds = new HashSet<String>()
+  Set<String> activePlayerDnis = new HashSet<String>()
+  childDevices.each { ChildDeviceWrapper child ->
+    String playerId = child.getDataValue('id')
+    String dni = child.getDeviceNetworkId()
+    if(playerId != null && playerId != '' && dni != null && dni != '') {
+      activePlayerIds.add(playerId)
+      activePlayerDnis.add(dni)
+    }
+  }
+
+  if(activePlayerIds.isEmpty() || activePlayerDnis.isEmpty()) { return }
+
+  Integer removedEntries = 0
+  removedEntries += pruneStaticMapKeys(audioClipQueue, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(audioClipQueueHighPriority, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(audioClipQueueSaved, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(audioClipQueueTimers, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(groupsRegistry, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(statesRegistry, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(favoritesMap, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(playlistsMap, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(volumeFadeState, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(groupVolumeFadeState, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(lastVolumeFadeCallTime, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(favoriteRetryState, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(playlistRetryState, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingGroupDeviceUpdates, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(lastZgtXmlHash, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
+  removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
+  removedEntries += pruneEventTimestampKeys(activePlayerDnis)
+  removedEntries += pruneFavPlaylistDelegates(activePlayerDnis)
+
+  if(removedEntries > 0) {
+    logDebug("Cleaned ${removedEntries} orphaned static Sonos Advanced Player cache entries")
+  }
+}
+
+Integer pruneStaticMapKeys(ConcurrentHashMap map, Set<String> activeKeys, String prefixDelimiter = null) {
+  if(map == null || map.isEmpty() || activeKeys == null || activeKeys.isEmpty()) { return 0 }
+
+  Integer removedEntries = 0
+  List<String> keys = new ArrayList<String>(map.keySet())
+  keys.each { String key ->
+    String normalizedKey = prefixDelimiter != null ? extractKeyPrefix(key, prefixDelimiter) : key
+    if(normalizedKey == null || !activeKeys.contains(normalizedKey)) {
+      if(map.remove(key) != null) {
+        removedEntries++
+      }
+    }
+  }
+  return removedEntries
+}
+
+Integer pruneEventTimestampKeys(Set<String> activePlayerDnis) {
+  if(eventTimestamps == null || eventTimestamps.isEmpty() || activePlayerDnis == null || activePlayerDnis.isEmpty()) { return 0 }
+
+  Integer removedEntries = 0
+  List<String> keys = new ArrayList<String>(eventTimestamps.keySet())
+  keys.each { String key ->
+    String dni = extractEventTimestampDni(key)
+    if(dni == null || !activePlayerDnis.contains(dni)) {
+      if(eventTimestamps.remove(key) != null) {
+        removedEntries++
+      }
+    }
+  }
+  return removedEntries
+}
+
+Integer pruneFavPlaylistDelegates(Set<String> activePlayerDnis) {
+  if(favPlaylistDelegate == null || favPlaylistDelegate.isEmpty() || activePlayerDnis == null || activePlayerDnis.isEmpty()) { return 0 }
+
+  Integer removedEntries = 0
+  List<String> householdIds = new ArrayList<String>(favPlaylistDelegate.keySet())
+  householdIds.each { String householdId ->
+    String delegateDni = favPlaylistDelegate.get(householdId)
+    if(delegateDni == null || !activePlayerDnis.contains(delegateDni)) {
+      if(favPlaylistDelegate.remove(householdId, delegateDni)) {
+        removedEntries++
+      }
+    }
+  }
+  return removedEntries
+}
+
+String extractKeyPrefix(String key, String delimiter) {
+  if(key == null || delimiter == null) { return null }
+  Integer delimiterIndex = key.indexOf(delimiter)
+  if(delimiterIndex <= 0) { return key }
+  return key.substring(0, delimiterIndex)
+}
+
+String extractEventTimestampDni(String key) {
+  String dni = extractKeyPrefix(key, '-last')
+  if(dni == null || dni == key) {
+    dni = extractKeyPrefix(key, '-sid')
+  }
+  return dni
+}
+
+void clearStaticDriverStateForCurrentDevice() {
+  String playerId = getId()
+  String dni = getDeviceDNI()
+
+  if(playerId != null && playerId != '') {
+    audioClipQueue?.remove(playerId)
+    audioClipQueueHighPriority?.remove(playerId)
+    audioClipQueueSaved?.remove(playerId)
+    audioClipQueueTimers?.remove(playerId)
+    groupsRegistry?.remove(playerId)
+    statesRegistry?.remove(playerId)
+    favoritesMap?.remove(playerId)
+    playlistsMap?.remove(playerId)
+    volumeFadeState?.remove(playerId)
+    groupVolumeFadeState?.remove(playerId)
+    lastVolumeFadeCallTime?.remove(playerId)
+    lastGroupVolumeFadeCallTime?.remove(playerId)
+  }
+
+  if(dni != null && dni != '') {
+    favoriteRetryState?.remove(dni)
+    playlistRetryState?.remove(dni)
+    pendingGroupDeviceUpdates?.remove(dni)
+    pendingLocalDeviceEvents?.remove(dni)
+    lastMetadataContainerId?.remove(dni)
+    lastPlaybackState?.remove(dni)
+    lastWsEventLog?.remove(dni)
+    lastZgtXmlHash?.remove(dni)
+    jsonSlurpers?.remove(dni)
+    wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
+    eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+  }
+
+  releaseFavPlaylistDelegate()
+}
+
+void uninstalled() {
+  clearStaticDriverStateForCurrentDevice()
+}
+
 
 void audioClipQueueInitialization() {
+  maybeCleanupStaticDriverState()
   if(audioClipQueue == null) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueue.containsKey(getId())) {
     audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
@@ -4917,13 +5092,11 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 @CompileStatic
 void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
+  maybeCleanupStaticDriverState()
   String dni = device.getDeviceNetworkId()
-  groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.get(dni)
-  if(deviceSlurper == null) {
-    deviceSlurper = new groovy.json.JsonSlurper()
-    groovy.json.JsonSlurper existing = jsonSlurpers.putIfAbsent(dni, deviceSlurper)
-    if(existing != null) { deviceSlurper = existing }
-  }
+  groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.computeIfAbsent(dni, { String ignored ->
+    new groovy.json.JsonSlurper()
+  } as java.util.function.Function<String, groovy.json.JsonSlurper>)
   ArrayList json = (ArrayList)deviceSlurper.parseText(message)
   if(json.size() < 2) {return}
   LinkedHashMap deviceSettings = getDeviceSettings()

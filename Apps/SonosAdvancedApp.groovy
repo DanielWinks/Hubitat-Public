@@ -482,14 +482,22 @@ void saveGroup() {
     }
     String oldDni = "${app.id}-SonosGroupDevice-${editingGroup}"
     String newDni = "${app.id}-SonosGroupDevice-${newName}"
-    // Update state first so it stays consistent if the device rename call fails
-    state.userGroups.remove(editingGroup)
     DeviceWrapper existingDevice = getChildDevice(oldDni)
     if(existingDevice) {
-      existingDevice.setDeviceNetworkId(newDni)
-      existingDevice.setLabel("Sonos Group: ${newName}")
+        try {
+          existingDevice.setDeviceNetworkId(newDni)
+        } catch (Exception e) {
+          logError("Failed to rename group device from '${editingGroup}' to '${newName}': ${e.message}")
+          return
+        }
+        try {
+          existingDevice.setLabel("Sonos Group: ${newName}")
+        } catch (Exception e) {
+          logWarn("Renamed group device DNI for '${editingGroup}', but could not update the label: ${e.message}")
+        }
       logInfo("Renamed group device from '${editingGroup}' to '${newName}'")
     }
+      state.userGroups.remove(editingGroup)
   }
 
   state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
