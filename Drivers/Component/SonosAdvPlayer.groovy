@@ -870,7 +870,7 @@ void muteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(true)
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.muteGroup()
   }
   else { playerSetPlayerMute(true) }
 }
@@ -878,7 +878,7 @@ void unmuteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(false)
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).unmuteGroup()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.unmuteGroup()
   }
   else { playerSetPlayerMute(false) }
 }
@@ -888,7 +888,7 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGroupedAndNotCoordinator: ${isFollower}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
   if(isFollower) {
     logDebug("setGroupVolume: Delegating to coordinator")
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).setGroupVolume(level, duration)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.setGroupVolume(level, duration)
     return
   }
   String deviceId = getId()
@@ -1001,7 +1001,7 @@ void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeUp()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.groupVolumeUp()
   }
   else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 }
@@ -1009,7 +1009,7 @@ void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).groupVolumeDown()
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.groupVolumeDown()
   }
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
@@ -1146,7 +1146,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
       scheduleNextFavoriteRetryCheck()
     }
   } else if(isGroupedAndNotCoordinator() == true) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
 
@@ -1233,7 +1233,7 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
       scheduleNextPlaylistRetryCheck()
     }
   } else if(isGroupedAndNotCoordinator() == true) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId()).loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
   }
 }
 
