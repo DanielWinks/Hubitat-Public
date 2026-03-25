@@ -1,23 +1,27 @@
 # Sonos Advanced App & Drivers - Reliability, Stability & Performance TODO
 
 ## Context
+
 Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos component drivers (`Drivers/Component/SonosAdv*.groovy`), and supporting libraries (`Libraries/SMAPILibrary.groovy`, `Libraries/UtilitiesAndLoggingLibrary.groovy`) to identify bugs and improvements for reliability, stability, and performance.
 
 ---
 
 ## HIGH Priority - Bugs & Crash Risks
 
-### 1. Double comma syntax error in `getDeviceDescriptionLocalSync()`
+### 1. Double comma syntax error in `getDeviceDescriptionLocalSync()` [DONE]
+
 - **File:** `Apps/SonosAdvancedApp.groovy:1439`
 - **Issue:** `uri: "http://${ipAddress}/xml/device_description.xml",,` has a trailing double comma in the map literal. Groovy may treat this as a null entry or fail at parse time.
-- **Fix:** Remove the extra comma.
+- **Status:** Fixed in branch `fix/issue-1-double-comma-syntax` by removing the extra comma from the map literal.
 
 ### 2. Null pointer in `dequeueAudioClip()` when rightChannel is null
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:4504-4506`
 - **Issue:** `rightChannel` (line 4470) can be null if no right channel child device exists. Line 4504 checks `clipMessage.rightChannel` (the message data), but line 4506 calls `rightChannel.playerLoadAudioClip()` on the potentially-null device wrapper.
 - **Fix:** Add null guard: `if(clipMessage.rightChannel && rightChannel) {`
 
 ### 3. Unsafe chained calls after `getDeviceFromRincon()` - multiple locations
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:832, 840, 850`
 - **Issue:** Pattern `parent?.getDeviceFromRincon(getGroupCoordinatorId()).muteGroup()` uses safe-nav on `parent` but not on the return value of `getDeviceFromRincon()` which can return null.
 - **Fix:** Change to `parent?.getDeviceFromRincon(getGroupCoordinatorId())?.muteGroup()` (and similar for all chained calls).
@@ -33,6 +37,7 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Resolution:** The activation path now makes the null-coordinator case explicit by logging a warning and replaying the group device's held state when the coordinator cannot be resolved.
 
 ### 6. Null `groupId` in `getGroupCoordinatorForPlayerDeviceLocal()`
+
 - **File:** `Apps/SonosAdvancedApp.groovy:1528`
 - **Issue:** If the httpPost callback fails or device is unreachable, `groupId` remains null. `groupId.tokenize(':')[0]` will NPE.
 - **Fix:** Add null check on `groupId` before tokenizing.
@@ -42,36 +47,43 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 ## MEDIUM Priority - Reliability & Error Handling
 
 ### 7. Silent exception swallowing in error callbacks
+
 - **Files:** `Apps/SonosAdvancedApp.groovy:2585-2586, 2609-2611`
 - **Issue:** Empty catch blocks `catch(Exception e){}` hide failures in error reporting itself. At minimum, these should log at trace level.
 - **Fix:** Add `logTrace("Could not read error details: ${e.message}")` in catch blocks.
 
 ### 8. `localControlCallback()` logs errors but never retries
+
 - **File:** `Apps/SonosAdvancedApp.groovy:2581-2592`
 - **Issue:** Failed SOAP/HTTP commands are only logged, never retried. For transient network issues, this means commands are silently lost.
 - **Fix:** Add retry logic using the existing `handleAsyncHttpFailureWithRetry()` pattern from UtilitiesAndLoggingLibrary, at least for idempotent operations.
 
 ### 9. State updated before device operation in group rename
+
 - **File:** `Apps/SonosAdvancedApp.groovy:485-489`
 - **Issue:** `state.userGroups.remove(editingGroup)` runs before `setDeviceNetworkId()`. If the device op fails, state is corrupted.
 - **Fix:** Reorder to perform device operation first, then update state on success.
 
 ### 10. Static discovery maps shared across all app instances
+
 - **File:** `Apps/SonosAdvancedApp.groovy:52-54`
 - **Issue:** `discoveredSonoses` and `discoveredSonosSecondaries` are `@Field static` — shared across ALL instances of the app. Multiple Sonos Advanced installs will overwrite each other's discovery data.
 - **Fix:** Key the maps by app instance ID, or use instance-scoped state instead of static fields.
 
 ### 11. Unbounded growth of static maps in SonosAdvPlayer
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:264-280`
 - **Issue:** Static ConcurrentHashMaps for `audioClipQueue`, `eventTimestamps`, `lastPlaybackState`, `lastWsEventLog`, `lastZgtXmlHash` grow unbounded. With many devices or long uptime, these consume memory without cleanup.
 - **Fix:** Add periodic eviction of stale entries (e.g., remove entries older than 1 hour from timestamp maps).
 
 ### 12. Mutex deadlock risk in WebSocket subscription management
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:2350-2432`
 - **Issue:** Semaphore uses `tryAcquire()` without timeout parameter. If the thread holding the lock dies between acquire and release, subsequent operations are permanently blocked.
 - **Fix:** Use `tryAcquire(timeout, TimeUnit)` variant and ensure `finally` blocks always release.
 
 ### 13. `pendingGroupDeviceUpdates` lost on flush failure
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:3715-3763`
 - **Issue:** `pendingGroupDeviceUpdates.remove(dni)` happens before processing. If flush fails midway, queued updates are permanently lost.
 - **Fix:** Only remove from map after successful processing, or re-insert on failure.
@@ -81,26 +93,31 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 ## LOW Priority - Performance & Code Quality
 
 ### 14. O(n) duplicate scan per discovered device
+
 - **File:** `Apps/SonosAdvancedApp.groovy:1082-1083`
 - **Issue:** `discoveredSonoses.values().any { it.deviceIp == ipAddress }` is O(n) on every discovery event.
 - **Fix:** Maintain a secondary IP→device index for O(1) lookup.
 
 ### 15. `buildRinconMap()` and `getDeviceFromRincon()` both call `getChildDevices()`
+
 - **File:** `Apps/SonosAdvancedApp.groovy:1301-1316`
 - **Issue:** Both methods iterate all child devices. In methods that call both, this is redundant.
 - **Fix:** Have `getDeviceFromRincon()` use a cached map or accept a pre-built map as parameter.
 
 ### 16. Redundant `getRightChannelRincon()` calls
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:175`
 - **Issue:** `getRightChannelRincon()` called twice in the same conditional check.
 - **Fix:** Cache result in a local variable.
 
 ### 17. JsonSlurper caching creates unnecessary garbage
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy:4799-4810`
 - **Issue:** `putIfAbsent()` creates object before check. Use `computeIfAbsent()` instead for lazy initialization.
 - **Fix:** Replace `putIfAbsent` pattern with `computeIfAbsent`.
 
 ### 18. More methods should use `@CompileStatic`
+
 - **File:** `Drivers/Component/SonosAdvPlayer.groovy` (throughout)
 - **Issue:** Only a few methods use `@CompileStatic`. Adding it to more pure-logic methods would improve performance and catch type errors at compile time.
 - **Fix:** Add `@CompileStatic` to methods that don't rely on dynamic dispatch.
@@ -108,6 +125,7 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 ---
 
 ## Verification
+
 - Deploy modified files to a Hubitat hub and verify:
   - Discovery finds all Sonos players without errors
   - Group creation/deletion works
