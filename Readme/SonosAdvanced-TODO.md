@@ -28,9 +28,9 @@ Review of the Sonos Advanced App (`Apps/SonosAdvancedApp.groovy`), all Sonos com
 - **Fix:** Add null guard before `.split()`.
 
 ### 5. Null coordinator in `updateGroupDevices()` passed to `notifyGroupDeviceActivated()`
-- **File:** `Apps/SonosAdvancedApp.groovy:1606-1607`
-- **Issue:** `rinconMap[coordinatorId]` can be null. It's passed directly to `notifyGroupDeviceActivated(gd, coordinator)` without null check.
-- **Fix:** Add `if(coordinator != null)` guard before calling `notifyGroupDeviceActivated()`.
+- **Status:** Addressed
+- **File:** `Apps/SonosAdvancedApp.groovy`
+- **Resolution:** The activation path now makes the null-coordinator case explicit by logging a warning and replaying the group device's held state when the coordinator cannot be resolved.
 
 ### 6. Null `groupId` in `getGroupCoordinatorForPlayerDeviceLocal()`
 - **File:** `Apps/SonosAdvancedApp.groovy:1528`

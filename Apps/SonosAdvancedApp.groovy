@@ -1646,6 +1646,7 @@ void notifyGroupDeviceActivated(ChildDeviceWrapper gd, ChildDeviceWrapper coordi
     String jsonAttrs = JsonOutput.toJson(attrs)
     gd.updateBatchPlaybackState(jsonAttrs)
   } else {
+    logWarn("Could not resolve group coordinator while activating ${gd.displayName}; replaying held state only")
     // No coordinator available; replay any held state directly.
     // When coordinator IS present, replayHeldState() is called internally
     // by updateBatchPlaybackState() via the isActive && !wasActive branch,
