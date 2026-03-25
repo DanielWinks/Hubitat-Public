@@ -4807,6 +4807,10 @@ void componentSetLoudnessLocal(Boolean desiredLoudness) {
 
 void componentMuteGroupLocal(Boolean desiredMute) {
   DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  if(coordinator == null) {
+    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group mute")
+    return
+  }
   String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredMute: desiredMute]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
@@ -4815,6 +4819,10 @@ void componentMuteGroupLocal(Boolean desiredMute) {
 
 void componentSetGroupRelativeLevelLocal(Integer adjustment) {
   DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  if(coordinator == null) {
+    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume adjustment")
+    return
+  }
   String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [Adjustment: adjustment]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
@@ -4823,6 +4831,10 @@ void componentSetGroupRelativeLevelLocal(Integer adjustment) {
 
 void componentSetGroupLevelLocal(BigDecimal level) {
   DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  if(coordinator == null) {
+    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume set")
+    return
+  }
   String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredVolume: level]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)

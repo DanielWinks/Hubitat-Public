@@ -1516,6 +1516,10 @@ String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
 
 DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
   String ip = device.getDataValue('localUpnpHost')
+  if(ip == null) {
+    logWarn("No localUpnpHost found for ${device?.displayName}; cannot determine group coordinator")
+    return null
+  }
   String groupId
   Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
   httpPost(params) { resp ->
@@ -1523,9 +1527,20 @@ DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
       GPathResult xml = resp.data
       groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text().toString()
     }
-    else { logError(resp.data) }
+    else { logError(resp?.data) }
   }
-  return getDeviceFromRincon(groupId.tokenize(':')[0])
+  if(groupId == null || groupId == '') {
+    logWarn("No group ID returned for ${device?.displayName}; cannot determine group coordinator")
+    return null
+  }
+
+  List<String> groupIdParts = groupId.tokenize(':')
+  if(groupIdParts.size() == 0) {
+    logWarn("Unexpected group ID '${groupId}' returned for ${device?.displayName}")
+    return null
+  }
+
+  return getDeviceFromRincon(groupIdParts[0])
 }
 
 String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
