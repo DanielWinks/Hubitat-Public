@@ -27,7 +27,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.11.0',
+    version: '0.11.1',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
