@@ -4835,6 +4835,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
   if(getAudioClipQueueIsEmpty() && getChimeBeforeTTS()) {playerLoadAudioClipChime(volume)}
   if(duration > 0) { audioClip.duration = duration }
   audioClip.uri = uri
+  logTrace("Enqueuing audio clip with URI: ${uri}, volume: ${args.volume}, duration: ${duration}")
   enqueueAudioClip(audioClip)
   logTrace('Enqueued')
 }
