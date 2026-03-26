@@ -383,6 +383,7 @@ void initialize() {
   // runEvery3Hours('fullRenewSubscriptions')
 }
 void configure() {
+  reinitializeCorruptedStaticFields()
   atomicState.audioClipPlaying = false
   atomicState.wsRetryCount = 0
   migrationCleanup()
@@ -676,7 +677,13 @@ void cleanupStaticDriverState() {
  * Validates all @Field static ConcurrentHashMap fields and re-initializes any that have been
  * corrupted to a non-ConcurrentHashMap type (e.g., Boolean) during hub restarts or driver reloads.
  * This prevents ClassCastException in @CompileStatic methods that access these fields.
+ *
+ * IMPORTANT: This method MUST be @CompileStatic so it reads/writes the same JVM-level static
+ * fields that other @CompileStatic methods access. Without it, dynamic Groovy resolves field
+ * access through the MetaObject Protocol, which may reference a different storage location
+ * than the raw JVM static field that @CompileStatic methods use via getstatic/putstatic bytecode.
  */
+@CompileStatic
 void reinitializeCorruptedStaticFields() {
   if(!(audioClipQueue instanceof ConcurrentHashMap)) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!(audioClipQueueHighPriority instanceof ConcurrentHashMap)) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
