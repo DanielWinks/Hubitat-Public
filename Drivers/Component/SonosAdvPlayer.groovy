@@ -575,6 +575,7 @@ void migrationCleanup() {
 }
 
 void maybeCleanupStaticDriverState() {
+  reinitializeCorruptedStaticFields()
   Long nowEpoch = Instant.now().getEpochSecond()
   Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
   if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
@@ -669,6 +670,38 @@ void cleanupStaticDriverState() {
   if(removedEntries > 0) {
     logDebug("Cleaned ${removedEntries} orphaned static Sonos Advanced Player cache entries")
   }
+}
+
+/**
+ * Validates all @Field static ConcurrentHashMap fields and re-initializes any that have been
+ * corrupted to a non-ConcurrentHashMap type (e.g., Boolean) during hub restarts or driver reloads.
+ * This prevents ClassCastException in @CompileStatic methods that access these fields.
+ */
+void reinitializeCorruptedStaticFields() {
+  if(!(audioClipQueue instanceof ConcurrentHashMap)) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!(audioClipQueueHighPriority instanceof ConcurrentHashMap)) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!(audioClipQueueSaved instanceof ConcurrentHashMap)) { audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!(audioClipQueueTimers instanceof ConcurrentHashMap)) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!(groupsRegistry instanceof ConcurrentHashMap)) { groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>() }
+  if(!(statesRegistry instanceof ConcurrentHashMap)) { statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>() }
+  if(!(favoritesMap instanceof ConcurrentHashMap)) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!(playlistsMap instanceof ConcurrentHashMap)) { playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!(favPlaylistDelegate instanceof ConcurrentHashMap)) { favPlaylistDelegate = new ConcurrentHashMap<String, String>() }
+  if(!(eventTimestamps instanceof ConcurrentHashMap)) { eventTimestamps = new ConcurrentHashMap<String, Long>() }
+  if(!(wsSubscriptionStatus instanceof ConcurrentHashMap)) { wsSubscriptionStatus = new ConcurrentHashMap<String, String>() }
+  if(!(jsonSlurpers instanceof ConcurrentHashMap)) { jsonSlurpers = new ConcurrentHashMap<String, groovy.json.JsonSlurper>() }
+  if(!(favoriteRetryState instanceof ConcurrentHashMap)) { favoriteRetryState = new ConcurrentHashMap<String, Map>() }
+  if(!(playlistRetryState instanceof ConcurrentHashMap)) { playlistRetryState = new ConcurrentHashMap<String, Map>() }
+  if(!(volumeFadeState instanceof ConcurrentHashMap)) { volumeFadeState = new ConcurrentHashMap<String, Map>() }
+  if(!(groupVolumeFadeState instanceof ConcurrentHashMap)) { groupVolumeFadeState = new ConcurrentHashMap<String, Map>() }
+  if(!(lastVolumeFadeCallTime instanceof ConcurrentHashMap)) { lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>() }
+  if(!(lastGroupVolumeFadeCallTime instanceof ConcurrentHashMap)) { lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>() }
+  if(!(pendingGroupDeviceUpdates instanceof ConcurrentHashMap)) { pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>() }
+  if(!(pendingLocalDeviceEvents instanceof ConcurrentHashMap)) { pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>() }
+  if(!(lastMetadataContainerId instanceof ConcurrentHashMap)) { lastMetadataContainerId = new ConcurrentHashMap<String, String>() }
+  if(!(lastPlaybackState instanceof ConcurrentHashMap)) { lastPlaybackState = new ConcurrentHashMap<String, String>() }
+  if(!(lastWsEventLog instanceof ConcurrentHashMap)) { lastWsEventLog = new ConcurrentHashMap<String, String>() }
+  if(!(lastZgtXmlHash instanceof ConcurrentHashMap)) { lastZgtXmlHash = new ConcurrentHashMap<String, Integer>() }
 }
 
 @CompileStatic
@@ -804,19 +837,19 @@ void onUninstalled() {
 
 void audioClipQueueInitialization() {
   maybeCleanupStaticDriverState()
-  if(audioClipQueue == null) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!(audioClipQueue instanceof ConcurrentHashMap)) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueue.containsKey(getId())) {
     audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
   }
-  if(audioClipQueueHighPriority == null) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!(audioClipQueueHighPriority instanceof ConcurrentHashMap)) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueueHighPriority.containsKey(getId())) {
     audioClipQueueHighPriority[getId()] = new ConcurrentLinkedQueue<Map>()
   }
-  if(audioClipQueueSaved == null) { audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
+  if(!(audioClipQueueSaved instanceof ConcurrentHashMap)) { audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueueSaved.containsKey(getId())) {
     audioClipQueueSaved[getId()] = new ConcurrentLinkedQueue<Map>()
   }
-  if(audioClipQueueTimers == null) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!(audioClipQueueTimers instanceof ConcurrentHashMap)) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
   if(!audioClipQueueTimers.containsKey(getId())) {
     audioClipQueueTimers[getId()] = new LinkedHashMap()
   }
@@ -824,12 +857,12 @@ void audioClipQueueInitialization() {
 
 
 void groupsRegistryInitialization() {
-  if(groupsRegistry == null) {groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()}
+  if(!(groupsRegistry instanceof ConcurrentHashMap)) {groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()}
   if(!groupsRegistry.containsKey(getId())) {groupsRegistry[getId()] = new ArrayList<DeviceWrapper>()}
 }
 
 void favoritesMapInitialization() {
-  if(favoritesMap == null) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
+  if(!(favoritesMap instanceof ConcurrentHashMap)) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
   // getFavorites() is now triggered by subscribeToWsEvents() after WebSocket connects
 }
 
