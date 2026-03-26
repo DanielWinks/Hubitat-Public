@@ -383,7 +383,6 @@ void initialize() {
   // runEvery3Hours('fullRenewSubscriptions')
 }
 void configure() {
-  reinitializeCorruptedStaticFields()
   atomicState.audioClipPlaying = false
   atomicState.wsRetryCount = 0
   migrationCleanup()
@@ -576,7 +575,6 @@ void migrationCleanup() {
 }
 
 void maybeCleanupStaticDriverState() {
-  reinitializeCorruptedStaticFields()
   Long nowEpoch = Instant.now().getEpochSecond()
   Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
   if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
@@ -671,44 +669,6 @@ void cleanupStaticDriverState() {
   if(removedEntries > 0) {
     logDebug("Cleaned ${removedEntries} orphaned static Sonos Advanced Player cache entries")
   }
-}
-
-/**
- * Validates all @Field static ConcurrentHashMap fields and re-initializes any that have been
- * corrupted to a non-ConcurrentHashMap type (e.g., Boolean) during hub restarts or driver reloads.
- * This prevents ClassCastException in @CompileStatic methods that access these fields.
- *
- * IMPORTANT: This method MUST be @CompileStatic so it reads/writes the same JVM-level static
- * fields that other @CompileStatic methods access. Without it, dynamic Groovy resolves field
- * access through the MetaObject Protocol, which may reference a different storage location
- * than the raw JVM static field that @CompileStatic methods use via getstatic/putstatic bytecode.
- */
-@CompileStatic
-void reinitializeCorruptedStaticFields() {
-  if(!(audioClipQueue instanceof ConcurrentHashMap)) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
-  if(!(audioClipQueueHighPriority instanceof ConcurrentHashMap)) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
-  if(!(audioClipQueueSaved instanceof ConcurrentHashMap)) { audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
-  if(!(audioClipQueueTimers instanceof ConcurrentHashMap)) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
-  if(!(groupsRegistry instanceof ConcurrentHashMap)) { groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>() }
-  if(!(statesRegistry instanceof ConcurrentHashMap)) { statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>() }
-  if(!(favoritesMap instanceof ConcurrentHashMap)) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
-  if(!(playlistsMap instanceof ConcurrentHashMap)) { playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>() }
-  if(!(favPlaylistDelegate instanceof ConcurrentHashMap)) { favPlaylistDelegate = new ConcurrentHashMap<String, String>() }
-  if(!(eventTimestamps instanceof ConcurrentHashMap)) { eventTimestamps = new ConcurrentHashMap<String, Long>() }
-  if(!(wsSubscriptionStatus instanceof ConcurrentHashMap)) { wsSubscriptionStatus = new ConcurrentHashMap<String, String>() }
-  if(!(jsonSlurpers instanceof ConcurrentHashMap)) { jsonSlurpers = new ConcurrentHashMap<String, groovy.json.JsonSlurper>() }
-  if(!(favoriteRetryState instanceof ConcurrentHashMap)) { favoriteRetryState = new ConcurrentHashMap<String, Map>() }
-  if(!(playlistRetryState instanceof ConcurrentHashMap)) { playlistRetryState = new ConcurrentHashMap<String, Map>() }
-  if(!(volumeFadeState instanceof ConcurrentHashMap)) { volumeFadeState = new ConcurrentHashMap<String, Map>() }
-  if(!(groupVolumeFadeState instanceof ConcurrentHashMap)) { groupVolumeFadeState = new ConcurrentHashMap<String, Map>() }
-  if(!(lastVolumeFadeCallTime instanceof ConcurrentHashMap)) { lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>() }
-  if(!(lastGroupVolumeFadeCallTime instanceof ConcurrentHashMap)) { lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>() }
-  if(!(pendingGroupDeviceUpdates instanceof ConcurrentHashMap)) { pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>() }
-  if(!(pendingLocalDeviceEvents instanceof ConcurrentHashMap)) { pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>() }
-  if(!(lastMetadataContainerId instanceof ConcurrentHashMap)) { lastMetadataContainerId = new ConcurrentHashMap<String, String>() }
-  if(!(lastPlaybackState instanceof ConcurrentHashMap)) { lastPlaybackState = new ConcurrentHashMap<String, String>() }
-  if(!(lastWsEventLog instanceof ConcurrentHashMap)) { lastWsEventLog = new ConcurrentHashMap<String, String>() }
-  if(!(lastZgtXmlHash instanceof ConcurrentHashMap)) { lastZgtXmlHash = new ConcurrentHashMap<String, Integer>() }
 }
 
 @CompileStatic
@@ -3294,12 +3254,15 @@ void flushPendingLocalDeviceEvents() {
 }
 
 // Favorites/playlists WS delegate helpers — only one player per household subscribes
-// NOTE: isFavPlaylistDelegate() has a side effect — claims the delegate slot on first call.
+// NOTE: checkIsFavPlaylistDelegate() has a side effect — claims the delegate slot on first call.
 // For read-only checks use: favPlaylistDelegate.get(getHouseholdId()) == device.getDeviceNetworkId()
-Boolean isFavPlaylistDelegate() {
+// IMPORTANT: This method must NOT be named isFavPlaylistDelegate() because Groovy's MOP treats
+// isFoo() as the Boolean getter for property "foo", conflicting with the @Field static
+// ConcurrentHashMap named "favPlaylistDelegate" and causing ClassCastException.
+Boolean checkIsFavPlaylistDelegate() {
   String householdId = getHouseholdId()
   if(!householdId) {
-    logWarn('isFavPlaylistDelegate: householdId not yet set, acting as delegate (expected on fresh install only)')
+    logWarn('checkIsFavPlaylistDelegate: householdId not yet set, acting as delegate (expected on fresh install only)')
     return true
   }
   String myDni = this.device?.getDeviceNetworkId()
@@ -3985,32 +3948,32 @@ void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocal
 String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
 
 @CompileStatic
-ConcurrentLinkedQueue<Map> getAudioClipQueue() {
+ConcurrentLinkedQueue<Map> getDeviceAudioClipQueue() {
   audioClipQueueInitialization()
   return audioClipQueue[getId()]
 }
 
 @CompileStatic
-ConcurrentLinkedQueue<Map> getAudioClipQueueHighPriority() {
+ConcurrentLinkedQueue<Map> getDeviceAudioClipQueueHighPriority() {
   audioClipQueueInitialization()
   return audioClipQueueHighPriority[getId()]
 }
 
 @CompileStatic
-ConcurrentLinkedQueue<Map> getAudioClipQueueSaved() {
+ConcurrentLinkedQueue<Map> getDeviceAudioClipQueueSaved() {
   audioClipQueueInitialization()
   return audioClipQueueSaved[getId()]
 }
 
 @CompileStatic
-LinkedHashMap getAudioClipQueueTimers() {
+LinkedHashMap getDeviceAudioClipQueueTimers() {
   audioClipQueueInitialization()
   return audioClipQueueTimers[getId()]
 }
 
 @CompileStatic
 void addTimerToAudioClipQueueTimers(Long clipDuration, String clipUri) {
-  LinkedHashMap timers = getAudioClipQueueTimers()
+  LinkedHashMap timers = getDeviceAudioClipQueueTimers()
   timers[clipUri] = Instant.now().getEpochSecond() + clipDuration
   // runIn(clipDuration + 10, 'dequeueAudioClip')
 }
@@ -4018,19 +3981,19 @@ void addTimerToAudioClipQueueTimers(Long clipDuration, String clipUri) {
 @CompileStatic
 Integer getAudioClipQueueLength() {
   audioClipQueueInitialization()
-  return getAudioClipQueue().size() as Integer
+  return getDeviceAudioClipQueue().size() as Integer
 }
 
 @CompileStatic
 Boolean getAudioClipQueueIsEmpty() {
   audioClipQueueInitialization()
-  return getAudioClipQueue().size() == 0
+  return getDeviceAudioClipQueue().size() == 0
 }
 
 void saveRegularAudioClipQueue() {
   logTrace('saveRegularAudioClipQueue')
-  ConcurrentLinkedQueue<Map> regularQueue = getAudioClipQueue()
-  ConcurrentLinkedQueue<Map> savedQueue = getAudioClipQueueSaved()
+  ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
+  ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
 
   // Save all queued regular priority clips
   savedQueue.clear()
@@ -4053,8 +4016,8 @@ void saveRegularAudioClipQueue() {
 
 void restoreRegularAudioClipQueue() {
   logTrace('restoreRegularAudioClipQueue')
-  ConcurrentLinkedQueue<Map> regularQueue = getAudioClipQueue()
-  ConcurrentLinkedQueue<Map> savedQueue = getAudioClipQueueSaved()
+  ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
+  ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
 
   // Restore saved clips to regular queue
   List<Map> savedList = new ArrayList<Map>(savedQueue)
@@ -4326,7 +4289,7 @@ void renewWebsocketConnection() { initializeWebsocketConnection() }
 // =============================================================================
 void subscribeToWsEvents() {
   // Favorites and playlists are household-scoped — only one player per household needs to subscribe
-  if(isFavPlaylistDelegate()) {
+  if(checkIsFavPlaylistDelegate()) {
     if(isCurrentlySubcribedToPlaylistWS() == false) { subscribeToPlaylists() }
     if(isCurrentlySubcribedToFavoritesWS() == false) { subscribeToFavorites() }
   }
@@ -4794,14 +4757,14 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   audioClip.uri = uri
 
   // Check if this is the first high-priority clip
-  ConcurrentLinkedQueue<Map> highPriorityQueue = getAudioClipQueueHighPriority()
+  ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
   Boolean isFirstHighPriority = highPriorityQueue.isEmpty()
 
   if(isFirstHighPriority) {
     // Save currently playing + all queued regular priority clips
     saveRegularAudioClipQueue()
     // Clear regular queue
-    getAudioClipQueue().clear()
+    getDeviceAudioClipQueue().clear()
     // Reset playback state to interrupt current clip
     setAtomicStateValue('audioClipPlaying', false)
   }
@@ -4875,7 +4838,7 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
 
 void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
-  ConcurrentLinkedQueue<Map> queue = getAudioClipQueue()
+  ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
 
   // Regular priority clips go to regular queue
   // High priority clips are now handled separately via playerLoadAudioClipHighPriority
@@ -4889,17 +4852,17 @@ void dequeueAudioClip() {
   ChildDeviceWrapper rightChannel = getRightChannelChild()
 
   // Check high-priority queue first
-  ConcurrentLinkedQueue<Map> highPriorityQueue = getAudioClipQueueHighPriority()
+  ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
   Map clipMessage = highPriorityQueue.poll()
 
   // If no high-priority clips, check if we should restore saved queue
   if(!clipMessage) {
     // If high-priority queue is empty and saved queue has items, restore them
-    if(!getAudioClipQueueSaved().isEmpty()) {
+    if(!getDeviceAudioClipQueueSaved().isEmpty()) {
       restoreRegularAudioClipQueue()
     }
     // Now get from regular queue
-    clipMessage = getAudioClipQueue().poll()
+    clipMessage = getDeviceAudioClipQueue().poll()
   }
 
   if(!clipMessage) {
@@ -5336,7 +5299,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
-    if(isFavPlaylistDelegate()) {
+    if(checkIsFavPlaylistDelegate()) {
       getFavorites()
       getPlaylists()
     }
