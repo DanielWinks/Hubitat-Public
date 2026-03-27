@@ -121,7 +121,7 @@ metadata {
   command 'setNightMode', [[ name: 'Night Mode (Soundbar only)*', type: 'ENUM', description: 'Toggle Night Mode on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
   command 'setSpeechEnhancement', [[ name: 'Speech Enhancement (Soundbar only)*', type: 'ENUM', description: 'Toggle Speech Enhancement on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
 
-  command 'selectLineIn'
+  command 'selectLineIn', [[name: 'Source Player', type: 'STRING', description: 'RINCON ID, IP address, or player name of source device (optional, defaults to this player)']]
   command 'selectTV'
 
   command 'playHighPriorityTTS', [
@@ -1074,12 +1074,83 @@ void setSpeechEnhancement(String mode) {
   asynchttpPost('localControlCallback', params)
 }
 
-void selectLineIn() {
-  if(!hasLineInCapability()) {
-    logWarn("Line-In is not supported on this Sonos device")
-    return
+@CompileStatic
+String resolveSourceRincon(String sourceIdentifier) {
+  if (sourceIdentifier == null || sourceIdentifier.trim() == '') {
+    if (!hasLineInCapability()) {
+      logWarn("Line-In is not supported on this Sonos device")
+      return null
+    }
+    return getId()
   }
-  String rinconId = getId()
+
+  String trimmed = sourceIdentifier.trim()
+
+  if (trimmed.startsWith('RINCON_')) {
+    ChildDeviceWrapper sourceDevice = findSiblingByRincon(trimmed)
+    if (sourceDevice != null) {
+      String caps = sourceDevice.getDataValue('capabilities')
+      if (caps == null || !caps.contains('LINE_IN')) {
+        logWarn("Source device '${sourceDevice.displayName}' does not have Line-In capability")
+        return null
+      }
+    } else {
+      logDebug("RINCON '${trimmed}' not found among sibling devices; passing through as-is")
+    }
+    return trimmed
+  }
+
+  if (trimmed.matches('^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')) {
+    return resolveRinconFromSibling(trimmed, 'deviceIp')
+  }
+
+  return resolveRinconFromSibling(trimmed, 'displayName')
+}
+
+@CompileStatic
+private ChildDeviceWrapper findSiblingByRincon(String rincon) {
+  List<ChildDeviceWrapper> childDevices = getParentAppChildDevices()
+  if (childDevices == null) { return null }
+  return (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child -> child.getDataValue('id') == rincon }
+}
+
+@CompileStatic
+private String resolveRinconFromSibling(String value, String matchField) {
+  List<ChildDeviceWrapper> childDevices = getParentAppChildDevices()
+  if (childDevices == null || childDevices.isEmpty()) {
+    logWarn("Cannot resolve source player: no sibling devices found")
+    return null
+  }
+
+  ChildDeviceWrapper sourceDevice = (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child ->
+    if (matchField == 'displayName') {
+      return child.displayName?.toLowerCase() == value.toLowerCase()
+    }
+    return child.getDataValue(matchField) == value
+  }
+
+  if (sourceDevice == null) {
+    logWarn("Cannot resolve source player: no device found matching '${value}' by ${matchField}")
+    return null
+  }
+
+  String caps = sourceDevice.getDataValue('capabilities')
+  if (caps == null || !caps.contains('LINE_IN')) {
+    logWarn("Source device '${sourceDevice.displayName}' does not have Line-In capability")
+    return null
+  }
+
+  String rincon = sourceDevice.getDataValue('id')
+  if (rincon == null || rincon == '') {
+    logWarn("Source device '${sourceDevice.displayName}' has no RINCON ID")
+    return null
+  }
+  return rincon
+}
+
+void selectLineIn(String sourceIdentifier = null) {
+  String rinconId = resolveSourceRincon(sourceIdentifier)
+  if (rinconId == null) { return }
   String lineInURI = "x-rincon-stream:${rinconId}"
   logInfo("Switching to Line-In source: ${lineInURI}")
   String ip = getDeviceDataValue('localUpnpHost')
@@ -2553,6 +2624,11 @@ DeviceWrapper getThisDevice() {
 }
 InstalledAppWrapper getParentApp() {
   return getParent() as InstalledAppWrapper
+}
+List<ChildDeviceWrapper> getParentAppChildDevices() {
+  InstalledAppWrapper parentApp = getParentApp()
+  if (parentApp == null) { return null }
+  return parentApp.getChildDevices()
 }
 String getSid(String sid) {
   return device.getDataValue(sid)
