@@ -910,12 +910,12 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  if(volume) { volume += getTTSBoostAmount() }
-  else { volume = getPlayerVolume() + getTTSBoostAmount() }
   LinkedHashMap tts = textToSpeech(text, voice)
   if(hasAudioClipCapability() == true) {
     playerLoadAudioClip(tts.uri, volume, tts.duration)
   } else {
+    if(volume) { volume += getTTSBoostAmount() }
+    else { volume = getPlayerVolume() + getTTSBoostAmount() }
     componentPlayTextNoRestoreLocal(text, volume, voice)
   }
 }
@@ -4849,8 +4849,8 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   ]
   Map args = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos', 'priority': 'HIGH']
   if(uri) {args.streamUrl = uri}
-  if(volume) {args.volume = volume + getTTSBoostAmount()}
-  else {args.volume = getPlayerVolume() + getTTSBoostAmount()}
+  if(volume) {args.volume = Math.min((volume + getTTSBoostAmount()) as Integer, 100)}
+  else {args.volume = Math.min(getPlayerVolume() + getTTSBoostAmount(), 100)}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json, priority: 'HIGH' ]
   if(loadAudioClipOnRightChannel()) {
@@ -4897,8 +4897,8 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
   ]
   Map args = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
   if(uri) {args.streamUrl = uri}
-  if(volume) {args.volume = volume + getTTSBoostAmount()}
-  else {args.volume = getPlayerVolume() + getTTSBoostAmount()}
+  if(volume) {args.volume = Math.min((volume + getTTSBoostAmount()) as Integer, 100)}
+  else {args.volume = Math.min(getPlayerVolume() + getTTSBoostAmount(), 100)}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
   if(loadAudioClipOnRightChannel()) {
@@ -5713,7 +5713,10 @@ void processWebsocketMessage(String message) {
       setAudioClipPlaying(false)
     }
     else if(audioClips.find{it?.status == 'ACTIVE'}) {setAudioClipPlaying(true)}
-    else if(audioClips.find{it?.status == 'ERROR'}) {setAudioClipPlaying(false)}
+    else if(audioClips.find{it?.status == 'ERROR'}) {
+      logWarn("Audio clip playback returned ERROR status: ${audioClips}")
+      setAudioClipPlaying(false)
+    }
   }
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
