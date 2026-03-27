@@ -1091,7 +1091,7 @@ String resolveSourceRincon(String sourceIdentifier) {
     if (sourceDevice != null) {
       String caps = sourceDevice.getDataValue('capabilities')
       if (caps == null || !caps.contains('LINE_IN')) {
-        logWarn("Source device '${sourceDevice.displayName}' does not have Line-In capability")
+        logWarn("Source device '${sourceDevice.getDataValue('name')}' does not have Line-In capability")
         return null
       }
     } else {
@@ -1104,7 +1104,9 @@ String resolveSourceRincon(String sourceIdentifier) {
     return resolveRinconFromSibling(trimmed, 'deviceIp')
   }
 
-  return resolveRinconFromSibling(trimmed, 'displayName')
+  String result = resolveRinconFromSibling(trimmed, 'name')
+  if (result != null) { return result }
+  return resolveRinconFromSiblingByLabelSubstring(trimmed)
 }
 
 @CompileStatic
@@ -1123,26 +1125,51 @@ private String resolveRinconFromSibling(String value, String matchField) {
   }
 
   ChildDeviceWrapper sourceDevice = (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child ->
-    if (matchField == 'displayName') {
-      return child.displayName?.toLowerCase() == value.toLowerCase()
+    if (matchField == 'name') {
+      return child.getDataValue('name')?.toLowerCase()?.contains(value.toLowerCase())
     }
     return child.getDataValue(matchField) == value
   }
 
-  if (sourceDevice == null) {
-    logWarn("Cannot resolve source player: no device found matching '${value}' by ${matchField}")
-    return null
-  }
+  if (sourceDevice == null) { return null }
 
   String caps = sourceDevice.getDataValue('capabilities')
   if (caps == null || !caps.contains('LINE_IN')) {
-    logWarn("Source device '${sourceDevice.displayName}' does not have Line-In capability")
+    logWarn("Source device '${sourceDevice.getDataValue('name')}' does not have Line-In capability")
     return null
   }
 
   String rincon = sourceDevice.getDataValue('id')
   if (rincon == null || rincon == '') {
-    logWarn("Source device '${sourceDevice.displayName}' has no RINCON ID")
+    logWarn("Source device '${sourceDevice.getDataValue('name')}' has no RINCON ID")
+    return null
+  }
+  return rincon
+}
+
+private String resolveRinconFromSiblingByLabelSubstring(String value) {
+  List<ChildDeviceWrapper> childDevices = getParentAppChildDevices()
+  if (childDevices == null || childDevices.isEmpty()) { return null }
+
+  String lowerValue = value.toLowerCase()
+  ChildDeviceWrapper sourceDevice = (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child ->
+    return child.label?.toLowerCase()?.contains(lowerValue)
+  }
+
+  if (sourceDevice == null) {
+    logWarn("Cannot resolve source player: no device found matching '${value}'")
+    return null
+  }
+
+  String caps = sourceDevice.getDataValue('capabilities')
+  if (caps == null || !caps.contains('LINE_IN')) {
+    logWarn("Source device '${sourceDevice.getDataValue('name')}' does not have Line-In capability")
+    return null
+  }
+
+  String rincon = sourceDevice.getDataValue('id')
+  if (rincon == null || rincon == '') {
+    logWarn("Source device '${sourceDevice.getDataValue('name')}' has no RINCON ID")
     return null
   }
   return rincon
