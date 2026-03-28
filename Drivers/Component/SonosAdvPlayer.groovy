@@ -347,6 +347,9 @@ import java.util.concurrent.TimeUnit
 @Field private final String PLAYLIST_RETRY_CALLBACK = 'checkPlaylistPlaybackAndRetry'
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
+
+@Field static final Integer AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS = 600
+@Field static final Integer AUDIO_CLIP_WATCHDOG_MULTIPLIER = 2
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
@@ -369,6 +372,7 @@ import java.util.concurrent.TimeUnit
 // Initialize and Configure
 // =============================================================================
 void initialize() {
+  cancelAudioClipWatchdog()
   normalizeSemaphorePermits(avtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
   normalizeSemaphorePermits(zgtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
   normalizeSemaphorePermits(mrrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
@@ -383,7 +387,7 @@ void initialize() {
   // runEvery3Hours('fullRenewSubscriptions')
 }
 void configure() {
-  atomicState.audioClipPlaying = false
+  cancelAudioClipWatchdog()
   atomicState.wsRetryCount = 0
   migrationCleanup()
   // Apply child device preferences synchronously (no-ops when devices already exist)
@@ -4868,8 +4872,8 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
     saveRegularAudioClipQueue()
     // Clear regular queue
     getDeviceAudioClipQueue().clear()
-    // Reset playback state to interrupt current clip
-    setAtomicStateValue('audioClipPlaying', false)
+    // Cancel stale watchdog from interrupted clip and reset playback state
+    cancelAudioClipWatchdog()
   }
 
   // Add to high-priority queue
@@ -4877,7 +4881,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 
   // If first high-priority or nothing playing, start immediately
   Boolean audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
-  if(isFirstHighPriority || audioClipPlaying == false) {
+  if(isFirstHighPriority || audioClipPlaying != true) {
     dequeueAudioClip()
   }
 }
@@ -4885,7 +4889,6 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 @CompileStatic
 void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0) {
   logTrace('playerLoadAudioClip')
-  // subscribeToAudioClip()
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
     return
@@ -4917,7 +4920,6 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
 @CompileStatic
 void playerLoadAudioClipChime(BigDecimal volume = null) {
   logTrace('playerLoadAudioClipChime')
-  // subscribeToAudioClip()
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')
     return
@@ -4947,7 +4949,12 @@ void enqueueAudioClip(Map clipMessage) {
   // High priority clips are now handled separately via playerLoadAudioClipHighPriority
   queue.add(clipMessage)
 
-  if(atomicState.audioClipPlaying == false) {dequeueAudioClip()}
+  if(atomicState.audioClipPlaying != true) {
+    dequeueAudioClip()
+  } else {
+    // Clip is queued behind an active clip — extend the watchdog timer
+    extendAudioClipWatchdog(clipMessage)
+  }
 }
 
 void dequeueAudioClip() {
@@ -4983,15 +4990,14 @@ void dequeueAudioClip() {
   }
 
   atomicState.audioClipPlaying = true
-  // if(clipMessage?.duration != null && clipMessage?.duration > 0) {
-  //   addTimerToAudioClipQueueTimers(clipMessage.duration as Integer, clipMessage.uri)
-  // }
+  subscribeToAudioClip()
   sendWsMessage(clipMessage.leftChannel)
   if(clipMessage.rightChannel && rightChannel) {
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
   } else if(clipMessage.rightChannel) {
     logWarn('Right channel audio clip requested but no right channel child device is available. Playing clip on left channel only.')
   }
+  startAudioClipWatchdog(clipMessage)
 }
 // =============================================================================
 // End Websocket Commands
@@ -5846,10 +5852,51 @@ void setChildPlaylists(String html) {
 void setAudioClipPlaying(Boolean s) {
   atomicState.audioClipPlaying = s
   if(s == false) {
+    unschedule('audioClipWatchdog')
+    atomicState.audioClipQueueStartTime = null
+    atomicState.audioClipQueueTotalDuration = null
     // Clear currently playing clip when playback finishes successfully
     atomicState.currentlyPlayingClip = null
     dequeueAudioClip()
   }
+}
+
+void cancelAudioClipWatchdog() {
+  unschedule('audioClipWatchdog')
+  atomicState.audioClipQueueStartTime = null
+  atomicState.audioClipQueueTotalDuration = null
+  atomicState.audioClipPlaying = false
+}
+
+void startAudioClipWatchdog(Map clipMessage) {
+  Integer clipDuration = (clipMessage?.duration != null && clipMessage.duration > 0) ? clipMessage.duration as Integer : AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS
+  Integer totalDuration = clipDuration * AUDIO_CLIP_WATCHDOG_MULTIPLIER
+  atomicState.audioClipQueueStartTime = now()
+  atomicState.audioClipQueueTotalDuration = totalDuration
+  Integer watchdogDelay = Math.max(totalDuration, 10)
+  runIn(watchdogDelay, 'audioClipWatchdog', [overwrite: true])
+}
+
+void extendAudioClipWatchdog(Map clipMessage) {
+  Integer clipDuration = (clipMessage?.duration != null && clipMessage.duration > 0) ? clipMessage.duration as Integer : AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS
+  Integer totalDuration = (atomicState.audioClipQueueTotalDuration ?: 0) as Integer
+  totalDuration += clipDuration * AUDIO_CLIP_WATCHDOG_MULTIPLIER
+  atomicState.audioClipQueueTotalDuration = totalDuration
+  Long startTime = atomicState.audioClipQueueStartTime as Long
+  Integer elapsed = startTime ? ((now() - startTime) / 1000) as Integer : 0
+  Integer watchdogDelay = Math.max(totalDuration - elapsed, 10)
+  runIn(watchdogDelay, 'audioClipWatchdog', [overwrite: true])
+}
+
+void audioClipWatchdog() {
+  if(atomicState.audioClipPlaying != true) { return }
+  Integer totalDuration = (atomicState.audioClipQueueTotalDuration ?: AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS) as Integer
+  Long startTime = (atomicState.audioClipQueueStartTime ?: 0L) as Long
+  Integer elapsed = startTime ? ((now() - startTime) / 1000) as Integer : 0
+  logWarn("Audio clip watchdog fired: allowed ${totalDuration}s, actual elapsed ~${elapsed}s — resetting audioClipPlaying")
+  atomicState.audioClipQueueStartTime = null
+  atomicState.audioClipQueueTotalDuration = null
+  setAudioClipPlaying(false)
 }
 
 @CompileStatic
