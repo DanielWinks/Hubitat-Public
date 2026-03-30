@@ -46,7 +46,9 @@
  *     - Away Mode: Energy-saving temps when nobody is home
  *     - Night Mode: Sleep-friendly temps when everyone is asleep
  *
- *  2. The app watches Hubitat's location modes (Home, Away, Night, etc.)
+ *  2. You select which Hubitat location modes map to "Away" and "Night"
+ *     (e.g., "Vacation" → Away, "Sleep" → Night). Any mode not selected
+ *     is treated as Normal mode.
  *
  *  3. When modes change, the app:
  *     - Saves your current temperature preferences (if in Normal mode)
@@ -254,6 +256,20 @@
  *  - If any sensor reports "open", app can turn off heating/cooling
  *  - Saves energy by not heating/cooling the outdoors
  *
+ *  MODE MAPPING (required):
+ *
+ *  awayModes:
+ *  - One or more Hubitat location modes that should use Away temperatures
+ *  - Example: "Away", "Vacation", "Gone"
+ *  - Multiple modes can map to the same Away behavior
+ *
+ *  nightModes:
+ *  - One or more Hubitat location modes that should use Night temperatures
+ *  - Example: "Night", "Sleep", "Bedtime"
+ *  - Multiple modes can map to the same Night behavior
+ *
+ *  NOTE: Any mode NOT selected as Away or Night is treated as Normal mode.
+ *
  *  BEHAVIOR SETTINGS:
  *
  *  disableWithOpenWindowsOrDoors (TRUE or FALSE):
@@ -341,19 +357,32 @@
  *  THREAD SAFETY:
  *  - runIn() with [overwrite: true] prevents duplicate timers
  *  - Multiple windows opening = single timer (keeps restarting)
+ *  - disableThermostatDueToOpenWindow() re-checks window state before acting
+ *    to guard against timer/close event race conditions
  *
  *  DATA TYPES:
  *  - BigDecimal for temperatures (precise decimal math)
  *  - Boolean for flags (TRUE/FALSE values)
  *  - String for mode names ("Away", "Night", "Normal")
+ *  - List<String> for configurable mode lists (settings.awayModes, settings.nightModes)
+ *
+ *  STATE VARIABLES:
+ *  - state.setpointsRestored: Boolean flag tracking save/restore lifecycle
+ *  - state.currentOperatingState: String tracking current mode ("Normal", "Away", "Night")
+ *  - state.disabledDueToOpenWindow: Boolean tracking open-window thermostat disable
+ *  - state.initializedBefore: Boolean preventing wrong saves on first install
+ *  - state.setPointLow / state.setPointHigh: Saved normal heating/cooling setpoints
  *
  *  EVENT HANDLING:
  *  - subscribe() registers event handlers (callbacks)
  *  - Handlers receive Event object with device and value info
+ *  - All mode handling flows through handleModeChange() (single code path)
  *
  *  ERROR HANDLING:
  *  - Null checks prevent crashes if sensors/settings missing
  *  - Graceful degradation (continues working even if something fails)
+ *  - First-install guard prevents saving wrong temps as "normal"
+ *  - configure() calls both unsubscribe() and unschedule() for clean resets
  */
 
 // ============================================================================
@@ -502,7 +531,31 @@ Map mainPage() {
       )
     }
 
-    // ===== SECTION 2: OPEN WINDOW/DOOR SETTINGS =====
+    // ===== SECTION 2: MODE MAPPING =====
+    // Let users select which Hubitat location modes map to Away and Night behavior.
+    // Any mode NOT selected here is treated as "Normal" (preferred temperatures).
+    // 'mode' input type shows a dropdown of all configured Hubitat location modes.
+    section('<br><br><hr><h2>Mode Settings</h2>') {
+      input (
+        'awayModes',
+        'mode',
+        title: 'Which location modes should use "Away" temperatures?',
+        description: 'Select one or more modes (e.g., Away, Vacation)',
+        required: true,
+        multiple: true
+      )
+
+      input (
+        'nightModes',
+        'mode',
+        title: 'Which location modes should use "Night" temperatures?',
+        description: 'Select one or more modes (e.g., Night, Sleep)',
+        required: true,
+        multiple: true
+      )
+    }
+
+    // ===== SECTION 3: OPEN WINDOW/DOOR SETTINGS =====
     // <br> creates blank lines (spacing)
     // <hr> creates a horizontal line (visual separator)
     section('<br><br><hr><h2>Open Window/Door Settings</h2>') {
@@ -594,29 +647,31 @@ Map mainPage() {
  * - User clicks a "Configure" button (if you add one)
  * - App needs to reset its event subscriptions
  * - Something went wrong and needs a fresh start
+ * - The library's updated() lifecycle hook calls this automatically
  *
  * WHAT IT DOES:
  * 1. Cancels all existing event subscriptions (stops listening to devices)
- * 2. Calls initialize() to set everything up fresh from scratch
+ * 2. Cancels all pending scheduled tasks (stops stale timers)
+ * 3. Calls initialize() to set everything up fresh from scratch
  *
  * WHY IT EXISTS:
  * - Provides a "clean slate" if settings change or things get stuck
  * - Prevents duplicate event handlers from accumulating
- * - Like rebooting your computer when it's acting weird
- *
- * WHEN YOU MIGHT USE IT:
- * - Changed which thermostat the app controls
- * - Added/removed contact sensors
- * - Things aren't working and you want to reset
+ * - Prevents stale timers from firing after reconfiguration
  *
  * TECHNICAL NOTE:
  * - unsubscribe() = "stop listening to all device events"
- * - This prevents the app from receiving duplicate notifications
+ * - unschedule() = "cancel all pending timers (runIn, schedule)"
  */
 void configure() {
   // Stop listening to all device events
   // This clears out any old subscriptions that might be stale
   unsubscribe()
+
+  // Cancel all pending scheduled tasks (e.g., open-window disable timers)
+  // Without this, old timers could fire after reconfiguration and cause
+  // unexpected behavior (e.g., turning off the thermostat from a stale timer)
+  unschedule()
 
   // Now set everything up fresh
   // initialize() will create new subscriptions with current settings
@@ -695,22 +750,21 @@ void initialize() {
   // Check which mode we're in and apply appropriate settings
   // This uses if-else logic to determine what to do
 
-  if (mode == 'Away') {
-    // Currently in Away mode - apply Away temperatures now
+  if (isAwayMode(mode)) {
+    // Currently in an Away mode - apply Away temperatures now
     // settings.awayModeVirtualThermostat = the virtual thermostat for Away mode
     // handleModeChange() does the actual work of applying temperatures
     handleModeChange('Away', awayModeVirtualThermostat)
 
-  } else if (mode == 'Night') {
-    // Currently in Night mode - apply Night temperatures now
+  } else if (isNightMode(mode)) {
+    // Currently in a Night mode - apply Night temperatures now
     // settings.nightModeVirtualThermostat = the virtual thermostat for Night mode
     handleModeChange('Night', nightModeVirtualThermostat)
 
   } else {
     // Some other mode (Home, Day, etc.) - treat as Normal mode
-    // location.getMode() returns the actual mode name (might be custom)
     // null = no virtual thermostat needed for Normal mode
-    handleModeChange(location.getMode())
+    handleModeChange(mode)
   }
 
   // STEP 6: Check for currently-open windows/doors at startup
@@ -737,19 +791,23 @@ void initialize() {
  * state.setpointsRestored (Boolean: true or false):
  * - Tracks whether we're using normal temps or Away/Night temps
  * - TRUE = Currently using normal/preferred temperatures
- *   - No temperatures are saved in memory yet
- *   - This is the default starting state
- * - FALSE = Currently using Away/Night temperatures
- *   - Normal temperatures ARE saved in memory
- *   - Will need to restore them when returning to Normal mode
+ * - FALSE = Currently using Away/Night temperatures (normal temps are saved)
  * - Default: true (assume we start in normal mode)
- * - Purpose: THE CRITICAL FLAG (see header documentation for details)
  *
  * state.currentOperatingState (String: "Normal", "Away", or "Night"):
  * - Tracks which mode the app thinks it's currently in
  * - Default: "Normal" (home and awake)
- * - Purpose: Helps with debugging and potential future features
- * - Example: If something goes wrong, you can check logs to see mode
+ *
+ * state.disabledDueToOpenWindow (Boolean: true or false):
+ * - Tracks whether the thermostat was turned off because a window/door was open
+ * - Prevents mode changes from accidentally re-enabling the thermostat
+ * - Default: false
+ *
+ * state.initializedBefore (Boolean: true or false):
+ * - Guards against saving wrong temps on first install
+ * - Set to true the first time the app enters a Normal mode
+ * - While false, Away/Night mode transitions apply setpoints without saving
+ * - Default: false
  *
  * WHY CHECK "== null"?
  * - State variables persist between app runs (saved to hub's disk)
@@ -791,8 +849,46 @@ private void ensureStateDefaults() {
     state.disabledDueToOpenWindow = false
   }
 
+  // Track whether the app has completed at least one full initialization cycle.
+  // On the very first install, if the hub is in Away/Night mode, we should NOT
+  // save the thermostat's current setpoints as "normal" temps because they may
+  // already be Away/Night temps from manual adjustment before the app was installed.
+  // After the first full cycle (entering normal mode at least once), this flag
+  // is set to true and normal save/restore behavior takes effect.
+  if (state.initializedBefore == null) {
+    state.initializedBefore = false
+  }
+
   // After this method, all state variables are guaranteed to exist
   // Either with their existing values (if already set) or defaults (if new)
+}
+
+/**
+ * CHECK IF A MODE IS AN "AWAY" MODE
+ *
+ * Returns true if the given mode name is one that the user configured as an
+ * Away mode in settings.awayModes. This replaces hardcoded "Away" comparisons
+ * so users can map any Hubitat mode (e.g., "Vacation", "Gone") to Away behavior.
+ *
+ * @param modeName The Hubitat location mode name to check
+ * @return Boolean true if this mode should use Away temperatures
+ */
+private boolean isAwayMode(String modeName) {
+  return (settings.awayModes as List<String>)?.contains(modeName) ?: false
+}
+
+/**
+ * CHECK IF A MODE IS A "NIGHT" MODE
+ *
+ * Returns true if the given mode name is one that the user configured as a
+ * Night mode in settings.nightModes. This replaces hardcoded "Night" comparisons
+ * so users can map any Hubitat mode (e.g., "Sleep", "Bedtime") to Night behavior.
+ *
+ * @param modeName The Hubitat location mode name to check
+ * @return Boolean true if this mode should use Night temperatures
+ */
+private boolean isNightMode(String modeName) {
+  return (settings.nightModes as List<String>)?.contains(modeName) ?: false
 }
 
 // =============================================================================
@@ -938,8 +1034,22 @@ void contactSensorEventHandler(Event evt) {
  * - contactSensorEventHandler() runs (for the "closed" event)
  * - That method calls thermostat.auto() to turn it back on
  * - Thermostat resumes normal operation automatically
+ *
+ * SAFETY RE-CHECK:
+ * Before turning off, this method verifies that:
+ * 1. The open window feature is still enabled (user might have toggled it off)
+ * 2. At least one window/door is still actually open (race condition guard)
+ * If either check fails, the method exits without turning off the thermostat.
  */
 void disableThermostatDueToOpenWindow() {
+  // Safety re-check: verify the feature is still enabled and windows are still open.
+  // A race condition could occur if a window closes just as the timer fires
+  // but before the unschedule() in contactSensorEventHandler executes.
+  if (!settings.disableWithOpenWindowsOrDoors || allContactSensorsClosed()) {
+    logDebug('Open window timer fired but feature disabled or all windows now closed; skipping')
+    return
+  }
+
   // Log what we're doing (appears in logs if settings.logEnable is true)
   // This helps troubleshoot: "Why did my thermostat turn off?"
   logInfo('Disabling thermostat due to open window/door')
@@ -1153,18 +1263,13 @@ private void setThermostatAutoUnlessWindowOpen() {
  * WHAT IT DOES:
  * 1. Receives notification that mode changed (new mode in evt.value)
  * 2. Logs the change (for troubleshooting)
- * 3. Determines if this is a "special" mode (Away or Night) or normal mode
- * 4. Delegates to handleModeChange() to do the actual temperature adjustments
+ * 3. Uses isAwayMode()/isNightMode() helpers to classify the new mode
+ * 4. Delegates ALL mode handling to handleModeChange() (single code path)
  *
- * MODE CATEGORIES:
- * - "Away" = Special mode (apply energy-saving temps from Away virtual thermostat)
- * - "Night" = Special mode (apply sleep temps from Night virtual thermostat)
- * - Everything else = Normal mode (restore user's preferred temps)
- *
- * SPECIAL CASE - Restoring Setpoints:
- * When exiting Away or Night mode to return to normal, we need to restore
- * saved temperatures. But only if we actually saved them! This is where the
- * state.setpointsRestored flag becomes critical.
+ * MODE CATEGORIES (user-configurable via settings):
+ * - Away modes (settings.awayModes): Apply energy-saving temps
+ * - Night modes (settings.nightModes): Apply sleep temps
+ * - Everything else: Normal mode (restore user's preferred temps)
  *
  * PARAMETERS:
  * @param evt Event object containing:
@@ -1172,52 +1277,23 @@ private void setThermostatAutoUnlessWindowOpen() {
  */
 void locationModeChangeHandler(Event evt) {
   // Extract the new mode name from the event
-  // evt.value = String like "Away", "Night", "Home", "Day", etc.
   String mode = evt.value
 
   // Log the mode change for debugging
-  // ${mode} inserts the mode name into the string
-  // This appears in logs if settings.debugLogEnable is true
   logDebug("locationModeChangeHandler: Location mode changed to ${mode}")
 
-  // ===== CHECK MODE TYPE AND HANDLE APPROPRIATELY =====
-
-  // CASE 1: Entering Away Mode
-  if (mode == 'Away') {
-    // Location mode is now "Away" - nobody is home
-    // Apply energy-saving temperatures from Away virtual thermostat
-    // settings.awayModeVirtualThermostat = the virtual device for Away temps
-    // handleModeChange() does the actual work of saving and applying temps
+  // Classify the mode and delegate to the single handleModeChange() code path.
+  // This avoids duplicating restore logic that could diverge over time.
+  if (isAwayMode(mode)) {
     handleModeChange('Away', awayModeVirtualThermostat)
 
-  // CASE 2: Entering Night Mode
-  } else if (mode == 'Night') {
-    // Location mode is now "Night" - everyone is asleep
-    // Apply sleep-friendly temperatures from Night virtual thermostat
-    // settings.nightModeVirtualThermostat = the virtual device for Night temps
+  } else if (isNightMode(mode)) {
     handleModeChange('Night', nightModeVirtualThermostat)
 
-  // CASE 3: Entering Some Other Mode (returning to normal)
   } else {
-    // Location mode is something else: "Home", "Day", "Evening", etc.
-    // This means we're returning to normal operation
-
-    // Check if we have saved temperatures to restore
-    // state.setpointsRestored = false means temps ARE saved (need to restore)
-    // state.setpointsRestored = true means already using normal temps (do nothing)
-    if (state.setpointsRestored == false) {
-      // We have saved setpoints from Away or Night mode
-      // Log what we're doing and restore them
-      // \"${mode}\" = escape quotes so they appear in the string
-      logInfo("Location exited \"${mode}\" mode; restoring previous setpoints")
-
-      // Restore the saved normal temperatures
-      restoreStoredSetpoints()
-    }
-    // If setpointsRestored is true, we're already using normal temps
-    // No action needed - just stay as-is
+    // Any mode not configured as Away or Night is treated as Normal
+    handleModeChange(mode)
   }
-  // Method ends - mode change has been handled
 }
 
 /**
@@ -1225,15 +1301,15 @@ void locationModeChangeHandler(Event evt) {
  *
  * This is the "master brain" method that coordinates all mode transitions.
  * It manages the complex logic of saving, restoring, and applying temperature
- * setpoints while respecting manual user changes. This is where the magic
- * of "smart but respectful" automation happens.
+ * setpoints while respecting manual user changes. Both locationModeChangeHandler()
+ * and initialize() delegate to this single method, keeping all mode-transition
+ * logic in one place.
  *
- * THE CHALLENGE:
- * We want to:
- * 1. Apply Away/Night temps when entering those modes
- * 2. Restore normal temps when returning to normal mode
- * 3. NOT overwrite saved normal temps when jumping between Away and Night
- * 4. Remember manual user changes made in normal mode
+ * CALLERS:
+ * - locationModeChangeHandler() classifies the mode using isAwayMode()/isNightMode()
+ *   and passes "Away" or "Night" as modeName (with the virtual thermostat), or the
+ *   raw mode name for normal modes (with no virtual thermostat).
+ * - initialize() does the same classification at startup for the current mode.
  *
  * THE SOLUTION - The state.setpointsRestored FLAG:
  * This boolean flag is the KEY to the entire system:
@@ -1249,29 +1325,12 @@ void locationModeChangeHandler(Event evt) {
  * - If mode changes to Away/Night again, should NOT save (already saved!)
  * - If mode returns to Normal, SHOULD restore saved temps
  *
- * LOGIC FLOW FOR AWAY MODE:
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ 1. Check: Is setpointsRestored == true? (Are we in normal mode?)       │
- * │    YES: We're currently in normal mode                                  │
- * │         → Save current setpoints (storeCurrentSetpoints)                │
- * │         → If save succeeds, apply Away virtual thermostat setpoints     │
- * │         → Mark setpointsRestored = false (saved, not restored yet)      │
- * │    NO: We're already in Away or Night mode                              │
- * │        → Don't save (would overwrite normal temps with Away/Night!)     │
- * │        → Just apply Away virtual thermostat setpoints                   │
- * └─────────────────────────────────────────────────────────────────────────┘
- *
- * LOGIC FLOW FOR NIGHT MODE:
- * Same as Away mode, but uses Night virtual thermostat
- *
- * LOGIC FLOW FOR NORMAL MODE:
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ 1. Check: Is setpointsRestored == false? (Do we have saved temps?)     │
- * │    YES: We have saved setpoints to restore                              │
- * │         → Restore saved setpoints (restoreStoredSetpoints)              │
- * │         → Mark setpointsRestored = true (back to normal)                │
- * │    NO: Already using normal temps (do nothing)                          │
- * └─────────────────────────────────────────────────────────────────────────┘
+ * FIRST-INSTALL GUARD (state.initializedBefore):
+ * On the very first install, if the hub is already in an Away/Night mode,
+ * the thermostat may be showing Away/Night temps from manual setup. Saving
+ * those as "normal" temps would be incorrect. When initializedBefore is false,
+ * the method applies the virtual thermostat setpoints but skips saving.
+ * The flag is set to true the first time a Normal mode is entered.
  *
  * WALKTHROUGH EXAMPLE:
  * ═══════════════════════════════════════════════════════════════════════════
@@ -1282,104 +1341,70 @@ void locationModeChangeHandler(Event evt) {
  * Bedtime (Away → Night) | FALSE             | 70°F / 75°F | 68°F / 72°F ✓
  * Return home (→ Home)   | TRUE              | (cleared)   | 70°F / 75°F ✓
  * ═══════════════════════════════════════════════════════════════════════════
- * ✓ = Correct behavior achieved by the flag logic
  *
- * PARAMETERS:
- * @param modeName Name of mode entering ("Away", "Night", or other)
+ * @param modeName Logical mode category: "Away", "Night", or the raw Hubitat
+ *                 mode name for normal modes (e.g., "Home", "Day")
  * @param modeThermostat Virtual thermostat device with setpoints for this mode
  *                       (null for normal modes that don't use virtual thermostats)
  */
 private void handleModeChange(String modeName, DeviceWrapper modeThermostat=null) {
-  // The comments below explain the old logic, now replaced with detailed inline comments
-  // OLD COMMENT: Only store current setpoints if not already stored;
-  // OLD COMMENT: We're only interested in storing the non-away and non-night setpoints
-  // OLD COMMENT: We don't want to overwrite the stored setpoints if we're already in away or night mode
-  // OLD COMMENT: When jumping straight between away and night modes, it should not store the setpoints again
-
   // ===== CASE 1: ENTERING AWAY MODE =====
   if (modeName == 'Away') {
-    // Log that we're entering Away mode
-    // \"${modeName}\" = escape quotes so they appear in the log message
-    // This appears in logs if settings.logEnable is true
-    logInfo("Location entered \"${modeName}\" mode")
+    logInfo("Location entered Away mode (\"${location.getMode()}\")")
 
-    // Check if we're currently in normal mode (using normal temperatures)
-    // state.setpointsRestored == true means "using normal temps, not saved yet"
     if (state.setpointsRestored == true) {
-      // We're in normal mode - need to save current temps before changing
-
-      // Try to save current setpoints to memory
-      // storeCurrentSetpoints() returns true if successful, false if error
-      if (storeCurrentSetpoints()) {
-        // Save succeeded - now apply Away mode temperatures
-        // modeThermostat = the Away virtual thermostat device
-        // modeName = "Away" (for logging purposes)
+      // We're in normal mode - need to save current temps before changing.
+      // Guard: on first install in Away/Night, the thermostat may already show
+      // Away/Night temps from manual setup. Saving those as "normal" would be
+      // wrong. Skip the save and just apply the virtual thermostat setpoints.
+      if (state.initializedBefore == false) {
+        logWarn('First initialization in Away mode; skipping setpoint save (thermostat may not have normal temps)')
+        applyVirtualThermostatSetpoints(modeThermostat, modeName)
+      } else if (storeCurrentSetpoints()) {
         applyVirtualThermostatSetpoints(modeThermostat, modeName)
       }
-      // If save failed, applyVirtualThermostatSetpoints is NOT called
-      // This prevents entering Away mode without saving normal temps
-      // The thermostat stays at current temps (safe failure mode)
-
+      // If storeCurrentSetpoints() failed, thermostat stays at current temps (safe failure)
     } else {
-      // state.setpointsRestored == false means we're already in Away or Night mode
-      // Normal temps are ALREADY saved in memory from earlier
-      // Just apply Away setpoints without re-saving
-      // This preserves the original normal temps in memory
+      // Already in Away or Night — normal temps already saved, just apply new setpoints
       applyVirtualThermostatSetpoints(modeThermostat, modeName)
     }
 
-    // Exit this method immediately - nothing else to do for Away mode
     return
   }
 
   // ===== CASE 2: ENTERING NIGHT MODE =====
-  // Same logic as Away mode, but with Night virtual thermostat
-  else if (modeName == 'Night') {
-    // Log that we're entering Night mode
-    logInfo("Location entered \"${modeName}\" mode")
+  if (modeName == 'Night') {
+    logInfo("Location entered Night mode (\"${location.getMode()}\")")
 
-    // Check if we're currently in normal mode
     if (state.setpointsRestored == true) {
-      // In normal mode - save before applying Night setpoints
-      if (storeCurrentSetpoints()) {
-        // Save succeeded - apply Night mode temperatures
+      // Same first-install guard as Away mode above
+      if (state.initializedBefore == false) {
+        logWarn('First initialization in Night mode; skipping setpoint save (thermostat may not have normal temps)')
+        applyVirtualThermostatSetpoints(modeThermostat, modeName)
+      } else if (storeCurrentSetpoints()) {
         applyVirtualThermostatSetpoints(modeThermostat, modeName)
       }
     } else {
-      // Already in Away or Night - just apply Night setpoints without saving
       applyVirtualThermostatSetpoints(modeThermostat, modeName)
     }
 
-    // Exit immediately
     return
   }
 
   // ===== CASE 3: ENTERING NORMAL MODE (anything other than Away or Night) =====
   // If we get here, modeName is something like "Home", "Day", "Evening", etc.
-  // These are all treated as "Normal" mode (not Away, not Night)
 
-  // Check ALL three conditions (all must be true):
-  // 1. modeName != 'Away' = not entering Away mode
-  // 2. modeName != 'Night' = not entering Night mode
-  // 3. state.setpointsRestored == false = we have saved temps to restore
-  //
-  // && = "and" operator (all conditions must be true)
-  if (modeName != 'Away' && modeName != 'Night' && state.setpointsRestored == false) {
-    // We have saved setpoints from Away or Night mode
-    // Time to restore them!
+  // Mark that we've now been through a normal mode at least once.
+  // After this, future Away/Night transitions will correctly save setpoints.
+  state.initializedBefore = true
 
-    // Log that we're exiting Away/Night mode to some normal mode
-    logInfo("Location exited \"${modeName}\" mode")
+  if (state.setpointsRestored == false) {
+    // We have saved setpoints from Away or Night mode — time to restore
+    logInfo("Location entered \"${modeName}\" mode (was ${state.currentOperatingState}); restoring previous setpoints")
 
-    // Update state to reflect we're back in normal mode
     state.currentOperatingState = 'Normal'
-
-    // Restore the saved normal temperatures
     restoreStoredSetpoints()
   }
-  // If conditions aren't met, do nothing (already using normal temps)
-
-  // Method ends here - mode change has been fully handled
 }
 
 /**
