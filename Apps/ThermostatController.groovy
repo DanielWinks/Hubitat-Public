@@ -712,6 +712,16 @@ void initialize() {
     // null = no virtual thermostat needed for Normal mode
     handleModeChange(location.getMode())
   }
+
+  // STEP 6: Check for currently-open windows/doors at startup
+  // If the app (re)initializes while a window is already open, we need to
+  // start the disable timer so the thermostat doesn't run indefinitely.
+  // The setThermostatAutoUnlessWindowOpen() calls above handle the immediate
+  // mode set, but we also need the timer in case windows were already open.
+  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
+    logInfo('Window/door is currently open at initialization; starting disable timer')
+    runIn((settings.openWindowDuration ?: 3) * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
+  }
   // After initialize() completes, the app is fully set up and running
 }
 
@@ -775,7 +785,13 @@ private void ensureStateDefaults() {
   }
   // If it already has a value, do nothing (preserves existing state)
 
-  // After this method, both state variables are guaranteed to exist
+  // Check if disabledDueToOpenWindow has ever been set
+  // Tracks whether thermostat was turned off because a window/door was open
+  if (state.disabledDueToOpenWindow == null) {
+    state.disabledDueToOpenWindow = false
+  }
+
+  // After this method, all state variables are guaranteed to exist
   // Either with their existing values (if already set) or defaults (if new)
 }
 
@@ -875,6 +891,9 @@ void contactSensorEventHandler(Event evt) {
       // If the timer already expired and method ran, this does nothing (harmless)
       unschedule('disableThermostatDueToOpenWindow')
 
+      // Clear the tracking flag so mode changes know windows are closed
+      state.disabledDueToOpenWindow = false
+
       // Log what we're doing (appears in logs if settings.logEnable is true)
       logInfo('All windows/doors closed; restoring thermostat automation')
 
@@ -931,9 +950,9 @@ void disableThermostatDueToOpenWindow() {
   // No heating, no cooling - complete shutdown
   thermostat.off()
 
-  // That's it! The thermostat is now off and will stay off until:
-  // - All windows/doors are closed
-  // - contactSensorEventHandler() turns it back on with .auto()
+  // Track that we disabled due to open window so mode changes won't
+  // accidentally re-enable the thermostat while a window is still open
+  state.disabledDueToOpenWindow = true
 }
 
 /**
@@ -1075,6 +1094,39 @@ boolean anyContactSensorsOpen() {
   //   }
   // }
   // return false  // Checked all sensors, none are open
+}
+
+/**
+ * SET THERMOSTAT TO AUTO UNLESS WINDOW IS OPEN
+ *
+ * Helper method that sets the thermostat to auto mode, but first checks
+ * whether any contact sensors report a window/door as open. If the open
+ * window feature is enabled and any sensor is open, the thermostat is
+ * turned OFF instead of auto to avoid heating/cooling the outdoors.
+ *
+ * This method should be used in place of raw thermostat.auto() calls
+ * anywhere the thermostat mode is being set as part of setpoint changes
+ * (mode transitions, setpoint restoration, etc.).
+ *
+ * WHEN WINDOW IS OPEN:
+ * - Keeps thermostat off (or turns it off)
+ * - Sets state.disabledDueToOpenWindow = true
+ * - Starts the open window disable timer so that if the timer hasn't
+ *   fired yet (e.g., window just opened), it will still fire
+ *
+ * WHEN ALL WINDOWS ARE CLOSED:
+ * - Sets thermostat to auto mode as normal
+ * - Clears state.disabledDueToOpenWindow
+ */
+private void setThermostatAutoUnlessWindowOpen() {
+  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
+    logInfo('Window/door is open; keeping thermostat disabled instead of setting to auto')
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
+    return
+  }
+  thermostat.auto()
+  state.disabledDueToOpenWindow = false
 }
 
 // =============================================================================
@@ -1508,10 +1560,11 @@ private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, Strin
     thermostat.setCoolingSetpoint(cool)
   }
 
-  // Set the physical thermostat to AUTO mode
-  // .auto() = enable automatic heating/cooling based on current temperature
-  // This ensures the thermostat will heat or cool as needed
-  thermostat.auto()
+  // Set the physical thermostat to AUTO mode (unless a window is open)
+  // setThermostatAutoUnlessWindowOpen() checks for open contact sensors
+  // If any window/door is open and the feature is enabled, keeps thermostat OFF
+  // Otherwise enables automatic heating/cooling based on current temperature
+  setThermostatAutoUnlessWindowOpen()
 
   // Update our internal operating state to match the new mode
   // state.currentOperatingState = persistent memory of current mode
@@ -1611,10 +1664,11 @@ private void restoreStoredSetpoints() {
   // This is CRITICAL - tells handleModeChange to save again next time
   state.setpointsRestored = true
 
-  // Set the physical thermostat to AUTO mode
-  // .auto() = enable automatic heating/cooling
-  // Ensures thermostat can heat or cool as needed
-  thermostat.auto()
+  // Set the physical thermostat to AUTO mode (unless a window is open)
+  // setThermostatAutoUnlessWindowOpen() checks for open contact sensors
+  // If any window/door is open and the feature is enabled, keeps thermostat OFF
+  // Otherwise enables automatic heating/cooling based on current temperature
+  setThermostatAutoUnlessWindowOpen()
 
   // Update our internal operating state to "Normal"
   // state.currentOperatingState = persistent memory of current mode
