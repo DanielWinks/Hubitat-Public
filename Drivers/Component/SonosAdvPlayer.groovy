@@ -3557,6 +3557,14 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   Boolean previouslyWasGroupCoordinator = getId() == previousGroupCoordinator
   setIsGroupCoordinator(isGroupCoordinator)
 
+  // Signal setGroupPlayerIds() to re-evaluate group devices even when the
+  // player list is unchanged. Avoids calling parentUpdateGroupDevices() here
+  // directly, which would use potentially stale player data if both coordinator
+  // and membership change in the same event.
+  if(isGroupCoordinator != previouslyWasGroupCoordinator) {
+    setDeviceDataValue('coordinatorStatusChanged', 'true')
+  }
+
   if(isGroupCoordinator) {
     if(!subValid('sid1')) {
       clearCurrentPlayingStates()
@@ -3609,17 +3617,21 @@ List<String> getGroupPlayerIds() {
 void setGroupPlayerIds(List<String> groupPlayerIds) {
   String newValue = groupPlayerIds.join(',')
   String oldValue = getDeviceDataValue('groupPlayerIds')
-  if(newValue == oldValue) { return }
-  Boolean wasGrouped = oldValue ? oldValue.tokenize(',').size() > 1 : false
-  Boolean isNowGrouped = groupPlayerIds.size() > 1
-  setDeviceDataValue('groupPlayerIds', newValue)
-  this.device.sendEvent(name: 'isGrouped', value: isNowGrouped ? 'on' : 'off')
-  this.device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
-  // Subscribe/unsubscribe sid4 (GroupRenderingControl) on group transitions
-  if(isNowGrouped && !wasGrouped) {
-    subscribeToMrGrcEvents()
-  } else if(!isNowGrouped && wasGrouped) {
-    unsubscribeFromMrGrcEvents()
+  Boolean coordinatorChanged = getDeviceDataValue('coordinatorStatusChanged') == 'true'
+  if(coordinatorChanged) { setDeviceDataValue('coordinatorStatusChanged', '') }
+  if(newValue == oldValue && !coordinatorChanged) { return }
+  if(newValue != oldValue) {
+    Boolean wasGrouped = oldValue ? oldValue.tokenize(',').size() > 1 : false
+    Boolean isNowGrouped = groupPlayerIds.size() > 1
+    setDeviceDataValue('groupPlayerIds', newValue)
+    this.device.sendEvent(name: 'isGrouped', value: isNowGrouped ? 'on' : 'off')
+    this.device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
+    // Subscribe/unsubscribe sid4 (GroupRenderingControl) on group transitions
+    if(isNowGrouped && !wasGrouped) {
+      subscribeToMrGrcEvents()
+    } else if(!isNowGrouped && wasGrouped) {
+      unsubscribeFromMrGrcEvents()
+    }
   }
   logTrace('Updating group device with new group membership information')
   parentUpdateGroupDevices(getId(), groupPlayerIds)
@@ -5360,8 +5372,8 @@ void processWebsocketMessage(String message) {
 
       if(groupId != null && groupId != '') { setGroupId(groupId) }
       if(groupName != null && groupName != '') { setGroupName(groupName) }
-      if(playerIds != null && playerIds.size() > 0) { setGroupPlayerIds(playerIds) }
       if(coordinatorId != null && coordinatorId != '') { setGroupCoordinatorId(coordinatorId) }
+      if(playerIds != null && playerIds.size() > 0) { setGroupPlayerIds(playerIds) }
 
       // Build a lightweight player name lookup from the players array
       // Only extract id and name — ignore devices, capabilities, versions, etc.

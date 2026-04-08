@@ -1644,20 +1644,28 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   }
   String joinedPlayersValue = joinedPlayerNames.join(', ')
 
+  // Resolve caller once — constant for all group devices in this call.
+  // Verify the calling player is the actual Sonos group coordinator.
+  // Without this, every player in the group whose configured coordinator matches
+  // a group device would incorrectly activate that device when all members are
+  // the same across multiple group devices with different coordinators.
+  ChildDeviceWrapper callerDevice = rinconMap[coordinatorId]
+  Boolean isCallerActualCoordinator = callerDevice?.getDataValue('isGroupCoordinator') == 'true'
+
   groupsForCoord.each{gd ->
     HashSet<String> list1 = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> list2 = new  HashSet<String>(playersInGroup)
     list2.add(coordinatorId)
     Boolean allPlayersAreGrouped = list1.equals(list2)
+    Boolean shouldBeActive = allPlayersAreGrouped && isCallerActualCoordinator
     Boolean wasActive = gd.currentValue('switch') == 'on'
-    if(allPlayersAreGrouped) { gd.sendEvent(name: 'switch', value: 'on') }
+    if(shouldBeActive) { gd.sendEvent(name: 'switch', value: 'on') }
     else { gd.sendEvent(name: 'switch', value: 'off') }
     gd.sendEvent(name: 'currentlyJoinedPlayers', value: joinedPlayersValue)
-    if(allPlayersAreGrouped && !wasActive) {
-      ChildDeviceWrapper coordinator = rinconMap[coordinatorId]
-      notifyGroupDeviceActivated(gd, coordinator)
+    if(shouldBeActive && !wasActive) {
+      notifyGroupDeviceActivated(gd, callerDevice)
     }
-    if(!allPlayersAreGrouped && wasActive) {
+    if(!shouldBeActive && wasActive) {
       notifyGroupDeviceDeactivated(gd)
     }
   }
