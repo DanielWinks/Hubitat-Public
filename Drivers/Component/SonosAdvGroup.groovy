@@ -33,7 +33,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Group',
-    version: '0.11.4',
+    version: '0.11.5',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,

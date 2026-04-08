@@ -47,7 +47,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Utilities and Logging Library',
-  version: '0.11.4',
+  version: '0.11.5',
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/UtilitiesAndLoggingLibrary.groovy'
 
 )
