@@ -3557,6 +3557,18 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   Boolean previouslyWasGroupCoordinator = getId() == previousGroupCoordinator
   setIsGroupCoordinator(isGroupCoordinator)
 
+  // Re-evaluate group devices when coordinator status changes.
+  // Handles the case where coordinator changes without player list changing
+  // (setGroupPlayerIds early-returns when player list is unchanged).
+  if(isGroupCoordinator != previouslyWasGroupCoordinator) {
+    try {
+      List<String> currentPlayerIds = getGroupPlayerIds()
+      if(currentPlayerIds != null && currentPlayerIds.size() > 1) {
+        parentUpdateGroupDevices(getId(), currentPlayerIds)
+      }
+    } catch(Exception ignored) {}
+  }
+
   if(isGroupCoordinator) {
     if(!subValid('sid1')) {
       clearCurrentPlayingStates()
@@ -5360,8 +5372,8 @@ void processWebsocketMessage(String message) {
 
       if(groupId != null && groupId != '') { setGroupId(groupId) }
       if(groupName != null && groupName != '') { setGroupName(groupName) }
-      if(playerIds != null && playerIds.size() > 0) { setGroupPlayerIds(playerIds) }
       if(coordinatorId != null && coordinatorId != '') { setGroupCoordinatorId(coordinatorId) }
+      if(playerIds != null && playerIds.size() > 0) { setGroupPlayerIds(playerIds) }
 
       // Build a lightweight player name lookup from the players array
       // Only extract id and name — ignore devices, capabilities, versions, etc.
