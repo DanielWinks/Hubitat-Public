@@ -2972,7 +2972,7 @@ void subscribeResubscribeGenericCallback(String sub, String resub, String subId,
       updateSid(subId, response.headers)
       // Cancel any retries queued by prior "attempt in progress" fallbacks so
       // they don't keep firing now that we have a valid subscription.
-      unschedule(sub)
+      removeResub(sub)
       clearSubscriptionRetryAttempts(sub)
       clearSubscriptionRetryAttempts(resub)
       scheduleResubscriptionToEvents(resub)
