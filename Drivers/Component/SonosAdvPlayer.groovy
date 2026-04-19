@@ -917,7 +917,7 @@ BigDecimal coerceVolume(Object volume) {
       return null
     }
   }
-  logWarn("Unsupported volume type ${volume.getClass().getName()}; ignoring.")
+  logWarn("Unsupported volume type; ignoring.")
   return null
 }
 
