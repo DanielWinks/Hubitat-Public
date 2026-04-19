@@ -2742,12 +2742,12 @@ void executeLocalControlRetry() {
 
 Boolean shouldRequestZgtResub(String dni) {
   if(dni == null || dni == '') { return false }
-  Long now = System.currentTimeMillis()
+  Long nowMs = now()
   Long previous = zgtResubRequestAt.get(dni)
-  if(previous != null && (now - previous) < ZGT_RESUB_REQUEST_MIN_INTERVAL_MS) {
+  if(previous != null && (nowMs - previous) < ZGT_RESUB_REQUEST_MIN_INTERVAL_MS) {
     return false
   }
-  zgtResubRequestAt.put(dni, now)
+  zgtResubRequestAt.put(dni, nowMs)
   return true
 }
 
