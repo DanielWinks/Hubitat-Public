@@ -277,15 +277,18 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static Semaphore avtSubscribeMutex = new Semaphore(1)
-@Field static Semaphore zgtSubscribeMutex = new Semaphore(1)
-@Field static Semaphore mrrcSubscribeMutex = new Semaphore(1)
-@Field static Semaphore mrgrcSubscribeMutex = new Semaphore(1)
-@Field static Semaphore unsubscribeMutex = new Semaphore(4)
+// Per-(DNI, sid) subscription mutexes. Previously these were shared static
+// singletons, which caused every driver instance on the hub to serialize
+// through a single permit per sid -- a large contributor to the ZGT retry
+// storm whenever multiple players' 1-hour resub windows aligned.
+@Field static ConcurrentHashMap<String, Semaphore> subscribeMutexes = new ConcurrentHashMap<String, Semaphore>()
+@Field static ConcurrentHashMap<String, Semaphore> unsubscribeMutexes = new ConcurrentHashMap<String, Semaphore>()
 @Field static final Integer SUBSCRIBE_MUTEX_MAX_PERMITS = 1
-@Field static final Integer UNSUBSCRIBE_MUTEX_MAX_PERMITS = 4
+@Field static final Integer UNSUBSCRIBE_MUTEX_MAX_PERMITS = 1
 @Field static final Integer SUBSCRIBE_MUTEX_WAIT_SECONDS = 2
 @Field static final Integer SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS = 5
+@Field static final Integer SUBSCRIBE_RETRY_MAX_ATTEMPTS = 3
+@Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -373,11 +376,7 @@ import java.util.concurrent.TimeUnit
 // =============================================================================
 void initialize() {
   cancelAudioClipWatchdog()
-  normalizeSemaphorePermits(avtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  normalizeSemaphorePermits(zgtSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  normalizeSemaphorePermits(mrrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  normalizeSemaphorePermits(mrgrcSubscribeMutex, SUBSCRIBE_MUTEX_MAX_PERMITS)
-  normalizeSemaphorePermits(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS)
+  resetSubscriptionMutexesForDevice()
   maybeCleanupStaticDriverState()
   configure()
   // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
@@ -896,12 +895,31 @@ void playText(String text, BigDecimal volume = null) {
   if(getAlwaysUseLoadAudioClip()) { devicePlayText(text, volume) }
   else{ devicePlayTextNoRestore(text, volume) }
 }
+// Public speech entry points. Volume is typed as Object to tolerate callers
+// that pass Integer/Long/String (Rule Machine, webCoRE, user apps). Without
+// this the @CompileStatic signature throws ClassCastException on any caller
+// that doesn't hand us a literal BigDecimal.
+void playTextAndRestore(String text, Object volume = null) { devicePlayText(text, coerceVolume(volume)) }
+void playTextAndResume(String text, Object volume = null) { devicePlayText(text, coerceVolume(volume)) }
+void speak(String text, Object volume = null, String voice = null) { devicePlayText(text, coerceVolume(volume), voice) }
+
 @CompileStatic
-void playTextAndRestore(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
-@CompileStatic
-void playTextAndResume(String text, BigDecimal volume = null) { devicePlayText(text, volume) }
-@CompileStatic
-void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
+BigDecimal coerceVolume(Object volume) {
+  if(volume == null) { return null }
+  if(volume instanceof BigDecimal) { return (BigDecimal) volume }
+  if(volume instanceof Number) { return new BigDecimal(((Number) volume).toString()) }
+  if(volume instanceof CharSequence) {
+    String asString = volume.toString().trim()
+    if(asString == '') { return null }
+    try { return new BigDecimal(asString) }
+    catch(NumberFormatException e) {
+      logWarn("Could not parse volume '${asString}'; ignoring.")
+      return null
+    }
+  }
+  logWarn("Unsupported volume type ${volume.getClass().getName()}; ignoring.")
+  return null
+}
 
 void setTrack(String uri) { componentSetStreamUrlLocal(uri) }
 void playTrack(String uri, BigDecimal volume = null) {
@@ -2688,7 +2706,6 @@ Boolean subValid(String sid) {
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
-  maybeCleanupStaticDriverState()
   Long expiresEpoch = Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)
   // Store expiry in-memory for subValid() checks
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
@@ -2701,32 +2718,50 @@ void updateSid(String sid, Map headers) {
 }
 
 void scheduleResubscriptionToEvents(String eventsToResub) {
-  runIn(RESUB_INTERVAL-100, eventsToResub, [overwrite: true])
+  // Stagger the 1-hour resub window deterministically per device so that
+  // multiple players don't all hit the hub at the same second.
+  Integer jitterSeconds = getDeviceResubJitterSeconds()
+  runIn(RESUB_INTERVAL - 100 - jitterSeconds, eventsToResub, [overwrite: true])
+  clearSubscriptionRetryAttempts(eventsToResub)
 }
 
 void retrySubscription(String eventsToRetry, Integer retryTime = 60) {
+  // This is the "real retry" path (used by 412 callback and by the initial
+  // schedule on subscribe-failure), distinct from the mutex-contention
+  // retries gated by scheduleSubscriptionRetry. Reset the mutex-contention
+  // budget so a real server-driven retry doesn't get counted against the
+  // cap.
+  clearSubscriptionRetryAttempts(eventsToRetry)
   runIn(retryTime, eventsToRetry, [overwrite: true])
 }
 
-void removeResub(String resub) { unschedule(resub)}
+// Queue a bounded retry for a subscribe/resubscribe whose mutex attempt
+// failed. Returns true iff a retry was actually scheduled (caller can gate
+// log output on the return value to avoid floods). The retry budget caps the
+// self-rescheduling loop that previously ran indefinitely.
+Boolean scheduleSubscriptionRetry(String eventsToRetry, String clearOnCancel = null) {
+  Integer attempts = incrementSubscriptionRetryAttempts(eventsToRetry)
+  if(attempts > SUBSCRIBE_RETRY_MAX_ATTEMPTS) {
+    logWarn("${eventsToRetry} retry budget exhausted (${attempts - 1} attempts); waiting for next scheduled window.")
+    clearSubscriptionRetryAttempts(eventsToRetry)
+    if(clearOnCancel != null) { clearSubscriptionRetryAttempts(clearOnCancel) }
+    return false
+  }
+  runIn(5, eventsToRetry, [overwrite: true])
+  return true
+}
+
+Integer getDeviceResubJitterSeconds() {
+  String dni = getDNI()
+  if(dni == null || dni == '') { return 0 }
+  return Math.abs(dni.hashCode() % 180)
+}
 
 Integer getRandomLockRetry(Integer low = 8, Integer high = 30) {
-  return Math.abs( rand.nextInt() % (high - low) ) + low
+  return Math.abs(rand.nextInt() % (high - low)) + low
 }
 
-@CompileStatic
-void normalizeSemaphorePermits(Semaphore mutex, Integer permits) {
-  if(mutex == null) { return }
-
-  synchronized(mutex) {
-    Integer availablePermits = mutex.availablePermits()
-    if(availablePermits > permits) {
-      logTrace("Normalizing semaphore permits from ${availablePermits} to ${permits}")
-      mutex.drainPermits()
-      mutex.release(permits)
-    }
-  }
-}
+void removeResub(String resub) { unschedule(resub)}
 
 @CompileStatic
 Boolean tryAcquireMutexWithTimeout(Semaphore mutex, Integer timeoutSeconds, String lockName) {
@@ -2756,14 +2791,49 @@ void releaseMutexIfHeld(Semaphore mutex, Integer maxPermits, String lockName) {
   }
 }
 
-@CompileStatic
 Semaphore getMutexForSid(String sid) {
-  if(sid == 'sid1') {return avtSubscribeMutex}
-  if(sid == 'sid2') {return mrrcSubscribeMutex}
-  if(sid == 'sid3') {return zgtSubscribeMutex}
-  if(sid == 'sid4') {return mrgrcSubscribeMutex}
-  logWarn("Unknown subscription sid '${sid}'")
-  return null
+  if(sid != 'sid1' && sid != 'sid2' && sid != 'sid3' && sid != 'sid4') {
+    logWarn("Unknown subscription sid '${sid}'")
+    return null
+  }
+  String key = "${getDNI()}-${sid}"
+  Semaphore existing = subscribeMutexes.get(key)
+  if(existing != null) { return existing }
+  return subscribeMutexes.computeIfAbsent(key, { k -> new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS) })
+}
+
+Semaphore getUnsubscribeMutexForDevice() {
+  String key = getDNI()
+  if(key == null || key == '') { return null }
+  Semaphore existing = unsubscribeMutexes.get(key)
+  if(existing != null) { return existing }
+  return unsubscribeMutexes.computeIfAbsent(key, { k -> new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS) })
+}
+
+void resetSubscriptionMutexesForDevice() {
+  String dni = getDNI()
+  if(dni == null || dni == '') { return }
+  ['sid1', 'sid2', 'sid3', 'sid4'].each { String sid ->
+    String key = "${dni}-${sid}"
+    subscribeMutexes.put(key, new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS))
+  }
+  unsubscribeMutexes.put(dni, new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS))
+}
+
+String retryAttemptKey(String eventsToRetry) {
+  return "${getDNI()}-${eventsToRetry}"
+}
+
+void clearSubscriptionRetryAttempts(String eventsToRetry) {
+  subscribeRetryAttempts.remove(retryAttemptKey(eventsToRetry))
+}
+
+Integer incrementSubscriptionRetryAttempts(String eventsToRetry) {
+  String key = retryAttemptKey(eventsToRetry)
+  Integer current = subscribeRetryAttempts.get(key) ?: 0
+  Integer next = current + 1
+  subscribeRetryAttempts.put(key, next)
+  return next
 }
 
 void unlockSubscribeMutexAfterTimeout(String sid) {
@@ -2776,15 +2846,19 @@ void unlockSubscribeMutexAfterTimeoutCallback(Map data) {
 }
 
 void unlockUnsubscribeMutexAfterTimeout() {
-  logTrace("Scheduling unlock of unsubscribeMutex in ${SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS} seconds...")
   runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockUnsubscribeMutexAfterTimeoutCallback', [overwrite: true])
 }
 void unlockUnsubscribeMutexAfterTimeoutCallback() {
-  releaseMutexIfHeld(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
+  releaseMutexIfHeld(getUnsubscribeMutexForDevice(), UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
 }
 
 @CompileStatic
 void upnpSubscribeGeneric(String sub, String subId, String subPath, String callback, String evtSub) {
+  // Idempotency guard: if we already hold a valid SID for this service, skip
+  // entirely. External callers (e.g. the parent app's 499/GROUP_STATUS_MOVED
+  // handler) can hammer subscribeTo* freely without causing mutex contention
+  // or redundant UPnP SUBSCRIBE traffic.
+  if(subValid(subId)) { return }
   Semaphore mutex = getMutexForSid(subId)
   Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${sub} (${subId})")
   if(acquired == true) {
@@ -2805,13 +2879,12 @@ void upnpSubscribeGeneric(String sub, String subId, String subPath, String callb
       }
     }
   } else {
-    Integer timeout = getRandomLockRetry()
-    logTrace("${sub} attempt in progress...trying again in ${timeout} seconds.")
-    retrySubscription(sub, timeout)
+    if(scheduleSubscriptionRetry(sub)) {
+      logTrace("${sub} attempt in progress, queued retry.")
+    }
   }
 }
 
-@CompileStatic
 void upnpResubscribeGeneric(String resub, String subId, String subPath, String callback, String evtSub) {
   Semaphore mutex = getMutexForSid(subId)
   Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${resub} (${subId})")
@@ -2835,15 +2908,15 @@ void upnpResubscribeGeneric(String resub, String subId, String subPath, String c
       }
     }
   } else {
-    Integer timeout = getRandomLockRetry()
-    logTrace("${resub} attempt in progress...trying again in ${timeout} seconds.")
-    retrySubscription(resub, timeout)
+    if(scheduleSubscriptionRetry(resub)) {
+      logTrace("${resub} attempt in progress, queued retry.")
+    }
   }
 }
 
-@CompileStatic
 void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evtSub, String callback) {
-  Boolean acquired = tryAcquireMutexWithTimeout(unsubscribeMutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${unsub} (${subId})")
+  Semaphore mutex = getUnsubscribeMutexForDevice()
+  Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${unsub} (${subId})")
   if(acquired == true) {
     unlockUnsubscribeMutexAfterTimeout()
     Boolean releaseMutex = true
@@ -2862,8 +2935,6 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
         removeResub(resub)
         releaseMutex = false
       } else {
-        // Log which values are missing to help with debugging
-        logTrace("${unsub} skipped - missing required data: host=${localUpnpHost != null && localUpnpHost != ''}, sid=${sid != null && sid != ''}, dni=${dni != null && dni != ''}")
         // Clean up anyway since we can't unsubscribe
         if(subId != null) { deleteSid(subId) }
         if(resub != null) { removeResub(resub) }
@@ -2872,13 +2943,13 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
       logInfo("${unsub} failed due to ${e}")
     } finally {
       if(releaseMutex == true) {
-        releaseMutexIfHeld(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
+        releaseMutexIfHeld(mutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
       }
     }
   } else {
-    Integer timeout = getRandomLockRetry()
-    logTrace("${unsub} attempt in progress...trying again in ${timeout} seconds.")
-    retrySubscription(resub, timeout)
+    if(scheduleSubscriptionRetry(unsub, resub)) {
+      logTrace("${unsub} attempt in progress, queued retry.")
+    }
   }
 }
 
@@ -2899,6 +2970,11 @@ void subscribeResubscribeGenericCallback(String sub, String resub, String subId,
     } else if(response?.status == 200) {
       logTrace("Sucessfully subscribed to ${domain}")
       updateSid(subId, response.headers)
+      // Cancel any retries queued by prior "attempt in progress" fallbacks so
+      // they don't keep firing now that we have a valid subscription.
+      unschedule(sub)
+      clearSubscriptionRetryAttempts(sub)
+      clearSubscriptionRetryAttempts(resub)
       scheduleResubscriptionToEvents(resub)
     }
   } finally {
@@ -2906,7 +2982,6 @@ void subscribeResubscribeGenericCallback(String sub, String resub, String subId,
   }
 }
 
-@CompileStatic
 void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse response) {
   try {
     if(response?.status == 412){
@@ -2916,7 +2991,7 @@ void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse res
     }
     deleteSid(subId)
   } finally {
-    releaseMutexIfHeld(unsubscribeMutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
+    releaseMutexIfHeld(getUnsubscribeMutexForDevice(), UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
   }
 }
 // /////////////////////////////////////////////////////////////////////////////
@@ -3027,6 +3102,16 @@ void subscribeToZgtEvents() {
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_CALLBACK
   upnpSubscribeGeneric(sub, subId, subPath, callback, evtSub)
+}
+
+// Entry point used by the parent app when a GROUP_STATUS_MOVED 499 arrives.
+// Skips the subscribe entirely when the ZGT subscription is still valid --
+// GROUP_STATUS_MOVED does not invalidate the UPnP SID, it only means the
+// coordinator changed. Otherwise we batch burst-y callers into a single 2s
+// delayed subscribe so storms of 499s coalesce into one network request.
+void requestZgtResub() {
+  if(subValid('sid3')) { return }
+  runIn(2, 'subscribeToZgtEvents', [overwrite: true])
 }
 
 @CompileStatic

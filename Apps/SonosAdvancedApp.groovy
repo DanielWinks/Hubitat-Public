@@ -55,6 +55,11 @@ preferences {
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
+// Per-child debounce for GROUP_STATUS_MOVED driven ZGT resubscribes. Burst 499
+// responses during group transitions would otherwise fire dozens of subscribes
+// on the same device back to back.
+@Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
+@Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -2735,15 +2740,25 @@ void executeLocalControlRetry() {
   }
 }
 
+Boolean shouldRequestZgtResub(String dni) {
+  if(dni == null || dni == '') { return false }
+  Long now = System.currentTimeMillis()
+  Long previous = zgtResubRequestAt.get(dni)
+  if(previous != null && (now - previous) < ZGT_RESUB_REQUEST_MIN_INTERVAL_MS) {
+    return false
+  }
+  zgtResubRequestAt.put(dni, now)
+  return true
+}
+
 Boolean responseIsValid(AsyncResponse response, String requestName = null) {
   if(response?.status == 499) {
     try{
       Map errData = response.getErrorData()
       if(errData?.groupStatus == 'GROUP_STATUS_MOVED') {
         ChildDeviceWrapper child = getDeviceFromRincon(errData?.playerId)
-        if(child) {
-          child.subscribeToZgtEvents()
-          logDebug('Resubscribed to ZGT to handle "GROUP_STATUS_MOVED" errors')
+        if(child != null && shouldRequestZgtResub(child.getDeviceNetworkId())) {
+          child.requestZgtResub()
         }
       }
     } catch(Exception e){}
