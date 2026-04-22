@@ -945,7 +945,7 @@ BigDecimal coerceVolume(Object volume) {
       return null
     }
   }
-  logWarn("Unsupported volume type; ignoring.")
+  logWarn("Unsupported volume value '${volume}'; ignoring.")
   return null
 }
 
