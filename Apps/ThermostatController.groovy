@@ -735,48 +735,24 @@ void initialize() {
   // When mode changes, call locationModeChangeHandler()
   subscribe(location, 'mode', 'locationModeChangeHandler')
 
-  // STEP 5: Handle the current mode immediately
-  // Don't wait for the next mode change - act now!
-
-  // Get the current location mode as a String
-  // Example: "Home", "Away", "Night", "Day", etc.
   String mode = location.getMode()
+  logDebug("Active location mode: ${mode}")
 
-  // Log which mode we're currently in (for troubleshooting)
-  // logDebug() only logs if settings.debugLogEnable is true
-  // ${...} inserts the mode value into the string
-  logDebug("Active location mode: ${location.getMode()}")
-
-  // Check which mode we're in and apply appropriate settings
-  // This uses if-else logic to determine what to do
-
-  if (isAwayMode(mode)) {
-    // Currently in an Away mode - apply Away temperatures now
-    // settings.awayModeVirtualThermostat = the virtual thermostat for Away mode
-    // handleModeChange() does the actual work of applying temperatures
-    handleModeChange('Away', awayModeVirtualThermostat)
-
-  } else if (isNightMode(mode)) {
-    // Currently in a Night mode - apply Night temperatures now
-    // settings.nightModeVirtualThermostat = the virtual thermostat for Night mode
-    handleModeChange('Night', nightModeVirtualThermostat)
-
-  } else {
-    // Some other mode (Home, Day, etc.) - treat as Normal mode
-    // null = no virtual thermostat needed for Normal mode
-    handleModeChange(mode)
-  }
-
-  // STEP 6: Check for currently-open windows/doors at startup
-  // If the app (re)initializes while a window is already open, we need to
-  // start the disable timer so the thermostat doesn't run indefinitely.
-  // The setThermostatAutoUnlessWindowOpen() calls above handle the immediate
-  // mode set, but we also need the timer in case windows were already open.
+  // If a window/door is already open at startup, defer mode handling entirely.
+  // Turn the thermostat off and stash the current Hubitat mode so it is applied
+  // when contactSensorEventHandler() sees all windows close. Also start the
+  // disable timer as a belt-and-suspenders guard (noop if already off).
   if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
-    logInfo('Window/door is currently open at initialization; starting disable timer')
+    logInfo("Window/door open at initialization; deferring mode application for \"${mode}\" and keeping thermostat off")
+    state.pendingLocationMode = mode
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
     runIn((settings.openWindowDuration ?: 3) * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
+    return
   }
-  // After initialize() completes, the app is fully set up and running
+
+  state.pendingLocationMode = null
+  applyModeFromHubitat(mode)
 }
 
 /**
@@ -985,20 +961,18 @@ void contactSensorEventHandler(Event evt) {
       state.disabledDueToOpenWindow = false
       logInfo('All windows/doors closed; restoring thermostat automation')
 
-      // Re-apply the setpoints for the current mode. If a mode change happened
-      // while the window was open, applyVirtualThermostatSetpoints() /
-      // restoreStoredSetpoints() deferred the physical setpoint writes to avoid
-      // triggering the HVAC. Finish that work now that it is safe.
-      String currentMode = location.getMode()
-      if (isAwayMode(currentMode)) {
-        applyVirtualThermostatSetpoints(awayModeVirtualThermostat, 'Away')
-      } else if (isNightMode(currentMode)) {
-        applyVirtualThermostatSetpoints(nightModeVirtualThermostat, 'Night')
-      } else if (state.setpointsRestored == false) {
-        restoreStoredSetpoints()
-      } else {
-        thermostat.auto()
+      // If a Hubitat mode change was deferred during the open-window period,
+      // apply it now. Always finish with thermostat.auto() so the thermostat
+      // is re-enabled: the apply path may not touch the mode (Normal→Normal
+      // is a noop inside handleModeChange), and the disable timer may have
+      // turned the thermostat off.
+      String pending = state.pendingLocationMode
+      if (pending) {
+        state.pendingLocationMode = null
+        logInfo("Applying deferred mode change to \"${pending}\"")
+        applyModeFromHubitat(pending)
       }
+      thermostat.auto()
     } else {
       // At least one window/door is still open
       // Keep thermostat disabled for now, just log the information
@@ -1277,22 +1251,33 @@ private void setThermostatAutoUnlessWindowOpen() {
  *   - evt.value: New mode name as a String (e.g., "Away", "Night", "Home", "Day")
  */
 void locationModeChangeHandler(Event evt) {
-  // Extract the new mode name from the event
   String mode = evt.value
-
-  // Log the mode change for debugging
   logDebug("locationModeChangeHandler: Location mode changed to ${mode}")
 
-  // Classify the mode and delegate to the single handleModeChange() code path.
-  // This avoids duplicating restore logic that could diverge over time.
+  // If a window/door is open, defer the entire mode change until it closes.
+  // There's no point in saving/restoring setpoints or re-classifying the mode
+  // while the HVAC is supposed to stay off anyway, and doing so risks writing
+  // setpoints whose side effects wake the HVAC up. contactSensorEventHandler()
+  // applies the stored pendingLocationMode when all windows close.
+  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
+    logInfo("Window/door open; deferring mode change to \"${mode}\" until all windows close")
+    state.pendingLocationMode = mode
+    return
+  }
+
+  state.pendingLocationMode = null
+  applyModeFromHubitat(mode)
+}
+
+// Classify the raw Hubitat location mode and dispatch to handleModeChange().
+// Shared by locationModeChangeHandler(), initialize(), and the open-window
+// close handler so the classification logic lives in exactly one place.
+private void applyModeFromHubitat(String mode) {
   if (isAwayMode(mode)) {
     handleModeChange('Away', awayModeVirtualThermostat)
-
   } else if (isNightMode(mode)) {
     handleModeChange('Night', nightModeVirtualThermostat)
-
   } else {
-    // Any mode not configured as Away or Night is treated as Normal
     handleModeChange(mode)
   }
 }
@@ -1550,24 +1535,6 @@ private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, Strin
     return
   }
 
-  // Record the mode even if we have to defer the physical write, so that
-  // contactSensorEventHandler() knows which setpoints to apply when the
-  // window closes.
-  state.currentOperatingState = modeName
-
-  // If a window/door is open, do NOT write setpoints to the physical thermostat.
-  // Many thermostat drivers implicitly re-enable heat/cool mode as a side effect
-  // of setpoint commands, which would run the HVAC with the window open. The
-  // final thermostat.off() after the setpoint writes is not a reliable guard
-  // against this because of command ordering/queuing. Defer the writes and
-  // re-apply them in contactSensorEventHandler() when all windows close.
-  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
-    logInfo("Window/door open; deferring ${modeName} setpoint application and keeping thermostat off")
-    thermostat.off()
-    state.disabledDueToOpenWindow = true
-    return
-  }
-
   Double heat = (modeThermostat.currentValue('heatingSetpoint') as BigDecimal)?.toDouble()
   Double cool = (modeThermostat.currentValue('coolingSetpoint') as BigDecimal)?.toDouble()
 
@@ -1579,6 +1546,7 @@ private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, Strin
   }
 
   setThermostatAutoUnlessWindowOpen()
+  state.currentOperatingState = modeName
 }
 
 
@@ -1639,23 +1607,11 @@ private void restoreStoredSetpoints() {
     return
   }
 
-  state.currentOperatingState = 'Normal'
-
-  // If a window/door is open, defer the restore. Writing setpoints now could
-  // cause the thermostat driver to re-enable heat/cool as a side effect, which
-  // would run the HVAC with the window open. setpointsRestored stays false so
-  // contactSensorEventHandler() finishes the restore when windows close.
-  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
-    logInfo('Window/door open; deferring setpoint restoration and keeping thermostat off')
-    thermostat.off()
-    state.disabledDueToOpenWindow = true
-    return
-  }
-
   thermostat.setHeatingSetpoint(low.toDouble())
   thermostat.setCoolingSetpoint(high.toDouble())
   state.setpointsRestored = true
   setThermostatAutoUnlessWindowOpen()
+  state.currentOperatingState = 'Normal'
 }
 
 // =============================================================================
