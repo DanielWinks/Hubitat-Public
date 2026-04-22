@@ -196,11 +196,17 @@ Map mainPage() {
           range: '100..4096',
           description: 'Token cap for each individual stage call (weather, calendar, weaver).'
         input 'stageDelaySeconds', 'number',
-          title: 'Delay Between Stages (seconds)',
+          title: 'Delay Between Stages & Retries (seconds)',
           required: false,
-          defaultValue: 3,
-          range: '0..30',
-          description: 'Spacing between Gemini calls to stay under rate limits (free tier ~15 RPM).'
+          defaultValue: 7,
+          range: '0..60',
+          description: 'Spacing between Gemini calls. Free-tier gemini-2.5-flash is 10 RPM (6s min between calls), gemini-2.5-flash-lite is 15 RPM (4s min). Default 7s gives safety margin for all free-tier Flash models. Also applied before a retry.'
+
+        Map timing = computeGenerationTime()
+        paragraph("<b>Estimated Generation Time</b><br>" +
+          "<b>Typical:</b> ~${timing.typical} seconds (no retries, fast API responses)<br>" +
+          "<b>Maximum:</b> ~${timing.maxFormatted} if every stage must retry AND every call hits the 30s HTTP timeout (worst case; unlikely to ever occur).<br>" +
+          "<small>Max = ${timing.maxCalls} calls × 30s timeout + ${timing.maxGaps} gaps × ${timing.delay}s delay = ${timing.maxSeconds}s. Each of the 3 stages (weather, calendar, weaver) runs at most twice thanks to the single-retry logic.</small>")
       }
 
       section('<b>Stage Prompts</b> (Multi-Stage Chain)') {
@@ -772,16 +778,38 @@ private void startMultiStageChain(String weatherReport, String weatherAlerts, St
     weatherSummary: null,
     calendarSummary: null,
     fallbackText: fallbackText,
-    failures: []
+    failures: [],
+    // Per-stage attempt counters. Each stage runs at most MAX_STAGE_ATTEMPTS
+    // (twice: initial call + one retry) before being recorded as failed.
+    attempts: [weather: 0, calendar: 0, weaver: 0]
   ]
 
   // Kick off Stage A immediately. Subsequent stages are scheduled via runIn().
   runStageWeather()
 }
 
+// Each stage runs at most this many times (initial attempt + retry). Hard-coded
+// rather than exposed as a setting because "single retry" is the explicit policy.
+@Field static final Integer MAX_STAGE_ATTEMPTS = 2
+
+/**
+ * outputDiffersFromInput() - Quality check for a stage output. Returns false if
+ * the Gemini response is empty, whitespace-only, or identical (trimmed) to the
+ * content we sent. This catches the failure mode where the model echoes the
+ * input back instead of summarizing / rewriting it.
+ */
+private boolean outputDiffersFromInput(String output, String input) {
+  if (!output) { return false }
+  String o = output.trim()
+  String i = (input ?: '').trim()
+  if (!o) { return false }
+  return o != i
+}
+
 /**
  * runStageWeather() - Stage A: condense the weather forecast and any alerts
- * into a single TTS-friendly paragraph.
+ * into a single TTS-friendly paragraph. Retries once if Gemini fails or if
+ * the output is empty or identical to the input.
  */
 void runStageWeather() {
   Map chain = (state.chain as Map) ?: [:]
@@ -797,33 +825,50 @@ void runStageWeather() {
       return
     }
 
-    StringBuilder content = new StringBuilder()
+    Integer attempt = ((chain.attempts?.weather ?: 0) as Integer) + 1
+    chain.attempts.weather = attempt
+    logDebug("Stage A (weather) attempt ${attempt}/${MAX_STAGE_ATTEMPTS}")
+
+    StringBuilder sb = new StringBuilder()
     if (alerts) {
-      content.append('WEATHER ALERTS:\n').append(alerts).append('\n\n')
+      sb.append('WEATHER ALERTS:\n').append(alerts).append('\n\n')
     }
     if (weather) {
-      content.append('WEATHER FORECAST:\n').append(weather)
+      sb.append('WEATHER FORECAST:\n').append(weather)
     }
+    String content = sb.toString()
 
     String systemPrompt = settings.weatherStagePrompt ?: DEFAULT_WEATHER_PROMPT
-    Map result = callGeminiDirect(systemPrompt, content.toString())
+    Map result = callGeminiDirect(systemPrompt, content)
 
-    if (result.success) {
+    boolean ok = result.success && outputDiffersFromInput(result.text, content)
+    if (ok) {
       chain.weatherSummary = result.text
-      logInfo('Stage A (weather) succeeded')
+      state.chain = chain
+      logInfo("Stage A (weather) succeeded on attempt ${attempt}")
       logDebug("Stage A output: ${result.text}")
+      scheduleNextStage('runStageCalendar')
+      return
+    }
+
+    // Quality / API failure path
+    String why = result.success ? 'output identical to input or empty' : result.error
+    if (attempt < MAX_STAGE_ATTEMPTS) {
+      logWarn("Stage A (weather) attempt ${attempt} unacceptable (${why}); retrying")
+      state.chain = chain
+      scheduleNextStage('runStageWeather')
     } else {
       chain.weatherSummary = ''
-      chain.failures << "weather: ${result.error}"
-      logWarn("Stage A (weather) failed: ${result.error}")
+      chain.failures << "weather: ${why} (gave up after ${attempt} attempts)"
+      state.chain = chain
+      logWarn("Stage A (weather) failed after ${attempt} attempts: ${why}")
+      scheduleNextStage('runStageCalendar')
     }
-    state.chain = chain
-    scheduleNextStage('runStageCalendar')
 
   } catch (Exception e) {
     logError("Stage A exception: ${e.message}")
     chain.weatherSummary = ''
-    chain.failures << "weather exception: ${e.message}"
+    (chain.failures as List) << "weather exception: ${e.message}"
     state.chain = chain
     scheduleNextStage('runStageCalendar')
   }
@@ -833,6 +878,7 @@ void runStageWeather() {
  * runStageCalendar() - Stage B: condense calendar events into a date-anchored
  * chronological summary. The DATE ANCHOR block is prepended so Gemini can
  * resolve absolute event dates to relative phrases (today/tomorrow/this Friday).
+ * Retries once if Gemini fails or if the output is empty or identical to input.
  */
 void runStageCalendar() {
   Map chain = (state.chain as Map) ?: [:]
@@ -848,29 +894,44 @@ void runStageCalendar() {
       return
     }
 
-    String systemPrompt = (settings.calendarStagePrompt ?: DEFAULT_CALENDAR_PROMPT)
+    Integer attempt = ((chain.attempts?.calendar ?: 0) as Integer) + 1
+    chain.attempts.calendar = attempt
+    logDebug("Stage B (calendar) attempt ${attempt}/${MAX_STAGE_ATTEMPTS}")
+
+    String systemPrompt = settings.calendarStagePrompt ?: DEFAULT_CALENDAR_PROMPT
     // Date anchor goes ABOVE the prompt so it is the first thing Gemini sees.
     String fullSystemPrompt = "${dateAnchor}\n\n${systemPrompt}"
     String content = "CALENDAR EVENTS:\n${calendar}"
 
     Map result = callGeminiDirect(fullSystemPrompt, content)
 
-    if (result.success) {
+    boolean ok = result.success && outputDiffersFromInput(result.text, content)
+    if (ok) {
       chain.calendarSummary = result.text
-      logInfo('Stage B (calendar) succeeded')
+      state.chain = chain
+      logInfo("Stage B (calendar) succeeded on attempt ${attempt}")
       logDebug("Stage B output: ${result.text}")
+      scheduleNextStage('runStageWeaver')
+      return
+    }
+
+    String why = result.success ? 'output identical to input or empty' : result.error
+    if (attempt < MAX_STAGE_ATTEMPTS) {
+      logWarn("Stage B (calendar) attempt ${attempt} unacceptable (${why}); retrying")
+      state.chain = chain
+      scheduleNextStage('runStageCalendar')
     } else {
       chain.calendarSummary = ''
-      chain.failures << "calendar: ${result.error}"
-      logWarn("Stage B (calendar) failed: ${result.error}")
+      chain.failures << "calendar: ${why} (gave up after ${attempt} attempts)"
+      state.chain = chain
+      logWarn("Stage B (calendar) failed after ${attempt} attempts: ${why}")
+      scheduleNextStage('runStageWeaver')
     }
-    state.chain = chain
-    scheduleNextStage('runStageWeaver')
 
   } catch (Exception e) {
     logError("Stage B exception: ${e.message}")
     chain.calendarSummary = ''
-    chain.failures << "calendar exception: ${e.message}"
+    (chain.failures as List) << "calendar exception: ${e.message}"
     state.chain = chain
     scheduleNextStage('runStageWeaver')
   }
@@ -879,7 +940,9 @@ void runStageCalendar() {
 /**
  * runStageWeaver() - Stage C: combine the weather and calendar summaries into
  * a single natural-flowing morning announcement with greeting and closing.
- * If both prior stages failed, falls back directly to plain concatenated text.
+ * Retries once if Gemini fails or the output is empty/unchanged; if the retry
+ * also fails, concatenates the partial summaries directly. If both prior
+ * stages also failed, falls back to plain concatenated text.
  */
 void runStageWeaver() {
   Map chain = (state.chain as Map) ?: [:]
@@ -890,60 +953,119 @@ void runStageWeaver() {
     // If both summaries are empty, there's nothing for the weaver to do.
     if (!weatherSummary && !calendarSummary) {
       logWarn('Both stage summaries empty; using plain fallback text')
-      storeAnnouncement(chain.fallbackText ?: 'Good morning!')
+      storeAnnouncement((chain.fallbackText ?: 'Good morning!') as String)
       cleanupChain()
       return
     }
 
-    StringBuilder content = new StringBuilder()
+    Integer attempt = ((chain.attempts?.weaver ?: 0) as Integer) + 1
+    chain.attempts.weaver = attempt
+    logDebug("Stage C (weaver) attempt ${attempt}/${MAX_STAGE_ATTEMPTS}")
+
+    StringBuilder sb = new StringBuilder()
     if (weatherSummary) {
-      content.append('WEATHER SEGMENT:\n').append(weatherSummary).append('\n\n')
+      sb.append('WEATHER SEGMENT:\n').append(weatherSummary).append('\n\n')
     }
     if (calendarSummary) {
-      content.append('CALENDAR SEGMENT:\n').append(calendarSummary)
+      sb.append('CALENDAR SEGMENT:\n').append(calendarSummary)
     }
+    String content = sb.toString()
 
     String systemPrompt = settings.weaverStagePrompt ?: DEFAULT_WEAVER_PROMPT
-    Map result = callGeminiDirect(systemPrompt, content.toString())
+    Map result = callGeminiDirect(systemPrompt, content)
 
-    String finalText
-    if (result.success) {
-      finalText = result.text
-      logInfo('Stage C (weaver) succeeded')
-    } else {
-      // Weaver failed - concatenate the partial summaries directly so the user
-      // still gets the AI-improved sub-segments rather than a raw fallback.
-      logWarn("Stage C (weaver) failed: ${result.error}; concatenating partial summaries")
-      chain.failures << "weaver: ${result.error}"
-      StringBuilder concat = new StringBuilder('Good morning! ')
-      if (weatherSummary) { concat.append(weatherSummary).append(' ') }
-      if (calendarSummary) { concat.append(calendarSummary) }
-      finalText = concat.toString().trim()
+    boolean ok = result.success && outputDiffersFromInput(result.text, content)
+    if (ok) {
+      logInfo("Stage C (weaver) succeeded on attempt ${attempt}")
+      if (chain.failures) {
+        logWarn("Chain completed with earlier failures: ${chain.failures}")
+      }
+      storeAnnouncement(result.text as String)
+      cleanupChain()
+      return
     }
+
+    String why = result.success ? 'output identical to input or empty' : result.error
+    if (attempt < MAX_STAGE_ATTEMPTS) {
+      logWarn("Stage C (weaver) attempt ${attempt} unacceptable (${why}); retrying")
+      state.chain = chain
+      scheduleNextStage('runStageWeaver')
+      return
+    }
+
+    // Retry exhausted - concatenate partial AI-improved summaries rather than
+    // dropping back to raw input text.
+    logWarn("Stage C (weaver) failed after ${attempt} attempts: ${why}; concatenating partial summaries")
+    chain.failures << "weaver: ${why} (gave up after ${attempt} attempts)"
+    StringBuilder concat = new StringBuilder('Good morning! ')
+    if (weatherSummary) { concat.append(weatherSummary).append(' ') }
+    if (calendarSummary) { concat.append(calendarSummary) }
+    String finalText = concat.toString().trim()
 
     if (chain.failures) {
       logWarn("Chain completed with failures: ${chain.failures}")
     }
-
     storeAnnouncement(finalText)
     cleanupChain()
 
   } catch (Exception e) {
     logError("Stage C exception: ${e.message}")
-    storeAnnouncement(chain.fallbackText ?: 'Good morning!')
+    storeAnnouncement((chain.fallbackText ?: 'Good morning!') as String)
     cleanupChain()
   }
 }
 
 /**
- * scheduleNextStage() - Schedule the next stage with the configured inter-stage
- * delay. A delay of 0 runs immediately (still through runIn for state safety).
+ * scheduleNextStage() - Schedule a stage method with the configured delay.
+ * Also used to schedule a retry of the same stage (same spacing applies so
+ * we stay under rate limits). A delay of 0 runs immediately.
  */
 private void scheduleNextStage(String methodName) {
-  Integer delay = (settings.stageDelaySeconds ?: 3) as Integer
+  Integer delay = (settings.stageDelaySeconds ?: 7) as Integer
   if (delay < 0) { delay = 0 }
   logDebug("Scheduling ${methodName} in ${delay}s")
   runIn(delay, methodName, [overwrite: false])
+}
+
+/**
+ * computeGenerationTime() - Compute best-case and worst-case generation time
+ * estimates based on current settings. Used by mainPage() to show the user
+ * how long a full generation can take in the absolute worst case (every stage
+ * retries and every call hits the 30s HTTP timeout).
+ *
+ * Worst case walkthrough:
+ *   Stage A call 1 -> [delay] -> Stage A call 2 -> [delay] -> Stage B call 1
+ *   -> [delay] -> Stage B call 2 -> [delay] -> Stage C call 1 -> [delay]
+ *   -> Stage C call 2.
+ *   = 6 calls + 5 delays.
+ */
+private Map computeGenerationTime() {
+  Integer delay = (settings.stageDelaySeconds ?: 7) as Integer
+  if (delay < 0) { delay = 0 }
+  Integer httpTimeout = 30      // matches timeout used in callGeminiDirect
+  Integer numStages = 3
+  Integer maxCalls = numStages * MAX_STAGE_ATTEMPTS  // 6
+  Integer maxGaps = maxCalls - 1                      // 5
+  Integer maxSeconds = (maxCalls * httpTimeout) + (maxGaps * delay)
+
+  // Typical case: one call per stage, each averaging 5s API time, with the
+  // configured delay between successful stages.
+  Integer typicalApiSeconds = 5
+  Integer typicalSeconds = (numStages * typicalApiSeconds) + ((numStages - 1) * delay)
+
+  Integer mins = (maxSeconds / 60) as Integer
+  Integer secs = (maxSeconds % 60) as Integer
+  String maxFormatted = mins > 0 ? "${mins} min ${secs} sec (${maxSeconds}s)" : "${maxSeconds} seconds"
+
+  return [
+    delay: delay,
+    httpTimeout: httpTimeout,
+    maxCalls: maxCalls,
+    maxGaps: maxGaps,
+    maxSeconds: maxSeconds,
+    maxFormatted: maxFormatted,
+    typical: typicalSeconds
+  ]
 }
 
 /**
