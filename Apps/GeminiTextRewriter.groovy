@@ -74,13 +74,19 @@ definition(
 // Base URL for Google Gemini API
 @Field static final String GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
-// Available Gemini models
+// Available Gemini models (updated April 2026)
+// Free tier includes Flash and Flash-Lite variants; Pro models are paid-only
+// since April 1, 2026. gemini-3-pro-preview was shut down March 9, 2026.
 @Field static final Map GEMINI_MODELS = [
-  'gemini-3-pro-preview': 'Gemini 3 Pro (Most Powerful, Reasoning)',
-  'gemini-3-flash-preview': 'Gemini 3 Flash (Fast, High Scale)',
-  'gemini-2.5-flash': 'Gemini 2.5 Flash (Fast, Balanced)',
-  'gemini-2.5-pro': 'Gemini 2.5 Pro (Reasoning, Complex Tasks)',
-  'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite (Fastest, Cost-Efficient)',
+  // Free tier
+  'gemini-2.5-flash': 'Gemini 2.5 Flash (Free Tier - Fast, Balanced - Recommended Default)',
+  'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite (Free Tier - Fastest, Highest Quota)',
+  'gemini-3-flash-preview': 'Gemini 3 Flash Preview (Free Tier - Newest Flash, Preview)',
+  'gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash-Lite Preview (Free Tier - Most Cost-Efficient, Preview)',
+  // Paid tier only
+  'gemini-2.5-pro': 'Gemini 2.5 Pro (PAID - Reasoning, Complex Tasks)',
+  'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview (PAID - Most Powerful Reasoning)',
+  // Legacy
   'gemini-2.0-flash': 'Gemini 2.0 Flash (Legacy)'
 ]
 
