@@ -636,6 +636,9 @@ void cleanupStaticDriverState() {
     clearedEntries += clearStaticMap(jsonSlurpers)
     clearedEntries += clearStaticMap(eventTimestamps)
     clearedEntries += clearStaticMap(favPlaylistDelegate)
+    clearedEntries += clearStaticMap(subscribeMutexes)
+    clearedEntries += clearStaticMap(unsubscribeMutexes)
+    clearedEntries += clearStaticMap(subscribeRetryAttempts)
     if(clearedEntries > 0) {
       logDebug("Cleared ${clearedEntries} orphaned static Sonos Advanced Player cache entries with no active players present")
     }
@@ -668,6 +671,9 @@ void cleanupStaticDriverState() {
   removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
   removedEntries += pruneEventTimestampKeys(activePlayerDnis)
   removedEntries += pruneFavPlaylistDelegates(activePlayerDnis)
+  removedEntries += pruneDniPrefixedMap(subscribeMutexes, activePlayerDnis)
+  removedEntries += pruneDniPrefixedMap(unsubscribeMutexes, activePlayerDnis)
+  removedEntries += pruneDniPrefixedMap(subscribeRetryAttempts, activePlayerDnis)
 
   if(removedEntries > 0) {
     logDebug("Cleaned ${removedEntries} orphaned static Sonos Advanced Player cache entries")
@@ -733,6 +739,25 @@ Integer pruneFavPlaylistDelegates(Set<String> activePlayerDnis) {
   return removedEntries
 }
 
+// Prune keys from a static map whose leading segment (before the first '-')
+// isn't an active DNI. Used for the per-device subscription/retry maps whose
+// keys are either "${dni}" or "${dni}-${suffix}". Safe assumption: Sonos
+// DNIs are RINCON_XXXX style with no '-' characters.
+@CompileStatic
+Integer pruneDniPrefixedMap(ConcurrentHashMap map, Set<String> activeDnis) {
+  if(map == null || map.isEmpty() || activeDnis == null || activeDnis.isEmpty()) { return 0 }
+  Integer removed = 0
+  List<String> keys = new ArrayList<String>(map.keySet())
+  keys.each { String key ->
+    Integer idx = key.indexOf('-')
+    String dni = idx < 0 ? key : key.substring(0, idx)
+    if(!activeDnis.contains(dni)) {
+      if(map.remove(key) != null) { removed++ }
+    }
+  }
+  return removed
+}
+
 @CompileStatic
 String extractKeyPrefix(String key, String delimiter) {
   if(key == null || delimiter == null) { return null }
@@ -790,6 +815,9 @@ void clearStaticDriverStateForCurrentDevice() {
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+      unsubscribeMutexes?.remove(dni)
+      subscribeMutexes?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+      subscribeRetryAttempts?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
     }
 
     releaseFavPlaylistDelegate()
@@ -917,7 +945,7 @@ BigDecimal coerceVolume(Object volume) {
       return null
     }
   }
-  logWarn("Unsupported volume type; ignoring.")
+  logWarn("Unsupported volume value '${volume}'; ignoring.")
   return null
 }
 
