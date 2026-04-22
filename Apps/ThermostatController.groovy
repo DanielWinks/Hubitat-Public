@@ -981,23 +981,24 @@ void contactSensorEventHandler(Event evt) {
     // allContactSensorsClosed() returns true only if EVERY sensor is closed
     if (allContactSensorsClosed()) {
       // All windows/doors are closed - safe to re-enable thermostat
-
-      // Cancel the countdown timer (if it's still running)
-      // unschedule('methodName') stops a scheduled method from running
-      // If the timer already expired and method ran, this does nothing (harmless)
       unschedule('disableThermostatDueToOpenWindow')
-
-      // Clear the tracking flag so mode changes know windows are closed
       state.disabledDueToOpenWindow = false
-
-      // Log what we're doing (appears in logs if settings.logEnable is true)
       logInfo('All windows/doors closed; restoring thermostat automation')
 
-      // Set thermostat back to "auto" mode (can heat or cool as needed)
-      // settings.thermostat = the thermostat device from configuration
-      // .auto() is a method that sets the thermostat to automatic mode
-      // Note: This doesn't change temperature setpoints, just enables operation
-      thermostat.auto()
+      // Re-apply the setpoints for the current mode. If a mode change happened
+      // while the window was open, applyVirtualThermostatSetpoints() /
+      // restoreStoredSetpoints() deferred the physical setpoint writes to avoid
+      // triggering the HVAC. Finish that work now that it is safe.
+      String currentMode = location.getMode()
+      if (isAwayMode(currentMode)) {
+        applyVirtualThermostatSetpoints(awayModeVirtualThermostat, 'Away')
+      } else if (isNightMode(currentMode)) {
+        applyVirtualThermostatSetpoints(nightModeVirtualThermostat, 'Night')
+      } else if (state.setpointsRestored == false) {
+        restoreStoredSetpoints()
+      } else {
+        thermostat.auto()
+      }
     } else {
       // At least one window/door is still open
       // Keep thermostat disabled for now, just log the information
@@ -1544,58 +1545,40 @@ private boolean storeCurrentSetpoints() {
  * @param modeName The mode name ("Away" or "Night") for logging and state tracking
  */
 private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, String modeName) {
-  // Check if a virtual thermostat was provided
-  // modeThermostat could be null if user hasn't configured one
   if (modeThermostat == null) {
-    // No virtual thermostat configured for this mode
-    // Log a warning so user knows why nothing happened
     logWarn("No virtual thermostat configured for ${modeName} mode")
-
-    // Exit immediately - can't apply setpoints without a source
     return
   }
 
-  // Read the heating setpoint from the virtual thermostat
-  // 1. modeThermostat.currentValue('heatingSetpoint') = get value
-  // 2. as BigDecimal = convert to precise decimal
-  // 3. ?. = safe operator (if null, stop here and result is null)
-  // 4. toDouble() = convert to regular Double for real thermostat
-  // Example: Virtual thermostat says 65°F → read as 65.0
-  Double heat = (modeThermostat.currentValue('heatingSetpoint') as BigDecimal)?.toDouble()
+  // Record the mode even if we have to defer the physical write, so that
+  // contactSensorEventHandler() knows which setpoints to apply when the
+  // window closes.
+  state.currentOperatingState = modeName
 
-  // Read the cooling setpoint from the virtual thermostat
-  // Same pattern as heating setpoint above
-  // Example: Virtual thermostat says 80°F → read as 80.0
-  Double cool = (modeThermostat.currentValue('coolingSetpoint') as BigDecimal)?.toDouble()
-
-  // Check if we successfully read a heating setpoint
-  // It might be null if virtual thermostat isn't working properly
-  if (heat != null) {
-    // We have a valid heating setpoint - apply it to REAL thermostat
-    // thermostat = the physical thermostat device
-    // .setHeatingSetpoint(heat) = tell thermostat to use this heating target
-    // This is the moment the physical thermostat actually changes!
-    thermostat.setHeatingSetpoint(heat)
+  // If a window/door is open, do NOT write setpoints to the physical thermostat.
+  // Many thermostat drivers implicitly re-enable heat/cool mode as a side effect
+  // of setpoint commands, which would run the HVAC with the window open. The
+  // final thermostat.off() after the setpoint writes is not a reliable guard
+  // against this because of command ordering/queuing. Defer the writes and
+  // re-apply them in contactSensorEventHandler() when all windows close.
+  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
+    logInfo("Window/door open; deferring ${modeName} setpoint application and keeping thermostat off")
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
+    return
   }
 
-  // Check if we successfully read a cooling setpoint
+  Double heat = (modeThermostat.currentValue('heatingSetpoint') as BigDecimal)?.toDouble()
+  Double cool = (modeThermostat.currentValue('coolingSetpoint') as BigDecimal)?.toDouble()
+
+  if (heat != null) {
+    thermostat.setHeatingSetpoint(heat)
+  }
   if (cool != null) {
-    // We have a valid cooling setpoint - apply it to REAL thermostat
-    // .setCoolingSetpoint(cool) = tell thermostat to use this cooling target
     thermostat.setCoolingSetpoint(cool)
   }
 
-  // Set the physical thermostat to AUTO mode (unless a window is open)
-  // setThermostatAutoUnlessWindowOpen() checks for open contact sensors
-  // If any window/door is open and the feature is enabled, keeps thermostat OFF
-  // Otherwise enables automatic heating/cooling based on current temperature
   setThermostatAutoUnlessWindowOpen()
-
-  // Update our internal operating state to match the new mode
-  // state.currentOperatingState = persistent memory of current mode
-  // modeName = "Away" or "Night" (whatever was passed in)
-  // This helps us track what mode we're in for future decisions
-  state.currentOperatingState = modeName
 }
 
 
@@ -1648,57 +1631,31 @@ private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, Strin
  * - Double = standard, used by thermostat commands
  */
 private void restoreStoredSetpoints() {
-  // Retrieve the saved heating setpoint from memory
-  // state.setPointLow = where we stored it in storeCurrentSetpoints()
-  // as BigDecimal = convert back to precise decimal type
   BigDecimal low = state.setPointLow as BigDecimal
-
-  // Retrieve the saved cooling setpoint from memory
-  // state.setPointHigh = where we stored the cooling temp
   BigDecimal high = state.setPointHigh as BigDecimal
 
-  // Safety check: verify both values were successfully retrieved
-  // || = "or" operator (if EITHER is null, condition is true)
   if (low == null || high == null) {
-    // One or both stored values are missing
-
-    // Log a warning so user knows restoration failed
-    // This is unusual but could happen after app reinstall or state reset
     logWarn('No stored setpoints available to restore')
-
-    // Exit immediately - can't restore without valid values
-    // Thermostat stays at current settings (safe failure mode)
     return
   }
 
-  // If we get here, both values are valid and ready to restore
-
-  // Apply the saved heating setpoint to the REAL thermostat
-  // thermostat = the physical thermostat device
-  // .setHeatingSetpoint() = command to set heating target temperature
-  // low.toDouble() = convert BigDecimal to Double for the command
-  thermostat.setHeatingSetpoint(low.toDouble())
-
-  // Apply the saved cooling setpoint to the REAL thermostat
-  // .setCoolingSetpoint() = command to set cooling target temperature
-  // high.toDouble() = convert BigDecimal to Double for the command
-  thermostat.setCoolingSetpoint(high.toDouble())
-
-  // Mark that setpoints have been successfully restored
-  // state.setpointsRestored = true means "back to normal, no temps in memory"
-  // This is CRITICAL - tells handleModeChange to save again next time
-  state.setpointsRestored = true
-
-  // Set the physical thermostat to AUTO mode (unless a window is open)
-  // setThermostatAutoUnlessWindowOpen() checks for open contact sensors
-  // If any window/door is open and the feature is enabled, keeps thermostat OFF
-  // Otherwise enables automatic heating/cooling based on current temperature
-  setThermostatAutoUnlessWindowOpen()
-
-  // Update our internal operating state to "Normal"
-  // state.currentOperatingState = persistent memory of current mode
-  // "Normal" = not Away, not Night - regular temperatures in use
   state.currentOperatingState = 'Normal'
+
+  // If a window/door is open, defer the restore. Writing setpoints now could
+  // cause the thermostat driver to re-enable heat/cool as a side effect, which
+  // would run the HVAC with the window open. setpointsRestored stays false so
+  // contactSensorEventHandler() finishes the restore when windows close.
+  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
+    logInfo('Window/door open; deferring setpoint restoration and keeping thermostat off')
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
+    return
+  }
+
+  thermostat.setHeatingSetpoint(low.toDouble())
+  thermostat.setCoolingSetpoint(high.toDouble())
+  state.setpointsRestored = true
+  setThermostatAutoUnlessWindowOpen()
 }
 
 // =============================================================================
