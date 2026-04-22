@@ -735,48 +735,24 @@ void initialize() {
   // When mode changes, call locationModeChangeHandler()
   subscribe(location, 'mode', 'locationModeChangeHandler')
 
-  // STEP 5: Handle the current mode immediately
-  // Don't wait for the next mode change - act now!
-
-  // Get the current location mode as a String
-  // Example: "Home", "Away", "Night", "Day", etc.
   String mode = location.getMode()
+  logDebug("Active location mode: ${mode}")
 
-  // Log which mode we're currently in (for troubleshooting)
-  // logDebug() only logs if settings.debugLogEnable is true
-  // ${...} inserts the mode value into the string
-  logDebug("Active location mode: ${location.getMode()}")
-
-  // Check which mode we're in and apply appropriate settings
-  // This uses if-else logic to determine what to do
-
-  if (isAwayMode(mode)) {
-    // Currently in an Away mode - apply Away temperatures now
-    // settings.awayModeVirtualThermostat = the virtual thermostat for Away mode
-    // handleModeChange() does the actual work of applying temperatures
-    handleModeChange('Away', awayModeVirtualThermostat)
-
-  } else if (isNightMode(mode)) {
-    // Currently in a Night mode - apply Night temperatures now
-    // settings.nightModeVirtualThermostat = the virtual thermostat for Night mode
-    handleModeChange('Night', nightModeVirtualThermostat)
-
-  } else {
-    // Some other mode (Home, Day, etc.) - treat as Normal mode
-    // null = no virtual thermostat needed for Normal mode
-    handleModeChange(mode)
-  }
-
-  // STEP 6: Check for currently-open windows/doors at startup
-  // If the app (re)initializes while a window is already open, we need to
-  // start the disable timer so the thermostat doesn't run indefinitely.
-  // The setThermostatAutoUnlessWindowOpen() calls above handle the immediate
-  // mode set, but we also need the timer in case windows were already open.
+  // If a window/door is already open at startup, defer mode handling entirely.
+  // Turn the thermostat off and stash the current Hubitat mode so it is applied
+  // when contactSensorEventHandler() sees all windows close. Also start the
+  // disable timer as a belt-and-suspenders guard (noop if already off).
   if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
-    logInfo('Window/door is currently open at initialization; starting disable timer')
+    logInfo("Window/door open at initialization; deferring mode application for \"${mode}\" and keeping thermostat off")
+    state.pendingLocationMode = mode
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
     runIn((settings.openWindowDuration ?: 3) * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
+    return
   }
-  // After initialize() completes, the app is fully set up and running
+
+  state.pendingLocationMode = null
+  applyModeFromHubitat(mode)
 }
 
 /**
@@ -981,22 +957,21 @@ void contactSensorEventHandler(Event evt) {
     // allContactSensorsClosed() returns true only if EVERY sensor is closed
     if (allContactSensorsClosed()) {
       // All windows/doors are closed - safe to re-enable thermostat
-
-      // Cancel the countdown timer (if it's still running)
-      // unschedule('methodName') stops a scheduled method from running
-      // If the timer already expired and method ran, this does nothing (harmless)
       unschedule('disableThermostatDueToOpenWindow')
-
-      // Clear the tracking flag so mode changes know windows are closed
       state.disabledDueToOpenWindow = false
-
-      // Log what we're doing (appears in logs if settings.logEnable is true)
       logInfo('All windows/doors closed; restoring thermostat automation')
 
-      // Set thermostat back to "auto" mode (can heat or cool as needed)
-      // settings.thermostat = the thermostat device from configuration
-      // .auto() is a method that sets the thermostat to automatic mode
-      // Note: This doesn't change temperature setpoints, just enables operation
+      // If a Hubitat mode change was deferred during the open-window period,
+      // apply it now. Always finish with thermostat.auto() so the thermostat
+      // is re-enabled: the apply path may not touch the mode (Normal→Normal
+      // is a noop inside handleModeChange), and the disable timer may have
+      // turned the thermostat off.
+      String pending = state.pendingLocationMode
+      if (pending) {
+        state.pendingLocationMode = null
+        logInfo("Applying deferred mode change to \"${pending}\"")
+        applyModeFromHubitat(pending)
+      }
       thermostat.auto()
     } else {
       // At least one window/door is still open
@@ -1276,22 +1251,33 @@ private void setThermostatAutoUnlessWindowOpen() {
  *   - evt.value: New mode name as a String (e.g., "Away", "Night", "Home", "Day")
  */
 void locationModeChangeHandler(Event evt) {
-  // Extract the new mode name from the event
   String mode = evt.value
-
-  // Log the mode change for debugging
   logDebug("locationModeChangeHandler: Location mode changed to ${mode}")
 
-  // Classify the mode and delegate to the single handleModeChange() code path.
-  // This avoids duplicating restore logic that could diverge over time.
+  // If a window/door is open, defer the entire mode change until it closes.
+  // There's no point in saving/restoring setpoints or re-classifying the mode
+  // while the HVAC is supposed to stay off anyway, and doing so risks writing
+  // setpoints whose side effects wake the HVAC up. contactSensorEventHandler()
+  // applies the stored pendingLocationMode when all windows close.
+  if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
+    logInfo("Window/door open; deferring mode change to \"${mode}\" until all windows close")
+    state.pendingLocationMode = mode
+    return
+  }
+
+  state.pendingLocationMode = null
+  applyModeFromHubitat(mode)
+}
+
+// Classify the raw Hubitat location mode and dispatch to handleModeChange().
+// Shared by locationModeChangeHandler(), initialize(), and the open-window
+// close handler so the classification logic lives in exactly one place.
+private void applyModeFromHubitat(String mode) {
   if (isAwayMode(mode)) {
     handleModeChange('Away', awayModeVirtualThermostat)
-
   } else if (isNightMode(mode)) {
     handleModeChange('Night', nightModeVirtualThermostat)
-
   } else {
-    // Any mode not configured as Away or Night is treated as Normal
     handleModeChange(mode)
   }
 }
@@ -1544,57 +1530,22 @@ private boolean storeCurrentSetpoints() {
  * @param modeName The mode name ("Away" or "Night") for logging and state tracking
  */
 private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, String modeName) {
-  // Check if a virtual thermostat was provided
-  // modeThermostat could be null if user hasn't configured one
   if (modeThermostat == null) {
-    // No virtual thermostat configured for this mode
-    // Log a warning so user knows why nothing happened
     logWarn("No virtual thermostat configured for ${modeName} mode")
-
-    // Exit immediately - can't apply setpoints without a source
     return
   }
 
-  // Read the heating setpoint from the virtual thermostat
-  // 1. modeThermostat.currentValue('heatingSetpoint') = get value
-  // 2. as BigDecimal = convert to precise decimal
-  // 3. ?. = safe operator (if null, stop here and result is null)
-  // 4. toDouble() = convert to regular Double for real thermostat
-  // Example: Virtual thermostat says 65°F → read as 65.0
   Double heat = (modeThermostat.currentValue('heatingSetpoint') as BigDecimal)?.toDouble()
-
-  // Read the cooling setpoint from the virtual thermostat
-  // Same pattern as heating setpoint above
-  // Example: Virtual thermostat says 80°F → read as 80.0
   Double cool = (modeThermostat.currentValue('coolingSetpoint') as BigDecimal)?.toDouble()
 
-  // Check if we successfully read a heating setpoint
-  // It might be null if virtual thermostat isn't working properly
   if (heat != null) {
-    // We have a valid heating setpoint - apply it to REAL thermostat
-    // thermostat = the physical thermostat device
-    // .setHeatingSetpoint(heat) = tell thermostat to use this heating target
-    // This is the moment the physical thermostat actually changes!
     thermostat.setHeatingSetpoint(heat)
   }
-
-  // Check if we successfully read a cooling setpoint
   if (cool != null) {
-    // We have a valid cooling setpoint - apply it to REAL thermostat
-    // .setCoolingSetpoint(cool) = tell thermostat to use this cooling target
     thermostat.setCoolingSetpoint(cool)
   }
 
-  // Set the physical thermostat to AUTO mode (unless a window is open)
-  // setThermostatAutoUnlessWindowOpen() checks for open contact sensors
-  // If any window/door is open and the feature is enabled, keeps thermostat OFF
-  // Otherwise enables automatic heating/cooling based on current temperature
   setThermostatAutoUnlessWindowOpen()
-
-  // Update our internal operating state to match the new mode
-  // state.currentOperatingState = persistent memory of current mode
-  // modeName = "Away" or "Night" (whatever was passed in)
-  // This helps us track what mode we're in for future decisions
   state.currentOperatingState = modeName
 }
 
@@ -1648,56 +1599,18 @@ private void applyVirtualThermostatSetpoints(DeviceWrapper modeThermostat, Strin
  * - Double = standard, used by thermostat commands
  */
 private void restoreStoredSetpoints() {
-  // Retrieve the saved heating setpoint from memory
-  // state.setPointLow = where we stored it in storeCurrentSetpoints()
-  // as BigDecimal = convert back to precise decimal type
   BigDecimal low = state.setPointLow as BigDecimal
-
-  // Retrieve the saved cooling setpoint from memory
-  // state.setPointHigh = where we stored the cooling temp
   BigDecimal high = state.setPointHigh as BigDecimal
 
-  // Safety check: verify both values were successfully retrieved
-  // || = "or" operator (if EITHER is null, condition is true)
   if (low == null || high == null) {
-    // One or both stored values are missing
-
-    // Log a warning so user knows restoration failed
-    // This is unusual but could happen after app reinstall or state reset
     logWarn('No stored setpoints available to restore')
-
-    // Exit immediately - can't restore without valid values
-    // Thermostat stays at current settings (safe failure mode)
     return
   }
 
-  // If we get here, both values are valid and ready to restore
-
-  // Apply the saved heating setpoint to the REAL thermostat
-  // thermostat = the physical thermostat device
-  // .setHeatingSetpoint() = command to set heating target temperature
-  // low.toDouble() = convert BigDecimal to Double for the command
   thermostat.setHeatingSetpoint(low.toDouble())
-
-  // Apply the saved cooling setpoint to the REAL thermostat
-  // .setCoolingSetpoint() = command to set cooling target temperature
-  // high.toDouble() = convert BigDecimal to Double for the command
   thermostat.setCoolingSetpoint(high.toDouble())
-
-  // Mark that setpoints have been successfully restored
-  // state.setpointsRestored = true means "back to normal, no temps in memory"
-  // This is CRITICAL - tells handleModeChange to save again next time
   state.setpointsRestored = true
-
-  // Set the physical thermostat to AUTO mode (unless a window is open)
-  // setThermostatAutoUnlessWindowOpen() checks for open contact sensors
-  // If any window/door is open and the feature is enabled, keeps thermostat OFF
-  // Otherwise enables automatic heating/cooling based on current temperature
   setThermostatAutoUnlessWindowOpen()
-
-  // Update our internal operating state to "Normal"
-  // state.currentOperatingState = persistent memory of current mode
-  // "Normal" = not Away, not Night - regular temperatures in use
   state.currentOperatingState = 'Normal'
 }
 
