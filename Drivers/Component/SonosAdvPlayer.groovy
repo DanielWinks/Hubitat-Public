@@ -962,7 +962,8 @@ void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioC
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   LinkedHashMap tts = textToSpeech(text, voice)
   if(hasAudioClipCapability() == true) {
-    playerLoadAudioClip(tts.uri, volume, tts.duration)
+    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
+    playerLoadAudioClip(tts.uri as String, volume, ttsDuration)
   } else {
     if(volume) { volume += getTTSBoostAmount() }
     else { volume = getPlayerVolume() + getTTSBoostAmount() }
@@ -5993,8 +5994,19 @@ void cancelAudioClipWatchdog() {
   atomicState.audioClipPlaying = false
 }
 
+// textToSpeech() returns duration as a String on some TTS providers, so a raw
+// `duration > 0` on the Map value invokes String.compareTo(Integer) and throws
+// "Integer cannot be cast to String". Always coerce via toIntegerOrNull first.
+private Integer coerceClipDuration(Object raw) {
+  if(raw == null) { return null }
+  if(raw instanceof Number) { return ((Number) raw).intValue() }
+  try { return new BigDecimal(raw.toString().trim()).intValue() }
+  catch(Exception ignored) { return null }
+}
+
 void startAudioClipWatchdog(Map clipMessage) {
-  Integer clipDuration = (clipMessage?.duration != null && clipMessage.duration > 0) ? clipMessage.duration as Integer : AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS
+  Integer parsed = coerceClipDuration(clipMessage?.duration)
+  Integer clipDuration = (parsed != null && parsed > 0) ? parsed : AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS
   Integer totalDuration = clipDuration * AUDIO_CLIP_WATCHDOG_MULTIPLIER
   atomicState.audioClipQueueStartTime = now()
   atomicState.audioClipQueueTotalDuration = totalDuration
@@ -6003,7 +6015,8 @@ void startAudioClipWatchdog(Map clipMessage) {
 }
 
 void extendAudioClipWatchdog(Map clipMessage) {
-  Integer clipDuration = (clipMessage?.duration != null && clipMessage.duration > 0) ? clipMessage.duration as Integer : AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS
+  Integer parsed = coerceClipDuration(clipMessage?.duration)
+  Integer clipDuration = (parsed != null && parsed > 0) ? parsed : AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS
   Integer totalDuration = (atomicState.audioClipQueueTotalDuration ?: 0) as Integer
   totalDuration += clipDuration * AUDIO_CLIP_WATCHDOG_MULTIPLIER
   atomicState.audioClipQueueTotalDuration = totalDuration
