@@ -159,14 +159,15 @@
  *  SCENARIO 6: OPEN WINDOW DETECTED
  *  ┌───────────────────────────────────────────────────────────────────────┐
  *  │ 1. Contact sensor reports: "Window opened"                          │
- *  │ 2. App starts a countdown timer (default: 3 minutes)                │
- *  │ 3. If window still open when timer expires:                         │
- *  │    - App turns thermostat completely OFF                            │
- *  │    - Stops heating/cooling to avoid wasting energy                  │
- *  │ 4. When window closes (and all other windows are closed):          │
- *  │    - App cancels timer (if still counting)                          │
+ *  │ 2. App immediately turns thermostat OFF (no grace period)           │
+ *  │ 3. App also schedules a belt-and-suspenders retry after             │
+ *  │    openWindowDuration minutes in case the first off() was lost      │
+ *  │ 4. thermostatEventHandler watches thermostat events; if the         │
+ *  │    thermostat drifts back to cooling/heating/non-off mode while a   │
+ *  │    window is still open, it is forced off again                     │
+ *  │ 5. When all windows/doors close:                                    │
+ *  │    - App cancels the scheduled retry                                │
  *  │    - App turns thermostat back to "auto" mode                       │
- *  │ 5. Why wait 3 minutes? So briefly opening a door doesn't trigger   │
  *  └───────────────────────────────────────────────────────────────────────┘
  *
  *  ============================================================================
@@ -278,10 +279,12 @@
  *  - Default: TRUE
  *
  *  openWindowDuration (number of minutes, 1-30):
- *  - How long to wait before turning off thermostat for open window
+ *  - Retry interval (in minutes) for the belt-and-suspenders safety retry
+ *    that re-asserts thermostat.off() after a sensor opens. The thermostat
+ *    is turned off immediately on every sensor-open event; this setting
+ *    only controls the scheduled follow-up call in case the first off()
+ *    command was lost to a transient mesh issue.
  *  - Default: 3 minutes
- *  - Why wait? Prevents turning off for brief door openings (getting mail, etc.)
- *  - Longer = less sensitive, Shorter = more aggressive energy saving
  *
  *  LOGGING SETTINGS (for troubleshooting):
  *
@@ -570,14 +573,16 @@ Map mainPage() {
         defaultValue: true
       )
 
-      // Number input: how many minutes to wait before turning off
+      // Number input: retry interval for the belt-and-suspenders disable call.
+      // The thermostat is turned off immediately whenever any sensor opens;
+      // this setting only controls the follow-up runIn() that re-asserts the
+      // off() command in case the initial call was lost to a mesh/retry issue.
       // 'number' = only accepts numeric input
       // range: '1..30' = must be between 1 and 30 (Hubitat enforces this)
-      // Why wait? So briefly opening a door doesn't trigger the automation
       input (
         'openWindowDuration',
         'number',
-        title: 'Duration of minutes to wait before disabling thermostat',
+        title: 'Retry interval (minutes) for the open-window thermostat-off safety retry',
         range: '1..30',
         required: true,
         defaultValue: 3
@@ -713,6 +718,11 @@ void initialize() {
   // This ensures state.setpointsRestored and state.currentOperatingState exist
   // If they already exist, this does nothing (safe to call multiple times)
   ensureStateDefaults()
+
+  // Log a fresh snapshot of every configured contact sensor using
+  // skipCache=true. Produces one logInfo per sensor on every install/update
+  // so we always have a known-good baseline in the logs.
+  logFreshSensorStates()
 
   // STEP 2: Subscribe to thermostat events
   // Listen to ALL events from the thermostat device
@@ -888,21 +898,21 @@ private boolean isNightMode(String modeName) {
  * WHAT IT DOES (the logic flow):
  * 1. Logs which sensor changed and its new state (for debugging)
  * 2. Checks if open window detection is enabled (can be turned off in settings)
- * 3. If sensor OPENED: Starts a countdown timer to disable thermostat
+ * 3. If sensor OPENED: Immediately turns the thermostat off and schedules
+ *    a retry after openWindowDuration minutes
  * 4. If sensor CLOSED: Checks if ALL sensors are closed, re-enables if yes
  *
- * THE TIMER STRATEGY:
- * - Opening a door briefly shouldn't trigger the automation
- * - Example: Getting mail, letting pet out, bringing in groceries
- * - Timer gives a "grace period" (default: 3 minutes from settings)
- * - If door closes before timer expires, thermostat stays on
- * - This prevents annoying on/off cycling for brief openings
+ * THE RETRY STRATEGY:
+ * - The thermostat is turned off immediately on any sensor-open event so
+ *   the HVAC cannot keep running while a window/door is open, even briefly.
+ * - openWindowDuration drives a scheduled retry call to
+ *   disableThermostatDueToOpenWindow() as belt-and-suspenders in case the
+ *   first off() command is lost to a transient Z-Wave / mesh issue.
  *
  * THE "OVERWRITE" TRICK:
  * - runIn(..., [overwrite: true]) means "cancel previous timer, start new one"
- * - Without this: Opening 3 windows = 3 separate timers = chaos
- * - With this: Opening 3 windows = 1 timer that keeps restarting
- * - Result: thermostat turns off 3 minutes after the LAST window opens
+ * - Without this: Opening 3 windows = 3 separate retries stacked up
+ * - With this: Opening 3 windows = 1 retry timer that keeps restarting
  *
  * PARAMETERS:
  * @param evt Event object containing information about what happened:
@@ -931,84 +941,77 @@ void contactSensorEventHandler(Event evt) {
 
   // ===== CASE 1: SENSOR OPENED =====
   if (evt.value == 'open') {
-    // A window or door just opened
+    // Turn the thermostat off immediately — no grace period. If the HVAC
+    // is already running when a window opens, we do not want it to keep
+    // running for the openWindowDuration window. initialize() already
+    // uses this exact pattern when it detects an open sensor at startup.
+    logInfo("${evt.device.displayName} opened; turning thermostat off")
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
 
-    // Start a countdown timer to disable the thermostat
-    // settings.openWindowDuration = number of minutes from configuration
-    // * 60 converts minutes to seconds (runIn uses seconds)
-    // Example: 3 minutes * 60 = 180 seconds
-
-    // runIn(seconds, 'methodName', options) schedules a method to run later
-    // - First parameter: how many seconds to wait (180 = 3 minutes)
-    // - Second parameter: name of method to call (as a String)
-    // - Third parameter: options Map
-    //   - [overwrite: true] = cancel any existing timer with same name
+    // Retain the scheduled retry as belt-and-suspenders: re-asserts off()
+    // after openWindowDuration minutes. Noop if the thermostat is already
+    // off by then, but protects against the first off() call being lost
+    // to a transient Z-Wave / mesh issue.
     runIn(openWindowDuration * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
 
-    // Exit immediately - nothing else to do for "open" events
     return
   }
 
   // ===== CASE 2: SENSOR CLOSED =====
   if (evt.value == 'closed') {
-    // A window or door just closed
-
-    // Check if ALL configured sensors are now closed
-    // allContactSensorsClosed() returns true only if EVERY sensor is closed
+    // Check if ALL configured sensors are now closed. allContactSensorsClosed()
+    // now uses currentValue('contact', true) (skipCache), so this reads fresh
+    // values directly from Hubitat's attribute database rather than the
+    // per-execution in-memory cache.
     if (allContactSensorsClosed()) {
-      // All windows/doors are closed - safe to re-enable thermostat
       unschedule('disableThermostatDueToOpenWindow')
-      state.disabledDueToOpenWindow = false
       logInfo('All windows/doors closed; restoring thermostat automation')
 
-      // If a Hubitat mode change was deferred during the open-window period,
-      // apply it now. Always finish with thermostat.auto() so the thermostat
-      // is re-enabled: the apply path may not touch the mode (Normal→Normal
-      // is a noop inside handleModeChange), and the disable timer may have
-      // turned the thermostat off.
+      // Apply any deferred Hubitat location-mode change first. handleModeChange
+      // may or may not touch the thermostat depending on the destination mode
+      // (Normal→Normal is a noop), so setThermostatAutoUnlessWindowOpen() below
+      // handles the actual re-enable.
       String pending = state.pendingLocationMode
       if (pending) {
         state.pendingLocationMode = null
         logInfo("Applying deferred mode change to \"${pending}\"")
         applyModeFromHubitat(pending)
       }
-      thermostat.auto()
+
+      // Authoritative single path for enabling the thermostat: re-checks
+      // anyContactSensorsOpen() (also skipCache) immediately before setting
+      // auto, and owns state.disabledDueToOpenWindow end-to-end.
+      setThermostatAutoUnlessWindowOpen()
     } else {
-      // At least one window/door is still open
-      // Keep thermostat disabled for now, just log the information
       logInfo('Another window/door remains open; keeping thermostat disabled')
     }
-    // No need for return here - it's the last case anyway
   }
-  // Method ends here - all possible cases handled
 }
 
 /**
  * DISABLE THERMOSTAT DUE TO OPEN WINDOW
  *
- * This method is called by the countdown timer (runIn) if a window or door
- * remains open for the full configured duration. Think of it as the "timeout
- * handler" - the timer expired, so now take action.
+ * Belt-and-suspenders retry invoked by runIn() from contactSensorEventHandler()
+ * and initialize() after a sensor opens. The primary off() command is issued
+ * immediately by those handlers — this method only re-asserts it after
+ * openWindowDuration minutes in case that first command was lost to a
+ * transient Z-Wave / mesh issue. A noop if the thermostat is already off.
  *
  * WHEN IT'S CALLED:
- * - Window/door opens → 3 minute timer starts → timer expires → this runs
- * - Will NOT be called if window closes before timer expires
- * - Will NOT be called if unschedule() cancels the timer
+ * - Window/door opens → handler calls thermostat.off() AND schedules this
+ *   method via runIn(openWindowDuration * 60, ...) → this runs N minutes later
+ * - Will NOT be called if the window/door closes first and the close branch
+ *   calls unschedule('disableThermostatDueToOpenWindow')
  *
  * WHAT IT DOES:
- * 1. Logs that it's disabling the thermostat (for troubleshooting)
- * 2. Turns the thermostat completely OFF (stops all heating/cooling)
- *
- * WHY TURN OFF (instead of just lowering temperature)?
- * - Completely stops wasting energy on heating/cooling the outdoors
- * - Provides clear indication that something is wrong (open window)
- * - Forces user to address the issue (close the window)
- * - More aggressive energy saving than just adjusting setpoints
+ * 1. Logs that it's re-asserting the disable (for troubleshooting)
+ * 2. Calls thermostat.off() (stops all heating/cooling)
  *
  * WHEN USER CLOSES WINDOW:
  * - contactSensorEventHandler() runs (for the "closed" event)
- * - That method calls thermostat.auto() to turn it back on
- * - Thermostat resumes normal operation automatically
+ * - That method unschedules this retry and calls
+ *   setThermostatAutoUnlessWindowOpen() to re-enable the thermostat
  *
  * SAFETY RE-CHECK:
  * Before turning off, this method verifies that:
@@ -1041,6 +1044,23 @@ void disableThermostatDueToOpenWindow() {
 }
 
 /**
+ * LOG FRESH SENSOR STATES
+ *
+ * Walks every configured contact sensor and logs its current value using
+ * currentValue(name, skipCache=true), which forces a fresh read from
+ * Hubitat's attribute database. Called from initialize() so every install,
+ * update, or app-save produces an explicit, up-to-date snapshot in the
+ * logs. This gives us a reliable baseline for troubleshooting stale-cache
+ * issues.
+ */
+private void logFreshSensorStates() {
+  settings.contactSensors?.each { cs ->
+    String val = cs.currentValue('contact', true)
+    logInfo("Sensor state: ${cs.displayName} = ${val}")
+  }
+}
+
+/**
  * ALL CONTACT SENSORS CLOSED
  *
  * Helper method that checks if ALL configured contact sensors are closed.
@@ -1059,7 +1079,11 @@ void disableThermostatDueToOpenWindow() {
  * ?. = "safe navigation operator" = only do this if not null
  * .every{ } = "check if ALL items pass this test"
  * cs -> = "for each sensor (call it 'cs'), do..."
- * cs.currentValue('contact') = get sensor's current contact value
+ * cs.currentValue('contact', true) = get sensor's current contact value;
+ *   the second argument is skipCache=true, which forces a fresh read from
+ *   Hubitat's attribute database rather than the per-execution in-memory
+ *   cache. Without skipCache the cache can lag when events fire in rapid
+ *   succession, producing a false "all closed" result.
  * == 'closed' = check if it equals the string 'closed'
  * ?: true = "if the whole thing is null, return true instead"
  *
@@ -1098,9 +1122,13 @@ private boolean allContactSensorsClosed() {
   //   = { cs -> ... } is a closure (anonymous function)
   //     - cs = current sensor being tested
 
-  // cs.currentValue('contact')
+  // cs.currentValue('contact', true)
   //   = gets the current value of the sensor's 'contact' attribute
   //   = returns 'open' or 'closed' as a String
+  //   = the second argument (skipCache=true) forces a fresh read from
+  //     Hubitat's attribute database instead of the per-execution cache;
+  //     the cached value can lag behind reality when multiple events fire
+  //     in quick succession, producing a false "all closed" result.
 
   // == 'closed'
   //   = checks if the value equals the string 'closed'
@@ -1111,14 +1139,14 @@ private boolean allContactSensorsClosed() {
   //   = if the whole expression before ?: is null, return true
   //   = this handles the case where no sensors are configured
 
-  return settings.contactSensors?.every { cs -> cs.currentValue('contact') == 'closed' } ?: true
+  return settings.contactSensors?.every { cs -> cs.currentValue('contact', true) == 'closed' } ?: true
 
   // EQUIVALENT CODE (more verbose but easier to understand):
   // if (settings.contactSensors == null || settings.contactSensors.isEmpty()) {
   //   return true  // No sensors configured - consider "all closed"
   // }
   // for (sensor in settings.contactSensors) {
-  //   if (sensor.currentValue('contact') != 'closed') {
+  //   if (sensor.currentValue('contact', true) != 'closed') {
   //     return false  // Found an open sensor - not all closed
   //   }
   // }
@@ -1144,7 +1172,10 @@ private boolean allContactSensorsClosed() {
  * ?. = "safe navigation operator"
  * .any{ } = "check if ANY item passes this test" (opposite of .every)
  * cs -> = "for each sensor"
- * cs.currentValue('contact') = get sensor's current value
+ * cs.currentValue('contact', true) = get sensor's current value, with
+ *   skipCache=true so the read comes from Hubitat's attribute database
+ *   rather than the per-execution cache (see allContactSensorsClosed()
+ *   for the full rationale).
  * == 'open' = check if it equals 'open'
  * ?: false = "if null, return false instead"
  *
@@ -1158,8 +1189,14 @@ private boolean allContactSensorsClosed() {
  *   - false = All sensors are closed (or no sensors configured)
  *
  * USAGE:
- * Currently not used by the app, but provided for potential future features.
- * Could be used to check "should I disable something because a window is open?"
+ * - initialize() checks this at startup to decide whether to defer mode
+ *   application and turn the thermostat off.
+ * - locationModeChangeHandler() uses it to defer mode changes while a
+ *   window/door is open.
+ * - setThermostatAutoUnlessWindowOpen() uses it as the guard that
+ *   prevents the thermostat from being enabled with a sensor open.
+ * - disableThermostatDueToOpenWindow() and thermostatEventHandler()
+ *   both use it as their re-check gate.
  */
 boolean anyContactSensorsOpen() {
   // Similar to allContactSensorsClosed() but uses .any{} and checks for 'open'
@@ -1167,14 +1204,15 @@ boolean anyContactSensorsOpen() {
   // .any{ } returns true if AT LEAST ONE item passes the test
   // Stops checking as soon as it finds a match (efficient)
 
-  return settings.contactSensors?.any { cs -> cs.currentValue('contact') == 'open' } ?: false
+  // skipCache=true — see allContactSensorsClosed() for the rationale.
+  return settings.contactSensors?.any { cs -> cs.currentValue('contact', true) == 'open' } ?: false
 
   // EQUIVALENT CODE:
   // if (settings.contactSensors == null || settings.contactSensors.isEmpty()) {
   //   return false  // No sensors configured
   // }
   // for (sensor in settings.contactSensors) {
-  //   if (sensor.currentValue('contact') == 'open') {
+  //   if (sensor.currentValue('contact', true) == 'open') {
   //     return true  // Found an open sensor
   //   }
   // }
@@ -1654,10 +1692,40 @@ private void restoreStoredSetpoints() {
  * @param evt Event object containing device, attribute, and value information
  */
 void thermostatEventHandler(Event evt) {
-  // Log the event with device name, type, and value
-  // ${evt.device.displayName} = thermostat's friendly name
-  // ${evt.type} = what kind of event this is
-  // ${evt.value} = the new value being reported
-  // This only appears in logs if debug logging is enabled
-  logDebug("thermostatEventHandler: ${evt.device.displayName}, ${evt.type}: ${evt.value}")
+  // evt.name is the attribute that changed (e.g. "thermostatOperatingState");
+  // evt.type is the event source/type and is frequently null on device
+  // attribute events — that's why the original bug report showed
+  // "null: cooling". Log evt.name for clarity.
+  logDebug("thermostatEventHandler: ${evt.device.displayName}, ${evt.name}: ${evt.value}")
+
+  // Reactive safety net. If the open-window protection is disabled, there
+  // is nothing to react to.
+  if (!settings.disableWithOpenWindowsOrDoors) { return }
+
+  // Gate on evt.name before doing any sensor reads. The thermostat fires
+  // many events we do not care about here (temperature, humidity, setpoint
+  // reports) and each one would otherwise trigger a skipCache=true DB read
+  // across every configured contact sensor. Only operating-state and mode
+  // transitions can cause HVAC to run.
+  if (evt.name != 'thermostatOperatingState' && evt.name != 'thermostatMode') { return }
+
+  // Now that we know this event is one we might act on, check whether any
+  // sensor is currently open.
+  if (!anyContactSensorsOpen()) { return }
+
+  // Active operating states: Hubitat reports 'pending cool' / 'pending heat'
+  // before the compressor engages. Catching them lets us force the thermostat
+  // off before the HVAC actually starts.
+  boolean operatingActive = (evt.name == 'thermostatOperatingState' &&
+                              evt.value in ['cooling', 'heating', 'pending cool', 'pending heat'])
+
+  // Any thermostatMode other than 'off' could let the thermostat's own
+  // temperature logic activate HVAC. Reverse it immediately.
+  boolean modeWouldRun = (evt.name == 'thermostatMode' && evt.value != 'off')
+
+  if (operatingActive || modeWouldRun) {
+    logWarn("Window/door open but thermostat reported ${evt.name}=${evt.value}; forcing off")
+    thermostat.off()
+    state.disabledDueToOpenWindow = true
+  }
 }
