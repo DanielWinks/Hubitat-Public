@@ -5996,12 +5996,13 @@ void cancelAudioClipWatchdog() {
 
 // textToSpeech() returns duration as a String on some TTS providers, so a raw
 // `duration > 0` on the Map value invokes String.compareTo(Integer) and throws
-// "Integer cannot be cast to String". Always coerce via toIntegerOrNull first.
+// "Integer cannot be cast to String". Always coerce via coerceClipDuration() first.
 private Integer coerceClipDuration(Object raw) {
   if(raw == null) { return null }
   if(raw instanceof Number) { return ((Number) raw).intValue() }
   try { return new BigDecimal(raw.toString().trim()).intValue() }
-  catch(Exception ignored) { return null }
+  catch(NumberFormatException ignored) { return null }
+  catch(ArithmeticException ignored) { return null }
 }
 
 void startAudioClipWatchdog(Map clipMessage) {
