@@ -92,7 +92,12 @@ class MethodReferenceRule implements Rule {
 
     boolean hasUnresolvedIncludes = pr.preprocessed.includes.any { String fqn -> !index.knowsLibrary(fqn) }
     Severity severity
-    if (isLibrary || hasUnresolvedIncludes) {
+    if (isLibrary) {
+      // Library files routinely call methods (refresh, configure, ...) that
+      // the host driver/app is expected to provide. We can't verify those
+      // without a host context, so report as INFO rather than warning.
+      severity = Severity.INFO
+    } else if (hasUnresolvedIncludes) {
       severity = Severity.WARNING
     } else {
       severity = Severity.ERROR

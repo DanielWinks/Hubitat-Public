@@ -122,6 +122,7 @@ void configure() {
 }
 
 void restartESP() { sendCommandAsync(RESTART_ESP, null, null) }
+void setConsumableStatus(String status) { sendEvent(name: 'consumableStatus', value: status) }
 void checkConnection() { sendQueryAsync(UPTIME_STATE, 'checkConnectionCallback') }
 void checkConnectionCallback(AsyncResponse response, Map data = null) {
   logDebug("response.status = ${response.status}")

@@ -29,29 +29,27 @@ class UtilitiesAndLoggingLibrarySpec extends Specification {
     lib.convertHexToInt('0A0B') == 2571
   }
 
-  def "convertHexToIP roundtrips when every octet is >= 16"() {
-    given:
-    String ip = '192.168.50.100'
-
+  def "convertHexToIP roundtrips with convertIPToHex for any IP"() {
     expect:
-    // The roundtrip only works when every octet's hex form is two characters.
-    // See `convertIPToHex BUG` test below for the gotcha.
     lib.convertHexToIP(lib.convertIPToHex(ip)) == ip
+
+    where:
+    ip << ['192.168.50.100', '192.168.1.10', '10.0.0.1', '255.255.255.255', '0.0.0.0']
   }
 
-  def "convertIPToHex with byte-sized octets produces 8 uppercase hex chars"() {
+  def "convertIPToHex always produces 8 uppercase hex chars"() {
     expect:
-    lib.convertIPToHex('255.255.255.255') == 'FFFFFFFF'
-    lib.convertIPToHex('192.168.50.100') ==~ /[0-9A-F]{8}/
+    lib.convertIPToHex(ip) ==~ /[0-9A-F]{8}/
+
+    where:
+    ip << ['192.168.50.100', '192.168.1.10', '10.0.0.1', '0.0.0.0']
   }
 
-  def "convertIPToHex BUG: octets less than 16 produce non-zero-padded hex"() {
-    // Real bug in the library - documenting it here as a regression test.
-    // When this is patched to %02X (zero-padded), update the expectation to
-    // 'C0A8010A' / length 8.
+  def "convertIPToHex zero-pads single-digit octets"() {
+    // Regression test for the original bug where 192.168.1.10 produced
+    // 'C0A81A' (6 chars) because the format string was %X instead of %02X.
     expect:
-    lib.convertIPToHex('192.168.1.10') == 'C0A81A'
-    lib.convertIPToHex('192.168.1.10').length() == 6
+    lib.convertIPToHex('192.168.1.10') == 'C0A8010A'
   }
 
   def "tryCreateAccessToken populates state.accessToken on first call"() {

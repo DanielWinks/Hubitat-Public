@@ -31,7 +31,6 @@ metadata {
   }
 }
 
-void updated() { logInfo('Updated...') }
 void initialize() { logInfo('Installed...') }
 void open() { parent?.componentOpen(this.device) }
 void close() { parent?.componentClose(this.device) }

@@ -29,8 +29,8 @@ metadata {
   definition(name: 'ThirdReality Smart Blind', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '') {
     capability 'Configuration'
     capability 'Refresh'
-    capability 'Window Shade'
-    capability 'Switch Level'
+    capability 'WindowShade'
+    capability 'SwitchLevel'
     capability 'Battery'
     attribute 'lastCheckin', 'STRING'
     command 'updateFirmware'
@@ -139,7 +139,7 @@ void setShadePosition(Integer value) {
 }
 
 @CompileStatic
-void setLevel(BigDecimal value, rate = null) {
+void setLevel(BigDecimal value, BigDecimal rate = null) {
   logInfo("Setting the Blinds to level: ${value}")
   setShadePosition(value as Integer)
 }

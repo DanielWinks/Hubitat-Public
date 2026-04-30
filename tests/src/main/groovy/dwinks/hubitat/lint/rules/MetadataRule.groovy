@@ -8,6 +8,7 @@ import dwinks.hubitat.lint.Violation
 import groovy.transform.CompileStatic
 import org.codehaus.groovy.ast.ClassNode
 import org.codehaus.groovy.ast.expr.ClosureExpression
+import org.codehaus.groovy.ast.expr.ConstantExpression
 import org.codehaus.groovy.ast.expr.Expression
 import org.codehaus.groovy.ast.expr.MethodCallExpression
 import org.codehaus.groovy.ast.expr.VariableExpression
@@ -95,17 +96,25 @@ class MetadataRule implements Rule {
 
     List<MethodCallExpression> innerCalls = AstUtil.callsInClosure(body)
     MethodCallExpression defCall = innerCalls.find { AstUtil.methodName(it) == 'definition' }
+    boolean isComponentDriver = false
     if (defCall == null) {
       v << new Violation(pr.filePath, metadata.lineNumber, metadata.columnNumber, name, Severity.ERROR,
         'Driver metadata { ... } is missing a definition(...) call.')
     } else {
       checkRequiredFields(pr.filePath, defCall, DRIVER_REQUIRED, 'definition', v)
+      // Component drivers (children of a parent) are configured via the parent
+      // and don't need their own preferences UI.
+      Map<String, Expression> defArgs = AstUtil.namedArgs(defCall)
+      Expression component = defArgs['component']
+      if (component instanceof ConstantExpression) {
+        isComponentDriver = ((ConstantExpression) component).value == true
+      }
     }
 
     // preferences inside metadata is the canonical place; outside is also accepted by Hubitat
     boolean hasPrefsInside = innerCalls.any { AstUtil.methodName(it) == 'preferences' }
     boolean hasPrefsTop = AstUtil.findTopLevelCall(pr.module, 'preferences') != null
-    if (!hasPrefsInside && !hasPrefsTop) {
+    if (!hasPrefsInside && !hasPrefsTop && !isComponentDriver) {
       v << new Violation(pr.filePath, metadata.lineNumber, metadata.columnNumber, name, Severity.WARNING,
         'Driver has no preferences { ... } block; users will have no settings UI.')
     }
