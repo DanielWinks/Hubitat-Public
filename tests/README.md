@@ -19,6 +19,9 @@ Groovy's own AST, and runs a pipeline of rules:
 | `CompileStatic`   | `@CompileStatic` methods with untyped parameters, missing return types, untyped `catch (e)`, untyped closure params |
 | `MethodReference` | `subscribe`/`runIn`/`runInMillis`/`schedule`/`runEvery*`/`asynchttp*` callbacks and `mappings { path { action: [...] } }` handlers that don't resolve to a defined method (locally or in any `#include`'d library) |
 | `DriverDefinition`| Unknown capability names, `command 'foo'` declarations with no matching method, attribute types that aren't recognized, unusual input types |
+| `CapabilityRequiredMethods` | For each `capability 'X'`, verifies the methods Hubitat expects (e.g. `Switch` → `on()`+`off()`) are defined locally or via an `#include`'d library. Catalog lives in `hubitat-capability-methods.txt` |
+| `DuplicateMethod` | Two methods with the same signature in the merged class - host vs `#include`'d library, library vs library, or the same `#include` listed twice |
+| `DuplicateField`  | `@Field` declarations that would collide when libraries are merged into the host class |
 | `Sandbox`         | `package` declarations, `System.exit`, `Runtime.exec`, `new File`, reflection (`Class.forName`), `@Grab`/`@Grapes` |
 
 Cross-file resolution: before running rules, the linter parses every file and

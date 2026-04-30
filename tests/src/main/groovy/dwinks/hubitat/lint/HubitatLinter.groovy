@@ -3,8 +3,11 @@ package dwinks.hubitat.lint
 import dwinks.hubitat.lint.reporters.ConsoleReporter
 import dwinks.hubitat.lint.reporters.GitHubAnnotationReporter
 import dwinks.hubitat.lint.reporters.Reporter
+import dwinks.hubitat.lint.rules.CapabilityRequiredMethodsRule
 import dwinks.hubitat.lint.rules.CompileStaticRule
 import dwinks.hubitat.lint.rules.DriverDefinitionRule
+import dwinks.hubitat.lint.rules.DuplicateFieldRule
+import dwinks.hubitat.lint.rules.DuplicateMethodRule
 import dwinks.hubitat.lint.rules.ImportRule
 import dwinks.hubitat.lint.rules.MetadataRule
 import dwinks.hubitat.lint.rules.MethodReferenceRule
@@ -63,6 +66,9 @@ class HubitatLinter {
       new CompileStaticRule(),
       new MethodReferenceRule(),
       DriverDefinitionRule.fromResource(),
+      CapabilityRequiredMethodsRule.fromResource(),
+      new DuplicateMethodRule(),
+      new DuplicateFieldRule(),
       new SandboxRule()
     ]
 
