@@ -1,0 +1,98 @@
+# Hubitat sandboxed imports (compiled from observed-in-production usage and
+# the Hubitat developer documentation). Lines starting with '#' are comments.
+# Each entry is one of:
+#   * Exact FQN match: java.util.Random
+#   * Package wildcard: java.util.concurrent.*  (matches anything below the package)
+#   * Star prefix:     hubitat.*                (matches all hubitat subpackages)
+#
+# When in doubt, prefer narrow wildcards. Hubitat's own sandbox is a strict
+# allowlist - this file should err on the side of being conservative.
+
+# --- Hubitat platform ---
+com.hubitat.app.*
+com.hubitat.app.exception.*
+com.hubitat.hub.domain.*
+com.hubitat.hub.executor.*
+hubitat.device.*
+hubitat.helper.*
+hubitat.scheduling.*
+hubitat.zigbee.*
+hubitat.zwave.*
+hubitat.matter.*
+
+# --- Groovy core (curated) ---
+groovy.json.JsonOutput
+groovy.json.JsonSlurper
+groovy.json.JsonBuilder
+groovy.transform.CompileStatic
+groovy.transform.Field
+groovy.transform.TypeChecked
+groovy.transform.PackageScope
+groovy.transform.ToString
+groovy.transform.EqualsAndHashCode
+groovy.transform.TupleConstructor
+groovy.transform.Canonical
+groovy.transform.Immutable
+groovy.transform.MapConstructor
+groovy.util.slurpersupport.GPathResult
+groovy.util.slurpersupport.NodeChild
+groovy.util.XmlSlurper
+groovy.xml.XmlUtil
+groovy.xml.XmlParser
+groovy.xml.MarkupBuilder
+groovy.xml.StreamingMarkupBuilder
+
+# --- java.util ---
+java.util.ArrayList
+java.util.Calendar
+java.util.Date
+java.util.GregorianCalendar
+java.util.HashMap
+java.util.HashSet
+java.util.LinkedHashMap
+java.util.LinkedHashSet
+java.util.LinkedList
+java.util.List
+java.util.Map
+java.util.Random
+java.util.Set
+java.util.SortedMap
+java.util.TimeZone
+java.util.TreeMap
+java.util.UUID
+java.util.concurrent.*
+
+# --- java.text / java.time / java.math ---
+java.text.SimpleDateFormat
+java.text.DateFormat
+java.text.DecimalFormat
+java.text.NumberFormat
+java.time.*
+java.time.format.*
+java.time.temporal.*
+java.time.zone.*
+java.math.BigDecimal
+java.math.BigInteger
+java.math.MathContext
+java.math.RoundingMode
+
+# --- networking & encoding ---
+java.net.URLEncoder
+java.net.URLDecoder
+java.net.URI
+java.security.MessageDigest
+java.security.SecureRandom
+javax.crypto.Mac
+javax.crypto.spec.SecretKeySpec
+javax.crypto.Cipher
+javax.crypto.spec.IvParameterSpec
+javax.crypto.spec.GCMParameterSpec
+
+# --- regex ---
+java.util.regex.Matcher
+java.util.regex.Pattern
+
+# --- IO/strings ---
+java.nio.charset.StandardCharsets
+java.io.ByteArrayInputStream
+java.io.ByteArrayOutputStream
