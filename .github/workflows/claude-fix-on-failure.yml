@@ -31,32 +31,12 @@ concurrency:
 jobs:
   open_fix_issue:
     name: Open @claude fix issue
-    # Hoist workflow_run metadata into env so the shell body reads them as
-    # $X variables rather than splicing ${{ github.event.* }} into run:
-    # blocks. None of these are user-controlled (workflow_run metadata is
-    # GitHub-managed) but the env: pattern is the safe-by-default GitHub
-    # Actions convention for shell access. NOTE: the job-level if: cannot
-    # use env (GitHub does not expose env context to job if:), so the
-    # failure-only gate below references github.event.* directly.
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      REPO_FULL_NAME: ${{ github.repository }}
-      WF_NAME: ${{ github.event.workflow_run.name }}
-      WF_HTML_URL: ${{ github.event.workflow_run.html_url }}
-      WF_RUN_ID: ${{ github.event.workflow_run.id }}
-      WF_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-      WF_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-      WF_EVENT: ${{ github.event.workflow_run.event }}
-      WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-      WF_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
     # workflow_run fires for every completion (success, failure, cancelled);
-    # only act on actual failures. NOTE: the env context is NOT available in
-    # job-level if: per GitHub Actions context-availability rules, so we
+    # only act on actual failures. The env context is NOT available in
+    # job-level if: (per GitHub Actions context-availability rules), so we
     # reference github.event.workflow_run.conclusion directly. The conclusion
-    # value is a GitHub-controlled enum ("success" | "failure" | "cancelled" |
-    # "skipped" | "neutral" | "timed_out" | ...), not user input, so there's
-    # no injection surface here even though the env: pattern would normally
-    # be safer.
+    # is a GitHub-controlled enum ("success" | "failure" | "cancelled" |
+    # "skipped" | "neutral" | "timed_out" | ...), not user input.
     if: github.event.workflow_run.conclusion == 'failure'
     runs-on: self-hosted
     permissions:
@@ -65,74 +45,81 @@ jobs:
       contents: read
     steps:
       - name: Open or comment on @claude fix issue
-        shell: bash
-        run: |
-          set -euo pipefail
+        # Uses actions/github-script (the established pattern in this repo --
+        # see release-sonos-advanced.yml) instead of the gh CLI, which is not
+        # installed on the self-hosted runner. github-script bundles its own
+        # Node runtime + Octokit, so it has no runner-side dependencies.
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const wf = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
 
-          # Stable title -- used for de-duplication. If an open issue with
-          # this exact title already exists, we comment on it instead of
-          # opening a new one. Prevents fix-loop spam if Claude's fix
-          # introduces another failure of the same workflow on the same branch.
-          TITLE="[CI failure] $WF_NAME on $WF_HEAD_BRANCH"
+            // Stable title -- used for de-duplication. If an open issue with
+            // this exact title already exists, comment on it instead of
+            // creating a new one. Prevents fix-loop spam if Claude's fix
+            // introduces another failure of the same workflow on the same
+            // branch.
+            const title = `[CI failure] ${wf.name} on ${wf.head_branch}`;
 
-          # Search open issues with the exact title. The --search filter is
-          # fuzzy, so we narrow with a strict equality check via a separate
-          # jq invocation -- gh's --jq does not pass --arg through to jq, so
-          # we pipe the JSON out and run jq ourselves.
-          existing=$(gh issue list \
-            --repo "$REPO_FULL_NAME" \
-            --state open \
-            --search "$TITLE in:title" \
-            --json number,title \
-            | jq -r --arg t "$TITLE" '[.[] | select(.title == $t)] | first | .number // empty')
+            // Body shared between the create and comment paths. The @claude
+            // mention at the top is what triggers .github/workflows/claude.yml.
+            const body = [
+              `@claude please investigate and fix this CI failure.`,
+              ``,
+              `- **Workflow:** \`${wf.name}\``,
+              `- **Branch:** \`${wf.head_branch}\``,
+              `- **Commit:** \`${wf.head_sha}\``,
+              `- **Triggering event:** \`${wf.event}\``,
+              `- **Conclusion:** \`${wf.conclusion}\``,
+              `- **Run:** ${wf.html_url}`,
+              `- **Subject:** ${wf.display_title}`,
+              ``,
+              `## Suggested approach`,
+              ``,
+              `1. Investigate the failed run via the URL above. The failed step`,
+              `   logs can be fetched from the GitHub API at`,
+              `   \`/repos/${owner}/${repo}/actions/runs/${wf.id}/logs\` (returns a`,
+              `   redirect to a zip of all logs), or you can read the run page`,
+              `   directly. The "actions: read" permission has already been granted.`,
+              `2. Identify the root cause. The bundle workflows zip Groovy source`,
+              `   files under \`Apps/\`, \`Drivers/\`, and \`Libraries/\` -- failures`,
+              `   here are usually syntax errors or missing files in the source tree.`,
+              `   The release workflows update versions and tag releases -- failures`,
+              `   are usually metadata or git-push errors.`,
+              `3. Open a PR targeting \`${wf.head_branch}\` with the fix.`,
+              `4. Once the fix lands and CI is green, close this issue.`,
+              ``,
+              `## Skip and stop if`,
+              ``,
+              `- The failure looks transient (runner timeout, GitHub outage,`,
+              `  secret expiration).`,
+              `- The failure is in auto-generated content under \`Bundles/\``,
+              `  (re-run the workflow rather than editing).`,
+              `- You can't reach a high-confidence root cause from the logs alone.`,
+              `  Comment back with what you found and stop -- do not guess at a fix.`,
+            ].join('\n');
 
-          # Body is shared between the create and comment paths. The @claude
-          # mention at the top is what triggers .github/workflows/claude.yml.
-          # Backticks are escaped (\`) since the heredoc tag is unquoted, so
-          # bare backticks would otherwise trigger command substitution.
-          BODY=$(cat <<EOF
-          @claude please investigate and fix this CI failure.
+            // Search for an existing open issue with the exact title. We list
+            // open issues directly (rather than via the search API) to avoid
+            // search-indexing lag, which would otherwise let a fast-firing
+            // second failure create a duplicate before the first issue is
+            // indexed. listForRepo returns BOTH issues and PRs; filter PRs out
+            // via the .pull_request property which is absent on real issues.
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const existing = open.find(i => !i.pull_request && i.title === title);
 
-          - **Workflow:** \`$WF_NAME\`
-          - **Branch:** \`$WF_HEAD_BRANCH\`
-          - **Commit:** \`$WF_HEAD_SHA\`
-          - **Triggering event:** \`$WF_EVENT\`
-          - **Conclusion:** \`$WF_CONCLUSION\`
-          - **Run:** $WF_HTML_URL
-          - **Subject:** $WF_DISPLAY_TITLE
-
-          ## Suggested approach
-
-          1. Read the failed step output:
-             \`gh run view $WF_RUN_ID --log-failed --repo $REPO_FULL_NAME\`
-          2. Identify the root cause. The bundle workflows zip Groovy source
-             files under \`Apps/\`, \`Drivers/\`, and \`Libraries/\` -- failures
-             here are usually syntax errors or missing files in the source tree.
-             The release workflows update versions and tag releases -- failures
-             are usually metadata or git-push errors.
-          3. Open a PR targeting \`$WF_HEAD_BRANCH\` with the fix.
-          4. Once the fix lands and CI is green, close this issue.
-
-          ## Skip and stop if
-
-          - The failure looks transient (runner timeout, GitHub outage,
-            secret expiration).
-          - The failure is in auto-generated content under \`Bundles/\`
-            (re-run the workflow rather than editing).
-          - You can't reach a high-confidence root cause from the logs alone.
-            Comment back with what you found and stop -- do not guess at a fix.
-          EOF
-          )
-
-          if [ -n "$existing" ]; then
-            echo "Existing open issue #$existing matches; appending comment instead of creating duplicate."
-            gh issue comment "$existing" \
-              --repo "$REPO_FULL_NAME" \
-              --body "$BODY"
-          else
-            echo "No matching open issue; creating a new one."
-            gh issue create \
-              --repo "$REPO_FULL_NAME" \
-              --title "$TITLE" \
-              --body "$BODY"
-          fi
+            if (existing) {
+              core.info(`Existing open issue #${existing.number} matches; commenting instead of creating duplicate.`);
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number, body,
+              });
+            } else {
+              core.info('No matching open issue; creating a new one.');
+              const created = await github.rest.issues.create({
+                owner, repo, title, body,
+              });
+              core.info(`Created issue #${created.data.number}.`);
+            }
