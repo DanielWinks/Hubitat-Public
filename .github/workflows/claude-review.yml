@@ -1,0 +1,102 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Cancel a stale review when new commits land on the same PR.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude code review
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
+    timeout-minutes: 25
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@v6
+        with:
+          # Need history to diff against the base branch.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Wait for other PR checks to complete
+        id: wait_for_ci
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Excluded from the wait-and-pass check (this job's own check name).
+          SELF_CHECK_NAME: 'Claude code review'
+        run: |
+          set -euo pipefail
+
+          # Let GitHub queue any other PR-triggered workflows before polling.
+          # When a PR is opened, multiple workflows schedule in parallel; if we
+          # poll immediately we can race past checks that haven't registered yet.
+          echo "Waiting 60s for other workflows to register..."
+          sleep 60
+
+          api_url="repos/$REPO_FULL_NAME/commits/$PR_HEAD_SHA/check-runs?per_page=100"
+
+          # Poll until every non-self check reaches a terminal state. The
+          # job-level timeout-minutes (25) bounds the total wait.
+          while :; do
+            data=$(gh api "$api_url")
+            in_flight=$(echo "$data" | jq --arg self "$SELF_CHECK_NAME" \
+              '[.check_runs[] | select(.name != $self and (.status == "queued" or .status == "in_progress"))] | length')
+            [ "$in_flight" = "0" ] && break
+            echo "Waiting on $in_flight other check(s)..."
+            sleep 30
+          done
+
+          # All other checks are done -- did any not pass? Treat success,
+          # skipped, and neutral as passing; everything else (failure, cancelled,
+          # timed_out, action_required, stale) blocks the review.
+          failed=$(echo "$data" | jq --arg self "$SELF_CHECK_NAME" \
+            '[.check_runs[] | select(.name != $self and .conclusion != null and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral")] | length')
+
+          if [ "$failed" != "0" ]; then
+            echo "::warning::$failed other check(s) did not pass; skipping Claude review."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "All other checks passed; proceeding with Claude review."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Claude review
+        if: steps.wait_for_ci.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          # Pull workflow context into env vars so the prompt body never
+          # mixes ${{ }} interpolation with potentially adversarial data.
+          # None of these are attacker-controlled for the pull_request
+          # trigger, but using env: is a defense-in-depth standard.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          # OAuth token from `claude setup-token` -- billed against the user's
+          # Claude Max subscription, not API credits.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Invoke the project-local /review slash command. The command reads
+          # the PR diff, spawns specialized subagents, and posts inline
+          # review comments plus a top-level summary.
+          prompt: |
+            /review
+
+            Repository: ${{ env.REPO_FULL_NAME }}
+            Pull request: #${{ env.PR_NUMBER }}
+            Base ref: ${{ env.PR_BASE_REF }}
+            Head SHA: ${{ env.PR_HEAD_SHA }}

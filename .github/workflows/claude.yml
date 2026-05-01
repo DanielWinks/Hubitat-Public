@@ -1,0 +1,60 @@
+name: Claude Code
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Hoist user-content references into env: vars so the @claude trigger
+    # check (and any future logic) reads them via the env context. This is
+    # purely defensive -- contains() in an if: expression is evaluated by
+    # the GitHub expression engine and never reaches a shell -- but it
+    # keeps potentially-adversarial values in a single declaration site.
+    env:
+      COMMENT_BODY: ${{ github.event.comment.body }}
+      REVIEW_BODY: ${{ github.event.review.body }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      ISSUE_TITLE: ${{ github.event.issue.title }}
+    if: |
+      (github.event_name == 'issue_comment' && contains(env.COMMENT_BODY, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(env.COMMENT_BODY, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(env.REVIEW_BODY, '@claude')) ||
+      (github.event_name == 'issues' && (contains(env.ISSUE_BODY, '@claude') || contains(env.ISSUE_TITLE, '@claude')))
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # This is an optional setting that allows Claude to read CI results on PRs.
+          additional_permissions: |
+            actions: read
+          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will
+          # perform the instructions specified in the comment that tagged it.
+          # prompt: 'Update the pull request description to include a summary of changes.'
+
+          # Optional: Add claude_args to customize behavior and configuration.
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options.
+          # claude_args: '--allowed-tools Bash(gh pr *)'
