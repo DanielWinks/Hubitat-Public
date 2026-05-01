@@ -31,12 +31,13 @@ concurrency:
 jobs:
   open_fix_issue:
     name: Open @claude fix issue
-    # Hoist all workflow_run metadata into env so the if: condition and
-    # the shell body both reference values via env.X / "$X" rather than
-    # mixing ${{ github.event.* }} substitutions through the file. None of
-    # these values are user-controlled (workflow_run trigger metadata is
-    # GitHub-managed) but the env-only convention keeps the file
-    # audit-friendly.
+    # Hoist workflow_run metadata into env so the shell body reads them as
+    # $X variables rather than splicing ${{ github.event.* }} into run:
+    # blocks. None of these are user-controlled (workflow_run metadata is
+    # GitHub-managed) but the env: pattern is the safe-by-default GitHub
+    # Actions convention for shell access. NOTE: the job-level if: cannot
+    # use env (GitHub does not expose env context to job if:), so the
+    # failure-only gate below references github.event.* directly.
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO_FULL_NAME: ${{ github.repository }}
@@ -49,8 +50,14 @@ jobs:
       WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
       WF_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title }}
     # workflow_run fires for every completion (success, failure, cancelled);
-    # only act on actual failures.
-    if: env.WF_CONCLUSION == 'failure'
+    # only act on actual failures. NOTE: the env context is NOT available in
+    # job-level if: per GitHub Actions context-availability rules, so we
+    # reference github.event.workflow_run.conclusion directly. The conclusion
+    # value is a GitHub-controlled enum ("success" | "failure" | "cancelled" |
+    # "skipped" | "neutral" | "timed_out" | ...), not user input, so there's
+    # no injection surface here even though the env: pattern would normally
+    # be safer.
+    if: github.event.workflow_run.conclusion == 'failure'
     runs-on: self-hosted
     permissions:
       issues: write

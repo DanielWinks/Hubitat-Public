@@ -14,21 +14,17 @@ on:
 
 jobs:
   claude:
-    # Hoist user-content references into env: vars so the @claude trigger
-    # check (and any future logic) reads them via the env context. This is
-    # purely defensive -- contains() in an if: expression is evaluated by
-    # the GitHub expression engine and never reaches a shell -- but it
-    # keeps potentially-adversarial values in a single declaration site.
-    env:
-      COMMENT_BODY: ${{ github.event.comment.body }}
-      REVIEW_BODY: ${{ github.event.review.body }}
-      ISSUE_BODY: ${{ github.event.issue.body }}
-      ISSUE_TITLE: ${{ github.event.issue.title }}
+    # The env context is NOT available in job-level if: per GitHub Actions
+    # context-availability rules, so we reference github.event.* directly.
+    # contains() in an if: expression is evaluated by GitHub's expression
+    # engine -- it never reaches a shell, so the user-controlled body/title
+    # values cannot cause injection. The expression engine treats them as
+    # opaque strings for substring search.
     if: |
-      (github.event_name == 'issue_comment' && contains(env.COMMENT_BODY, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(env.COMMENT_BODY, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(env.REVIEW_BODY, '@claude')) ||
-      (github.event_name == 'issues' && (contains(env.ISSUE_BODY, '@claude') || contains(env.ISSUE_TITLE, '@claude')))
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: self-hosted
     permissions:
       contents: read
