@@ -1,0 +1,104 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Cancel a stale review when new commits land on the same PR.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude code review
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read # Required for Claude to read CI results on PRs
+    timeout-minutes: 25
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@v6
+        with:
+          # Need history to diff against the base branch.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Wait for other PR checks to complete
+        id: wait_for_ci
+        # Uses actions/github-script (the established pattern in this repo --
+        # see release-sonos-advanced.yml) instead of the gh CLI, which is not
+        # installed on the self-hosted runner. github-script bundles its own
+        # Node runtime + Octokit, so it has no runner-side dependencies.
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const SELF_CHECK_NAME = 'Claude code review';
+            const PASS_CONCLUSIONS = new Set(['success', 'skipped', 'neutral']);
+            const sha = context.payload.pull_request.head.sha;
+            const { owner, repo } = context.repo;
+
+            // Let GitHub queue any other PR-triggered workflows before polling.
+            // When a PR is opened multiple workflows schedule in parallel; an
+            // immediate poll can race past checks that haven't registered yet.
+            core.info('Waiting 60s for other workflows to register...');
+            await new Promise(r => setTimeout(r, 60_000));
+
+            // Poll until every non-self check reaches a terminal state. The
+            // job-level timeout-minutes (25) bounds the total wait.
+            let others = [];
+            while (true) {
+              const all = await github.paginate(github.rest.checks.listForRef, {
+                owner, repo, ref: sha, per_page: 100,
+              });
+              others = all.filter(c => c.name !== SELF_CHECK_NAME);
+              const inFlight = others.filter(c => c.status !== 'completed');
+              if (inFlight.length === 0) break;
+              core.info(`Waiting on ${inFlight.length} other check(s)...`);
+              await new Promise(r => setTimeout(r, 30_000));
+            }
+
+            // All non-self checks completed. Treat success / skipped / neutral
+            // as passing; anything else (failure, cancelled, timed_out,
+            // action_required, stale) blocks the review.
+            const failed = others.filter(c => c.conclusion && !PASS_CONCLUSIONS.has(c.conclusion));
+            if (failed.length > 0) {
+              const names = failed.map(c => `${c.name} (${c.conclusion})`).join(', ');
+              core.warning(`${failed.length} other check(s) did not pass: ${names}; skipping Claude review.`);
+              core.setOutput('skip', 'true');
+            } else {
+              core.info('All other checks passed; proceeding with Claude review.');
+              core.setOutput('skip', 'false');
+            }
+
+      - name: Run Claude review
+        if: steps.wait_for_ci.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          # Pull workflow context into env vars so the prompt body never
+          # mixes ${{ }} interpolation with potentially adversarial data.
+          # None of these are attacker-controlled for the pull_request
+          # trigger, but using env: is a defense-in-depth standard.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          # OAuth token from `claude setup-token` -- billed against the user's
+          # Claude Max subscription, not API credits.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Invoke the project-local /review slash command. The command reads
+          # the PR diff, spawns specialized subagents, and posts inline
+          # review comments plus a top-level summary.
+          prompt: |
+            /review
+
+            Repository: ${{ env.REPO_FULL_NAME }}
+            Pull request: #${{ env.PR_NUMBER }}
+            Base ref: ${{ env.PR_BASE_REF }}
+            Head SHA: ${{ env.PR_HEAD_SHA }}

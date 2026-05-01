@@ -1,0 +1,125 @@
+name: Auto-issue on CI failure
+
+# When any of the listed workflows finish with a failure, open (or update)
+# a GitHub issue mentioning @claude. The existing claude.yml workflow
+# listens for @claude in issue bodies/titles and will pick this up
+# automatically, attempting a fix.
+#
+# Workflows excluded from this trigger -- creating an issue when one of these
+# fails would risk a feedback loop:
+#   - "Claude PR Review"            (Claude reviewing Claude reviewing Claude...)
+#   - "Claude Code"                 (Claude's own runs)
+#   - "Auto-issue on CI failure"    (would self-trigger on its own failures)
+on:
+  workflow_run:
+    workflows:
+      - "Create ThirdReality Bundle"
+      - "Create Sonos Advanced Controller Bundle"
+      - "Create UtilitiesAndLoggingLibrary Bundle"
+      - "Release Sonos Advanced Controller"
+      - "Release Gemini Text Rewriter"
+    types: [completed]
+
+# Static group serializes all auto-issue jobs across the repo. Since each
+# job runs in seconds and CI failures are rare, this is cheap insurance
+# against double-fire races. The script-level dedup (search-then-comment)
+# is the primary safeguard against duplicate issues.
+concurrency:
+  group: ci-failure-issue
+  cancel-in-progress: false
+
+jobs:
+  open_fix_issue:
+    name: Open @claude fix issue
+    # workflow_run fires for every completion (success, failure, cancelled);
+    # only act on actual failures. The env context is NOT available in
+    # job-level if: (per GitHub Actions context-availability rules), so we
+    # reference github.event.workflow_run.conclusion directly. The conclusion
+    # is a GitHub-controlled enum ("success" | "failure" | "cancelled" |
+    # "skipped" | "neutral" | "timed_out" | ...), not user input.
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: self-hosted
+    permissions:
+      issues: write
+      actions: read
+      contents: read
+    steps:
+      - name: Open or comment on @claude fix issue
+        # Uses actions/github-script (the established pattern in this repo --
+        # see release-sonos-advanced.yml) instead of the gh CLI, which is not
+        # installed on the self-hosted runner. github-script bundles its own
+        # Node runtime + Octokit, so it has no runner-side dependencies.
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const wf = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+
+            // Stable title -- used for de-duplication. If an open issue with
+            // this exact title already exists, comment on it instead of
+            // creating a new one. Prevents fix-loop spam if Claude's fix
+            // introduces another failure of the same workflow on the same
+            // branch.
+            const title = `[CI failure] ${wf.name} on ${wf.head_branch}`;
+
+            // Body shared between the create and comment paths. The @claude
+            // mention at the top is what triggers .github/workflows/claude.yml.
+            const body = [
+              `@claude please investigate and fix this CI failure.`,
+              ``,
+              `- **Workflow:** \`${wf.name}\``,
+              `- **Branch:** \`${wf.head_branch}\``,
+              `- **Commit:** \`${wf.head_sha}\``,
+              `- **Triggering event:** \`${wf.event}\``,
+              `- **Conclusion:** \`${wf.conclusion}\``,
+              `- **Run:** ${wf.html_url}`,
+              `- **Subject:** ${wf.display_title}`,
+              ``,
+              `## Suggested approach`,
+              ``,
+              `1. Investigate the failed run via the URL above. The failed step`,
+              `   logs can be fetched from the GitHub API at`,
+              `   \`/repos/${owner}/${repo}/actions/runs/${wf.id}/logs\` (returns a`,
+              `   redirect to a zip of all logs), or you can read the run page`,
+              `   directly. The "actions: read" permission has already been granted.`,
+              `2. Identify the root cause. The bundle workflows zip Groovy source`,
+              `   files under \`Apps/\`, \`Drivers/\`, and \`Libraries/\` -- failures`,
+              `   here are usually syntax errors or missing files in the source tree.`,
+              `   The release workflows update versions and tag releases -- failures`,
+              `   are usually metadata or git-push errors.`,
+              `3. Open a PR targeting \`${wf.head_branch}\` with the fix.`,
+              `4. Once the fix lands and CI is green, close this issue.`,
+              ``,
+              `## Skip and stop if`,
+              ``,
+              `- The failure looks transient (runner timeout, GitHub outage,`,
+              `  secret expiration).`,
+              `- The failure is in auto-generated content under \`Bundles/\``,
+              `  (re-run the workflow rather than editing).`,
+              `- You can't reach a high-confidence root cause from the logs alone.`,
+              `  Comment back with what you found and stop -- do not guess at a fix.`,
+            ].join('\n');
+
+            // Search for an existing open issue with the exact title. We list
+            // open issues directly (rather than via the search API) to avoid
+            // search-indexing lag, which would otherwise let a fast-firing
+            // second failure create a duplicate before the first issue is
+            // indexed. listForRepo returns BOTH issues and PRs; filter PRs out
+            // via the .pull_request property which is absent on real issues.
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const existing = open.find(i => !i.pull_request && i.title === title);
+
+            if (existing) {
+              core.info(`Existing open issue #${existing.number} matches; commenting instead of creating duplicate.`);
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number, body,
+              });
+            } else {
+              core.info('No matching open issue; creating a new one.');
+              const created = await github.rest.issues.create({
+                owner, repo, title, body,
+              });
+              core.info(`Created issue #${created.data.number}.`);
+            }
