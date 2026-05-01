@@ -1,0 +1,141 @@
+# Map of Hubitat capability -> required command/method names.
+#
+# Format: CapabilityName : method1, method2, method3
+# Lines starting with # are comments. Capabilities that are pure marker /
+# attribute-only types (sensors) appear with an empty method list, which means
+# the linter doesn't require any methods for them.
+#
+# Source: Hubitat Driver Capabilities documentation. Update as Hubitat ships
+# new capabilities. The CapabilityRequiredMethodsRule checks that each declared
+# capability's required methods exist either locally OR via an #include'd
+# library.
+
+# --- Switches and outlets ---
+Switch:on,off
+Bulb:on,off
+Light:on,off
+Outlet:on,off
+RelaySwitch:on,off
+SwitchLevel:setLevel
+ChangeLevel:startLevelChange,stopLevelChange
+ColorControl:setColor,setHue,setSaturation
+ColorTemperature:setColorTemperature
+LightEffects:setEffect,setNextEffect,setPreviousEffect
+
+# --- Buttons ---
+PushableButton:push
+HoldableButton:hold
+DoubleTapableButton:doubleTap
+ReleasableButton:release
+Momentary:push
+
+# --- Locks ---
+Lock:lock,unlock
+LockCodes:setCode,deleteCode,getCodes,reloadCodes,requestCode
+
+# --- Doors / shades / valves ---
+DoorControl:open,close
+GarageDoorControl:open,close
+WindowShade:open,close,setPosition
+WindowBlind:open,close,setPosition
+Valve:open,close
+
+# --- Climate ---
+Thermostat:setHeatingSetpoint,setCoolingSetpoint,setThermostatMode,setThermostatFanMode,off,heat,cool,auto,emergencyHeat,fanAuto,fanOn,fanCirculate
+ThermostatCoolingSetpoint:setCoolingSetpoint
+ThermostatHeatingSetpoint:setHeatingSetpoint
+ThermostatMode:setThermostatMode,off,heat,cool,auto,emergencyHeat
+ThermostatFanMode:setThermostatFanMode,fanAuto,fanOn,fanCirculate
+ThermostatSchedule:setSchedule
+FanControl:setSpeed
+
+# --- Notification / sound / media ---
+# AudioNotification.playTrackAtVolume / MusicPlayer.{resumeTrack,restoreTrack}
+# are legacy SmartThings-era methods that Hubitat tolerates as optional. Add
+# them back here if a future Hubitat release requires them.
+Notification:deviceNotification
+SpeechSynthesis:speak
+SpeechRecognition:listen
+AudioVolume:setVolume,mute,unmute,volumeUp,volumeDown
+AudioNotification:playText,playTrack
+MediaTransport:play,pause,stop
+MusicPlayer:play,pause,stop,nextTrack,previousTrack,setLevel,mute,unmute,playTrack,setTrack
+Speaker:setLevel,mute,unmute
+MediaInputSource:setInputSource
+MediaController:startActivity,getAllActivities,getCurrentActivity
+TV:channelUp,channelDown,volumeUp,volumeDown
+SamsungTV:on,off,mute,unmute,volumeUp,volumeDown,channelUp,channelDown
+Tone:beep
+Chime:playSound,stop
+
+# --- Cameras ---
+ImageCapture:take
+VideoCapture:capture,clip
+VideoCamera:on,off,flip,mute,unmute,monitor
+
+# --- Alarms / safety ---
+Alarm:siren,strobe,both,off
+SecurityKeypad:setEntryDelay,setExitDelay,setCodeLength,setCode,deleteCode,getCodes,armAway,armHome,disarm
+TimedSession:setTimeRemaining,start,stop,pause,cancel
+
+# --- Lifecycle ---
+Configuration:configure
+Initialize:initialize
+Refresh:refresh
+HealthCheck:ping
+
+# --- Indicators / consumables ---
+Indicator:indicatorWhenOn,indicatorWhenOff,indicatorNever
+Consumable:setConsumableStatus
+
+# --- Other actuators ---
+LocationMode:setMode
+ZwMultichannel:enableEpEvents,epCmd
+Telnet:telnetStatus
+
+# --- Marker / attribute-only capabilities (no required methods) ---
+AccelerationSensor:
+Actuator:
+AirQuality:
+Battery:
+Beacon:
+Button:
+CarbonDioxideMeasurement:
+CarbonMonoxideDetector:
+Color:
+ColorMode:
+ContactSensor:
+CurrentMeter:
+EnergyMeter:
+EstimatedTimeOfArrival:
+FilterStatus:
+GalleryStatus:
+GasDetector:
+IlluminanceMeasurement:
+LiquidFlowRate:
+Mailbox:
+MotionSensor:
+PHMeasurement:
+PowerMeter:
+PowerSource:
+PresenceSensor:
+PressureMeasurement:
+RelativeHumidityMeasurement:
+Sensor:
+ShockSensor:
+SignalStrength:
+SleepSensor:
+SmokeDetector:
+SoundPressureLevel:
+SoundSensor:
+StepSensor:
+TamperAlert:
+Temperature:
+TemperatureMeasurement:
+ThermostatOperatingState:
+ThermostatSetpoint:
+ThreeAxis:
+TouchSensor:
+UltravioletIndex:
+VoltageMeasurement:
+WaterSensor:

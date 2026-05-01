@@ -1,0 +1,72 @@
+plugins {
+  id 'groovy'
+  id 'application'
+}
+
+group = 'dwinks.hubitat'
+version = '0.1.0'
+
+repositories {
+  mavenCentral()
+}
+
+ext {
+  groovyVersion = '4.0.24'
+  spockVersion  = '2.4-M5-groovy-4.0'
+}
+
+dependencies {
+  implementation "org.apache.groovy:groovy:${groovyVersion}"
+  implementation "org.apache.groovy:groovy-json:${groovyVersion}"
+  implementation "org.apache.groovy:groovy-xml:${groovyVersion}"
+  implementation "org.apache.groovy:groovy-dateutil:${groovyVersion}"
+  implementation 'commons-cli:commons-cli:1.8.0'
+  // Required so the Groovy parser can read @Grab-annotated source without
+  // throwing NoClassDefFoundError when GrabAnnotationTransformation loads.
+  // We never actually fetch dependencies - SandboxRule reports @Grab as a
+  // violation before that would happen.
+  implementation 'org.apache.ivy:ivy:2.5.2'
+
+  testImplementation "org.spockframework:spock-core:${spockVersion}"
+  testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+  testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+application {
+  mainClass = 'dwinks.hubitat.lint.HubitatLinter'
+}
+
+java {
+  toolchain {
+    languageVersion = JavaLanguageVersion.of(21)
+  }
+}
+
+compileGroovy {
+  groovyOptions.parameters = true
+}
+
+test {
+  useJUnitPlatform()
+  testLogging {
+    events 'passed', 'skipped', 'failed'
+    exceptionFormat 'full'
+  }
+}
+
+run {
+  if (project.hasProperty('args')) {
+    args project.getProperty('args').split('\\s+')
+  } else {
+    args '../Apps', '../Drivers', '../Libraries'
+  }
+  standardInput = System.in
+}
+
+tasks.register('lint', JavaExec) {
+  group = 'verification'
+  description = 'Lint Hubitat Apps, Drivers and Libraries'
+  classpath = sourceSets.main.runtimeClasspath
+  mainClass = 'dwinks.hubitat.lint.HubitatLinter'
+  args '../Apps', '../Drivers', '../Libraries'
+}

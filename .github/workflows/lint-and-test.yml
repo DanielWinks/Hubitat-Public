@@ -1,0 +1,75 @@
+name: Lint and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  lint:
+    name: Lint Apps, Drivers and Libraries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Compile lint suite
+        working-directory: tests
+        run: gradle assemble --no-daemon
+
+      - name: Run linter (with GitHub annotations)
+        working-directory: tests
+        run: |
+          gradle run --no-daemon \
+            -Pargs="../Apps ../Drivers ../Libraries --github" || \
+          echo "::error::Lint produced errors"
+        # We capture errors but don't fail the step here so CI can continue to
+        # the test job. The next step inspects exit code from the report.
+
+      - name: Fail job if linter found ERROR-level violations
+        working-directory: tests
+        run: |
+          gradle run --no-daemon -Pargs="../Apps ../Drivers ../Libraries"
+
+  test:
+    name: Spock Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Run tests
+        working-directory: tests
+        run: gradle test --no-daemon
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spock-test-report
+          path: tests/build/reports/tests/test/
+          if-no-files-found: ignore

@@ -129,6 +129,7 @@ void configure() {
 }
 
 void restartESP() { sendCommandAsync(RESTART_ESP, null, null) }
+void createChildDevices() { logDebug('createChildDevices: no child devices defined for this driver') }
 void checkConnection() { sendQueryAsync(UPTIME_STATE, 'checkConnectionCallback') }
 void checkConnectionCallback(AsyncResponse response, Map data = null) {
   logDebug("response.status = ${response.status}")

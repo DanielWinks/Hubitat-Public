@@ -144,7 +144,23 @@ void callbackMethod(AsyncResponse response, Map data) {
 
 ## Testing
 
-There is no automated test framework. Code must be tested by deploying to an actual Hubitat hub. Some apps expose test endpoints (e.g., GeminiTextRewriter has `/test`). Rely on logging for debugging.
+Two layers of automation live under `tests/`:
+
+1. **Static analyzer** (`gradle lint` from `tests/`) - parses every Groovy
+   file with the official Groovy AST and runs rules covering syntax,
+   metadata blocks, the Hubitat sandbox import allowlist, `@CompileStatic`
+   correctness, capability/command/attribute consistency, and method-name
+   references like `runIn('foo')`.
+2. **Spock unit tests** (`gradle test` from `tests/`) - load library files
+   into a `HubitatScriptHarness` (which stubs `state`, `settings`, `log`,
+   scheduling, events, etc.) and assert behavior of individual methods.
+
+Beyond those, code still needs to be smoke-tested on a real Hubitat hub for
+runtime semantics and UI behavior. Some apps expose test endpoints
+(e.g., GeminiTextRewriter has `/test`). Rely on logging for debugging.
+
+See `tests/README.md` for the full list of rules, harness capabilities,
+and how to add new tests.
 
 ## Adding a New Package
 

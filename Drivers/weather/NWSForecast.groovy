@@ -171,7 +171,8 @@ metadata {
   // USER PREFERENCES (Configuration Options)
   // ---------------------------------------------------------------------------
   // These settings appear in the device configuration page
-  section() {
+  preferences {
+   section() {
     // Geographic location for weather data
     // Defaults to hub's location if available
     input(
@@ -257,6 +258,7 @@ metadata {
         [60: "60 Minutes"]
       ]
     )
+   }
   }
 }
 
