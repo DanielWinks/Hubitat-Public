@@ -502,7 +502,7 @@ String convertHexToIP(String hex) {
  */
 String convertIPToHex(String ipAddress) {
   List<String> parts = ipAddress.tokenize('.')
-  return String.format("%X%X%X%X", parts[0] as Integer, parts[1] as Integer, parts[2] as Integer, parts[3] as Integer)
+  return String.format("%02X%02X%02X%02X", parts[0] as Integer, parts[1] as Integer, parts[2] as Integer, parts[3] as Integer)
 }
 
 // =============================================================================
