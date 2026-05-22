@@ -422,6 +422,19 @@ void humidityEvent(Event event) {
     String mode = getSetting('highHumMode') as String
     if (mode == 'householdDifferential') {
       evaluateHouseholdDifferential(value)
+    } else if (mode == 'fastRollingAverage' || mode == 'slowRollingAverage') {
+      // While the fan is on, baseline is frozen on the child device and the
+      // rolling-average attribute stops emitting events, so childHumidityEvent
+      // never fires and fan-off never re-evaluates. Drive evaluation directly
+      // here using the still-stored (frozen) baseline value.
+      DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
+      String fanState = fanSwitchDevice.currentValue("switch") as String
+      if (fanState == 'on') {
+        BigDecimal baseline = child.currentValue(mode) as BigDecimal
+        if (baseline != null) {
+          evaluateFanDecision(value, baseline)
+        }
+      }
     }
   }
 }
@@ -598,8 +611,10 @@ void switchEvent(Event event) {
     removeStateVar(TRIGGERED_BY_APP)
     removeStateVar(FAN_START_HUMIDITY)
 
-    // Cancel max runtime timer
+    // Cancel pending auto-off timers so they don't fire later against a
+    // subsequent manual re-on of the fan within the original timer window.
     unscheduleMethod("runtimeExceeded")
+    unscheduleMethod("doorOpenedAutoOff")
   } else if (event.value == "on") {
     // Bug #6 fix: Only schedule maxRuntime if fanOnSince doesn't already exist
     // (prevents timer reset on redundant on commands)
@@ -634,9 +649,39 @@ void contactEvent(Event event) {
 
       scheduleIn(doorOpenTimeValue * 60, "doorOpenedAutoOff")
     }
+
+    // If humidity has already normalized, turn off immediately rather than
+    // waiting for the next humidity event or the door-open timer.
+    if (fanState == "on") {
+      evaluateOffFromCurrentState()
+    }
   }
   else if (event.value == "closed") {
     unscheduleMethod("doorOpenedAutoOff")
+  }
+}
+
+/**
+ * Reads the latest humidity from state and baseline from the child device,
+ * then invokes evaluateFanDecision. Used when an external trigger (e.g. the
+ * door opening) should cause an immediate re-evaluation rather than waiting
+ * for the next periodic humidity event.
+ */
+@CompileStatic
+void evaluateOffFromCurrentState() {
+  String currentHumStr = getStateVar('currentHumidity') as String
+  if (currentHumStr == null) { return }
+  BigDecimal currentHumidity = new BigDecimal(currentHumStr)
+
+  String mode = getSetting('highHumMode') as String
+  if (mode == 'householdDifferential') {
+    evaluateHouseholdDifferential(currentHumidity)
+  } else {
+    ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
+    BigDecimal baseline = child.currentValue(mode) as BigDecimal
+    if (baseline != null) {
+      evaluateFanDecision(currentHumidity, baseline)
+    }
   }
 }
 

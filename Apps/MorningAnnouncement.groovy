@@ -452,7 +452,7 @@ void generateAnnouncement() {
 
     // Gather input data from devices (shared across all modes)
     String todayDate = "Today is ${new Date().format('MMMM dd, yyyy')}."
-    String weatherReport = getDeviceAttributeValue(settings.weatherReportDevice, 'detailedForecast')
+    String weatherReport = getDeviceAttributeValue(settings.weatherReportDevice, 'forecastSummary')
     String weatherAlerts = getDeviceAttributeValue(settings.weatherAlertsDevice, 'alertsFriendlyText')
     String calendarEvents = getDeviceAttributeValue(settings.calendarEventsDevice, 'nextEventFriendlyString')
 
