@@ -1,10 +1,10 @@
 {
   "packageName": "Solar Shade & Window Advisor",
   "author": "Daniel Winks",
-  "version": "1.0.0",
-  "releaseNotes": "1.0.0 Initial release: per-side solar load with occlusion modeling, Open-Meteo weather, thermostat-aware four-state shade/window advisories, and an adaptive thermal model that learns from indoor sensors.",
+  "version": "1.1.0",
+  "releaseNotes": "1.1.0 Humidity comfort gate: window-open advisories now respect outdoor dew point (sensors or Open-Meteo) with indoor-humidity-adaptive thresholds, plus a bias-corrected outdoor temperature forecast.\n1.0.0 Initial release: per-side solar load with occlusion modeling, Open-Meteo weather, thermostat-aware four-state shade/window advisories, and an adaptive thermal model that learns from indoor sensors.",
   "minimumHEVersion": "2.3.4",
-  "dateReleased": "2026-06-05",
+  "dateReleased": "2026-06-10",
   "licenseFile": "",
   "documentationLink": "",
   "communityLink": "",
