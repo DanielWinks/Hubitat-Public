@@ -4409,7 +4409,7 @@ void sendEventsToNewGroupMembers(List<String> newRincons) {
 }
 
 void parentSendEventToDNI(String dni, String name, Object value) {
-  parent?.sendEvent(dni, [name:name, value:value])
+  parent?.sendChildEvent(dni, [name:name, value:value])
 }
 
 

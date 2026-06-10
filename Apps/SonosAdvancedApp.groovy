@@ -49,12 +49,13 @@ preferences {
 // =============================================================================
 // Fields
 // =============================================================================
-@Field static Map playerSelectionOptions = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
+// Hub login sessions expire; re-login when the cached cookie is older than this.
+@Field static final Long HUB_COOKIE_MAX_AGE_MS = 10L * 60L * 1000L
 // Per-child debounce for GROUP_STATUS_MOVED driven ZGT resubscribes. Burst 499
 // responses during group transitions would otherwise fire dozens of subscribes
 // on the same device back to back.
@@ -652,6 +653,10 @@ void createGroupDevices() {
   if(!state.userGroups) {return}
   logDebug('Creating group devices...')
   state.userGroups.each{ it ->
+    if(!it.value?.groupCoordinatorId || !it.value?.playerIds) {
+      logWarn("Skipping group '${it.key}': saved group state is missing coordinator or player list")
+      return
+    }
     String dni = "${app.id}-SonosGroupDevice-${it.key}"
     DeviceWrapper device = getChildDevice(dni)
     if (device == null) {
@@ -1032,7 +1037,6 @@ void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
-  discoveryQueue = new ConcurrentLinkedQueue<LinkedHashMap>()
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
 
@@ -1363,6 +1367,15 @@ Map<String, ChildDeviceWrapper> buildRinconMap() {
  */
 ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return app.getChildDevices().find { it.getDataValue('id') == rincon }
+}
+
+void sendChildEvent(String dni, Map event) {
+  ChildDeviceWrapper child = getChildDevice(dni)
+  if(child == null) {
+    logWarn("sendChildEvent: no child device found for DNI ${dni}")
+    return
+  }
+  child.sendEvent(event)
 }
 
 /**
@@ -2765,6 +2778,10 @@ Boolean shouldRequestZgtResub(String dni) {
 }
 
 Boolean responseIsValid(AsyncResponse response, String requestName = null) {
+  if(response == null) {
+    logError("${requestName ?: 'Request'} received no response")
+    return false
+  }
   if(response?.status == 499) {
     try{
       Map errData = response.getErrorData()
@@ -3487,11 +3504,16 @@ Boolean uninstallDriverCode(String driverCodeId, String cookie) {
 }
 
 String login() {
-  // If we already have a valid cookie, try to reuse it
-  if(state.hubCookie) {
+  // Reuse a recent cookie, but treat it as stale after HUB_COOKIE_MAX_AGE_MS --
+  // hub sessions expire, and a cookie trusted forever breaks version checks and
+  // library publishing until it is manually cleared.
+  Long cookieAgeMs = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+  if(state.hubCookie && cookieAgeMs != null && cookieAgeMs < HUB_COOKIE_MAX_AGE_MS) {
     logDebug("Reusing existing cookie")
     return state.hubCookie
   }
+  state.remove('hubCookie')
+  state.remove('hubCookieTime')
 
   try {
     Map params = [
@@ -3518,6 +3540,7 @@ String login() {
           String cookieValue = setCookieHeader.value ?: setCookieHeader.toString()
           cookie = cookieValue.split(';')[0]
           state.hubCookie = cookie  // Store for reuse like HPM
+          state.hubCookieTime = now()
           logDebug("Got cookie: ${cookie?.take(20)}...")
         } else {
           logWarn("No Set-Cookie header in login response")
