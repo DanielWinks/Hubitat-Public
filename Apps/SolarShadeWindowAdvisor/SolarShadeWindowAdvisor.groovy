@@ -575,7 +575,7 @@ void pushThermalSample() {
   com.hubitat.app.ChildDeviceWrapper stats = getStatsDevice()
   if (stats == null) { return }
   Double indoor = averageTemp(settings.tempSensors)
-  Double tOut = state.wxCurrentTemp != null ? asDouble(state.wxCurrentTemp) : null
+  Double tOut = currentOutdoorTemp()
   if (indoor == null || tOut == null) { return }
   Long t = now()
   double solar = maxWallLoadAt(t, hourlyIndexFor(t))
@@ -636,10 +636,17 @@ double[] forecastWindowsOpen(double startTin, Integer horizonHours, Integer lead
   if (leadSteps > steps) { leadSteps = steps }
   double[] tOutSeq = new double[steps]
   double[] solarSeq = new double[steps]
+  // Bias-correct the hourly curve toward observed reality: on a rising morning the
+  // hourly forecast lags the actual outdoor temperature, which made the projection
+  // start too cool and recommend opening while it was already warmer outside. The
+  // observed-minus-forecast offset decays to zero over BIAS_DECAY_MIN minutes.
+  double bias = 0.0d
+  Double obsOut = currentOutdoorTemp()
+  if (obsOut != null) { bias = (obsOut as double) - forecastOutdoorTemp(hourlyIndexFor(now())) }
   for (Integer i = 0; i < steps; i++) {
     Long epoch = now() + ((i + 1) * stepMin * 60000L)
     Integer wx = hourlyIndexFor(epoch)
-    tOutSeq[i] = forecastOutdoorTemp(wx)
+    tOutSeq[i] = forecastOutdoorTemp(wx) + decayedBias(bias, ((i + 1) * stepMin) as double, BIAS_DECAY_MIN as double)
     solarSeq[i] = maxWallLoadAt(epoch, wx)
   }
   // Coefficients: start from the physics defaults, then use the LEARNED windows-open

@@ -210,6 +210,26 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     tr[3] < tr[2]        // ...but below the end (still warming)
   }
 
+  def "forecastWindowsOpen bias-corrects the lagging hourly curve toward observed reality"() {
+    given: 'the hourly forecast says 71F but the observed current temperature is 73F (rising morning)'
+    HubitatScriptHarness fresh = ScriptLoader.load(appFile)
+    long t = System.currentTimeMillis()
+    fresh.state.wxHourEpochs = [t - 1800000L]
+    fresh.state.wxTemp = [71.0]
+    fresh.state.wxCurrentTemp = 73.0
+    fresh.settings.windowOpenTauMin = 45
+    fresh.settings.wallCount = 0
+
+    when: 'forecasting with the +2F bias, then again with the observation matching the curve'
+    double[] withBias = fresh.forecastWindowsOpen(72.0d, 3, 1)
+    fresh.state.wxCurrentTemp = 71.0
+    double[] noBias = fresh.forecastWindowsOpen(72.0d, 3, 1)
+
+    then: 'the bias-corrected projection runs warmer near-term and no cooler at the end'
+    withBias[3] > noBias[3]
+    withBias[2] >= noBias[2]
+  }
+
   def "shouldCloseWindows is two-horizon: stays open through a temporary warm spell, closes at the last moment"() {
     expect:
     // signature: (projNearTerm, projEnd, coolSP, heatSP, maxDevHot, maxDevCold, reopenMargin); ceiling = 74+3 = 77
