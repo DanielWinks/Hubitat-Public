@@ -877,6 +877,21 @@ double clampDouble(double value, double lo, double hi) {
 }
 
 @CompileStatic
+double fToC(double f) { return (f - 32.0d) / 1.8d }
+
+@CompileStatic
+double cToF(double c) { return (c * 1.8d) + 32.0d }
+
+// Magnus-formula dew point (Celsius in, Celsius out; valid roughly -45..60C).
+// RH is clamped to [1,100] so sensor glitches cannot produce -Infinity.
+@CompileStatic
+double dewPointC(double tempC, double rhPct) {
+  double rh = clampDouble(rhPct, 1.0d, 100.0d)
+  double g = Math.log(rh / 100.0d) + ((17.62d * tempC) / (243.12d + tempC))
+  return (243.12d * g) / (17.62d - g)
+}
+
+@CompileStatic
 double solarIncidenceCos(double altitudeDeg, double sunAzimuthDeg, double wallAzimuthDeg) {
   if (altitudeDeg <= 0.0d) { return 0.0d }
   double altRad = Math.toRadians(altitudeDeg)

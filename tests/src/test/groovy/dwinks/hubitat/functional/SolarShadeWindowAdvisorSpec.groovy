@@ -72,6 +72,28 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     app.effectiveSolarLoad(80.0d, 1.0d) == 0.0d
   }
 
+  // --- Humidity comfort gate --------------------------------------------------
+
+  def "fToC and cToF convert exactly at reference points and invert each other"() {
+    expect:
+    app.fToC(32.0d) == 0.0d
+    app.fToC(212.0d) == 100.0d
+    app.cToF(0.0d) == 32.0d
+    Math.abs(app.cToF(app.fToC(73.4d)) - 73.4d) < 1e-9
+  }
+
+  def "dewPointC matches known psychrometric values"() {
+    expect:
+    // 25C at 60% RH -> dew point ~16.7C (standard Magnus check value)
+    Math.abs(app.dewPointC(25.0d, 60.0d) - 16.7d) < 0.3d
+    // saturated air: dew point equals air temperature
+    Math.abs(app.dewPointC(20.0d, 100.0d) - 20.0d) < 0.05d
+    // dry air: dew point falls far below air temperature
+    app.dewPointC(30.0d, 20.0d) < 10.0d
+    // RH is clamped, so a bogus 0% does not produce -Infinity
+    app.dewPointC(20.0d, 0.0d) > -100.0d
+  }
+
   // --- Forecasting & decision logic -----------------------------------------
 
   def "windows-open trajectory captures min/max/end plus the near-term lookahead value"() {
