@@ -975,7 +975,7 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
   if(hasAudioClipCapability() == true) {
     playerLoadAudioClipHighPriority(textToSpeech(text, voice).uri, volume )
   } else {
-    componentPlayTextNoRestoreLocal(textToSpeech(text, voice).uri, volume, voice)
+    componentPlayTextNoRestoreLocal(text, volume, voice)
   }
 }
 
@@ -5251,67 +5251,73 @@ void httpPostAsync(Map params, String callback = 'localControlCallback') {
 // =============================================================================
 void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
-  Map data = ['name': 'HE Audio Clip', 'appId': 'com.hubitat.sonos']
   Map tts = textToSpeech(text, voice)
   String streamUrl = tts.uri
-  if (volume) data.volume = (int)volume
-
-  String playerId = getId()
-  if(volume) {componentSetGroupLevelLocal(device, volume)}
-  setAVTransportURIAndPlay(device, streamUrl)
+  if(volume) {componentSetGroupLevelLocal(volume)}
+  setAVTransportURIAndPlay(streamUrl)
 }
 
 void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  if(ip == null || ip.isEmpty()) {
+    logWarn("removeAllTracksFromQueue: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
+    return
+  }
   Map params = getSoapActionParams(ip, AVTransport, 'RemoveAllTracksFromQueue')
   asynchttpPost(callbackMethod, params)
 }
 
 void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map controlValues = [CurrentURI: currentURI, CurrentURIMetaData: currentURIMetaData]
-  if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
+  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  if(ip == null || ip.isEmpty()) {
+    logWarn("setAVTransportURIAndPlay: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
+    return
+  }
+  Map controlValues = [CurrentURI: currentURI]
+  if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  Map data = [dni:device.getDeviceNetworkId()]
-  asynchttpPost('setAVTransportURIAndPlayCallback', params, data)
+  asynchttpPost('setAVTransportURIAndPlayCallback', params)
 }
 
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
-  if(!responseIsValid(response, 'setAVTransportURICallback')) { return }
-  ChildDeviceWrapper child = app.getChildDevice(data.dni)
-  child.play()
+  localControlCallback(response, data)
+  if(response?.status == 200 && response.hasError() == false) { play() }
 }
 
 void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map controlValues = [CurrentURI: currentURI, CurrentURIMetaData: currentURIMetaData]
-  if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
+  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  if(ip == null || ip.isEmpty()) {
+    logWarn("setAVTransportURI: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
+    return
+  }
+  Map controlValues = [CurrentURI: currentURI]
+  if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  Map data = [dni:device.getDeviceNetworkId()]
-  asynchttpPost('localControlCallback', params, data)
+  asynchttpPost('localControlCallback', params)
 }
 
-void addURIToQueue(String enqueuedURI, String currentURIMetaData = null) {
-  String ip = getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
-  Map controlValues = [EnqueuedURI: enqueuedURI, CurrentURIMetaData: currentURIMetaData]
-  if(currentURIMetaData) {controlValues += [CurrentURIMetaData: currentURIMetaData]}
+void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
+  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  if(ip == null || ip.isEmpty()) {
+    logWarn("addURIToQueue: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
+    return
+  }
+  Map controlValues = [EnqueuedURI: enqueuedURI]
+  if(enqueuedURIMetaData) {controlValues.EnqueuedURIMetaData = enqueuedURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'AddURIToQueue', controlValues)
-  // removeAllTracksFromQueue(device)
   asynchttpPost('localControlCallback', params)
 }
 
 void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
-  String playerId = device.getDataValue('id')
   logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
-  if(volume) {componentSetGroupLevelLocal(device, volume)}
-  setAVTransportURIAndPlay(device, streamUrl)
+  if(volume) {componentSetGroupLevelLocal(volume)}
+  setAVTransportURIAndPlay(streamUrl)
 }
 
 void componentSetStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
-  String playerId = device.getDataValue('id')
   logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
-  if(volume) {componentSetGroupLevelLocal(device, volume)}
-  setAVTransportURI(device, streamUrl)
+  if(volume) {componentSetGroupLevelLocal(volume)}
+  setAVTransportURI(streamUrl)
 }
 
 void getDeviceStateAsync(String callbackMethod = 'localControlCallback', Map service, String action, Map data = null, Map controlValues = null) {
@@ -5342,7 +5348,7 @@ void componentSetBassLocal(BigDecimal level) {
 }
 
 void componentSetBalanceLocal(BigDecimal level) {
-  if(!hasLeftAndRightChannelsSync(device)) {
+  if(!parent?.hasLeftAndRightChannelsSync(device)) {
     logWarn("Can not set balance on non-stereo pair.")
     return
   }
@@ -5382,7 +5388,7 @@ void componentSetLoudnessLocal(Boolean desiredLoudness) {
 }
 
 void componentMuteGroupLocal(Boolean desiredMute) {
-  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
   if(coordinator == null) {
     logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group mute")
     return
@@ -5394,7 +5400,7 @@ void componentMuteGroupLocal(Boolean desiredMute) {
 }
 
 void componentSetGroupRelativeLevelLocal(Integer adjustment) {
-  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
   if(coordinator == null) {
     logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume adjustment")
     return
@@ -5406,7 +5412,7 @@ void componentSetGroupRelativeLevelLocal(Integer adjustment) {
 }
 
 void componentSetGroupLevelLocal(BigDecimal level) {
-  DeviceWrapper coordinator = getGroupCoordinatorForPlayerDeviceLocal(device)
+  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
   if(coordinator == null) {
     logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume set")
     return
