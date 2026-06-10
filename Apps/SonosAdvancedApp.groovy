@@ -1486,7 +1486,7 @@ GPathResult getDeviceDescriptionLocalSync(String ipAddress) {
   try {
     httpGet(params) { resp ->
       if (resp && resp.data && resp.success) { return resp.data }
-      else { logError(resp.data) }
+      else { logError("getDeviceDescriptionLocalSync: unexpected response: ${resp?.data}") }
     }
   } catch(Exception e){
     logInfo("Could not connect to: ${ipAddress}. If this is a Sonos player, please report an issue. Note that RIGHT channel speakers on a stereo pair, subwoofers, or rear channel speakers this is expected. Only LEFT channel in stereo pairs (or Arc/Beam in a center + rear setup) will respond.")
@@ -1524,7 +1524,7 @@ List<DeviceWrapper> getCurrentGroupedDevices(DeviceWrapper device) {
       GPathResult xml = resp.data
       groupedRincons = (xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text()).toString().tokenize(',')
     }
-    else { logError(resp.data) }
+    else { logError("getCurrentGroupedDevices: unexpected response: ${resp?.data}") }
   }
   List<DeviceWrapper> groupedDevices = getDevicesFromRincons(groupedRincons)
   return groupedDevices
@@ -1552,7 +1552,7 @@ String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
       GPathResult xml = resp.data
       groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text().toString()
     }
-    else { logError(resp.data) }
+    else { logError("getGroupForPlayerDeviceLocal: unexpected response: ${resp?.data}") }
   }
   return groupId
 }
@@ -1570,7 +1570,7 @@ DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
       GPathResult xml = resp.data
       groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZoneGroupID'].text().toString()
     }
-    else { logError(resp?.data) }
+    else { logError("getGroupCoordinatorForPlayerDeviceLocal: unexpected response: ${resp?.data}") }
   }
   if(groupId == null || groupId == '') {
     logWarn("No group ID returned for ${device?.displayName}; cannot determine group coordinator")
@@ -1595,7 +1595,7 @@ String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
       GPathResult xml = resp.data
       groupId = xml['Body']['GetZoneGroupAttributesResponse']['CurrentMuseHouseholdId'].text().toString()
     }
-    else { logError(resp.data) }
+    else { logError("getHouseholdForPlayerDeviceLocal: unexpected response: ${resp?.data}") }
   }
   return groupId
 }
@@ -2105,7 +2105,7 @@ Map getInstalledLibraryVersionWithValidation(Integer libraryId, String expectedN
   } catch(Exception e) {
     result.error = "Error: ${e.message}"
     logWarn("Error getting library version for ID ${libraryId}: ${e.message}")
-    logError("Stack trace:", e)
+    logError("Stack trace: ${e}")
   }
 
   return result
@@ -2329,7 +2329,7 @@ void publishLibraries() {
       }
     } catch(Exception e) {
       String error = "Error publishing ${library.name}: ${e.message}"
-      logError(error, e)
+      logError(error)
       errors << error
       failCount++
     }
@@ -2438,7 +2438,7 @@ Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version
     }
 
   } catch(Exception e) {
-    logError("Error publishing library to hub: ${e.message}", e)
+    logError("Error publishing library to hub: ${e.message}")
     return false
   }
 }
@@ -2483,7 +2483,7 @@ Map getLibraryCode(Integer libraryId, String cookie) {
 
   } catch(Exception e) {
     logWarn("Error getting library code: ${e.message}")
-    logError("Stack trace:", e)
+    logError("Stack trace: ${e}")
     return null
   }
 }
@@ -2628,7 +2628,7 @@ Map sendLocalJsonQuerySync(Map args) {
   logTrace("sendLocalQuerySync: ${params}")
   httpGet(params) { resp ->
     if (resp && resp.data && resp.success) { return resp.data }
-    else { logError(resp.data) }
+    else { logError("sendLocalJsonQuerySync: unexpected response: ${resp?.data}") }
   }
 }
 
