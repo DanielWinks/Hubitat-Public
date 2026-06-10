@@ -283,6 +283,81 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     app.buildAdvisory(false, false, false, null).message.startsWith('Open the windows')
   }
 
+  // --- evaluate() end-to-end: the real-world humidity scenarios --------------
+
+  private HubitatScriptHarness freshEvaluateApp(double indoorTemp, double outdoorTemp, double outdoorDewPoint) {
+    HubitatScriptHarness fresh = ScriptLoader.load(appFile)
+    fresh.settings.thermostat = new MockDevice(currentValues: [coolingSetpoint: 74.0, heatingSetpoint: 66.0,
+                                                               thermostatOperatingState: 'idle', thermostatMode: 'cool'])
+    fresh.settings.tempSensors = [new MockDevice(currentValues: [temperature: indoorTemp])]
+    fresh.settings.maxDevHot = 3.0
+    fresh.settings.maxDevCold = 10.0
+    fresh.settings.windowOpenTauMin = 45
+    fresh.settings.forecastHorizonHours = 3
+    fresh.settings.closeLeadHours = 1
+    fresh.settings.wallCount = 0
+    fresh.settings.latitude = '40.0'
+    fresh.settings.longitude = '-83.0'
+    fresh.settings.debugLogEnable = false
+    fresh.state.wxHourEpochs = [System.currentTimeMillis() - 600000L]
+    fresh.state.wxTemp = [outdoorTemp]
+    fresh.state.wxCurrentTemp = outdoorTemp
+    fresh.state.wxCurrentDewPoint = outdoorDewPoint
+    return fresh
+  }
+
+  def "evaluate vetoes opening when muggy outside with no real temperature advantage"() {
+    given: 'the reported failure: 72F inside, 73F outside, dew point 70F'
+    HubitatScriptHarness fresh = freshEvaluateApp(72.0d, 73.0d, 70.0d)
+
+    when:
+    fresh.evaluate()
+
+    then:
+    fresh.state.lastHumidityVeto == true
+    fresh.state.lastWindowRec == 'closed'
+  }
+
+  def "evaluate recommends open when much cooler outside even though humid"() {
+    given: '73F inside, 63F outside at saturation (dew point 63F)'
+    HubitatScriptHarness fresh = freshEvaluateApp(73.0d, 63.0d, 63.0d)
+
+    when:
+    fresh.evaluate()
+
+    then:
+    fresh.state.lastHumidityVeto == false
+    fresh.state.lastWindowRec == 'open'
+  }
+
+  def "a muggy interior relaxes the gate: outdoor air no damper than indoors is allowed in"() {
+    given: '73F inside at 75% RH (indoor dew point ~64.6F); 71F outside, dew point 64F'
+    // With the fixed 60F threshold this WOULD veto (excess 4 > advantage 2), but the
+    // indoor dew point relaxes the threshold above 64F, so the gate disengages.
+    HubitatScriptHarness fresh = freshEvaluateApp(73.0d, 71.0d, 64.0d)
+    fresh.settings.indoorHumiditySensors = [new MockDevice(currentValues: [humidity: 75.0])]
+
+    when:
+    fresh.evaluate()
+
+    then:
+    fresh.state.lastHumidityVeto == false
+    fresh.state.lastWindowRec == 'open'
+  }
+
+  def "evaluate leaves behavior unchanged when no humidity data exists"() {
+    given: 'mild dry conditions, no dew point data at all'
+    HubitatScriptHarness fresh = freshEvaluateApp(72.0d, 70.0d, 0.0d)
+    fresh.state.remove('wxCurrentDewPoint')
+
+    when:
+    fresh.evaluate()
+
+    then:
+    fresh.state.lastHumidityVeto == false
+    fresh.state.lastWindowRec == 'open'
+  }
+
   // --- Inlined sun-position trig --------------------------------------------
 
   def "daysSinceJ2000 increases by exactly one per 86,400,000 ms"() {

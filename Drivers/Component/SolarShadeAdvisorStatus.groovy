@@ -37,6 +37,9 @@ metadata {
     attribute 'shadesToDraw', 'string'            // comma-separated wall names, or 'none'
     attribute 'predictedIndoorHigh', 'number'
     attribute 'predictedIndoorLow', 'number'
+    attribute 'outdoorDewPoint', 'number'
+    attribute 'indoorDewPoint', 'number'
+    attribute 'humidityVeto', 'string'            // active | inactive
     attribute 'modelTimeConstantMin', 'number'
     attribute 'modelSamples', 'number'
     attribute 'lastEvaluation', 'string'
@@ -49,6 +52,7 @@ metadata {
 void installed() {
   sendEvent(name: 'advisoryState', value: 'D')
   sendEvent(name: 'advisoryMessage', value: 'Awaiting first evaluation.')
+  sendEvent(name: 'humidityVeto', value: 'inactive')
 }
 
 void updated() { }

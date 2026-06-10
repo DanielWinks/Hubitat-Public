@@ -725,8 +725,27 @@ void evaluate() {
   // cool, and close at the last sensible moment as it actually warms). Hysteresis
   // makes it slightly harder to RE-open once we've said close.
   double reopenMargin = (state.lastWindowRec == 'closed') ? WINDOW_HYST : 0.0d
-  boolean windowsShouldClose = shouldCloseWindows(projNear, projEnd,
+  boolean thermalClose = shouldCloseWindows(projNear, projEnd,
       coolSp as double, heatSp as double, maxDevHot, maxDevCold, reopenMargin)
+
+  // Humidity comfort gate: when outdoor air is muggier than the comfort threshold,
+  // opening is vetoed unless it is enough cooler outside to be worth it. Evaluates
+  // CURRENT conditions only - the thermal forecast knows nothing about humidity.
+  Double dpOut = outdoorDewPoint()
+  Double dpIn = indoorDewPoint()
+  Double outTempNow = currentOutdoorTemp()
+  boolean humidityVeto = false
+  if (dpOut != null && outTempNow != null) {
+    double threshold = (settings.dewPointComfort ?: (getTempScale() == 'C' ? 15.5 : 60.0)) as double
+    if (dpIn != null && (dpIn as double) > threshold) { threshold = dpIn as double }  // muggy house relaxes the gate
+    double slope = (settings.dewPointSlope ?: 1.0) as double
+    double clearMargin = (state.lastHumidityVeto == true) ? (HUMIDITY_HYST as double) : 0.0d
+    humidityVeto = humidityVetoActive(indoorNow as double, outTempNow as double, dpOut as double,
+        threshold, slope, clearMargin)
+  }
+  state.lastHumidityVeto = humidityVeto
+
+  boolean windowsShouldClose = thermalClose || humidityVeto
 
   boolean cooling = coolingDominant(indoorNow as double, heatSp as double, coolSp as double)
 
@@ -744,7 +763,8 @@ void evaluate() {
   boolean shadesShouldDraw = wallRecs.values().any { it == 'draw' }
   boolean windowsOpen = anyWindowOpen()
 
-  Map advisory = buildAdvisory(windowsShouldClose, shadesShouldDraw)
+  String dpText = dpOut != null ? "${round1(dpOut)} deg${getTempScale()}" : null
+  Map advisory = buildAdvisory(windowsShouldClose, shadesShouldDraw, humidityVeto, dpText)
 
   // The ACTION to actually take, given the current window state. 'none' when the
   // windows already match the recommendation, so we never nag about a no-op (e.g.
@@ -754,9 +774,9 @@ void evaluate() {
   else if (windowsShouldClose && windowsOpen) { windowAction = 'close' }
 
   double hotCeiling = (coolSp as double) + maxDevHot
-  logInfo("Advisory [${advisory.key}] | windows-open proj: now ${fmt(indoorNow)} -> +${leadHours}h ${fmt(projNear)} -> +${hours}h ${fmt(projEnd)} (min ${fmt(projMin)}/max ${fmt(projMax)}) deg${getTempScale()}, hotCeiling ${fmt(hotCeiling)}; shouldClose=${windowsShouldClose}, windowsOpen=${windowsOpen}, action=${windowAction}")
+  logInfo("Advisory [${advisory.key}] | windows-open proj: now ${fmt(indoorNow)} -> +${leadHours}h ${fmt(projNear)} -> +${hours}h ${fmt(projEnd)} (min ${fmt(projMin)}/max ${fmt(projMax)}) deg${getTempScale()}, hotCeiling ${fmt(hotCeiling)}; dewPoint ${fmt(dpOut)}, humidityVeto=${humidityVeto}, shouldClose=${windowsShouldClose}, windowsOpen=${windowsOpen}, action=${windowAction}")
 
-  updateStatusDevice(advisory, projMax, projMin, wallRecs)
+  updateStatusDevice(advisory, projMax, projMin, wallRecs, dpOut, dpIn, humidityVeto)
   maybeNotify(advisory, windowAction)
   state.lastWindowRec = advisory.windowRec
   state.lastEvaluation = nowFormatted()
@@ -798,7 +818,8 @@ Boolean anyWindowOpen() {
 // Output: status device + notifications
 // =============================================================================
 
-void updateStatusDevice(Map advisory, Double projHigh, Double projLow, Map wallRecs) {
+void updateStatusDevice(Map advisory, Double projHigh, Double projLow, Map wallRecs,
+                        Double outdoorDp, Double indoorDp, boolean humidityVeto) {
   com.hubitat.app.ChildDeviceWrapper dev = getStatusDevice()
   if (dev == null) { return }
   dev.sendEvent(name: 'advisoryState', value: advisory.key)
@@ -809,6 +830,9 @@ void updateStatusDevice(Map advisory, Double projHigh, Double projLow, Map wallR
   dev.sendEvent(name: 'shadesToDraw', value: drawList ? drawList.join(', ') : 'none')
   dev.sendEvent(name: 'predictedIndoorHigh', value: round1(projHigh), unit: getTempScale())
   dev.sendEvent(name: 'predictedIndoorLow', value: round1(projLow), unit: getTempScale())
+  dev.sendEvent(name: 'humidityVeto', value: humidityVeto ? 'active' : 'inactive')
+  if (outdoorDp != null) { dev.sendEvent(name: 'outdoorDewPoint', value: round1(outdoorDp), unit: getTempScale()) }
+  if (indoorDp != null) { dev.sendEvent(name: 'indoorDewPoint', value: round1(indoorDp), unit: getTempScale()) }
   // The learned thermal-model stats live on the separate "Solar Shade Thermal Model"
   // child device; mirror its learned time-constant + sample count here for convenience.
   com.hubitat.app.ChildDeviceWrapper stats = getStatsDevice()
