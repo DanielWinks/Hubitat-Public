@@ -2865,13 +2865,34 @@ Integer incrementSubscriptionRetryAttempts(String eventsToRetry) {
   return next
 }
 
+// Each sid gets its own fallback callback so overwrite:true only replaces the
+// pending unlock for the SAME sid. With a single shared callback name, scheduling
+// one sid's fallback cancelled any other sid's pending unlock, leaving that mutex
+// held until tryAcquire timeouts degraded every later subscribe for it.
 void unlockSubscribeMutexAfterTimeout(String sid) {
-  logTrace("Scheduling unlock of subscribeMutex in ${SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS} seconds...")
-  runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSubscribeMutexAfterTimeoutCallback', [overwrite: true, data:['sid':sid]])
+  logTrace("Scheduling unlock of subscribeMutex for ${sid} in ${SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS} seconds...")
+  switch(sid) {
+    case 'sid1': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid1SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
+    case 'sid2': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid2SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
+    case 'sid3': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid3SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
+    case 'sid4': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid4SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
+    default: logWarn("Unknown subscription sid '${sid}'; not scheduling subscribe mutex fallback release")
+  }
 }
+void unlockSid1SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid1') }
+void unlockSid2SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid2') }
+void unlockSid3SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid3') }
+void unlockSid4SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid4') }
+
+void releaseSubscribeMutexForSid(String sid) {
+  Semaphore mutex = getMutexForSid(sid)
+  releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${sid}")
+}
+
+// Retained so fallback jobs scheduled by prior driver code that are still
+// pending when this version is installed release their mutex instead of erroring.
 void unlockSubscribeMutexAfterTimeoutCallback(Map data) {
-  Semaphore mutex = getMutexForSid(data['sid'])
-  releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${data['sid']}")
+  releaseSubscribeMutexForSid(data['sid'] as String)
 }
 
 void unlockUnsubscribeMutexAfterTimeout() {
