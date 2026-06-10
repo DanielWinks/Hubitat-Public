@@ -62,6 +62,10 @@ definition(
 // Humidity comfort gate
 @Field static final Double HUMIDITY_HYST = 1.0d      // extra hub-degrees of advantage required to CLEAR an active veto
 
+// Forecast bias correction: the observed-minus-hourly-forecast outdoor temperature
+// offset is applied to the projection, decaying linearly to zero over this window.
+@Field static final Double BIAS_DECAY_MIN = 90.0d
+
 // Learned-model wiring (the thermal-model child device)
 @Field static final String THERMAL_DRIVER = 'Solar Shade Thermal Model'
 @Field static final Double LEARN_MIN_SAMPLES = 15.0d       // samples before trusting the learned windows-open model
@@ -949,6 +953,15 @@ double shadedOcclusionFraction(double altitudeDeg, double sunAzimuthDeg, double 
 @CompileStatic
 double effectiveSolarLoad(double rawLoad, double occlusionFraction) {
   return rawLoad * (1.0d - clampDouble(occlusionFraction, 0.0d, 1.0d))
+}
+
+// Linear decay of the observed-vs-forecast outdoor temperature bias: full at
+// minutesAhead=0, zero at/after decayMinutes.
+@CompileStatic
+double decayedBias(double bias, double minutesAhead, double decayMinutes) {
+  if (decayMinutes <= 0.0d || minutesAhead >= decayMinutes) { return 0.0d }
+  if (minutesAhead <= 0.0d) { return bias }
+  return bias * (1.0d - (minutesAhead / decayMinutes))
 }
 
 // Integrates the windows-open response trajectory and returns [min, max, end] over

@@ -116,6 +116,18 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     app.humidityVetoActive(75.5d, 70.0d, 65.0d, 60.0d, 1.0d, 1.0d)    // active veto: needs 6.0, stays on
   }
 
+  def "decayedBias is full now, zero at and after the decay window, linear in between"() {
+    expect:
+    app.decayedBias(2.0d, 0.0d, 90.0d) == 2.0d
+    Math.abs(app.decayedBias(2.0d, 45.0d, 90.0d) - 1.0d) < 1e-9
+    app.decayedBias(2.0d, 90.0d, 90.0d) == 0.0d
+    app.decayedBias(2.0d, 240.0d, 90.0d) == 0.0d
+    // negative bias (forecast running warm) decays the same way
+    Math.abs(app.decayedBias(-3.0d, 30.0d, 90.0d) + 2.0d) < 1e-9
+    // degenerate decay window -> no correction at all
+    app.decayedBias(2.0d, 10.0d, 0.0d) == 0.0d
+  }
+
   // --- Forecasting & decision logic -----------------------------------------
 
   def "windows-open trajectory captures min/max/end plus the near-term lookahead value"() {
