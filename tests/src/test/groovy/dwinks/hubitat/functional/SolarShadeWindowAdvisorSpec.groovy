@@ -94,6 +94,28 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     app.dewPointC(20.0d, 0.0d) > -100.0d
   }
 
+  def "humidity veto blocks a muggy open, allows a cool-humid open, and ignores dry air"() {
+    expect:
+    // signature: (indoorTemp, outdoorTemp, outdoorDp, threshold, slope, clearMargin)
+    // The reported failure: 72F in, 73F out, dew point ~70F (very muggy) -> VETO
+    app.humidityVetoActive(72.0d, 73.0d, 70.0d, 60.0d, 1.0d, 0.0d)
+    // Cool + humid: 73F in, 63F out at saturation (dew point 63F) -> 10F advantage
+    // covers the 3F dew point excess -> open is allowed
+    !app.humidityVetoActive(73.0d, 63.0d, 63.0d, 60.0d, 1.0d, 0.0d)
+    // Dry air NEVER vetoes - even when outdoor is warmer than indoor, the thermal
+    // forecast remains the only authority (preserves existing behavior)
+    !app.humidityVetoActive(72.0d, 78.0d, 55.0d, 60.0d, 1.0d, 0.0d)
+    // Exactly at the threshold (excess == 0) the gate stays disengaged
+    !app.humidityVetoActive(72.0d, 78.0d, 60.0d, 60.0d, 1.0d, 0.0d)
+  }
+
+  def "humidity veto hysteresis: a marginal case clears only without the active-veto margin"() {
+    expect:
+    // excess 5 -> required advantage 5; actual advantage 5.5
+    !app.humidityVetoActive(75.5d, 70.0d, 65.0d, 60.0d, 1.0d, 0.0d)   // inactive veto: clears
+    app.humidityVetoActive(75.5d, 70.0d, 65.0d, 60.0d, 1.0d, 1.0d)    // active veto: needs 6.0, stays on
+  }
+
   // --- Forecasting & decision logic -----------------------------------------
 
   def "windows-open trajectory captures min/max/end plus the near-term lookahead value"() {

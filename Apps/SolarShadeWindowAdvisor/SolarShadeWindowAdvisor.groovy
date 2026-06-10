@@ -59,6 +59,9 @@ definition(
 @Field static final Double WINDOW_HYST = 1.5d              // re-open hysteresis (degrees below ceiling)
 @Field static final Integer WINDOW_FORECAST_STEP_MIN = 10  // integration step (min) for the windows-open forecast
 
+// Humidity comfort gate
+@Field static final Double HUMIDITY_HYST = 1.0d      // extra hub-degrees of advantage required to CLEAR an active veto
+
 // Learned-model wiring (the thermal-model child device)
 @Field static final String THERMAL_DRIVER = 'Solar Shade Thermal Model'
 @Field static final Double LEARN_MIN_SAMPLES = 15.0d       // samples before trusting the learned windows-open model
@@ -991,6 +994,21 @@ boolean shouldCloseWindows(double projNearTerm, double projEnd,
   boolean tooHot = (projEnd > hotCeiling) && (projNearTerm > hotCeiling)
   boolean tooCold = projEnd < coldFloor
   return tooHot || tooCold
+}
+
+// Humidity comfort gate: when outdoor dew point exceeds the comfort threshold,
+// opening is vetoed unless the indoor-outdoor temperature advantage covers the
+// excess (slope degrees of advantage per degree of excess). Dry air (excess <= 0)
+// NEVER vetoes - the thermal forecast stays the only authority there. clearMargin
+// is HUMIDITY_HYST while the veto is already active, making it harder to clear
+// (same hysteresis pattern as the window reopen margin).
+@CompileStatic
+boolean humidityVetoActive(double indoorTemp, double outdoorTemp, double outdoorDp,
+                           double threshold, double slope, double clearMargin) {
+  double excess = outdoorDp - threshold
+  if (excess <= 0.0d) { return false }
+  double required = slope * excess
+  return (indoorTemp - outdoorTemp) < (required + clearMargin)
 }
 
 @CompileStatic
