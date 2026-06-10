@@ -185,6 +185,21 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     app.buildAdvisory(false, false).message.startsWith('Open the windows')
   }
 
+  def "buildAdvisory phrases the humidity veto, keeps the key format, and is unchanged without the veto"() {
+    expect:
+    // default-args overload: existing 2-arg calls behave exactly as before
+    !app.buildAdvisory(true, false).message.contains('humid')
+    app.buildAdvisory(true, false, true, '70.0 degF').key == 'win:closed|shade:open'
+    app.buildAdvisory(true, false, true, '70.0 degF').message.contains('too humid')
+    app.buildAdvisory(true, false, true, '70.0 degF').message.contains('70.0 degF')
+    // dew point text is optional
+    app.buildAdvisory(true, true, true, null).message.contains('too humid')
+    // veto + shades both mentioned
+    app.buildAdvisory(true, true, true, null).message.contains('shades')
+    // the veto flag is irrelevant when windows are recommended open
+    app.buildAdvisory(false, false, false, null).message.startsWith('Open the windows')
+  }
+
   // --- Inlined sun-position trig --------------------------------------------
 
   def "daysSinceJ2000 increases by exactly one per 86,400,000 ms"() {

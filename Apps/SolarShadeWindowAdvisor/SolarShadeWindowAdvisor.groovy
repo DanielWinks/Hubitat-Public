@@ -612,12 +612,16 @@ double[] forecastWindowsOpen(double startTin, Integer horizonHours, Integer lead
 // window change (see maybeNotify): they fire only when the windows are NOT already
 // in the recommended state, so we never tell you to close windows that are already
 // closed (or vice-versa). Messages are phrased as the action to take.
-Map buildAdvisory(boolean windowsShouldClose, boolean shadesShouldDraw) {
+Map buildAdvisory(boolean windowsShouldClose, boolean shadesShouldDraw, boolean humidityVeto = false, String dewPointText = null) {
   String winRec = windowsShouldClose ? 'closed' : 'open'
   String shadeRec = shadesShouldDraw ? 'draw' : 'open'
   String key = "win:${winRec}|shade:${shadeRec}"
   String msg
-  if (windowsShouldClose && shadesShouldDraw) {
+  if (windowsShouldClose && humidityVeto) {
+    String dp = dewPointText ? " (dew point ${dewPointText})" : ''
+    msg = "Keep the windows closed - outdoor air is too humid${dp} for the small temperature benefit."
+    if (shadesShouldDraw) { msg = "${msg} Draw shades on the sun-exposed side(s)." }
+  } else if (windowsShouldClose && shadesShouldDraw) {
     msg = 'Close the windows and draw shades on the sun-exposed sides - opening up would overheat the house soon; let HVAC handle it.'
   } else if (windowsShouldClose) {
     msg = 'Close the windows so HVAC runs efficiently - opening up would overheat the house soon. Shades can stay open (low solar load).'
