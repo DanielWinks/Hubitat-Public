@@ -2129,6 +2129,7 @@ Boolean deviceHasBattery() {
     return false
   }
 
+  Boolean hasBattery = false
   try {
     Map params = [
       uri: "${getLocalUpnpUrl()}/status/batterystatus",
@@ -2136,14 +2137,13 @@ Boolean deviceHasBattery() {
     ]
     httpGet(params) {resp ->
       if(resp.status == 200) {
-        return resp.data.children().find{it.name() == 'LocalBatteryStatus'}.size() > 0
-      } else { return false }
+        hasBattery = resp.data.children().find{it.name() == 'LocalBatteryStatus'} != null
+      }
     }
   } catch(Exception e) {
     logTrace("deviceHasBattery: Could not check battery status: ${e.message}")
-    return false
   }
-  return false
+  return hasBattery
 }
 
 void createRemoveFavoritesChildDevice(Boolean create) {
