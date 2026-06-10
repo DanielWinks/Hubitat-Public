@@ -973,7 +973,7 @@ void stopDiscovery() {
 
   try {
     unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
-    unsubscribe(location, 'sdpTerm.ssdp:all')
+    unsubscribe(location, 'ssdpTerm.urn:schemas-upnp-org:device:ZonePlayer:1')
   } catch(Exception e) { logWarn("Error unsubscribing SSDP: ${e.message}") }
 
   try {
@@ -1107,6 +1107,12 @@ void processMdnsDiscovery() {
   }
 }
 
+Boolean isIpAlreadyDiscovered(String ipAddress) {
+  Boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
+  Boolean alreadyDiscoveredSecondary = discoveredSonosSecondaries.values().any { it.deviceIp == ipAddress }
+  return alreadyDiscovered || alreadyDiscoveredSecondary
+}
+
 void processDiscoveredSonosDevice(String ipAddress) {
   if(!ipAddress) { return }
   if(atomicState.discoveryRunning != true) {
@@ -1114,10 +1120,7 @@ void processDiscoveredSonosDevice(String ipAddress) {
     return
   }
 
-  // Check if we already discovered this IP (in primaries or secondaries)
-  boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
-  boolean alreadyDiscoveredSecondary = discoveredSonosSecondaries.values().any { it.deviceIp == ipAddress }
-  if(alreadyDiscovered || alreadyDiscoveredSecondary) {
+  if(isIpAlreadyDiscovered(ipAddress)) {
     logTrace("Device at ${ipAddress} already discovered, skipping")
     return
   }
@@ -1142,8 +1145,12 @@ void processDiscoveredSonosDevice(String ipAddress) {
 @CompileStatic
 void subscribeToSsdpEvents(Location location) {
   logDebug("Subscribing to SSDP Discovery events...")
+  // SSDP responses carry the responder's concrete ST as the event value, so there is
+  // no 'ssdpTerm.ssdp:all' event. The 'lan discovery ssdp:all' search elicits Sonos
+  // responses with the ZonePlayer URN as their ST -- subscribe to that to catch
+  // players whose upnp:rootdevice response was missed.
 	subscribe(location, 'ssdpTerm.upnp:rootdevice', 'ssdpEventHandler')
-	subscribe(location, 'sdpTerm.ssdp:all', 'ssdpEventHandler')
+	subscribe(location, 'ssdpTerm.urn:schemas-upnp-org:device:ZonePlayer:1', 'ssdpEventHandler')
 }
 
 void ssdpEventHandler(Event event) {
@@ -1156,6 +1163,13 @@ void ssdpEventHandler(Event event) {
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event?.networkAddress as String)
   String ipPort = convertHexToInt(event?.deviceAddress as String).toString()
+
+  // Devices send multiple SSDP responses (and we subscribe to two STs) -- skip the
+  // synchronous player info/description fetches for already-seen IPs.
+  if(isIpAlreadyDiscovered(ipAddress)) {
+    logTrace("Device at ${ipAddress} already discovered, skipping")
+    return
+  }
 
   LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
   if(playerInfo) {
@@ -2361,7 +2375,6 @@ void publishLibraries() {
  */
 String extractLibraryVersion(String sourceCode) {
   logWarn("Extracting library version from source code...")
-  logWarn(sourceCode)
   try {
     // Look for version: 'x.x.x' or version: "x.x.x" in library() block
     def versionMatch = (sourceCode =~ /library\s*\([^)]*version\s*:\s*['"]([\d.]+)['"]/)
