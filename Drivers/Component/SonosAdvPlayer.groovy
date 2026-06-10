@@ -219,7 +219,9 @@ Boolean getAlwaysUseLoadAudioClip() { return settings.alwaysUseLoadAudioClip != 
 Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
 Boolean getEnableRawWebsocketLogging() { return settings.enableRawWebsocketLogging != null ? settings.enableRawWebsocketLogging : false }
 
+@CompileStatic
 Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
+@CompileStatic
 Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
 
 
@@ -949,7 +951,9 @@ BigDecimal coerceVolume(Object volume) {
   return null
 }
 
+@CompileStatic
 void setTrack(String uri) { componentSetStreamUrlLocal(uri) }
+@CompileStatic
 void playTrack(String uri, BigDecimal volume = null) {
   if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
   else{ componentLoadStreamUrlLocal(uri, volume) }
@@ -994,6 +998,7 @@ void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice
   componentPlayTextNoRestoreLocal(text, volume, voice)
 }
 
+@CompileStatic
 void devicePlayTrack(String uri, BigDecimal volume = null) {
   componentLoadStreamUrlLocal(uri, volume)
 }
@@ -1100,9 +1105,13 @@ Boolean isVolumeFadeInProgress() {
 
 @CompileStatic
 void setVolume(BigDecimal level) { setLevel(level) }
+@CompileStatic
 void setTreble(BigDecimal level) { componentSetTrebleLocal(level)}
+@CompileStatic
 void setBass(BigDecimal level) { componentSetBassLocal(level)}
+@CompileStatic
 void setLoudness(String mode) { componentSetLoudnessLocal(mode == 'on')}
+@CompileStatic
 void setBalance(BigDecimal level) { componentSetBalanceLocal(level)}
 void setNightMode(String mode) {
   if(!hasHTPlaybackCapability()) {
@@ -1379,7 +1388,9 @@ Boolean isGroupVolumeFadeInProgress() {
   return deviceId ? groupVolumeFadeState.containsKey(deviceId) : false
 }
 
+@CompileStatic
 void setGroupLevel(BigDecimal level, BigDecimal duration = null) { setGroupVolume(level, duration) }
+@CompileStatic
 void setGroupMute(String mode) {
   logDebug("Setting group mute to ${mode}")
   if(mode == 'muted') { muteGroup() }
