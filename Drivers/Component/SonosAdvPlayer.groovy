@@ -2287,10 +2287,7 @@ void parse(String raw) {
         Integer xmlHash = xmlBody.hashCode()
         Integer prevHash = lastZgtXmlHash.put(zgtDni, xmlHash)
         if(prevHash != null && prevHash == xmlHash) { return }
-        LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>()
-        if(getGroupPlayerIds() != null) {
-          oldGroupedRincons = new LinkedHashSet((getGroupPlayerIds()))
-        }
+        LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>(getGroupPlayerIds())
         setLastInboundZgtEvent()
         processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)
       } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
@@ -3305,15 +3302,15 @@ String getLocalWsUrl(){
 }
 
 List<String> getLocalApiUrlSecondaries(){
-  List<String> secondaryDeviceIps = getDeviceDataValue('secondaryDeviceIps').tokenize(',')
+  List<String> secondaryDeviceIps = getSecondaryDeviceIps()
   return secondaryDeviceIps.collect{"https://${it}:1443/api/v1/"}
 }
 List<String> getLocalUpnpHostSecondaries(){
-  List<String> secondaryDeviceIps = getDeviceDataValue('secondaryDeviceIps').tokenize(',')
+  List<String> secondaryDeviceIps = getSecondaryDeviceIps()
   return secondaryDeviceIps.collect{"${it}:1400"}
 }
 List<String> getLocalUpnpUrlSecondaries(){
-  List<String> secondaryDeviceIps = getDeviceDataValue('secondaryDeviceIps').tokenize(',')
+  List<String> secondaryDeviceIps = getSecondaryDeviceIps()
   return secondaryDeviceIps.collect{"http://${it}:1400"}
 }
 
@@ -3587,7 +3584,7 @@ String getId() { return getDeviceDataValue('id')
 void setId(String id) { setDeviceDataValue('id', id)
 }
 List<String> getSecondaryIds() {
-  return getDeviceDataValue('secondaryIds').tokenize(',')
+  return getDeviceDataValue('secondaryIds')?.tokenize(',') ?: []
 }
 void setSecondaryIds(List<String> ids) {
   setDeviceDataValue('secondaryIds', ids.join(','))
@@ -3607,7 +3604,7 @@ void setDeviceIp(String ipAddress) {
   setDeviceDataValue('deviceIp', ipAddress)
 }
 List<String> getSecondaryDeviceIps() {
-  return getDeviceDataValue('secondaryDeviceIps').tokenize(',')
+  return getDeviceDataValue('secondaryDeviceIps')?.tokenize(',') ?: []
 }
 void setSecondaryDeviceIps(List<String> ipAddresses) {
   setDeviceDataValue('secondaryDeviceIps', ipAddresses.join(','))
@@ -3747,7 +3744,7 @@ Boolean isGroupedAndNotCoordinator() {
 }
 
 List<String> getGroupPlayerIds() {
-  return getDeviceDataValue('groupPlayerIds').tokenize(',')
+  return getDeviceDataValue('groupPlayerIds')?.tokenize(',') ?: []
 }
 void setGroupPlayerIds(List<String> groupPlayerIds) {
   String newValue = groupPlayerIds.join(',')
@@ -5504,8 +5501,7 @@ void processWebsocketMessage(String message) {
       // Deduplicate: skip processing if nothing has changed
       String oldGroupId = getGroupId()
       String oldCoordinatorId = getGroupCoordinatorId()
-      List<String> oldPlayerIds = []
-      try { oldPlayerIds = getGroupPlayerIds() } catch (Exception ignored) {}
+      List<String> oldPlayerIds = getGroupPlayerIds()
       if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds) {
         logTrace('Groups websocket event received but group data unchanged, skipping processing')
         return
