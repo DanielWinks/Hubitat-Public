@@ -8,11 +8,7 @@
       "id": "6cad9e9c-4b0b-423b-b0e1-1c5a3c0d1196",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json",
       "name": "Sonos Advanced Controller",
-      "tags": [
-        "Speakers",
-        "Multimedia",
-        "LAN"
-      ]
+      "tags": ["Speakers", "Multimedia", "LAN"]
     },
     {
       "category": "Window Coverings",
@@ -20,10 +16,7 @@
       "id": "0494570e-0fdd-4ea0-a8f4-7eba8e154ddd",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/ThirdReality/packageManifest.json",
       "name": "Third Reality Smart Blind Drivers",
-      "tags": [
-        "Window Coverings",
-        "Zigbee"
-      ]
+      "tags": ["Window Coverings", "Zigbee"]
     },
     {
       "category": "Presence & Location",
@@ -31,20 +24,22 @@
       "id": "5810284c-4abc-4e79-a9f4-fd21d9f90fb4",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/PresenceHelpers/packageManifest.json",
       "name": "HTTP Presence Helper",
-      "tags": [
-        "Utility",
-        "Presence & Location"
-      ]
+      "tags": ["Utility", "Presence & Location"]
     },
     {
       "category": "Utilities",
       "description": "Use Google Gemini API to rewrite text with various styles (improve, shorten, lengthen, formalize, casual, simplify).",
       "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/GeminiTextRewriter/packageManifest.json",
       "name": "Gemini Text Rewriter",
-      "tags": [
-        "Tools & Utilities",
-        "Cloud"
-      ]
+      "tags": ["Tools & Utilities", "Cloud"]
+    },
+    {
+      "category": "Climate Control",
+      "description": "Advises when to draw shades and open/close windows per building side. Combines sun-path solar load, per-side occlusion (shared walls, partial walls, and computed shading from nearby structures), free Open-Meteo weather, and an adaptive thermal model that learns from your indoor temperature sensors to keep the house within a comfortable band around the thermostat setpoints.",
+      "id": "74e1afd2-0510-4807-ba94-527a010d8ad1",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SolarShadeWindowAdvisor/packageManifest.json",
+      "name": "Solar Shade & Window Advisor",
+      "tags": ["Climate Control", "Window Coverings", "Convenience"]
     }
   ],
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US"

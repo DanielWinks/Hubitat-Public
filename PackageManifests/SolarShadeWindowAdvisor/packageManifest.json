@@ -1,0 +1,39 @@
+{
+  "packageName": "Solar Shade & Window Advisor",
+  "author": "Daniel Winks",
+  "version": "1.0.0",
+  "releaseNotes": "1.0.0 Initial release: per-side solar load with occlusion modeling, Open-Meteo weather, thermostat-aware four-state shade/window advisories, and an adaptive thermal model that learns from indoor sensors.",
+  "minimumHEVersion": "2.3.4",
+  "dateReleased": "2026-06-05",
+  "licenseFile": "",
+  "documentationLink": "",
+  "communityLink": "",
+  "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
+  "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
+  "apps": [
+    {
+      "id": "4f83969b-0e22-46e1-9f97-a46e6a93c499",
+      "name": "Solar Shade & Window Advisor",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SolarShadeWindowAdvisor/SolarShadeWindowAdvisor.groovy",
+      "required": true,
+      "oauth": false
+    }
+  ],
+  "drivers": [
+    {
+      "id": "96146a7b-b8dc-4189-a5fc-496038d3b6bb",
+      "name": "Solar Shade Advisor Status",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SolarShadeAdvisorStatus.groovy",
+      "required": true
+    },
+    {
+      "id": "23a8e84e-8797-474e-8bd0-4b36a9cb2abf",
+      "name": "Solar Shade Thermal Model",
+      "namespace": "dwinks",
+      "location": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/ThermalModelStatistics.groovy",
+      "required": true
+    }
+  ]
+}
