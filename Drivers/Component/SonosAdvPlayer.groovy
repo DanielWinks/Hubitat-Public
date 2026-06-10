@@ -6068,7 +6068,7 @@ void isFavoritePlaying(Map json) {
   String objectId = id?.objectId
   if(objectId != null && objectId != '') {
     List tok = objectId.tokenize(':')
-    if(tok.size() >= 1) { objectId = tok[1] }
+    if(tok.size() >= 2) { objectId = tok[1] }
   }
   String serviceId = id?.serviceId
   String accountId = id?.accountId
