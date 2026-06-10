@@ -487,8 +487,8 @@ Double wallEffectiveLoadAt(Integer wallIndex, Long epoch, Integer wxIndex) {
   double dni = asDouble(dniList[wxIndex])
   double dhi = asDouble(dhiList[wxIndex])
   Map sun = sunPositionAt(epoch)
-  double alt = (sun.altitude) as double
-  double az = (sun.azimuth) as double
+  double alt = asDouble(sun.altitude)
+  double az = asDouble(sun.azimuth)
   double wallAz = asDouble(settings."wall${wallIndex}Azimuth")
   double rawLoad = normalizedSolarLoad(dni, dhi, alt, az, wallAz)
   double occ = wallOcclusionFraction(wallIndex, alt, az, wallAz)
