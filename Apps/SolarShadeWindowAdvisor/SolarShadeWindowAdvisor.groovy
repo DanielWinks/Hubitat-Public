@@ -107,6 +107,15 @@ Map mainPage() {
       input 'closeLeadHours', 'number', title: 'Close-windows lead time (hours) - close only when overheating is this close. Lower = keep windows open longer / close at the last moment', required: true, defaultValue: 1, range: '1..6'
     }
 
+    section('<h2>Humidity &amp; Comfort</h2>') {
+      input 'outdoorHumiditySensors', 'capability.relativeHumidityMeasurement', title: 'Outdoor humidity sensor(s) (optional; Open-Meteo is used when unset)', required: false, multiple: true
+      input 'outdoorTempSensors', 'capability.temperatureMeasurement', title: 'Outdoor temperature sensor(s) (optional; Open-Meteo is used when unset)', required: false, multiple: true
+      input 'indoorHumiditySensors', 'capability.relativeHumidityMeasurement', title: 'Indoor humidity sensor(s) (optional; a muggy interior relaxes the humidity gate)', required: false, multiple: true
+      input 'dewPointComfort', 'decimal', title: "Outdoor dew point (&deg;${getTempScale()}) at/above which air starts feeling humid", required: true, defaultValue: (getTempScale() == 'C' ? 15.5 : 60.0), range: '0..100'
+      input 'dewPointSlope', 'decimal', title: 'Degrees of indoor-outdoor temperature advantage required per degree of dew point excess', required: true, defaultValue: 1.0, range: '0.1..5'
+      paragraph 'Windows are not recommended open when outdoor air is muggy unless it is also enough cooler outside to be worth it. With no sensors selected, Open-Meteo current conditions are used automatically.'
+    }
+
     section('<h2>Windows &amp; Shades</h2>') {
       input 'windowContacts', 'capability.contactSensor', title: 'Window contact sensors (global; open = fresh air in progress)', required: false, multiple: true
       input 'drawThreshold', 'number', title: 'Solar load (0-100) at/above which shades should be drawn', required: true, defaultValue: 60, range: '10..100'
@@ -328,7 +337,7 @@ String buildWeatherUri() {
   BigDecimal lng = (settings.longitude ?: location.longitude) as BigDecimal
   String tempUnit = (getTempScale() == 'C') ? 'celsius' : 'fahrenheit'
   String hourly = 'temperature_2m,shortwave_radiation,direct_normal_irradiance,diffuse_radiation,cloud_cover'
-  return "${OPEN_METEO_URL}?latitude=${lat}&longitude=${lng}&current=temperature_2m,cloud_cover&hourly=${hourly}&forecast_days=2&timezone=auto&temperature_unit=${tempUnit}"
+  return "${OPEN_METEO_URL}?latitude=${lat}&longitude=${lng}&current=temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover&hourly=${hourly}&forecast_days=2&timezone=auto&temperature_unit=${tempUnit}"
 }
 
 void refreshWeather() {
@@ -361,6 +370,10 @@ void weatherCallback(response, Map data) {
 
   state.wxCurrentTemp = asDouble(current?.temperature_2m)
   state.wxCloudNow = asDouble(current?.cloud_cover)
+  // Current humidity/dew point (hub-scale - Open-Meteo returns dew point in the
+  // requested temperature_unit). Null when absent so the comfort gate disengages.
+  state.wxCurrentRh = asDoubleOrNull(current?.relative_humidity_2m)
+  state.wxCurrentDewPoint = asDoubleOrNull(current?.dew_point_2m)
 
   List times = (hourly?.time ?: []) as List
   state.wxHourEpochs = times.collect { t -> parseOpenMeteoTime(t as String) }
@@ -504,6 +517,49 @@ Double averageTemp(devices) {
   List vals = devices.collect { d -> asDoubleOrNull(d.currentValue('temperature')) }.findAll { it != null }
   if (vals.isEmpty()) { return null }
   return (vals.sum() as double) / vals.size()
+}
+
+Double averageHumidity(devices) {
+  if (!devices) { return null }
+  List vals = devices.collect { d -> asDoubleOrNull(d.currentValue('humidity')) }.findAll { it != null }
+  if (vals.isEmpty()) { return null }
+  return (vals.sum() as double) / vals.size()
+}
+
+// Best current outdoor temperature: local sensors when configured, else Open-Meteo.
+Double currentOutdoorTemp() {
+  Double sensor = averageTemp(settings.outdoorTempSensors)
+  if (sensor != null) { return sensor }
+  return asDoubleOrNull(state.wxCurrentTemp)
+}
+
+// Dew point in hub-scale degrees from a hub-scale temperature and RH percent.
+Double dewPointHubScale(Double temp, Double rh) {
+  if (temp == null || rh == null) { return null }
+  if (getTempScale() == 'F') { return cToF(dewPointC(fToC(temp as double), rh as double)) }
+  return dewPointC(temp as double, rh as double)
+}
+
+// Outdoor dew point (hub scale): local RH sensors (with the best available outdoor
+// temperature) win; else Open-Meteo's current dew point; else null - and the
+// humidity comfort gate disengages entirely.
+Double outdoorDewPoint() {
+  Double rh = averageHumidity(settings.outdoorHumiditySensors)
+  if (rh != null) {
+    Double t = currentOutdoorTemp()
+    if (t != null) { return dewPointHubScale(t, rh) }
+  }
+  return asDoubleOrNull(state.wxCurrentDewPoint)
+}
+
+// Indoor dew point (hub scale) from the indoor humidity + temperature sensors, or
+// null when either is unavailable.
+Double indoorDewPoint() {
+  Double rh = averageHumidity(settings.indoorHumiditySensors)
+  if (rh == null) { return null }
+  Double t = averageTemp(settings.tempSensors)
+  if (t == null) { return null }
+  return dewPointHubScale(t, rh)
 }
 
 void recordAndEvaluate() {

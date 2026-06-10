@@ -1,6 +1,7 @@
 package dwinks.hubitat.functional
 
 import dwinks.hubitat.stubs.HubitatScriptHarness
+import dwinks.hubitat.stubs.MockDevice
 import dwinks.hubitat.stubs.ScriptLoader
 import spock.lang.Shared
 import spock.lang.Specification
@@ -16,11 +17,12 @@ import spock.lang.Specification
 class SolarShadeWindowAdvisorSpec extends Specification {
 
   @Shared HubitatScriptHarness app
+  @Shared File appFile
 
   def setupSpec() {
-    File f = new File('../Apps/SolarShadeWindowAdvisor/SolarShadeWindowAdvisor.groovy')
-    assert f.exists(), "Could not find ${f.absolutePath}"
-    app = ScriptLoader.load(f)
+    appFile = new File('../Apps/SolarShadeWindowAdvisor/SolarShadeWindowAdvisor.groovy')
+    assert appFile.exists(), "Could not find ${appFile.absolutePath}"
+    app = ScriptLoader.load(appFile)
   }
 
   // --- Solar geometry -------------------------------------------------------
@@ -126,6 +128,67 @@ class SolarShadeWindowAdvisorSpec extends Specification {
     Math.abs(app.decayedBias(-3.0d, 30.0d, 90.0d) + 2.0d) < 1e-9
     // degenerate decay window -> no correction at all
     app.decayedBias(2.0d, 10.0d, 0.0d) == 0.0d
+  }
+
+  def "weather fetch requests and stores current humidity and dew point"() {
+    given:
+    HubitatScriptHarness fresh = ScriptLoader.load(appFile)
+    fresh.settings.latitude = '40.0'
+    fresh.settings.longitude = '-83.0'
+
+    expect: 'the current= parameter list asks Open-Meteo for humidity + dew point'
+    fresh.buildWeatherUri().contains('current=temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover')
+
+    when: 'a successful response arrives'
+    def response = new Expando(
+      status: 200,
+      hasError: { -> false },
+      getJson: { -> [current: [temperature_2m: 73.0, relative_humidity_2m: 93.0, dew_point_2m: 70.8, cloud_cover: 80],
+                     hourly: [time: ['2026-06-10T07:00'], temperature_2m: [71.0], shortwave_radiation: [120.0],
+                              direct_normal_irradiance: [300.0], diffuse_radiation: [80.0], cloud_cover: [80]]] }
+    )
+    fresh.weatherCallback(response, null)
+
+    then:
+    fresh.state.wxCurrentTemp == 73.0d
+    fresh.state.wxCurrentRh == 93.0d
+    fresh.state.wxCurrentDewPoint == 70.8d
+  }
+
+  def "dew point sources: local sensors win, Open-Meteo fills in, absence disables"() {
+    given:
+    HubitatScriptHarness fresh = ScriptLoader.load(appFile)
+
+    expect: 'nothing configured, no weather yet -> null (gate disengages)'
+    fresh.outdoorDewPoint() == null
+    fresh.indoorDewPoint() == null
+
+    when: 'Open-Meteo current data only'
+    fresh.state.wxCurrentTemp = 73.0
+    fresh.state.wxCurrentDewPoint = 70.8
+
+    then:
+    fresh.outdoorDewPoint() == 70.8d
+
+    when: 'a local outdoor RH sensor takes precedence (73F at 100% RH -> dew point 73F)'
+    fresh.settings.outdoorHumiditySensors = [new MockDevice(currentValues: [humidity: 100.0])]
+
+    then:
+    Math.abs(fresh.outdoorDewPoint() - 73.0d) < 0.2d
+
+    when: 'a local outdoor temperature sensor overrides Open-Meteo current temp'
+    fresh.settings.outdoorTempSensors = [new MockDevice(currentValues: [temperature: 63.0])]
+
+    then:
+    Math.abs(fresh.outdoorDewPoint() - 63.0d) < 0.2d
+    fresh.currentOutdoorTemp() == 63.0d
+
+    when: 'indoor humidity + indoor temperature sensors -> indoor dew point (72F at 50% RH -> ~52.5F)'
+    fresh.settings.tempSensors = [new MockDevice(currentValues: [temperature: 72.0])]
+    fresh.settings.indoorHumiditySensors = [new MockDevice(currentValues: [humidity: 50.0])]
+
+    then:
+    Math.abs(fresh.indoorDewPoint() - 52.5d) < 1.0d
   }
 
   // --- Forecasting & decision logic -----------------------------------------
