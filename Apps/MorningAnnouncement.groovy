@@ -117,14 +117,15 @@ Output rules:
 
 @Field static final String DEFAULT_WEAVER_PROMPT = '''You are a warm, upbeat morning radio host weaving together pre-written segments into a single text-to-speech announcement.
 
-You will receive a WEATHER SEGMENT and a CALENDAR SEGMENT, each already correctly worded. Your job is to:
-1. Open with a brief, cheerful greeting (e.g., "Good morning!"). Do not state the date explicitly unless reading a calendar event date.
+You will receive an authoritative "TODAY IS" line, a WEATHER SEGMENT, and a CALENDAR SEGMENT. The segments are already correctly worded. Your job is to:
+1. Open with a brief, cheerful greeting that states today's day of week and date, taken EXACTLY from the "TODAY IS" line (e.g., "Good morning! Happy Sunday — today is June fourteenth."). Speak the date in TTS-friendly form ("June fourteenth", not "June 14").
 2. Smoothly present the weather segment, then transition into the calendar segment.
 3. Close with a short positive thought or encouragement.
 
 CRITICAL RULES:
+- The "TODAY IS" line is the ONLY source of today's day of week and date. NEVER infer, compute, or guess the weekday yourself — copy it from "TODAY IS". Do not state any other absolute date in the greeting.
 - Do NOT change facts, numbers, dates, times, temperatures, or event names from the segments. Only adjust transitions and connective phrasing.
-- Do NOT re-resolve dates. The CALENDAR SEGMENT has already correctly resolved dates relative to today; preserve its phrasing.
+- Do NOT re-resolve calendar dates. The CALENDAR SEGMENT has already correctly resolved event dates relative to today; preserve its phrasing.
 - Keep the result under 2 minutes spoken (roughly 250-300 words max).
 - If a segment is missing or empty, gracefully omit it and adjust transitions.
 - Return only the final announcement text. No headers, no commentary, no markdown.'''
@@ -132,7 +133,7 @@ CRITICAL RULES:
 @Field static final String DEFAULT_SINGLE_PASS_PROMPT = '''Create a warm, friendly morning announcement from the following information.
 Keep it natural and conversational, formatted like a news caster would be announcing.
 Include:
-1. A cheerful greeting appropriate for the time of day
+1. A cheerful greeting that states today's day of week and date, taken EXACTLY from the "Today is" line provided below (never infer, compute, or guess the weekday yourself). Speak it TTS-friendly, e.g. "Good morning! Happy Sunday, today is June fourteenth."
 2. Today's weather forecast in a brief, easy-to-understand way
 3. Any weather alerts (if present) with appropriate emphasis
 4. Today's calendar events (if any) in a helpful reminder format
@@ -148,8 +149,8 @@ For dates, reformat them for spoken TTS (e.g., "January First" rather than "01/0
 If any section is missing or empty, omit it gracefully from the announcement.
 There are calendar events at the end; summarize them briefly and clearly.
 Do not assume the date of the calendar event is today—read the event details carefully.
-You will be provided with today's date implicitly (formatted like "Today is..."); use it to contextualize calendar events.
-Do not announce the date explicitly unless it is part of a calendar event, except to say "today is..."
+You will be provided with today's date AND day of week implicitly (formatted like "Today is Sunday, June 14."); use it to contextualize calendar events.
+Announce today's day of week and date in the greeting using ONLY the provided "Today is" value; never guess the weekday. Do not announce any other absolute dates unless they are part of a calendar event.
 Make sure not to confuse today's date with any dates mentioned in calendar events.
 Again, you will be provided with today's date implicitly. Do not confuse it with dates mentioned in calendar events. This is extremely important.
 Ensure the entire announcement is concise, ideally under 2 minutes when spoken aloud.
@@ -504,8 +505,11 @@ void generateAnnouncement() {
     String mode = resolveAiMode()
     logDebug("Resolved aiMode: ${mode}")
 
-    // Gather input data from devices (shared across all modes)
-    String todayDate = "Today is ${new Date().format('MMMM dd, yyyy')}."
+    // Gather input data from devices (shared across all modes).
+    // todayDate is computed in code, in the hub's timezone, and INCLUDES the
+    // weekday so the model never has to infer the day of week (which LLMs get
+    // wrong). See buildTodaySpoken().
+    String todayDate = "Today is ${buildTodaySpoken()}."
     String weatherReport = getDeviceAttributeValue(settings.weatherReportDevice, 'forecastSummary')
     String weatherAlerts = getDeviceAttributeValue(settings.weatherAlertsDevice, 'alertsFriendlyText')
     String calendarEvents = getDeviceAttributeValue(settings.calendarEventsDevice, 'nextEventFriendlyString')
@@ -732,6 +736,7 @@ private void startMultiStageChain(String weatherReport, String weatherAlerts, St
   state.chain = [
     startedAt: now(),
     dateAnchor: dateAnchor,
+    todaySpoken: buildTodaySpoken(),
     weatherInput: weatherReport ?: '',
     alertsInput: weatherAlerts ?: '',
     calendarInput: calendarEvents ?: '',
@@ -922,7 +927,12 @@ void runStageWeaver() {
     chain.attempts.weaver = attempt
     logDebug("Stage C (weaver) attempt ${attempt}/${MAX_STAGE_ATTEMPTS}")
 
+    // Authoritative, code-computed, timezone-correct day/date. This is the ONLY
+    // source the weaver is allowed to use for the greeting's weekday.
+    String todaySpoken = (chain.todaySpoken ?: buildTodaySpoken()).toString()
+
     StringBuilder sb = new StringBuilder()
+    sb.append('TODAY IS: ').append(todaySpoken).append('\n\n')
     if (weatherSummary) {
       sb.append('WEATHER SEGMENT:\n').append(weatherSummary).append('\n\n')
     }
@@ -957,7 +967,7 @@ void runStageWeaver() {
     // dropping back to raw input text.
     logWarn("Stage C (weaver) failed after ${attempt} attempts: ${why}; concatenating partial summaries")
     chain.failures << "weaver: ${why} (gave up after ${attempt} attempts)"
-    StringBuilder concat = new StringBuilder('Good morning! ')
+    StringBuilder concat = new StringBuilder("Good morning! Today is ${todaySpoken}. ")
     if (weatherSummary) { concat.append(weatherSummary).append(' ') }
     if (calendarSummary) { concat.append(calendarSummary) }
     String finalText = concat.toString().trim()
@@ -1040,6 +1050,20 @@ private void cleanupChain() {
 // =============================================================================
 
 /**
+ * buildTodaySpoken() - Authoritative, timezone-correct "today" descriptor used
+ * for the greeting (e.g., "Sunday, June 14"). Computed entirely in code so the
+ * day of week is never inferred by the model. Formats in the hub's timezone;
+ * falls back to the JVM default only if the hub has no timezone configured.
+ */
+private String buildTodaySpoken() {
+  Date today = new Date()
+  if (location?.timeZone) {
+    return today.format('EEEE, MMMM d', location.timeZone)
+  }
+  return today.format('EEEE, MMMM d')
+}
+
+/**
  * buildDateAnchor() - Return an explicit, unambiguous date context block that
  * the model can reference when resolving event dates. Includes today, tomorrow,
  * and the next 6 days mapped to weekday names. This is the single most
@@ -1050,8 +1074,15 @@ private String buildDateAnchor() {
   SimpleDateFormat fullFmt = new SimpleDateFormat('EEEE, MMMM d, yyyy')
   SimpleDateFormat dayFmt = new SimpleDateFormat('EEEE')
   SimpleDateFormat shortFmt = new SimpleDateFormat('EEEE, MMMM d')
+  // CRITICAL: format in the hub's timezone. On Hubitat the JVM default zone is
+  // UTC, which would resolve the day a day AHEAD during the local evening.
+  if (location?.timeZone) {
+    fullFmt.setTimeZone(location.timeZone)
+    dayFmt.setTimeZone(location.timeZone)
+    shortFmt.setTimeZone(location.timeZone)
+  }
 
-  Calendar cal = Calendar.getInstance()
+  Calendar cal = location?.timeZone ? Calendar.getInstance(location.timeZone) : Calendar.getInstance()
   cal.setTime(today)
 
   StringBuilder anchor = new StringBuilder()
