@@ -370,12 +370,15 @@ void sonosEventUnsubscribe(String eventSubURL, String host, String dni, String s
 
 @CompileStatic
 String unescapeXML(String toUnescape) {
-  return toUnescape.replace('&amp;','&').replace('&amp;','&').replace('&amp;','&').replace('&amp;','&').replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>')
+  // Named entities must be decoded before '&amp;' so a literal '&lt;' in the
+  // source ('&amp;lt;') is not collapsed twice.
+  return toUnescape.replace('&quot;','"').replace('&apos;',"'").replace('&lt;','<').replace('&gt;','>').replace('&amp;','&')
 }
 
 @CompileStatic
 String escapeXML(String toEscape) {
-  return toEscape.replace('"', '&quot;').replace("'", '&apos;').replace('<', '&lt;').replace('>','&gt;').replace('&','&amp;')
+  // '&' must be escaped first so the entities introduced below are not re-escaped.
+  return toEscape.replace('&','&amp;').replace('"', '&quot;').replace("'", '&apos;').replace('<', '&lt;').replace('>','&gt;')
 }
 
 @CompileStatic
