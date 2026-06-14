@@ -3,8 +3,7 @@
 Hubitat Code Publisher
 
 Publishes Groovy source files (apps, drivers, libraries) to a Hubitat hub.
-Reads hub connection info from .vscode/settings.json and maintains a mapping
-of local files to Hubitat IDs in .hubitat/metadata.json.
+Reads hub connection info and file mappings from .hubitat/metadata.json.
 
 Usage:
     python3 hubitat_publish.py <code_type> <file_path> [workspace_root]
@@ -27,7 +26,6 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SETTINGS_FILE = ".zed/settings.json"
 METADATA_DIR = ".hubitat"
 METADATA_FILE = ".hubitat/metadata.json"
 
@@ -112,26 +110,28 @@ def detect_code_type(filepath):
 # ---------------------------------------------------------------------------
 
 
-def load_settings(workspace_root):
-    """Load hub host from .zed/settings.json."""
-    settings_path = Path(workspace_root) / SETTINGS_FILE
-    if not settings_path.exists():
+def load_hub_hostname(workspace_root):
+    """Load hub hostname from .hubitat/metadata.json."""
+    metadata_path = Path(workspace_root) / METADATA_FILE
+    if not metadata_path.exists():
         raise FileNotFoundError(
-            f"Settings file not found: {settings_path}\n"
-            f"Please create {SETTINGS_FILE} with 'hubitat.hub.hostname' set."
+            f"Metadata file not found: {metadata_path}\n"
+            f"Please create {METADATA_FILE} with 'hubitat.hub.hostname' set.\n"
+            f'Example: {{"hubitat.hub.hostname": "192.168.1.4", "files": []}}'
         )
 
-    with open(settings_path, "r") as f:
-        settings = json.load(f)
+    with open(metadata_path, "r") as f:
+        data = json.load(f)
 
-    host = settings.get("hubitat.hub.hostname")
+    host = data.get("hubitat.hub.hostname")
     if not host:
         raise ValueError(
-            f"'hubitat.hub.hostname' not set in {SETTINGS_FILE}.\n"
-            f"Add your hub's IP or hostname to continue."
+            f"'hubitat.hub.hostname' not set in {METADATA_FILE}.\n"
+            f"Add your hub's IP or hostname to the top-level of the JSON.\n"
+            f'Example: {{"hubitat.hub.hostname": "192.168.1.4", "files": [...]}}'
         )
 
-    return {"host": host}
+    return host
 
 
 def load_metadata(workspace_root):
@@ -145,11 +145,25 @@ def load_metadata(workspace_root):
 
 
 def save_metadata(workspace_root, files):
-    """Save the files list to .hubitat/metadata.json."""
+    """Save the files list to .hubitat/metadata.json, preserving any extra top-level keys."""
     metadata_path = Path(workspace_root) / METADATA_FILE
+
+    # Preserve any existing top-level keys (e.g. hubitat.hub.hostname, networkTimeout)
+    extra = {}
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, "r") as f:
+                existing = json.load(f)
+            for key, value in existing.items():
+                if key != "files":
+                    extra[key] = value
+        except (json.JSONDecodeError, IOError):
+            pass
+
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"files": files, **extra}
     with open(metadata_path, "w") as f:
-        json.dump({"files": files}, f, indent=2)
+        json.dump(data, f, indent=2)
         f.write("\n")
 
 
@@ -406,15 +420,14 @@ def main():
         sys.exit(1)
 
     try:
-        settings = load_settings(workspace_root)
-        host = settings["host"]
+        host = load_hub_hostname(workspace_root)
         publish(host, code_type, filepath, workspace_root)
     except (FileNotFoundError, ValueError) as e:
         print(f"Configuration error: {e}")
         sys.exit(1)
     except ConnectionError as e:
         print(f"Connection error: {e}")
-        print(f"Verify your hub is reachable at the address in {SETTINGS_FILE}")
+        print(f"Verify your hub is reachable at the address in {METADATA_FILE}")
         sys.exit(1)
     except RuntimeError as e:
         print(f"Publish error: {e}")
