@@ -402,10 +402,33 @@ import com.hubitat.app.DeviceWrapper
 // Events are how Hubitat tells our app "something just happened!"
 import com.hubitat.hub.domain.Event
 
-// Include our custom utility library for logging and helper functions
-// This provides useful tools like logDebug(), logInfo(), logWarn()
-// The "#include" loads code from a shared library file
-#include dwinks.UtilitiesAndLoggingLibrary
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
 
 // ============================================================================
 // APP DEFINITION (Tells Hubitat About This App)
