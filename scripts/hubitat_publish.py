@@ -37,8 +37,9 @@ APP_PATTERN = re.compile(r"^\s*definition\s*\(", re.MULTILINE)
 LIBRARY_PATTERN = re.compile(r"^\s*library\s*\(", re.MULTILINE)
 
 # Patterns for extracting name / namespace from Groovy definitions
-NAME_RE = re.compile(r'name\s*:\s*"([^"]+)"')
-NAMESPACE_RE = re.compile(r'namespace\s*:\s*"([^"]+)"')
+# Groovy allows both single and double quotes for strings
+NAME_RE = re.compile(r"""name\s*:\s*["']([^"']+)["']""")
+NAMESPACE_RE = re.compile(r"""namespace\s*:\s*["']([^"']+)["']""")
 
 # Hubitat API endpoints for listing user code
 HUB_LIST_ENDPOINTS = {
@@ -325,11 +326,35 @@ def update_existing_code(host, code_type, code_id, version, source):
 def publish(host, code_type, filepath, workspace_root):
     """Orchestrate the full publish flow for a single file."""
     # ---- Read source ----
-    try:
-        source = Path(filepath).read_text(encoding="utf-8")
-    except (IOError, OSError) as e:
-        print(f"Error reading source file: {e}")
-        sys.exit(1)
+    while True:
+        print(f"File: {filepath}")
+        try:
+            source = Path(filepath).read_text(encoding="utf-8")
+        except (IOError, OSError) as e:
+            print(f"Error reading source file: {e}")
+            sys.exit(1)
+
+        # ---- Quick confirmation (Enter=continue, type a different path to switch) ----
+        cfm = input("Press Enter to publish this file, or type a new path: ").strip()
+        if cfm == "":
+            break
+        # Treat as a new file path
+        new_path = cfm
+        if not os.path.isabs(new_path):
+            new_path = os.path.abspath(os.path.join(workspace_root, new_path))
+        if not os.path.isfile(new_path):
+            print(f"File not found: {new_path}")
+            continue
+        filepath = new_path
+        # Re-detect code type from the new file
+        redetected = detect_code_type(filepath)
+        if redetected:
+            code_type = redetected
+            print(f"Auto-detected code type: {code_type}")
+        else:
+            print(
+                "Could not auto-detect code type from new file; using previously detected type."
+            )
 
     # ---- Confirm detected type matches (already resolved by main if using auto) ----
     detected = detect_code_type(filepath)
