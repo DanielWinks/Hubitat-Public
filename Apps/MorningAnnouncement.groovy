@@ -4,50 +4,55 @@
 // Author: Daniel Winks
 // Description: Generates personalized morning announcements by combining
 //              weather reports, weather alerts, and calendar events, then
-//              using Google Gemini AI to create natural, engaging announcements.
+//              using the OpenRouter AI API to create natural, engaging
+//              announcements.
 //
 // Features:
 //   - Device-based inputs (weather, alerts, calendar)
-//   - Integration with Gemini Text Rewriter app
+//   - Direct OpenRouter API integration (multi-stage chain or single pass)
 //   - Scheduled generation (configurable time)
 //   - Manual generation button
 //   - HTTP webhook endpoint for external triggering
 //   - Global variable storage for Rule Machine access
 //   - HTTP endpoint to retrieve latest announcement
+//   - Standalone: no external library #include required
 // =============================================================================
 
-/**
- *  MIT License
- *  Copyright 2026 Daniel Winks (daniel.winks@gmail.com)
- *
- *  Permission is hereby granted, free of charge, to any person obtaining a copy
- *  of this software and associated documentation files (the "Software"), to deal
- *  in the Software without restriction, including without limitation the rights
- *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- *  copies of the Software, and to permit persons to whom the Software is
- *  furnished to do so, subject to the following conditions:
- *
- *  The above copyright notice and this permission notice shall be included in all
- *  copies or substantial portions of the Software.
- *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- *  SOFTWARE.
- **/
+//
+//  MIT License
+//  Copyright 2026 Daniel Winks (daniel.winks@gmail.com)
+//
+//  Permission is hereby granted, free of charge, to any person obtaining a copy
+//  of this software and associated documentation files (the "Software"), to deal
+//  in the Software without restriction, including without limitation the rights
+//  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//  copies of the Software, and to permit persons to whom the Software is
+//  furnished to do so, subject to the following conditions:
+//
+//  The above copyright notice and this permission notice shall be included in all
+//  copies or substantial portions of the Software.
+//
+//  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//  SOFTWARE.
+//
 
-// Include the utilities and logging library
-#include dwinks.UtilitiesAndLoggingLibrary
+// This app is fully standalone - it intentionally does NOT #include any library.
+// The small slice of helpers it needs (logging, lifecycle hooks, log auto-off,
+// and OAuth token creation) are inlined at the bottom of this file. Everything
+// else it calls (runIn, schedule, setGlobalVar, render, createAccessToken, now)
+// is a Hubitat platform built-in.
 
-// Import required classes
+// Import required classes. groovy.transform.Field must be imported explicitly
+// here because, without a library #include, nothing else provides it and
+// @Field static final would otherwise fail to parse on the hub.
 import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
 import groovy.transform.Field
 import com.hubitat.app.DeviceWrapper
-import com.hubitat.hub.domain.Event
 import java.text.SimpleDateFormat
 import java.util.Calendar
 
@@ -55,25 +60,27 @@ import java.util.Calendar
 // GLOBAL CONSTANTS
 // =============================================================================
 
-@Field static final String GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
+@Field static final String OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
 
-@Field static final Map GEMINI_MODELS = [
-  // Free tier (as of April 2026)
-  'gemini-2.5-flash': 'Gemini 2.5 Flash (Free Tier - Fast, Balanced - Recommended Default)',
-  'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite (Free Tier - Fastest, Highest Quota)',
-  'gemini-3-flash-preview': 'Gemini 3 Flash Preview (Free Tier - Newest Flash, Preview)',
-  'gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash-Lite Preview (Free Tier - Most Cost-Efficient, Preview)',
-  // Paid tier only (Pro models removed from free tier April 1, 2026)
-  'gemini-2.5-pro': 'Gemini 2.5 Pro (PAID - Reasoning, Complex Tasks)',
-  'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview (PAID - Most Powerful Reasoning)',
-  // Legacy (still available but being phased out)
-  'gemini-2.0-flash': 'Gemini 2.0 Flash (Legacy)'
+// Curated list of popular OpenRouter models. Any model not listed here can be
+// used via the free-text "Custom Model Slug" override input.
+@Field static final Map OPENROUTER_MODELS = [
+  'openai/gpt-4o-mini': 'OpenAI GPT-4o mini (Fast, very cheap - Recommended Default)',
+  'openai/gpt-4o': 'OpenAI GPT-4o (Higher quality, pricier)',
+  'anthropic/claude-3.5-haiku': 'Anthropic Claude 3.5 Haiku (Fast, natural prose)',
+  'anthropic/claude-3.5-sonnet': 'Anthropic Claude 3.5 Sonnet (High quality, pricier)',
+  'google/gemini-2.5-flash': 'Google Gemini 2.5 Flash (Fast, balanced)',
+  'meta-llama/llama-3.3-70b-instruct': 'Meta Llama 3.3 70B Instruct (Open model)',
+  'meta-llama/llama-3.3-70b-instruct:free': 'Meta Llama 3.3 70B Instruct (FREE - rate-limited)',
+  'deepseek/deepseek-chat': 'DeepSeek Chat (Cheap, capable)'
 ]
+
+@Field static final String DEFAULT_OPENROUTER_MODEL = 'openai/gpt-4o-mini'
 
 @Field static final Map AI_MODES = [
   'off': 'Off (use plain concatenated text)',
-  'singlePass': 'Single Pass (legacy: send to Gemini Text Rewriter app via location event)',
-  'multiStage': 'Multi-Stage Chain (recommended: focused weather + calendar + weave passes via direct API)'
+  'singlePass': 'Single Pass (one combined OpenRouter call)',
+  'multiStage': 'Multi-Stage Chain (recommended: focused weather + calendar + weave passes via OpenRouter)'
 ]
 
 @Field static final String DEFAULT_WEATHER_PROMPT = '''You are a friendly local weather presenter writing a single short paragraph for a morning text-to-speech announcement.
@@ -122,6 +129,34 @@ CRITICAL RULES:
 - If a segment is missing or empty, gracefully omit it and adjust transitions.
 - Return only the final announcement text. No headers, no commentary, no markdown.'''
 
+@Field static final String DEFAULT_SINGLE_PASS_PROMPT = '''Create a warm, friendly morning announcement from the following information.
+Keep it natural and conversational, formatted like a news caster would be announcing.
+Include:
+1. A cheerful greeting appropriate for the time of day
+2. Today's weather forecast in a brief, easy-to-understand way
+3. Any weather alerts (if present) with appropriate emphasis
+4. Today's calendar events (if any) in a helpful reminder format
+5. A positive closing thought or encouragement
+Keep the tone upbeat and informative.
+Make it feel personal and engaging, not robotic.
+The input text contains sections, named "WEATHER FORECAST:", "WEATHER ALERTS:", and "UPCOMING CALENDAR EVENTS:"...
+do not leave these in verbatim. Reword the announcement so it flows together nicely as if it were being announced by a news caster.
+Pay special attention to weather forecasts, as these will be read aloud, so ensure temperature units and conditions are clear.
+For things like temperature, include the word "degrees" after the number for clarity, such as "75 degrees" rather than just "75".
+For times, reformat them for spoken TTS (e.g., "8 AM" rather than "08:00").
+For dates, reformat them for spoken TTS (e.g., "January First" rather than "01/01", or January thirteenth rather than "13th").
+If any section is missing or empty, omit it gracefully from the announcement.
+There are calendar events at the end; summarize them briefly and clearly.
+Do not assume the date of the calendar event is today—read the event details carefully.
+You will be provided with today's date implicitly (formatted like "Today is..."); use it to contextualize calendar events.
+Do not announce the date explicitly unless it is part of a calendar event, except to say "today is..."
+Make sure not to confuse today's date with any dates mentioned in calendar events.
+Again, you will be provided with today's date implicitly. Do not confuse it with dates mentioned in calendar events. This is extremely important.
+Ensure the entire announcement is concise, ideally under 2 minutes when spoken aloud.
+This will be a text-to-speech announcement, so clarity and natural phrasing are key, as well as spelling out any acronyms, numbers, or abbreviations for proper pronunciation.
+If there is a weather alert, make sure it stands out in the announcement and is clearly communicated, as this is critical information for the listener.
+Do not omit weather alerts if they are present, even if they are long. Summarize them as best as possible while ensuring the critical information is conveyed.'''
+
 /**
  * definition() - Defines app metadata for Hubitat
  */
@@ -129,7 +164,7 @@ definition(
   name: 'Morning Announcement',
   namespace: 'dwinks',
   author: 'Daniel Winks',
-  description: 'Generate personalized morning announcements from weather, alerts, and calendar events using AI',
+  description: 'Generate personalized morning announcements from weather, alerts, and calendar events using the OpenRouter AI API',
   category: 'Utility',
   iconUrl: '',
   iconX2Url: '',
@@ -167,28 +202,38 @@ Map mainPage() {
         required: true,
         defaultValue: 'multiStage',
         submitOnChange: true,
-        description: 'How (or whether) to use Gemini to enhance the announcement.'
-      paragraph '''<small><b>Multi-Stage Chain</b> (recommended): three focused Gemini calls — one for weather, one for calendar, one to weave them together. Calendar dates are anchored to today's date to prevent date confusion. Requires a Gemini API key configured below.<br><br><b>Single Pass</b> (legacy): sends one combined prompt to the Gemini Text Rewriter app via location event. Requires the Gemini Text Rewriter app installed.<br><br><b>Off</b>: returns plain concatenated text with no AI enhancement.</small>'''
+        description: 'How (or whether) to use OpenRouter to enhance the announcement.'
+      paragraph '''<small><b>Multi-Stage Chain</b> (recommended): three focused OpenRouter calls — one for weather, one for calendar, one to weave them together. Calendar dates are anchored to today's date to prevent date confusion.<br><br><b>Single Pass</b>: sends one combined prompt directly to OpenRouter in a single call (cheaper, fewer requests).<br><br><b>Off</b>: returns plain concatenated text with no AI enhancement.<br><br>Both AI modes require an OpenRouter API key configured below.</small>'''
     }
 
-    if (settings.aiMode == 'multiStage') {
-      section('<b>Direct Gemini API Configuration</b> (Multi-Stage Chain)') {
-        paragraph 'Get your API key from: <a href="https://aistudio.google.com/app/apikey" target="_blank">Google AI Studio</a>'
-        input 'geminiApiKey', 'text',
-          title: 'Gemini API Key',
+    // Shared OpenRouter configuration - required by both AI modes.
+    if (settings.aiMode == 'multiStage' || settings.aiMode == 'singlePass') {
+      section('<b>OpenRouter API Configuration</b>') {
+        paragraph 'Get your API key from: <a href="https://openrouter.ai/keys" target="_blank">OpenRouter Keys</a>'
+        input 'openRouterApiKey', 'text',
+          title: 'OpenRouter API Key',
           required: true,
-          description: 'API key used directly by this app for the multi-stage chain'
-        input 'geminiModel', 'enum',
-          title: 'Gemini Model',
-          options: GEMINI_MODELS,
+          description: 'API key used directly by this app (sent as an Authorization Bearer token).'
+        input 'openRouterModel', 'enum',
+          title: 'Model',
+          options: OPENROUTER_MODELS,
           required: true,
-          defaultValue: 'gemini-2.5-flash'
+          defaultValue: DEFAULT_OPENROUTER_MODEL
+        input 'openRouterCustomModel', 'text',
+          title: 'Custom Model Slug (optional override)',
+          required: false,
+          description: 'Type any OpenRouter model slug to override the dropdown above, e.g. anthropic/claude-3.7-sonnet or x-ai/grok-2. Leave blank to use the dropdown selection.'
         input 'temperature', 'decimal',
           title: 'Temperature (0.0-1.0)',
           required: false,
           defaultValue: 0.6,
           range: '0.0..1.0',
           description: 'Lower = more focused, higher = more creative. 0.6 is a good balance for announcements.'
+      }
+    }
+
+    if (settings.aiMode == 'multiStage') {
+      section('<b>Multi-Stage Tuning</b>') {
         input 'maxTokensPerStage', 'number',
           title: 'Max Tokens per Stage',
           required: false,
@@ -200,7 +245,7 @@ Map mainPage() {
           required: false,
           defaultValue: 7,
           range: '0..60',
-          description: 'Spacing between Gemini calls. Free-tier gemini-2.5-flash is 10 RPM (6s min between calls), gemini-2.5-flash-lite is 15 RPM (4s min). Default 7s gives safety margin for all free-tier Flash models. Also applied before a retry.'
+          description: 'Spacing between OpenRouter calls, also applied before a retry. Helps stay under per-model rate limits. The default is comfortable for paid models; increase it if you select a rate-limited :free model.'
 
         Map timing = computeGenerationTime()
         paragraph("<b>Estimated Generation Time</b><br>" +
@@ -230,41 +275,13 @@ Map mainPage() {
     }
 
     if (settings.aiMode == 'singlePass') {
-      section('<b>Single Pass Configuration</b> (Legacy)') {
+      section('<b>Single Pass Configuration</b>') {
         input 'maxTokens', 'number', title: 'Max Tokens for AI Response', required: false, defaultValue: 2048, description: 'Maximum number of tokens to allow for the AI-generated announcement (default: 2048)'
-        paragraph '''<small>Single Pass mode communicates with your Gemini Text Rewriter app via location events. Make sure you have the Gemini Text Rewriter app installed and configured.</small>'''
+        paragraph '''<small>Single Pass mode sends one combined prompt directly to OpenRouter and stores the response. It uses the OpenRouter API key and model configured above.</small>'''
         input 'customInstructions', 'text',
-          title: 'Instructions for AI (single combined prompt)',
+          title: 'Instructions for AI (sent as the system message)',
           required: true,
-          defaultValue: '''
-            Create a warm, friendly morning announcement from the following information.
-            Keep it natural and conversational, formatted like a news caster would be announcing.
-            Include:
-            1. A cheerful greeting appropriate for the time of day
-            2. Today's weather forecast in a brief, easy-to-understand way
-            3. Any weather alerts (if present) with appropriate emphasis
-            4. Today's calendar events (if any) in a helpful reminder format
-            5. A positive closing thought or encouragement
-            Keep the tone upbeat and informative.
-            Make it feel personal and engaging, not robotic.
-            The input text contains sections, named "WEATHER FORECAST:", "WEATHER ALERTS:", and "UPCOMING CALENDAR EVENTS:"...
-            do not leave these in verbatim. Reword the announcement so it flows together nicely as if it were being announced by a news caster.
-            Pay special attention to weather forecasts, as these will be read aloud, so ensure temperature units and conditions are clear.
-            For things like temperature, include the word "degrees" after the number for clarity, such as "75 degrees" rather than just "75".
-            For times, reformat them for spoken TTS (e.g., "8 AM" rather than "08:00").
-            For dates, reformat them for spoken TTS (e.g., "January First" rather than "01/01", or January thirteenth rather than "13th").
-            If any section is missing or empty, omit it gracefully from the announcement.
-            There are calendar events at the end; summarize them briefly and clearly.
-            Do not assume the date of the calendar event is today—read the event details carefully.
-            You will be provided with today's date implicitly (formatted like "Today's date is..."); use it to contextualize calendar events.
-            Do not announce the date explicitly unless it is part of a calendar event, except to say "today is..."
-            Make sure not to confuse today's date with any dates mentioned in calendar events.
-            Again, you will be provided with today's date implicitly. Do not confuse it with dates mentioned in calendar events. This is extremely important.
-            Ensure the entire announcement is concise, ideally under 2 minutes when spoken aloud.
-            This will be a text-to-speech announcement, so clarity and natural phrasing are key, as well as spelling out any acronyms, numbers, or abbreviations for proper pronunciation.
-            If there is a weather alert, make sure it stands out in the announcement and is clearly communicated, as this is critical information for the listener.
-            Do not omit weather alerts if they are present, even if they are long. Summarize them as best as possible while ensuring the critical information is conveyed.
-            ''',
+          defaultValue: DEFAULT_SINGLE_PASS_PROMPT,
           description: 'This prompt guides the AI on how to structure and present your morning announcement.'
       }
     }
@@ -328,21 +345,58 @@ Map generateNowPage() {
 // =============================================================================
 // LIFECYCLE METHODS
 // =============================================================================
+// installed()/updated()/uninstalled() were previously provided by
+// UtilitiesAndLoggingLibrary. They are inlined here (app-only variants) so the
+// app is fully standalone.
 
+/**
+ * installed() - Called once when the app is first installed.
+ */
+void installed() {
+  logDebug('Installed...')
+  try {
+    initialize()
+  } catch (e) {
+    logWarn("initialize() resulted in error: ${e}")
+  }
+  if (settings.logEnable != false) { runIn(1800, 'logsOff') }
+  if (settings.debugLogEnable != false) { runIn(1800, 'debugLogsOff') }
+}
+
+/**
+ * updated() - Called whenever the user saves preferences.
+ */
+void updated() {
+  logDebug('Updated...')
+  try {
+    configure()
+  } catch (e) {
+    logWarn("configure() resulted in error: ${e}")
+  }
+}
+
+/**
+ * uninstalled() - Called when the app is removed.
+ */
+void uninstalled() {
+  logDebug('Uninstalled...')
+  unschedule()
+  unsubscribe()
+}
+
+/**
+ * configure() - Re-establish schedules/subscriptions. Called from updated().
+ */
 void configure() {
   logInfo('Configuring Morning Announcement app')
   unsubscribe()
   unschedule()
-
-  // Subscribe to location events for Gemini responses
-  subscribe(location, 'geminiRewriteResponse', 'handleGeminiResponseEvent')
-
-  // Subscribe to location events for all completed Gemini text rewrites
-  subscribe(location, 'geminiTextRewritten', 'handleGeminiTextRewrittenEvent')
-
   initialize()
 }
 
+/**
+ * initialize() - Create the OAuth token and (re)install the daily schedule.
+ */
 void initialize() {
   logInfo('Initializing Morning Announcement app')
 
@@ -437,8 +491,8 @@ Map getAnnouncementWebhook() {
 /**
  * generateAnnouncement() - Main entry point for generating a morning announcement.
  * Dispatches to one of three flows based on settings.aiMode:
- *   - 'multiStage' (default): focused weather + calendar + weave Gemini calls (direct API)
- *   - 'singlePass'         : legacy single-prompt path via Gemini Text Rewriter (location event)
+ *   - 'multiStage' (default): focused weather + calendar + weave OpenRouter calls
+ *   - 'singlePass'         : one combined prompt sent directly to OpenRouter
  *   - 'off'                : store the plain concatenated text as-is
  * Backwards compat: if aiMode is unset and the legacy useGeminiRewriter flag is true,
  * defaults to 'singlePass' to preserve existing installations.
@@ -466,10 +520,7 @@ void generateAnnouncement() {
         break
 
       case 'singlePass':
-        String combinedInput = buildCombinedInput(todayDate, weatherReport, weatherAlerts, calendarEvents)
-        logDebug("Combined input (single pass): ${combinedInput}")
-        sendGeminiRequest(combinedInput, fallbackText)
-        logInfo('Sent announcement to Gemini Text Rewriter for single-pass enhancement - awaiting response event')
+        runSinglePass(todayDate, weatherReport, weatherAlerts, calendarEvents, fallbackText)
         break
 
       case 'off':
@@ -517,15 +568,20 @@ private String getDeviceAttributeValue(DeviceWrapper device, String attributeNam
 }
 
 /**
- * buildCombinedInput() - Combine all inputs with instructions for AI
- * Parameters: todayDate, weatherReport, weatherAlerts, calendarEvents
+ * buildSinglePassContent() - Build the data block (date + named sections) sent as
+ * the user message in single-pass mode. The instructions live separately in the
+ * system message (settings.customInstructions), so they are NOT prepended here.
  */
-private String buildCombinedInput(String todayDate, String weatherReport, String weatherAlerts, String calendarEvents) {
-  StringBuilder input = new StringBuilder()
+private String buildSinglePassContent(String todayDate, String weatherReport, String weatherAlerts, String calendarEvents) {
+  // If nothing to announce, ask for a brief cheerful message instead.
+  if (!weatherReport && !weatherAlerts && !calendarEvents) {
+    StringBuilder empty = new StringBuilder()
+    if (todayDate) { empty.append(todayDate).append('\n\n') }
+    empty.append('No weather or calendar information is available today. Create a brief, cheerful good morning message.')
+    return empty.toString()
+  }
 
-  // Add custom instructions
-  input.append(settings.customInstructions ?: 'Create a morning announcement from the following:')
-  input.append('\n\n')
+  StringBuilder input = new StringBuilder()
 
   // Add today's date (provided implicitly)
   if (todayDate) {
@@ -554,12 +610,7 @@ private String buildCombinedInput(String todayDate, String weatherReport, String
     input.append('\n\n')
   }
 
-  // If nothing to announce
-  if (!weatherReport && !weatherAlerts && !calendarEvents) {
-    return 'Create a brief, cheerful good morning message. No weather or calendar information is available today.'
-  }
-
-  return input.toString()
+  return input.toString().trim()
 }
 
 /**
@@ -609,48 +660,30 @@ private String buildContentOnly(String todayDate, String weatherReport, String w
 }
 
 /**
- * sendGeminiRequest() - Send text to Gemini for enhancement via location events
- * This is a fire-and-forget operation; the response will be handled by the event listener
+ * runSinglePass() - Single Pass mode: send one combined prompt directly to
+ * OpenRouter. The user-configured instructions become the system message; the
+ * date + weather + alerts + calendar block becomes the user message. Falls back
+ * to plain concatenated text if the API key is missing or the call fails.
  */
-private void sendGeminiRequest(String inputText, String fallbackText) {
-  try {
-    // Generate unique request ID
-    String requestId = UUID.randomUUID().toString()
+private void runSinglePass(String todayDate, String weatherReport, String weatherAlerts, String calendarEvents, String fallbackText) {
+  if (!settings.openRouterApiKey) {
+    logWarn('Single Pass selected but no OpenRouter API key configured; falling back to plain text')
+    storeAnnouncement(fallbackText)
+    return
+  }
 
-    logDebug("Sending rewrite request with ID: ${requestId}")
+  String systemPrompt = settings.customInstructions ?: DEFAULT_SINGLE_PASS_PROMPT
+  String content = buildSinglePassContent(todayDate, weatherReport, weatherAlerts, calendarEvents)
+  logDebug("Single-pass content: ${content}")
 
-    // Store request details in state for response handler
-    state.pendingGeminiRequest = [
-      requestId: requestId,
-      originalText: inputText,
-      fallbackText: fallbackText,
-      timestamp: now()
-    ]
+  Integer maxTokens = (settings.maxTokens ?: 2048) as Integer
+  Map result = callOpenRouterDirect(systemPrompt, content, maxTokens)
 
-    // Prepare request data (include fallback text for error cases)
-    Map requestData = [
-      requestId: requestId,
-      mode: 'custom',
-      fallbackText: fallbackText
-    ]
-
-    // Add maxTokens if specified
-    if (settings.maxTokens) {
-      requestData.maxTokens = settings.maxTokens
-    }
-
-    // Send location event to Gemini Text Rewriter app
-    sendLocationEvent(
-      name: 'geminiRewriteRequest',
-      value: inputText,
-      data: JsonOutput.toJson(requestData)
-    )
-
-    logDebug("Sent rewrite request via location event")
-
-  } catch (Exception e) {
-    logError("Error sending Gemini request: ${e.message}")
-    // Fall back to storing fallback text if send fails
+  if (result.success && result.text) {
+    logInfo('Single-pass OpenRouter enhancement succeeded')
+    storeAnnouncement(result.text as String)
+  } else {
+    logWarn("Single-pass OpenRouter enhancement failed: ${result.error}; using fallback text")
     storeAnnouncement(fallbackText)
   }
 }
@@ -677,79 +710,6 @@ private void storeAnnouncement(String announcement) {
   }
 }
 
-/**
- * handleGeminiResponseEvent() - Process responses from Gemini Text Rewriter app
- * This event-driven handler completes the announcement workflow by storing the result
- */
-void handleGeminiResponseEvent(Event evt) {
-  try {
-    logDebug("Received Gemini response event: ${evt.value?.take(50)}...")
-
-    Map responseData = evt.data ? parseJson(evt.data) : [:]
-    String requestId = responseData?.requestId
-
-    // Check if this response matches our pending request
-    if (state.pendingGeminiRequest?.requestId == requestId) {
-      logDebug("Response matches pending request ID: ${requestId}")
-
-      // Get the enhanced text or fall back to content without instructions
-      String announcement = ''
-      if (responseData.success && responseData.rewritten) {
-        announcement = responseData.rewritten
-        logInfo('Received AI-enhanced announcement')
-      } else {
-        // Use fallback text (content only, no instructions) if enhancement failed
-        announcement = state.pendingGeminiRequest.fallbackText ?: state.pendingGeminiRequest.originalText
-        logWarn("AI enhancement failed: ${responseData.error ?: 'Unknown error'}, using fallback text")
-      }
-
-      // Store the announcement
-      storeAnnouncement(announcement)
-
-      // Clean up pending request
-      state.remove('pendingGeminiRequest')
-
-    } else {
-      logDebug("Response ID ${requestId} doesn't match pending request, ignoring")
-    }
-
-  } catch (Exception e) {
-    logError("Error handling Gemini response event: ${e.message}")
-    // Try to fall back to fallback text or original text if we have it
-    if (state.pendingGeminiRequest?.fallbackText) {
-      storeAnnouncement(state.pendingGeminiRequest.fallbackText)
-      state.remove('pendingGeminiRequest')
-    } else if (state.pendingGeminiRequest?.originalText) {
-      storeAnnouncement(state.pendingGeminiRequest.originalText)
-      state.remove('pendingGeminiRequest')
-    }
-  }
-}
-
-/**
- * handleGeminiTextRewrittenEvent() - Store any completed rewrite in global variable
- * This listener captures ALL rewrite completions from the Gemini app, regardless of source
- */
-void handleGeminiTextRewrittenEvent(Event evt) {
-  try {
-    String rewrittenText = evt.value
-    Map eventData = evt.data ? parseJson(evt.data) : [:]
-
-    logDebug("Received geminiTextRewritten event: ${rewrittenText?.take(50)}...")
-    logDebug("Event data - mode: ${eventData.mode}, success: ${eventData.success}")
-
-    // Store in global variable if configured and rewrite was successful
-    if (settings.globalVariableName && rewrittenText && eventData.success) {
-      setGlobalVar(settings.globalVariableName, rewrittenText)
-      logInfo("Stored rewritten text in global variable: ${settings.globalVariableName}")
-      logDebug("Text preview: ${rewrittenText.take(100)}...")
-    }
-
-  } catch (Exception e) {
-    logError("Error handling geminiTextRewritten event: ${e.message}")
-  }
-}
-
 // =============================================================================
 // MULTI-STAGE CHAIN (Stage A: Weather, Stage B: Calendar, Stage C: Weave)
 // =============================================================================
@@ -760,8 +720,8 @@ void handleGeminiTextRewrittenEvent(Event evt) {
  * not block for the duration of all three calls in a single thread.
  */
 private void startMultiStageChain(String weatherReport, String weatherAlerts, String calendarEvents, String fallbackText) {
-  if (!settings.geminiApiKey) {
-    logWarn('Multi-stage chain selected but no Gemini API key configured; falling back to plain text')
+  if (!settings.openRouterApiKey) {
+    logWarn('Multi-stage chain selected but no OpenRouter API key configured; falling back to plain text')
     storeAnnouncement(fallbackText)
     return
   }
@@ -794,9 +754,9 @@ private void startMultiStageChain(String weatherReport, String weatherAlerts, St
 
 /**
  * outputDiffersFromInput() - Quality check for a stage output. Returns false if
- * the Gemini response is empty, whitespace-only, or identical (trimmed) to the
- * content we sent. This catches the failure mode where the model echoes the
- * input back instead of summarizing / rewriting it.
+ * the response is empty, whitespace-only, or identical (trimmed) to the content
+ * we sent. This catches the failure mode where the model echoes the input back
+ * instead of summarizing / rewriting it.
  */
 private boolean outputDiffersFromInput(String output, String input) {
   if (!output) { return false }
@@ -808,7 +768,7 @@ private boolean outputDiffersFromInput(String output, String input) {
 
 /**
  * runStageWeather() - Stage A: condense the weather forecast and any alerts
- * into a single TTS-friendly paragraph. Retries once if Gemini fails or if
+ * into a single TTS-friendly paragraph. Retries once if the API fails or if
  * the output is empty or identical to the input.
  */
 void runStageWeather() {
@@ -839,7 +799,7 @@ void runStageWeather() {
     String content = sb.toString()
 
     String systemPrompt = settings.weatherStagePrompt ?: DEFAULT_WEATHER_PROMPT
-    Map result = callGeminiDirect(systemPrompt, content)
+    Map result = callOpenRouterDirect(systemPrompt, content)
 
     boolean ok = result.success && outputDiffersFromInput(result.text, content)
     if (ok) {
@@ -876,9 +836,9 @@ void runStageWeather() {
 
 /**
  * runStageCalendar() - Stage B: condense calendar events into a date-anchored
- * chronological summary. The DATE ANCHOR block is prepended so Gemini can
+ * chronological summary. The DATE ANCHOR block is prepended so the model can
  * resolve absolute event dates to relative phrases (today/tomorrow/this Friday).
- * Retries once if Gemini fails or if the output is empty or identical to input.
+ * Retries once if the API fails or if the output is empty or identical to input.
  */
 void runStageCalendar() {
   Map chain = (state.chain as Map) ?: [:]
@@ -899,11 +859,11 @@ void runStageCalendar() {
     logDebug("Stage B (calendar) attempt ${attempt}/${MAX_STAGE_ATTEMPTS}")
 
     String systemPrompt = settings.calendarStagePrompt ?: DEFAULT_CALENDAR_PROMPT
-    // Date anchor goes ABOVE the prompt so it is the first thing Gemini sees.
+    // Date anchor goes ABOVE the prompt so it is the first thing the model sees.
     String fullSystemPrompt = "${dateAnchor}\n\n${systemPrompt}"
     String content = "CALENDAR EVENTS:\n${calendar}"
 
-    Map result = callGeminiDirect(fullSystemPrompt, content)
+    Map result = callOpenRouterDirect(fullSystemPrompt, content)
 
     boolean ok = result.success && outputDiffersFromInput(result.text, content)
     if (ok) {
@@ -940,7 +900,7 @@ void runStageCalendar() {
 /**
  * runStageWeaver() - Stage C: combine the weather and calendar summaries into
  * a single natural-flowing morning announcement with greeting and closing.
- * Retries once if Gemini fails or the output is empty/unchanged; if the retry
+ * Retries once if the API fails or the output is empty/unchanged; if the retry
  * also fails, concatenates the partial summaries directly. If both prior
  * stages also failed, falls back to plain concatenated text.
  */
@@ -972,7 +932,7 @@ void runStageWeaver() {
     String content = sb.toString()
 
     String systemPrompt = settings.weaverStagePrompt ?: DEFAULT_WEAVER_PROMPT
-    Map result = callGeminiDirect(systemPrompt, content)
+    Map result = callOpenRouterDirect(systemPrompt, content)
 
     boolean ok = result.success && outputDiffersFromInput(result.text, content)
     if (ok) {
@@ -1042,7 +1002,7 @@ private void scheduleNextStage(String methodName) {
 private Map computeGenerationTime() {
   Integer delay = (settings.stageDelaySeconds ?: 7) as Integer
   if (delay < 0) { delay = 0 }
-  Integer httpTimeout = 30      // matches timeout used in callGeminiDirect
+  Integer httpTimeout = 30      // matches timeout used in callOpenRouterDirect
   Integer numStages = 3
   Integer maxCalls = numStages * MAX_STAGE_ATTEMPTS  // 6
   Integer maxGaps = maxCalls - 1                      // 5
@@ -1076,14 +1036,14 @@ private void cleanupChain() {
 }
 
 // =============================================================================
-// DATE ANCHOR (calendar-date grounding for Gemini)
+// DATE ANCHOR (calendar-date grounding for the model)
 // =============================================================================
 
 /**
  * buildDateAnchor() - Return an explicit, unambiguous date context block that
- * Gemini can reference when resolving event dates. Includes today, tomorrow,
+ * the model can reference when resolving event dates. Includes today, tomorrow,
  * and the next 6 days mapped to weekday names. This is the single most
- * effective fix for "Gemini thinks the event is on the wrong day" issues.
+ * effective fix for "the model thinks the event is on the wrong day" issues.
  */
 private String buildDateAnchor() {
   Date today = new Date()
@@ -1102,7 +1062,7 @@ private String buildDateAnchor() {
   anchor.append("TOMORROW: ${fullFmt.format(cal.time)}\n")
   anchor.append('UPCOMING DAYS:\n')
 
-  // Reset to today, then list the next 7 days with weekday + date so Gemini
+  // Reset to today, then list the next 7 days with weekday + date so the model
   // can disambiguate "this Friday" vs "next Friday".
   cal.setTime(today)
   for (int i = 2; i <= 7; i++) {
@@ -1115,32 +1075,44 @@ private String buildDateAnchor() {
 }
 
 // =============================================================================
-// DIRECT GEMINI API HELPERS
-// (Adapted from GeminiTextRewriter.groovy:1121-1235; duplicated here so this
-// app can call Gemini directly without a location-event round trip.)
+// DIRECT OPENROUTER API HELPERS
 // =============================================================================
+// OpenRouter exposes an OpenAI-compatible chat completions endpoint. The system
+// prompt and user content are sent as separate messages (roles), and the key is
+// sent as an Authorization Bearer header rather than a URL query parameter.
 
 /**
- * callGeminiDirect() - Synchronous Gemini API call. Returns a result map:
+ * callOpenRouterDirect() - Synchronous OpenRouter chat-completions call.
+ * Returns a result map:
  *   [success: true, text: '...']
  *   [success: false, error: '...']
+ *
+ * @param systemPrompt The system message (instructions)
+ * @param content      The user message (data to act on)
+ * @param maxTokens    Optional token cap; defaults to maxTokensPerStage when null
  */
-private Map callGeminiDirect(String systemPrompt, String content) {
+private Map callOpenRouterDirect(String systemPrompt, String content, Integer maxTokens = null) {
   try {
-    if (!settings.geminiApiKey) {
-      return [success: false, error: 'No Gemini API key configured']
+    if (!settings.openRouterApiKey) {
+      return [success: false, error: 'No OpenRouter API key configured']
     }
 
-    String modelName = (settings.geminiModel ?: 'gemini-2.5-flash').trim()
-    String apiKey = settings.geminiApiKey.trim()
-    String apiUrl = "${GEMINI_API_BASE}/${modelName}:generateContent?key=${apiKey}"
+    String apiKey = settings.openRouterApiKey.trim()
+    String model = resolveModel()
 
-    Map requestBody = buildGeminiRequest(systemPrompt, content)
+    Map requestBody = buildOpenRouterRequest(systemPrompt, content, maxTokens)
 
-    logDebug("Gemini call -> model=${modelName}, content len=${content?.length()}")
+    logDebug("OpenRouter call -> model=${model}, content len=${content?.length()}")
 
     Map params = [
-      uri: apiUrl,
+      uri: OPENROUTER_API_URL,
+      headers: [
+        // Concatenate (not GString-interpolate) so the header value is a plain
+        // String, which the underlying http-builder expects.
+        'Authorization': ('Bearer ' + apiKey),
+        'HTTP-Referer': 'https://github.com/DanielWinks/Hubitat-Public',
+        'X-Title': 'Hubitat Morning Announcement'
+      ],
       contentType: 'application/json',
       requestContentType: 'application/json',
       body: JsonOutput.toJson(requestBody),
@@ -1159,15 +1131,15 @@ private Map callGeminiDirect(String systemPrompt, String content) {
       if (text) {
         return [success: true, text: text]
       }
-      return [success: false, error: 'Empty text in Gemini response']
+      return [success: false, error: 'Empty text in OpenRouter response']
     }
-    return [success: false, error: "Gemini API returned status ${responseStatus}"]
+    return [success: false, error: "OpenRouter API returned status ${responseStatus}"]
 
   } catch (groovyx.net.http.HttpResponseException e) {
     String detail = "HTTP ${e.statusCode}"
     try {
       if (e.response?.data?.error?.message) {
-        detail = "Gemini API Error: ${e.response.data.error.message}"
+        detail = "OpenRouter API Error: ${e.response.data.error.message}"
       }
     } catch (Exception ignore) { /* keep generic detail */ }
     return [success: false, error: detail]
@@ -1177,42 +1149,55 @@ private Map callGeminiDirect(String systemPrompt, String content) {
 }
 
 /**
- * buildGeminiRequest() - Construct the JSON body expected by Gemini's
- * generateContent endpoint.
+ * resolveModel() - Effective model = custom override (if set) else the dropdown
+ * selection else the default. Trimmed so stray whitespace never reaches the API.
  */
-private Map buildGeminiRequest(String systemPrompt, String content) {
+private String resolveModel() {
+  String custom = settings.openRouterCustomModel?.toString()?.trim()
+  if (custom) { return custom }
+  String selected = settings.openRouterModel?.toString()?.trim()
+  if (selected) { return selected }
+  return DEFAULT_OPENROUTER_MODEL
+}
+
+/**
+ * buildOpenRouterRequest() - Construct the JSON body expected by OpenRouter's
+ * OpenAI-compatible /chat/completions endpoint. The system prompt and content
+ * are sent as distinct role-tagged messages.
+ */
+private Map buildOpenRouterRequest(String systemPrompt, String content, Integer maxTokens = null) {
+  Integer tokenCap = maxTokens ?: ((settings.maxTokensPerStage ?: 800) as Integer)
   return [
-    contents: [
-      [parts: [[text: "${systemPrompt}\n\n${content}"]]]
+    model: resolveModel(),
+    messages: [
+      [role: 'system', content: systemPrompt],
+      [role: 'user', content: content]
     ],
-    generationConfig: [
-      temperature: (settings.temperature ?: 0.6) as Double,
-      maxOutputTokens: (settings.maxTokensPerStage ?: 800) as Integer,
-      topP: 0.95,
-      topK: 40
-    ]
+    temperature: (settings.temperature ?: 0.6) as Double,
+    max_tokens: tokenCap,
+    top_p: 0.95
   ]
 }
 
 /**
- * extractTextFromResponse() - Pull the generated text out of the Gemini
- * response payload. Returns null if not found.
+ * extractTextFromResponse() - Pull the generated text out of the OpenRouter
+ * response payload (choices[0].message.content). Returns null if not found.
  */
 private String extractTextFromResponse(def responseData) {
   try {
-    if (responseData?.candidates && responseData.candidates.size() > 0) {
-      def first = responseData.candidates[0]
-      if (first.finishReason && first.finishReason != 'STOP') {
-        logWarn("Gemini text may be truncated/filtered. finishReason=${first.finishReason}")
+    if (responseData?.choices && responseData.choices.size() > 0) {
+      def first = responseData.choices[0]
+      String finishReason = first?.finish_reason
+      if (finishReason && finishReason != 'stop') {
+        logWarn("OpenRouter text may be truncated/filtered. finish_reason=${finishReason}")
       }
-      if (first?.content?.parts && first.content.parts.size() > 0) {
-        return first.content.parts[0].text?.trim()
-      }
+      String text = first?.message?.content
+      return text?.trim()
     }
-    logWarn("Gemini response missing candidates: ${responseData}")
+    logWarn("OpenRouter response missing choices: ${responseData}")
     return null
   } catch (Exception e) {
-    logError("Error parsing Gemini response: ${e.message}")
+    logError("Error parsing OpenRouter response: ${e.message}")
     return null
   }
 }
@@ -1237,4 +1222,69 @@ String getCloudUri() {
   return state.accessToken ?
     "${getApiServerUrl()}/${hubUID}/apps/${app.id}/generate?access_token=${state.accessToken}" :
     'Access token not available'
+}
+
+// =============================================================================
+// INLINED HELPERS (formerly from dwinks.UtilitiesAndLoggingLibrary)
+// =============================================================================
+// App-only variants of the logging, log auto-off, and OAuth helpers. Inlined so
+// this app carries no library #include dependency.
+
+/**
+ * logError() - Error-level log, gated on the logEnable setting.
+ */
+void logError(String message) {
+  if (settings.logEnable != false) { log.error("${app.label ?: app.name}: ${message}") }
+}
+
+/**
+ * logWarn() - Warning-level log, gated on the logEnable setting.
+ */
+void logWarn(String message) {
+  if (settings.logEnable != false) { log.warn("${app.label ?: app.name}: ${message}") }
+}
+
+/**
+ * logInfo() - Info-level log, gated on the logEnable setting.
+ */
+void logInfo(String message) {
+  if (settings.logEnable != false) { log.info("${app.label ?: app.name}: ${message}") }
+}
+
+/**
+ * logDebug() - Debug-level log, gated on both logEnable and debugLogEnable.
+ */
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) { log.debug("${app.label ?: app.name}: ${message}") }
+}
+
+/**
+ * logsOff() - Auto-disable general logging after the 30-minute timer fires.
+ */
+void logsOff() {
+  logWarn('Logging disabled (30 minute timeout)')
+  app.updateSetting('logEnable', [value: 'false', type: 'bool'])
+}
+
+/**
+ * debugLogsOff() - Auto-disable debug logging after the 30-minute timer fires.
+ */
+void debugLogsOff() {
+  logWarn('Debug logging disabled (30 minute timeout)')
+  app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'])
+}
+
+/**
+ * tryCreateAccessToken() - Create the OAuth access token for webhooks if absent.
+ */
+void tryCreateAccessToken() {
+  if (state.accessToken == null) {
+    try {
+      logDebug('Creating Access Token...')
+      createAccessToken()
+      logDebug("accessToken: ${state.accessToken}")
+    } catch (e) {
+      logError('OAuth is not enabled for app. Please enable.')
+    }
+  }
 }
