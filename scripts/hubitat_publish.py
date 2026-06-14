@@ -55,41 +55,40 @@ VALID_TYPES = {"app", "driver", "library"}
 # ---------------------------------------------------------------------------
 
 
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """
-    A redirect handler that refuses to follow any redirects.
-    Used when we need to capture a 302 Location header (e.g. for new code creation).
-    """
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _create_req(url, data=None, method="GET"):
-    """Create a urllib Request with common headers."""
+def _create_req(url, data=None, method="GET", headers=None):
+    """Create a urllib Request with common headers and optional extras."""
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     req.add_header("Accept", "application/json")
+    if headers:
+        for key, value in headers.items():
+            req.add_header(key, value)
     return req
 
 
-def _open(req, allow_redirects=True, timeout=15):
+def _open(req, timeout=15, allow_redirects=True):
     """
-    Open a request, optionally following redirects.
-    Returns (status, body_str, headers_dict).
+    Open a request.
+    Returns (status, body_str, final_url, headers_dict).
     """
     if allow_redirects:
         opener = urllib.request.build_opener()
     else:
-        opener = urllib.request.build_opener(NoRedirectHandler)
+        # Build opener without redirect handling to capture 302 responses
+        opener = urllib.request.OpenerDirector()
+        opener.add_handler(urllib.request.HTTPHandler())
+        opener.add_handler(urllib.request.HTTPSHandler())
+        opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+        opener.add_handler(urllib.request.HTTPErrorProcessor())
+        # No HTTPRedirectHandler — redirects will raise HTTPError
 
     try:
         with opener.open(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
-            return resp.status, body, dict(resp.headers)
+            return resp.status, body, resp.url, dict(resp.headers)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""
-        return e.code, body, dict(e.headers)
+        return e.code, body, e.url, dict(e.headers)
     except urllib.error.URLError as e:
         raise ConnectionError(f"Cannot connect to hub: {e.reason}") from e
     except socket.timeout:
@@ -137,7 +136,7 @@ def fetch_hub_code_list(host, code_type):
         return []
     url = f"http://{host}/{endpoint}"
     try:
-        status, body, _ = _open(_create_req(url), timeout=10)
+        status, body, _, _ = _open(_create_req(url), timeout=10)
         if status == 200:
             return json.loads(body)
     except (ConnectionError, json.JSONDecodeError):
@@ -243,7 +242,7 @@ def find_file_in_metadata(files, filepath):
 def get_hub_version(host, code_type, code_id):
     """Fetch the current version of a code file from the hub. Returns int or None."""
     url = f"http://{host}/{code_type}/ajax/code?id={code_id}"
-    status, body, _ = _open(_create_req(url))
+    status, body, _, _ = _open(_create_req(url))
 
     if status == 200:
         try:
@@ -255,32 +254,75 @@ def get_hub_version(host, code_type, code_id):
     return None
 
 
+def _extract_create_error(body):
+    """Extract the Hubitat '#errors' message from a /save HTML failure response.
+
+    On a rejected create, Hubitat re-renders the editor page (HTTP 200) with the
+    failure reason inside a <div id="errors">...</div> block. This mirrors the
+    reference extension's parseCreateNewErrorFromHTML().
+    """
+    if not body:
+        return "empty response from hub"
+    errors_match = re.search(
+        r'id=["\']errors["\'][^>]*>\s*([^<]{1,500})', body, re.IGNORECASE | re.DOTALL
+    )
+    if errors_match and errors_match.group(1).strip():
+        return errors_match.group(1).strip()
+    low = body[:2000].lower()
+    if "password" in low and "login" in low:
+        return (
+            "hub returned a login page (this script targets unsecured hubs; "
+            "hub security may be enabled)"
+        )
+    if "/ui2/" in body or "<title>" in low:
+        # Newer firmware re-renders the editor SPA shell (HTTP 200, no server-side
+        # #errors block) when a create is rejected — typically a COMPILE failure.
+        return (
+            "hub rejected the save and returned its editor shell page with no error "
+            "detail. This almost always means the source failed to COMPILE on the hub "
+            "— e.g. a missing import (Hubitat does not auto-import "
+            "groovy.transform.Field or groovy.transform.CompileStatic), a "
+            "sandbox-disallowed import, or a syntax error. Open the file on the hub to "
+            "see the exact compiler message."
+        )
+    return f"unparseable hub response. Body: {body[:300]}"
+
+
 def create_new_code(host, code_type, source):
     """
-    Create a brand-new code file on the hub.
+    Create a brand-new code file on the hub via the /save endpoint.
     Returns the new numeric ID assigned by Hubitat.
+
+    On success Hubitat responds 302 with Location: /<type>/editor/<id>, where the
+    new ID is the final path segment. On failure it returns 200 with the editor
+    HTML containing a <div id="errors"> block.
+
+    This mirrors the working vscode-hubitat-dev extension: do NOT follow the
+    redirect — the 302 itself is the success signal and its Location header is
+    the only reliable source of the new ID.
     """
     url = f"http://{host}/{code_type}/save"
     form_data = urllib.parse.urlencode(
-        {
-            "id": "",
-            "version": "",
-            "create": "",
-            "source": source,
-        }
+        {"id": "", "version": "", "create": "", "source": source}
     ).encode("utf-8")
 
     req = _create_req(url, data=form_data, method="POST")
-    status, _, headers = _open(req, allow_redirects=False)
+    status, body, _, headers = _open(req, allow_redirects=False)
 
     if status == 302:
-        location = headers.get("Location", headers.get("location", ""))
-        match = re.search(r"/(\d+)$", location)
-        if match:
-            return int(match.group(1))
-        raise RuntimeError(f"Could not parse new ID from redirect location: {location}")
+        location = headers.get("Location") or headers.get("location") or ""
+        new_id = location.rstrip("/").rsplit("/", 1)[-1].split("?")[0].split("#")[0]
+        if new_id.isdigit():
+            return int(new_id)
+        raise RuntimeError(
+            f"Hub created the {code_type} but returned an unexpected "
+            f"redirect Location: '{location}'"
+        )
 
-    raise RuntimeError(f"Failed to create new {code_type}. HTTP {status}")
+    # Anything other than a 302 means the save was rejected.
+    raise RuntimeError(
+        f"Failed to create new {code_type}. HTTP {status}: {_extract_create_error(body)}"
+    )
 
 
 def update_existing_code(host, code_type, code_id, version, source):
@@ -298,7 +340,7 @@ def update_existing_code(host, code_type, code_id, version, source):
     ).encode("utf-8")
 
     req = _create_req(url, data=form_data, method="POST")
-    status, body, _ = _open(req)
+    status, body, _, _ = _open(req)
 
     if status == 200:
         try:
@@ -319,7 +361,7 @@ def update_existing_code(host, code_type, code_id, version, source):
 
 
 # ---------------------------------------------------------------------------
-# Main publish flow
+# Orchestration
 # ---------------------------------------------------------------------------
 
 
