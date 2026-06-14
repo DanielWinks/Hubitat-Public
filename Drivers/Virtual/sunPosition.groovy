@@ -21,7 +21,23 @@
  *  SOFTWARE.
 */
 
-#include dwinks.UtilitiesAndLoggingLibrary
+import groovy.transform.Field
+import groovy.transform.CompileStatic
+
+String nowFormatted() {
+  if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
+  else                  return new Date().format('yyyy-MMM-dd h:mm:ss a')
+}
+
+String runEveryCustomSeconds(Integer seconds) {
+  String currentSecond = new Date().format('ss')
+  return "${currentSecond} /${seconds} * * * ?"
+}
+
+double nowDays() {
+  return (now() / 86400000)
+}
+
 
 metadata {
   definition (name: 'Sun Posistion', namespace: 'dwinks', author: 'Daniel Winks') {
