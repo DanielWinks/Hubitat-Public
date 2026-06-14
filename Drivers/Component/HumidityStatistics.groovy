@@ -79,8 +79,38 @@ import java.math.BigDecimal
 // CompileStatic: Annotation for compile-time type checking
 import groovy.transform.CompileStatic
 
-// Include the utilities and logging library - provides helper functions
-#include dwinks.UtilitiesAndLoggingLibrary
+// Inlined from UtilitiesAndLoggingLibrary - only what this driver uses
+void clearAllStates() {
+  state.clear()
+  if (device) device.getCurrentStates().each { device.deleteCurrentState(it.name) }
+}
+
+void emitEvent(String name, Object value, String unit = null, String descriptionText = null) {
+  Map eventData = [name: name, value: value]
+  if (unit != null) {
+    eventData.unit = unit
+  }
+  if (descriptionText != null) {
+    eventData.descriptionText = descriptionText
+  }
+  sendEvent(eventData)
+}
+
+Long getCurrentTime() { return now() }
+
+Object getDeviceCurrentValue(String attributeName) {
+  return device.currentValue(attributeName)
+}
+
+Object getSetting(String key) { return settings[key] }
+
+Date getTodayAtTime(String timeString) {
+  return timeToday(timeString)
+}
+
+void deleteDeviceCurrentState(String attributeName) {
+  device.deleteCurrentState(attributeName)
+}
 
 // ============================================================================
 // DRIVER METADATA - Tells Hubitat about this driver's capabilities
