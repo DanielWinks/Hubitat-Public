@@ -66,8 +66,120 @@ import com.hubitat.app.DeviceWrapper  // Represents a Hubitat device
 // JSON serialization for complex objects
 import groovy.json.JsonOutput         // Converts Maps/Lists to JSON strings
 
-// Include shared utilities library (provides logging helpers: logDebug, logInfo, etc.)
-#include dwinks.UtilitiesAndLoggingLibrary
+// Static field annotation for compile-time constants
+import groovy.transform.Field
+
+// Logging functions (inlined from UtilitiesAndLoggingLibrary)
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+
+// HTTP retry and state management utilities (inlined from UtilitiesAndLoggingLibrary)
+void clearAllStates() {
+  state.clear()
+  if (device) device.getCurrentStates().each { device.deleteCurrentState(it.name) }
+}
+
+void resetHttpRetryCounter(String stateKey = 'httpRetryAttemptCount') {
+  state[stateKey] = 0
+  logDebug "HTTP retry counter reset (${stateKey})"
+}
+
+Integer getHttpStatusCode(AsyncResponse response) {
+  if (response == null) return null
+  def statusObj = response.status
+  if (statusObj == null) return null
+  if (statusObj instanceof Number) {
+    return (statusObj as Number).intValue()
+  }
+  try {
+    String statusText = statusObj.toString()
+    try {
+      return statusText.toInteger()
+    } catch (Exception ignored) {
+      def matcher = (statusText =~ /(\d{3})/)
+      if (matcher.find()) {
+        return matcher.group(1).toInteger()
+      }
+      return null
+    }
+  } catch (Exception e) {
+    return null
+  }
+}
+
+Boolean isHttpResponseFailure(AsyncResponse response) {
+  Integer statusCode = getHttpStatusCode(response)
+  return response?.hasError() || statusCode == null || statusCode != 200
+}
+
+@Field static final List<Integer> DEFAULT_HTTP_RETRY_DELAYS_SECONDS = [60, 180, 300]
+@Field static final Integer DEFAULT_MAX_HTTP_RETRY_ATTEMPTS = 3
+
+Boolean handleAsyncHttpFailureWithRetry(
+  AsyncResponse response,
+  String retryMethodName,
+  String stateKey = 'httpRetryAttemptCount',
+  List<Integer> retryDelays = DEFAULT_HTTP_RETRY_DELAYS_SECONDS,
+  Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS,
+  String customErrorMessage = null
+) {
+  Integer currentRetryCount = state[stateKey] ?: 0
+  Integer statusCode = getHttpStatusCode(response)
+  String errorDetails = customErrorMessage ?: (response?.hasError() ?
+    "HTTP request error: ${response.getErrorMessage()}" :
+    (statusCode != null ? "HTTP request returned status ${statusCode} (expected 200 OK)" :
+      "HTTP request returned no status code"))
+  logError "${errorDetails} (attempt ${currentRetryCount + 1} of ${maxRetries + 1})"
+  if (currentRetryCount < maxRetries) {
+    Integer retryDelaySeconds = retryDelays[currentRetryCount]
+    state[stateKey] = currentRetryCount + 1
+    String delayDescription = retryDelaySeconds >= 60 ?
+        "${retryDelaySeconds / 60} minute(s)" :
+        "${retryDelaySeconds} second(s)"
+    logWarn "Scheduling retry attempt ${currentRetryCount + 1} of ${maxRetries} in ${delayDescription}"
+    runIn(retryDelaySeconds, retryMethodName)
+    return true
+  } else {
+    logError "All ${maxRetries} retry attempts failed. Will retry at next scheduled refresh."
+    state[stateKey] = 0
+    return false
+  }
+}
+
+void executeHttpRetryGet(
+    String callbackMethodName,
+    Map httpParams,
+    String retryMethodName,
+    String stateKey = 'httpRetryAttemptCount',
+    Integer maxRetries = DEFAULT_MAX_HTTP_RETRY_ATTEMPTS
+) {
+  Integer currentRetryCount = state[stateKey] ?: 0
+  logInfo "Executing HTTP GET retry attempt ${currentRetryCount} of ${maxRetries}"
+  asynchttpGet(callbackMethodName, httpParams)
+}
+
 
 
 // =============================================================================
