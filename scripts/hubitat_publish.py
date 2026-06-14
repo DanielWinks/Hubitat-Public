@@ -8,7 +8,8 @@ Reads hub connection info and file mappings from .hubitat/metadata.json.
 Usage:
     python3 hubitat_publish.py <code_type> <file_path> [workspace_root]
 
-Where code_type is one of: app, driver, library
+Where code_type is one of: app, driver, library, auto
+(Use "auto" to auto-detect from file content)
 
 Workspace root defaults to the ZED_WORKTREE_ROOT env var, falling back to cwd.
 """
@@ -34,6 +35,17 @@ METADATA_FILE = ".hubitat/metadata.json"
 DRIVER_PATTERN = re.compile(r"^\s*metadata\s*\{", re.MULTILINE)
 APP_PATTERN = re.compile(r"^\s*definition\s*\(", re.MULTILINE)
 LIBRARY_PATTERN = re.compile(r"^\s*library\s*\(", re.MULTILINE)
+
+# Patterns for extracting name / namespace from Groovy definitions
+NAME_RE = re.compile(r'name\s*:\s*"([^"]+)"')
+NAMESPACE_RE = re.compile(r'namespace\s*:\s*"([^"]+)"')
+
+# Hubitat API endpoints for listing user code
+HUB_LIST_ENDPOINTS = {
+    "app": "hub2/userAppTypes",
+    "driver": "hub2/userDeviceTypes",
+    "library": "hub2/userLibraries",
+}
 
 VALID_TYPES = {"app", "driver", "library"}
 
@@ -102,6 +114,53 @@ def detect_code_type(filepath):
         return "app"
     if LIBRARY_PATTERN.search(content):
         return "library"
+    return None
+
+
+def extract_name_and_namespace(source):
+    """Extract the definition name and namespace from Groovy source code.
+    Returns (name, namespace) — either may be None if not found."""
+    name_match = NAME_RE.search(source)
+    ns_match = NAMESPACE_RE.search(source)
+    return (
+        name_match.group(1) if name_match else None,
+        ns_match.group(1) if ns_match else None,
+    )
+
+
+def fetch_hub_code_list(host, code_type):
+    """Fetch the full list of user code of a given type from the hub.
+    Returns a list of dicts (the parsed JSON array), or an empty list on failure."""
+    endpoint = HUB_LIST_ENDPOINTS.get(code_type)
+    if not endpoint:
+        return []
+    url = f"http://{host}/{endpoint}"
+    try:
+        status, body, _ = _open(_create_req(url), timeout=10)
+        if status == 200:
+            return json.loads(body)
+    except (ConnectionError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def find_matching_code(hub_list, name, namespace):
+    """Search the hub code list for an entry matching name and namespace.
+    Prefers an exact match on both; falls back to name-only match.
+    Returns the matching entry dict, or None."""
+    if not hub_list or not name:
+        return None
+
+    # Exact match on name + namespace
+    for entry in hub_list:
+        if entry.get("name") == name and entry.get("namespace") == namespace:
+            return entry
+
+    # Fallback: name-only match
+    for entry in hub_list:
+        if entry.get("name") == name:
+            return entry
+
     return None
 
 
@@ -272,7 +331,7 @@ def publish(host, code_type, filepath, workspace_root):
         print(f"Error reading source file: {e}")
         sys.exit(1)
 
-    # ---- Auto-detect safety check ----
+    # ---- Confirm detected type matches (already resolved by main if using auto) ----
     detected = detect_code_type(filepath)
     if detected and detected != code_type:
         print(
@@ -329,8 +388,93 @@ def publish(host, code_type, filepath, workspace_root):
         # CREATE NEW (or link to existing)
         # ============================================================
         print(f"No existing mapping found for this file in {METADATA_FILE}.")
-        print()
 
+        # ---- Auto-detect from hub ----
+        code_name, code_namespace = extract_name_and_namespace(source)
+        if code_name:
+            print(
+                f'Extracted name="{code_name}", namespace="{code_namespace}" from source.'
+            )
+        else:
+            print("Could not extract name from source code.")
+
+        print(f"Fetching existing {code_type}s from hub...")
+        hub_list = fetch_hub_code_list(host, code_type)
+
+        matched = None
+        if hub_list:
+            print(f"Found {len(hub_list)} {code_type}(s) on hub.")
+            matched = find_matching_code(hub_list, code_name, code_namespace)
+        else:
+            print(
+                f"Could not fetch {code_type} list from hub (will fall back to manual entry)."
+            )
+
+        if matched:
+            # ---- Auto-matched an existing hub entry ----
+            match_id = matched["id"]
+            match_name = matched["name"]
+            print()
+            print(f"Found matching {code_type} on hub:")
+            print(f"  ID: {match_id}")
+            print(f"  Name: {match_name}")
+            if matched.get("namespace"):
+                print(f"  Namespace: {matched['namespace']}")
+            print()
+
+            prompt = (
+                input(f"Link to this {code_type}? (Y/n, or enter a different ID): ")
+                .strip()
+                .lower()
+            )
+
+            if prompt == "" or prompt == "y":
+                # Use the matched ID
+                code_id = match_id
+            else:
+                # User may have entered a different ID
+                try:
+                    code_id = int(prompt)
+                    print(f"Linking to manually specified {code_type} ID {code_id} ...")
+                except ValueError:
+                    print(f"Invalid input. Creating new {code_type} instead.")
+                    code_id = None
+
+            if code_id is not None:
+                hub_version = get_hub_version(host, code_type, code_id)
+                if hub_version is None:
+                    print(
+                        f"\u26a0\ufe0f  No {code_type} with ID {code_id} found on hub."
+                    )
+                    confirm = (
+                        input("Continue anyway and force push? (y/n): ").strip().lower()
+                    )
+                    if confirm != "y":
+                        print("Cancelled.")
+                        sys.exit(0)
+                    hub_version = 0
+
+                success, new_version = update_existing_code(
+                    host, code_type, code_id, hub_version, source
+                )
+
+                if success:
+                    files.append(
+                        {
+                            "filepath": filepath,
+                            "codeType": code_type,
+                            "id": code_id,
+                            "version": new_version,
+                        }
+                    )
+                    save_metadata(workspace_root, files)
+                    print(
+                        f"\u2705 Successfully published {code_type} (ID {code_id}, version {new_version})"
+                    )
+                return
+
+        # ---- No auto-match — manual entry or create new ----
+        print()
         prompt = input("Enter Hubitat ID (leave blank to create new): ").strip()
 
         if prompt:
@@ -405,6 +549,17 @@ def main():
         if len(sys.argv) > 3
         else os.environ.get("ZED_WORKTREE_ROOT", os.getcwd())
     )
+
+    # ---- Resolve "auto" code type ----
+    if code_type == "auto":
+        code_type = detect_code_type(filepath)
+        if code_type is None:
+            print(
+                "Error: could not auto-detect code type from file content.\n"
+                "Please specify one of: app, driver, library"
+            )
+            sys.exit(1)
+        print(f"Auto-detected code type: {code_type}")
 
     if code_type not in VALID_TYPES:
         print(
