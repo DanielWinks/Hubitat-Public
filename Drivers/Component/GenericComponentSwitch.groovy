@@ -21,8 +21,60 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.genericComponentLibrary
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void initialize() { configure() }
+void configure() {
+    log.info 'Installed...'
+}
+
+void on() {
+    parent?.componentOn(this.device)
+}
+
+void off() {
+    parent?.componentOff(this.device)
+}
+
+void refresh() {
+  parent?.componentRefresh(this.device)
+}
+
+void parse(String message) {
+  if (message == 'on' || message == 'off') {
+    sendEvent(
+      name:'switch',
+      value:message,
+      descriptionText:"${device.displayName} switch has been turned ${message}"
+    )
+  }
+}
 
 metadata {
   definition(name: 'Generic Component Switch', namespace: 'dwinks', author: 'Daniel Winks', component: true) {

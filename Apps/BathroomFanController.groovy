@@ -67,8 +67,61 @@ import groovy.transform.Field
 // CompileStatic: Annotation that enables compile-time type checking for safer code
 import groovy.transform.CompileStatic
 
-// Include the utilities and logging library - provides helper functions for logging and common tasks
-#include dwinks.UtilitiesAndLoggingLibrary
+// Inlined utility functions from dwinks.UtilitiesAndLoggingLibrary
+@SuppressWarnings('unused')
+private void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void callDeviceMethod(DeviceWrapper device, String methodName, Object... args) {
+  device."${methodName}"(*args)
+}
+@SuppressWarnings('unused')
+private Object getDeviceProperty(DeviceWrapper device, String propertyName) {
+  return device."${propertyName}"
+}
+
+// Exception logging helpers
+void logException(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.exception "${device.label ?: device.name }: ${message}"
+    if(app) log.exception "${app.label ?: app.name }: ${message}"
+  }
+}
+void logExceptionWithDetails(String message, Exception exception) {
+  logException("${message}: ${exception.message}")
+}
+
+// State and settings helpers
+Object getStateVar(String key) { return state[key] }
+void setStateVar(String key, Object value) { state[key] = value }
+void removeStateVar(String key) {
+  if (app) app.getState().remove(key)
+  if (device) device.getState().remove(key)
+}
+Object getSetting(String key) { return settings[key] }
+Long getCurrentTime() { return now() }
+
+// Scheduling helpers
+void scheduleIn(Integer seconds, String methodName) { runIn(seconds, methodName) }
+void unscheduleMethod(String methodName) { unschedule(methodName) }
+
+// App label and child device helpers
+String getAppLabel() { return app.label }
+DeviceWrapper getAppChildDevice(String dni) { return app.getChildDevice(dni) }
+DeviceWrapper createAppChildDevice(String namespace, String typeName, String dni, Map properties) {
+  return addChildDevice(namespace, typeName, dni, properties)
+}
 
 // ============================================================================
 // APP DEFINITION - Metadata that tells Hubitat about this app

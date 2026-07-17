@@ -22,8 +22,28 @@
  */
 
 import hubitat.zigbee.zcl.DataType
+import groovy.transform.Field
+import groovy.transform.CompileStatic
 
-#include dwinks.UtilitiesAndLoggingLibrary
+// Logging functions (inlined from UtilitiesAndLoggingLibrary)
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+
+// Time utility (inlined from UtilitiesAndLoggingLibrary)
+String nowFormatted() {
+  if(location.timeZone) return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone)
+  else                  return new Date().format('yyyy-MMM-dd h:mm:ss a')
+}
 
 metadata {
   definition(name: 'ThirdReality Smart Blind', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '') {

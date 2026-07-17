@@ -39,13 +39,54 @@
  *  SOFTWARE.
  **/
 
-// Include the utilities and logging library from the Libraries folder
-#include dwinks.UtilitiesAndLoggingLibrary
+// Inlined utility functions from dwinks.UtilitiesAndLoggingLibrary
+@SuppressWarnings('unused')
+private void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void tryCreateAccessToken() {
+  if (state.accessToken == null) {
+    try {
+      logDebug('Creating Access Token...')
+      createAccessToken()
+      logDebug("accessToken: ${state.accessToken}")
+    } catch(e) {
+      logError('OAuth is not enabled for app. Please enable.')
+    }
+  }
+}
 
 // Import required Groovy/Java classes for HTTP operations and JSON parsing
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.Field
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.DeviceWrapper
 
 /**
  * definition() - Defines app metadata for Hubitat

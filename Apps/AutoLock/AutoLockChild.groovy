@@ -37,7 +37,33 @@
 //   - Means to Unlock: Triggers that cause the lock(s) to unlock
 // =============================================================================
 
-#include dwinks.UtilitiesAndLoggingLibrary
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
 
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.hub.domain.Event

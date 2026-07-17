@@ -1,4 +1,18 @@
-#include dwinks.UtilitiesAndLoggingLibrary
+// Inlined utility functions from dwinks.UtilitiesAndLoggingLibrary
+@SuppressWarnings('unused')
+private void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+@SuppressWarnings('unused')
+private void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
 
 definition(
   name: 'Shade Controller',

@@ -21,7 +21,6 @@
  *  SOFTWARE.
  **/
 
-#include dwinks.UtilitiesAndLoggingLibrary
 
 definition(
   name: "Bathroom Fan Controllers",

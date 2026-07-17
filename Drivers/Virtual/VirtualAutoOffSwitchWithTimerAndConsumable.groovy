@@ -21,7 +21,7 @@
  *  SOFTWARE.
 */
 
-#include dwinks.UtilitiesAndLoggingLibrary
+
 
 metadata {
   definition (name: 'Virtual Auto Off Switch With Button And Consumable', namespace: 'dwinks', author: 'Daniel Winks', importUrl: '') {

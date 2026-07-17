@@ -21,8 +21,6 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
-
 metadata {
   definition(
     name: 'Sonos Advanced Snapshot',
@@ -46,4 +44,3 @@ void configure() {}
 
 void on() { joinPlayersToCoordinator() }
 void off() { removePlayersFromCoordinator() }
-

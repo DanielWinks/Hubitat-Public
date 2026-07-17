@@ -21,7 +21,21 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
+import groovy.transform.Field
+import groovy.transform.CompileStatic
+
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
 
 metadata {
   definition(

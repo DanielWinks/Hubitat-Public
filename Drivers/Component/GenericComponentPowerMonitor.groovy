@@ -21,7 +21,6 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
 #include dwinks.genericComponentLibrary
 
 metadata {

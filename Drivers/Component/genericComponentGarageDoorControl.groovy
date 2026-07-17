@@ -1,4 +1,15 @@
 /**
+ *  Generic Component Smart Garage Door Control
+ *
+ *  Virtual child device driver created by the Garage Door Controller parent app.
+ *  Implements the standard Hubitat GarageDoorControl and ContactSensor
+ *  capabilities so the door can be controlled from Dashboards, Rule Machine,
+ *  Alexa, Google Home, etc.
+ *
+ *  Parent-child communication:
+ *    Child → Parent: open() / close() → parent.componentOpen() / componentClose()
+ *    Parent → Child: sendEvent() for door/contact attributes, setState() for sensor data
+ *
  *  MIT License
  *  Copyright 2023 Daniel Winks (daniel.winks@gmail.com)
  *
@@ -21,18 +32,75 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
-
 metadata {
-  definition(name: 'Generic Component Smart Garage Door Control', namespace: 'dwinks', author: 'Daniel Winks', component: true) {
-    capability 'GarageDoorControl' //door - ENUM ['unknown', 'open', 'closing', 'closed', 'opening']
-    capability 'ContactSensor' //contact - ENUM ['closed', 'open']
-    command 'clearState'
-  }
+    definition(
+        name:      'Generic Component Smart Garage Door Control',
+        namespace: 'dwinks',
+        author:    'Daniel Winks',
+        component: true
+    ) {
+        capability 'GarageDoorControl'  // door  — ENUM ['unknown', 'open', 'closing', 'closed', 'opening']
+        capability 'ContactSensor'      // contact — ENUM ['closed', 'open']
+        command 'clearState'
+    }
 }
 
-void initialize() { logInfo('Installed...') }
-void open() { parent?.componentOpen(this.device) }
-void close() { parent?.componentClose(this.device) }
-void setState(String stateName, String stateValue) { state[stateName] = stateValue }
-void clearState() { state.clear() }
+// =============================================================================
+// LIFECYCLE HOOKS
+// =============================================================================
+
+void installed() {
+    // Do NOT sendEvent here — Hubitat may deliver these events after
+    // the parent app has already pushed the correct state via configure(),
+    // causing the child to show stale values. The parent owns the door
+    // and contact attributes; the child just logs and waits.
+    logDebug('Child device installed.')
+}
+
+void initialize() {
+    // Hubitat calls initialize() after installed(). If the parent app
+    // has already sent the door state, this is a no-op. If not, the
+    // parent's configure() will push state on the next sensor read.
+    logDebug('Child device initialized.')
+}
+
+void updated() {
+    logDebug('Child device updated.')
+}
+
+// =============================================================================
+// COMMANDS (from external consumers → forwarded to parent app)
+// =============================================================================
+
+void open() {
+    logDebug('Received open() command — forwarding to parent app.')
+    parent?.componentOpen(device)
+}
+
+void close() {
+    logDebug('Received close() command — forwarding to parent app.')
+    parent?.componentClose(device)
+}
+
+// =============================================================================
+// STATE MANAGEMENT (used by parent app to store per-sensor readings)
+// =============================================================================
+
+void setState(String stateName, String stateValue) {
+    state[stateName] = stateValue
+}
+
+void clearState() {
+    state.clear()
+}
+
+// =============================================================================
+// LOGGING
+//
+// Component child devices do not have their own preferences, so we log
+// unconditionally at debug level. The parent app controls verbosity.
+// =============================================================================
+
+void logDebug(String message) {
+    log.debug "${device.label ?: device.name}: ${message}"
+}

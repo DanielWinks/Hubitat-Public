@@ -1,4 +1,49 @@
 /**
+ *  Garage Door Controller
+ *
+ *  Monitors upper/lower tilt/contact sensors on a rolling garage door and
+ *  controls a relay switch to operate the opener. Creates a virtual child
+ *  device ("Generic Component Smart Garage Door Control") that exposes
+ *  standard door/contact capabilities so other Hubitat apps (e.g., Rule
+ *  Machine, Dashboards, Alexa/Google Home) can interact with the door.
+ *
+ *  State Machine
+ *  -------------
+ *  The door state is managed as a finite state machine with these states:
+ *
+ *    CLOSED          – Upper sensor is NOT tilted (door is fully closed).
+ *    OPENING         – Optimistic: set immediately when openDoor() is called.
+ *    OPEN            – Upper AND lower sensors are both tilted (fully open).
+ *    PARTIALLY_OPEN  – Upper sensor tilted, lower sensor NOT tilted.
+ *                       Only reported AFTER the sensor-settle delay expires.
+ *    CLOSING         – Optimistic: set immediately when closeDoor() is called.
+ *    UNKNOWN         – Upper sensor NOT tilted but lower sensor IS tilted.
+ *                       Physically improbable; only reported AFTER settle.
+ *
+ *  Key design rules:
+ *    • OPENING / CLOSING are *optimistic* — set by command, never by sensors.
+ *    • The lower sensor firing during OPENING is a definitive "fully open"
+ *      signal — state transitions to OPEN immediately, no settle wait.
+ *    • The upper sensor reporting "closed" during CLOSING is a definitive
+ *      "fully closed" signal — state transitions to CLOSED immediately.
+ *    • When only an upper sensor is configured, the settle timer (checkDoor)
+ *      acts as the transition trigger: after the timer expires, if the
+ *      upper sensor is tripped the door is assumed fully open.
+ *    • PARTIALLY_OPEN and UNKNOWN are only reported when the settle timer
+ *      fires — they are never set mid-motion from transient sensor events.
+ *    • Sensor events outside of command states (OPENING/CLOSING) are
+ *      evaluated immediately with no deferral.
+ *
+ *  Sensor semantics for a rolling / sectional garage door:
+ *    • "Upper" sensor — mounted near the top of the door opening.  The
+ *      top panel tilts almost immediately when the door starts to open,
+ *      so this sensor fires very early in the open cycle and very late
+ *      in the close cycle.  **Required.**
+ *    • "Lower" sensor — mounted near the bottom of the door opening.
+ *      The lowest panel travels straight up until the door is nearly
+ *      fully open before tilting, so this sensor only fires when the
+ *      door has almost reached the fully-open position.  **Optional.**
+ *
  *  MIT License
  *  Copyright 2023 Daniel Winks (daniel.winks@gmail.com)
  *
@@ -21,230 +66,741 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.hub.domain.Event
+import groovy.transform.Field
 
-definition (
-  name: 'Garage Door Controller',
-  namespace: 'dwinks',
-  author: 'Daniel Winks',
-  description: 'Garage Door Controller',
-  category: '',
-  iconUrl: '',
-  iconX2Url: '',
-  iconX3Url: ''
+// =============================================================================
+// CONSTANTS
+//
+// All string literals and magic numbers are defined here as @Field static final
+// constants for clarity, performance, and to avoid typos from repeated inlining.
+// =============================================================================
+
+// -- Door state values (written to the child device's "door" attribute) --------
+
+@Field static final String STATE_OPEN            = 'open'
+@Field static final String STATE_CLOSED          = 'closed'
+@Field static final String STATE_PARTIALLY_OPEN  = 'partially open'
+@Field static final String STATE_OPENING         = 'opening'
+@Field static final String STATE_CLOSING         = 'closing'
+@Field static final String STATE_UNKNOWN         = 'unknown'
+
+// -- Contact sensor states ----------------------------------------------------
+
+@Field static final String CONTACT_OPEN   = 'open'
+@Field static final String CONTACT_CLOSED = 'closed'
+
+// -- Hubitat event attribute names --------------------------------------------
+
+@Field static final String ATTR_DOOR    = 'door'
+@Field static final String ATTR_CONTACT = 'contact'
+@Field static final String ATTR_SWITCH  = 'switch'
+
+// -- Switch values ------------------------------------------------------------
+
+@Field static final String SWITCH_ON = 'on'
+
+// -- Timing constants (all in milliseconds) -----------------------------------
+
+@Field static final Integer RELAY_PULSE_DELAY_MS   = 750   // How long the relay stays on (momentary pulse)
+@Field static final Integer SENSOR_SETTLE_DELAY_MS  = 5000  // Command timeout: max wait for door to respond to open/close
+
+// -- Button control -----------------------------------------------------------
+
+@Field static final String ATTR_PUSHED = 'pushed'
+
+// NOTE: Hubitat's Groovy sandbox does not allow @Field initializers to
+// reference other @Field constants, so NOTIFY_STATES uses string literals
+// directly rather than the STATE_* constant names.
+@Field static final List<String> NOTIFY_STATES = ['open', 'closed', 'unknown']
+
+// -- Child device identifiers -------------------------------------------------
+
+@Field static final String CHILD_NAMESPACE = 'dwinks'
+@Field static final String CHILD_DRIVER    = 'Generic Component Smart Garage Door Control'
+@Field static final String CHILD_ID_SUFFIX = '-DoorController'
+
+// =============================================================================
+// LOGGING UTILITIES
+//
+// Centralized logging helpers that respect the user's logging preferences.
+// Each method prefixes the message with the device or app label for context.
+// =============================================================================
+
+void logError(String message) {
+    if (settings.logEnable != false) {
+        if (device) { log.error "${device.label ?: device.name}: ${message}" }
+        if (app)    { log.error "${app.label ?: app.name}: ${message}" }
+    }
+}
+
+void logWarn(String message) {
+    if (settings.logEnable != false) {
+        if (device) { log.warn "${device.label ?: device.name}: ${message}" }
+        if (app)    { log.warn "${app.label ?: app.name}: ${message}" }
+    }
+}
+
+void logInfo(String message) {
+    if (settings.logEnable != false) {
+        if (device) { log.info "${device.label ?: device.name}: ${message}" }
+        if (app)    { log.info "${app.label ?: app.name}: ${message}" }
+    }
+}
+
+void logDebug(String message) {
+    if (settings.logEnable != false && settings.debugLogEnable != false) {
+        if (device) { log.debug "${device.label ?: device.name}: ${message}" }
+        if (app)    { log.debug "${app.label ?: app.name}: ${message}" }
+    }
+}
+
+// =============================================================================
+// APP DEFINITION & PREFERENCES
+// =============================================================================
+
+definition(
+    name:        'Garage Door Controller',
+    namespace:   'dwinks',
+    author:      'Daniel Winks',
+    description: 'Garage Door Controller',
+    category:    '',
+    iconUrl:     '',
+    iconX2Url:   '',
+    iconX3Url:   ''
 )
 
 preferences {
-  page (
-    name: 'mainPage', title: 'Garage Door Controller'
-  )
+    page(name: 'mainPage', title: 'Garage Door Controller')
 }
 
 Map mainPage() {
-  dynamicPage(
-    name: 'mainPage',
-    title: '<h1>Garage Door Controller</h1>',
-    install: true,
-    uninstall: true,
-    refreshInterval: 0
-  ) {
-    section('<b>Device Instructions</b>', hideable: true, hidden: true) {
+    dynamicPage(
+        name:           'mainPage',
+        title:          '<h1>Garage Door Controller</h1>',
+        install:        true,
+        uninstall:      true,
+        refreshInterval: 0
+    ) {
+        section('<b>Device Instructions</b>', hideable: true, hidden: true) {
+            paragraph 'Upper sensor: mounts near top of door. The top panel tilts almost immediately when the door starts to open, so this sensor detects motion very early. Required.'
+            paragraph 'Lower sensor: mounts near bottom of door. The bottom panel only tilts near the fully-open position. Optional — enables "partially open" detection.'
+            paragraph 'Relay for controlling door opener.'
+        }
 
-      paragraph 'Tilt/Contact Sensor(s) for determining door state, optional.'
+        section('<h2>Devices</h2>') {
+            input 'doorUpperSensors', 'capability.contactSensor',
+                title:    '<b>(Required) Upper tilt/contact sensor</b>',
+                description: 'Mounted near top of door. Tilts (reports "open") almost immediately when door starts opening.',
+                required: true,
+                multiple: true
+            input 'doorLowerSensors', 'capability.contactSensor',
+                title:    '<b>(Optional) Lower tilt/contact sensor</b>',
+                description: 'Mounted near bottom of door. Tilts (reports "open") only when door is nearly fully open.',
+                required: false,
+                multiple: true
+            input 'relaySwitch', 'capability.switch',
+                title:    '<b>Opener Relay Switch</b>',
+                required: true
+            input 'disableModes', 'mode',
+                title:    '<b>Disable Remote Access in modes</b>',
+                multiple: true
+        }
 
-      paragraph 'Relay for controlling door opener.'
+        section('<h2>Notification Devices</h2>') {
+            input 'notificationDevices', 'capability.notification',
+                title:    '<b>Notification Devices</b>',
+                required: false,
+                multiple: true
+        }
+
+        section('<h2>Button Control</h2>') {
+            paragraph 'Select button devices to control the garage door. ' +
+                'When the specified button number is pressed, the door toggles: ' +
+                'open if closed, close if open. ' +
+                'Presses are ignored while the door is already in motion (opening or closing). ' +
+                'Mode restrictions (disableModes) are respected.'
+            input 'buttonDevices', 'capability.pushableButton',
+                title:    '<b>Button Device(s)</b>',
+                required: false,
+                multiple: true
+            input 'buttonNumber', 'number',
+                title:        '<b>Button Number</b>',
+                description:  'Which button number to listen for (e.g., 1 for the top button).',
+                required:     true,
+                defaultValue: 1,
+                range:        '1..99'
+        }
+
+        section('Logging') {
+            input 'logEnable', 'bool',
+                title:        'Enable Logging',
+                required:     false,
+                defaultValue: true
+            input 'debugLogEnable', 'bool',
+                title:        'Enable debug logging',
+                required:     false,
+                defaultValue: false
+            input 'descriptionTextEnable', 'bool',
+                title:        'Enable descriptionText logging',
+                required:     false,
+                defaultValue: true
+        }
+
+        section() {
+            label title: 'Enter a name for this app instance', required: false
+        }
     }
-
-    section('<h2>Devices</h2>') {
-      input 'doorClosedSensors', 'capability.contactSensor', title: '<b>(Required) Sensor(s) for fully closed state</b>', required: true, multiple: true
-      input 'doorOpenedSensors', 'capability.contactSensor', title: '<b>(Optional) Sensor(s) for fully opened state</b>', required: false, multiple: true
-      input 'relaySwitch', 'capability.switch', title: '<b>Opener Relay Switch</b>', required: true
-      input 'disableModes', 'mode', title: '<b>Disable Remote Access in modes</b>', multiple: true
-    }
-
-    section('<h2>Notification Devices</h2>') {
-      input 'notificationDevices', 'capability.notification', title: '<b>Notification Devices</b>', required: false, multiple: true
-    }
-
-    section('<h2>Auto-Close</h2>') {
-      input 'autoCloseTimeOut', 'number', title: '<b>Auto-Close Timeout Minutes</b>', required: true, defaultValue: 30
-    }
-
-    section('Logging') {
-      input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
-      input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
-      input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
-    }
-
-    section() {
-      label title: 'Enter a name for this app instance', required: false
-    }
-  }
 }
 
+// =============================================================================
+// LIFECYCLE HOOKS
+//
+// installed(): called once when the app is first installed.
+// updated():   called each time preferences are saved.
+// initialize(): compatibility alias; delegates to configure().
+//
+// All three paths call configure(), which rebuilds subscriptions, ensures
+// the child device exists, and re-evaluates the current door state from
+// sensor readings to keep everything in sync.
+// =============================================================================
+
+void installed() { configure() }
+void updated()   { configure() }
 void initialize() { configure() }
 
 void configure() {
-  unsubscribe()
-  subscribe(relaySwitch, 'switch', switchEvent)
-  subscribe(doorClosedSensors, 'contact', closedContactEvent)
-  subscribe(doorOpenedSensors, 'contact', openedContactEvent)
-  subscribe(getDoorController(), 'door', doorControllerEvent)
-  processContactSensors()
+    unsubscribe()
+
+    // Ensure the child device exists before subscribing to its events.
+    // getDoorController() creates the child on first call if it doesn't exist.
+    ChildDeviceWrapper doorController = getDoorController()
+
+    subscribe(relaySwitch,       ATTR_SWITCH,  switchEvent)
+    subscribe(doorUpperSensors,  ATTR_CONTACT, upperContactEvent)
+    subscribe(doorLowerSensors,  ATTR_CONTACT, lowerContactEvent)
+    subscribe(doorController,    ATTR_DOOR,    doorControllerEvent)
+    subscribe(buttonDevices,     ATTR_PUSHED,  buttonPushedEvent)
+
+    // Push the current sensor-derived state to the child immediately.
+    // On startup there is no motion, so immediate evaluation is correct.
+    processContactSensors()
+
+    // Hubitat may deliver the child's lifecycle events asynchronously.
+    // Re-push state after a short delay to ensure it sticks.
+    runInMillis(2000, resyncChildState)
 }
+
+// =============================================================================
+// RELAY CONTROL
+//
+// The garage door opener is triggered by a momentary relay closure.
+// relaySwitchOn() fires the relay; the switchEvent handler automatically
+// turns it back off after RELAY_PULSE_DELAY_MS (a simulated button press).
+// =============================================================================
 
 void switchEvent(Event event) {
-  logDebug("Received relay switch event: ${event.value}")
-  if (event.value == 'on') { runInMillis(500, 'relaySwitchOff', [overwrite:true]) }
-  DeviceWrapper dev = event.getDevice()
+    logDebug("Received relay switch event: ${event.value}")
+    if (event.value == SWITCH_ON) {
+        runInMillis(RELAY_PULSE_DELAY_MS, 'relaySwitchOff', [overwrite: true])
+    }
 }
 
-void relaySwitchOff() { relaySwitch.off() }
-void relaySwitchOn() { relaySwitch.on() }
-
-void processContactSensors() {
-  ChildDeviceWrapper doorController = getDoorController()
-
-  // Update state variables for all contact sensors:
-  doorClosedSensors.each {DeviceWrapper sensor ->
-    String name = sensor.getLabel() != null && sensor.getLabel() != '' ? sensor.getLabel() : sensor.getName()
-    doorController.setState("${name}", sensor.currentState('contact').value)
-  }
-  doorOpenedSensors.each {DeviceWrapper sensor ->
-    String name = sensor.getLabel() != null && sensor.getLabel() != '' ? sensor.getLabel() : sensor.getName()
-    doorController.setState("${name}", sensor.currentState('contact').value)
-  }
-
-  String value
-  // If any 'door closed' sensors are open, set garage door as being open:
-  List<DeviceWrapper> openDoorClosedSensors = doorClosedSensors.findAll {DeviceWrapper doorSensor ->
-    doorSensor.currentState('contact').value == 'open'
-  }
-  List<DeviceWrapper> closedDoorOpenSensors = doorOpenedSensors.findAll {DeviceWrapper doorSensor ->
-    doorSensor.currentState('contact').value == 'closed'
-  }
-  // Open 'closed' sensor and no 'open' sensors:
-  if (openDoorClosedSensors.size() > 0 && hasDoorOpenedSensors() == false) {
-    value = 'open'
-  }
-
-  // Open 'closed' sensor and no closed 'open' sensors (ie, door between openen and closed):
-  if (openDoorClosedSensors.size() > 0 && hasDoorOpenedSensors() == true && closedDoorOpenSensors.size() == 0) {
-    value = 'partially open'
-  }
-
-  // Open 'closed' sensor and closed 'open' sensors:
-  if (openDoorClosedSensors.size() > 0 && hasDoorOpenedSensors() == true && closedDoorOpenSensors.size() > 0) {
-    value = 'open'
-  }
-
-  // Closed 'closed' sensor and no 'open' sensors:
-  if (openDoorClosedSensors.size() == 0 && hasDoorOpenedSensors() == false) {
-    value = 'closed'
-  }
-
-  // Closed 'closed' sensor and closed 'open' sensors:
-  // (This shouldn't happen, as it would require the door being both closed and open at the same time)
-  if (openDoorClosedSensors.size() == 0 && hasDoorOpenedSensors() == true && closedDoorOpenSensors.size() > 0) {
-    value = 'unknown'
-  }
-
-  doorController.sendEvent(name: 'door', value: value)
-  if(value == 'open' || value == 'closed') { doorController.sendEvent(name: 'contact', value: value) }
-  if (value == 'open') {
-    logWarn('Closing door due to Auto-Close Timeout being reached...')
-    runIn(autoCloseTimeOut * 60, 'autoClose')
-  }
-
-  if (value == 'closed') {
-    logDebug 'Cancelling autoClose scheduled task...'
-    unschedule('autoClose')
-  }
+void relaySwitchOff() {
+    relaySwitch.off()
+    runInMillis(5000, 'relayStateVerification', [overwrite: true])
+}
+void relaySwitchOn()  {
+    relaySwitch.on()
+    runInMillis(RELAY_PULSE_DELAY_MS, 'relaySwitchOff', [overwrite: true])
 }
 
-// Events for when a door moves to/from fully closed position:
-void closedContactEvent(Event event) {
-  logDebug "Closed contact event: ${event.value}"
-  ChildDeviceWrapper doorController = getChildDevice(doorControllerId)
-  // Wait 5 seconds and check sensors again when opening:
-  if (event.value == 'open' && doorController.currentState('door').value == 'opening') {
-    runInMillis(5000, 'processContactSensors', [overwrite:true])
-  } else {
-    processContactSensors()
-  }
+// Verifies the relay state after a pulse; turns it off if still on after 5 seconds.
+// Runs recursively every 5 seconds to ensure the relay is turned off.
+// Calls refreshRelayState() to ensure the relay state is updated after turning it off.
+void relayStateVerification() {
+    if (relaySwitch.currentValue('switch', true) == SWITCH_ON) {
+        relaySwitchOff()
+        runInMillis(1000, 'refreshRelayState', [overwrite: true])
+    } else {
+        runInMillis(5000, 'relayStateVerification', [overwrite: true])
+    }
 }
 
-// Events for when a door moves to/from fully open position:
-void openedContactEvent(Event event) {
-  logDebug("Open contact event: ${event.value}")
-  ChildDeviceWrapper doorController = getChildDevice(doorControllerId)
-  // Wait 5 seconds and check sensors again when closing:
-  if (event.value == 'open' && doorController.currentState('door').value == 'closing') {
-    runInMillis(5000, 'processContactSensors', [overwrite:true])
-  } else {
-    processContactSensors()
-  }
+// Refreshes the relay state by querying the relay switch's current value.
+void refreshRelayState() {
+    relaySwitch.refresh()
 }
 
-void doorControllerEvent(Event event) {
-  logDebug("Received door controller event: ${event.value}")
-  String message = "The garage door is currently ${event.value}"
-  if (notificationDevices) { notificationDevices*.deviceNotification(message) }
-}
+// =============================================================================
+// CHILD DEVICE MANAGEMENT
+//
+// Returns the virtual child device that represents the garage door to the
+// rest of the Hubitat ecosystem. The child is created eagerly in configure()
+// (via installed/updated/initialize) so it always exists before any
+// subscriptions or event handlers reference it.
+//
+// Child capabilities: GarageDoorControl (door) + ContactSensor (contact)
+// =============================================================================
 
 ChildDeviceWrapper getDoorController() {
-  ChildDeviceWrapper doorController = getChildDevice(doorControllerId)
-  if (!doorController) {
-    doorController = addChildDevice(
-      'dwinks', 'Generic Component Smart Garage Door Control', getDoorControllerId(),
-      [label: "${app.label}", isComponent: true]
-    )
-  }
-  return doorController
+    ChildDeviceWrapper doorController = getChildDevice(doorControllerId)
+    if (!doorController) {
+        doorController = addChildDevice(
+            CHILD_NAMESPACE,
+            CHILD_DRIVER,
+            doorControllerId,
+            [label: "${app.label}", isComponent: true]
+        )
+    }
+    return doorController
 }
 
-String getDoorControllerId() { return "${app.id}-DoorController" }
-
-void componentClose(DeviceWrapper device) {
-  if (location.mode in settings.disableModes) { return }
-  closeDoor()
+String getDoorControllerId() {
+    return "${app.id}${CHILD_ID_SUFFIX}"
 }
 
-void componentOpen(DeviceWrapper device) {
-  if (location.mode in settings.disableModes) { return }
-  openDoor()
+// =============================================================================
+// HELPER: SENSOR DISPLAY NAME
+//
+// Resolves a human-readable name for a sensor, preferring its user-assigned
+// label over the internal device name.
+// =============================================================================
+
+String getSensorDisplayName(DeviceWrapper sensor) {
+    String label = sensor.getLabel()
+    return (label != null && label != '') ? label : sensor.getName()
 }
 
-void sendDoorEvent(String data) {
-  ChildDeviceWrapper doorController = getChildDevice(doorControllerId)
-  sendEvent(doorController, [name: 'door', value: data])
+// =============================================================================
+// HELPER: SENSOR CONTACT MATCHING
+//
+// Returns the subset of a sensor list whose contact attribute matches the
+// given target state. Accepts null lists (returns empty) for optional
+// sensor groups like doorLowerSensors.
+// =============================================================================
+
+List<DeviceWrapper> findSensorsInContactState(List<DeviceWrapper> sensors, String contactState) {
+    if (sensors == null) { return [] }
+    return sensors.findAll { DeviceWrapper s ->
+        s.currentState(ATTR_CONTACT).value == contactState
+    }
 }
+
+// =============================================================================
+// HELPER: LOWER-SENSOR AVAILABILITY
+//
+// Returns true when the user has configured at least one lower sensor,
+// enabling detection of "partially open" vs "fully open".
+// =============================================================================
+
+Boolean hasDoorLowerSensors() {
+    return doorLowerSensors != null && doorLowerSensors.size() > 0
+}
+
+// =============================================================================
+// DOOR STATE DETERMINATION (FINITE STATE MACHINE)
+//
+// This method evaluates both sensors and transitions to the appropriate
+// settled state.  It is called in two contexts:
+//
+//   1. Immediately — on startup (configure / resyncChildState) and when
+//      sensor events fire outside of a command state.
+//   2. As the settle handler — when checkDoor fires after the command
+//      timeout, or when a definitive sensor signal (lower sensor during
+//      OPENING, upper sensor closing during CLOSING) triggers an immediate
+//      transition.
+//
+// Important: this method NEVER produces OPENING or CLOSING.  Those are
+// optimistic states set only by openDoor() / closeDoor().
+//
+// Sensor-driven state transitions:
+//   Upper   Lower   →  New State
+//   ------  ------     ---------
+//   closed  closed     CLOSED          (door fully closed)
+//   closed  open       UNKNOWN         (physically improbable)
+//   open    (none)     OPEN            (no lower sensor configured)
+//   open    closed     PARTIALLY_OPEN  (not yet fully open)
+//   open    open       OPEN            (door fully open)
+//
+// =============================================================================
+
+void processContactSensors() {
+    ChildDeviceWrapper doorController = getDoorController()
+
+    // Persist each sensor's current contact state on the child device so
+    // other automations can inspect individual sensor readings if needed.
+    updateSensorStatesOnChild(doorController)
+
+    // Upper sensors are "tripped" when contact = "open" (door has left
+    // the fully-closed position — the top panel has tilted).
+    List<DeviceWrapper> trippedUpperSensors = findSensorsInContactState(doorUpperSensors, CONTACT_OPEN)
+    // Lower sensors are "tripped" when contact = "open" (door has reached
+    // the fully-open position — the bottom panel has tilted).
+    List<DeviceWrapper> trippedLowerSensors = findSensorsInContactState(doorLowerSensors, CONTACT_OPEN)
+
+    Integer upperSensorTrippedCount = trippedUpperSensors.size()
+    Integer lowerSensorTrippedCount = trippedLowerSensors.size()
+    Boolean hasLowerSensors         = hasDoorLowerSensors()
+
+    // Determine the door state from the sensor readings.
+    String doorState = determineDoorState(upperSensorTrippedCount, lowerSensorTrippedCount, hasLowerSensors)
+    logInfo("Door state computed: '${doorState}' (upperTripped=${upperSensorTrippedCount}, lowerTripped=${lowerSensorTrippedCount}, hasLowerSensors=${hasLowerSensors})")
+    logSensorDiagnostics(trippedUpperSensors, trippedLowerSensors)
+
+    // Publish the state to the virtual child device.
+    // IMPORTANT: Use the app-level sendEvent(device, map) form, not
+    // device.sendEvent(map). The app form ensures events are routed
+    // correctly for parent\u2192child communication.
+    sendEvent(doorController, [name: ATTR_DOOR, value: doorState])
+
+    // Mirror terminal states to the "contact" attribute so the child device
+    // also works as a contact sensor for apps that use that capability.
+    if (doorState == STATE_OPEN || doorState == STATE_CLOSED) {
+        sendEvent(doorController, [name: ATTR_CONTACT, value: doorState])
+    }
+}
+
+/**
+ * Re-evaluates and re-pushes the door state to the child device.
+ * Used by configure() as a deferred safety net to overwrite any stale
+ * values that may have been set by the child's asynchronous lifecycle events.
+ */
+void resyncChildState() {
+    logDebug('Deferred re-sync: pushing current door state to child device.')
+    processContactSensors()
+}
+
+/**
+ * Logs per-sensor diagnostic information to help identify misconfiguration.
+ * Shows which sensors are in each group, their current contact state,
+ * and whether they are considered "tripped" for the state calculation.
+ */
+void logSensorDiagnostics(List<DeviceWrapper> trippedUpper, List<DeviceWrapper> trippedLower) {
+    if (!(settings.logEnable != false && settings.debugLogEnable != false)) { return }
+
+    logDebug('── Upper sensors ──')
+    logSensorGroup('  doorUpperSensors', doorUpperSensors, trippedUpper)
+
+    logDebug('── Lower sensors ──')
+    logSensorGroup('  doorLowerSensors', doorLowerSensors, trippedLower)
+}
+
+void logSensorGroup(String label, List<DeviceWrapper> sensors, List<DeviceWrapper> trippedList) {
+    if (sensors == null || sensors.size() == 0) {
+        logDebug("${label}: (none configured)")
+        return
+    }
+    sensors.each { DeviceWrapper s ->
+        String contact = s.currentState(ATTR_CONTACT)?.value ?: '(no reading)'
+        Boolean isTripped = trippedList?.contains(s) ?: false
+        logDebug("${label}: ${getSensorDisplayName(s)} = '${contact}' ${isTripped ? '\u2190 TRIPPED' : ''}")
+    }
+}
+
+/**
+ * Writes each contact sensor's current state as a named state variable
+ * on the child device. The variable name is the sensor's display name.
+ */
+void updateSensorStatesOnChild(ChildDeviceWrapper doorController) {
+    doorUpperSensors.each { DeviceWrapper sensor ->
+        doorController.setState(getSensorDisplayName(sensor), sensor.currentState(ATTR_CONTACT).value)
+    }
+    doorLowerSensors?.each { DeviceWrapper sensor ->
+        doorController.setState(getSensorDisplayName(sensor), sensor.currentState(ATTR_CONTACT).value)
+    }
+}
+
+/**
+ * Pure function: maps upper/lower sensor readings to a door state string.
+ *
+ * Sensor semantics:
+ *   • Upper sensor tripped (contact = "open") → door has left fully-closed.
+ *   • Lower sensor tripped (contact = "open") → door has reached fully-open.
+ *
+ * @param upperSensorTrippedCount  How many upper sensors are tripped (>0 = door NOT fully closed)
+ * @param lowerSensorTrippedCount  How many lower sensors are tripped (>0 = door IS fully open)
+ * @param hasLowerSensors          Whether the user configured any lower sensors
+ * @return One of: STATE_OPEN, STATE_CLOSED, STATE_PARTIALLY_OPEN, STATE_UNKNOWN
+ */
+String determineDoorState(Integer upperSensorTrippedCount, Integer lowerSensorTrippedCount, Boolean hasLowerSensors) {
+    Boolean doorLeftClosed = upperSensorTrippedCount > 0     // Upper sensor tilted → door not at fully-closed
+    Boolean doorAtFullOpen = hasLowerSensors && lowerSensorTrippedCount > 0  // Lower sensor tilted → door at fully-open
+
+    // ── Upper sensor NOT tripped → door is at fully-closed position ───────
+    if (!doorLeftClosed) {
+        if (doorAtFullOpen) { return STATE_UNKNOWN }  // Upper=closed + Lower=open — physically improbable
+        return STATE_CLOSED                            // Upper=closed — door is fully closed
+    }
+
+    // ── Upper sensor IS tripped → door has left the fully-closed position ─
+    if (!hasLowerSensors) { return STATE_OPEN }         // No lower sensors — assume fully open
+    if (doorAtFullOpen)    { return STATE_OPEN }         // Lower sensor confirms fully open
+    return STATE_PARTIALLY_OPEN                          // Upper=open + Lower=closed — not yet fully open
+}
+
+// =============================================================================
+// SENSOR EVENT HANDLERS
+//
+// These fire when any contact sensor changes state.  The behaviour depends
+// on whether the door is currently executing a command (OPENING/CLOSING):
+//
+//   • During OPENING:
+//       - Lower sensor fires → door IS fully open; transition to OPEN
+//         immediately and cancel the settle timeout.
+//       - Upper sensor fires (only upper sensor configured) → door has
+//         started moving but we cannot confirm full-open yet; re-arm the
+//         settle timer to give the door time to finish.
+//       - Upper sensor fires (lower sensor also configured) → door has
+//         started moving; wait for lower sensor or settle timeout.
+//   • During CLOSING:
+//       - Upper sensor reports "closed" → door IS fully closed; transition
+//         to CLOSED immediately and cancel the settle timeout.
+//   • Not in a command state (idle / settled):
+//       - Evaluate sensors immediately — no deferral needed.
+// =============================================================================
+
+/**
+ * Handles events from upper sensors.  The upper sensor tilts almost
+ * immediately when the door starts opening, and is the last sensor to
+ * un-tilt when the door closes.
+ */
+void upperContactEvent(Event event) {
+    logDebug("Upper-sensor event (${getSensorDisplayName(event.getDevice())}): ${event.value}")
+    ChildDeviceWrapper doorController = getDoorController()
+    String currentState = doorController.currentState(ATTR_DOOR).value
+
+    if (currentState == STATE_CLOSING && event.value == CONTACT_CLOSED) {
+        // Door was closing and upper sensor confirms fully closed.
+        logInfo('Upper sensor reports closed while closing — door is now closed.')
+        unschedule('checkDoor')
+        processContactSensors()
+    } else if (currentState == STATE_OPENING && !hasDoorLowerSensors()) {
+        // Only upper sensor available — door has started opening but we
+        // cannot confirm full-open from this event alone.  Re-arm the
+        // settle timer to give the door time to finish its travel.
+        logDebug('Upper sensor fired during opening (no lower sensor) — re-arming settle timer.')
+        runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
+    } else if (!isTransientCommandState(currentState)) {
+        // Not in a command state — evaluate immediately.
+        processContactSensors()
+    }
+    // else: OPENING with lower sensors — upper sensor firing is expected;
+    // we wait for the lower sensor or the settle timeout.
+}
+
+/**
+ * Handles events from lower sensors.  The lower sensor only tilts when
+ * the door is nearly fully open, making it a definitive "fully open" signal.
+ */
+void lowerContactEvent(Event event) {
+    logDebug("Lower-sensor event (${getSensorDisplayName(event.getDevice())}): ${event.value}")
+    ChildDeviceWrapper doorController = getDoorController()
+    String currentState = doorController.currentState(ATTR_DOOR).value
+
+    if (currentState == STATE_OPENING && event.value == CONTACT_OPEN) {
+        // Door was opening and lower sensor confirms fully open.
+        logInfo('Lower sensor reports open while opening — door is now fully open.')
+        unschedule('checkDoor')
+        processContactSensors()
+    } else if (!isTransientCommandState(currentState)) {
+        // Not in a command state — evaluate immediately.
+        processContactSensors()
+    }
+}
+
+// =============================================================================
+// DOOR CONTROLLER EVENT HANDLER
+//
+// Listens for state changes on the child device and sends user notifications
+// only for terminal or error states (open, closed, unknown). Transient states
+// like "opening" and "partially open" are intentionally not notified to avoid
+// alert fatigue.
+// =============================================================================
+
+void doorControllerEvent(Event event) {
+    logDebug("Door controller state changed: ${event.value}")
+    if (event.value in NOTIFY_STATES) {
+        String message = "The garage door is currently ${event.value}"
+        if (notificationDevices) {
+            notificationDevices*.deviceNotification(message)
+        }
+    }
+}
+
+// =============================================================================
+// DOOR OPEN / CLOSE COMMANDS
+//
+// These are the primary actions: optimistically set the door state to
+// OPENING / CLOSING immediately, activate the relay (which toggles the
+// opener motor), and schedule a settle-and-check timer.  The relay is
+// pulsed momentarily — the switchEvent handler turns it off after
+// RELAY_PULSE_DELAY_MS.
+//
+// The settle timer (checkDoor) serves as a command timeout: if sensor
+// feedback hasn't confirmed the expected movement by the time it fires,
+// the door is considered unresponsive.
+// =============================================================================
 
 void openDoor() {
-  sendDoorEvent('opening')
-  relaySwitchOn()
-  runIn(10, 'checkDoor')
+    sendDoorEvent(STATE_OPENING)   // Optimistic: report "opening" immediately
+    relaySwitchOn()
+    runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
 }
 
 void closeDoor() {
-  sendDoorEvent('closing')
-  relaySwitchOn()
+    sendDoorEvent(STATE_CLOSING)   // Optimistic: report "closing" immediately
+    relaySwitchOn()
+    runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
 }
 
-void autoClose() { closeDoor() }
-
-Boolean hasDoorOpenedSensors() {
-  return doorOpenedSensors != null && doorOpenedSensors?.size() > 0
+/**
+ * Sets the door state optimistically on the child device.
+ * Used internally by openDoor() and closeDoor() to immediately publish
+ * the transient "opening" / "closing" state before sensor feedback
+ * confirms the result.
+ */
+void sendDoorEvent(String doorState) {
+    ChildDeviceWrapper doorController = getDoorController()
+    sendEvent(doorController, [name: ATTR_DOOR, value: doorState])
 }
+
+// =============================================================================
+// MODE-BASED ACCESS RESTRICTION
+//
+// componentClose() and componentOpen() are called by the child device's
+// component interface (e.g., from Dashboards or voice assistants). If the
+// current hub mode is in the user's disable list, the command is silently
+// ignored. A null guard prevents NPE when no modes are configured.
+// =============================================================================
+
+void componentClose(DeviceWrapper device) {
+    if (isRemoteAccessDisabled()) { return }
+    closeDoor()
+}
+
+void componentOpen(DeviceWrapper device) {
+    if (isRemoteAccessDisabled()) { return }
+    openDoor()
+}
+
+/**
+ * Returns true if the current hub mode matches one of the user-selected
+ * modes where remote door operation should be blocked.
+ */
+Boolean isRemoteAccessDisabled() {
+    return settings.disableModes && location.mode in settings.disableModes
+}
+
+// =============================================================================
+// BUTTON CONTROL
+//
+// Physical or virtual button devices (capability.pushableButton) can control
+// the garage door. When the configured button number is pressed, the selected
+// action (Toggle / Open / Close) is performed. Mode restrictions are respected.
+// =============================================================================
+
+void buttonPushedEvent(Event event) {
+    logDebug("Button pushed: device=${getSensorDisplayName(event.getDevice())}, button=${event.value}")
+
+    // Only respond to the configured button number.
+    Integer configuredButton = (settings.buttonNumber ?: 1) as Integer
+    if (event.value != configuredButton.toString()) {
+        logDebug("Button ${event.value} ignored — listening for button ${configuredButton}.")
+        return
+    }
+
+    // Respect mode-based access restrictions.
+    if (isRemoteAccessDisabled()) {
+        logDebug('Button blocked — current hub mode is in the disable list.')
+        return
+    }
+
+    ChildDeviceWrapper doorController = getDoorController()
+    String currentState = doorController.currentState(ATTR_DOOR).value
+
+    // Never send a relay command while the door is already in motion.
+    if (isTransientCommandState(currentState)) {
+        logDebug("Button ignored — door is currently '${currentState}' (in motion).")
+        return
+    }
+
+    // Toggle: open if closed, close if open.
+    if (currentState == STATE_OPEN) {
+        logInfo("Button toggle: door is 'open' — closing.")
+        closeDoor()
+    } else if (currentState == STATE_CLOSED) {
+        logInfo("Button toggle: door is 'closed' — opening.")
+        openDoor()
+    } else {
+        // 'partially open' or 'unknown' — not safe to toggle.
+        logDebug("Button ignored — door is '${currentState}' (not clearly open or closed).")
+    }
+}
+
+// =============================================================================
+// DOOR MOVEMENT VERIFICATION (COMMAND TIMEOUT)
+//
+// Called SENSOR_SETTLE_DELAY_MS after a door open/close command.
+//
+// If sensor events have already confirmed the transition (e.g., lower
+// sensor fired during OPENING, or upper sensor reported closed during
+// CLOSING), the scheduled checkDoor will have been cancelled and this
+// method will never run.
+//
+// If we get here, the optimistic OPENING/CLOSING state is still active.
+// We evaluate the current sensor readings to determine whether the door
+// actually moved, and transition to the appropriate settled state or
+// log an error if the door didn't respond.
+// =============================================================================
 
 void checkDoor() {
-  List<DeviceWrapper> openDoorClosedSensors = doorClosedSensors.findAll {DeviceWrapper doorSensor ->
-    doorSensor.currentState('contact').value == 'open'
-  }
-  List<DeviceWrapper> closedDoorOpenSensors = doorOpenedSensors.findAll {DeviceWrapper doorSensor ->
-    doorSensor.currentState('contact').value == 'closed'
-  }
-  if (openDoorClosedSensors.size() == 0) {
-    logError('Door requested to open, no sensors detected open state!')
-  }
+    ChildDeviceWrapper doorController = getDoorController()
+    String currentState = doorController.currentState(ATTR_DOOR).value
+
+    if (!isTransientCommandState(currentState)) {
+        // Already settled (shouldn't normally happen since we unschedule
+        // on confirmation, but handle gracefully).
+        logDebug("checkDoor: door already settled to '${currentState}'.")
+        return
+    }
+
+    // Check whether the key sensor indicates the door actually moved.
+    Boolean upperTripped = findSensorsInContactState(doorUpperSensors, CONTACT_OPEN).size() > 0
+
+    if (currentState == STATE_OPENING) {
+        if (upperTripped) {
+            // Door has at least started opening — evaluate and transition.
+            logInfo('checkDoor: door moved (upper sensor tripped) — settling state.')
+            processContactSensors()
+        } else {
+            logError(
+                "Door failed to open — upper sensor still not tripped " +
+                "after ${SENSOR_SETTLE_DELAY_MS}ms. " +
+                'Check opener relay, sensor batteries, and door mechanics.'
+            )
+        }
+    } else if (currentState == STATE_CLOSING) {
+        if (!upperTripped) {
+            // Door has closed — evaluate and transition.
+            logInfo('checkDoor: door closed (upper sensor not tripped) — settling state.')
+            processContactSensors()
+        } else {
+            logError(
+                "Door failed to close — upper sensor still tripped " +
+                "after ${SENSOR_SETTLE_DELAY_MS}ms. " +
+                'Check opener relay, sensor batteries, and door mechanics.'
+            )
+        }
+    }
+}
+
+/**
+ * Returns true if the given state is an optimistic command state
+ * (opening/closing) that has not yet been confirmed by sensor feedback.
+ */
+Boolean isTransientCommandState(String doorState) {
+    return doorState == STATE_OPENING || doorState == STATE_CLOSING
 }

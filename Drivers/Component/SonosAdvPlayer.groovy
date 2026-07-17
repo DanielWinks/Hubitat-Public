@@ -21,7 +21,43 @@
  *  SOFTWARE.
  */
 
-#include dwinks.UtilitiesAndLoggingLibrary
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
+  }
+}
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+void logException(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.exception "${device.label ?: device.name }: ${message}"
+    if(app) log.exception "${app.label ?: app.name }: ${message}"
+  }
+}
+void logTrace(String message) {
+  if (settings.logEnable != false && settings.traceLogEnable != false) {
+    if(device) log.trace "${device.label ?: device.name }: ${message}"
+    if(app) log.trace "${app.label ?: app.name }: ${message}"
+  }
+}
+
 #include dwinks.SMAPILibrary
 
 metadata {
