@@ -41,6 +41,7 @@ metadata {
     ) {
         capability 'GarageDoorControl'  // door  — ENUM ['unknown', 'open', 'closing', 'closed', 'opening']
         capability 'ContactSensor'      // contact — ENUM ['closed', 'open']
+        command 'stop'
         command 'clearState'
     }
 }
@@ -80,6 +81,11 @@ void open() {
 void close() {
     logDebug('Received close() command — forwarding to parent app.')
     parent?.componentClose(device)
+}
+
+void stop() {
+    logDebug('Received stop() command — forwarding to parent app.')
+    parent?.componentStop(device)
 }
 
 // =============================================================================

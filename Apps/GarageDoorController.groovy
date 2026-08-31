@@ -185,9 +185,10 @@ Map mainPage() {
         refreshInterval: 0
     ) {
         section('<b>Device Instructions</b>', hideable: true, hidden: true) {
-            paragraph 'Upper sensor: mounts near top of door. The top panel tilts almost immediately when the door starts to open, so this sensor detects motion very early. Required.'
-            paragraph 'Lower sensor: mounts near bottom of door. The bottom panel only tilts near the fully-open position. Optional — enables "partially open" detection.'
-            paragraph 'Relay for controlling door opener.'
+            paragraph 'For a RATGDO, select the ESPHome RATGDO Garage Door driver below. Its direct open, close, and stop commands are used as the primary control path.'
+            paragraph 'Upper sensor: reports open whenever the door has left fully closed. Required.'
+            paragraph 'Lower sensor: reports open only when the door is fully open. Optional, but recommended for physical full-open verification.'
+            paragraph 'The legacy relay input is retained only for existing non-RATGDO installations.'
         }
 
         section('<h2>Devices</h2>') {
@@ -201,9 +202,15 @@ Map mainPage() {
                 description: 'Mounted near bottom of door. Tilts (reports "open") only when door is nearly fully open.',
                 required: false,
                 multiple: true
+            input 'ratgdoDoor', 'capability.garageDoorControl',
+                title:    '<b>RATGDO Garage Door (recommended)</b>',
+                description: 'Select a device using the ESPHome RATGDO Garage Door driver. This enables direct open, close, and stop commands.',
+                required: false,
+                multiple: false
             input 'relaySwitch', 'capability.switch',
-                title:    '<b>Opener Relay Switch</b>',
-                required: true
+                title:    '<b>Legacy Opener Relay Switch</b>',
+                description: 'Only used when no RATGDO garage door device is selected.',
+                required: false
             input 'disableModes', 'mode',
                 title:    '<b>Disable Remote Access in modes</b>',
                 multiple: true
@@ -278,7 +285,13 @@ void configure() {
     // getDoorController() creates the child on first call if it doesn't exist.
     ChildDeviceWrapper doorController = getDoorController()
 
-    subscribe(relaySwitch,       ATTR_SWITCH,  switchEvent)
+    if (hasRATGDO()) {
+        subscribe(ratgdoDoor, ATTR_DOOR, ratgdoDoorEvent)
+    } else if (relaySwitch != null) {
+        subscribe(relaySwitch, ATTR_SWITCH, switchEvent)
+    } else {
+        logError('Configure a RATGDO Garage Door device or a legacy opener relay switch.')
+    }
     subscribe(doorUpperSensors,  ATTR_CONTACT, upperContactEvent)
     subscribe(doorLowerSensors,  ATTR_CONTACT, lowerContactEvent)
     subscribe(doorController,    ATTR_DOOR,    doorControllerEvent)
@@ -309,10 +322,15 @@ void switchEvent(Event event) {
 }
 
 void relaySwitchOff() {
+    if (relaySwitch == null) { return }
     relaySwitch.off()
     runInMillis(5000, 'relayStateVerification', [overwrite: true])
 }
 void relaySwitchOn()  {
+    if (relaySwitch == null) {
+        logError('No legacy opener relay switch is configured.')
+        return
+    }
     relaySwitch.on()
     runInMillis(RELAY_PULSE_DELAY_MS, 'relaySwitchOff', [overwrite: true])
 }
@@ -321,6 +339,7 @@ void relaySwitchOn()  {
 // Runs recursively every 5 seconds to ensure the relay is turned off.
 // Calls refreshRelayState() to ensure the relay state is updated after turning it off.
 void relayStateVerification() {
+    if (relaySwitch == null) { return }
     if (relaySwitch.currentValue('switch', true) == SWITCH_ON) {
         relaySwitchOff()
         runInMillis(1000, 'refreshRelayState', [overwrite: true])
@@ -331,6 +350,7 @@ void relayStateVerification() {
 
 // Refreshes the relay state by querying the relay switch's current value.
 void refreshRelayState() {
+    if (relaySwitch == null) { return }
     relaySwitch.refresh()
 }
 
@@ -400,6 +420,14 @@ Boolean hasDoorLowerSensors() {
     return doorLowerSensors != null && doorLowerSensors.size() > 0
 }
 
+/**
+ * Returns true when this installation uses a RATGDO device with direct
+ * open/close/stop control and authoritative movement state.
+ */
+Boolean hasRATGDO() {
+    return ratgdoDoor != null
+}
+
 // =============================================================================
 // DOOR STATE DETERMINATION (FINITE STATE MACHINE)
 //
@@ -445,9 +473,16 @@ void processContactSensors() {
     Integer lowerSensorTrippedCount = trippedLowerSensors.size()
     Boolean hasLowerSensors         = hasDoorLowerSensors()
 
-    // Determine the door state from the sensor readings.
-    String doorState = determineDoorState(upperSensorTrippedCount, lowerSensorTrippedCount, hasLowerSensors)
-    logInfo("Door state computed: '${doorState}' (upperTripped=${upperSensorTrippedCount}, lowerTripped=${lowerSensorTrippedCount}, hasLowerSensors=${hasLowerSensors})")
+    String contactDoorState = determineDoorState(upperSensorTrippedCount, lowerSensorTrippedCount, hasLowerSensors)
+    String doorState = contactDoorState
+    if (hasRATGDO()) {
+        String ratgdoState = ratgdoDoor.currentValue(ATTR_DOOR)?.toString() ?: STATE_UNKNOWN
+        String currentChildState = doorController.currentValue(ATTR_DOOR)?.toString() ?: STATE_UNKNOWN
+        doorState = resolveRATGDODoorState(ratgdoState, contactDoorState, currentChildState)
+        logInfo("Door state resolved: '${doorState}' (ratgdo=${ratgdoState}, contacts=${contactDoorState}, upperTripped=${upperSensorTrippedCount}, lowerTripped=${lowerSensorTrippedCount})")
+    } else {
+        logInfo("Door state computed: '${doorState}' (upperTripped=${upperSensorTrippedCount}, lowerTripped=${lowerSensorTrippedCount}, hasLowerSensors=${hasLowerSensors})")
+    }
     logSensorDiagnostics(trippedUpperSensors, trippedLowerSensors)
 
     // Publish the state to the virtual child device.
@@ -461,6 +496,41 @@ void processContactSensors() {
     if (doorState == STATE_OPEN || doorState == STATE_CLOSED) {
         sendEvent(doorController, [name: ATTR_CONTACT, value: doorState])
     }
+}
+
+/**
+ * Combines RATGDO movement state with independently mounted contact sensors.
+ * Contacts are definitive at their endpoints: the upper contact confirms
+ * closed, while the lower contact confirms fully open. Between endpoints the
+ * RATGDO movement state supplies direction and the contacts identify partial
+ * opening after the motor is idle.
+ */
+String resolveRATGDODoorState(String ratgdoState, String contactDoorState, String currentChildState) {
+    if (ratgdoState == STATE_OPENING) {
+        return contactDoorState == STATE_OPEN ? STATE_OPEN : STATE_OPENING
+    }
+    if (ratgdoState == STATE_CLOSING) {
+        return contactDoorState == STATE_CLOSED ? STATE_CLOSED : STATE_CLOSING
+    }
+
+    // A poll can briefly return the pre-command endpoint state. Preserve the
+    // commanded direction until RATGDO reports movement or a contact confirms
+    // the expected endpoint.
+    if (currentChildState == STATE_OPENING && ratgdoState == STATE_CLOSED && contactDoorState != STATE_CLOSED) {
+        return STATE_OPENING
+    }
+    if (currentChildState == STATE_CLOSING && ratgdoState == STATE_OPEN && contactDoorState != STATE_OPEN) {
+        return STATE_CLOSING
+    }
+
+    if (ratgdoState == STATE_OPEN) {
+        return contactDoorState == STATE_UNKNOWN ? STATE_UNKNOWN : contactDoorState
+    }
+    if (ratgdoState == STATE_CLOSED) {
+        return contactDoorState == STATE_CLOSED ? STATE_CLOSED : STATE_UNKNOWN
+    }
+
+    return contactDoorState
 }
 
 /**
@@ -611,6 +681,16 @@ void lowerContactEvent(Event event) {
     }
 }
 
+/**
+ * Handles state updates from the ESPHome RATGDO Garage Door driver. RATGDO
+ * supplies authoritative motion direction; processContactSensors() merges that
+ * state with the independent upper/lower endpoint contacts.
+ */
+void ratgdoDoorEvent(Event event) {
+    logDebug("RATGDO door event: ${event.value}")
+    processContactSensors()
+}
+
 // =============================================================================
 // DOOR CONTROLLER EVENT HANDLER
 //
@@ -646,14 +726,33 @@ void doorControllerEvent(Event event) {
 
 void openDoor() {
     sendDoorEvent(STATE_OPENING)   // Optimistic: report "opening" immediately
-    relaySwitchOn()
-    runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
+    if (hasRATGDO()) {
+        ratgdoDoor.open()
+        runIn(2, 'processContactSensors', [overwrite: true])
+    } else {
+        relaySwitchOn()
+        runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
+    }
 }
 
 void closeDoor() {
     sendDoorEvent(STATE_CLOSING)   // Optimistic: report "closing" immediately
-    relaySwitchOn()
-    runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
+    if (hasRATGDO()) {
+        ratgdoDoor.close()
+        runIn(2, 'processContactSensors', [overwrite: true])
+    } else {
+        relaySwitchOn()
+        runInMillis(SENSOR_SETTLE_DELAY_MS, 'checkDoor', [overwrite: true])
+    }
+}
+
+void stopDoor() {
+    if (!hasRATGDO()) {
+        logWarn('Stop requires a RATGDO Garage Door device; the legacy relay can only toggle.')
+        return
+    }
+    ratgdoDoor.stop()
+    runIn(2, 'processContactSensors', [overwrite: true])
 }
 
 /**
@@ -684,6 +783,11 @@ void componentClose(DeviceWrapper device) {
 void componentOpen(DeviceWrapper device) {
     if (isRemoteAccessDisabled()) { return }
     openDoor()
+}
+
+void componentStop(DeviceWrapper device) {
+    if (isRemoteAccessDisabled()) { return }
+    stopDoor()
 }
 
 /**
@@ -757,6 +861,10 @@ void buttonPushedEvent(Event event) {
 // =============================================================================
 
 void checkDoor() {
+    if (hasRATGDO()) {
+        processContactSensors()
+        return
+    }
     ChildDeviceWrapper doorController = getDoorController()
     String currentState = doorController.currentState(ATTR_DOOR).value
 

@@ -65,6 +65,20 @@ import java.util.Calendar
 // Curated list of popular OpenRouter models. Any model not listed here can be
 // used via the free-text "Custom Model Slug" override input.
 @Field static final Map OPENROUTER_MODELS = [
+  'openai/gpt-5.6-luna': 'OpenAI ChatGPT GPT-5.6 Luna (Fast, cost-efficient - Recommended)',
+  'openai/gpt-5.6-luna-pro': 'OpenAI ChatGPT GPT-5.6 Luna Pro (Higher quality)',
+  'openai/gpt-5.6-terra': 'OpenAI ChatGPT GPT-5.6 Terra (Balanced)',
+  'openai/gpt-5.6-terra-pro': 'OpenAI ChatGPT GPT-5.6 Terra Pro (Higher quality)',
+  'openai/gpt-5.6-sol': 'OpenAI ChatGPT GPT-5.6 Sol (Flagship)',
+  'openai/gpt-5.6-sol-pro': 'OpenAI ChatGPT GPT-5.6 Sol Pro (Highest quality)',
+  'anthropic/claude-opus-5': 'Anthropic Claude Opus 5 (Flagship)',
+  'anthropic/claude-sonnet-5': 'Anthropic Claude Sonnet 5 (Balanced)',
+  'google/gemini-3.7-flash': 'Google Gemini 3.7 Flash (Fast, balanced)',
+  'google/gemini-3.6-flash': 'Google Gemini 3.6 Flash (Balanced)',
+  'google/gemini-3-flash-preview': 'Google Gemini 3 Flash Preview (Fast, capable)',
+  'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash (Fast, capable)',
+  'deepseek/deepseek-v4-pro': 'DeepSeek V4 Pro (High quality)',
+  'x-ai/grok-4.6': 'xAI Grok 4.6 (High quality)',
   'openai/gpt-4o-mini': 'OpenAI GPT-4o mini (Fast, very cheap - Recommended Default)',
   'openai/gpt-4o': 'OpenAI GPT-4o (Higher quality, pricier)',
   'anthropic/claude-3.5-haiku': 'Anthropic Claude 3.5 Haiku (Fast, natural prose)',
@@ -1223,16 +1237,24 @@ private String resolveModel() {
  */
 private Map buildOpenRouterRequest(String systemPrompt, String content, Integer maxTokens = null) {
   Integer tokenCap = maxTokens ?: ((settings.maxTokensPerStage != null ? settings.maxTokensPerStage : 800) as Integer)
-  return [
-    model: resolveModel(),
+  String model = resolveModel()
+  Map requestBody = [
+    model: model,
     messages: [
       [role: 'system', content: systemPrompt],
       [role: 'user', content: content]
     ],
-    temperature: (settings.temperature != null ? settings.temperature : 0.6) as Double,
-    max_tokens: tokenCap,
-    top_p: 0.95
+    max_tokens: tokenCap
   ]
+
+  // GPT-5.6 models use reasoning controls and reject sampling parameters such
+  // as temperature and top_p on OpenRouter's chat-completions endpoint.
+  if (!model.startsWith('openai/gpt-5.6-')) {
+    requestBody.temperature = (settings.temperature != null ? settings.temperature : 0.6) as Double
+    requestBody.top_p = 0.95
+  }
+
+  return requestBody
 }
 
 /**
