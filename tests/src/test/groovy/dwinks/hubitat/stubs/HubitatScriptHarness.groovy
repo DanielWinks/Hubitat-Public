@@ -31,6 +31,7 @@ class HubitatScriptHarness extends Script {
   List<List> subscriptions = []  // [[target, attr, handler]]
   List<String> unschedules = []  // method names (or '__all__')
   List<String> logs = []         // human-readable log lines
+  List<Object> hubCommands = []  // HubAction/HubMultiAction instances
   Map<String, Object> updatedSettings = [:]
 
   /** Mock device. Tests set this via {@code device = new MockDevice(...)}. */
@@ -39,6 +40,7 @@ class HubitatScriptHarness extends Script {
   MockLog log = new MockLog(this)
   Map location = [name: 'Test Location', mode: 'Day', timeZone: TimeZone.getTimeZone('America/New_York')]
   String hubUID = 'TEST-HUB-UID'
+  Object zwave = new MockZWave()
 
   /** Optional override for asynchttp callback responses (path -> response map). */
   Map<String, Object> httpResponses = [:]
@@ -124,6 +126,10 @@ class HubitatScriptHarness extends Script {
   double nowDays() { System.currentTimeMillis() / 86400000d }
   /** Hubitat's now() returns current millis. */
   long   now() { System.currentTimeMillis() }
+  String zwaveSecureEncap(String command) { "secure:${command}" }
+  String zwaveSecureEncap(hubitat.zwave.Command command) { "secure:${command.formatted}" }
+  List<String> delayBetween(List<String> commands, Number delay) { commands }
+  void sendHubCommand(Object command) { hubCommands << command }
 
   // ----- Setting updaters -----
   void updateSetting(String name, Map opts) { updatedSettings[name] = opts.value }
@@ -149,6 +155,7 @@ class MockDevice {
   String name = 'Test Device'
   Long id = 1L
   Map<String, Object> properties = [:]
+  Map<String, String> dataValues = [:]
   Map<String, Object> currentValues = [:]
   Map<String, Object> updatedSettings = [:]
 
@@ -161,6 +168,9 @@ class MockDevice {
   String getLabel()           { label }
   String getName()            { name }
   Long   getId()              { id }
+  String getDataValue(String name) { dataValues[name] }
+  void updateDataValue(String name, String value) { dataValues[name] = value }
+  void removeDataValue(String name) { dataValues.remove(name) }
   List<Map> getCurrentStates() {
     currentValues.collect { String n, Object v -> [name: n, value: v] }
   }
@@ -173,4 +183,46 @@ class MockApp {
   String label = 'Test App'
   String getId() { id?.toString() }
   String getLabel() { label }
+}
+
+/** Minimal dynamic Z-Wave factory used by driver behavior tests. */
+class MockZWave {
+  MockAssociationV2 associationV2 = new MockAssociationV2()
+  MockAssociationGrpInfoV1 associationGrpInfoV1 = new MockAssociationGrpInfoV1()
+
+  Object parse(String description, Map versions = [:]) { null }
+}
+
+/** Minimal Association V2 command factory used by driver behavior tests. */
+class MockAssociationV2 {
+  Boolean nullFormats = false
+
+  hubitat.zwave.Command associationGroupingsGet() {
+    new hubitat.zwave.Command(formatted: 'associationGroupingsGet', nullFormat: nullFormats)
+  }
+
+  hubitat.zwave.Command associationSet(Map arguments) {
+    new hubitat.zwave.Command(formatted: "associationSet:${arguments.groupingIdentifier}:${arguments.nodeId}", nullFormat: nullFormats)
+  }
+
+  hubitat.zwave.Command associationRemove(Map arguments) {
+    new hubitat.zwave.Command(formatted: "associationRemove:${arguments.groupingIdentifier}:${arguments.nodeId}", nullFormat: nullFormats)
+  }
+
+  hubitat.zwave.Command associationGet(Map arguments) {
+    new hubitat.zwave.Command(formatted: "associationGet:${arguments.groupingIdentifier}", nullFormat: nullFormats)
+  }
+}
+
+/** Minimal Association Group Information V1 command factory. */
+class MockAssociationGrpInfoV1 {
+  Boolean nullCommands = false
+
+  hubitat.zwave.Command associationGroupNameGet(Map arguments) {
+    nullCommands ? null : new hubitat.zwave.Command(formatted: "associationGroupNameGet:${arguments.groupingIdentifier}")
+  }
+
+  hubitat.zwave.Command associationGroupCommandListGet(Map arguments) {
+    nullCommands ? null : new hubitat.zwave.Command(formatted: "associationGroupCommandListGet:${arguments.groupingIdentifier}")
+  }
 }

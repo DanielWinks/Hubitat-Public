@@ -6,8 +6,57 @@ package groovy.util.slurpersupport
  * {@code groovy.xml.slurpersupport}. This shim lets Hubitat sources that
  * import the old package compile in our test harness.
  */
-class GPathResult {
-  // Empty stub - Hubitat code calls .text(), .name(), iteration etc. but
-  // tests that exercise XML-shaped code can supply a real GPathResult by
-  // delegating to XmlSlurper from the modern Groovy distribution.
+class GPathResult implements Iterable<GPathResult> {
+  final groovy.xml.slurpersupport.GPathResult delegate
+
+  GPathResult(groovy.xml.slurpersupport.GPathResult delegate) {
+    this.delegate = delegate
+  }
+
+  GPathResult getAt(String name) {
+    wrap(delegate.getAt(name))
+  }
+
+  GPathResult children() {
+    wrap(delegate.children())
+  }
+
+  GPathResult parent() {
+    wrap(delegate.parent())
+  }
+
+  String text() { delegate.text() }
+  String name() { delegate.name() }
+  int size() { delegate.size() }
+  boolean isEmpty() { delegate.isEmpty() }
+
+  GPathResult find(Closure predicate) {
+    for(groovy.xml.slurpersupport.GPathResult item : delegate) {
+      GPathResult wrapped = wrap(item)
+      if(predicate.call(wrapped)) { return wrapped }
+    }
+    return null
+  }
+
+  void each(Closure consumer) {
+    for(groovy.xml.slurpersupport.GPathResult item : delegate) {
+      consumer.call(wrap(item))
+    }
+  }
+
+  @Override
+  Iterator<GPathResult> iterator() {
+    Iterator source = delegate.iterator()
+    return new Iterator<GPathResult>() {
+      boolean hasNext() { source.hasNext() }
+      GPathResult next() { wrap((groovy.xml.slurpersupport.GPathResult)source.next()) }
+    }
+  }
+
+  @Override
+  String toString() { delegate.toString() }
+
+  private static GPathResult wrap(Object value) {
+    value == null ? null : new GPathResult((groovy.xml.slurpersupport.GPathResult)value)
+  }
 }

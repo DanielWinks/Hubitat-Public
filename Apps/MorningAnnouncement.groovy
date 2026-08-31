@@ -185,6 +185,8 @@ preferences {
 }
 
 Map mainPage() {
+  state.remove('generationPageEntered')
+  state.remove('generationInProgress')
   dynamicPage(name: 'mainPage', title: 'Morning Announcement Configuration', install: true, uninstall: true) {
     section('<b>Input Devices</b>') {
       paragraph 'Select devices and their attributes that contain the information for your morning announcement.'
@@ -229,7 +231,7 @@ Map mainPage() {
           required: false,
           defaultValue: 0.6,
           range: '0.0..1.0',
-          description: 'Lower = more focused, higher = more creative. 0.6 is a good balance for announcements.'
+          description: 'Controls randomness in the AI output. 0.0 = deterministic/factual, 0.5 = balanced, 1.0 = most creative/varied. 0.6 is a good balance for announcements.'
       }
     }
 
@@ -330,14 +332,22 @@ Map mainPage() {
 }
 
 Map generateNowPage() {
+  if (!state.generationPageEntered) {
+    state.generationPageEntered = true
+    state.generationInProgress = true
+    state.lastAnnouncement = null
+    state.lastGenerated = null
+    runIn(0, 'generateAnnouncement')
+  }
+
   dynamicPage(name: 'generateNowPage', title: 'Generate Announcement', nextPage: 'mainPage') {
     section {
-      paragraph 'Generating announcement...'
-      generateAnnouncement()
-      if (state.lastAnnouncement) {
-        paragraph "<b>Generated at ${state.lastGenerated}</b><br><br>${state.lastAnnouncement}"
+      if (state.generationInProgress) {
+        paragraph "<span class='app-state-${app.id}-generationStatus'><i>&lt;generating...&gt;</i></span>"
+      } else if (state.lastAnnouncement) {
+        paragraph "<b>Generated at <span class='app-state-${app.id}-generatedTime'>${state.lastGenerated}</span></b><br><br><span class='app-state-${app.id}-generatedText'>${state.lastAnnouncement}</span>"
       } else {
-        paragraph 'Generation failed. Check logs for details.'
+        paragraph "<span class='app-state-${app.id}-generationStatus'>Generation failed. Check logs for details.</span>"
       }
     }
   }
@@ -676,11 +686,11 @@ private void runSinglePass(String todayDate, String weatherReport, String weathe
     return
   }
 
-  String systemPrompt = settings.customInstructions ?: DEFAULT_SINGLE_PASS_PROMPT
+  String systemPrompt = resolvePromptSetting(settings.customInstructions, DEFAULT_SINGLE_PASS_PROMPT, 'single-pass')
   String content = buildSinglePassContent(todayDate, weatherReport, weatherAlerts, calendarEvents)
   logDebug("Single-pass content: ${content}")
 
-  Integer maxTokens = (settings.maxTokens ?: 2048) as Integer
+  Integer maxTokens = (settings.maxTokens != null ? settings.maxTokens : 2048) as Integer
   Map result = callOpenRouterDirect(systemPrompt, content, maxTokens)
 
   if (result.success && result.text) {
@@ -709,8 +719,23 @@ private void storeAnnouncement(String announcement) {
 
     logInfo('Morning announcement stored successfully')
 
+    // If generation was triggered from the UI page, send events for dynamic update
+    if (state.generationInProgress) {
+      state.generationInProgress = false
+      app.sendEvent(name: 'generationStatus', value: 'Complete!')
+      app.sendEvent(name: 'generatedText', value: announcement)
+      app.sendEvent(name: 'generatedTime', value: state.lastGenerated)
+    }
+
   } catch (Exception e) {
     logError("Failed to store announcement: ${e.message}")
+    // Also notify the UI of failure
+    if (state.generationInProgress) {
+      state.generationInProgress = false
+      app.sendEvent(name: 'generationStatus', value: "Error: ${e.message}")
+      app.sendEvent(name: 'generatedText', value: "Error: ${e.message}")
+      app.sendEvent(name: 'generatedTime', value: 'Failed')
+    }
   }
 }
 
@@ -803,7 +828,7 @@ void runStageWeather() {
     }
     String content = sb.toString()
 
-    String systemPrompt = settings.weatherStagePrompt ?: DEFAULT_WEATHER_PROMPT
+    String systemPrompt = resolvePromptSetting(settings.weatherStagePrompt, DEFAULT_WEATHER_PROMPT, 'weather')
     Map result = callOpenRouterDirect(systemPrompt, content)
 
     boolean ok = result.success && outputDiffersFromInput(result.text, content)
@@ -863,7 +888,7 @@ void runStageCalendar() {
     chain.attempts.calendar = attempt
     logDebug("Stage B (calendar) attempt ${attempt}/${MAX_STAGE_ATTEMPTS}")
 
-    String systemPrompt = settings.calendarStagePrompt ?: DEFAULT_CALENDAR_PROMPT
+    String systemPrompt = resolvePromptSetting(settings.calendarStagePrompt, DEFAULT_CALENDAR_PROMPT, 'calendar')
     // Date anchor goes ABOVE the prompt so it is the first thing the model sees.
     String fullSystemPrompt = "${dateAnchor}\n\n${systemPrompt}"
     String content = "CALENDAR EVENTS:\n${calendar}"
@@ -941,7 +966,7 @@ void runStageWeaver() {
     }
     String content = sb.toString()
 
-    String systemPrompt = settings.weaverStagePrompt ?: DEFAULT_WEAVER_PROMPT
+    String systemPrompt = resolvePromptSetting(settings.weaverStagePrompt, DEFAULT_WEAVER_PROMPT, 'weaver')
     Map result = callOpenRouterDirect(systemPrompt, content)
 
     boolean ok = result.success && outputDiffersFromInput(result.text, content)
@@ -991,7 +1016,7 @@ void runStageWeaver() {
  * we stay under rate limits). A delay of 0 runs immediately.
  */
 private void scheduleNextStage(String methodName) {
-  Integer delay = (settings.stageDelaySeconds ?: 7) as Integer
+  Integer delay = (settings.stageDelaySeconds != null ? settings.stageDelaySeconds : 7) as Integer
   if (delay < 0) { delay = 0 }
   logDebug("Scheduling ${methodName} in ${delay}s")
   runIn(delay, methodName, [overwrite: false])
@@ -1010,7 +1035,7 @@ private void scheduleNextStage(String methodName) {
  *   = 6 calls + 5 delays.
  */
 private Map computeGenerationTime() {
-  Integer delay = (settings.stageDelaySeconds ?: 7) as Integer
+  Integer delay = (settings.stageDelaySeconds != null ? settings.stageDelaySeconds : 7) as Integer
   if (delay < 0) { delay = 0 }
   Integer httpTimeout = 30      // matches timeout used in callOpenRouterDirect
   Integer numStages = 3
@@ -1197,14 +1222,14 @@ private String resolveModel() {
  * are sent as distinct role-tagged messages.
  */
 private Map buildOpenRouterRequest(String systemPrompt, String content, Integer maxTokens = null) {
-  Integer tokenCap = maxTokens ?: ((settings.maxTokensPerStage ?: 800) as Integer)
+  Integer tokenCap = maxTokens ?: ((settings.maxTokensPerStage != null ? settings.maxTokensPerStage : 800) as Integer)
   return [
     model: resolveModel(),
     messages: [
       [role: 'system', content: systemPrompt],
       [role: 'user', content: content]
     ],
-    temperature: (settings.temperature ?: 0.6) as Double,
+    temperature: (settings.temperature != null ? settings.temperature : 0.6) as Double,
     max_tokens: tokenCap,
     top_p: 0.95
   ]
@@ -1253,6 +1278,20 @@ String getCloudUri() {
   return state.accessToken ?
     "${getApiServerUrl()}/${hubUID}/apps/${app.id}/generate?access_token=${state.accessToken}" :
     'Access token not available'
+}
+
+/**
+ * resolvePromptSetting() - Resolve a text prompt from settings with a default fallback.
+ * Returns the user-configured value if non-null and non-empty; otherwise returns
+ * the provided default. Logs which source was used so users can verify in logs.
+ */
+private String resolvePromptSetting(String userValue, String defaultPrompt, String stageName) {
+  if (userValue != null && userValue.trim()) {
+    logDebug("Using user-configured ${stageName} prompt")
+    return userValue
+  }
+  logDebug("Using default ${stageName} prompt (not configured or empty)")
+  return defaultPrompt
 }
 
 // =============================================================================

@@ -379,13 +379,20 @@ import java.util.concurrent.TimeUnit
 @Field private final String MRGRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromMrGrcEventsCallback'
 @Field private final String MRGRC_EVENTS_DOMAIN  =  'MediaRenderer/GroupRenderingControl'
 
-@Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [2, 5, 10, 30]
+@Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [5, 15, 30]
 @Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> playlistRetryState = new ConcurrentHashMap<String, Map>()
 @Field private final String FAVORITE_RETRY_CALLBACK = 'checkFavoritePlaybackAndRetry'
+@Field private final String FAVORITE_RETRY_EVALUATION_CALLBACK = 'evaluateFavoritePlaybackAndRetry'
+@Field static final Integer FAVORITE_INITIAL_CHECK_DELAY_SECONDS = 5
+@Field static final Integer AMAZON_FAVORITE_INITIAL_CHECK_DELAY_SECONDS = 12
 
-@Field static final List<Integer> PLAYLIST_RETRY_INTERVALS = [2, 5, 10, 30]
+@Field static final List<Integer> PLAYLIST_RETRY_INTERVALS = [5, 15, 30]
 @Field private final String PLAYLIST_RETRY_CALLBACK = 'checkPlaylistPlaybackAndRetry'
+@Field private final String PLAYLIST_RETRY_EVALUATION_CALLBACK = 'evaluatePlaylistPlaybackAndRetry'
+@Field static final Integer PLAYLIST_INITIAL_CHECK_DELAY_SECONDS = 5
+@Field static final Integer PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS = 2
+@Field static final Integer MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES = 2
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 
@@ -1483,11 +1490,15 @@ void play() { playerPlay() }
 @CompileStatic
 void stop() {
   clearFavoriteRetryState()
+  clearPlaylistRetryState()
+  cancelPendingAmazonMusicAutoPlay()
   playerStop()
 }
 @CompileStatic
 void pause() {
   clearFavoriteRetryState()
+  clearPlaylistRetryState()
+  cancelPendingAmazonMusicAutoPlay()
   playerPause()
 }
 @CompileStatic
@@ -1559,18 +1570,21 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   Boolean shuffle = shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
-    // Clear any existing retry state for this device
+    // A new media request supersedes all pending confirmation/retry work.
     clearFavoriteRetryState()
+    clearPlaylistRetryState()
+    cancelPendingAmazonMusicAutoPlay()
 
-    // Execute the initial load
-    playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-
-    // Initialize retry state and schedule checks only if autoplay is enabled
     if(playOnCompletion) {
       String deviceId = device.getDeviceNetworkId()
-      // Clear playback state dedup so the retry poll's response is not suppressed
+      Boolean wasPlayingAtStart = isPlaybackCurrentlyActive(deviceId)
+      String operationId = createMediaLoadOperationId('favorite', favoriteId)
       lastPlaybackState.remove(deviceId)
+      lastMetadataContainerId.remove(deviceId)
+      Map favorite = findFavoriteById(favoriteId)
+      Boolean isAmazon = isAmazonMusicService(favorite?.service as String)
       favoriteRetryState.put(deviceId, [
+        operationId: operationId,
         favoriteId: favoriteId,
         action: action,
         repeat: repeat,
@@ -1578,9 +1592,22 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
         shuffle: shuffle,
         crossfade: crossfade,
         playOnCompletion: playOnCompletion,
-        attemptNumber: 0
+        attemptNumber: 0,
+        wasPlayingAtStart: wasPlayingAtStart,
+        playbackObserved: false,
+        metadataConfirmed: false,
+        loadAcknowledged: false,
+        ambiguousConfirmationPasses: 0,
+        isAmazon: isAmazon
       ])
-      scheduleNextFavoriteRetryCheck()
+    }
+
+    playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+
+    if(playOnCompletion) {
+      Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
+      Integer initialDelay = retryState?.isAmazon == true ? AMAZON_FAVORITE_INITIAL_CHECK_DELAY_SECONDS : FAVORITE_INITIAL_CHECK_DELAY_SECONDS
+      scheduleFavoriteRetryCallback(initialDelay, retryState?.operationId as String)
     }
   } else if(isGroupedAndNotCoordinator() == true) {
     parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
@@ -1646,18 +1673,19 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
   Boolean shuffle = shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
-    // Clear any existing retry state for this device
+    // A new media request supersedes all pending confirmation/retry work.
+    clearFavoriteRetryState()
     clearPlaylistRetryState()
+    cancelPendingAmazonMusicAutoPlay()
 
-    // Execute the initial load
-    playerLoadPlaylist(playlistId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-
-    // Initialize retry state and schedule checks only if autoplay is enabled
     if(playOnCompletion) {
       String deviceId = device.getDeviceNetworkId()
-      // Clear playback state dedup so the retry poll's response is not suppressed
+      Boolean wasPlayingAtStart = isPlaybackCurrentlyActive(deviceId)
+      String operationId = createMediaLoadOperationId('playlist', playlistId)
       lastPlaybackState.remove(deviceId)
+      lastMetadataContainerId.remove(deviceId)
       playlistRetryState.put(deviceId, [
+        operationId: operationId,
         playlistId: playlistId,
         action: action,
         repeat: repeat,
@@ -1665,9 +1693,20 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
         shuffle: shuffle,
         crossfade: crossfade,
         playOnCompletion: playOnCompletion,
-        attemptNumber: 0
+        attemptNumber: 0,
+        wasPlayingAtStart: wasPlayingAtStart,
+        playbackObserved: false,
+        metadataConfirmed: false,
+        loadAcknowledged: false,
+        ambiguousConfirmationPasses: 0
       ])
-      scheduleNextPlaylistRetryCheck()
+    }
+
+    playerLoadPlaylist(playlistId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
+
+    if(playOnCompletion) {
+      Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
+      schedulePlaylistRetryCallback(PLAYLIST_INITIAL_CHECK_DELAY_SECONDS, retryState?.operationId as String)
     }
   } else if(isGroupedAndNotCoordinator() == true) {
     parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
@@ -1684,91 +1723,91 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 // Favorite Retry Mechanism
 // =============================================================================
 
-/**
- * Clears the retry state for this device
- */
-@CompileStatic
 void clearFavoriteRetryState() {
   String deviceId = device.getDeviceNetworkId()
   favoriteRetryState.remove(deviceId)
-  // Note: We don't unschedule here because:
-  // 1. The callback will see no state and return early (safe no-op)
-  // 2. runIn with overwrite:true ensures only one callback is scheduled at a time
-  // 3. Hubitat scheduling is per-device, so no cross-device interference
+  unschedule(FAVORITE_RETRY_CALLBACK)
+  unschedule(FAVORITE_RETRY_EVALUATION_CALLBACK)
 }
 
-/**
- * Schedules the next retry check based on the current attempt number
- */
-@CompileStatic
 void scheduleNextFavoriteRetryCheck() {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = favoriteRetryState.get(deviceId)
-
-  if(retryState == null) {
-    return
-  }
-
+  if(retryState == null) { return }
   Integer attemptNumber = retryState.attemptNumber as Integer
-
-  if(attemptNumber >= FAVORITE_RETRY_INTERVALS.size()) {
-    // All retries exhausted
-    Integer totalWaitTime = FAVORITE_RETRY_INTERVALS.sum() as Integer
-    logWarn("Failed to play favorite '${retryState.favoriteId}' after ${FAVORITE_RETRY_INTERVALS.size()} retry attempts (waited up to ${totalWaitTime} seconds). The favorite may not have loaded correctly.")
-    clearFavoriteRetryState()
-    return
-  }
-
-  Integer delaySeconds = FAVORITE_RETRY_INTERVALS[attemptNumber]
-  logDebug("Scheduling favorite playback check in ${delaySeconds} seconds (attempt ${attemptNumber + 1}/${FAVORITE_RETRY_INTERVALS.size()})")
-  scheduleFavoriteRetryCallback(delaySeconds)
+  Integer intervalIndex = Math.max(attemptNumber - 1, 0)
+  Integer delaySeconds = FAVORITE_RETRY_INTERVALS[Math.min(intervalIndex, FAVORITE_RETRY_INTERVALS.size() - 1)]
+  logDebug("Scheduling favorite playback confirmation in ${delaySeconds} seconds after retry ${attemptNumber}/${FAVORITE_RETRY_INTERVALS.size()}")
+  scheduleFavoriteRetryCallback(delaySeconds, retryState.operationId as String)
 }
 
-void scheduleFavoriteRetryCallback(Integer delaySeconds) {
-  runIn(delaySeconds, FAVORITE_RETRY_CALLBACK, [overwrite: true])
+void scheduleFavoriteRetryCallback(Integer delaySeconds, String operationId = null) {
+  runIn(delaySeconds, FAVORITE_RETRY_CALLBACK, [overwrite: true, data: [operationId: operationId]])
 }
 
-/**
- * Checks if the favorite is playing and retries if not
- */
-@CompileStatic
 void checkFavoritePlaybackAndRetry() {
+  checkFavoritePlaybackAndRetry([:])
+}
+
+void checkFavoritePlaybackAndRetry(Map data) {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = favoriteRetryState.get(deviceId)
-
-  if(retryState == null) {
+  if(retryState == null || !isRetryOperationCurrent(retryState, data)) {
     logDebug("No retry state found, skipping playback check")
     return
   }
 
-  String currentStatus = getTransportStatus()
-  logDebug("Checking favorite playback status: ${currentStatus}")
+  retryState.playbackObserved = false
+  getPlaybackStatus()
+  getPlaybackMetadataStatus()
+  runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, FAVORITE_RETRY_EVALUATION_CALLBACK,
+    [overwrite: true, data: [operationId: retryState.operationId]])
+}
 
-  // Success if playing
-  if(currentStatus == 'playing') {
+void evaluateFavoritePlaybackAndRetry(Map data) {
+  String deviceId = device.getDeviceNetworkId()
+  Map retryState = favoriteRetryState.get(deviceId)
+  if(retryState == null || !isRetryOperationCurrent(retryState, data)) { return }
+
+  Boolean playbackActive = retryState.playbackObserved == true ||
+    (retryState.wasPlayingAtStart != true && getTransportStatus() == 'playing')
+
+  if(playbackActive && retryState.metadataConfirmed == true) {
     logInfo("Favorite '${retryState.favoriteId}' is now playing successfully")
     clearFavoriteRetryState()
     return
   }
 
-  // If status is null or empty, treat as not playing yet and continue retry
-  if(currentStatus == null || currentStatus == '') {
-    logDebug("Transport status is null/empty, will retry")
+  if(playbackActive && (retryState.loadAcknowledged == true || retryState.wasPlayingAtStart != true)) {
+    logInfo("Playback is active after loading favorite '${retryState.favoriteId}'; stopping retries while metadata confirmation completes")
+    clearFavoriteRetryState()
+    return
   }
 
-  // Active poll: if WS subscription lapsed, this one-off command will trigger a playbackStatus
-  // response that flows through the existing handler and clears retry state if playing
-  getPlaybackStatus()
+  if(playbackActive) {
+    Integer confirmationPasses = retryState.ambiguousConfirmationPasses as Integer
+    if(confirmationPasses < MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES) {
+      retryState.ambiguousConfirmationPasses = confirmationPasses + 1
+      logDebug("Playback is active but favorite '${retryState.favoriteId}' is not identified yet; polling again before retrying")
+      scheduleFavoriteRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
+      return
+    }
+    logWarn("Playback is active but favorite '${retryState.favoriteId}' could not be confirmed; stopping retries to avoid interrupting active playback")
+    clearFavoriteRetryState()
+    return
+  }
 
-  // Not playing yet, retry
-  // Note: This increment is safe because Hubitat device methods run single-threaded per device
   Integer attemptNumber = retryState.attemptNumber as Integer
+  if(attemptNumber >= FAVORITE_RETRY_INTERVALS.size()) {
+    logWarn("Failed to confirm favorite '${retryState.favoriteId}' after ${FAVORITE_RETRY_INTERVALS.size()} retry attempts. The favorite may not have loaded correctly.")
+    clearFavoriteRetryState()
+    return
+  }
+
   attemptNumber++
   retryState.attemptNumber = attemptNumber
-
   logInfo("Favorite '${retryState.favoriteId}' not playing yet, retrying (attempt ${attemptNumber}/${FAVORITE_RETRY_INTERVALS.size()})")
-
-  // Retry loading the favorite
+  resetRetryConfirmationSignals(retryState)
   playerLoadFavorite(
     retryState.favoriteId as String,
     retryState.action as String,
@@ -1778,8 +1817,6 @@ void checkFavoritePlaybackAndRetry() {
     retryState.crossfade as Boolean,
     retryState.playOnCompletion as Boolean
   )
-
-  // Schedule next check
   scheduleNextFavoriteRetryCheck()
 }
 
@@ -1793,91 +1830,91 @@ void checkFavoritePlaybackAndRetry() {
 // Playlist Retry Mechanism
 // =============================================================================
 
-/**
- * Clears the retry state for this device
- */
-@CompileStatic
 void clearPlaylistRetryState() {
   String deviceId = device.getDeviceNetworkId()
   playlistRetryState.remove(deviceId)
-  // Note: We don't unschedule here because:
-  // 1. The callback will see no state and return early (safe no-op)
-  // 2. runIn with overwrite:true ensures only one callback is scheduled at a time
-  // 3. Hubitat scheduling is per-device, so no cross-device interference
+  unschedule(PLAYLIST_RETRY_CALLBACK)
+  unschedule(PLAYLIST_RETRY_EVALUATION_CALLBACK)
 }
 
-/**
- * Schedules the next retry check based on the current attempt number
- */
-@CompileStatic
 void scheduleNextPlaylistRetryCheck() {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = playlistRetryState.get(deviceId)
-
-  if(retryState == null) {
-    return
-  }
-
+  if(retryState == null) { return }
   Integer attemptNumber = retryState.attemptNumber as Integer
-
-  if(attemptNumber >= PLAYLIST_RETRY_INTERVALS.size()) {
-    // All retries exhausted
-    Integer totalWaitTime = PLAYLIST_RETRY_INTERVALS.sum() as Integer
-    logWarn("Failed to play playlist '${retryState.playlistId}' after ${PLAYLIST_RETRY_INTERVALS.size()} retry attempts (waited up to ${totalWaitTime} seconds). The playlist may not have loaded correctly.")
-    clearPlaylistRetryState()
-    return
-  }
-
-  Integer delaySeconds = PLAYLIST_RETRY_INTERVALS[attemptNumber]
-  logDebug("Scheduling playlist playback check in ${delaySeconds} seconds (attempt ${attemptNumber + 1}/${PLAYLIST_RETRY_INTERVALS.size()})")
-  schedulePlaylistRetryCallback(delaySeconds)
+  Integer intervalIndex = Math.max(attemptNumber - 1, 0)
+  Integer delaySeconds = PLAYLIST_RETRY_INTERVALS[Math.min(intervalIndex, PLAYLIST_RETRY_INTERVALS.size() - 1)]
+  logDebug("Scheduling playlist playback confirmation in ${delaySeconds} seconds after retry ${attemptNumber}/${PLAYLIST_RETRY_INTERVALS.size()}")
+  schedulePlaylistRetryCallback(delaySeconds, retryState.operationId as String)
 }
 
-void schedulePlaylistRetryCallback(Integer delaySeconds) {
-  runIn(delaySeconds, PLAYLIST_RETRY_CALLBACK, [overwrite: true])
+void schedulePlaylistRetryCallback(Integer delaySeconds, String operationId = null) {
+  runIn(delaySeconds, PLAYLIST_RETRY_CALLBACK, [overwrite: true, data: [operationId: operationId]])
 }
 
-/**
- * Checks if the playlist is playing and retries if not
- */
-@CompileStatic
 void checkPlaylistPlaybackAndRetry() {
+  checkPlaylistPlaybackAndRetry([:])
+}
+
+void checkPlaylistPlaybackAndRetry(Map data) {
   String deviceId = device.getDeviceNetworkId()
   Map retryState = playlistRetryState.get(deviceId)
-
-  if(retryState == null) {
+  if(retryState == null || !isRetryOperationCurrent(retryState, data)) {
     logDebug("No retry state found, skipping playback check")
     return
   }
 
-  String currentStatus = getTransportStatus()
-  logDebug("Checking playlist playback status: ${currentStatus}")
+  retryState.playbackObserved = false
+  getPlaybackStatus()
+  getPlaybackMetadataStatus()
+  runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, PLAYLIST_RETRY_EVALUATION_CALLBACK,
+    [overwrite: true, data: [operationId: retryState.operationId]])
+}
 
-  // Success if playing
-  if(currentStatus == 'playing') {
+void evaluatePlaylistPlaybackAndRetry(Map data) {
+  String deviceId = device.getDeviceNetworkId()
+  Map retryState = playlistRetryState.get(deviceId)
+  if(retryState == null || !isRetryOperationCurrent(retryState, data)) { return }
+
+  Boolean playbackActive = retryState.playbackObserved == true ||
+    (retryState.wasPlayingAtStart != true && getTransportStatus() == 'playing')
+
+  if(playbackActive && retryState.metadataConfirmed == true) {
     logInfo("Playlist '${retryState.playlistId}' is now playing successfully")
     clearPlaylistRetryState()
     return
   }
 
-  // If status is null or empty, treat as not playing yet and continue retry
-  if(currentStatus == null || currentStatus == '') {
-    logDebug("Transport status is null/empty, will retry")
+  if(playbackActive && (retryState.loadAcknowledged == true || retryState.wasPlayingAtStart != true)) {
+    logInfo("Playback is active after loading playlist '${retryState.playlistId}'; stopping retries while metadata confirmation completes")
+    clearPlaylistRetryState()
+    return
   }
 
-  // Active poll: if WS subscription lapsed, this one-off command will trigger a playbackStatus
-  // response that flows through the existing handler and clears retry state if playing
-  getPlaybackStatus()
+  if(playbackActive) {
+    Integer confirmationPasses = retryState.ambiguousConfirmationPasses as Integer
+    if(confirmationPasses < MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES) {
+      retryState.ambiguousConfirmationPasses = confirmationPasses + 1
+      logDebug("Playback is active but playlist '${retryState.playlistId}' is not identified yet; polling again before retrying")
+      schedulePlaylistRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
+      return
+    }
+    logWarn("Playback is active but playlist '${retryState.playlistId}' could not be confirmed; stopping retries to avoid interrupting active playback")
+    clearPlaylistRetryState()
+    return
+  }
 
-  // Not playing yet, retry
-  // Note: This increment is safe because Hubitat device methods run single-threaded per device
   Integer attemptNumber = retryState.attemptNumber as Integer
+  if(attemptNumber >= PLAYLIST_RETRY_INTERVALS.size()) {
+    logWarn("Failed to confirm playlist '${retryState.playlistId}' after ${PLAYLIST_RETRY_INTERVALS.size()} retry attempts. The playlist may not have loaded correctly.")
+    clearPlaylistRetryState()
+    return
+  }
+
   attemptNumber++
   retryState.attemptNumber = attemptNumber
-
   logInfo("Playlist '${retryState.playlistId}' not playing yet, retrying (attempt ${attemptNumber}/${PLAYLIST_RETRY_INTERVALS.size()})")
-
-  // Retry loading the playlist
+  resetRetryConfirmationSignals(retryState)
   playerLoadPlaylist(
     retryState.playlistId as String,
     retryState.action as String,
@@ -1887,9 +1924,30 @@ void checkPlaylistPlaybackAndRetry() {
     retryState.crossfade as Boolean,
     retryState.playOnCompletion as Boolean
   )
-
-  // Schedule next check
   scheduleNextPlaylistRetryCheck()
+}
+
+String createMediaLoadOperationId(String mediaType, String mediaId) {
+  return "${mediaType}:${device.getDeviceNetworkId()}:${mediaId}:${now()}"
+}
+
+Boolean isRetryOperationCurrent(Map retryState, Map callbackData) {
+  if(retryState == null) { return false }
+  String callbackOperationId = callbackData?.operationId as String
+  return callbackOperationId == null || callbackOperationId == retryState.operationId?.toString()
+}
+
+Boolean isPlaybackCurrentlyActive(String deviceId) {
+  return getTransportStatus() == 'playing' || lastPlaybackState.get(deviceId) == 'PLAYBACK_STATE_PLAYING'
+}
+
+void resetRetryConfirmationSignals(Map retryState) {
+  retryState.playbackObserved = false
+  retryState.metadataConfirmed = false
+  retryState.loadAcknowledged = false
+  retryState.ambiguousConfirmationPasses = 0
+  lastPlaybackState.remove(device.getDeviceNetworkId())
+  lastMetadataContainerId.remove(device.getDeviceNetworkId())
 }
 
 // =============================================================================
@@ -2329,14 +2387,21 @@ void parse(String raw) {
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
       try {
         if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
-        // Skip expensive XML parsing if the ZGT content hasn't changed
+        if(!isPlausibleXmlPayload(xmlBody)) {
+          logDebug('Ignoring blank or non-XML ZGT event payload')
+          return
+        }
+        // Compare against the last successfully parsed payload. Invalid XML must
+        // not become the dedup baseline or count as a healthy inbound event.
         String zgtDni = device.getDeviceNetworkId()
         Integer xmlHash = xmlBody.hashCode()
-        Integer prevHash = lastZgtXmlHash.put(zgtDni, xmlHash)
+        Integer prevHash = lastZgtXmlHash.get(zgtDni)
         if(prevHash != null && prevHash == xmlHash) { return }
         LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>(getGroupPlayerIds())
-        setLastInboundZgtEvent()
-        processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)
+        if(processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)) {
+          lastZgtXmlHash.put(zgtDni, xmlHash)
+          setLastInboundZgtEvent()
+        }
       } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
     }
     else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
@@ -2507,18 +2572,35 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
 }
 
 @CompileStatic
-void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGroupedRincons) {
+Boolean isPlausibleXmlPayload(String payload) {
+  if(payload == null) { return false }
+  String normalized = payload.trim()
+  return normalized != '' && normalized.startsWith('<')
+}
+
+@CompileStatic
+Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGroupedRincons) {
+  if(!isPlausibleXmlPayload(xmlString)) {
+    logDebug('Ignoring blank or non-XML ZGT property set')
+    return false
+  }
+
   XmlSlurper xmlParser = new XmlSlurper()
   GPathResult propertyset = xmlParser.parseText(xmlString)
   String zoneGroupStateString = ((GPathResult)propertyset['property']['ZoneGroupState']).text() //['ZoneGroupState']['ZoneGroups']
-  GPathResult zoneGroupState = xmlParser.parseText(unEscapeLastChangeXML(zoneGroupStateString))
+  String unescapedZoneGroupState = unEscapeLastChangeXML(zoneGroupStateString)
+  if(!isPlausibleXmlPayload(unescapedZoneGroupState)) {
+    logDebug('Ignoring ZGT property set with blank or non-XML ZoneGroupState')
+    return false
+  }
+  GPathResult zoneGroupState = xmlParser.parseText(unescapedZoneGroupState)
   GPathResult zoneGroups = (GPathResult)zoneGroupState['ZoneGroups']
 
   // Cache the find result for this player to avoid repeated linear scans
   GPathResult myZonePlayer = zoneGroups.children().children().find{it['@UUID'] == getId()}
   if(myZonePlayer == null) {
     logTrace("Player ${getId()} not found in ZoneGroupTopology!")
-    return
+    return true
   }
   GPathResult myGroup = myZonePlayer.parent()
 
@@ -2587,6 +2669,7 @@ void processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrouped
       }
     }
   }
+  return true
 }
 
 @CompileStatic
@@ -4464,6 +4547,20 @@ ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
   return favoritesMap
 }
 
+@CompileStatic
+Map findFavoriteById(String favoriteId) {
+  if(favoriteId == null || favoriteId == '') { return null }
+  for(Map favorite : getFavoritesMap().values()) {
+    if(favorite?.get('id')?.toString() == favoriteId) { return favorite }
+  }
+  return null
+}
+
+@CompileStatic
+Boolean isAmazonMusicService(String serviceName) {
+  return serviceName != null && serviceName.toLowerCase().contains('amazon')
+}
+
 void clearFavoritesMap() {
   favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>()
 }
@@ -4988,9 +5085,9 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
 
   // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
   if(playOnCompletion) {
-    Map favorite = getFavoritesMap()?.get(favoriteId)
+    Map favorite = findFavoriteById(favoriteId)
     String serviceName = favorite?.service
-    if(serviceName?.toLowerCase()?.contains('amazon')) {
+    if(isAmazonMusicService(serviceName)) {
       logDebug("Amazon Music favorite detected - scheduling auto-play in 3 seconds as workaround for service limitation")
       scheduleAmazonMusicAutoPlay()
     }
@@ -4999,6 +5096,10 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
 
 void scheduleAmazonMusicAutoPlay() {
   runIn(3, 'playerPlay', [overwrite: true])
+}
+
+void cancelPendingAmazonMusicAutoPlay() {
+  unschedule('playerPlay')
 }
 
 void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
@@ -5940,19 +6041,31 @@ void processWebsocketMessage(String message) {
     }
   }
 
+  if(eventType?.namespace == 'favorites' && eventType?.response == 'loadFavorite') {
+    Map retryState = favoriteRetryState.get(dni)
+    if(retryState != null) { retryState.loadAcknowledged = eventType?.success == true }
+  }
+
+  if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
+    Map retryState = playlistRetryState.get(dni)
+    if(retryState != null) { retryState.loadAcknowledged = eventType?.success == true }
+  }
+
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     String currentState = eventData?.playbackState?.toString()
     String previousState = lastPlaybackState.put(dni, currentState)
+    Map favoriteState = favoriteRetryState.get(dni)
+    Map playlistState = playlistRetryState.get(dni)
+    if(currentState == 'PLAYBACK_STATE_PLAYING') {
+      if(favoriteState != null) { favoriteState.playbackObserved = true }
+      if(playlistState != null) { playlistState.playbackObserved = true }
+    }
     // Dedup: skip repeated same-state events (common as periodic heartbeats).
-    // If state rapidly transitions A -> B -> A, the second A is suppressed — acceptable because
-    // clearFavoriteRetryState/clearPlaylistRetryState will already have been called on the first A.
+    // Retry observation is updated before this return so an explicit playback
+    // poll can still confirm an unchanged PLAYING state.
     if(currentState == previousState) { return }
     if(currentState == 'PLAYBACK_STATE_PLAYING') {
       if(getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
-      // Clear favorite/playlist retry state — WebSocket confirms playback started
-      // This is critical when UPnP subscriptions are stale and transportStatus isn't updated
-      clearFavoriteRetryState()
-      clearPlaylistRetryState()
     } else if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
       lastMetadataContainerId.remove(dni)
     }
@@ -5961,7 +6074,8 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
-    if(containerKey == lastKey) { return }
+    Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
+    if(containerKey == lastKey && !retryPending) { return }
     lastMetadataContainerId.put(dni, containerKey)
     checkFavAndPlaylist(eventData)
   }
@@ -6131,6 +6245,11 @@ void isFavoritePlaying(Map json) {
   String foundFavImageUrl = favoritesMap[k]?.imageUrl
   String foundFavName = favoritesMap[k]?.name
 
+  Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
+  if(retryState != null) {
+    retryState.metadataConfirmed = (isFav || isFavAlt) && foundFavId == retryState.favoriteId?.toString()
+  }
+
   setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
 
@@ -6161,6 +6280,11 @@ void isPlaylistPlaying(Map json) {
         foundPlaylistName = value?.name
       }
     }
+  }
+
+  Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
+  if(retryState != null) {
+    retryState.metadataConfirmed = isPlaylist && foundPlaylistId == retryState.playlistId?.toString()
   }
 
   setCurrentPlaylist(foundPlaylistId, foundPlaylistName, isPlaylist)

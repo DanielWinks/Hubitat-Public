@@ -20,7 +20,7 @@ import org.codehaus.groovy.control.customizers.ImportCustomizer
 class ScriptLoader {
 
   /** Load a single file. Includes resolved against `libraryDir` if given. */
-  static HubitatScriptHarness load(File file, File libraryDir = null) {
+  static HubitatScriptHarness load(File file, File libraryDir = null, Boolean relaxCompileStatic = false) {
     String src = file.text
     Preprocessor.Result pp = Preprocessor.process(src)
 
@@ -43,11 +43,32 @@ class ScriptLoader {
     CompilerConfiguration cc = new CompilerConfiguration()
     cc.scriptBaseClass = HubitatScriptHarness.name
     ImportCustomizer ic = new ImportCustomizer()
-    ic.addStarImports('dwinks.hubitat.stubs')
+    // Hubitat supplies these imports implicitly to app/driver source. Plain
+    // GroovyShell does not, so mirror the platform defaults needed by the
+    // repository's larger production drivers.
+    ic.addImports(
+      'groovy.transform.CompileStatic',
+      'groovy.transform.Field',
+      'groovy.util.XmlSlurper',
+      'groovy.json.JsonOutput',
+      'groovy.json.JsonSlurper'
+    )
+    ic.addStarImports(
+      'dwinks.hubitat.stubs',
+      'java.util.concurrent',
+      'java.time',
+      'com.hubitat.app',
+      'com.hubitat.app.exception',
+      'com.hubitat.hub.domain',
+      'hubitat.device',
+      'hubitat.scheduling',
+      'groovy.util.slurpersupport'
+    )
     cc.addCompilationCustomizers(ic)
 
     GroovyShell shell = new GroovyShell(ScriptLoader.classLoader, cc)
-    Script s = shell.parse(full.toString(), file.name.replaceAll(/\W/, '_') + '.groovy')
+    String compilableSource = relaxCompileStatic ? stripCompileStaticAnnotations(full.toString()) : full.toString()
+    Script s = shell.parse(compilableSource, file.name.replaceAll(/\W/, '_') + '.groovy')
     if (!(s instanceof HubitatScriptHarness)) {
       throw new IllegalStateException("Loaded script is not a HubitatScriptHarness: ${s.class}")
     }
@@ -89,6 +110,24 @@ class ScriptLoader {
     // Drop the library(...) call if present (its arguments could fail to
     // resolve once inlined, and we don't need it for behavior tests).
     src.replaceFirst(/(?ms)^\s*library\s*\([^)]*\)\s*$/, '')
+  }
+
+  /**
+   * Runtime-behavior tests occasionally load a large Hubitat driver whose
+   * platform types are represented by deliberately minimal stubs. The normal
+   * linter still checks @CompileStatic usage; this option removes standalone
+   * annotations only for the GroovyShell behavior-test compilation.
+   */
+  private static String stripCompileStaticAnnotations(String src) {
+    String relaxedSource = src.replaceAll(/(?m)^\s*@CompileStatic\s*$/, '')
+
+    // Hubitat exposes `device` as a script property. In a plain GroovyShell,
+    // this driver's explicit getter would otherwise resolve `this.device`
+    // through itself and recurse indefinitely.
+    relaxedSource.replace(
+      'DeviceWrapper getDevice() { return this.device }',
+      'MockDevice getDevice() { return super.getDevice() }'
+    )
   }
 
   private static File findLibrary(File libraryDir, String fqn) {

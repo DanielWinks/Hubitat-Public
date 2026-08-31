@@ -41,6 +41,12 @@ LIBRARY_PATTERN = re.compile(r"^\s*library\s*\(", re.MULTILINE)
 NAME_RE = re.compile(r"""name\s*:\s*["']([^"']+)["']""")
 NAMESPACE_RE = re.compile(r"""namespace\s*:\s*["']([^"']+)["']""")
 
+# Start of the definition/library block. Extraction is anchored here so that
+# earlier occurrences of name:/namespace: (license headers, page(name:...),
+# child-app references like app(name:..., appName:..., namespace:...)) can
+# never be mistaken for the code's own identity.
+DEFINITION_START_RE = re.compile(r"^\s*(?:definition|library)\s*\(", re.MULTILINE)
+
 # Hubitat API endpoints for listing user code
 HUB_LIST_ENDPOINTS = {
     "app": "hub2/userAppTypes",
@@ -119,9 +125,14 @@ def detect_code_type(filepath):
 
 def extract_name_and_namespace(source):
     """Extract the definition name and namespace from Groovy source code.
-    Returns (name, namespace) — either may be None if not found."""
-    name_match = NAME_RE.search(source)
-    ns_match = NAMESPACE_RE.search(source)
+
+    Search is anchored at the definition(/library( block so that name:/namespace:
+    occurrences elsewhere in the file (pages, child-app references, comments)
+    are ignored. Returns (name, namespace) — either may be None if not found."""
+    block = DEFINITION_START_RE.search(source)
+    scope = source[block.end() :] if block else source
+    name_match = NAME_RE.search(scope)
+    ns_match = NAMESPACE_RE.search(scope)
     return (
         name_match.group(1) if name_match else None,
         ns_match.group(1) if ns_match else None,
@@ -146,22 +157,22 @@ def fetch_hub_code_list(host, code_type):
 
 def find_matching_code(hub_list, name, namespace):
     """Search the hub code list for an entry matching name and namespace.
-    Prefers an exact match on both; falls back to name-only match.
-    Returns the matching entry dict, or None."""
+    Returns (entry, match_kind) where match_kind is 'exact' (name + namespace)
+    or 'name-only' (namespace differs), or (None, None) if no match."""
     if not hub_list or not name:
-        return None
+        return None, None
 
     # Exact match on name + namespace
     for entry in hub_list:
         if entry.get("name") == name and entry.get("namespace") == namespace:
-            return entry
+            return entry, "exact"
 
-    # Fallback: name-only match
+    # Fallback: name-only match (namespace differs or is missing)
     for entry in hub_list:
         if entry.get("name") == name:
-            return entry
+            return entry, "name-only"
 
-    return None
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +241,21 @@ def find_file_in_metadata(files, filepath):
     """Return the first metadata entry matching the given filepath, or None."""
     for entry in files:
         if entry.get("filepath") == filepath:
+            return entry
+    return None
+
+
+def find_conflicting_link(files, code_type, code_id, filepath):
+    """Return a metadata entry that already links the given hub ID (for the same
+    code type) to a DIFFERENT local file, or None. Used to prevent accidentally
+    re-linking a hub app/driver that belongs to another source file (e.g. a
+    parent app matching an older standalone app with the same name)."""
+    for entry in files:
+        if (
+            entry.get("codeType") == code_type
+            and entry.get("id") == code_id
+            and entry.get("filepath") != filepath
+        ):
             return entry
     return None
 
@@ -446,9 +472,10 @@ def publish(host, code_type, filepath, workspace_root):
         hub_list = fetch_hub_code_list(host, code_type)
 
         matched = None
+        match_kind = None
         if hub_list:
             print(f"Found {len(hub_list)} {code_type}(s) on hub.")
-            matched = find_matching_code(hub_list, code_name, code_namespace)
+            matched, match_kind = find_matching_code(hub_list, code_name, code_namespace)
         else:
             print(
                 f"Could not fetch {code_type} list from hub (will fall back to manual entry)."
@@ -458,30 +485,59 @@ def publish(host, code_type, filepath, workspace_root):
             # ---- Auto-matched an existing hub entry ----
             match_id = matched["id"]
             match_name = matched["name"]
+            conflict = find_conflicting_link(files, code_type, match_id, filepath)
+            used_by = matched.get("usedBy") or []
             print()
             print(f"Found matching {code_type} on hub:")
             print(f"  ID: {match_id}")
             print(f"  Name: {match_name}")
             if matched.get("namespace"):
                 print(f"  Namespace: {matched['namespace']}")
+            if matched.get("lastModified"):
+                print(f"  Last modified: {matched['lastModified']}")
+            if used_by:
+                print(f"  In use by {len(used_by)} installed instance(s)")
+            if match_kind == "name-only":
+                print(
+                    f"  \u26a0\ufe0f  Name matches but namespace differs "
+                    f"(local: '{code_namespace}', hub: '{matched.get('namespace')}')"
+                )
+            if conflict:
+                print(
+                    f"  \u26a0\ufe0f  Hub ID {match_id} is already linked to a "
+                    f"different local file in {METADATA_FILE}:"
+                )
+                print(f"     {conflict.get('filepath')}")
+                print(
+                    f"     Linking would make both files publish over the same "
+                    f"hub {code_type}."
+                )
             print()
 
-            prompt = (
-                input(f"Link to this {code_type}? (Y/n, or enter a different ID): ")
-                .strip()
-                .lower()
-            )
+            default_yes = match_kind == "exact" and not conflict
+            if default_yes:
+                prompt_text = (
+                    f"Link to this {code_type}? (Y/n, or enter a different ID): "
+                )
+            else:
+                prompt_text = (
+                    f"Link to this {code_type}? (y/N, or enter a different ID): "
+                )
+            prompt = input(prompt_text).strip().lower()
 
-            if prompt == "" or prompt == "y":
+            if prompt == "y" or (prompt == "" and default_yes):
                 # Use the matched ID
                 code_id = match_id
+            elif prompt in ("", "n"):
+                # Declined — fall through to manual entry / create new
+                code_id = None
             else:
                 # User may have entered a different ID
                 try:
                     code_id = int(prompt)
                     print(f"Linking to manually specified {code_type} ID {code_id} ...")
                 except ValueError:
-                    print(f"Invalid input. Creating new {code_type} instead.")
+                    print(f"Invalid input. Not linking to ID {match_id}.")
                     code_id = None
 
             if code_id is not None:
