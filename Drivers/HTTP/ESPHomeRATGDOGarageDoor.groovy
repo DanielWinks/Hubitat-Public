@@ -65,6 +65,8 @@ metadata {
 @Field static final String STATE_CLOSING = 'closing'
 @Field static final String STATE_PARTIALLY_OPEN = 'partially open'
 @Field static final String STATE_UNKNOWN = 'unknown'
+@Field static final String DEVICE_TRACKER_PREFIX = 'device-tracker-'
+@Field static final String PRESENCE_CHILD_DRIVER = 'Generic Component Presence Sensor'
 
 void installed() {
     initialize()
@@ -207,6 +209,11 @@ private void processInboundMessage(final Map jsonData) {
     }
 
     emitIfChanged('status', 'online')
+    if (eventId.startsWith(DEVICE_TRACKER_PREFIX)) {
+        processDeviceTrackerEvent(eventId.substring(DEVICE_TRACKER_PREFIX.length()), jsonData.value)
+        return
+    }
+
     switch (eventId) {
         case 'cover-door':
             processCoverEvent(jsonData.value)
@@ -227,6 +234,38 @@ private void processInboundMessage(final Map jsonData) {
             logWarn("Ignoring unrecognized RATGDO event id: ${eventId}")
             break
     }
+}
+
+private void processDeviceTrackerEvent(final String trackerName, final Object value) {
+    final Boolean isHome = parseBoolean(value)
+    if (!trackerName || isHome == null) {
+        logWarn("RATGDO device-tracker event is missing a name or boolean value: ${trackerName}")
+        return
+    }
+
+    final String childDni = presenceChildDni(trackerName)
+    Object child = getChildDevice(childDni)
+    if (child == null) {
+        try {
+            child = addChildDevice(
+                'hubitat',
+                PRESENCE_CHILD_DRIVER,
+                childDni,
+                [name: PRESENCE_CHILD_DRIVER, label: "${device.displayName} - ${trackerName}", isComponent: true]
+            )
+            logInfo("Created presence child device for ${trackerName}")
+        } catch (Exception exception) {
+            logError("Unable to create presence child device for ${trackerName}: ${exception.message}")
+            return
+        }
+    }
+    sendEvent(child, [name: 'presence', value: isHome ? 'present' : 'not present',
+                      descriptionText: "${trackerName} is ${isHome ? 'home' : 'away'}"])
+}
+
+private String presenceChildDni(final String trackerName) {
+    final String safeTrackerName = trackerName.replaceAll(/[^A-Za-z0-9_-]/, '_')
+    return "${device.deviceNetworkId}-presence-${safeTrackerName}"
 }
 
 private void processCoverEvent(final Object value) {
@@ -288,6 +327,12 @@ private void logWarn(final String message) {
 private void logDebug(final String message) {
     if (settings.logEnable != false && settings.debugLogEnable != false) {
         log.debug("${device.displayName}: ${message}")
+    }
+}
+
+private void logInfo(final String message) {
+    if (settings.logEnable != false) {
+        log.info("${device.displayName}: ${message}")
     }
 }
 

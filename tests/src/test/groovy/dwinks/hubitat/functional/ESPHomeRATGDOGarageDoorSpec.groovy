@@ -21,6 +21,8 @@ class ESPHomeRATGDOGarageDoorSpec extends Specification {
     driver.events.clear()
     driver.scheduled.clear()
     driver.asyncCalls.clear()
+    driver.children.clear()
+    driver.childEvents.clear()
     driver.device.currentValues.clear()
     driver.settings.ip = '192.168.1.214'
     driver.settings.port = 80
@@ -80,5 +82,24 @@ class ESPHomeRATGDOGarageDoorSpec extends Specification {
     driver.events.find { Map event -> event.name == 'lock' }?.value == 'locked'
     driver.events.find { Map event -> event.name == 'motion' }?.value == 'active'
     driver.events.find { Map event -> event.name == 'obstruction' }?.value == 'clear'
+  }
+
+  def "BLE device-tracker POSTs create and update presence children"() {
+    when: 'the tracker first reports home'
+    driver.parse('{"id":"device-tracker-daniel_iphone","value":true}')
+
+    then:
+    driver.children.size() == 1
+    driver.children[0].displayName == 'Test Device - daniel_iphone'
+    driver.childEvents == [[device: driver.children[0], name: 'presence', value: 'present',
+                            descriptionText: 'daniel_iphone is home']]
+
+    when: 'the same tracker reports away'
+    driver.parse('{"id":"device-tracker-daniel_iphone","value":false}')
+
+    then:
+    driver.children.size() == 1
+    driver.childEvents.last() == [device: driver.children[0], name: 'presence', value: 'not present',
+                                  descriptionText: 'daniel_iphone is away']
   }
 }
