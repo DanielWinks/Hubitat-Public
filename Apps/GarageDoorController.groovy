@@ -362,7 +362,8 @@ void refreshRelayState() {
 // (via installed/updated/initialize) so it always exists before any
 // subscriptions or event handlers reference it.
 //
-// Child capabilities: GarageDoorControl (door) + ContactSensor (contact)
+// Child capabilities: GarageDoorControl (door) + ContactSensor (contact) +
+// Refresh (refreshes the configured RATGDO device and re-publishes state)
 // =============================================================================
 
 ChildDeviceWrapper getDoorController() {
@@ -788,6 +789,23 @@ void componentOpen(DeviceWrapper device) {
 void componentStop(DeviceWrapper device) {
     if (isRemoteAccessDisabled()) { return }
     stopDoor()
+}
+
+/**
+ * Refreshes the configured RATGDO device when the child device's refresh
+ * command is invoked, then re-publishes the refreshed door and contact state.
+ * RATGDO refreshes asynchronously, so the child reconciliation is deferred
+ * briefly to allow its refresh callbacks to update the device attributes.
+ */
+void componentRefresh(DeviceWrapper device) {
+    if (hasRATGDO()) {
+        logInfo('Refreshing RATGDO state from the child device.')
+        ratgdoDoor.refresh()
+        runIn(2, 'processContactSensors', [overwrite: true])
+    } else {
+        logDebug('Refreshing child state from configured contact sensors.')
+        processContactSensors()
+    }
 }
 
 /**

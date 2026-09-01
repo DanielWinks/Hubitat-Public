@@ -32,6 +32,7 @@ metadata {
         capability 'GarageDoorControl'
         capability 'Lock'
         capability 'MotionSensor'
+        capability 'Refresh'
         capability 'Sensor'
         capability 'Switch'
 
@@ -43,19 +44,7 @@ metadata {
     }
 
     preferences {
-        input name: 'logEnable', type: 'bool', title: 'Enable Logging', required: false, defaultValue: true
-        input name: 'debugLogEnable', type: 'bool', title: 'Enable Debug Logging', required: false, defaultValue: true
-        input name: 'ip', type: 'text', title: 'RATGDO IP Address', required: true
-        input name: 'port', type: 'number', title: 'HTTP Port', required: true, defaultValue: 80
-        input name: 'coverEntityId', type: 'text', title: 'ESPHome Cover Entity ID',
-            required: true, defaultValue: 'door',
-            description: 'The REST entity ID, normally derived from the ESPHome cover name. For name "Door", use "door".'
-        input name: 'lightEntityId', type: 'text', title: 'ESPHome Light Entity ID',
-            required: true, defaultValue: 'light',
-            description: 'The REST entity ID for the RATGDO light. The supplied configuration uses "light".'
-        input name: 'remoteLockEntityId', type: 'text', title: 'ESPHome Remote Lock Entity ID',
-            required: true, defaultValue: 'remotes',
-            description: 'The REST entity ID for the RATGDO remote-control lock. The supplied configuration uses "remotes".'
+        input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
     }
 }
 
@@ -67,12 +56,10 @@ metadata {
 @Field static final String STATE_UNKNOWN = 'unknown'
 @Field static final String DEVICE_TRACKER_PREFIX = 'device-tracker-'
 @Field static final String PRESENCE_CHILD_DRIVER = 'Generic Component Presence Sensor'
+@Field static final String HUBITAT_IP_SET = '/text/hubitat_ip/set'
 
 void installed() {
     initialize()
-    if (settings.debugLogEnable != false) {
-        runIn(1800, 'debugLogsOff')
-    }
 }
 
 void updated() {
@@ -88,13 +75,25 @@ void initialize() {
 }
 
 void configure() {
-    final String host = settings.ip?.toString()?.trim()
+    final String host = connectionIp()
     if (!host) {
         logWarn('RATGDO IP address is not configured')
         return
     }
     device.setDeviceNetworkId(getMACFromIP(host))
+    configureHubitatCallback()
     unschedule('scheduledRefresh')
+}
+
+private void configureHubitatCallback() {
+    String hubIp = location?.hub?.localIP?.toString()
+    if (!hubIp) { return }
+    try {
+        String callback = java.net.URLEncoder.encode("http://${hubIp}:39501", 'UTF-8')
+        asynchttpPost('commandCallback', [uri: "${baseUrl()}${HUBITAT_IP_SET}?value=${callback}"], [action: 'configure callback'])
+    } catch (Exception exception) {
+        logWarn("Unable to configure Hubitat callback URL: ${exception.message}")
+    }
 }
 
 void open() {
@@ -109,6 +108,20 @@ void close() {
 
 void stop() {
     sendCommandAsync('stop')
+}
+
+void refresh() {
+    ["${coverPath()}", "${baseUrl()}/light/${lightEntityId()}", "${baseUrl()}/lock/${remoteLockEntityId()}",
+     "${baseUrl()}/binary_sensor/motion", "${baseUrl()}/binary_sensor/obstruction"].each { String uri ->
+        try { asynchttpGet('refreshCallback', [uri: uri], [uri: uri]) }
+        catch (Exception exception) { logWarn("RATGDO refresh failed for ${uri}: ${exception.message}") }
+    }
+}
+
+void refreshCallback(AsyncResponse response, Map data = null) {
+    if (response?.hasError()) { logWarn("RATGDO refresh failed for ${data?.uri ?: ''}: ${response?.getErrorData()}"); return }
+    String body = response?.getData()?.toString()
+    if (body) { processInboundMessage(parseInboundJson(body)) }
 }
 
 void on() {
@@ -152,22 +165,28 @@ private void sendEntityCommandAsync(final String entityType, final String entity
 }
 
 private String coverPath() {
-    final String entityId = settings.coverEntityId?.toString()?.trim() ?: 'door'
-    return "${baseUrl()}/cover/${entityId}"
+    return "${baseUrl()}/cover/door"
 }
 
 private String baseUrl() {
-    final String host = settings.ip?.toString()?.trim()
-    final String portValue = settings.port?.toString()?.trim() ?: '80'
+    final String host = connectionIp()
+    final String portValue = connectionPort().toString()
     return "http://${host}:${portValue}"
 }
 
 private String lightEntityId() {
-    return settings.lightEntityId?.toString()?.trim() ?: 'light'
+    return 'light'
 }
 
 private String remoteLockEntityId() {
-    return settings.remoteLockEntityId?.toString()?.trim() ?: 'remotes'
+    return 'remotes'
+}
+
+private String connectionIp() { return device.getDataValue('ipAddress') ?: settings?.ip?.toString()?.trim() }
+
+private Integer connectionPort() {
+    try { return Integer.valueOf(device.getDataValue('port') ?: settings?.port ?: '80') }
+    catch (Exception ignored) { return 80 }
 }
 
 void parse(final String message) {
@@ -202,6 +221,7 @@ private Map parseInboundJson(final String body) {
 }
 
 private void processInboundMessage(final Map jsonData) {
+    if (!jsonData) { return }
     final String eventId = jsonData.id?.toString()
     if (!eventId) {
         logWarn("RATGDO event is missing an id: ${jsonData}")
@@ -216,18 +236,23 @@ private void processInboundMessage(final Map jsonData) {
 
     switch (eventId) {
         case 'cover-door':
+        case 'cover/door':
             processCoverEvent(jsonData.value)
             break
         case 'light-light':
+        case 'light/light':
             processBooleanEvent('switch', jsonData.value, 'on', 'off', eventId)
             break
         case 'lock-remotes':
+        case 'lock/remotes':
             processBooleanEvent('lock', jsonData.value, 'locked', 'unlocked', eventId)
             break
         case 'binary_sensor-motion':
+        case 'binary_sensor/motion':
             processBooleanEvent('motion', jsonData.value, 'active', 'inactive', eventId)
             break
         case 'binary_sensor-obstruction':
+        case 'binary_sensor/obstruction':
             processBooleanEvent('obstruction', jsonData.value, 'detected', 'clear', eventId)
             break
         default:
@@ -312,33 +337,22 @@ private static Boolean parseBoolean(final Object value) {
     return null
 }
 
-private void logError(final String message) {
-    if (settings.logEnable != false) {
-        log.error("${device.displayName}: ${message}")
-    }
-}
+private void logError(final String message) { writeLog('error', message) }
+private void logWarn(final String message) { writeLog('warn', message) }
+private void logDebug(final String message) { writeLog('debug', message) }
+private void logInfo(final String message) { writeLog('info', message) }
+private void logTrace(final String message) { writeLog('trace', message) }
 
-private void logWarn(final String message) {
-    if (settings.logEnable != false) {
-        log.warn("${device.displayName}: ${message}")
-    }
-}
-
-private void logDebug(final String message) {
-    if (settings.logEnable != false && settings.debugLogEnable != false) {
-        log.debug("${device.displayName}: ${message}")
-    }
-}
-
-private void logInfo(final String message) {
-    if (settings.logEnable != false) {
-        log.info("${device.displayName}: ${message}")
-    }
-}
-
-void debugLogsOff() {
-    logWarn('Debug logging disabled')
-    device.updateSetting('debugLogEnable', [value: 'false', type: 'bool'])
+private void writeLog(final String level, final String message) {
+    List<String> levels = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+    String configured = levels.contains(settings?.logLevel?.toString()) ? settings.logLevel.toString() : 'info'
+    if (configured == 'off' || levels.indexOf(level) < levels.indexOf(configured)) { return }
+    String prefix = device?.displayName ?: 'ESPHome RATGDO'
+    if (level == 'error') { log.error("${prefix}: ${message}") }
+    else if (level == 'warn') { log.warn("${prefix}: ${message}") }
+    else if (level == 'info') { log.info("${prefix}: ${message}") }
+    else if (level == 'debug') { log.debug("${prefix}: ${message}") }
+    else { log.trace("${prefix}: ${message}") }
 }
 
 private void emitIfChanged(final String attribute, final Object value) {

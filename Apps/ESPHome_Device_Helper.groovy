@@ -15,8 +15,10 @@
  **/
 
 import groovy.transform.Field
+import hubitat.scheduling.AsyncResponse
 
 @Field static final String ESPHOME_MDNS_SERVICE = '_esphomelib._tcp'
+@Field static final String ESPHOME_HTTP_MDNS_SERVICE = '_http._tcp'
 @Field static final Integer DISCOVERY_DURATION_SECONDS = 60
 @Field static final Integer DISCOVERY_POLL_SECONDS = 5
 
@@ -83,6 +85,7 @@ preferences {
 
 Map mainPage() {
     ensureState()
+    applyPendingESPHomeLabel()
     syncProvisionedChildSettings()
     if (!isDiscoveryRunning()) { startDiscovery(false) }
     Integer remainingSeconds = getRemainingDiscoverySeconds()
@@ -107,14 +110,23 @@ Map mainPage() {
     // Discovery results and the timer are refreshed through SSR events instead.
     return dynamicPage(name: 'mainPage', title: 'ESPHome Device Helper', refreshInterval: 0, install: true, uninstall: true) {
         section {
-            paragraph '<p>Discovery listens only for ESPHome\'s <code>_esphomelib._tcp</code> mDNS service.</p>'
+            paragraph '<p>Discovery listens on ESPHome API and HTTP mDNS records and verifies each candidate with the ESPHome web server.</p>'
             String timerText = isDiscoveryRunning() ? "<b>Discovery running:</b> ${remainingSeconds} seconds remaining" : '<b>Discovery is stopped.</b>'
             paragraph "<span class='ssr-app-state-${app.id}-discoveryTimer'>${timerText}</span>"
             input name: 'btnExtendDiscovery', type: 'button', title: 'Extend discovery (60 seconds)', submitOnChange: true
         }
         section('Discovered ESPHome devices') { paragraph displayDiscoveryTable() }
         section {
-            paragraph '<small>Use the green add button in the discovery table to create a power-monitoring child device. Only plaintext ESPHome native API devices are supported.</small>'
+            paragraph '<small>Use the green add button in the discovery table to create an ESPHome child device. Candidates are verified over HTTP before appearing here.</small>'
+        }
+        if (state.pendingCreateESPHome) {
+            Map pendingCreate = (atomicState.discoveredESPHome ?: [:])[state.pendingCreateESPHome] as Map
+            section {
+                paragraph "<b>Create '${escapeHtml(pendingCreate?.friendlyName ?: state.pendingCreateESPHome)}'</b>"
+                input name: 'espHomeDriverSelection', type: 'enum', title: 'Driver', options: availableESPHomeDrivers(), defaultValue: state.pendingESPHomeDriver ?: 'ESPHome Power Monitoring Switch', required: true, submitOnChange: true
+                input name: 'btnConfirmCreateESPHome', type: 'button', title: 'Create device', submitOnChange: true
+                input name: 'btnCancelCreateESPHome', type: 'button', title: 'Cancel', submitOnChange: true
+            }
         }
         if (state.pendingDeleteESPHome) {
             Map pending = (atomicState.discoveredESPHome ?: [:])[state.pendingDeleteESPHome] as Map
@@ -122,6 +134,14 @@ Map mainPage() {
                 paragraph "<b>Remove '${escapeHtml(pending?.friendlyName ?: state.pendingDeleteESPHome)}'?</b> This deletes its Hubitat child device."
                 input name: 'btnConfirmRemoveESPHome', type: 'button', title: 'Yes, remove device', submitOnChange: true
                 input name: 'btnCancelRemoveESPHome', type: 'button', title: 'Cancel', submitOnChange: true
+            }
+        }
+        if (state.pendingLabelEditESPHome) {
+            Map pendingLabel = (atomicState.discoveredESPHome ?: [:])[state.pendingLabelEditESPHome] as Map
+            section {
+                input name: 'espHomeLabelValue', type: 'text', title: "Name for ${pendingLabel?.hostname ?: state.pendingLabelEditESPHome}", defaultValue: pendingLabel?.friendlyName ?: pendingLabel?.hostname, required: true, submitOnChange: true
+                input name: 'btnSaveESPHomeLabel', type: 'button', title: 'Save name', submitOnChange: true
+                input name: 'btnCancelESPHomeLabel', type: 'button', title: 'Cancel', submitOnChange: true
             }
         }
         section('Logging', hideable: true) {
@@ -156,8 +176,8 @@ private void syncProvisionedChildSettings() {
         if (!dni || !record?.ipAddress) { return }
         Object child = getChildDevices().find { Object candidate -> candidate.deviceNetworkId == dni }
         if (!child) { return }
-        child.updateSetting('ipAddress', [value: record.ipAddress.toString(), type: 'text'])
-        child.updateSetting('port', [value: (record.port ?: 6053).toString(), type: 'number'])
+        String driverName = record.driverName?.toString() ?: child.typeName?.toString()
+        configureChildConnection(child, record, driverName, "http://${location.hub.localIP}:39501", false)
         if (!child.currentValue('networkStatus') || child.currentValue('networkStatus') == 'offline') { child.initialize() }
     }
 }
@@ -170,7 +190,15 @@ void onUninstalled() {
 
 void appButtonHandler(String buttonName) {
     if (buttonName == 'btnExtendDiscovery') { extendDiscovery(DISCOVERY_DURATION_SECONDS) }
-    if (buttonName?.startsWith('createESPHome|')) { createESPHomeDevice(buttonName.substring('createESPHome|'.length())) }
+    if (buttonName?.startsWith('createESPHome|')) { state.pendingCreateESPHome = buttonName.substring('createESPHome|'.length()) }
+    if (buttonName == 'btnConfirmCreateESPHome') {
+        String selected = state.pendingCreateESPHome?.toString()
+        String driver = settings?.espHomeDriverSelection?.toString() ?: 'ESPHome Power Monitoring Switch'
+        state.remove('pendingCreateESPHome')
+        state.remove('pendingESPHomeDriver')
+        createESPHomeDevice(selected, driver)
+    }
+    if (buttonName == 'btnCancelCreateESPHome') { state.remove('pendingCreateESPHome') }
     if (buttonName?.startsWith('removeESPHome|')) { state.pendingDeleteESPHome = buttonName.substring('removeESPHome|'.length()) }
     if (buttonName == 'btnConfirmRemoveESPHome') {
         String selected = state.pendingDeleteESPHome?.toString()
@@ -178,37 +206,66 @@ void appButtonHandler(String buttonName) {
         removeESPHomeDevice(selected)
     }
     if (buttonName == 'btnCancelRemoveESPHome') { state.remove('pendingDeleteESPHome') }
+    if (buttonName?.startsWith('editESPHome|')) {
+        state.pendingLabelEditESPHome = buttonName.substring('editESPHome|'.length())
+        app.removeSetting('espHomeLabelValue')
+    }
+    if (buttonName == 'btnSaveESPHomeLabel') { /* Applied on the following page render. */ }
+    if (buttonName == 'btnCancelESPHomeLabel') {
+        state.remove('pendingLabelEditESPHome')
+        app.removeSetting('espHomeLabelValue')
+    }
 }
 
-private void createESPHomeDevice(String selected) {
+private void applyPendingESPHomeLabel() {
+    String selected = state.pendingLabelEditESPHome?.toString()
+    String label = settings?.espHomeLabelValue?.toString()?.trim()
+    Map record = selected ? ((atomicState.discoveredESPHome ?: [:]) as Map)[selected] as Map : null
+    if (!record || !label) { logWarn('Enter a name before saving'); return }
+    record.friendlyName = label
+    if (record.childDni) {
+        Object child = getChildDevices().find { Object candidate -> candidate.deviceNetworkId == record.childDni.toString() }
+        if (child) { child.setLabel(label) }
+    }
+    Map devices = new LinkedHashMap((atomicState.discoveredESPHome ?: [:]) as Map)
+    devices[selected] = record
+    atomicState.discoveredESPHome = devices
+    state.remove('pendingLabelEditESPHome')
+    app.removeSetting('espHomeLabelValue')
+    logInfo("Updated ESPHome device name to ${label}")
+    app.sendEvent(name: 'discoveryTable', value: 'updated')
+}
+
+private void createESPHomeDevice(String selected, String requestedDriver = 'ESPHome Power Monitoring Switch') {
     ensureState()
     Map record = selected ? ((atomicState.discoveredESPHome ?: [:]) as Map)[selected] as Map : null
     if (!record) { logWarn('Select a discovered ESPHome device before creating a child device'); return }
     if (!record.ipAddress) { logWarn("${record.friendlyName ?: record.hostname} has no IPv4 address"); return }
-    if (isEncryptedApi(record.apiEncryption)) {
-        logWarn("${record.friendlyName ?: record.hostname} advertises encrypted API; plaintext native API support is required")
-        return
-    }
     String dni = stableChildDni(record)
-    String driverName = resolveESPHomeDriver(record)
+    String driverName = resolveESPHomeDriver(record, requestedDriver)
+    String callbackUrl = "http://${location.hub.localIP}:39501"
     Map props = [label: record.friendlyName ?: record.hostname, name: record.friendlyName ?: record.hostname,
-                 ipAddress: record.ipAddress, port: (record.port ?: 6053) as Integer]
+                 data: [ipAddress: record.ipAddress, port: '80', hubitatCallbackUrl: callbackUrl]]
     try {
         Object child = getChildDevices().find { Object candidate -> candidate.deviceNetworkId == dni }
+        if (!child && record.childDni) {
+            // Adopt children created by older versions, which prefixed the MAC.
+            child = getChildDevices().find { Object candidate -> candidate.deviceNetworkId == record.childDni.toString() }
+            if (child) { child.setDeviceNetworkId(dni) }
+        }
         if (child) {
-            child.updateSetting('ipAddress', [value: record.ipAddress.toString(), type: 'text'])
-            child.updateSetting('port', [value: (record.port ?: 6053).toString(), type: 'number'])
-            child.initialize()
+            configureChildConnection(child, record, driverName, callbackUrl)
             record.childDni = dni
+            record.childDeviceId = child.id
+            record.driverName = driverName
             record.apiStatus = 'updated'
             logInfo("Updated ESPHome child device ${dni}")
         } else {
             child = addChildDevice('dwinks', driverName, dni, props)
-            child.updateSetting('ipAddress', [value: record.ipAddress.toString(), type: 'text'])
-            child.updateSetting('port', [value: (record.port ?: 6053).toString(), type: 'number'])
-            child.initialize()
+            configureChildConnection(child, record, driverName, callbackUrl)
             record.childDni = dni
             record.childDeviceId = child?.id
+            record.driverName = driverName
             record.apiStatus = 'created'
             logInfo("Created ESPHome power-monitoring child device ${dni} using ${driverName}")
         }
@@ -223,10 +280,32 @@ private void createESPHomeDevice(String selected) {
     }
 }
 
-private String resolveESPHomeDriver(Map record) {
+private Map<String, String> availableESPHomeDrivers() {
+    return [
+        'ESPHome Power Monitoring Switch': 'Power Monitoring Switch',
+        'ESPHome RATGDO Garage Door': 'RATGDO Garage Door'
+    ]
+}
+
+private String resolveESPHomeDriver(Map record, String requestedDriver) {
     // Keep driver selection centralized so additional ESPHome device profiles can
     // be added without changing the discovery table or button handling.
-    return 'ESPHome Power Monitoring Switch'
+    return availableESPHomeDrivers().containsKey(requestedDriver) ? requestedDriver : 'ESPHome Power Monitoring Switch'
+}
+
+private void configureChildConnection(Object child, Map record, String driverName, String callbackUrl, Boolean refreshAfter = true) {
+    if (driverName == 'ESPHome RATGDO Garage Door') {
+        child.updateDataValue('ipAddress', record.ipAddress.toString())
+        child.updateDataValue('port', '80')
+        child.updateDataValue('hubitatCallbackUrl', callbackUrl)
+    } else {
+        child.updateDataValue('ipAddress', record.ipAddress.toString())
+        child.updateDataValue('port', '80')
+        child.updateDataValue('hubitatCallbackUrl', callbackUrl)
+    }
+    child.initialize()
+    // Seed the child with current ESPHome values immediately after creation.
+    if (refreshAfter) { child.refresh() }
 }
 
 private void removeESPHomeDevice(String selected) {
@@ -249,14 +328,10 @@ private void removeESPHomeDevice(String selected) {
     }
 }
 
-private Boolean isEncryptedApi(Object value) {
-    return value != null && ['true', 'yes', '1', 'noise'].contains(value.toString().trim().toLowerCase())
-}
-
 private String stableChildDni(Map record) {
     String source = (record.mac ?: record.hostname ?: record.ipAddress ?: 'unknown').toString()
     String normalized = source.replaceAll('[^A-Za-z0-9]', '').toUpperCase()
-    return "esphome-${normalized ?: Math.abs(source.hashCode())}"
+    return normalized ?: "esphome-${Math.abs(source.hashCode())}"
 }
 
 void systemStartHandler(Map event) { startMdnsDiscovery() }
@@ -264,6 +339,7 @@ void systemStartHandler(Map event) { startMdnsDiscovery() }
 void startMdnsDiscovery() {
     try {
         registerMDNSListener(ESPHOME_MDNS_SERVICE)
+        registerMDNSListener(ESPHOME_HTTP_MDNS_SERVICE)
         logDebug("Registered mDNS listener: ${ESPHOME_MDNS_SERVICE}")
     } catch (Exception exception) {
         logWarn("Could not register ${ESPHOME_MDNS_SERVICE}: ${exception.message}")
@@ -271,7 +347,10 @@ void startMdnsDiscovery() {
 }
 
 void unregisterMdnsListener() {
-    try { unregisterMDNSListener(ESPHOME_MDNS_SERVICE) }
+    try {
+        unregisterMDNSListener(ESPHOME_MDNS_SERVICE)
+        unregisterMDNSListener(ESPHOME_HTTP_MDNS_SERVICE)
+    }
     catch (Exception exception) { logTrace("Could not unregister ${ESPHOME_MDNS_SERVICE}: ${exception.message}") }
 }
 
@@ -326,15 +405,21 @@ void updateDiscoveryTimer() {
 void processMdnsDiscovery() {
     if (!isDiscoveryRunning()) { return }
     try {
-        List<Map> entries = (getMDNSEntries(ESPHOME_MDNS_SERVICE) ?: []) as List<Map>
-        Integer beforeCount = (atomicState.discoveredESPHome as Map).size()
-        entries.each { Map entry -> mergeMdnsEntry(entry) }
-        Integer afterCount = (atomicState.discoveredESPHome as Map).size()
-        if (afterCount != beforeCount) {
-            logInfo("Discovered ${afterCount - beforeCount} new ESPHome device(s); ${afterCount} total")
-            app.sendEvent(name: 'discoveryTable', value: 'updated')
+        [ESPHOME_MDNS_SERVICE, ESPHOME_HTTP_MDNS_SERVICE].each { String service ->
+            List<Map> entries = (getMDNSEntries(service) ?: []) as List<Map>
+            entries.each { Map entry ->
+                logTrace("mDNS ${service} raw entry: ${entry}")
+                if (service == ESPHOME_MDNS_SERVICE) {
+                    // _esphomelib._tcp is the ESPHome native API service. Its
+                    // port is normally 6053, so it cannot be HTTP-verified.
+                    mergeMdnsEntry(entry)
+                    app.sendEvent(name: 'discoveryTable', value: 'updated')
+                } else {
+                    verifyHttpMdnsEntry(entry)
+                }
+            }
+            logTrace("Processed ${entries.size()} ${service} candidates")
         }
-        logTrace("Processed ${entries.size()} ${ESPHOME_MDNS_SERVICE} entries")
     } catch (Exception exception) {
         logWarn("Error processing ESPHome mDNS entries: ${exception.message}")
     }
@@ -344,13 +429,20 @@ void processMdnsDiscovery() {
 private void mergeMdnsEntry(Map entry) {
     String hostname = cleanHostname(entry?.server ?: entry?.name ?: '')
     String ipAddress = extractIpv4(entry?.ip4Addresses ?: entry?.ipAddress)
-    Integer port = parseInteger(entry?.port) ?: 6053
-    Map properties = entry?.properties instanceof Map ? (entry.properties as Map) : [:]
-    if (entry?.txt instanceof Map) { properties.putAll(entry.txt as Map) }
-    String mac = firstText(entry?.mac, entry?.macAddress, properties.mac)
+    Integer port = parseInteger(entry?.port) ?: 80
+    Map properties = mdnsProperties(entry)
+    String mac = firstText(entry?.mac, entry?.macAddress, properties.mac, properties.macaddress)
     String key = (mac ?: hostname ?: ipAddress).toLowerCase()
+    logTrace("mDNS merge: hostname=${hostname}, ip=${ipAddress}, port=${port}, mac=${mac}, version=${firstText(entry?.version, entry?.ver, properties.version)}, properties=${properties}")
     if (!key) { return }
-    Map existing = ((atomicState.discoveredESPHome as Map)[key] ?: [:]) as Map
+    Map discoveredBefore = (atomicState.discoveredESPHome ?: [:]) as Map
+    String existingKey = discoveredBefore.keySet().find { Object candidateKey ->
+        Map candidate = discoveredBefore[candidateKey] as Map
+        return candidateKey.toString().equalsIgnoreCase(key) ||
+            (hostname && candidate?.hostname?.toString()?.equalsIgnoreCase(hostname)) ||
+            (ipAddress && candidate?.ipAddress?.toString() == ipAddress)
+    }?.toString()
+    Map existing = (existingKey ? discoveredBefore[existingKey] : discoveredBefore[key] ?: [:]) as Map
     Map updated = new LinkedHashMap(existing)
     updated.id = key
     updated.hostname = hostname ?: existing.hostname ?: key
@@ -366,8 +458,92 @@ private void mergeMdnsEntry(Map entry) {
     updated.firstSeen = existing.firstSeen ?: now()
     updated.lastSeen = now()
     Map discovered = new LinkedHashMap((atomicState.discoveredESPHome ?: [:]) as Map)
+    if (existingKey && existingKey != key) { discovered.remove(existingKey) }
     discovered[key] = updated
     atomicState.discoveredESPHome = discovered
+}
+
+private void verifyHttpMdnsEntry(Map entry) {
+    String ipAddress = extractIpv4(entry?.ip4Addresses ?: entry?.ipAddress)
+    Integer port = parseInteger(entry?.port) ?: 80
+    String key = mdnsEntryKey(entry, ipAddress)
+    logTrace("mDNS candidate: key=${key}, ip=${ipAddress}, port=${port}, properties=${mdnsProperties(entry)}")
+    if (!key || !ipAddress) { return }
+    Map pending = (atomicState.pendingHttpVerification ?: [:]) as Map
+    if (pending[key]) { return }
+    if (((atomicState.discoveredESPHome ?: [:]) as Map).containsKey(key)) {
+        mergeMdnsEntry(entry)
+        app.sendEvent(name: 'discoveryTable', value: 'updated')
+        return
+    }
+    pending[key] = now()
+    atomicState.pendingHttpVerification = pending
+    try {
+        asynchttpGet('verifyEspHomeHttpCallback', [uri: "http://${ipAddress}:${port}/", timeout: 3], [key: key, entry: entry])
+    } catch (Exception exception) {
+        pending.remove(key)
+        atomicState.pendingHttpVerification = pending
+        logTrace("HTTP verification failed for ${ipAddress}: ${exception.message}")
+    }
+}
+
+void verifyEspHomeHttpCallback(AsyncResponse response, Map data = null) {
+    String key = data?.key?.toString()
+    Map pending = (atomicState.pendingHttpVerification ?: [:]) as Map
+    pending.remove(key)
+    atomicState.pendingHttpVerification = pending
+    if (response?.hasError()) { return }
+    String body = response?.getData()?.toString()?.toLowerCase() ?: ''
+    if (!(body.contains('esphome') || body.contains('/events') || body.contains('web_server'))) {
+        logTrace("Rejected non-ESPHome HTTP mDNS candidate ${key}")
+        return
+    }
+    mergeMdnsEntry(data?.entry as Map)
+    logInfo("Verified ESPHome device ${key} over HTTP")
+    app.sendEvent(name: 'discoveryTable', value: 'updated')
+}
+
+private String mdnsEntryKey(Map entry, String ipAddress) {
+    String hostname = cleanHostname(entry?.server ?: entry?.name ?: '')
+    Map properties = mdnsProperties(entry)
+    String mac = firstText(entry?.mac, entry?.macAddress, properties.mac, properties.macaddress)
+    return (mac ?: hostname ?: ipAddress).toLowerCase()
+}
+
+/**
+ * Hubitat has returned mDNS TXT records as both maps and collections of
+ * key=value strings across platform releases. ESPHome publishes its identity
+ * (including MAC and firmware version) in those TXT records.
+ */
+private Map mdnsProperties(Map entry) {
+    Map properties = [:]
+    addMdnsProperties(properties, entry)
+    addMdnsProperties(properties, entry?.properties)
+    addMdnsProperties(properties, entry?.txt)
+    addMdnsProperties(properties, entry?.txtRecords)
+    addMdnsProperties(properties, entry?.serviceProperties)
+    return properties
+}
+
+private void addMdnsProperties(Map target, Object source) {
+    if (source instanceof Map) {
+        (source as Map).each { Object key, Object value ->
+            String propertyName = key?.toString()?.trim()?.toLowerCase()
+            if (propertyName) { target[propertyName] = value }
+        }
+        return
+    }
+    if (source instanceof Collection) {
+        (source as Collection).each { Object item -> addMdnsProperties(target, item) }
+        return
+    }
+    String text = source?.toString()?.trim()?.replaceFirst(/^\[/, '')?.replaceFirst(/\]$/, '') ?: ''
+    Integer separator = text.indexOf('=')
+    if (separator > 0) {
+        String propertyName = text.substring(0, separator).trim().replaceAll(/^['"]|['"]$/, '').toLowerCase()
+        String propertyValue = text.substring(separator + 1).trim().replaceAll(/^['"]|['"]$/, '')
+        if (propertyName) { target[propertyName] = propertyValue }
+    }
 }
 
 private String firstText(Object... candidates) {
@@ -402,6 +578,7 @@ private Integer getRemainingDiscoverySeconds() {
 
 private void ensureState() {
     if (!(atomicState.discoveredESPHome instanceof Map)) { atomicState.discoveredESPHome = [:] }
+    if (!(atomicState.pendingHttpVerification instanceof Map)) { atomicState.pendingHttpVerification = [:] }
     if (!(atomicState.recentLogs instanceof List)) { atomicState.recentLogs = [] }
     if (atomicState.discoveryRunning == null) { atomicState.discoveryRunning = false }
 }
@@ -410,16 +587,13 @@ private String renderDiscoveryTable() {
     Map devices = (atomicState.discoveredESPHome ?: [:]) as Map
     if (devices.isEmpty()) { return '<p>No ESPHome devices discovered yet. Discovery is running...</p>' }
     StringBuilder html = new StringBuilder()
-    html.append("<style>.esphome-discovery{width:100%;border-collapse:collapse}.esphome-discovery th,.esphome-discovery td{padding:6px 8px;border:1px solid #ddd;text-align:left;white-space:nowrap;vertical-align:middle}.esphome-discovery th{background:#f5f5f5}.esphome-discovery th:first-child,.esphome-discovery td:first-child{text-align:center;width:42px;padding-left:4px;padding-right:4px}.esphome-discovery td:first-child .form-group{display:none}.esphome-discovery td:first-child .submitOnChange{line-height:20px;vertical-align:middle}.esphome-discovery .device-link a{color:#2196F3;text-decoration:none;font-weight:500}.esphome-discovery .device-link a:hover{text-decoration:underline}</style>")
-    html.append("<div style='overflow-x:auto'><table class='esphome-discovery'><thead><tr><th>Add</th><th>Name</th><th>Hostname</th><th>IP</th><th>Port</th><th>MAC</th><th>Version</th><th>Platform / Board</th><th>Network</th><th>API encryption</th><th>Status</th><th>Last seen</th></tr></thead><tbody>")
+    html.append("<style>.esphome-discovery{width:100%;border-collapse:collapse}.esphome-discovery th,.esphome-discovery td{box-sizing:border-box;padding:6px 8px;border:1px solid #ddd;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}.esphome-discovery th{background:#f5f5f5}.esphome-discovery th:first-child,.esphome-discovery td:first-child{text-align:center;padding-left:4px;padding-right:4px}.esphome-discovery td:first-child .form-group{display:none}.esphome-discovery td:first-child .submitOnChange{line-height:20px;vertical-align:middle}.esphome-discovery .device-link a{color:#2196F3;text-decoration:none;font-weight:500}.esphome-discovery .device-link a:hover{text-decoration:underline}</style>")
+    html.append("<div style='overflow-x:auto'><table class='esphome-discovery' style='table-layout:fixed'><colgroup><col style='width:5%'><col style='width:24.5%'><col style='width:24.5%'><col style='width:16%'><col style='width:10%'><col style='width:9%'><col style='width:11%'></colgroup><thead><tr><th>Add</th><th>Name</th><th>Hostname</th><th>IP</th><th>MAC</th><th>Version</th><th>Last seen</th></tr></thead><tbody>")
     List<Map> rows = devices.values().collect { Object value -> value as Map }.sort { Map left, Map right -> (left.friendlyName ?: left.hostname).toString().toLowerCase() <=> (right.friendlyName ?: right.hostname).toString().toLowerCase() }
     rows.each { Map device ->
-        String platformBoard = [device.platform, device.board].findAll { Object value -> value }.join(' / ')
         String addIcon = "<iconify-icon icon='material-symbols:add-circle-outline-rounded' style='font-size:20px;vertical-align:middle'></iconify-icon>"
         String actionCell
-        if (isEncryptedApi(device.apiEncryption)) {
-            actionCell = "<td title='Encrypted ESPHome API is not supported'><span style='color:#9E9E9E'>${addIcon}</span></td>"
-        } else if (device.apiStatus in ['created', 'updated']) {
+        if (device.apiStatus in ['created', 'updated']) {
             String removeIcon = "<iconify-icon icon='material-symbols:delete-outline' style='font-size:20px;vertical-align:middle'></iconify-icon>"
             actionCell = "<td>${buttonLink("removeESPHome|${device.id}", removeIcon, '#F44336', '20px')}</td>"
         } else {
@@ -430,7 +604,12 @@ private String renderDiscoveryTable() {
         if (device.childDeviceId) {
             safeName = "<a href='/device/edit/${escapeHtml(device.childDeviceId)}' target='_blank'>${safeName}</a>"
         }
-        html.append("${actionCell}<td class='device-link'>${safeName}</td><td>${escapeHtml(device.hostname)}</td><td>${escapeHtml(device.ipAddress)}</td><td>${escapeHtml(device.port)}</td><td>${escapeHtml(device.mac)}</td><td>${escapeHtml(device.version)}</td><td>${escapeHtml(platformBoard)}</td><td>${escapeHtml(device.network)}</td><td>${escapeHtml(isEncryptedApi(device.apiEncryption) ? 'Yes' : 'No')}</td><td>${escapeHtml(device.apiStatus ?: 'discovered')}</td><td>${escapeHtml(formatTimestamp(device.lastSeen))}</td>")
+        String editButton = ''
+        if (device.childDeviceId) {
+            String editIcon = "<iconify-icon icon='material-symbols:edit' style='font-size:14px;vertical-align:middle;margin-left:4px'></iconify-icon>"
+            editButton = buttonLink("editESPHome|${device.id}", editIcon, '#424242', '14px')
+        }
+        html.append("${actionCell}<td class='device-link'>${safeName}${editButton}</td><td>${escapeHtml(device.hostname)}</td><td>${escapeHtml(device.ipAddress)}</td><td>${escapeHtml(device.mac)}</td><td>${escapeHtml(device.version)}</td><td>${escapeHtml(formatTimestamp(device.lastSeen))}</td>")
         html.append('</tr>')
     }
     html.append('</tbody></table></div>')

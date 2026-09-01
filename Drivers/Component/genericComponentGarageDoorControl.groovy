@@ -7,7 +7,7 @@
  *  Alexa, Google Home, etc.
  *
  *  Parent-child communication:
- *    Child → Parent: open() / close() → parent.componentOpen() / componentClose()
+ *    Child → Parent: open() / close() / refresh() → parent component handlers
  *    Parent → Child: sendEvent() for door/contact attributes, setState() for sensor data
  *
  *  MIT License
@@ -41,6 +41,7 @@ metadata {
     ) {
         capability 'GarageDoorControl'  // door  — ENUM ['unknown', 'open', 'closing', 'closed', 'opening']
         capability 'ContactSensor'      // contact — ENUM ['closed', 'open']
+        capability 'Refresh'
         command 'stop'
         command 'clearState'
     }
@@ -86,6 +87,11 @@ void close() {
 void stop() {
     logDebug('Received stop() command — forwarding to parent app.')
     parent?.componentStop(device)
+}
+
+void refresh() {
+    logDebug('Received refresh() command — forwarding to parent app.')
+    parent?.componentRefresh(device)
 }
 
 // =============================================================================
