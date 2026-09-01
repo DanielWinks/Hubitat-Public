@@ -797,7 +797,7 @@ void componentStop(DeviceWrapper device) {
  * RATGDO refreshes asynchronously, so the child reconciliation is deferred
  * briefly to allow its refresh callbacks to update the device attributes.
  */
-void componentRefresh(DeviceWrapper device) {
+void componentRefresh() {
     if (hasRATGDO()) {
         logInfo('Refreshing RATGDO state from the child device.')
         ratgdoDoor.refresh()

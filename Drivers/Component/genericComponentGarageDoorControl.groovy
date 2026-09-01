@@ -91,7 +91,7 @@ void stop() {
 
 void refresh() {
     logDebug('Received refresh() command — forwarding to parent app.')
-    parent?.componentRefresh(device)
+    parent?.componentRefresh()
 }
 
 // =============================================================================
