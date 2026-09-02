@@ -1,6 +1,9 @@
 // =============================================================================
 // SUNRISE SIMULATION APP
 // =============================================================================
+// MIT License
+// Copyright 2023 Daniel Winks (daniel.winks@gmail.com)
+// =============================================================================
 // Author: Daniel Winks
 // Description: Creates a gradual sunrise effect using RGB/RGBW bulbs to help
 //              with gentle wake-up. The animation progresses through three
@@ -18,38 +21,87 @@
 //   - Test button to manually trigger sunrise
 // =============================================================================
 
-// Include the utilities and logging library from the Libraries folder
+// =============================================================================
+// IMPORTS
+// =============================================================================
+
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.hub.domain.Event
+import groovy.transform.CompileStatic
+
+// =============================================================================
+// LOGGING
+// =============================================================================
+
 void logError(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('error')) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
     if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logWarn(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('warn')) {
     if(device) log.warn "${device.label ?: device.name }: ${message}"
     if(app) log.warn "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logInfo(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('info')) {
     if(device) log.info "${device.label ?: device.name }: ${message}"
     if(app) log.info "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logDebug(String message) {
-  if (settings.logEnable != false && settings.debugLogEnable != false) {
+  if (loggingEnabled('debug')) {
     if(device) log.debug "${device.label ?: device.name }: ${message}"
     if(app) log.debug "${app.label ?: app.name }: ${message}"
   }
 }
 
-// Import required Hubitat classes for device interaction and events
-import com.hubitat.app.DeviceWrapper
-import com.hubitat.hub.domain.Event
+/** Returns whether the configured logging level includes the requested level. */
+private boolean loggingEnabled(String messageLevel) {
+  String configuredLevel = settings.loggingLevel
+  if (!configuredLevel) {
+    // Preserve behavior for installations upgraded from the old boolean
+    // logging settings until the new dropdown is saved.
+    if (settings.logEnable == false) {
+      return false
+    }
+    configuredLevel = (settings.debugLogEnable == true) ? 'debug' : 'info'
+  }
+  return isLogLevelEnabled(configuredLevel, messageLevel)
+}
+
+/**
+ * Compares logging levels without accessing Hubitat runtime objects. This is
+ * intentionally statically compiled.
+ */
+@CompileStatic
+private static boolean isLogLevelEnabled(String configuredLevel, String messageLevel) {
+  Integer configuredRank = logLevelRank(configuredLevel)
+  Integer messageRank = logLevelRank(messageLevel)
+  return configuredRank > 0 && messageRank > 0 && messageRank <= configuredRank
+}
+
+/** Converts a logging level into its filtering rank. */
+@CompileStatic
+private static Integer logLevelRank(String level) {
+  switch (level?.toLowerCase()) {
+    case 'error':
+      return 1
+    case 'warn':
+      return 2
+    case 'info':
+      return 3
+    case 'debug':
+      return 4
+    default:
+      return 0
+  }
+}
 
 /**
  * definition() - Defines app metadata for Hubitat
@@ -121,11 +173,11 @@ Map mainPage() {
         multiple: true
       )
 
-      // Snooze switches - turning these on stops current sunrise and reschedules
+      // Snooze buttons - pressing one stops current sunrise and reschedules
       input(
-        'snoozeSwitches',
-        'capability.switch',
-        title: 'Snooze Sunrise with switches',
+        'snoozeButtons',
+        'capability.pushableButton',
+        title: 'Snooze Sunrise with buttons',
         required: false,
         multiple: true
       )
@@ -171,41 +223,20 @@ Map mainPage() {
     // =========================================================================
     // Configure logging verbosity and provide testing buttons
     section('<h2>Logging</h2>') {
-      // Enable/disable general informational logging
+      // Select the most detailed level that should be logged
       input(
-        'logEnable',
-        'bool',
-        title: 'Enable Logging',
+        'loggingLevel',
+        'enum',
+        title: 'Logging level',
+        options: [
+          off: 'Off',
+          error: 'Errors only',
+          warn: 'Warnings and errors',
+          info: 'Informational (recommended)',
+          debug: 'Debug'
+        ],
         required: false,
-        defaultValue: true
-      )
-
-      // Enable/disable detailed debug logging (verbose)
-      input(
-        'debugLogEnable',
-        'bool',
-        title: 'Enable debug logging',
-        required: false,
-        defaultValue: false
-      )
-
-      // Enable/disable description text in logs
-      input(
-        'descriptionTextEnable',
-        'bool',
-        title: 'Enable descriptionText logging',
-        required: false,
-        defaultValue: true
-      )
-
-      // Button to reinitialize the app (reschedule, resubscribe, etc.)
-      input(
-        name: 'initializeBtn',
-        type: 'button',
-        title: 'Initialize',
-        backgroundColor: 'Crimson',
-        textColor: 'white',
-        submitOnChange: true
+        defaultValue: 'info'
       )
 
       // Button to manually trigger a test sunrise immediately
@@ -233,14 +264,26 @@ Map mainPage() {
 }
 
 // =============================================================================
-// Lifecycle & Configuration
+// LIFECYCLE & CONFIGURATION
 // =============================================================================
 
 /**
- * configure() - Called when the app configuration changes
- * This method clears all existing subscriptions and reinitializes the app
- * to ensure the new settings take effect properly.
+ * Clears this app's runtime state.
+ *
+ * This app is not a device, so the generic library implementation cannot be
+ * called unless the library is included. Keeping the small app-specific
+ * implementation here also avoids importing unrelated library methods.
  */
+void clearAllStates() {
+  state.clear()
+}
+
+/** Reinitializes the app whenever settings are saved, including Done. */
+void updated() {
+  configure()
+}
+
+/** Clears subscriptions and reinitializes the app configuration. */
 void configure() {
   unsubscribe() // Remove all existing event subscriptions
   initialize()  // Reinitialize the app with new settings
@@ -267,14 +310,14 @@ void initialize() {
  * subscribeEventHandlers() - Sets up event listeners for user control switches
  * This subscribes to switch events so the app can respond when users interact with:
  * - Disable switches: Immediately stop the sunrise animation
- * - Snooze switches: Temporarily pause and reschedule the sunrise
+ * - Snooze buttons: Temporarily pause and reschedule the sunrise
  */
 private void subscribeEventHandlers() {
   // Listen for disable switch events (on/off changes)
   subscribe(disableSwitches, 'switch', 'disableEvent')
 
-  // Listen for snooze switch events (on/off changes)
-  subscribe(snoozeSwitches, 'switch', 'snoozeSwitchEvent')
+  // Listen for snooze button presses
+  subscribe(snoozeButtons, 'pushed', 'snoozeButtonEvent')
 }
 
 /**
@@ -296,15 +339,26 @@ private void calculateStageDurations() {
 
   // Calculate interval for stage 1 (10 steps across 1/3 of total time)
   // Minimum interval is 1 second to avoid overwhelming the hub
-  state.stage1interval = (Math.round(stageSecs / 10) > 1) ? Math.round(stageSecs / 10) : 1
+  state.stage1interval = calculateInterval(stageSecs, 10)
 
   // Calculate interval for stage 2 (40 steps across 1/3 of total time)
   // More steps means shorter intervals for smoother transition
-  state.stage2interval = (Math.round(stageSecs / 40) > 1) ? Math.round(stageSecs / 40) : 1
+  state.stage2interval = calculateInterval(stageSecs, 40)
 
   // Calculate interval for stage 3 (80 steps across 1/3 of total time)
   // Finest granularity for the final brightening phase
-  state.stage3interval = (Math.round(stageSecs / 80) > 1) ? Math.round(stageSecs / 80) : 1
+  state.stage3interval = calculateInterval(stageSecs, 80)
+}
+
+/**
+ * Calculates a safe animation interval without accessing Hubitat runtime
+ * objects. This is intentionally statically compiled.
+ */
+@CompileStatic
+private static Integer calculateInterval(Integer stageSeconds, Integer stepCount) {
+  double intervalValue = stageSeconds.doubleValue() / stepCount.doubleValue()
+  Integer interval = (Integer) Math.round(intervalValue)
+  return (interval > 1) ? interval : 1
 }
 
 /**
@@ -325,7 +379,7 @@ private void scheduleSunrise() {
 }
 
 // =============================================================================
-// UI Button Handlers
+// UI BUTTON HANDLERS
 // =============================================================================
 
 /**
@@ -337,10 +391,6 @@ private void scheduleSunrise() {
  */
 void appButtonHandler(String buttonId) {
   switch (buttonId) {
-    case 'initializeBtn':
-      // User clicked "Initialize" - reconfigure and restart the app
-      initialize()
-      break
     case 'testBtn':
       // User clicked "Test Sunrise" - run the sunrise immediately for testing
       sunriseStart()
@@ -349,43 +399,28 @@ void appButtonHandler(String buttonId) {
 }
 
 // =============================================================================
-// Event Handlers
+// EVENT HANDLERS
 // =============================================================================
 
 /**
- * snoozeSwitchEvent() - Handles snooze switch state changes
- * When the snooze switch is turned ON:
+ * snoozeButtonEvent() - Handles snooze button presses
+ * When a snooze button is pressed:
  *   - Immediately stops the current sunrise animation
- *   - Schedules the switch to turn off after the snooze duration
- *   - When the switch auto-turns off, it triggers a new sunrise
- * When the snooze switch is turned OFF manually:
- *   - Immediately starts a new sunrise (canceling the snooze)
+ *   - Schedules a new sunrise after the snooze duration
  *
- * @param event - The Event object containing switch state and device info
+ * @param event - The Event object containing button information
  */
-void snoozeSwitchEvent(Event event) {
-  logDebug("Received snooze switch event: ${event.value}")
+void snoozeButtonEvent(Event event) {
+  logDebug("Received snooze button press: ${event.value}")
 
-  // Check if the switch was turned ON
-  if ('on' == "${event.value}") {
-    logDebug('Snooze switch turned on')
+  // Stop the current sunrise animation and turn off bulbs.
+  abortSunrise()
+  state.snoozeActive = true
 
-    // Stop the current sunrise animation and turn off bulbs
-    abortSunrise()
-
-    // Convert snooze duration from minutes to seconds
-    Integer snoozeDurationSecs = (60 * (settings.snoozeDuration as Integer))
-
-    // Schedule the snooze switch to turn off after the snooze duration
-    // This will trigger another sunrise when it turns off
-    runIn(snoozeDurationSecs, 'snoozeOffHandler')
-  }
-
-  // Check if the switch was turned OFF
-  if ('off' == "${event.value}") {
-    // User manually ended the snooze - start sunrise immediately
-    sunriseStart()
-  }
+  // Restart the sunrise when the snooze duration expires.
+  Integer snoozeDurationSecs = (60 * (settings.snoozeDuration as Integer))
+  unschedule('snoozeOffHandler')
+  runIn(snoozeDurationSecs, 'snoozeOffHandler')
 }
 
 /**
@@ -408,20 +443,16 @@ void disableEvent(Event event) {
 }
 
 // =============================================================================
-// Snooze & Disable Controls
+// SNOOZE & DISABLE CONTROLS
 // =============================================================================
 
 /**
- * snoozeOffHandler() - Turns off all snooze switches after snooze period ends
+ * snoozeOffHandler() - Ends the snooze period and restarts the sunrise
  * This method is called automatically after the snooze duration expires.
- * Turning off the snooze switches will trigger snoozeSwitchEvent(), which
- * will then start a new sunrise animation.
  */
 private void snoozeOffHandler() {
-  // Iterate through all configured snooze switches and turn them off
-  settings.snoozeSwitches?.each { DeviceWrapper ss ->
-    ss.off()
-  }
+  state.snoozeActive = false
+  sunriseStart()
 }
 
 /**
@@ -458,7 +489,7 @@ private void turnOffAllBulbs() {
 }
 
 // =============================================================================
-// Sunrise Sequencing
+// SUNRISE SEQUENCING
 // =============================================================================
 
 /**
@@ -527,19 +558,34 @@ private void brightenRGBWBulbsStart() {
 
   // Build the initial color map that will be sent to bulbs
   // This map contains HSV (Hue, Saturation, Value/Level) values
-  state.rgbwColorMap = [
+  Map initialColorMap = [
     hue       : state.rgbwHue,
     saturation: state.rgbwSaturation,
     level     : state.rgbwLevel
   ]
+  state.rgbwColorMap = initialColorMap
 
   // Log the starting parameters for debugging
   logDebug("Starting RGBW animation - ColorMap: ${state.rgbwColorMap}, CT: ${state.rgbwCT}")
 
   // Check if animation is already running (prevents duplicate animations)
   if (!state.brightenRGBWBulbsRunning) {
-    // Start the animation loop
-    brightenRGBWBulbs()
+    state.brightenRGBWBulbsRunning = 'true'
+
+    // Pre-stage the exact first color/level before the animation loop sends
+    // its next command. This prevents bulbs from briefly using their previous
+    // brightness while changing into the sunrise color.
+    preStageInitialColor(initialColorMap)
+
+    // Give the devices a moment to accept the staged command before advancing.
+    runIn(1, 'brightenRGBWBulbs')
+  }
+}
+
+/** Sends the first sunrise command before the animation loop begins. */
+private void preStageInitialColor(Map colorMap) {
+  settings.rgbwBulbs?.each { DeviceWrapper bulb ->
+    bulb.setColor(colorMap)
   }
 }
 
@@ -692,7 +738,7 @@ private void brightenRGBWBulbs() {
 }
 
 // =============================================================================
-// Helper Methods
+// HELPERS
 // =============================================================================
 
 /**
@@ -700,7 +746,7 @@ private void brightenRGBWBulbs() {
  * This method checks the state of user-configured control switches to determine
  * if the sunrise animation should be blocked. Returns true if EITHER:
  * 1. Any disable switch is currently ON, OR
- * 2. Any snooze switch is currently ON
+ * 2. A snooze is currently active
  *
  * @return boolean - true if sunrise should be disabled, false if it can run
  */
@@ -711,10 +757,8 @@ private boolean sunriseDisabled() {
     (sw.currentValue('switch') == 'on')
   }
 
-  // Check if any snooze switches are on
-  boolean snoozed = settings.snoozeSwitches?.any { DeviceWrapper sw ->
-    (sw.currentValue('switch') == 'on')
-  }
+  // Button devices are momentary, so snooze state is tracked by the app.
+  boolean snoozed = (state.snoozeActive == true)
 
   // Return true if either disabled or snoozed (OR logic)
   return (disabled || snoozed)
@@ -731,9 +775,14 @@ private boolean sunriseDisabled() {
  * @return boolean - true if presence requirement is satisfied, false otherwise
  */
 private boolean requiredPresencePresent() {
-  // If no presence sensors configured, return true (no requirement)
-  // Otherwise, check if at least one sensor shows 'present'
-  return settings.requiredPresence?.any { DeviceWrapper presence ->
+  // Hubitat returns an empty collection when the optional input has no
+  // selections. Treat both null and empty selections as no requirement.
+  List<DeviceWrapper> presenceSensors = settings.requiredPresence as List<DeviceWrapper>
+  if (presenceSensors == null || presenceSensors.isEmpty()) {
+    return true
+  }
+  // When sensors are selected, at least one must report "present".
+  return presenceSensors.any { DeviceWrapper presence ->
     (presence.currentValue('presence') == 'present')
   }
 }

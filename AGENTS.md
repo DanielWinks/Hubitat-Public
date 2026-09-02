@@ -1,8 +1,8 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Project Overview
 
-This repository contains Hubitat Elevation home automation apps, drivers, and libraries written in Groovy by Daniel Winks. Hubitat is a local home automation platform; all code runs directly on a Hubitat hub with no traditional build or compile step.
+This repository contains Hubitat Elevation home automation apps, drivers, and legacy libraries written in Groovy by Daniel Winks. Hubitat is a local home automation platform; production code is deployed as raw Groovy and runs directly on a Hubitat hub. New code should be standalone and self-contained; library inclusion is a legacy pattern retained for existing packages.
 
 ## Repository Structure
 
@@ -17,7 +17,7 @@ Drivers/                       # Hubitat Drivers grouped by category
   ZigBee/window_shade/         # ZigBee device drivers (Third Reality blinds)
   calendar/                    # iCalendar integration driver
   weather/                     # NWS forecast driver
-Libraries/                     # Reusable Groovy libraries included via #include
+Libraries/                     # Legacy reusable Groovy libraries; do not include in new code
 Bundles/                       # Auto-generated HPM bundle packages (DO NOT EDIT)
 PackageManifests/              # Hubitat Package Manager manifest files
 Resources/                     # Static assets (images)
@@ -31,7 +31,8 @@ repository.json                # Root HPM repository registry
 - **Language**: Groovy 2.4.21 (Hubitat's embedded runtime)
 - **Docs**: http://docs.groovy-lang.org/docs/groovy-2.4.21/html/documentation/
 - **Platform docs**: https://docs2.hubitat.com/en/developer
-- **No build system** -- files are raw Groovy deployed directly to a Hubitat hub
+- **Production deployment**: files are raw Groovy deployed directly to a Hubitat hub
+- **Local verification**: the `tests/` Gradle project provides linting and Spock tests
 
 ## Key Conventions
 
@@ -45,9 +46,17 @@ repository.json                # Root HPM repository registry
 
 All files use the `dwinks` namespace. Preserve this for backward compatibility.
 
-### Library Inclusion
+### Libraries and Standalone Code
 
-Libraries are included via `#include` directives at the top of files:
+Libraries and `#include` directives are legacy. Do not add library inclusions to
+new Apps or Drivers, and do not create new shared-library dependencies for new
+features. Inline the small helper surface needed by a standalone file instead.
+This avoids hidden merged-class methods, duplicate definitions, installation
+ordering problems, and version drift on hubs. Preserve existing library files
+and inclusions when maintaining legacy packages unless the task explicitly
+migrates them.
+
+Existing legacy code may use:
 
 ```groovy
 #include dwinks.UtilitiesAndLoggingLibrary
@@ -67,11 +76,20 @@ Libraries are included via `#include` directives at the top of files:
 
 ### Logging
 
-Use the logging methods from `UtilitiesAndLoggingLibrary` -- never use `System.out` or raw `log.*` calls:
+Use local logging helpers in new standalone code -- never use `System.out` or
+raw `log.*` calls throughout application logic:
 
 - `logDebug(message)`, `logInfo(message)`, `logWarn(message)`, `logError(message)`, `logTrace(message)`
 
-Apps and drivers expose boolean preferences: `logEnable`, `debugLogEnable`, `descriptionTextEnable`. Logs auto-disable after 30 minutes via `logsOff()`.
+Expose one `enum` preference named `logLevel` when adding configurable
+logging (retain an existing setting name only when compatibility requires it).
+Use the standard levels, ordered from most detailed to least:
+`trace`, `debug`, `info`, `warn`, `error`, `off`. The selected level should
+allow that level and more important messages. Prefer `info` as the default.
+Legacy boolean settings such as `logEnable`, `debugLogEnable`, and
+`descriptionTextEnable` may remain for compatibility but should not be added
+to new code. Automatic log shutoff timers are also legacy; logging should be
+controlled by the selected level.
 
 ### State vs Settings
 
@@ -94,6 +112,49 @@ subscribe(device, 'attribute', 'handlerMethod')
 sendEvent(name: 'attribute', value: data)
 ```
 
+### Standalone App/Driver Structure
+
+New files should generally contain their own logging, lifecycle, device
+helpers, and HTTP/retry helpers rather than relying on `#include`. Organize
+larger files into visible comment sections such as imports/constants,
+logging, metadata/preferences, lifecycle/configuration, event handlers,
+device commands, HTTP integration, and pure calculation/helpers.
+
+Use the standard lifecycle flow where applicable:
+
+```groovy
+void installed() { initialize() }
+void updated() { configure() }
+void initialize() { configure() }
+void configure() { /* unschedule, unsubscribe, subscribe, schedule */ }
+```
+
+Settings belong in `settings.*`; mutable runtime state belongs in `state.*`.
+Momentary controls such as snooze actions should use button capabilities and
+explicit app state rather than modeling a button as a persistent switch.
+
+### Recent Development Patterns
+
+Recent work favors these patterns for new integrations and refactors:
+
+- Standalone Apps and Drivers with small local helper implementations. Do not
+  add new `#include` dependencies; migrate legacy inclusions only as part of an
+  intentional compatibility-aware change.
+- A single overall logging-level dropdown, with optional separate display-log
+  filtering only when the UI needs it. Use `trace`, `debug`, `info`, `warn`,
+  `error`, and `off`, and normalize unexpected values safely.
+- Explicit `installed()`, `updated()`, `initialize()`, and `configure()` flows,
+  with settings updates re-subscribing and rescheduling cleanly.
+- `@Field static final` constants and `@CompileStatic` for pure calculations,
+  parsers, formatters, and typed transformations; isolate dynamic Hubitat API
+  access at narrow boundaries.
+- Local HTTP integrations with defensive response parsing, bounded retries,
+  stale-callback protection, and clear online/offline state where applicable.
+  ESPHome work uses native mDNS discovery plus HTTP control, and may create
+  child presence/device-tracker devices when the integration exposes them.
+- Regression tests for state transitions, HTTP behavior, retries, parsers,
+  device tracking, and pure calculation logic.
+
 ### HTTP Endpoints / Webhooks
 
 Follow the established pattern:
@@ -109,7 +170,8 @@ Always use `tryCreateAccessToken()` for OAuth -- never hardcode tokens.
 
 ### Async HTTP with Retry
 
-Use the retry utilities from `UtilitiesAndLoggingLibrary`:
+For new standalone HTTP integrations, keep the retry flow local to the file.
+Legacy code may use the library utilities:
 
 ```groovy
 resetHttpRetryCounter()
@@ -130,6 +192,7 @@ void callbackMethod(AsyncResponse response, Map data) {
 - **Always use braces** for control structures: `if (condition) { ... }` not `if (condition) ...`
 - **Use concrete types** instead of `def`: `String`, `Integer`, `Map`, `List`
 - **Use `@CompileStatic`** where possible for performance and compile-time type checking
+- **Apply `@CompileStatic` wherever code can be statically typed**, especially pure calculations, parsers, formatters, constants, and typed data transformations. Keep Hubitat dynamic-property/device-dispatch boundaries dynamic or isolate them behind typed helpers. Resolve Groovy 2.4 static-compiler issues explicitly; for example, use primitive `double` arithmetic when passing values to `Math.round()` rather than relying on `/` returning a compatible type.
 - **Use `@Field static final`** for constants
 - **Include MIT license header** on all source files
 
@@ -137,7 +200,7 @@ void callbackMethod(AsyncResponse response, Map data) {
 
 - Existing `mappings` paths (webhook URLs used by external systems)
 - Existing `state` keys (breaking these corrupts running installations)
-- Existing `settings` keys and types (breaking these loses user configuration)
+- Existing `settings` keys and types (breaking these loses user configuration), unless an intentional migration is part of the task
 - Existing scheduling and subscription patterns
 - The `dwinks` namespace across all files
 - Lifecycle hooks: `installed()`, `updated()`, `uninstalled()`, `initialize()`
@@ -146,12 +209,12 @@ void callbackMethod(AsyncResponse response, Map data) {
 
 Two layers of automation live under `tests/`:
 
-1. **Static analyzer** (`gradle lint` from `tests/`) - parses every Groovy
+1. **Static analyzer** (`./gradlew lint` from `tests/`) - parses every Groovy
    file with the official Groovy AST and runs rules covering syntax,
    metadata blocks, the Hubitat sandbox import allowlist, `@CompileStatic`
    correctness, capability/command/attribute consistency, and method-name
    references like `runIn('foo')`.
-2. **Spock unit tests** (`gradle test` from `tests/`) - load library files
+2. **Spock unit tests** (`./gradlew test` from `tests/`) - load library files
    into a `HubitatScriptHarness` (which stubs `state`, `settings`, `log`,
    scheduling, events, etc.) and assert behavior of individual methods.
 
@@ -159,13 +222,15 @@ Beyond those, code still needs to be smoke-tested on a real Hubitat hub for
 runtime semantics and UI behavior. Some apps expose test endpoints
 (e.g., GeminiTextRewriter has `/test`). Rely on logging for debugging.
 
-See `tests/README.md` for the full list of rules, harness capabilities,
+New behavior should have a focused regression test when practical, especially
+for parsers, HTTP response handling, retries, state transitions, device
+tracking, and pure calculations. See `tests/README.md` for the full list of rules, harness capabilities,
 and how to add new tests.
 
 ## Adding a New Package
 
-1. Add Groovy files under `Apps/` or `Drivers/` (and `Libraries/` if needed)
-2. Include libraries via `#include dwinks.LibraryName`
+1. Add standalone Groovy files under `Apps/` or `Drivers/` (and add to `Libraries/` only when explicitly maintaining a legacy library)
+2. Keep new code self-contained; use `#include` only when maintaining an existing legacy package or when an intentional migration requires it
 3. Create `PackageManifests/<PackageName>/packageManifest.json` with raw GitHub URLs
 4. Add entry to root `repository.json` if creating a new top-level package
 5. Do not edit `Bundles/` -- these are auto-generated by GitHub Actions
@@ -178,7 +243,7 @@ GitHub Actions in `.github/workflows/`:
 - `release-gemini-text-rewriter.yml` -- Automated release for Gemini Text Rewriter
 - `SonosAdvancedBundles.yml` -- HPM bundle creation for Sonos
 - `ThirdRealityBundles.yml` -- HPM bundle creation for Third Reality
-- `UtilitiesAndLoggingLibrary.yml` -- Library release workflow
+- `UtilitiesAndLoggingLibrary.yml` -- Legacy library release workflow
 
 Release process: version increment via workflow input (patch/minor) -> update version across files -> update packageManifest.json -> create ZIP bundles -> publish GitHub release -> update repository.json.
 
@@ -191,11 +256,28 @@ Release process: version increment via workflow input (patch/minor) -> update ve
 
 ## Reference Files
 
-- `Apps/SunriseSimulation.groovy` -- Good example of webhooks, scheduling, state, and settings patterns
-- `Libraries/UtilitiesAndLoggingLibrary.groovy` -- Core utilities used across all apps and drivers
+- `Apps/SunriseSimulation.groovy` -- Standalone scheduling, state, settings, button events, and level-based logging
+- `Apps/ESPHome_Device_Helper.groovy` -- Recent standalone app with mDNS discovery, HTTP integration, child devices, and level-based logging
+- `Drivers/HTTP/ESPHomeRATGDOGarageDoor.groovy` -- Recent HTTP driver with lifecycle hooks, typed constants, and level-based logging
+- `Libraries/UtilitiesAndLoggingLibrary.groovy` -- Legacy shared utility library; use as a maintenance reference, not a default dependency
 - `.github/copilot-instructions.md` -- Additional AI coding assistant guidance
+
+## Repository Skills
+
+Reusable repository-local Codex skills live under `skills/`:
+
+- `skills/hubitat-groovy-development/` -- standalone Hubitat Groovy implementation patterns
+- `skills/hubitat-review/` -- read-only compatibility and quality review
+- `skills/hubitat-test-and-lint/` -- targeted and full verification workflow
+- `skills/hubitat-package-release/` -- HPM manifests and release workflow guidance
+- `skills/hubitat-skill-maintainer/` -- detects and corrects drift in repository skill guidance
+
+Use these skills for their matching workflows; keep this file as the source of
+truth for repository-wide policy.
 
 ## Documentation
 
-Always use the `llms-txt-mcp` (or `mcpdoc`) tools to look up library APIs
-before writing code. Do not rely on training data for framework-specific APIs.
+Use the available Hubitat documentation or repository test/stub definitions to
+verify framework-specific APIs before writing code. Do not rely on memory when
+the API behavior is uncertain, especially for scheduling, device capabilities,
+HTTP callbacks, and dynamic-page inputs.
