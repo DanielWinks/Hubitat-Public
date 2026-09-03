@@ -79,7 +79,14 @@ import java.math.BigDecimal
 // CompileStatic: Annotation for compile-time type checking
 import groovy.transform.CompileStatic
 
-// Inlined from UtilitiesAndLoggingLibrary - only what this driver uses
+// Field: Annotation for constants shared by the driver script
+import groovy.transform.Field
+
+@Field static final Long RATE_WINDOW_MILLISECONDS = 300000L
+@Field static final Long GAP_THRESHOLD_MILLISECONDS = 900000L
+@Field static final Integer MAX_RATE_HISTORY_ENTRIES = 32
+
+// Standalone helpers used by this driver
 void clearAllStates() {
   state.clear()
   if (device) device.getCurrentStates().each { device.deleteCurrentState(it.name) }
@@ -110,6 +117,136 @@ Date getTodayAtTime(String timeString) {
 
 void deleteDeviceCurrentState(String attributeName) {
   device.deleteCurrentState(attributeName)
+}
+
+Long getDayStart(Long timestamp) {
+  Calendar calendar = Calendar.getInstance()
+  calendar.setTimeInMillis(timestamp)
+  calendar.set(Calendar.HOUR_OF_DAY, 0)
+  calendar.set(Calendar.MINUTE, 0)
+  calendar.set(Calendar.SECOND, 0)
+  calendar.set(Calendar.MILLISECOND, 0)
+  return calendar.getTimeInMillis()
+}
+
+Long getWeekStart(Long timestamp) {
+  Calendar calendar = Calendar.getInstance()
+  calendar.setTimeInMillis(timestamp)
+  calendar.set(Calendar.HOUR_OF_DAY, 0)
+  calendar.set(Calendar.MINUTE, 0)
+  calendar.set(Calendar.SECOND, 0)
+  calendar.set(Calendar.MILLISECOND, 0)
+  calendar.add(Calendar.DATE, -(calendar.get(Calendar.DAY_OF_WEEK) - Calendar.SUNDAY))
+  return calendar.getTimeInMillis()
+}
+
+/**
+ * Returns the time-weighted derivative over the short control window.
+ *
+ * Each adjacent pair of readings contributes its slope multiplied by the
+ * amount of that interval that overlaps the window. This makes the result
+ * independent of sensor reporting frequency while still reacting quickly
+ * when the sensor begins reporting frequently during a shower.
+ */
+BigDecimal calculateShortTermRate(List history, Long currentTime) {
+  if (history == null || history.size() < 2) {
+    return null
+  }
+
+  Long windowStart = currentTime - RATE_WINDOW_MILLISECONDS
+  BigDecimal weightedRate = BigDecimal.ZERO
+  Long weightedMilliseconds = 0L
+
+  for (Integer index = 1; index < history.size(); index += 1) {
+    Map previous = history[index - 1] as Map
+    Map current = history[index] as Map
+    Long previousTime = previous.time as Long
+    Long currentReadingTime = current.time as Long
+    if (currentReadingTime <= previousTime) {
+      continue
+    }
+    // Do not dilute the local derivative with the tail of a sleeping
+    // interval. The interval is still retained for the overall TWA and is
+    // surfaced as measurementGap; the next frequent sample starts a fresh
+    // local derivative window.
+    if (currentReadingTime - previousTime > GAP_THRESHOLD_MILLISECONDS) {
+      continue
+    }
+
+    Long overlapStart = Math.max(previousTime, windowStart)
+    Long overlapEnd = Math.min(currentReadingTime, currentTime)
+    if (overlapEnd <= overlapStart) {
+      continue
+    }
+
+    BigDecimal previousHumidity = previous.humidity as BigDecimal
+    BigDecimal currentHumidity = current.humidity as BigDecimal
+    BigDecimal elapsedMinutes = new BigDecimal(currentReadingTime - previousTime) / 60000G
+    BigDecimal intervalRate = (currentHumidity - previousHumidity) / elapsedMinutes
+    Long overlapMilliseconds = overlapEnd - overlapStart
+    weightedRate += intervalRate * overlapMilliseconds
+    weightedMilliseconds += overlapMilliseconds
+  }
+
+  if (weightedMilliseconds <= 0L) {
+    return null
+  }
+  return weightedRate / new BigDecimal(weightedMilliseconds)
+}
+
+void updatePeriodicAverages(Long previousTime, Long currentTime, BigDecimal humidity) {
+  Long currentDayStart = getDayStart(currentTime)
+  Long currentWeekStart = getWeekStart(currentTime)
+
+  Long storedDayStart = state.dailyPeriodStart as Long
+  if (storedDayStart == null || storedDayStart != currentDayStart) {
+    state.dailyPeriodStart = currentDayStart
+    state.dailyTimeWeightedHumidity = BigDecimal.ZERO
+    state.dailyElapsedTime = 0L
+    emitEvent('dailyTimeWeightedAverageStartTime', currentDayStart, null, null)
+  }
+
+  Long storedWeekStart = state.weeklyPeriodStart as Long
+  if (storedWeekStart == null || storedWeekStart != currentWeekStart) {
+    state.weeklyPeriodStart = currentWeekStart
+    state.weeklyTimeWeightedHumidity = BigDecimal.ZERO
+    state.weeklyElapsedTime = 0L
+    emitEvent('weeklyTimeWeightedAverageStartTime', currentWeekStart, null, null)
+  }
+
+  Long intervalStart = Math.min(previousTime, currentTime)
+  Long intervalEnd = Math.max(previousTime, currentTime)
+  if (intervalEnd > intervalStart) {
+    Long dayOverlapStart = Math.max(intervalStart, currentDayStart)
+    Long dayOverlapMilliseconds = intervalEnd - dayOverlapStart
+    if (dayOverlapMilliseconds > 0L) {
+      BigDecimal dailyHumidity = (state.dailyTimeWeightedHumidity ?: BigDecimal.ZERO) as BigDecimal
+      Long dailyElapsed = (state.dailyElapsedTime ?: 0L) as Long
+      state.dailyTimeWeightedHumidity = dailyHumidity + (humidity * dayOverlapMilliseconds)
+      state.dailyElapsedTime = dailyElapsed + dayOverlapMilliseconds
+    }
+
+    Long weekOverlapStart = Math.max(intervalStart, currentWeekStart)
+    Long weekOverlapMilliseconds = intervalEnd - weekOverlapStart
+    if (weekOverlapMilliseconds > 0L) {
+      BigDecimal weeklyHumidity = (state.weeklyTimeWeightedHumidity ?: BigDecimal.ZERO) as BigDecimal
+      Long weeklyElapsed = (state.weeklyElapsedTime ?: 0L) as Long
+      state.weeklyTimeWeightedHumidity = weeklyHumidity + (humidity * weekOverlapMilliseconds)
+      state.weeklyElapsedTime = weeklyElapsed + weekOverlapMilliseconds
+    }
+  }
+
+  BigDecimal dailyNumerator = (state.dailyTimeWeightedHumidity ?: BigDecimal.ZERO) as BigDecimal
+  Long dailyDuration = (state.dailyElapsedTime ?: 0L) as Long
+  BigDecimal dailyAverage = dailyDuration > 0L ?
+    dailyNumerator / new BigDecimal(dailyDuration) : humidity
+  emitEvent('dailyTimeWeightedAverage', dailyAverage.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+
+  BigDecimal weeklyNumerator = (state.weeklyTimeWeightedHumidity ?: BigDecimal.ZERO) as BigDecimal
+  Long weeklyDuration = (state.weeklyElapsedTime ?: 0L) as Long
+  BigDecimal weeklyAverage = weeklyDuration > 0L ?
+    weeklyNumerator / new BigDecimal(weeklyDuration) : humidity
+  emitEvent('weeklyTimeWeightedAverage', weeklyAverage.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
 }
 
 // ============================================================================
@@ -159,6 +296,9 @@ metadata {
 
     // Rate of Change
     attribute 'rateOfChange', 'NUMBER'                           // Humidity change rate (%/min)
+    attribute 'shortTermRateOfChange', 'NUMBER'                  // Time-weighted local derivative (%/min)
+    attribute 'measurementGap', 'ENUM', ['true', 'false']        // Previous interval exceeded the control gap
+    attribute 'measurementGapMinutes', 'NUMBER'                  // Length of the previous reporting interval
 
     // Baseline Freeze (prevents rolling averages from updating during fan runs)
     attribute 'baselineFrozen', 'ENUM', ['true', 'false']
@@ -186,6 +326,7 @@ metadata {
     command 'recordFanStart', [[name: 'humidity', type: 'NUMBER']]
     command 'recordFanStop', [[name: 'humidity', type: 'NUMBER'], [name: 'durationMinutes', type: 'NUMBER']]
     command 'setHouseholdHumidity', [[name: 'humidity', type: 'NUMBER']]
+    command 'logHumidityEvent', [[name: 'humidity', type: 'NUMBER']]
   }
 }
 
@@ -244,7 +385,21 @@ preferences {
  *
  * These schedules persist even if the hub restarts.
  */
+void installed() {
+  configure()
+}
+
+void updated() {
+  configure()
+}
+
+void uninstalled() {
+  unschedule()
+}
+
 void configure() {
+  unschedule()
+
   // Schedule daily reset: runs at midnight (00:00:00) every day
   // This allows tracking of daily humidity patterns
   schedule('0 0 0 * * ?', 'resetDailyTWAverages')
@@ -273,8 +428,7 @@ void configure() {
  * WARNING: This is irreversible! All historical data is lost.
  */
 void resetAllStatistics() {
-  // clearStates() is from the UtilitiesAndLoggingLibrary
-  // It deletes all state variables and current device attribute values
+  // Delete all state variables and current device attribute values.
   clearAllStates()
 }
 
@@ -317,6 +471,9 @@ void resetTimeWeightedStatistics() {
     'unixTimePrevious',
     'unixTimeCurrent',
     'rateOfChange',
+    'shortTermRateOfChange',
+    'measurementGap',
+    'measurementGapMinutes',
     'smoothedRateOfChange',
     'rateOfChangeAcceleration',
     'humidityStdDev',
@@ -336,6 +493,15 @@ void resetTimeWeightedStatistics() {
     // device.deleteCurrentState() removes the stored value for that attribute
     deleteDeviceCurrentState(it)
   }
+  state.remove('rocHistory')
+  state.remove('previousShortTermRate')
+  state.remove('previousShortTermRateAt')
+  state.remove('dailyPeriodStart')
+  state.remove('dailyTimeWeightedHumidity')
+  state.remove('dailyElapsedTime')
+  state.remove('weeklyPeriodStart')
+  state.remove('weeklyTimeWeightedHumidity')
+  state.remove('weeklyElapsedTime')
 }
 
 /**
@@ -360,11 +526,17 @@ void resetTimeWeightedStatistics() {
  * - now() returns current time in milliseconds since Unix epoch
  */
 void resetDailyTWAverages() {
+  Long currentTime = getCurrentTime()
+  state.dailyPeriodStart = getDayStart(currentTime)
+  state.dailyTimeWeightedHumidity = BigDecimal.ZERO
+  state.dailyElapsedTime = 0L
+
   // Send an event setting the daily start time to right now
   // This marks the beginning of a new day for tracking purposes
-  emitEvent('dailyTimeWeightedAverageStartTime', getCurrentTime(), null, null)
+  emitEvent('dailyTimeWeightedAverageStartTime', currentTime, null, null)
 
   // Reset daily min/max and time above threshold
+  deleteDeviceCurrentState('dailyTimeWeightedAverage')
   deleteDeviceCurrentState('dailyMinHumidity')
   deleteDeviceCurrentState('dailyMaxHumidity')
   deleteDeviceCurrentState('dailyMinutesAboveThreshold')
@@ -390,9 +562,15 @@ void resetDailyTWAverages() {
  * to use daily averages (more responsive) or weekly averages (more stable).
  */
 void resetWeeklyTWAverages() {
+  Long currentTime = getCurrentTime()
+  state.weeklyPeriodStart = getWeekStart(currentTime)
+  state.weeklyTimeWeightedHumidity = BigDecimal.ZERO
+  state.weeklyElapsedTime = 0L
+
   // Send an event setting the weekly start time to right now
   // This marks the beginning of a new week for tracking purposes
-  emitEvent('weeklyTimeWeightedAverageStartTime', getCurrentTime(), null, null)
+  emitEvent('weeklyTimeWeightedAverageStartTime', currentTime, null, null)
+  deleteDeviceCurrentState('weeklyTimeWeightedAverage')
 }
 
 // =============================================================================
@@ -558,6 +736,7 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // This tells us how long the previous humidity level lasted
   // Example: If previous was 5 minutes ago, this = 300000 milliseconds
   BigDecimal elapsedTimeSinceLastUpdate = unixTimeCurrent - unixTimePrevious
+  Boolean measurementGap = elapsedTimeSinceLastUpdate > GAP_THRESHOLD_MILLISECONDS
 
   // Get midnight of today for daily tracking
   // timeToday() is a Hubitat function that returns a Date object for today at specified time
@@ -594,6 +773,8 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   emitEvent('unixTimeFirst', unixTimeFirst, null, null)
   emitEvent('totalElapsedTime', totalElapsedTime, null, null)
   emitEvent('elapsedTimeSinceLastUpdate', elapsedTimeSinceLastUpdate, null, null)
+  emitEvent('measurementGap', measurementGap ? 'true' : 'false', null, null)
+  emitEvent('measurementGapMinutes', (elapsedTimeSinceLastUpdate / 60000G).setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
   emitEvent('dailyTimeWeightedAverageStartTime', twDailyStart, null, null)
   emitEvent('weeklyTimeWeightedAverageStartTime', twWeeklyStart, null, null)
 
@@ -667,6 +848,11 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // ROUND_HALF_UP means 45.65 → 45.7 and 45.64 → 45.6
   emitEvent('timeWeightedAverage', timeWeightedAverage.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
 
+  // Daily and weekly averages use only the portion of this interval that
+  // belongs to the current period. This remains correct when a sleeping
+  // sensor reports for the first time after midnight or after a weekend.
+  updatePeriodicAverages(unixTimePrevious.longValue(), unixTimeCurrent.longValue(), humidityPrevious)
+
   // Capture pre-update slow average for variance/stddev calculation (needed before EMA update)
   BigDecimal preUpdateSlowAvg = getDeviceCurrentValue('slowRollingAverage') as BigDecimal
 
@@ -709,15 +895,19 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
     emitEvent('fastRollingAverage', pAvgFast.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
 
     // SLOW ROLLING AVERAGE (time-weighted EMA)
+    //
+    // A long reporting gap is not evidence that the humidity was at the new
+    // value for the entire interval. Protect the control baseline from one
+    // stale-interval jump; subsequent frequent readings will move it normally.
     BigDecimal pAvgSlow = getDeviceCurrentValue('slowRollingAverage') as BigDecimal
     if (pAvgSlow == null) {
       pAvgSlow = humidityCurrent
-    } else {
+    } else if (!measurementGap) {
       pAvgSlow = pAvgSlow * (1.0 - alphaSlow) + humidityCurrent * alphaSlow
     }
     emitEvent('slowRollingAverage', pAvgSlow.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
-  } else if (elapsedTimeSinceLastUpdate == 0) {
-    // First reading - initialize both averages
+  } else if (getDeviceCurrentValue('slowRollingAverage') == null) {
+    // First reading - initialize both averages, even if the fan is already on.
     emitEvent('fastRollingAverage', humidityCurrent.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
     emitEvent('slowRollingAverage', humidityCurrent.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
   }
@@ -727,9 +917,6 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // ============================================================================
   // Calculate how fast humidity is changing (%/min) and whether it's rising.
   // ============================================================================
-
-  // Capture previous rate of change BEFORE emitting the new one (for acceleration calc)
-  BigDecimal previousRoc = getDeviceCurrentValue('rateOfChange') as BigDecimal
 
   // Rate of change in %/min (positive = rising, negative = falling)
   BigDecimal currentRoc = null
@@ -747,29 +934,54 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // PHASE 7: ADVANCED STATISTICS
   // ============================================================================
 
-  // --- 7a: Smoothed Rate of Change (EMA-filtered derivative) ---
-  // Filters out noise from the raw single-sample RoC, giving a reliable
-  // "humidity is rapidly rising/falling" signal.
-  if (elapsedTimeSinceLastUpdate > 0 && currentRoc != null) {
-    BigDecimal tauRocMs = ((getSetting('tauRocMinutes') ?: 5) as BigDecimal) * 60000
-    double alphaRoc = 1.0d - Math.exp(-elapsedTimeSinceLastUpdate.doubleValue() / tauRocMs.doubleValue())
+  // --- 7a: Time-weighted local derivative ---
+  // Keep a small timestamped history rather than assuming a sample interval.
+  // Each adjacent slope is weighted by the real duration that overlaps the
+  // short control window. A long interval is reported separately as a gap so
+  // consumers can use the magnitude without mistaking it for a rapid change.
+  List rateHistory = state.rocHistory instanceof List ?
+    new ArrayList(state.rocHistory as List) : []
+  rateHistory << [time: unixTimeCurrent.longValue(), humidity: humidityCurrent]
+  while (rateHistory.size() > MAX_RATE_HISTORY_ENTRIES) {
+    rateHistory.remove(0)
+  }
+  state.rocHistory = rateHistory
 
-    BigDecimal smoothedRoc = getDeviceCurrentValue('smoothedRateOfChange') as BigDecimal
-    if (smoothedRoc == null) {
-      smoothedRoc = currentRoc
+  BigDecimal shortTermRate = calculateShortTermRate(rateHistory, unixTimeCurrent.longValue())
+  if (shortTermRate != null) {
+    emitEvent('shortTermRateOfChange', shortTermRate.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
+  }
+
+  // --- 7b: Smoothed derivative and acceleration ---
+  // Reset the derivative smoother across a reporting gap. This prevents an
+  // overnight interval from suppressing the first real shower slope.
+  if (shortTermRate != null) {
+    BigDecimal previousShortTermRate = state.previousShortTermRate as BigDecimal
+    BigDecimal smoothedRate = getDeviceCurrentValue('smoothedRateOfChange') as BigDecimal
+    if (measurementGap || smoothedRate == null) {
+      smoothedRate = shortTermRate
     } else {
-      smoothedRoc = smoothedRoc * (1.0 - alphaRoc) + currentRoc * alphaRoc
+      BigDecimal tauRocMs = ((getSetting('tauRocMinutes') ?: 5) as BigDecimal) * 60000
+      double alphaRoc = 1.0d - Math.exp(-elapsedTimeSinceLastUpdate.doubleValue() / tauRocMs.doubleValue())
+      smoothedRate = smoothedRate * (1.0 - alphaRoc) + shortTermRate * alphaRoc
     }
-    emitEvent('smoothedRateOfChange', smoothedRoc.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
+    emitEvent('smoothedRateOfChange', smoothedRate.setScale(2, BigDecimal.ROUND_HALF_UP), null, null)
 
-    // --- 7b: Rate of Change Acceleration (second derivative) ---
-    // Detects the very beginning of a shower spike — humidity isn't just
-    // rising, it's rising *faster*. Units: %/min²
-    if (previousRoc != null) {
+    // Detect a change in the derivative without crossing a stale interval.
+    if (!measurementGap && previousShortTermRate != null && elapsedTimeSinceLastUpdate > 0) {
       BigDecimal elapsedMin = elapsedTimeSinceLastUpdate / 60000
-      BigDecimal acceleration = (currentRoc - previousRoc) / elapsedMin
+      BigDecimal acceleration = (shortTermRate - previousShortTermRate) / elapsedMin
       emitEvent('rateOfChangeAcceleration', acceleration.setScale(3, BigDecimal.ROUND_HALF_UP), null, null)
     }
+
+    state.previousShortTermRate = measurementGap ? null : shortTermRate
+    state.previousShortTermRateAt = measurementGap ? null : unixTimeCurrent.longValue()
+  }
+  if (measurementGap) {
+    deleteDeviceCurrentState('shortTermRateOfChange')
+    deleteDeviceCurrentState('rateOfChangeAcceleration')
+    state.previousShortTermRate = null
+    state.previousShortTermRateAt = null
   }
 
   // --- 7c: Running Standard Deviation (EMA-based variance) ---
@@ -824,10 +1036,15 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   if (threshold != null && threshold > 0 && elapsedTimeSinceLastUpdate > 0) {
     if (humidityPrevious >= threshold) {
       BigDecimal minutesAbove = getDeviceCurrentValue('dailyMinutesAboveThreshold') as BigDecimal
-      BigDecimal elapsedMin = elapsedTimeSinceLastUpdate / 60000
+      Long currentDayStart = getDayStart(unixTimeCurrent.longValue())
+      Long intervalStartForDay = Math.max(unixTimePrevious.longValue(), currentDayStart)
+      Long dailyMilliseconds = unixTimeCurrent.longValue() - intervalStartForDay
+      BigDecimal elapsedMin = dailyMilliseconds > 0L ? dailyMilliseconds / 60000G : BigDecimal.ZERO
       if (minutesAbove == null) { minutesAbove = 0 }
-      minutesAbove += elapsedMin
-      emitEvent('dailyMinutesAboveThreshold', minutesAbove.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+      if (elapsedMin > 0G) {
+        minutesAbove += elapsedMin
+        emitEvent('dailyMinutesAboveThreshold', minutesAbove.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
+      }
     }
   }
 

@@ -16,7 +16,9 @@ Check:
 3. Existing mappings, settings, state keys, commands, and child-device IDs;
    flag migrations explicitly.
 4. New standalone-code compliance; treat `#include` as legacy.
-5. Local logging helpers and one level dropdown for new configurable logging.
+5. Local logging helpers and one level dropdown for new configurable logging;
+   verify the dropdown uses the exact Hubitat labels `Trace`, `Debug`, `Info`,
+   `Warn`, `Error`, and `Off`.
 6. `@CompileStatic` opportunities and dynamic Hubitat boundaries. Watch for
    Groovy 2.4 issues such as `/` yielding `BigDecimal` and `Math.round()`
    overload mismatches.

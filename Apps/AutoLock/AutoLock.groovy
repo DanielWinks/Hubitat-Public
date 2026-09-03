@@ -66,7 +66,8 @@ definition(
   iconUrl: '',
   iconX2Url: '',
   iconX3Url: '',
-  documentationLink: ''
+  documentationLink: '',
+  installOnOpen: true
 )
 
 preferences {
@@ -77,25 +78,14 @@ void configure() {}
 
 Map mainPage() {
   dynamicPage(name: 'mainPage') {
-    isInstalled()
-    if (app.getInstallationState() == 'COMPLETE') {
-      section("${app.label ?: 'Auto Lock'}") {
-        paragraph 'Automatically lock and unlock doors based on presence, mode, time, contact sensors, motion sensors, and switches.'
-      }
-      section('Lock Automation Instances') {
-        app(name: 'autoLockChild', appName: 'Auto Lock Child', namespace: 'dwinks', title: 'New Auto Lock Instance', multiple: true)
-      }
-      section('General') {
-        label title: 'Enter a name for parent app (optional)', required: false
-      }
+    section("${app.label ?: 'Auto Lock'}") {
+      paragraph 'Automatically lock and unlock doors based on presence, mode, time, contact sensors, motion sensors, and switches.'
     }
-  }
-}
-
-void isInstalled() {
-  if (app.getInstallationState() != 'COMPLETE') {
-    section() {
-      paragraph 'Please click <b>Done</b> to install the parent app.'
+    section('Lock Automation Instances') {
+      app(name: 'autoLockChild', appName: 'Auto Lock Child', namespace: 'dwinks', title: 'New Auto Lock Instance', multiple: true)
+    }
+    section('General') {
+      label title: 'Enter a name for parent app (optional)', required: false
     }
   }
 }

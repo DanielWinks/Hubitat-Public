@@ -82,15 +82,6 @@ private void logDebug(String message) {
     if(app) log.debug "${app.label ?: app.name }: ${message}"
   }
 }
-@SuppressWarnings('unused')
-private void callDeviceMethod(DeviceWrapper device, String methodName, Object... args) {
-  device."${methodName}"(*args)
-}
-@SuppressWarnings('unused')
-private Object getDeviceProperty(DeviceWrapper device, String propertyName) {
-  return device."${propertyName}"
-}
-
 // Exception logging helpers
 void logException(String message) {
   if (settings.logEnable != false) {
@@ -532,7 +523,6 @@ ChildDeviceWrapper getOrCreateChildDevices(String childDNI) {
  *                          ↓
  *              childHumidityEvent() → Fan decision
  */
-@CompileStatic
 void humidityEvent(Event event) {
   // Log the received value for debugging purposes
   // This helps troubleshoot if sensors are reporting bad values
@@ -558,7 +548,7 @@ void humidityEvent(Event event) {
     // Send this reading to the child device for statistical tracking
     // The child device will update its rolling averages
     // This eventually triggers childHumidityEvent() when statistics update
-    callDeviceMethod(child, 'logHumidityEvent', value)
+    child.logHumidityEvent(value)
   }
   // If value is invalid (<=0 or >=100), we silently ignore it
   // The previous valid value remains in state.currentHumidity
@@ -628,7 +618,6 @@ void humidityEvent(Event event) {
  * Hubitat's state storage converts booleans to strings, so we work with
  * strings directly to avoid conversion issues.
  */
-@CompileStatic
 void childHumidityEvent(Event event) {
   // Extract the three humidity values we need for decision making
 
@@ -688,7 +677,7 @@ void childHumidityEvent(Event event) {
 
   if ((currentHumidity - changeLimitValue) > trackedHumValue && isIncreasing == 'true') {
     // Turn on the fan
-    callDeviceMethod(fanSwitchDevice, 'on')
+    fanSwitchDevice.on()
 
     // Log why we turned it on (helpful for understanding behavior)
     logDebug("Last Humidity Reading(${lastHumidity}) was great enough to trigger a fan event.")
@@ -701,7 +690,7 @@ void childHumidityEvent(Event event) {
     if (decreasingSuccessively == 'true') {
       // Humidity has been decreasing for 2+ readings, time to turn off
       logDebug("Current Humidity(${currentHumidity}) has been decreasing successively. Turning off fan.")
-      callDeviceMethod(fanSwitchDevice, 'off')
+      fanSwitchDevice.off()
     }
 
     // Log why we didn't turn on (or turned off)
@@ -905,18 +894,17 @@ void contactEvent(Event event) {
  * The log message includes the fan's display name and the timeout duration,
  * making it clear in logs why the fan turned off.
  */
-@CompileStatic
 void doorOpenedAutoOff() {
   // Log the reason for shutoff (helpful for troubleshooting)
   // fanSwitch.displayName is the human-readable name of the fan device
   DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
   Integer doorOpenTimeValue = getSetting('doorOpenTime') as Integer
-  String displayName = getDeviceProperty(fanSwitchDevice, 'displayName') as String
+  String displayName = fanSwitchDevice.displayName as String
 
   logInfo("Auto-off: ${displayName} has been on with door open for ${doorOpenTimeValue} minutes")
 
   // Turn off the fan
-  callDeviceMethod(fanSwitchDevice, 'off')
+  fanSwitchDevice.off()
 }
 
 /**
@@ -941,19 +929,18 @@ void doorOpenedAutoOff() {
  * LOG MESSAGE:
  * Clearly states why the fan turned off (exceeded max runtime).
  */
-@CompileStatic
 void runtimeExceeded() {
   // Log the reason for shutoff with specific timing information
   // This helps users understand what happened if they see the fan turned off
   DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
   Integer maxRuntimeValue = getSetting('maxRuntime') as Integer
-  String displayName = getDeviceProperty(fanSwitchDevice, 'displayName') as String
+  String displayName = fanSwitchDevice.displayName as String
 
   logInfo("Auto-off: ${displayName} has been on for ${maxRuntimeValue} minutes")
 
   // Turn off the fan
   // This overrides any other control logic (humidity-based, manual, etc.)
-  callDeviceMethod(fanSwitchDevice, 'off')
+  fanSwitchDevice.off()
 
   // Note: The switchEvent() function will automatically clean up state.fanOnSince
   // when it receives the "off" event, so we don't need to do that here

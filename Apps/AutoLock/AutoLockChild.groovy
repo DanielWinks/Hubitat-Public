@@ -348,6 +348,19 @@ Map meansToUnlockPage() {
 // Lifecycle Methods
 // =============================================================================
 
+void installed() {
+  initialize()
+}
+
+void updated() {
+  configure()
+}
+
+void uninstalled() {
+  unsubscribe()
+  unschedule()
+}
+
 void configure() {
   // Clear any transient waiting state to avoid dangling waits across updates
   clearWaitingForUnlockByPresence()

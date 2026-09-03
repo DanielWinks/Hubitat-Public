@@ -21,6 +21,8 @@ Use for new features and refactors in `Apps/` and `Drivers/`.
   applicable; settings updates should cleanly resubscribe and reschedule.
 - Use one `logLevel` enum preference (`trace`, `debug`, `info`, `warn`, `error`,
   `off`) for new logging, defaulting to `info`, and local logging helpers.
+  Use the exact Hubitat labels `Trace`, `Debug`, `Info`, `Warn`, `Error`, and
+  `Off` in the dropdown; do not add explanatory text to those labels.
 - Model momentary controls as button events plus explicit app state.
 - For local integrations, use defensive HTTP parsing, bounded retries, stale
   callback protection, and explicit online/offline state where useful.

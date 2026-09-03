@@ -12,7 +12,7 @@
  *  HOW IT WORKS (THE BIG PICTURE):
  *  1. The app constantly monitors humidity sensor(s) in your bathroom
  *  2. It tracks the "normal" humidity levels over time using statistical averages
- *  3. When humidity suddenly spikes above normal (by your configured amount),
+ *  3. When humidity suddenly spikes above the stable baseline with a rapid rise,
  *     it turns on the fan
  *  4. The fan stays on until humidity drops back to normal levels
  *  5. Safety features prevent the fan from running too long or when door is open
@@ -68,7 +68,7 @@ import groovy.transform.Field
 import groovy.transform.CompileStatic
 
 // ============================================================================
-// INLINED HELPER FUNCTIONS (from dwinks.UtilitiesAndLoggingLibrary)
+// STANDALONE HELPER FUNCTIONS
 // ============================================================================
 
 // Logging helpers
@@ -82,6 +82,18 @@ void logDebug(String message) {
   if (settings.logEnable != false && settings.debugLogEnable != false) {
     if(device) log.debug "${device.label ?: device.name }: ${message}"
     if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+void logWarn(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.warn "${device.label ?: device.name }: ${message}"
+    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  }
+}
+void logError(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.error "${device.label ?: device.name }: ${message}"
+    if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
 
@@ -113,13 +125,6 @@ void unscheduleMethod(String methodName) { unschedule(methodName) }
 // App label helper
 String getAppLabel() { return app.label }
 
-// Device interaction helpers
-void callDeviceMethod(DeviceWrapper device, String methodName, Object... args) {
-  device."${methodName}"(*args)
-}
-Object getDeviceProperty(DeviceWrapper device, String propertyName) {
-  return device."${propertyName}"
-}
 DeviceWrapper getAppChildDevice(String dni) { return getChildDevice(dni) }
 DeviceWrapper createAppChildDevice(String namespace, String typeName, String dni, Map properties) {
   return addChildDevice(namespace, typeName, dni, properties)
@@ -165,74 +170,33 @@ Map mainPage() {
 
       input "humiditySensors", "capability.relativeHumidityMeasurement", title: "Humidity Sensor(s)", multiple: true, required: true
 
-      input "householdHumiditySensor", "capability.relativeHumidityMeasurement", title: "Optional Household Humidity Sensor, i.e. central thermostat humidity sensor", multiple: false, required: false
+      input "householdHumiditySensor", "capability.relativeHumidityMeasurement", title: "Optional Household Humidity Sensor for diagnostics", multiple: false, required: false
 
       input "fanSwitch", "capability.switch", title: "Fan Switch", required: true
 
-      paragraph "The door sensor you select will turn off the fan when the door has been open for a specified time, 10 minutes by default. Optional."
-
-      input "doorSensor", "capability.contactSensor", title: "Door Sensor", required: false
-    }
-
-    // -------------------------------------------------------------------------
-    // Change Limit Configuration
-    // -------------------------------------------------------------------------
-    section("<b>Change Limit:</b>", hideable: true, hidden: false) {
-      paragraph "Maximum change a newly received value can be from historical average without turning on fan."
-
-      input "changeLimit", "number", title: "Change Limit", required: true, defaultValue: 2
     }
 
     // -------------------------------------------------------------------------
     // Maximum Runtime Configuration
     // -------------------------------------------------------------------------
-    section("<b>Max Run Time:</b>", hideable: true, hidden: false) {
+    section("<b>Fan Run Limits:</b>", hideable: true, hidden: false) {
       paragraph "Maximum time fan may run under any circumstances."
 
       input "maxRuntime", "number", title: "Max run time (minutes, 0 to disable, max 720)", required: true, defaultValue: 60, range: '0..720'
-    }
+      input "minRuntime", "number", title: "Minimum fan run time (minutes, 0 to disable, max 30)", required: false, defaultValue: 5, range: '0..30'
+      input "cooldownPeriod", "number", title: "Re-trigger delay after fan turns off (minutes, 0 to disable, max 30)", required: false, defaultValue: 3, range: '0..30'
 
-    // -------------------------------------------------------------------------
-    // Door Open Time Configuration
-    // -------------------------------------------------------------------------
-    section("<b>Door Open Time:</b>", hideable: true, hidden: false) {
-      paragraph 'Maximum time fan may run after opening door.'
-
-      input "doorOpenTime", "number", title: "Max run time after door opening (minutes, 0 to disable, max 60)", required: true, defaultValue: 10, range: '0..60'
-    }
-
-    // -------------------------------------------------------------------------
-    // Humidity Tracking Mode Selection
-    // -------------------------------------------------------------------------
-    section("<b>Humidity Statistic To Track:</b>", hideable: true, hidden: false) {
-      paragraph 'Humidity statistic type to track for historical value comparison.'
-
-      input 'highHumMode', 'enum', title: 'Humidity Statistic To Track', required: true, offerAll: false, defaultValue: 'Fast Rolling Average', options: [slowRollingAverage:'Slow Rolling Average', fastRollingAverage:'Fast Rolling Average (recommended)', timeWeightedAverage:'Time Weighted Average', householdDifferential:'Household Sensor Differential']
-    }
-
-    // -------------------------------------------------------------------------
-    // Minimum Runtime
-    // -------------------------------------------------------------------------
-    section("<b>Min Run Time:</b>", hideable: true, hidden: false) {
-      paragraph 'Minimum time fan must run before auto-off (prevents short-cycling). 0 to disable.'
-
-      input "minRuntime", "number", title: "Min run time (minutes, 0 to disable, max 30)", required: false, defaultValue: 5, range: '0..30'
-    }
-
-    // -------------------------------------------------------------------------
-    // Cooldown Period
-    // -------------------------------------------------------------------------
-    section("<b>Cooldown Period:</b>", hideable: true, hidden: false) {
-      paragraph 'After the fan turns off, wait this many minutes before allowing it to turn on again. 0 to disable.'
-
-      input "cooldownPeriod", "number", title: "Cooldown period (minutes, 0 to disable, max 30)", required: false, defaultValue: 3, range: '0..30'
+      input "doorSensor", "capability.contactSensor", title: "Door Sensor (optional)", required: false, submitOnChange: true
+      if (settings.doorSensor) {
+        input "doorOpenTime", "number", title: "Max run time after door opening (minutes, 0 to disable, max 60)", required: true, defaultValue: 10, range: '0..60'
+      }
     }
 
     // -------------------------------------------------------------------------
     // Absolute Ceiling
     // -------------------------------------------------------------------------
-    section("<b>Absolute Humidity Ceiling:</b>", hideable: true, hidden: false) {
-      paragraph 'If humidity exceeds this value, the fan turns on unconditionally regardless of trends. 0 to disable.'
+    section("<b>Safety Override:</b>", hideable: true, hidden: false) {
+      paragraph 'If humidity reaches this emergency ceiling, the fan may start even without a valid rise-rate signal. Mode restrictions still prevent automatic starts.'
 
       input "absoluteCeiling", "number", title: "Absolute humidity ceiling (%, 0 to disable, max 95)", required: false, defaultValue: 95, range: '0..95'
     }
@@ -243,13 +207,13 @@ Map mainPage() {
     section("<b>Fan Speed Control:</b>", hideable: true, hidden: false) {
       paragraph 'Optional: Use a dimmer-capable fan switch to set low/high speed based on humidity delta.'
 
-      input "fanDimmer", "capability.switchLevel", title: "Fan Dimmer (optional)", required: false
+      input "fanDimmer", "capability.switchLevel", title: "Fan Dimmer (optional)", required: false, submitOnChange: true
 
-      input "lowSpeedLevel", "number", title: "Low speed level (%)", required: false, defaultValue: 50, range: '1..100'
-
-      input "highSpeedLevel", "number", title: "High speed level (%)", required: false, defaultValue: 100, range: '1..100'
-
-      input "highSpeedThreshold", "number", title: "Humidity delta above baseline to trigger high speed", required: false, defaultValue: 10, range: '1..50'
+      if (settings.fanDimmer) {
+        input "lowSpeedLevel", "number", title: "Low speed level (%)", required: false, defaultValue: 50, range: '1..100'
+        input "highSpeedLevel", "number", title: "High speed level (%)", required: false, defaultValue: 100, range: '1..100'
+        input "highSpeedThreshold", "number", title: "Humidity delta above baseline to trigger high speed", required: false, defaultValue: 10, range: '1..50'
+      }
     }
 
     // -------------------------------------------------------------------------
@@ -262,12 +226,16 @@ Map mainPage() {
     }
 
     // -------------------------------------------------------------------------
-    // Active Mode Restriction
+    // Mode Policies
     // -------------------------------------------------------------------------
     section("<b>Mode Restriction:</b>", hideable: true, hidden: false) {
-      paragraph 'Only allow automatic fan control when the hub is in one of these modes. Leave empty for no restriction.'
+      paragraph 'Automatic fan starts are blocked in the modes selected below. Leave empty to allow automatic starts in every mode.'
+      input "disallowedModes", "mode", title: "Modes that disallow automatic fan starts", required: false, multiple: true
+    }
 
-      input "activeModes", "mode", title: "Active Modes (leave empty for all modes)", required: false, multiple: true
+    section("<b>High-Certainty Modes:</b>", hideable: true, hidden: false) {
+      paragraph 'Automatic starts require a stronger humidity rise and rise rate in the modes selected below. This is useful for preventing false starts overnight without disabling shower detection.'
+      input "highCertaintyModes", "mode", title: "Modes requiring high-certainty starts", required: false, multiple: true
     }
 
     // -------------------------------------------------------------------------
@@ -298,6 +266,32 @@ Map mainPage() {
 @Field static final String FAN_OFF_SINCE = 'fanOffSince'
 @Field static final String FAN_START_HUMIDITY = 'fanStartHumidity'
 @Field static final String HOUSEHOLD_HUMIDITY = 'householdHumidity'
+@Field static final String LAST_HUMIDITY_AT = 'lastHumidityAt'
+@Field static final String SENSOR_READINGS = 'sensorReadings'
+@Field static final String RISE_CANDIDATE_COUNT = 'riseCandidateCount'
+@Field static final String DECLINE_SAMPLE_COUNT = 'declineSampleCount'
+@Field static final String REARM_REQUIRED = 'rearmRequired'
+@Field static final String PEAK_HUMIDITY = 'peakHumidity'
+@Field static final String LAST_SHORT_TERM_RATE = 'lastShortTermRate'
+@Field static final String LAST_RATE_ACCELERATION = 'lastRateAcceleration'
+@Field static final String LAST_MEASUREMENT_GAP = 'lastMeasurementGap'
+@Field static final String CONTROL_BASELINE_ATTRIBUTE = 'slowRollingAverage'
+
+// Fixed control tuning. These values intentionally are not user preferences:
+// the slow EMA provides the weather-resistant baseline, the rate gate filters
+// gradual environmental drift, and the confirmation/hysteresis prevents
+// short-lived spikes from causing fan chatter.
+@Field static final BigDecimal START_DELTA = new BigDecimal('2.0')
+@Field static final BigDecimal STOP_DELTA = new BigDecimal('1.0')
+@Field static final BigDecimal MIN_RISE_RATE = new BigDecimal('0.20')
+@Field static final BigDecimal STRONG_RISE_RATE = new BigDecimal('0.60')
+@Field static final BigDecimal MIN_RISE_ACCELERATION = new BigDecimal('0.05')
+@Field static final BigDecimal MIN_FALL_RATE = new BigDecimal('0.05')
+@Field static final BigDecimal HIGH_CERTAINTY_MULTIPLIER = new BigDecimal('1.5')
+@Field static final BigDecimal REARM_DELTA = new BigDecimal('0.5')
+@Field static final BigDecimal PEAK_DROP_TO_STOP = new BigDecimal('2.0')
+@Field static final Integer RISE_CONFIRMATION_SAMPLES = 2
+@Field static final Integer DECLINE_CONFIRMATION_SAMPLES = 2
 
 String getHumidityStatSensor() {
   return "${app.id}-${humidityStaticSensor}"
@@ -307,10 +301,34 @@ String getHumidityStatSensor() {
 // LIFECYCLE METHODS
 // =============================================================================
 
+void installed() {
+  configure()
+}
+
+void updated() {
+  configure()
+}
+
+void uninstalled() {
+  unsubscribe()
+  unschedule()
+
+  try {
+    deleteChildDevice(getHumidityStatSensor())
+  } catch (Exception e) {
+    logWarn("Unable to remove humidity statistics child device: ${e.message}")
+  }
+}
+
 void configure() {
   unsubscribe()
 
   ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
+
+  if (child == null) {
+    logError('Humidity Statistics driver is not installed; automation is disabled')
+    return
+  }
 
   initializeApp(child)
 }
@@ -322,7 +340,9 @@ void initializeApp(ChildDeviceWrapper child) {
 
   subscribe(fanSwitch, "switch", switchEvent)
 
-  subscribe(doorSensor, "contact", contactEvent)
+  if (doorSensor) {
+    subscribe(doorSensor, "contact", contactEvent)
+  }
 
   // Subscribe to household humidity sensor if configured (Bug #3 fix)
   if (householdHumiditySensor) {
@@ -332,15 +352,8 @@ void initializeApp(ChildDeviceWrapper child) {
   // Subscribe to location mode changes (Feature 7)
   subscribe(location, "mode", modeChangeEvent)
 
-  // Only subscribe to child device stat attribute if not in householdDifferential mode
-  // (householdDifferential mode evaluates directly in humidityEvent)
-  String mode = getSetting('highHumMode') as String
-  if (mode != 'householdDifferential') {
-    subscribe(child, mode, childHumidityEvent)
-  }
-
-  // Initialize baseline freeze to false
-  callDeviceMethod(child, 'setBaselineFreeze', 'false')
+  String fanState = fanSwitch.currentValue('switch') as String
+  child.setBaselineFreeze(fanState == 'on' ? 'true' : 'false')
 }
 
 // =============================================================================
@@ -377,16 +390,26 @@ ChildDeviceWrapper getOrCreateChildDevices(String childDNI) {
 // =============================================================================
 
 /**
- * Stores household humidity from the household sensor (Bug #3 fix).
- * Also forwards the value to the child device for differential calculation.
+ * Stores household humidity from the optional household sensor for diagnostics.
+ * It is not used as the fan-control baseline.
  */
 void householdHumidityEvent(Event event) {
   logDebug("Received household humidity event: ${event.value}")
-  setStateVar(HOUSEHOLD_HUMIDITY, event.value)
+  BigDecimal humidity
+  try {
+    humidity = new BigDecimal(event.value as String)
+  } catch (Exception e) {
+    logWarn("Ignoring invalid household humidity value: ${event.value}")
+    return
+  }
 
-  // Forward to child device so it can compute bathroomDifferential
+  setStateVar(HOUSEHOLD_HUMIDITY, humidity.toString())
+
+  // Forward to the child device so it can expose bathroomDifferential.
   ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
-  callDeviceMethod(child, 'setHouseholdHumidity', new BigDecimal(event.value))
+  if (child != null) {
+    child.setHouseholdHumidity(humidity)
+  }
 }
 
 /**
@@ -397,16 +420,35 @@ void modeChangeEvent(Event event) {
 }
 
 /**
- * Checks if the current hub mode is in the activeModes list (Feature 7).
- * Returns true if no restriction is set or if current mode is in the list.
- * Cannot be @CompileStatic due to location.mode access.
+ * Normalizes a Hubitat single- or multi-select mode preference to a list.
  */
-Boolean isModeActive() {
-  List activeModesList = settings.activeModes
-  if (!activeModesList || activeModesList.isEmpty()) {
-    return true
+List<String> getConfiguredModes(Object configuredModes) {
+  if (configuredModes == null) {
+    return []
   }
-  return activeModesList.contains(location.mode)
+  if (configuredModes instanceof Collection) {
+    return configuredModes.collect { Object mode -> mode.toString() }
+  }
+  return [configuredModes.toString()]
+}
+
+/**
+ * Returns true when automatic fan starts are allowed in the current mode.
+ */
+Boolean isModeAllowed() {
+  String currentMode = location.mode as String
+  List<String> disallowedModes = getConfiguredModes(settings.disallowedModes)
+  return !disallowedModes.any { String mode -> mode.equalsIgnoreCase(currentMode) }
+}
+
+/**
+ * Returns true when the current mode requires stronger evidence before an
+ * automatic fan start.
+ */
+Boolean isHighCertaintyMode() {
+  String currentMode = location.mode as String
+  List<String> highCertaintyModes = getConfiguredModes(settings.highCertaintyModes)
+  return highCertaintyModes.any { String mode -> mode.equalsIgnoreCase(currentMode) }
 }
 
 /**
@@ -429,18 +471,16 @@ Boolean isInCooldown() {
 /**
  * Sends a push notification if a notification device is configured (Feature 6).
  */
-@CompileStatic
 void sendNotification(String message) {
   DeviceWrapper notifDevice = getSetting('notificationDevice') as DeviceWrapper
   if (notifDevice != null) {
-    callDeviceMethod(notifDevice, 'deviceNotification', message)
+    notifDevice.deviceNotification(message)
   }
 }
 
 /**
  * Sets fan dimmer level based on humidity delta above baseline (Feature 5).
  */
-@CompileStatic
 void setFanSpeed(BigDecimal currentHumidity, BigDecimal baseline) {
   DeviceWrapper dimmer = getSetting('fanDimmer') as DeviceWrapper
   if (dimmer == null) { return }
@@ -453,111 +493,198 @@ void setFanSpeed(BigDecimal currentHumidity, BigDecimal baseline) {
   Integer level = delta >= threshold ? highSpeed : lowSpeed
 
   logDebug("Setting fan speed to ${level}% (delta: ${delta}, threshold: ${threshold})")
-  callDeviceMethod(dimmer, 'setLevel', level)
+  dimmer.setLevel(level)
 }
 
 // =============================================================================
 // HUMIDITY PROCESSING - THE CORE LOGIC
 // =============================================================================
 
-@CompileStatic
+String getHumiditySensorKey(Event event) {
+  Object sensorId = event.deviceId
+  if (sensorId == null) {
+    sensorId = event.deviceNetworkId
+  }
+  if (sensorId == null && event.device != null) {
+    sensorId = event.device.deviceNetworkId ?: event.device.id
+  }
+  return sensorId == null ? 'default' : sensorId.toString()
+}
+
+/**
+ * Aggregates the latest value from each selected bathroom sensor.
+ *
+ * The maximum is intentional: a sensor closest to the shower should be able
+ * to start the fan immediately, even if another selected sensor is asleep.
+ * The baseline is built from the same aggregate, so a persistent difference
+ * between sensors is learned rather than treated as a new trigger each time.
+ */
+BigDecimal aggregateHumidity(Map readings) {
+  List<BigDecimal> values = []
+  readings.each { Object key, Object readingObject ->
+    if (readingObject instanceof Map) {
+      Object humidityObject = (readingObject as Map).humidity
+      if (humidityObject != null) {
+        try {
+          values << new BigDecimal(humidityObject.toString())
+        } catch (Exception ignored) {
+          logDebug("Ignoring invalid stored humidity for sensor ${key}")
+        }
+      }
+    }
+  }
+  return values ? values.max() : null
+}
+
 void humidityEvent(Event event) {
   logDebug("Received humidity event: ${event.value}")
 
-  ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
-
-  BigDecimal value = new BigDecimal(event.value)
+  BigDecimal value
+  try {
+    value = new BigDecimal(event.value as String)
+  } catch (Exception e) {
+    logWarn("Ignoring invalid humidity value: ${event.value}")
+    return
+  }
 
   if (value > 0 && value < 100) {
-    setStateVar('currentHumidity', value.toString())
+    Long currentTime = getCurrentTime()
+    Map readings = (getStateVar(SENSOR_READINGS) as Map) ?: [:]
+    readings[getHumiditySensorKey(event)] = [humidity: value.toString(), at: currentTime.toString()]
+    setStateVar(SENSOR_READINGS, readings)
 
-    callDeviceMethod(child, 'logHumidityEvent', value)
+    BigDecimal aggregate = aggregateHumidity(readings)
+    if (aggregate == null) {
+      return
+    }
 
-    // In householdDifferential mode, evaluate directly using household humidity
-    String mode = getSetting('highHumMode') as String
-    if (mode == 'householdDifferential') {
-      evaluateHouseholdDifferential(value)
-    } else if (mode == 'fastRollingAverage' || mode == 'slowRollingAverage') {
-      // While the fan is on, baseline is frozen on the child device and the
-      // rolling-average attribute stops emitting events, so childHumidityEvent
-      // never fires and fan-off never re-evaluates. Drive evaluation directly
-      // here using the still-stored (frozen) baseline value.
-      DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
-      String fanState = fanSwitchDevice.currentValue("switch") as String
-      if (fanState == 'on') {
-        BigDecimal baseline = child.currentValue(mode) as BigDecimal
-        if (baseline != null) {
-          evaluateFanDecision(value, baseline)
-        }
-      }
+    ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
+    if (child == null) {
+      logError('Humidity Statistics driver is unavailable; cannot evaluate humidity')
+      setStateVar('currentHumidity', aggregate.toString())
+      setStateVar('lastHumidity', aggregate.toString())
+      setStateVar(LAST_HUMIDITY_AT, currentTime.toString())
+      return
+    }
+
+    // Capture the stable baseline before recording this reading. The driver
+    // protects it from a single long-gap reading and freezes it during a run.
+    BigDecimal baseline = child.currentValue(CONTROL_BASELINE_ATTRIBUTE) as BigDecimal
+    child.logHumidityEvent(aggregate)
+
+    if (baseline == null) {
+      // The first reading establishes the baseline; it cannot also be a
+      // reliable shower trigger.
+      baseline = child.currentValue(CONTROL_BASELINE_ATTRIBUTE) as BigDecimal
+    }
+
+    BigDecimal shortTermRate = child.currentValue('shortTermRateOfChange') as BigDecimal
+    BigDecimal acceleration = child.currentValue('rateOfChangeAcceleration') as BigDecimal
+    Boolean measurementGap = (child.currentValue('measurementGap') as String) == 'true'
+    setStateVar('currentHumidity', aggregate.toString())
+    setStateVar(LAST_HUMIDITY_AT, currentTime.toString())
+    setStateVar(LAST_SHORT_TERM_RATE, shortTermRate?.toString())
+    setStateVar(LAST_RATE_ACCELERATION, acceleration?.toString())
+    setStateVar(LAST_MEASUREMENT_GAP, measurementGap ? 'true' : 'false')
+
+    if (baseline != null) {
+      evaluateFanDecision(aggregate, baseline, shortTermRate, acceleration, measurementGap)
+    } else {
+      setStateVar('lastHumidity', aggregate.toString())
     }
   }
 }
 
 /**
- * Evaluates fan decision using the household sensor humidity as baseline (Improvement D).
- */
-@CompileStatic
-void evaluateHouseholdDifferential(BigDecimal currentHumidity) {
-  String householdStr = getStateVar(HOUSEHOLD_HUMIDITY) as String
-  if (householdStr == null) {
-    logDebug("No household humidity reading available yet, skipping evaluation")
-    return
-  }
-  BigDecimal householdHumidity = new BigDecimal(householdStr)
-  evaluateFanDecision(currentHumidity, householdHumidity)
-}
-
-/**
- * Called when the child device stat attribute updates (for non-householdDifferential modes).
- */
-@CompileStatic
-void childHumidityEvent(Event event) {
-  BigDecimal trackedHumValue = new BigDecimal(event.value)
-  BigDecimal currentHumidity = new BigDecimal(getStateVar('currentHumidity') as String).setScale(1, BigDecimal.ROUND_HALF_UP)
-  evaluateFanDecision(currentHumidity, trackedHumValue)
-}
-
-/**
- * Core fan decision logic. Called by both childHumidityEvent (stat-based modes)
- * and evaluateHouseholdDifferential (household differential mode).
+ * Core fan decision logic.
  *
  * @param currentHumidity The current bathroom humidity reading
- * @param baseline The baseline humidity to compare against (rolling avg or household)
+ * @param baseline The fixed slow rolling average baseline
+ * @param shortTermRate The time-weighted local derivative in percentage points per minute
+ * @param acceleration The local derivative acceleration, when available
+ * @param measurementGap True when the previous reporting interval was stale
  */
-@CompileStatic
-void evaluateFanDecision(BigDecimal currentHumidity, BigDecimal baseline) {
-  BigDecimal lastHumidity = new BigDecimal((getStateVar('lastHumidity') ?: '0') as String).setScale(1, BigDecimal.ROUND_HALF_UP)
+void evaluateFanDecision(
+  BigDecimal currentHumidity,
+  BigDecimal baseline,
+  BigDecimal shortTermRate,
+  BigDecimal acceleration,
+  Boolean measurementGap
+) {
+  String lastHumidityString = getStateVar('lastHumidity') as String
+  BigDecimal lastHumidity = lastHumidityString == null ? currentHumidity : new BigDecimal(lastHumidityString)
 
-  logDebug("evaluateFanDecision - Current: ${currentHumidity}, Baseline: ${baseline}, Last: ${lastHumidity}")
+  Boolean humidityDecreasing = currentHumidity < lastHumidity
+  Integer declineSampleCount = (getStateVar(DECLINE_SAMPLE_COUNT) ?: 0) as Integer
+  if (humidityDecreasing) {
+    declineSampleCount += 1
+  } else {
+    declineSampleCount = 0
+  }
+  setStateVar(DECLINE_SAMPLE_COUNT, declineSampleCount)
 
-  String isIncreasing = currentHumidity > lastHumidity ? 'true' : 'false'
-  String decreasingSuccessively = getStateVar('isIncreasing') == 'false' && isIncreasing == 'false' ? 'true' : 'false'
-  setStateVar('isIncreasing', isIncreasing)
+  Boolean highCertainty = isHighCertaintyMode()
+  BigDecimal certaintyMultiplier = highCertainty ? HIGH_CERTAINTY_MULTIPLIER : BigDecimal.ONE
+  BigDecimal requiredDelta = START_DELTA * certaintyMultiplier
+  BigDecimal requiredRiseRate = MIN_RISE_RATE * certaintyMultiplier
+  BigDecimal strongRiseRate = STRONG_RISE_RATE * certaintyMultiplier
 
-  BigDecimal changeLimitValue = getSetting('changeLimit') as BigDecimal
+  Boolean ceilingReached = false
+  Integer ceiling = getSetting('absoluteCeiling') as Integer
+  if (ceiling != null && ceiling > 0) {
+    ceilingReached = currentHumidity >= ceiling
+  }
+
+  Boolean magnitudeQualified = currentHumidity - baseline >= requiredDelta
+  Boolean usableRate = shortTermRate != null && !measurementGap
+  Boolean rateQualified = usableRate && shortTermRate >= requiredRiseRate
+  Boolean strongRiseQualified = usableRate && shortTermRate >= strongRiseRate
+  Boolean accelerationQualified = usableRate && acceleration != null && acceleration >= MIN_RISE_ACCELERATION
+  Boolean riseCandidate = magnitudeQualified && rateQualified
+  Integer riseCandidateCount = (getStateVar(RISE_CANDIDATE_COUNT) ?: 0) as Integer
+  if (riseCandidate) {
+    riseCandidateCount += 1
+  } else {
+    riseCandidateCount = 0
+  }
+  setStateVar(RISE_CANDIDATE_COUNT, riseCandidateCount)
+
   DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
   String fanState = fanSwitchDevice.currentValue("switch") as String
 
-  // --- Determine if fan should turn on ---
-  Boolean shouldTurnOn = false
+  // A first reading after a sleeping interval is not a valid rate estimate,
+  // but its magnitude is still useful. A modest spike is enough during normal
+  // modes; high-certainty modes require a larger spike. This prevents an
+  // overnight sensor gap from delaying the start of a shower.
+  Boolean postGapSpike = measurementGap && magnitudeQualified
 
-  // Feature 4: Absolute ceiling — unconditional trigger
-  Integer ceiling = getSetting('absoluteCeiling') as Integer
-  if (ceiling != null && ceiling > 0 && currentHumidity >= ceiling) {
-    logDebug("Absolute ceiling ${ceiling}% reached, triggering fan")
-    shouldTurnOn = true
-  }
+  // Start immediately on a strong local rise or a clear first post-gap spike.
+  // Marginal local rises still require two consecutive qualifying readings.
+  Boolean shouldTurnOn = ceilingReached || postGapSpike ||
+    (riseCandidate && (strongRiseQualified ||
+      (highCertainty && accelerationQualified) ||
+      riseCandidateCount >= RISE_CONFIRMATION_SAMPLES))
 
-  // Standard trigger: humidity exceeds baseline + changeLimit and is rising
-  if (!shouldTurnOn && (currentHumidity - changeLimitValue) > baseline && isIncreasing == 'true') {
-    shouldTurnOn = true
+  // Once a run ends, require the humidity to come back close to baseline
+  // before accepting another automatic start. This is separate from the
+  // time-based cooldown and prevents on/off/on chatter while humidity is
+  // still elevated.
+  Boolean rearmRequired = getStateVar(REARM_REQUIRED) == 'true'
+  if (fanState != 'on' && rearmRequired && !ceilingReached) {
+    if (currentHumidity <= baseline + REARM_DELTA) {
+      removeStateVar(REARM_REQUIRED)
+      rearmRequired = false
+      logDebug('Humidity returned close to baseline; automatic fan starts are re-armed')
+    } else {
+      shouldTurnOn = false
+      setStateVar(RISE_CANDIDATE_COUNT, 0)
+    }
   }
 
   if (shouldTurnOn && fanState != 'on') {
-    // Feature 7: Mode restriction
-    if (!isModeActive()) {
-      logDebug("Fan trigger skipped: hub mode not in active modes list")
+    if (!isModeAllowed()) {
+      logDebug("Fan trigger skipped: automatic starts are disallowed in mode ${location.mode}")
+      setStateVar(RISE_CANDIDATE_COUNT, 0)
       setStateVar('lastHumidity', currentHumidity.toString())
       return
     }
@@ -565,30 +692,40 @@ void evaluateFanDecision(BigDecimal currentHumidity, BigDecimal baseline) {
     // Feature 2: Cooldown check
     if (isInCooldown()) {
       logDebug("Fan trigger skipped: still in cooldown period")
+      setStateVar(RISE_CANDIDATE_COUNT, 0)
       setStateVar('lastHumidity', currentHumidity.toString())
       return
     }
 
     // Turn on the fan
-    logDebug("Humidity(${currentHumidity}) exceeds baseline(${baseline}) + limit(${changeLimitValue}). Turning on fan.")
+    String triggerReason = ceilingReached ?
+      "absolute ceiling ${ceiling}% reached" :
+      (postGapSpike ?
+        "humidity rose ${currentHumidity - baseline}% above baseline after a reporting gap" :
+        "humidity rose ${currentHumidity - baseline}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min")
+    logDebug("${triggerReason}; turning on fan")
     setStateVar(TRIGGERED_BY_APP, 'true')  // Feature 3: track auto-trigger
     setStateVar(FAN_START_HUMIDITY, currentHumidity.toString())  // Feature 8: track start humidity
-    callDeviceMethod(fanSwitchDevice, 'on')
+    setStateVar(PEAK_HUMIDITY, currentHumidity.toString())
+    setStateVar(RISE_CANDIDATE_COUNT, 0)
+    fanSwitchDevice.on()
 
     // Feature 5: Set fan speed
     setFanSpeed(currentHumidity, baseline)
 
     // Feature 8: Record fan start on child device
     ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
-    callDeviceMethod(child, 'recordFanStart', currentHumidity)
+    if (child != null) {
+      child.recordFanStart(currentHumidity)
 
-    // Improvement B: Freeze baseline
-    callDeviceMethod(child, 'setBaselineFreeze', 'true')
+      // Improvement B: Freeze baseline
+      child.setBaselineFreeze('true')
+    }
 
     // Feature 6: Notification
-    String displayName = getDeviceProperty(fanSwitchDevice, 'displayName') as String
+    String displayName = fanSwitchDevice.displayName as String
     sendNotification("${displayName}: Fan turned on (humidity ${currentHumidity}%, baseline ${baseline}%)")
-  } else if (fanState == 'on' && !shouldTurnOn) {
+  } else if (fanState == 'on') {
     // --- Fan is on, evaluate whether to turn it off ---
 
     // Feature 3: Don't auto-off a manually turned on fan
@@ -598,10 +735,25 @@ void evaluateFanDecision(BigDecimal currentHumidity, BigDecimal baseline) {
       return
     }
 
-    // Bug #4 fix: Turn off when humidity returned to normal
-    Boolean humidityNormal = (currentHumidity - changeLimitValue) <= baseline
+    BigDecimal peakHumidity = (getStateVar(PEAK_HUMIDITY) ?: currentHumidity.toString()) as BigDecimal
+    if (currentHumidity > peakHumidity) {
+      peakHumidity = currentHumidity
+      setStateVar(PEAK_HUMIDITY, peakHumidity.toString())
+    }
 
-    if (humidityNormal || decreasingSuccessively == 'true') {
+    // Use hysteresis so the fan can turn off earlier than the start point
+    // without immediately bouncing back on at the same humidity. A sharp
+    // drop from the run peak is allowed on its first reading; a small,
+    // gradual decline still needs consecutive samples.
+    Boolean humidityNormal = currentHumidity <= baseline + STOP_DELTA
+    Boolean sharpDecline = !measurementGap &&
+      peakHumidity - currentHumidity >= PEAK_DROP_TO_STOP &&
+      shortTermRate != null && shortTermRate <= -MIN_FALL_RATE
+    Boolean sustainedDecline = humidityDecreasing &&
+      declineSampleCount >= DECLINE_CONFIRMATION_SAMPLES &&
+      !measurementGap && shortTermRate != null && shortTermRate <= -MIN_FALL_RATE
+
+    if (humidityNormal || sharpDecline || sustainedDecline) {
       // Feature 1: Check minimum runtime
       Integer minRuntimeValue = getSetting('minRuntime') as Integer
       if (minRuntimeValue != null && minRuntimeValue > 0) {
@@ -618,12 +770,13 @@ void evaluateFanDecision(BigDecimal currentHumidity, BigDecimal baseline) {
         }
       }
 
-      String reason = humidityNormal ? "humidity returned to normal" : "decreasing successively"
+      String reason = humidityNormal ? "humidity returned to normal" :
+        (sharpDecline ? "humidity dropped sharply after the peak" : "humidity is declining steadily")
       logDebug("Turning off fan: ${reason} (humidity ${currentHumidity}%, baseline ${baseline}%)")
-      callDeviceMethod(fanSwitchDevice, 'off')
+      fanSwitchDevice.off()
 
       // Feature 6: Notification
-      String displayName = getDeviceProperty(fanSwitchDevice, 'displayName') as String
+      String displayName = fanSwitchDevice.displayName as String
       sendNotification("${displayName}: Fan turned off (${reason}, humidity ${currentHumidity}%)")
     }
   }
@@ -635,11 +788,12 @@ void evaluateFanDecision(BigDecimal currentHumidity, BigDecimal baseline) {
 // FAN & DOOR EVENT HANDLING - SAFETY FEATURES
 // =============================================================================
 
-@CompileStatic
 void switchEvent(Event event) {
   logDebug("Received switch event: ${event.value}")
 
   if (event.value == "off") {
+    Boolean wasAutoTriggered = getStateVar(TRIGGERED_BY_APP) == 'true'
+
     // Feature 2: Record fan off time for cooldown tracking
     setStateVar(FAN_OFF_SINCE, getCurrentTime().toString())
 
@@ -653,18 +807,30 @@ void switchEvent(Event event) {
       String currentHumStr = getStateVar('currentHumidity') as String
       if (currentHumStr != null) {
         ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
-        callDeviceMethod(child, 'recordFanStop', [new BigDecimal(currentHumStr), durationMinutes])
+        if (child != null) {
+          child.recordFanStop(new BigDecimal(currentHumStr), durationMinutes)
+        }
       }
     }
 
     // Improvement B: Unfreeze baseline
     ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
-    callDeviceMethod(child, 'setBaselineFreeze', 'false')
+    if (child != null) {
+      child.setBaselineFreeze('false')
+    }
 
     // Clean up state
     removeStateVar(FAN_ON_SINCE)
     removeStateVar(TRIGGERED_BY_APP)
     removeStateVar(FAN_START_HUMIDITY)
+    if (wasAutoTriggered) {
+      setStateVar(REARM_REQUIRED, 'true')
+    } else {
+      removeStateVar(REARM_REQUIRED)
+      removeStateVar(PEAK_HUMIDITY)
+    }
+    setStateVar(RISE_CANDIDATE_COUNT, 0)
+    setStateVar(DECLINE_SAMPLE_COUNT, 0)
 
     // Cancel pending auto-off timers so they don't fire later against a
     // subsequent manual re-on of the fan within the original timer window.
@@ -728,41 +894,41 @@ void evaluateOffFromCurrentState() {
   if (currentHumStr == null) { return }
   BigDecimal currentHumidity = new BigDecimal(currentHumStr)
 
-  String mode = getSetting('highHumMode') as String
-  if (mode == 'householdDifferential') {
-    evaluateHouseholdDifferential(currentHumidity)
-  } else {
-    ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
-    BigDecimal baseline = child.currentValue(mode) as BigDecimal
-    if (baseline != null) {
-      evaluateFanDecision(currentHumidity, baseline)
-    }
+  ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
+  if (child == null) {
+    return
+  }
+
+  BigDecimal baseline = child.currentValue(CONTROL_BASELINE_ATTRIBUTE) as BigDecimal
+  if (baseline != null) {
+    BigDecimal shortTermRate = getStateVar(LAST_SHORT_TERM_RATE) as BigDecimal
+    BigDecimal acceleration = getStateVar(LAST_RATE_ACCELERATION) as BigDecimal
+    Boolean measurementGap = getStateVar(LAST_MEASUREMENT_GAP) == 'true'
+    evaluateFanDecision(currentHumidity, baseline, shortTermRate, acceleration, measurementGap)
   }
 }
 
-@CompileStatic
 void doorOpenedAutoOff() {
   DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
   Integer doorOpenTimeValue = getSetting('doorOpenTime') as Integer
-  String displayName = getDeviceProperty(fanSwitchDevice, 'displayName') as String
+  String displayName = fanSwitchDevice.displayName as String
 
   logInfo("Auto-off: ${displayName} has been on with door open for ${doorOpenTimeValue} minutes")
 
-  callDeviceMethod(fanSwitchDevice, 'off')
+  fanSwitchDevice.off()
 
   // Feature 6: Notification
   sendNotification("${displayName}: Fan auto-off after door open for ${doorOpenTimeValue} minutes")
 }
 
-@CompileStatic
 void runtimeExceeded() {
   DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
   Integer maxRuntimeValue = getSetting('maxRuntime') as Integer
-  String displayName = getDeviceProperty(fanSwitchDevice, 'displayName') as String
+  String displayName = fanSwitchDevice.displayName as String
 
   logInfo("Auto-off: ${displayName} has been on for ${maxRuntimeValue} minutes")
 
-  callDeviceMethod(fanSwitchDevice, 'off')
+  fanSwitchDevice.off()
 
   // Feature 6: Notification
   sendNotification("${displayName}: Fan auto-off after max runtime of ${maxRuntimeValue} minutes")

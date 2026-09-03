@@ -28,6 +28,29 @@
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.hub.domain.Event
 import groovy.transform.CompileStatic
+import groovy.transform.Field
+
+@Field static final Integer DEFAULT_SUNRISE_DURATION = 30
+@Field static final Integer DEFAULT_SNOOZE_DURATION = 10
+@Field static final Integer MIN_DURATION = 10
+@Field static final Integer MAX_DURATION = 60
+@Field static final Integer CT_STEP_KELVIN = 40
+@Field static final Integer START_CT = 2800
+@Field static final Integer END_CT = 5800
+@Field static final Integer DEFAULT_STAGE1_HUE_START = 0
+@Field static final Integer DEFAULT_STAGE1_HUE_END = 10
+@Field static final Integer DEFAULT_STAGE1_SATURATION_START = 100
+@Field static final Integer DEFAULT_STAGE1_SATURATION_END = 100
+@Field static final Integer DEFAULT_STAGE1_LEVEL_START = 1
+@Field static final Integer DEFAULT_STAGE1_LEVEL_END = 10
+@Field static final Integer DEFAULT_STAGE2_HUE_START = 10
+@Field static final Integer DEFAULT_STAGE2_HUE_END = 10
+@Field static final Integer DEFAULT_STAGE2_SATURATION_START = 100
+@Field static final Integer DEFAULT_STAGE2_SATURATION_END = 60
+@Field static final Integer DEFAULT_STAGE2_LEVEL_START = 10
+@Field static final Integer DEFAULT_STAGE2_LEVEL_END = 20
+@Field static final Integer DEFAULT_STAGE3_LEVEL_START = 20
+@Field static final Integer DEFAULT_STAGE3_LEVEL_END = 100
 
 // =============================================================================
 // LOGGING
@@ -35,44 +58,50 @@ import groovy.transform.CompileStatic
 
 void logError(String message) {
   if (loggingEnabled('error')) {
-    if(device) log.error "${device.label ?: device.name }: ${message}"
-    if(app) log.error "${app.label ?: app.name }: ${message}"
+    if (device) { log.error("${device.label ?: device.name}: ${message}") }
+    if (app) { log.error("${app.label ?: app.name}: ${message}") }
   }
 }
 
 void logWarn(String message) {
   if (loggingEnabled('warn')) {
-    if(device) log.warn "${device.label ?: device.name }: ${message}"
-    if(app) log.warn "${app.label ?: app.name }: ${message}"
+    if (device) { log.warn("${device.label ?: device.name}: ${message}") }
+    if (app) { log.warn("${app.label ?: app.name}: ${message}") }
   }
 }
 
 void logInfo(String message) {
   if (loggingEnabled('info')) {
-    if(device) log.info "${device.label ?: device.name }: ${message}"
-    if(app) log.info "${app.label ?: app.name }: ${message}"
+    if (device) { log.info("${device.label ?: device.name}: ${message}") }
+    if (app) { log.info("${app.label ?: app.name}: ${message}") }
   }
 }
 
 void logDebug(String message) {
   if (loggingEnabled('debug')) {
-    if(device) log.debug "${device.label ?: device.name }: ${message}"
-    if(app) log.debug "${app.label ?: app.name }: ${message}"
+    if (device) { log.debug("${device.label ?: device.name}: ${message}") }
+    if (app) { log.debug("${app.label ?: app.name}: ${message}") }
+  }
+}
+
+void logTrace(String message) {
+  if (loggingEnabled('trace')) {
+    if (device) { log.trace("${device.label ?: device.name}: ${message}") }
+    if (app) { log.trace("${app.label ?: app.name}: ${message}") }
   }
 }
 
 /** Returns whether the configured logging level includes the requested level. */
 private boolean loggingEnabled(String messageLevel) {
-  String configuredLevel = settings.loggingLevel
-  if (!configuredLevel) {
-    // Preserve behavior for installations upgraded from the old boolean
-    // logging settings until the new dropdown is saved.
-    if (settings.logEnable == false) {
-      return false
-    }
-    configuredLevel = (settings.debugLogEnable == true) ? 'debug' : 'info'
-  }
+  String configuredLevel = normalizeLogLevel(settings.logLevel ?: 'info')
   return isLogLevelEnabled(configuredLevel, messageLevel)
+}
+
+/** Normalizes an unexpected logging preference to the safe default. */
+@CompileStatic
+private static String normalizeLogLevel(String level) {
+  String normalized = level?.toLowerCase()
+  return ['trace', 'debug', 'info', 'warn', 'error', 'off'].contains(normalized) ? normalized : 'info'
 }
 
 /**
@@ -90,6 +119,8 @@ private static boolean isLogLevelEnabled(String configuredLevel, String messageL
 @CompileStatic
 private static Integer logLevelRank(String level) {
   switch (level?.toLowerCase()) {
+    case 'trace':
+      return 5
     case 'error':
       return 1
     case 'warn':
@@ -146,7 +177,8 @@ Map mainPage() {
         'sunriseTime',           // Setting name stored in settings.sunriseTime
         'time',                  // Input type: time picker
         title: 'Time to start sunrise simulation',
-        required: true           // User must configure this
+        required: true,          // User must configure this
+        submitOnChange: true
       )
     }
 
@@ -161,7 +193,8 @@ Map mainPage() {
         'capability.colorControl',       // Device type filter
         title: 'RGB capable bulbs',
         required: false,                 // Optional, but sunrise won't work without bulbs
-        multiple: true                   // User can select multiple bulbs
+        multiple: true,                  // User can select multiple bulbs
+        submitOnChange: true
       )
 
       // Disable switches - turning any of these on will prevent sunrise from running
@@ -170,7 +203,8 @@ Map mainPage() {
         'capability.switch',
         title: 'Disable Sunrise with switches',
         required: false,
-        multiple: true
+        multiple: true,
+        submitOnChange: true
       )
 
       // Snooze buttons - pressing one stops current sunrise and reschedules
@@ -179,7 +213,8 @@ Map mainPage() {
         'capability.pushableButton',
         title: 'Snooze Sunrise with buttons',
         required: false,
-        multiple: true
+        multiple: true,
+        submitOnChange: true
       )
 
       // Presence sensors - sunrise only runs if at least one shows "present"
@@ -188,7 +223,8 @@ Map mainPage() {
         'capability.presenceSensor',
         title: 'Required presence for Sunrise',
         required: false,
-        multiple: true
+        multiple: true,
+        submitOnChange: true
       )
     }
 
@@ -197,14 +233,15 @@ Map mainPage() {
     // =========================================================================
     // Configure timing parameters for the animation
     section('<h2>Sunrise Settings</h2>') {
-      // Total duration for the sunrise animation (divided into 3 equal stages)
+      // Total duration for the sunrise animation (divided across active stages)
       input(
         'sunriseDuration',
         'number',
         title: 'Duration of minutes to brighten lights',
         range: '10..60',           // Must be between 10 and 60 minutes
         required: true,
-        defaultValue: 30           // Default to 30 minutes
+        defaultValue: 30,          // Default to 30 minutes
+        submitOnChange: true
       )
 
       // How long to wait after snooze before starting a new sunrise
@@ -214,8 +251,66 @@ Map mainPage() {
         title: 'Duration of minutes to snooze',
         range: '10..60',
         required: true,
-        defaultValue: 10           // Default to 10 minute snooze
+        defaultValue: 10,          // Default to 10 minute snooze
+        submitOnChange: true
       )
+
+      input(
+        'startingStage',
+        'enum',
+        title: 'Start sunrise at stage',
+        options: [
+          '1': 'Stage 1 - Full RGB sunrise',
+          '2': 'Stage 2 - RGB softening',
+          '3': 'Stage 3 - CT brightening'
+        ],
+        required: true,
+        defaultValue: '1',
+        submitOnChange: true
+      )
+
+      input(
+        'customizeStages',
+        'bool',
+        title: 'Customize animation stages',
+        required: false,
+        defaultValue: false,
+        submitOnChange: true
+      )
+
+      String selectedStartingStage = "${settings.startingStage ?: '1'}"
+      if (settings.customizeStages == true && selectedStartingStage == '1') {
+        section('<h3>Stage 1 - RGB color ramp</h3>') {
+          input('stage1HueStart', 'number', title: 'Hue start (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE1_HUE_START, submitOnChange: true)
+          input('stage1HueEnd', 'number', title: 'Hue end (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE1_HUE_END, submitOnChange: true)
+          input('stage1SaturationStart', 'number', title: 'Saturation start (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE1_SATURATION_START, submitOnChange: true)
+          input('stage1SaturationEnd', 'number', title: 'Saturation end (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE1_SATURATION_END, submitOnChange: true)
+          input('stage1LevelStart', 'number', title: 'Brightness start (1-100)', range: '1..100', defaultValue: DEFAULT_STAGE1_LEVEL_START, submitOnChange: true)
+          input('stage1LevelEnd', 'number', title: 'Brightness end (1-100)', range: '1..100', defaultValue: DEFAULT_STAGE1_LEVEL_END, submitOnChange: true)
+        }
+
+      }
+
+      if (settings.customizeStages == true && ['1', '2'].contains(selectedStartingStage)) {
+        section('<h3>Stage 2 - RGB softening</h3>') {
+          input('stage2HueStart', 'number', title: 'Hue start (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE2_HUE_START, submitOnChange: true)
+          input('stage2HueEnd', 'number', title: 'Hue end (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE2_HUE_END, submitOnChange: true)
+          input('stage2SaturationStart', 'number', title: 'Saturation start (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE2_SATURATION_START, submitOnChange: true)
+          input('stage2SaturationEnd', 'number', title: 'Saturation end (0-100)', range: '0..100', defaultValue: DEFAULT_STAGE2_SATURATION_END, submitOnChange: true)
+          input('stage2LevelStart', 'number', title: 'Brightness start (1-100)', range: '1..100', defaultValue: DEFAULT_STAGE2_LEVEL_START, submitOnChange: true)
+          input('stage2LevelEnd', 'number', title: 'Brightness end (1-100)', range: '1..100', defaultValue: DEFAULT_STAGE2_LEVEL_END, submitOnChange: true)
+        }
+
+      }
+
+      if (settings.customizeStages == true && selectedStartingStage == '3') {
+        section('<h3>Stage 3 - CT brightening</h3>') {
+          input('stage3CTStart', 'number', title: 'Color temperature start (K)', range: '1000..10000', defaultValue: START_CT, submitOnChange: true)
+          input('stage3CTEnd', 'number', title: 'Color temperature end (K)', range: '1000..10000', defaultValue: END_CT, submitOnChange: true)
+          input('stage3LevelStart', 'number', title: 'Brightness start (1-100)', range: '1..100', defaultValue: DEFAULT_STAGE3_LEVEL_START, submitOnChange: true)
+          input('stage3LevelEnd', 'number', title: 'Brightness end (1-100)', range: '1..100', defaultValue: DEFAULT_STAGE3_LEVEL_END, submitOnChange: true)
+        }
+      }
     }
 
     // =========================================================================
@@ -225,18 +320,20 @@ Map mainPage() {
     section('<h2>Logging</h2>') {
       // Select the most detailed level that should be logged
       input(
-        'loggingLevel',
+        'logLevel',
         'enum',
         title: 'Logging level',
         options: [
-          off: 'Off',
-          error: 'Errors only',
-          warn: 'Warnings and errors',
-          info: 'Informational (recommended)',
-          debug: 'Debug'
+          trace: 'Trace',
+          debug: 'Debug',
+          info: 'Info',
+          warn: 'Warn',
+          error: 'Error',
+          off: 'Off'
         ],
         required: false,
-        defaultValue: 'info'
+        defaultValue: 'info',
+        submitOnChange: true
       )
 
       // Button to manually trigger a test sunrise immediately
@@ -245,6 +342,15 @@ Map mainPage() {
         type: 'button',
         title: 'Test Sunrise',
         backgroundColor: 'Crimson',
+        textColor: 'white',
+        submitOnChange: true
+      )
+
+      input(
+        name: 'previewBtn',
+        type: 'button',
+        title: 'Preview Sunrise in Logs',
+        backgroundColor: 'SteelBlue',
         textColor: 'white',
         submitOnChange: true
       )
@@ -280,6 +386,18 @@ void clearAllStates() {
 
 /** Reinitializes the app whenever settings are saved, including Done. */
 void updated() {
+  configure()
+}
+
+/** Cleans up all subscriptions and schedules when the app is removed. */
+void uninstalled() {
+  unsubscribe()
+  unschedule()
+  clearAllStates()
+}
+
+/** Initializes a newly installed app. */
+void installed() {
   configure()
 }
 
@@ -322,32 +440,172 @@ private void subscribeEventHandlers() {
 
 /**
  * calculateStageDurations() - Calculates timing intervals for each animation stage
- * The sunrise animation is divided into 3 equal-duration stages:
+ * The sunrise animation is divided across the configured active stages:
  * - Stage 1: Deep red to orange (10 steps)
  * - Stage 2: Orange to soft white (40 steps)
  * - Stage 3: Soft white to full brightness (80 steps)
  * This method calculates how many seconds between each step to achieve the user's
- * desired total duration.
+ * desired total duration. If the animation starts later, the skipped stages
+ * do not consume any of the configured duration.
  */
 private void calculateStageDurations() {
-  // Convert user's desired minutes into total seconds for the entire sunrise
-  Integer totalSecs = (60 * (settings.sunriseDuration as Integer))
+  Map animationConfig = buildAnimationConfig()
+  state.animationConfig = animationConfig
+  Map stages = animationConfig.stages as Map
+  state.stageSecs = stages.stage1.durationSeconds
+  state.stage1interval = calculateInterval(stages.stage1.durationSeconds as Integer, stages.stage1.steps as Integer)
+  state.stage2interval = calculateInterval(stages.stage2.durationSeconds as Integer, stages.stage2.steps as Integer)
+  state.stage3interval = calculateInterval(stages.stage3.durationSeconds as Integer, stages.stage3.steps as Integer)
+}
 
-  // Divide the total time into 3 equal stages
-  Integer stageSecs = (totalSecs / 3)
-  state.stageSecs = stageSecs
+/** Builds a validated snapshot of all stage settings for one animation run. */
+private Map buildAnimationConfig() {
+  Integer startingStage = normalizeInteger(settings.startingStage, 1, 1, 3)
+  Boolean customize = (settings.customizeStages == true)
+  Integer totalSeconds = 60 * normalizeInteger(settings.sunriseDuration, DEFAULT_SUNRISE_DURATION, MIN_DURATION, MAX_DURATION)
+  Integer activeStageCount = 4 - startingStage
+  Integer baseStageSeconds = (totalSeconds / activeStageCount)
+  Integer remainderSeconds = totalSeconds % activeStageCount
 
-  // Calculate interval for stage 1 (10 steps across 1/3 of total time)
-  // Minimum interval is 1 second to avoid overwhelming the hub
-  state.stage1interval = calculateInterval(stageSecs, 10)
+  Map stages = [
+    stage1: [
+      mode: 'rgb',
+      durationSeconds: 0,
+      hueStart: stageSetting('stage1HueStart', DEFAULT_STAGE1_HUE_START, 0, 100, customize),
+      hueEnd: stageSetting('stage1HueEnd', DEFAULT_STAGE1_HUE_END, 0, 100, customize),
+      saturationStart: stageSetting('stage1SaturationStart', DEFAULT_STAGE1_SATURATION_START, 0, 100, customize),
+      saturationEnd: stageSetting('stage1SaturationEnd', DEFAULT_STAGE1_SATURATION_END, 0, 100, customize),
+      levelStart: stageSetting('stage1LevelStart', DEFAULT_STAGE1_LEVEL_START, 1, 100, customize),
+      levelEnd: stageSetting('stage1LevelEnd', DEFAULT_STAGE1_LEVEL_END, 1, 100, customize)
+    ],
+    stage2: [
+      mode: 'rgb',
+      durationSeconds: 0,
+      hueStart: stageSetting('stage2HueStart', DEFAULT_STAGE2_HUE_START, 0, 100, customize),
+      hueEnd: stageSetting('stage2HueEnd', DEFAULT_STAGE2_HUE_END, 0, 100, customize),
+      saturationStart: stageSetting('stage2SaturationStart', DEFAULT_STAGE2_SATURATION_START, 0, 100, customize),
+      saturationEnd: stageSetting('stage2SaturationEnd', DEFAULT_STAGE2_SATURATION_END, 0, 100, customize),
+      levelStart: stageSetting('stage2LevelStart', DEFAULT_STAGE2_LEVEL_START, 1, 100, customize),
+      levelEnd: stageSetting('stage2LevelEnd', DEFAULT_STAGE2_LEVEL_END, 1, 100, customize)
+    ],
+    stage3: [
+      mode: 'ct',
+      durationSeconds: 0,
+      ctStart: stageSetting('stage3CTStart', START_CT, 1000, 10000, customize),
+      ctEnd: stageSetting('stage3CTEnd', END_CT, 1000, 10000, customize),
+      levelStart: stageSetting('stage3LevelStart', DEFAULT_STAGE3_LEVEL_START, 1, 100, customize),
+      levelEnd: stageSetting('stage3LevelEnd', DEFAULT_STAGE3_LEVEL_END, 1, 100, customize)
+    ]
+  ]
 
-  // Calculate interval for stage 2 (40 steps across 1/3 of total time)
-  // More steps means shorter intervals for smoother transition
-  state.stage2interval = calculateInterval(stageSecs, 40)
+  Map stage1 = stages.stage1 as Map
+  stage1.steps = calculateRgbStageSteps(
+    stage1.hueStart as Integer,
+    stage1.hueEnd as Integer,
+    stage1.saturationStart as Integer,
+    stage1.saturationEnd as Integer,
+    stage1.levelStart as Integer,
+    stage1.levelEnd as Integer
+  )
+  Map stage2 = stages.stage2 as Map
+  stage2.steps = calculateRgbStageSteps(
+    stage2.hueStart as Integer,
+    stage2.hueEnd as Integer,
+    stage2.saturationStart as Integer,
+    stage2.saturationEnd as Integer,
+    stage2.levelStart as Integer,
+    stage2.levelEnd as Integer
+  )
+  Map stage3 = stages.stage3 as Map
+  stage3.steps = calculateCtStageSteps(
+    stage3.ctStart as Integer,
+    stage3.ctEnd as Integer,
+    stage3.levelStart as Integer,
+    stage3.levelEnd as Integer
+  )
 
-  // Calculate interval for stage 3 (80 steps across 1/3 of total time)
-  // Finest granularity for the final brightening phase
-  state.stage3interval = calculateInterval(stageSecs, 80)
+  Integer activeIndex = 0
+  (startingStage..3).each { Integer stageNumber ->
+    Map stage = stages["stage${stageNumber}"] as Map
+    stage.durationSeconds = baseStageSeconds + ((activeIndex < remainderSeconds) ? 1 : 0)
+    activeIndex += 1
+  }
+  return [startingStage: startingStage, stages: stages]
+}
+
+/** Reads one optional advanced stage value or returns its documented default. */
+private Integer stageSetting(String settingName, Integer fallback, Integer minimum, Integer maximum, Boolean customize) {
+  return customize ? normalizeInteger(settings[settingName], fallback, minimum, maximum) : fallback
+}
+
+/** Calculates RGB steps from the largest hue, saturation, or brightness change. */
+@CompileStatic
+private static Integer calculateRgbStageSteps(Integer hueStart, Integer hueEnd, Integer saturationStart, Integer saturationEnd, Integer levelStart, Integer levelEnd) {
+  Integer hueDelta = Math.abs(hueEnd - hueStart)
+  Integer saturationDelta = Math.abs(saturationEnd - saturationStart)
+  Integer levelDelta = Math.abs(levelEnd - levelStart)
+  return Math.max(1, Math.max(hueDelta, Math.max(saturationDelta, levelDelta)))
+}
+
+/** Calculates CT steps from brightness change and a maximum CT change per step. */
+@CompileStatic
+private static Integer calculateCtStageSteps(Integer ctStart, Integer ctEnd, Integer levelStart, Integer levelEnd) {
+  Integer levelDelta = Math.abs(levelEnd - levelStart)
+  double ctSteps = Math.abs(ctEnd - ctStart).doubleValue() / CT_STEP_KELVIN.doubleValue()
+  Integer roundedCtSteps = (Integer) Math.ceil(ctSteps)
+  return Math.max(1, Math.max(levelDelta, roundedCtSteps))
+}
+
+/** Returns the saved configuration for an active stage. */
+private Map stageConfig(Integer stageNumber) {
+  Map animationConfig = state.animationConfig as Map
+  return animationConfig.stages["stage${stageNumber}"] as Map
+}
+
+/** Interpolates one stage frame from its configured start and end values. */
+private Map interpolateStageFrame(Map stage, Integer step) {
+  Integer totalSteps = stage.steps as Integer
+  Integer boundedStep = Math.max(0, Math.min(totalSteps, step))
+  if (stage.mode == 'ct') {
+    return [
+      colorTemperature: interpolateInteger(stage.ctStart as Integer, stage.ctEnd as Integer, boundedStep, totalSteps),
+      level: interpolateInteger(stage.levelStart as Integer, stage.levelEnd as Integer, boundedStep, totalSteps)
+    ]
+  }
+  return colorMap(
+    interpolateInteger(stage.hueStart as Integer, stage.hueEnd as Integer, boundedStep, totalSteps),
+    interpolateInteger(stage.saturationStart as Integer, stage.saturationEnd as Integer, boundedStep, totalSteps),
+    interpolateInteger(stage.levelStart as Integer, stage.levelEnd as Integer, boundedStep, totalSteps)
+  )
+}
+
+/** Interpolates an integer value using floating-point arithmetic and rounding. */
+@CompileStatic
+private static Integer interpolateInteger(Integer start, Integer end, Integer step, Integer totalSteps) {
+  double progress = step.doubleValue() / totalSteps.doubleValue()
+  return (Integer) Math.round(start + ((end - start) * progress))
+}
+
+/** Formats one calculated frame for concise Hubitat log output. */
+private String formatPreviewFrame(Map stage, Map frame) {
+  if (stage.mode == 'ct') {
+    return "${frame.level}% brightness, ${frame.colorTemperature}K CT"
+  }
+  return "${frame.level}% brightness, HSV hue ${frame.hue}, saturation ${frame.saturation}%"
+}
+
+/** Returns a bounded integer setting value without allowing malformed input to fail initialization. */
+@CompileStatic
+private static Integer normalizeInteger(Object rawValue, Integer fallback, Integer minimum, Integer maximum) {
+  Integer value = fallback
+  if (rawValue != null) {
+    try {
+      value = Integer.valueOf(rawValue.toString())
+    } catch (Exception ignored) {
+      value = fallback
+    }
+  }
+  return Math.max(minimum, Math.min(maximum, value))
 }
 
 /**
@@ -359,6 +617,15 @@ private static Integer calculateInterval(Integer stageSeconds, Integer stepCount
   double intervalValue = stageSeconds.doubleValue() / stepCount.doubleValue()
   Integer interval = (Integer) Math.round(intervalValue)
   return (interval > 1) ? interval : 1
+}
+
+/** Distributes fractional step intervals so each stage stays on its time budget. */
+@CompileStatic
+private static Integer calculateStepDelay(Integer stageSeconds, Integer stepCount, Integer completedSteps) {
+  double currentTarget = stageSeconds.doubleValue() * completedSteps.doubleValue() / stepCount.doubleValue()
+  double nextTarget = stageSeconds.doubleValue() * (completedSteps + 1).doubleValue() / stepCount.doubleValue()
+  Integer delay = (Integer) (Math.round(nextTarget) - Math.round(currentTarget))
+  return (delay > 0) ? delay : 1
 }
 
 /**
@@ -395,6 +662,10 @@ void appButtonHandler(String buttonId) {
       // User clicked "Test Sunrise" - run the sunrise immediately for testing
       sunriseStart()
       break
+    case 'previewBtn':
+      // User clicked "Preview Sunrise in Logs" - report without controlling bulbs
+      previewSunrise()
+      break
   }
 }
 
@@ -418,7 +689,8 @@ void snoozeButtonEvent(Event event) {
   state.snoozeActive = true
 
   // Restart the sunrise when the snooze duration expires.
-  Integer snoozeDurationSecs = (60 * (settings.snoozeDuration as Integer))
+  Integer snoozeMinutes = normalizeInteger(settings.snoozeDuration, DEFAULT_SNOOZE_DURATION, MIN_DURATION, MAX_DURATION)
+  Integer snoozeDurationSecs = (60 * snoozeMinutes)
   unschedule('snoozeOffHandler')
   runIn(snoozeDurationSecs, 'snoozeOffHandler')
 }
@@ -510,6 +782,11 @@ private void turnOffAllBulbs() {
 void sunriseStart() {
   logInfo('Starting sunrise simulation')
 
+  if (!settings.rgbwBulbs) {
+    logWarn('Skipping sunrise because no RGB/RGBW bulbs are configured')
+    return
+  }
+
   // Check if presence is required and if so, verify someone is home
   if (!requiredPresencePresent()) {
     logInfo('Skipping sunrise because required presence sensors are not present')
@@ -529,6 +806,29 @@ void sunriseStart() {
   brightenRGBWBulbsStart()
 }
 
+/** Logs the calculated sunrise plan without scheduling or commanding bulbs. */
+void previewSunrise() {
+  Map animationConfig = buildAnimationConfig()
+  Integer startingStage = animationConfig.startingStage as Integer
+  Map stages = animationConfig.stages as Map
+
+  logInfo('Sunrise preview start')
+  (startingStage..3).each { Integer stageNumber ->
+    Map stage = stages["stage${stageNumber}"] as Map
+    logInfo("Stage ${stageNumber}: ${stage.durationSeconds} seconds duration (${stage.steps} steps)")
+  }
+
+  (startingStage..3).each { Integer stageNumber ->
+    Map stage = stages["stage${stageNumber}"] as Map
+    logInfo("Stage ${stageNumber}, Start: ${formatPreviewFrame(stage, interpolateStageFrame(stage, 0))}")
+    Integer totalSteps = stage.steps as Integer
+    (1..totalSteps).each { Integer step ->
+      logInfo("Stage ${stageNumber}, Step ${step}: ${formatPreviewFrame(stage, interpolateStageFrame(stage, step))}")
+    }
+  }
+  logInfo('Sunrise preview end')
+}
+
 /**
  * brightenRGBWBulbsStart() - Initializes state variables and begins animation
  * This method sets up all the initial values for the 3-stage color animation:
@@ -540,53 +840,24 @@ void sunriseStart() {
  * brightenRGBWBulbs() for the first time.
  */
 private void brightenRGBWBulbsStart() {
-  // === Initialize Stage 1 starting values ===
-  // Start with deep red color (hue 0 on HSV color wheel)
-  state.rgbwHue = 0
-
-  // Start at full saturation (100%) for vibrant red color
-  state.rgbwSaturation = 100
-
-  // Start at very low brightness (1%) - barely visible
-  state.rgbwLevel = 1
-
-  // Set initial color temperature for stage 3 (warm white at 2800K)
-  state.rgbwCT = 2800
-
-  // Set animation to stage 1 (deep red to orange phase)
-  state.rgbwStage = 1
-
-  // Build the initial color map that will be sent to bulbs
-  // This map contains HSV (Hue, Saturation, Value/Level) values
-  Map initialColorMap = [
-    hue       : state.rgbwHue,
-    saturation: state.rgbwSaturation,
-    level     : state.rgbwLevel
-  ]
-  state.rgbwColorMap = initialColorMap
-
-  // Log the starting parameters for debugging
-  logDebug("Starting RGBW animation - ColorMap: ${state.rgbwColorMap}, CT: ${state.rgbwCT}")
-
-  // Check if animation is already running (prevents duplicate animations)
-  if (!state.brightenRGBWBulbsRunning) {
-    state.brightenRGBWBulbsRunning = 'true'
-
-    // Pre-stage the exact first color/level before the animation loop sends
-    // its next command. This prevents bulbs from briefly using their previous
-    // brightness while changing into the sunrise color.
-    preStageInitialColor(initialColorMap)
-
-    // Give the devices a moment to accept the staged command before advancing.
-    runIn(1, 'brightenRGBWBulbs')
+  if (state.brightenRGBWBulbsRunning == true) {
+    logDebug('Ignoring sunrise start because an animation is already running')
+    return
   }
-}
 
-/** Sends the first sunrise command before the animation loop begins. */
-private void preStageInitialColor(Map colorMap) {
-  settings.rgbwBulbs?.each { DeviceWrapper bulb ->
-    bulb.setColor(colorMap)
-  }
+  Map animationConfig = state.animationConfig as Map
+  Integer startingStage = animationConfig.startingStage as Integer
+  Map stage = stageConfig(startingStage)
+  state.brightenRGBWBulbsRunning = true
+  state.rgbwStage = startingStage
+  state.rgbwStep = 0
+
+  Map initialFrame = interpolateStageFrame(stage, 0)
+  applyStageFrame(stage, initialFrame)
+  logDebug("Starting sunrise at stage ${startingStage} - Frame: ${initialFrame}")
+
+  // Give the devices a moment to accept the staged command before advancing.
+  runIn(1, 'brightenRGBWBulbs')
 }
 
 /**
@@ -617,123 +888,87 @@ private void preStageInitialColor(Map colorMap) {
  * completes (brightness reaches 100%). This creates a self-perpetuating loop.
  */
 private void brightenRGBWBulbs() {
-  // Mark that the animation is currently running (prevents duplicates)
-  state.brightenRGBWBulbsRunning = 'true'
+  state.brightenRGBWBulbsRunning = true
 
   // Check if user has disabled or snoozed the sunrise
   if (sunriseDisabled()) {
     logInfo('Exiting brightenRGBWBulbs() because sunrise is disabled or snoozed')
-    state.remove('brightenRGBWBulbsRunning') // Clear the running flag
+    state.brightenRGBWBulbsRunning = false
     return
   }
 
-  // ========================================================================
-  // STAGE 1: Deep Red to Orange Transition
-  // ========================================================================
-  // This stage creates the initial sunrise glow, transitioning from deep red
-  // to orange while slowly increasing brightness. It mimics the very early
-  // sunrise when the sun is below the horizon.
-  if (state.rgbwStage == 1) {
-    // Apply current color to all configured bulbs
-    settings.rgbwBulbs?.each { DeviceWrapper bulb ->
-      bulb.setColor(state.rgbwColorMap)
-    }
-
-    // Increment hue by 1 (shifts color from red toward orange)
-    state.rgbwHue += 1
-
-    // Increment brightness by 1% (gradually brightens the bulbs)
-    state.rgbwLevel += 1
-
-    // Build updated color map with new values, rounding for clean integer values
-    state.rgbwColorMap = [
-      hue       : Math.round(state.rgbwHue),
-      saturation: Math.round(state.rgbwSaturation),
-      level     : Math.round(state.rgbwLevel)
-    ]
-    logDebug("Stage 1 (Deep Red → Orange) - ColorMap: ${state.rgbwColorMap}")
-
-    // Check if we've reached the end of stage 1 (hue 10 = orange)
-    if (state.rgbwColorMap.hue < 10) {
-      // Continue stage 1 - schedule next iteration
-      runIn((state.stage1interval as Integer), 'brightenRGBWBulbs')
-    } else {
-      // Stage 1 complete - set exact ending values and move to stage 2
-      state.rgbwColorMap = [hue: 10, saturation: 100, level: 10]
-      state.rgbwStage = 2
-      runIn((state.stage1interval as Integer), 'brightenRGBWBulbs')
-    }
+  // Ignore a callback left over from an abort or configuration update.
+  if (state.rgbwStage == null || state.rgbwStep == null || !state.animationConfig) {
+    logWarn('Exiting brightenRGBWBulbs() because animation state is incomplete')
+    state.brightenRGBWBulbsRunning = false
+    return
   }
 
-  // ========================================================================
-  // STAGE 2: Desaturate to Soft White
-  // ========================================================================
-  // This stage maintains the orange hue but gradually removes saturation,
-  // creating a soft, warm white glow. This mimics the sunrise transitioning
-  // from colored light to white light as the sun rises higher.
-  if (state.rgbwStage == 2) {
-    // Apply current color to all configured bulbs
-    settings.rgbwBulbs?.each { DeviceWrapper bulb ->
-      bulb.setColor(state.rgbwColorMap)
-    }
+  Integer stageNumber = state.rgbwStage as Integer
+  Map stage = stageConfig(stageNumber)
+  Integer stageStep = (state.rgbwStep as Integer) + 1
+  Integer totalSteps = stage.steps as Integer
+  Map frame = interpolateStageFrame(stage, stageStep)
 
-    // Decrease saturation by 1% (removes color, adds white)
-    state.rgbwSaturation -= 1
+  state.rgbwStep = stageStep
+  applyStageFrame(stage, frame)
+  logDebug("Stage ${stageNumber} - Frame: ${frame}")
 
-    // Increase brightness by 0.25% (slower increase than stage 1)
-    state.rgbwLevel += 0.25
-
-    // Build updated color map with new values
-    state.rgbwColorMap = [
-      hue       : Math.round(state.rgbwHue),
-      saturation: Math.round(state.rgbwSaturation),
-      level     : Math.round(state.rgbwLevel)
-    ]
-    logDebug("Stage 2 (Desaturate to Soft White) - ColorMap: ${state.rgbwColorMap}")
-
-    // Check if we've reached the end of stage 2 (60% saturation)
-    if (state.rgbwColorMap.saturation > 60) {
-      // Continue stage 2 - schedule next iteration
-      runIn((state.stage2interval as Integer), 'brightenRGBWBulbs')
-    } else {
-      // Stage 2 complete - set exact ending values and move to stage 3
-      state.rgbwColorMap = [hue: 10, saturation: 60, level: 20]
-      state.rgbwLevel = 20
-      state.rgbwStage = 3
-      runIn((state.stage2interval as Integer), 'brightenRGBWBulbs')
-    }
+  if (stageStep < totalSteps) {
+    Integer delay = calculateStepDelay(stage.durationSeconds as Integer, totalSteps, stageStep)
+    runIn(delay, 'brightenRGBWBulbs')
+    return
   }
 
-  // ========================================================================
-  // STAGE 3: Increase Color Temperature and Brightness
-  // ========================================================================
-  // This final stage uses color temperature (CT) mode instead of HSV color mode.
-  // It increases both the color temperature (from warm 2800K to cooler ~5800K)
-  // and brightness (from 20% to 100%), creating a full daylight effect.
-  if (state.rgbwStage == 3) {
-    // Apply current color temperature and brightness to all bulbs
-    // setColorTemperature(colorTemp, level, transitionTime)
-    settings.rgbwBulbs?.each { DeviceWrapper bulb ->
-      bulb.setColorTemperature((state.rgbwCT as Integer), (state.rgbwLevel as Integer), 0)
-    }
+  if (stageNumber < 3) {
+    Integer nextStageNumber = stageNumber + 1
+    state.rgbwStage = nextStageNumber
+    state.rgbwStep = 0
+    Map nextStage = stageConfig(nextStageNumber)
+    Map initialFrame = interpolateStageFrame(nextStage, 0)
+    applyStageFrame(nextStage, initialFrame)
+    Integer delay = calculateStepDelay(nextStage.durationSeconds as Integer, nextStage.steps as Integer, 0)
+    runIn(delay, 'brightenRGBWBulbs')
+    return
+  }
 
-    // Increase color temperature by 40K (makes light cooler/more neutral)
-    state.rgbwCT += 40
+  logInfo('Sunrise simulation complete')
+  state.brightenRGBWBulbsRunning = false
+}
 
-    // Increase brightness by 1%
-    state.rgbwLevel += 1
+/** Builds an integer HSV color map for a bulb command. */
+@CompileStatic
+private Map colorMap(Integer hue, Integer saturation, Integer level) {
+  return [hue: hue, saturation: saturation, level: level]
+}
 
-    logDebug("Stage 3 (Brighten to Full) - CT: ${state.rgbwCT}, Level: ${state.rgbwLevel}")
+/** Applies an RGB or CT frame and mirrors its values into the app state. */
+private void applyStageFrame(Map stage, Map frame) {
+  if (stage.mode == 'ct') {
+    state.rgbwCT = frame.colorTemperature
+    state.rgbwLevel = frame.level
+    setColorTemperatureOnBulbs(frame.colorTemperature as Integer, frame.level as Integer)
+    return
+  }
 
-    // Check if we've reached full brightness (100%)
-    if (state.rgbwLevel > 100) {
-      // Animation complete!
-      logInfo('Sunrise simulation complete')
-      state.remove('brightenRGBWBulbsRunning') // Clear the running flag
-    } else {
-      // Continue stage 3 - schedule next iteration
-      runIn((state.stage3interval as Integer), 'brightenRGBWBulbs')
-    }
+  state.rgbwHue = frame.hue
+  state.rgbwSaturation = frame.saturation
+  state.rgbwLevel = frame.level
+  state.rgbwColorMap = frame
+  setColorOnBulbs(frame)
+}
+
+/** Sends one HSV frame to every selected bulb. */
+private void setColorOnBulbs(Map color) {
+  settings.rgbwBulbs?.each { DeviceWrapper bulb ->
+    bulb.setColor(color)
+  }
+}
+
+/** Sends one CT frame to every selected bulb. */
+private void setColorTemperatureOnBulbs(Integer colorTemperature, Integer level) {
+  settings.rgbwBulbs?.each { DeviceWrapper bulb ->
+    bulb.setColorTemperature(colorTemperature, level, 0)
   }
 }
 

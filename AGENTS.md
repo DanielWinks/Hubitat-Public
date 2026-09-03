@@ -86,6 +86,9 @@ logging (retain an existing setting name only when compatibility requires it).
 Use the standard levels, ordered from most detailed to least:
 `trace`, `debug`, `info`, `warn`, `error`, `off`. The selected level should
 allow that level and more important messages. Prefer `info` as the default.
+When exposing the dropdown, use these exact Hubitat log names as labels:
+`Trace`, `Debug`, `Info`, `Warn`, `Error`, `Off` -- do not add explanatory
+text or recommendations to the labels.
 Legacy boolean settings such as `logEnable`, `debugLogEnable`, and
 `descriptionTextEnable` may remain for compatibility but should not be added
 to new code. Automatic log shutoff timers are also legacy; logging should be
@@ -142,7 +145,9 @@ Recent work favors these patterns for new integrations and refactors:
   intentional compatibility-aware change.
 - A single overall logging-level dropdown, with optional separate display-log
   filtering only when the UI needs it. Use `trace`, `debug`, `info`, `warn`,
-  `error`, and `off`, and normalize unexpected values safely.
+  `error`, and `off`, and normalize unexpected values safely. Display the
+  dropdown labels exactly as Hubitat does: `Trace`, `Debug`, `Info`, `Warn`,
+  `Error`, `Off`.
 - Explicit `installed()`, `updated()`, `initialize()`, and `configure()` flows,
   with settings updates re-subscribing and rescheduling cleanly.
 - `@Field static final` constants and `@CompileStatic` for pure calculations,
