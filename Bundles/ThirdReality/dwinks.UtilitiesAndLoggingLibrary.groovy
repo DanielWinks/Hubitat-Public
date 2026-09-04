@@ -47,7 +47,7 @@ library(
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Utilities and Logging Library',
-  version: '0.10.1',
+  version: '0.11.7',
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Libraries/UtilitiesAndLoggingLibrary.groovy'
 
 )
@@ -122,11 +122,16 @@ void installed() {
 
 /**
  * Called when the app or driver is uninstalled.
- * Unschedules all tasks and deletes child devices.
+ * Unschedules all tasks, runs optional custom uninstall cleanup, and deletes child devices.
  */
 void uninstalled() {
   logDebug('Uninstalled...')
   unschedule()
+  try { onUninstalled() }
+  catch(MissingMethodException ignored) {}
+  catch(e) {
+    logWarn("onUninstalled() resulted in error: ${e}")
+  }
   deleteChildDevices()
 }
 
@@ -497,7 +502,7 @@ String convertHexToIP(String hex) {
  */
 String convertIPToHex(String ipAddress) {
   List<String> parts = ipAddress.tokenize('.')
-  return String.format("%X%X%X%X", parts[0] as Integer, parts[1] as Integer, parts[2] as Integer, parts[3] as Integer)
+  return String.format("%02X%02X%02X%02X", parts[0] as Integer, parts[1] as Integer, parts[2] as Integer, parts[3] as Integer)
 }
 
 // =============================================================================
