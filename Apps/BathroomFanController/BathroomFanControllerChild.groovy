@@ -266,6 +266,7 @@ Map mainPage() {
 @Field static final String FAN_OFF_SINCE = 'fanOffSince'
 @Field static final String FAN_START_HUMIDITY = 'fanStartHumidity'
 @Field static final String HOUSEHOLD_HUMIDITY = 'householdHumidity'
+@Field static final String HOUSEHOLD_HUMIDITY_AT = 'householdHumidityAt'
 @Field static final String LAST_HUMIDITY_AT = 'lastHumidityAt'
 @Field static final String SENSOR_READINGS = 'sensorReadings'
 @Field static final String RISE_CANDIDATE_COUNT = 'riseCandidateCount'
@@ -276,12 +277,13 @@ Map mainPage() {
 @Field static final String LAST_RATE_ACCELERATION = 'lastRateAcceleration'
 @Field static final String LAST_MEASUREMENT_GAP = 'lastMeasurementGap'
 @Field static final String CONTROL_BASELINE_ATTRIBUTE = 'slowRollingAverage'
+@Field static final String CONTROL_BASELINE = 'controlBaseline'
+@Field static final String CONTROL_BASELINE_AT = 'controlBaselineAt'
 
 // Fixed control tuning. These values intentionally are not user preferences:
 // the slow EMA provides the weather-resistant baseline, the rate gate filters
 // gradual environmental drift, and the confirmation/hysteresis prevents
 // short-lived spikes from causing fan chatter.
-@Field static final BigDecimal START_DELTA = new BigDecimal('2.0')
 @Field static final BigDecimal STOP_DELTA = new BigDecimal('1.0')
 @Field static final BigDecimal MIN_RISE_RATE = new BigDecimal('0.20')
 @Field static final BigDecimal STRONG_RISE_RATE = new BigDecimal('0.60')
@@ -292,6 +294,9 @@ Map mainPage() {
 @Field static final BigDecimal PEAK_DROP_TO_STOP = new BigDecimal('2.0')
 @Field static final Integer RISE_CONFIRMATION_SAMPLES = 2
 @Field static final Integer DECLINE_CONFIRMATION_SAMPLES = 2
+@Field static final Long HOUSEHOLD_FRESHNESS_MILLISECONDS = 6L * 60L * 60L * 1000L
+@Field static final Long CONTROL_BASELINE_TAU_MILLISECONDS = 360L * 60L * 1000L
+@Field static final double CONTROL_BASELINE_MAX_ALPHA = 0.25d
 
 String getHumidityStatSensor() {
   return "${app.id}-${humidityStaticSensor}"
@@ -354,6 +359,11 @@ void initializeApp(ChildDeviceWrapper child) {
 
   String fanState = fanSwitch.currentValue('switch') as String
   child.setBaselineFreeze(fanState == 'on' ? 'true' : 'false')
+
+  // Seed the app-owned control baseline from existing statistics and the most
+  // recent household reading. This avoids waiting for a new bathroom event
+  // after an app update before the external humidity reference is used.
+  updateControlBaseline(child.currentValue(CONTROL_BASELINE_ATTRIBUTE) as BigDecimal, getCurrentTime())
 }
 
 // =============================================================================
@@ -390,8 +400,9 @@ ChildDeviceWrapper getOrCreateChildDevices(String childDNI) {
 // =============================================================================
 
 /**
- * Stores household humidity from the optional household sensor for diagnostics.
- * It is not used as the fan-control baseline.
+ * Stores household humidity from the optional household sensor and uses it as
+ * the external reference for the fan-control baseline. The raw reading remains
+ * available on the statistics child for diagnostics.
  */
 void householdHumidityEvent(Event event) {
   logDebug("Received household humidity event: ${event.value}")
@@ -403,12 +414,17 @@ void householdHumidityEvent(Event event) {
     return
   }
 
+  Long currentTime = getCurrentTime()
   setStateVar(HOUSEHOLD_HUMIDITY, humidity.toString())
+  setStateVar(HOUSEHOLD_HUMIDITY_AT, currentTime.toString())
 
   // Forward to the child device so it can expose bathroomDifferential.
   ChildDeviceWrapper child = getOrCreateChildDevices(getHumidityStatSensor())
   if (child != null) {
     child.setHouseholdHumidity(humidity)
+    updateControlBaseline(child.currentValue(CONTROL_BASELINE_ATTRIBUTE) as BigDecimal, currentTime)
+  } else {
+    updateControlBaseline(null, currentTime)
   }
 }
 
@@ -536,6 +552,127 @@ BigDecimal aggregateHumidity(Map readings) {
   return values ? values.max() : null
 }
 
+/**
+ * Selects the candidate baseline for the current environment. Household
+ * humidity is a floor rather than a replacement for the bathroom history:
+ * bathrooms can normally run drier than the rest of the house, but a reading
+ * below the household level must not look like a shower spike.
+ */
+@CompileStatic
+BigDecimal selectControlBaselineCandidate(BigDecimal bathroomBaseline, BigDecimal householdHumidity) {
+  if (bathroomBaseline == null) {
+    return householdHumidity
+  }
+  if (householdHumidity == null) {
+    return bathroomBaseline
+  }
+  return bathroomBaseline.max(householdHumidity)
+}
+
+/**
+ * Moves a stored control baseline toward a new candidate without allowing a
+ * single noisy household report or a long reporting gap to move it abruptly.
+ */
+@CompileStatic
+BigDecimal calculateStableControlBaseline(
+  BigDecimal previousBaseline,
+  BigDecimal candidate,
+  Long elapsedMilliseconds
+) {
+  if (candidate == null) {
+    return previousBaseline
+  }
+  if (previousBaseline == null || elapsedMilliseconds == null || elapsedMilliseconds <= 0L) {
+    return previousBaseline == null ? candidate : previousBaseline
+  }
+
+  double alpha = 1.0d - Math.exp(-elapsedMilliseconds.doubleValue() / CONTROL_BASELINE_TAU_MILLISECONDS.doubleValue())
+  if (alpha > CONTROL_BASELINE_MAX_ALPHA) {
+    alpha = CONTROL_BASELINE_MAX_ALPHA
+  }
+  BigDecimal smoothing = BigDecimal.valueOf(alpha)
+  return previousBaseline + ((candidate - previousBaseline) * smoothing)
+}
+
+/**
+ * Returns the latest household reading only while it is recent enough to be a
+ * useful outside-the-bathroom reference.
+ */
+BigDecimal getFreshHouseholdHumidity(Long currentTime) {
+  String humidityString = getStateVar(HOUSEHOLD_HUMIDITY) as String
+  String timestampString = getStateVar(HOUSEHOLD_HUMIDITY_AT) as String
+  if (humidityString == null || timestampString == null) {
+    return null
+  }
+
+  Long timestamp
+  try {
+    timestamp = timestampString as Long
+  } catch (Exception ignored) {
+    return null
+  }
+
+  if (timestamp > currentTime || currentTime - timestamp > HOUSEHOLD_FRESHNESS_MILLISECONDS) {
+    return null
+  }
+
+  try {
+    return new BigDecimal(humidityString)
+  } catch (Exception ignored) {
+    return null
+  }
+}
+
+/**
+ * Updates and returns the app-owned, slowly adapting control baseline.
+ */
+BigDecimal updateControlBaseline(BigDecimal bathroomBaseline, Long currentTime) {
+  BigDecimal householdHumidity = getFreshHouseholdHumidity(currentTime)
+  BigDecimal candidate = selectControlBaselineCandidate(bathroomBaseline, householdHumidity)
+  BigDecimal previousBaseline
+  try {
+    previousBaseline = new BigDecimal(getStateVar(CONTROL_BASELINE) as String)
+  } catch (Exception ignored) {
+    previousBaseline = null
+  }
+
+  // Do not adapt the control baseline while the fan is running. The child
+  // statistics are frozen too, and both protections keep a shower from
+  // becoming the next run's definition of normal.
+  DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
+  if (fanSwitchDevice?.currentValue('switch') == 'on') {
+    return previousBaseline ?: candidate
+  }
+
+  String previousAtString = getStateVar(CONTROL_BASELINE_AT) as String
+  Long previousAt = null
+  try {
+    previousAt = previousAtString as Long
+  } catch (Exception ignored) {
+    previousAt = null
+  }
+
+  Long elapsedMilliseconds = previousAt == null ? 0L : Math.max(0L, currentTime - previousAt)
+  BigDecimal stableBaseline = calculateStableControlBaseline(previousBaseline, candidate, elapsedMilliseconds)
+  if (stableBaseline != null) {
+    setStateVar(CONTROL_BASELINE, stableBaseline.toString())
+    setStateVar(CONTROL_BASELINE_AT, currentTime.toString())
+    logDebug("Control baseline updated: bathroom=${bathroomBaseline}, household=${householdHumidity}, baseline=${stableBaseline.setScale(1, BigDecimal.ROUND_HALF_UP)}")
+  }
+  return stableBaseline
+}
+
+/**
+ * A fresh household reading must not be higher than the bathroom before the
+ * local slope can qualify as a shower rise. This specifically rejects the
+ * common overnight case where the bathroom slowly rises but remains drier
+ * than the rest of the house.
+ */
+@CompileStatic
+Boolean isAboveHouseholdBaseline(BigDecimal currentHumidity, BigDecimal householdHumidity, BigDecimal requiredDelta) {
+  return householdHumidity == null || currentHumidity >= householdHumidity + requiredDelta
+}
+
 void humidityEvent(Event event) {
   logDebug("Received humidity event: ${event.value}")
 
@@ -587,8 +724,9 @@ void humidityEvent(Event event) {
     setStateVar(LAST_RATE_ACCELERATION, acceleration?.toString())
     setStateVar(LAST_MEASUREMENT_GAP, measurementGap ? 'true' : 'false')
 
-    if (baseline != null) {
-      evaluateFanDecision(aggregate, baseline, shortTermRate, acceleration, measurementGap)
+    BigDecimal controlBaseline = updateControlBaseline(baseline, currentTime)
+    if (controlBaseline != null) {
+      evaluateFanDecision(aggregate, controlBaseline, shortTermRate, acceleration, measurementGap)
     } else {
       setStateVar('lastHumidity', aggregate.toString())
     }
@@ -625,9 +763,11 @@ void evaluateFanDecision(
 
   Boolean highCertainty = isHighCertaintyMode()
   BigDecimal certaintyMultiplier = highCertainty ? HIGH_CERTAINTY_MULTIPLIER : BigDecimal.ONE
-  BigDecimal requiredDelta = START_DELTA * certaintyMultiplier
   BigDecimal requiredRiseRate = MIN_RISE_RATE * certaintyMultiplier
   BigDecimal strongRiseRate = STRONG_RISE_RATE * certaintyMultiplier
+
+  BigDecimal householdHumidity = getFreshHouseholdHumidity(getCurrentTime())
+  Boolean householdQualified = isAboveHouseholdBaseline(currentHumidity, householdHumidity, BigDecimal.ZERO)
 
   Boolean ceilingReached = false
   Integer ceiling = getSetting('absoluteCeiling') as Integer
@@ -635,12 +775,15 @@ void evaluateFanDecision(
     ceilingReached = currentHumidity >= ceiling
   }
 
-  Boolean magnitudeQualified = currentHumidity - baseline >= requiredDelta
+  // The slope is the primary shower signal. The baseline and household checks
+  // only establish that the rising signal is occurring at an elevated level;
+  // they do not require a fixed percentage jump before the fan can start.
+  Boolean aboveControlBaseline = currentHumidity > baseline
   Boolean usableRate = shortTermRate != null && !measurementGap
   Boolean rateQualified = usableRate && shortTermRate >= requiredRiseRate
   Boolean strongRiseQualified = usableRate && shortTermRate >= strongRiseRate
   Boolean accelerationQualified = usableRate && acceleration != null && acceleration >= MIN_RISE_ACCELERATION
-  Boolean riseCandidate = magnitudeQualified && rateQualified
+  Boolean riseCandidate = aboveControlBaseline && householdQualified && rateQualified
   Integer riseCandidateCount = (getStateVar(RISE_CANDIDATE_COUNT) ?: 0) as Integer
   if (riseCandidate) {
     riseCandidateCount += 1
@@ -652,15 +795,16 @@ void evaluateFanDecision(
   DeviceWrapper fanSwitchDevice = getSetting('fanSwitch') as DeviceWrapper
   String fanState = fanSwitchDevice.currentValue("switch") as String
 
-  // A first reading after a sleeping interval is not a valid rate estimate,
-  // but its magnitude is still useful. A modest spike is enough during normal
-  // modes; high-certainty modes require a larger spike. This prevents an
-  // overnight sensor gap from delaying the start of a shower.
-  Boolean postGapSpike = measurementGap && magnitudeQualified
+  // A reporting gap invalidates the local slope, so there is deliberately no
+  // post-gap magnitude shortcut. The next frequent samples must establish a
+  // real rate of rise before an automatic start is allowed.
+  if (aboveControlBaseline && householdHumidity != null && !householdQualified) {
+    logDebug("Fan trigger withheld: bathroom humidity ${currentHumidity}% is below fresh household humidity ${householdHumidity}%")
+  }
 
-  // Start immediately on a strong local rise or a clear first post-gap spike.
-  // Marginal local rises still require two consecutive qualifying readings.
-  Boolean shouldTurnOn = ceilingReached || postGapSpike ||
+  // Start immediately on a strong local rise. Marginal local rises require two
+  // consecutive qualifying readings, including after a reporting gap.
+  Boolean shouldTurnOn = ceilingReached ||
     (riseCandidate && (strongRiseQualified ||
       (highCertainty && accelerationQualified) ||
       riseCandidateCount >= RISE_CONFIRMATION_SAMPLES))
@@ -700,9 +844,7 @@ void evaluateFanDecision(
     // Turn on the fan
     String triggerReason = ceilingReached ?
       "absolute ceiling ${ceiling}% reached" :
-      (postGapSpike ?
-        "humidity rose ${currentHumidity - baseline}% above baseline after a reporting gap" :
-        "humidity rose ${currentHumidity - baseline}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min")
+      "humidity rose ${currentHumidity - baseline}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min"
     logDebug("${triggerReason}; turning on fan")
     setStateVar(TRIGGERED_BY_APP, 'true')  // Feature 3: track auto-trigger
     setStateVar(FAN_START_HUMIDITY, currentHumidity.toString())  // Feature 8: track start humidity
@@ -900,6 +1042,7 @@ void evaluateOffFromCurrentState() {
   }
 
   BigDecimal baseline = child.currentValue(CONTROL_BASELINE_ATTRIBUTE) as BigDecimal
+  baseline = updateControlBaseline(baseline, getCurrentTime())
   if (baseline != null) {
     BigDecimal shortTermRate = getStateVar(LAST_SHORT_TERM_RATE) as BigDecimal
     BigDecimal acceleration = getStateVar(LAST_RATE_ACCELERATION) as BigDecimal
