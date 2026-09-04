@@ -39,6 +39,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.clearPlaylistsMap()
     driver.favoriteRetryState.clear()
     driver.playlistRetryState.clear()
+    driver.groupDeviceUpdateRetryAttempts.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
   }
@@ -195,5 +196,31 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.empty
     driver.scheduled.empty
     driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
+  }
+
+  def "topology membership updates are deferred until the player callback returns"() {
+    when:
+    driver.parentUpdateGroupDevices('RINCON_COORD', ['RINCON_FOLLOW'])
+
+    then:
+    driver.scheduled == [[
+      1,
+      'deferredParentUpdateGroupDevices',
+      [overwrite: true, data: [coordinatorId: 'RINCON_COORD', playersInGroup: ['RINCON_FOLLOW']]]
+    ]]
+  }
+
+  def "follower group volume forwarding is deferred through the parent boundary"() {
+    given:
+    driver.device.dataValues.isGroupCoordinator = 'false'
+    driver.device.currentValues.isGrouped = 'on'
+
+    when:
+    driver.setGroupVolume(40G)
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(0) == 1
+    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.command == 'setGroupVolume'
+    websocketMessages.empty
   }
 }
