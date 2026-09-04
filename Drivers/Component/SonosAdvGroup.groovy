@@ -22,8 +22,8 @@
  */
 
 import groovy.transform.Field
-import com.hubitat.app.DeviceWrapper
 import java.util.concurrent.ConcurrentHashMap
+import groovy.json.JsonOutput
 
 void logError(String message) {
   if (settings.logEnable != false) {
@@ -59,6 +59,7 @@ void logDebug(String message) {
 @Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
+@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'groupCommandRequest'
 
 metadata {
   definition(
@@ -137,6 +138,9 @@ metadata {
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
+    // Internal asynchronous command bridge to the parent app. Group commands
+    // publish requests instead of synchronously calling parent child lookups.
+    attribute 'groupCommandRequest', 'string'
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
@@ -196,6 +200,41 @@ Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngrou
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
 Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
+
+Map getGroupCommandSettings() {
+  return [
+    useProportionalVolume: getUseProportionalVolumeSetting(),
+    controlUngroupedIndividually: getControlUngroupedIndividuallySetting()
+  ]
+}
+
+/**
+ * Publish a group command for the parent app to process after this driver
+ * invocation returns. Keeping the bridge event-based prevents a group command
+ * from holding the group driver's platform method slot while it waits for the
+ * parent app to look up and invoke another child device.
+ */
+void requestGroupCommand(String command, Map args = [:]) {
+  if(!command) {
+    return
+  }
+  Integer sequence = ((state.groupCommandSequence ?: 0) as Integer) + 1
+  state.groupCommandSequence = sequence
+  Map payload = [
+    groupDni: device.getDeviceNetworkId(),
+    requestId: "${device.getDeviceNetworkId()}-${sequence}",
+    command: command,
+    args: args ?: [:]
+  ]
+  runIn(1, 'emitGroupCommandRequest', [data: [payload: payload]])
+}
+
+void emitGroupCommandRequest(Map data) {
+  Map payload = data?.payload instanceof Map ? (Map)data.payload : null
+  if(payload?.command) {
+    sendEvent(name: GROUP_COMMAND_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+  }
+}
 
 private void sendVolumeStateEvents(Integer volumeLevel) {
   sendEvent(name: 'volume', value: volumeLevel, unit: '%')
@@ -279,8 +318,8 @@ void configure() {
     runIn(2, 'refresh')
   }
 }
-void on() { evictUnlistedPlayers() }
-void off() { removePlayersFromCoordinator() }
+void on() { requestGroupCommand('on', getGroupCommandSettings()) }
+void off() { requestGroupCommand('off', getGroupCommandSettings()) }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
 void clearState() { state.clear() }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
@@ -290,19 +329,13 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     logWarn('No text provided to play')
     return
   }
-  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  if(!allDevs) {
-    logWarn('No player devices found in group')
-    return
-  }
-  logDebug("All Devices In Group: ${allDevs}")
   try {
-    def ttsMap = textToSpeech(text, voice)
+    Map ttsMap = (Map)textToSpeech(text, voice)
     if(!ttsMap || !ttsMap.uri) {
       logWarn('Failed to generate TTS URI')
       return
     }
-    allDevs.each{it.playerLoadAudioClip(ttsMap.uri, volume)}
+    requestGroupCommand('playAudioClip', [uri: ttsMap.uri as String, volume: volume?.toString()])
   } catch (Exception e) {
     logError("Error playing text: ${e.message}")
   }
@@ -313,18 +346,13 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
     logWarn('No text provided to play')
     return
   }
-  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  if(!allDevs) {
-    logWarn('No player devices found in group')
-    return
-  }
   try {
-    def ttsMap = textToSpeech(text, voice)
+    Map ttsMap = (Map)textToSpeech(text, voice)
     if(!ttsMap || !ttsMap.uri) {
       logWarn('Failed to generate TTS URI')
       return
     }
-    allDevs.each{it.playerLoadAudioClipHighPriority(ttsMap.uri, volume)}
+    requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: volume?.toString()])
   } catch (Exception e) {
     logError("Error playing high priority TTS: ${e.message}")
   }
@@ -335,12 +363,7 @@ void playHighPriorityTrack(String uri, BigDecimal volume = null) {
     logWarn('No URI provided to play')
     return
   }
-  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  if(!allDevs) {
-    logWarn('No player devices found in group')
-    return
-  }
-  allDevs.each{it.playerLoadAudioClipHighPriority(uri, volume)}
+  requestGroupCommand('playHighPriorityTrack', [uri: uri, volume: volume?.toString()])
 }
 
 void enqueueLowPriorityTrack(String uri, BigDecimal volume = null) {
@@ -348,12 +371,7 @@ void enqueueLowPriorityTrack(String uri, BigDecimal volume = null) {
     logWarn('No URI provided to enqueue')
     return
   }
-  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  if(!allDevs) {
-    logWarn('No player devices found in group')
-    return
-  }
-  allDevs.each{it.playerLoadAudioClip(uri, volume)}
+  requestGroupCommand('enqueueLowPriorityTrack', [uri: uri, volume: volume?.toString()])
 }
 
 void joinPlayersToCoordinator() {
@@ -362,12 +380,7 @@ void joinPlayersToCoordinator() {
     logWarn('No followers found to join to coordinator')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found')
-    return
-  }
-  coordinator.playerModifyGroupMembers(followers)
+  requestGroupCommand('joinPlayersToCoordinator')
 }
 
 void removePlayersFromCoordinator() {
@@ -376,15 +389,7 @@ void removePlayersFromCoordinator() {
     logDebug('No followers to remove from coordinator')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found, cannot remove followers')
-    return
-  }
-  // Single atomic API call to remove all followers at once.
-  // This avoids N intermediate group topology changes that cause latency
-  // and can trigger unexpected playback on the coordinator.
-  coordinator.playerModifyGroupMembers([], allFollowerIds)
+  requestGroupCommand('removePlayersFromCoordinator')
 }
 
 void groupPlayers() {
@@ -393,35 +398,28 @@ void groupPlayers() {
     logWarn('No players found to group')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found')
-    return
-  }
-
   String currentSwitch = device.currentValue('switch')
   if(currentSwitch != 'on') {
     // Group is already inactive — no need to ungroup first, just create the group directly
-    coordinator.playerCreateGroup(allPlayers)
+    requestGroupCommand('createGroup')
     return
   }
 
   // Group is active — ungroup first to ensure the new coordinator is set correctly.
   // The regroup will be triggered by onGroupDeactivated() when the WebSocket event confirms the ungroup.
   state.pendingRegroup = true
-  ungroupPlayers()
+  requestGroupCommand('ungroupPlayers')
   // Safety timeout in case the WebSocket event never arrives
   runIn(10, 'regroupSafetyTimeout', [overwrite: true])
 }
 
 void createGroupAfterUngroup() {
   List<String> allPlayers = getAllPlayersInGroupDevice()
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator || !allPlayers) {
-    logWarn('Cannot create group after ungroup - coordinator or players not found')
+  if(!allPlayers) {
+    logWarn('Cannot create group after ungroup - no players found')
     return
   }
-  coordinator.playerCreateGroup(allPlayers)
+  requestGroupCommand('regroupAfterUngroup')
 }
 
 void regroupSafetyTimeout() {
@@ -437,13 +435,7 @@ void ungroupPlayers() {
     logDebug('No followers to ungroup')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logDebug('No coordinator found to ungroup')
-    return
-  }
-  // Single atomic call to remove all followers from the coordinator's group
-  coordinator.playerModifyGroupMembers([], allFollowerIds)
+  requestGroupCommand('ungroupPlayers')
 }
 
 void evictUnlistedPlayers() {
@@ -452,12 +444,7 @@ void evictUnlistedPlayers() {
     logWarn('No players found to manage')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found')
-    return
-  }
-  coordinator.playerCreateGroup(allPlayers)
+  requestGroupCommand('evictUnlistedPlayers')
 }
 
 // =============================================================================
@@ -489,38 +476,12 @@ List<String> getAllFollowersInGroupDevice() {
   return playerIdsStr.tokenize(',')
 }
 
-List<DeviceWrapper> getAllPlayerDevicesInGroupDevice() {
-  List<String> players = getAllPlayersInGroupDevice()
-  return parent?.getDevicesFromRincons(players)
-}
-
-List<DeviceWrapper> getAllFollowerDevicesInGroupDevice() {
-  List<String> players = getAllFollowersInGroupDevice()
-  return parent?.getDevicesFromRincons(players)
-}
-
-DeviceWrapper getCoordinatorDevice() {
-  return parent?.getDeviceFromRincon(getCoordinatorId())
-}
+// Player lookup and command dispatch are owned by the parent app. The group
+// driver only publishes asynchronous requests and applies local state.
 
 // =============================================================================
 // AudioVolume Capability Implementation
 // =============================================================================
-
-/**
- * Check if the speakers are actually grouped in Sonos with this coordinator.
- * This is different from being members of this "group device" - the speakers
- * must be actively grouped in Sonos for native group volume commands to work.
- */
-Boolean isActuallySonosGrouped() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) { return false }
-  // Note: isGroupCoordinator attribute is an ENUM with values 'on'/'off', not boolean
-  Boolean isGrouped = coordinator.currentValue('isGrouped', true) == 'on'
-  Boolean isCoordinator = coordinator.currentValue('isGroupCoordinator', true) == 'on'
-  logDebug("isActuallySonosGrouped() - isGrouped: ${isGrouped}, isGroupCoordinator: ${isCoordinator}")
-  return isGrouped && isCoordinator
-}
 
 /**
  * Set volume level (0-100)
@@ -598,49 +559,12 @@ void setVolume(BigDecimal level, BigDecimal duration = null) {
  * Internal: set volume immediately without fade (original setVolume logic)
  */
 private void setVolumeImmediate(Integer volumeLevel) {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  Boolean isGrouped = isActuallySonosGrouped()
-  logDebug("setVolumeImmediate(${volumeLevel}) - isGrouped: ${isGrouped}, useProportional: ${getUseProportionalVolumeSetting()}, controlIndividually: ${getControlUngroupedIndividuallySetting()}")
-
-  if(isGrouped) {
-    if(getUseProportionalVolumeSetting()) {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot set group volume')
-        return
-      }
-      logDebug("Using Sonos group volume API (proportional)")
-      coordinator.setGroupVolume(volumeLevel)
-    } else {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot set volume')
-        return
-      }
-      logDebug("Setting volume on each speaker directly (grouped, non-proportional)")
-      allDevs.each { it.setVolume(volumeLevel) }
-      sendVolumeStateEvents(volumeLevel)
-    }
-  } else {
-    if(getControlUngroupedIndividuallySetting()) {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot set volume')
-        return
-      }
-      logDebug("Setting volume on each speaker individually (ungrouped)")
-      allDevs.each { it.setVolume(volumeLevel) }
-      sendVolumeStateEvents(volumeLevel)
-    } else {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot set volume')
-        return
-      }
-      logDebug("Setting volume on coordinator only (ungrouped)")
-      coordinator.setVolume(volumeLevel)
-      logDebug("Sending volume event: ${volumeLevel}")
-      sendVolumeStateEvents(volumeLevel)
-    }
-  }
+  logDebug("setVolumeImmediate(${volumeLevel}) - useProportional: ${getUseProportionalVolumeSetting()}, controlIndividually: ${getControlUngroupedIndividuallySetting()}")
+  requestGroupCommand('setVolume', [
+    level: volumeLevel,
+    useProportionalVolume: getUseProportionalVolumeSetting(),
+    controlUngroupedIndividually: getControlUngroupedIndividuallySetting()
+  ])
 }
 
 void groupDeviceVolumeFadeStep() {
@@ -678,168 +602,28 @@ void cancelGroupDeviceVolumeFade() {
  * Increase volume
  */
 void volumeUp() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-
-  if(isActuallySonosGrouped()) {
-    if(getUseProportionalVolumeSetting()) {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot increase volume')
-        return
-      }
-      coordinator.groupVolumeUp()
-    } else {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot increase volume')
-        return
-      }
-      allDevs.each { it.volumeUp() }
-      runIn(1, 'refreshAverageVolume', [overwrite: true])
-    }
-  } else {
-    if(getControlUngroupedIndividuallySetting()) {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot increase volume')
-        return
-      }
-      allDevs.each { it.volumeUp() }
-      runIn(1, 'refreshAverageVolume', [overwrite: true])
-    } else {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot increase volume')
-        return
-      }
-      coordinator.volumeUp()
-      runIn(1, 'refresh', [overwrite: true])
-    }
-  }
+  requestGroupCommand('volumeUp', getGroupCommandSettings())
 }
 
 /**
  * Decrease volume
  */
 void volumeDown() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-
-  if(isActuallySonosGrouped()) {
-    if(getUseProportionalVolumeSetting()) {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot decrease volume')
-        return
-      }
-      coordinator.groupVolumeDown()
-    } else {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot decrease volume')
-        return
-      }
-      allDevs.each { it.volumeDown() }
-      runIn(1, 'refreshAverageVolume', [overwrite: true])
-    }
-  } else {
-    if(getControlUngroupedIndividuallySetting()) {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot decrease volume')
-        return
-      }
-      allDevs.each { it.volumeDown() }
-      runIn(1, 'refreshAverageVolume', [overwrite: true])
-    } else {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot decrease volume')
-        return
-      }
-      coordinator.volumeDown()
-      runIn(1, 'refresh', [overwrite: true])
-    }
-  }
+  requestGroupCommand('volumeDown', getGroupCommandSettings())
 }
 
 /**
  * Mute all players in the group
  */
 void mute() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-
-  if(isActuallySonosGrouped()) {
-    if(getUseProportionalVolumeSetting()) {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot mute')
-        return
-      }
-      coordinator.muteGroup()
-    } else {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot mute')
-        return
-      }
-      allDevs.each { it.mute() }
-      sendMuteStateEvents('muted')
-    }
-  } else {
-    if(getControlUngroupedIndividuallySetting()) {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot mute')
-        return
-      }
-      allDevs.each { it.mute() }
-      sendMuteStateEvents('muted')
-    } else {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot mute')
-        return
-      }
-      coordinator.mute()
-      sendMuteStateEvents('muted')
-    }
-  }
+  requestGroupCommand('mute', getGroupCommandSettings())
 }
 
 /**
  * Unmute all players in the group
  */
 void unmute() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-
-  if(isActuallySonosGrouped()) {
-    if(getUseProportionalVolumeSetting()) {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot unmute')
-        return
-      }
-      coordinator.unmuteGroup()
-    } else {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot unmute')
-        return
-      }
-      allDevs.each { it.unmute() }
-      sendMuteStateEvents('unmuted')
-    }
-  } else {
-    if(getControlUngroupedIndividuallySetting()) {
-      List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-      if(!allDevs) {
-        logWarn('No player devices found in group - cannot unmute')
-        return
-      }
-      allDevs.each { it.unmute() }
-      sendMuteStateEvents('unmuted')
-    } else {
-      if(!coordinator) {
-        logWarn('Coordinator device not found - cannot unmute')
-        return
-      }
-      coordinator.unmute()
-      sendMuteStateEvents('unmuted')
-    }
-  }
+  requestGroupCommand('unmute', getGroupCommandSettings())
 }
 
 // =============================================================================
@@ -852,109 +636,7 @@ void unmute() {
  * otherwise calculates average from individual player volumes
  */
 void refresh() {
-  Boolean isGrouped = isActuallySonosGrouped()
-  Boolean useProportional = getUseProportionalVolumeSetting()
-  logDebug("refresh() - isGrouped: ${isGrouped}, useProportional: ${useProportional}")
-
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logDebug('Coordinator not found for state refresh')
-    return
-  }
-
-  if(isGrouped && useProportional) {
-    // Use Sonos group volume (which is already an average)
-    Integer volume = coordinator.currentValue('groupVolume', true) as Integer
-    String muteState = coordinator.currentValue('groupMute', true)
-    logDebug("refresh() - Reading from coordinator: groupVolume=${volume}, groupMute=${muteState}")
-
-    if(volume != null) {
-      sendEvent(name: 'volume', value: volume, unit: '%')
-      sendEvent(name: 'groupVolume', value: volume)
-    }
-    if(muteState != null) {
-      sendEvent(name: 'mute', value: muteState)
-      sendEvent(name: 'groupMute', value: muteState)
-    }
-  } else {
-    // Calculate average from individual players
-    refreshAverageVolume()
-  }
-
-  // Refresh MusicPlayer attributes from coordinator
-  String status = coordinator.currentValue('status', true)
-  String trackData = coordinator.currentValue('trackData', true)
-  String trackDescription = coordinator.currentValue('trackDescription', true)
-
-  if(status != null) {
-    sendEvent(name: 'status', value: status)
-  }
-  String transportStatus = coordinator.currentValue('transportStatus', true)
-  if(transportStatus != null) {
-    sendEvent(name: 'transportStatus', value: transportStatus)
-  }
-  if(trackData != null) {
-    sendEvent(name: 'trackData', value: trackData)
-  }
-  if(trackDescription != null) {
-    sendEvent(name: 'trackDescription', value: trackDescription)
-  }
-
-  // Refresh extended playback attributes from coordinator
-  String currentTrackDuration = coordinator.currentValue('currentTrackDuration', true)
-  String currentArtistName = coordinator.currentValue('currentArtistName', true)
-  String albumArtURI = coordinator.currentValue('albumArtURI', true)
-  String albumArtSmall = coordinator.currentValue('albumArtSmall', true)
-  String albumArtMedium = coordinator.currentValue('albumArtMedium', true)
-  String albumArtLarge = coordinator.currentValue('albumArtLarge', true)
-  String audioSource = coordinator.currentValue('audioSource', true)
-  String currentAlbumName = coordinator.currentValue('currentAlbumName', true)
-  String currentTrackName = coordinator.currentValue('currentTrackName', true)
-  String currentFavorite = coordinator.currentValue('currentFavorite', true)
-  String currentPlaylist = coordinator.currentValue('currentPlaylist', true)
-  Integer currentTrackNumber = coordinator.currentValue('currentTrackNumber', true) as Integer
-  String nextArtistName = coordinator.currentValue('nextArtistName', true)
-  String nextAlbumName = coordinator.currentValue('nextAlbumName', true)
-  String nextTrackName = coordinator.currentValue('nextTrackName', true)
-  String nextTrackAlbumArtURI = coordinator.currentValue('nextTrackAlbumArtURI', true)
-  String queueTrackTotal = coordinator.currentValue('queueTrackTotal', true)
-  String queueTrackPosition = coordinator.currentValue('queueTrackPosition', true)
-  String currentRepeatOneMode = coordinator.currentValue('currentRepeatOneMode', true)
-  String currentRepeatAllMode = coordinator.currentValue('currentRepeatAllMode', true)
-  String currentCrossfadeMode = coordinator.currentValue('currentCrossfadeMode', true)
-  String currentShuffleMode = coordinator.currentValue('currentShuffleMode', true)
-
-  if(currentTrackDuration != null) sendEvent(name: 'currentTrackDuration', value: currentTrackDuration)
-  if(currentArtistName != null) sendEvent(name: 'currentArtistName', value: currentArtistName)
-  if(albumArtURI != null) sendEvent(name: 'albumArtURI', value: albumArtURI)
-  if(albumArtSmall != null) sendEvent(name: 'albumArtSmall', value: albumArtSmall)
-  if(albumArtMedium != null) sendEvent(name: 'albumArtMedium', value: albumArtMedium)
-  if(albumArtLarge != null) sendEvent(name: 'albumArtLarge', value: albumArtLarge)
-  if(audioSource != null) sendEvent(name: 'audioSource', value: audioSource)
-  if(currentAlbumName != null) sendEvent(name: 'currentAlbumName', value: currentAlbumName)
-  if(currentTrackName != null) sendEvent(name: 'currentTrackName', value: currentTrackName)
-  if(currentFavorite != null) sendEvent(name: 'currentFavorite', value: currentFavorite)
-  if(currentPlaylist != null) sendEvent(name: 'currentPlaylist', value: currentPlaylist)
-  if(currentTrackNumber != null) sendEvent(name: 'currentTrackNumber', value: currentTrackNumber)
-  if(nextArtistName != null) sendEvent(name: 'nextArtistName', value: nextArtistName)
-  if(nextAlbumName != null) sendEvent(name: 'nextAlbumName', value: nextAlbumName)
-  if(nextTrackName != null) sendEvent(name: 'nextTrackName', value: nextTrackName)
-  if(nextTrackAlbumArtURI != null) sendEvent(name: 'nextTrackAlbumArtURI', value: nextTrackAlbumArtURI)
-  if(queueTrackTotal != null) sendEvent(name: 'queueTrackTotal', value: queueTrackTotal)
-  if(queueTrackPosition != null) sendEvent(name: 'queueTrackPosition', value: queueTrackPosition)
-  if(currentRepeatOneMode != null) sendEvent(name: 'currentRepeatOneMode', value: currentRepeatOneMode)
-  if(currentRepeatAllMode != null) sendEvent(name: 'currentRepeatAllMode', value: currentRepeatAllMode)
-  if(currentCrossfadeMode != null) sendEvent(name: 'currentCrossfadeMode', value: currentCrossfadeMode)
-  if(currentShuffleMode != null) sendEvent(name: 'currentShuffleMode', value: currentShuffleMode)
-
-  // Refresh currently joined players from coordinator's group member names
-  String groupMemberNames = coordinator.currentValue('groupMemberNames', true)
-  if(groupMemberNames != null) {
-    // groupMemberNames is stored as a list toString(), e.g. "[Kitchen Player, Office Player]"
-    // Clean it up to a comma-separated string
-    String cleaned = groupMemberNames.replaceAll(/^\[|\]$/, '').trim()
-    sendEvent(name: 'currentlyJoinedPlayers', value: cleaned)
-  }
+  requestGroupCommand('refresh', getGroupCommandSettings())
 }
 
 /**
@@ -999,6 +681,7 @@ void updateBatchPlaybackState(String jsonAttributes) {
 
   // If group just became inactive, reset playback attributes and hold new ones
   if(wasActive && !isActive) {
+    handleLocalGroupDeactivation()
     if(getResetAttributesWhenInactiveSetting()) {
       resetPlaybackAttributes()
     }
@@ -1051,10 +734,9 @@ private void holdPlaybackState(Map newAttrs) {
 /**
  * Replay any held playback attributes that were accumulated while the group was inactive.
  * Merges held state with optional additional attributes (current batch wins on collision).
- * Called from the app via notifyGroupDeviceActivated() on off→on transition, and also
- * internally from updateBatchPlaybackState() when a batch includes switch:'on'.
- * Both paths are safe: the first caller consumes held state via atomic remove(),
- * subsequent calls find null and replay only additionalAttrs (or return early).
+ * Called internally from updateBatchPlaybackState() when a batch includes
+ * switch:'on'. The held state is consumed atomically, so repeated membership
+ * deliveries do not replay the same held data more than once.
  * @param additionalAttrs Optional map of new attributes to merge on top of held state
  */
 void replayHeldState(Map additionalAttrs = null) {
@@ -1111,19 +793,24 @@ private void resetPlaybackAttributes() {
   applyPlaybackAttributes(resetAttrs)
 }
 
+private void handleLocalGroupDeactivation() {
+  if(state.pendingRegroup) {
+    state.remove('pendingRegroup')
+    unschedule('regroupSafetyTimeout')
+    createGroupAfterUngroup()
+  }
+}
+
 /**
- * Called by the app when this group device transitions from active to inactive.
+ * Retained as a local compatibility hook for callers that explicitly invoke
+ * it when this group device transitions from active to inactive.
  * Resets playback attributes to a clean "inactive" state if configured to do so.
  * Only resets when both resetAttributesWhenInactive and onlyUpdateWhenActive are enabled,
  * because when the guard is off, playback attributes flow through unconditionally and
  * resetting would cause a brief flash of empty data immediately overwritten.
  */
 void onGroupDeactivated() {
-  if(state.pendingRegroup) {
-    state.remove('pendingRegroup')
-    unschedule('regroupSafetyTimeout')
-    createGroupAfterUngroup()
-  }
+  handleLocalGroupDeactivation()
   if(getResetAttributesWhenInactiveSetting() && getOnlyUpdateWhenActiveSetting()) {
     resetPlaybackAttributes()
   }
@@ -1133,39 +820,7 @@ void onGroupDeactivated() {
  * Calculate and update volume as average of all player volumes
  */
 void refreshAverageVolume() {
-  List<DeviceWrapper> allDevs = getAllPlayerDevicesInGroupDevice()
-  if(!allDevs || allDevs.size() == 0) {
-    logDebug('No player devices found for average volume calculation')
-    return
-  }
-
-  // Calculate average volume
-  Integer totalVolume = 0
-  Integer count = 0
-  Boolean anyMuted = false
-  Boolean allMuted = true
-
-  allDevs.each { dev ->
-    Integer vol = dev.currentValue('volume', true) as Integer
-    if(vol != null) {
-      totalVolume += vol
-      count++
-    }
-    String muteState = dev.currentValue('mute', true)
-    if(muteState == 'muted') {
-      anyMuted = true
-    } else {
-      allMuted = false
-    }
-  }
-
-  if(count > 0) {
-    Integer avgVolume = Math.round(totalVolume / count) as Integer
-    sendVolumeStateEvents(avgVolume)
-  }
-
-  // Mute state: muted if all players are muted
-  sendMuteStateEvents(allMuted ? 'muted' : 'unmuted')
+  requestGroupCommand('refresh', getGroupCommandSettings())
 }
 
 // =============================================================================
@@ -1176,60 +831,35 @@ void refreshAverageVolume() {
  * Play - forwards to coordinator
  */
 void play() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot play')
-    return
-  }
-  coordinator.play()
+  requestGroupCommand('play')
 }
 
 /**
  * Pause - forwards to coordinator
  */
 void pause() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot pause')
-    return
-  }
-  coordinator.pause()
+  requestGroupCommand('pause')
 }
 
 /**
  * Stop - forwards to coordinator
  */
 void stop() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot stop')
-    return
-  }
-  coordinator.stop()
+  requestGroupCommand('stop')
 }
 
 /**
  * Next track - forwards to coordinator
  */
 void nextTrack() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot skip track')
-    return
-  }
-  coordinator.nextTrack()
+  requestGroupCommand('nextTrack')
 }
 
 /**
  * Previous track - forwards to coordinator
  */
 void previousTrack() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot go to previous track')
-    return
-  }
-  coordinator.previousTrack()
+  requestGroupCommand('previousTrack')
 }
 
 /**
@@ -1248,12 +878,7 @@ void playTrack(String uri, BigDecimal volume = null) {
     logWarn('No URI provided to play')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot play track')
-    return
-  }
-  coordinator.playTrack(uri, volume)
+  requestGroupCommand('playTrack', [uri: uri, volume: volume?.toString()])
 }
 
 /**
@@ -1264,12 +889,7 @@ void setTrack(String uri) {
     logWarn('No URI provided to set')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot set track')
-    return
-  }
-  coordinator.setTrack(uri)
+  requestGroupCommand('setTrack', [uri: uri])
 }
 
 // =============================================================================
@@ -1280,132 +900,77 @@ void setTrack(String uri) {
  * Set repeat mode
  */
 void setRepeatMode(String mode) {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot set repeat mode')
-    return
-  }
-  coordinator.setRepeatMode(mode)
+  requestGroupCommand('setRepeatMode', [mode: mode])
 }
 
 /**
  * Repeat one track
  */
 void repeatOne() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot set repeat one')
-    return
-  }
-  coordinator.repeatOne()
+  requestGroupCommand('repeatOne')
 }
 
 /**
  * Repeat all tracks
  */
 void repeatAll() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot set repeat all')
-    return
-  }
-  coordinator.repeatAll()
+  requestGroupCommand('repeatAll')
 }
 
 /**
  * Disable repeat
  */
 void repeatNone() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot disable repeat')
-    return
-  }
-  coordinator.repeatNone()
+  requestGroupCommand('repeatNone')
 }
 
 /**
  * Set shuffle mode
  */
 void setShuffle(String mode) {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot set shuffle mode')
-    return
-  }
-  coordinator.setShuffle(mode)
+  requestGroupCommand('setShuffle', [mode: mode])
 }
 
 /**
  * Enable shuffle
  */
 void shuffleOn() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot enable shuffle')
-    return
-  }
-  coordinator.shuffleOn()
+  requestGroupCommand('shuffleOn')
 }
 
 /**
  * Disable shuffle
  */
 void shuffleOff() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot disable shuffle')
-    return
-  }
-  coordinator.shuffleOff()
+  requestGroupCommand('shuffleOff')
 }
 
 /**
  * Set crossfade mode
  */
 void setCrossfade(String mode) {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot set crossfade mode')
-    return
-  }
-  coordinator.setCrossfade(mode)
+  requestGroupCommand('setCrossfade', [mode: mode])
 }
 
 /**
  * Enable crossfade
  */
 void enableCrossfade() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot enable crossfade')
-    return
-  }
-  coordinator.enableCrossfade()
+  requestGroupCommand('enableCrossfade')
 }
 
 /**
  * Disable crossfade
  */
 void disableCrossfade() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot disable crossfade')
-    return
-  }
-  coordinator.disableCrossfade()
+  requestGroupCommand('disableCrossfade')
 }
 
 /**
  * Get list of favorites
  */
 void getFavorites() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot get favorites')
-    return
-  }
-  coordinator.getFavorites()
+  requestGroupCommand('getFavorites')
 }
 
 /**
@@ -1416,12 +981,7 @@ void loadFavorite(String favoriteId) {
     logWarn('No favorite ID provided')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot load favorite')
-    return
-  }
-  coordinator.loadFavorite(favoriteId)
+  requestGroupCommand('loadFavorite', [favoriteId: favoriteId])
 }
 
 /**
@@ -1432,35 +992,25 @@ void loadFavoriteFull(String favoriteId, String playMode = 'NORMAL', BigDecimal 
     logWarn('No favorite ID provided')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot load favorite')
-    return
-  }
   if((startTrack != null && startTrack.compareTo(BigDecimal.ONE) != 0) || (startTime != null && startTime.compareTo(BigDecimal.ZERO) != 0)) {
     logWarn("Group favorite load ignores startTrack/startTime; using play mode '${playMode}' only")
   }
   Map options = getFavoriteLoadOptionsFromPlayMode(playMode)
-  coordinator.loadFavoriteFull(
-    favoriteId,
-    options.repeatMode as String,
-    options.queueMode as String,
-    options.shuffleMode as String,
-    options.autoPlay as String,
-    options.crossfadeMode as String
-  )
+  requestGroupCommand('loadFavoriteFull', [
+    favoriteId: favoriteId,
+    repeatMode: options.repeatMode as String,
+    queueMode: options.queueMode as String,
+    shuffleMode: options.shuffleMode as String,
+    autoPlay: options.autoPlay as String,
+    crossfadeMode: options.crossfadeMode as String
+  ])
 }
 
 /**
  * Get playlists
  */
 void getPlaylists() {
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot get playlists')
-    return
-  }
-  coordinator.getPlaylists()
+  requestGroupCommand('getPlaylists')
 }
 
 /**
@@ -1471,12 +1021,7 @@ void loadPlaylist(String playlistId) {
     logWarn('No playlist ID provided')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot load playlist')
-    return
-  }
-  coordinator.loadPlaylist(playlistId)
+  requestGroupCommand('loadPlaylist', [playlistId: playlistId])
 }
 
 /**
@@ -1487,10 +1032,12 @@ void loadPlaylistFull(String playlistId, String repeatMode = 'repeat all', Strin
     logWarn('No playlist ID provided')
     return
   }
-  DeviceWrapper coordinator = getCoordinatorDevice()
-  if(!coordinator) {
-    logWarn('Coordinator device not found - cannot load playlist')
-    return
-  }
-  coordinator.loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+  requestGroupCommand('loadPlaylistFull', [
+    playlistId: playlistId,
+    repeatMode: repeatMode,
+    queueMode: queueMode,
+    shuffleMode: shuffleMode,
+    autoPlay: autoPlay,
+    crossfadeMode: crossfadeMode
+  ])
 }

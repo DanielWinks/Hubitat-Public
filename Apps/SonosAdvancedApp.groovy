@@ -194,6 +194,12 @@ preferences {
 // on the same device back to back.
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
+@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'groupCommandRequest'
+@Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
+@Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
+@Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
+@Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
+@Field static final Integer GROUP_STATE_DRAIN_MAX_ATTEMPTS = 3
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -649,6 +655,7 @@ void saveGroup() {
   app.removeSetting('editDeleteGroup')
 
   createGroupDevices()
+  runIn(1, 'subscribeToGroupCommandRequests')
 }
 
 void deleteGroup() {
@@ -669,6 +676,7 @@ void deleteGroup() {
   // Update groupDevices setting to match remaining groups so removeOrphans() can detect the orphaned device
   app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
   removeOrphans()
+  runIn(1, 'subscribeToGroupCommandRequests')
 }
 
 void cancelGroupEdit() {
@@ -704,6 +712,7 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  subscribeToGroupCommandRequests()
 
   state.remove('favs')
   unschedule('appGetFavoritesLocal')
@@ -825,6 +834,21 @@ void createGroupDevices() {
   removeOrphans()
 }
 
+/**
+ * Group devices publish command requests as an attribute event. Subscribing
+ * the parent app to that event gives commands a one-way boundary: the group
+ * driver never has to synchronously call parent.getDeviceFromRincon() while a
+ * parent callback may be updating group state.
+ */
+void subscribeToGroupCommandRequests() {
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    subscribe(groupDevice, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
+  }
+  getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
+    subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
+  }
+}
+
 void createPlayerDevicesWithFeedback() {
   List<String> willBeCreated = settings.playerDevices ? (settings.playerDevices - getCreatedPlayerDevices()) : []
   if(willBeCreated.size() == 0) {
@@ -841,6 +865,7 @@ void createPlayerDevicesWithFeedback() {
 
 void finalizePlayerCreation(Map data) {
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+  runIn(1, 'subscribeToGroupCommandRequests')
   Integer createdCount = data.createdCount as Integer
   Integer expectedCount = data.expectedCount as Integer
   if(createdCount == expectedCount) {
@@ -1502,13 +1527,540 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return app.getChildDevices().find { it.getDataValue('id') == rincon }
 }
 
+/**
+ * Queue a child event so player callbacks never synchronously fan out into
+ * another child device. The queue is keyed by target DNI and attribute, so a
+ * burst of state changes keeps only the newest value for each attribute.
+ */
 void sendChildEvent(String dni, Map event) {
-  ChildDeviceWrapper child = getChildDevice(dni)
-  if(child == null) {
-    logWarn("sendChildEvent: no child device found for DNI ${dni}")
+  if(!dni || !event?.name) {
     return
   }
-  child.sendEvent(event)
+  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
+      : [:]
+  Map<String, Object> childEvents = pending[dni] instanceof Map
+      ? pending[dni]
+      : [:]
+  childEvents[event.name as String] = event.value
+  pending[dni] = childEvents
+  state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
+  runIn(1, 'drainQueuedChildEvents', [overwrite: true])
+}
+
+/**
+ * Deliver queued child events after the originating player callback has
+ * returned. This method intentionally performs only the final child event
+ * delivery and never calls back into a player or group command.
+ */
+void drainQueuedChildEvents() {
+  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
+      : [:]
+  state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
+  if(pending.isEmpty()) {
+    return
+  }
+
+  pending.each { String dni, Map<String, Object> eventsForChild ->
+    ChildDeviceWrapper child = getChildDevice(dni)
+    if(child == null) {
+      logWarn("drainQueuedChildEvents: no child device found for DNI ${dni}")
+      return
+    }
+    eventsForChild.each { String name, Object value ->
+      if(value != null) {
+        child.sendEvent(name: name, value: value)
+      }
+    }
+  }
+}
+
+/**
+ * Receive a command request emitted by a Sonos Advanced Group device. Group
+ * drivers deliberately publish requests instead of synchronously traversing
+ * back through the parent app. The app owns child-device lookup and forwards
+ * only to player devices, so this handler cannot form an app -> group -> app
+ * call cycle.
+ */
+void groupCommandRequestHandler(Event event) {
+  String rawRequest = event?.value?.toString()
+  if(!rawRequest) {
+    logWarn('Ignoring empty group command request')
+    return
+  }
+
+  Map request
+  try {
+    request = (Map)parseJson(rawRequest)
+  } catch(Exception e) {
+    logWarn("Ignoring malformed group command request: ${e.message}")
+    return
+  }
+
+  String groupDni = request?.groupDni as String
+  String command = request?.command as String
+  if(!groupDni || !command || getChildDevice(groupDni) == null) {
+    logWarn("Ignoring group command request with invalid target or command: ${rawRequest}")
+    return
+  }
+
+  // Ensure the event callback returns before any player command is issued.
+  runIn(1, 'processGroupCommandRequest', [data: [request: request]])
+}
+
+void processGroupCommandRequest(Map data) {
+  Map request = data?.request instanceof Map ? (Map)data.request : null
+  String groupDni = request?.groupDni as String
+  String command = request?.command as String
+  if(!groupDni || !command) {
+    return
+  }
+
+  ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
+  if(groupDevice == null) {
+    logWarn("Group command ${command} ignored because ${groupDni} no longer exists")
+    return
+  }
+
+  Map args = request.args instanceof Map ? (Map)request.args : [:]
+  String requestId = request.requestId as String
+  logDebug("Processing group command ${command} for ${groupDni}${requestId ? " (${requestId})" : ''}")
+
+  try {
+    Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+    String coordinatorId = groupDevice.getDataValue('groupCoordinatorId')
+    List<String> playerIds = getAllPlayersForGroupDevice(groupDevice).unique()
+    ChildDeviceWrapper configuredCoordinator = coordinatorId ? rinconMap[coordinatorId] : null
+    ChildDeviceWrapper coordinator = resolveGroupCommandCoordinator(configuredCoordinator, playerIds, rinconMap)
+    String resolvedCoordinatorId = coordinator?.getDataValue('id') ?: coordinatorId
+    List<String> followerIds = playerIds.findAll { String id -> id != resolvedCoordinatorId }
+    List<ChildDeviceWrapper> playerDevices = playerIds.collect { String id -> rinconMap[id] }.findAll { it != null }
+
+    switch(command) {
+      case 'on':
+      case 'evictUnlistedPlayers':
+      case 'regroupAfterUngroup':
+      case 'createGroup':
+        if(coordinator && playerIds) {
+          coordinator.playerCreateGroup(playerIds)
+        } else {
+          logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
+        }
+        break
+
+      case 'off':
+      case 'removePlayersFromCoordinator':
+      case 'ungroupPlayers':
+        if(coordinator && followerIds) {
+          coordinator.playerModifyGroupMembers([], followerIds)
+        } else if(!coordinator) {
+          logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
+        }
+        break
+
+      case 'groupPlayers':
+        if(!coordinator) {
+          logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
+        } else if(groupDevice.currentValue('switch', true) == 'on') {
+          coordinator.playerModifyGroupMembers([], followerIds)
+        } else {
+          coordinator.playerCreateGroup(playerIds)
+        }
+        break
+
+      case 'joinPlayersToCoordinator':
+        if(coordinator && followerIds) {
+          coordinator.playerModifyGroupMembers(followerIds, [])
+        } else if(!coordinator) {
+          logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
+        }
+        break
+
+      case 'refresh':
+        refreshGroupDeviceState(groupDevice, coordinator, playerDevices, args)
+        break
+
+      case 'playAudioClip':
+        playerDevices.each { ChildDeviceWrapper player ->
+          player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume))
+        }
+        break
+
+      case 'playHighPriorityTrack':
+        playerDevices.each { ChildDeviceWrapper player ->
+          player.playerLoadAudioClipHighPriority(args.uri as String, toBigDecimal(args.volume))
+        }
+        break
+
+      case 'enqueueLowPriorityTrack':
+        playerDevices.each { ChildDeviceWrapper player ->
+          player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume))
+        }
+        break
+
+      case 'play':
+        if(coordinator) { coordinator.play() }
+        break
+      case 'pause':
+        if(coordinator) { coordinator.pause() }
+        break
+      case 'stop':
+        if(coordinator) { coordinator.stop() }
+        break
+      case 'nextTrack':
+        if(coordinator) { coordinator.nextTrack() }
+        break
+      case 'previousTrack':
+        if(coordinator) { coordinator.previousTrack() }
+        break
+      case 'playTrack':
+        if(coordinator) { coordinator.playTrack(args.uri as String, toBigDecimal(args.volume)) }
+        break
+      case 'setTrack':
+        if(coordinator) { coordinator.setTrack(args.uri as String) }
+        break
+
+      case 'setVolume':
+        executeGroupVolumeCommand(coordinator, playerDevices, args)
+        break
+      case 'volumeUp':
+        executeGroupRelativeVolumeCommand(coordinator, playerDevices, args, 1)
+        break
+      case 'volumeDown':
+        executeGroupRelativeVolumeCommand(coordinator, playerDevices, args, -1)
+        break
+      case 'mute':
+        executeGroupMuteCommand(coordinator, playerDevices, args, true)
+        break
+      case 'unmute':
+        executeGroupMuteCommand(coordinator, playerDevices, args, false)
+        break
+
+      case 'setRepeatMode':
+        if(coordinator) { coordinator.setRepeatMode(args.mode as String) }
+        break
+      case 'repeatOne':
+        if(coordinator) { coordinator.repeatOne() }
+        break
+      case 'repeatAll':
+        if(coordinator) { coordinator.repeatAll() }
+        break
+      case 'repeatNone':
+        if(coordinator) { coordinator.repeatNone() }
+        break
+      case 'setShuffle':
+        if(coordinator) { coordinator.setShuffle(args.mode as String) }
+        break
+      case 'shuffleOn':
+        if(coordinator) { coordinator.shuffleOn() }
+        break
+      case 'shuffleOff':
+        if(coordinator) { coordinator.shuffleOff() }
+        break
+      case 'setCrossfade':
+        if(coordinator) { coordinator.setCrossfade(args.mode as String) }
+        break
+      case 'enableCrossfade':
+        if(coordinator) { coordinator.enableCrossfade() }
+        break
+      case 'disableCrossfade':
+        if(coordinator) { coordinator.disableCrossfade() }
+        break
+      case 'getFavorites':
+        if(coordinator) { coordinator.getFavorites() }
+        break
+      case 'loadFavorite':
+        if(coordinator) { coordinator.loadFavorite(args.favoriteId as String) }
+        break
+      case 'loadFavoriteFull':
+        if(coordinator) {
+          coordinator.loadFavoriteFull(
+            args.favoriteId as String,
+            args.repeatMode as String,
+            args.queueMode as String,
+            args.shuffleMode as String,
+            args.autoPlay as String,
+            args.crossfadeMode as String
+          )
+        }
+        break
+      case 'getPlaylists':
+        if(coordinator) { coordinator.getPlaylists() }
+        break
+      case 'loadPlaylist':
+        if(coordinator) { coordinator.loadPlaylist(args.playlistId as String) }
+        break
+      case 'loadPlaylistFull':
+        if(coordinator) {
+          coordinator.loadPlaylistFull(
+            args.playlistId as String,
+            args.repeatMode as String,
+            args.queueMode as String,
+            args.shuffleMode as String,
+            args.autoPlay as String,
+            args.crossfadeMode as String
+          )
+        }
+        break
+      default:
+        logWarn("Unsupported group command '${command}'")
+    }
+  } catch(Exception e) {
+    logWarn("Group command ${command} failed for ${groupDni}: ${e.message}")
+  }
+}
+
+ChildDeviceWrapper resolveGroupCommandCoordinator(ChildDeviceWrapper configuredCoordinator,
+    List<String> playerIds, Map<String, ChildDeviceWrapper> rinconMap) {
+  ChildDeviceWrapper activeCoordinator = playerIds.collect { String id -> rinconMap[id] }
+    .find { ChildDeviceWrapper player ->
+      player != null && (player.getDataValue('isGroupCoordinator') == 'true' ||
+        player.currentValue('isGroupCoordinator', true) == 'on')
+    }
+  return activeCoordinator ?: configuredCoordinator
+}
+
+/**
+ * Receive a deferred player-to-parent command. Player drivers use this bridge
+ * when a command is addressed to a follower; the event is emitted after the
+ * follower method returns so the player never waits on the parent app's child
+ * lookup semaphore.
+ */
+void playerCommandRequestHandler(Event event) {
+  String rawRequest = event?.value?.toString()
+  if(!rawRequest) {
+    logWarn('Ignoring empty player command request')
+    return
+  }
+
+  Map request
+  try {
+    request = (Map)parseJson(rawRequest)
+  } catch(Exception e) {
+    logWarn("Ignoring malformed player command request: ${e.message}")
+    return
+  }
+
+  String playerDni = request?.playerDni as String
+  String command = request?.command as String
+  if(!playerDni || !command || getChildDevice(playerDni) == null) {
+    logWarn("Ignoring player command request with invalid target or command: ${rawRequest}")
+    return
+  }
+  runIn(1, 'processPlayerCommandRequest', [data: [request: request]])
+}
+
+void processPlayerCommandRequest(Map data) {
+  Map request = data?.request instanceof Map ? (Map)data.request : null
+  String playerDni = request?.playerDni as String
+  String command = request?.command as String
+  if(!playerDni || !command) {
+    return
+  }
+
+  ChildDeviceWrapper source = getChildDevice(playerDni)
+  if(source == null) {
+    logWarn("Player command ${command} ignored because ${playerDni} no longer exists")
+    return
+  }
+  List args = request.args instanceof List ? (List)request.args : []
+
+  try {
+    Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+    String configuredCoordinatorId = source.getDataValue('groupCoordinatorId')
+    List<String> candidateIds = source.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+    if(!candidateIds && source.getDataValue('id')) {
+      candidateIds.add(source.getDataValue('id'))
+    }
+    ChildDeviceWrapper coordinator = candidateIds.collect { String id -> rinconMap[id] }
+      .find { ChildDeviceWrapper player ->
+        player != null && (player.getDataValue('isGroupCoordinator') == 'true' ||
+          player.currentValue('isGroupCoordinator', true) == 'on')
+      }
+    if(coordinator == null && configuredCoordinatorId) {
+      coordinator = rinconMap[configuredCoordinatorId]
+    }
+    if(coordinator == null) {
+      logWarn("Player command ${command} could not resolve a coordinator for ${playerDni}")
+      return
+    }
+
+    switch(command) {
+      case 'muteGroup':
+        coordinator.muteGroup()
+        break
+      case 'unmuteGroup':
+        coordinator.unmuteGroup()
+        break
+      case 'setGroupVolume':
+        coordinator.setGroupVolume(toBigDecimal(args.size() > 0 ? args[0] : null), toBigDecimal(args.size() > 1 ? args[1] : null))
+        break
+      case 'groupVolumeUp':
+        coordinator.groupVolumeUp()
+        break
+      case 'groupVolumeDown':
+        coordinator.groupVolumeDown()
+        break
+      case 'loadFavoriteFull':
+        coordinator.loadFavoriteFull(
+          args.size() > 0 ? args[0] as String : null,
+          args.size() > 1 ? args[1] as String : null,
+          args.size() > 2 ? args[2] as String : null,
+          args.size() > 3 ? args[3] as String : null,
+          args.size() > 4 ? args[4] as String : null,
+          args.size() > 5 ? args[5] as String : null
+        )
+        break
+      case 'loadPlaylistFull':
+        coordinator.loadPlaylistFull(
+          args.size() > 0 ? args[0] as String : null,
+          args.size() > 1 ? args[1] as String : null,
+          args.size() > 2 ? args[2] as String : null,
+          args.size() > 3 ? args[3] as String : null,
+          args.size() > 4 ? args[4] as String : null,
+          args.size() > 5 ? args[5] as String : null
+        )
+        break
+      default:
+        logWarn("Unsupported deferred player command '${command}'")
+    }
+  } catch(Exception e) {
+    logWarn("Deferred player command ${command} failed for ${playerDni}: ${e.message}")
+  }
+}
+
+BigDecimal toBigDecimal(Object value) {
+  if(value == null || value.toString().trim() == '') {
+    return null
+  }
+  try {
+    return value instanceof BigDecimal ? (BigDecimal)value : new BigDecimal(value.toString())
+  } catch(Exception e) {
+    logWarn("Ignoring invalid numeric group command value '${value}'")
+    return null
+  }
+}
+
+Boolean groupCommandBoolean(Object value, Boolean defaultValue) {
+  if(value == null) { return defaultValue }
+  if(value instanceof Boolean) { return (Boolean)value }
+  return value.toString().toBoolean()
+}
+
+Boolean isSonosGrouped(ChildDeviceWrapper coordinator) {
+  return coordinator?.currentValue('isGrouped', true) == 'on' &&
+      coordinator?.currentValue('isGroupCoordinator', true) == 'on'
+}
+
+void executeGroupVolumeCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
+  BigDecimal level = toBigDecimal(args.level)
+  if(level == null) {
+    logWarn('Ignoring group volume command without a valid level')
+    return
+  }
+  BigDecimal duration = toBigDecimal(args.duration)
+  Boolean grouped = isSonosGrouped(coordinator)
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+
+  if(grouped && useProportional) {
+    coordinator.setGroupVolume(level, duration)
+  } else if((grouped && !useProportional) || (!grouped && controlIndividually)) {
+    players.each { ChildDeviceWrapper player -> player.setLevel(level) }
+  } else if(coordinator) {
+    coordinator.setLevel(level)
+  } else {
+    logWarn('Cannot execute group volume command without a coordinator')
+  }
+}
+
+void executeGroupRelativeVolumeCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args, Integer direction) {
+  Boolean grouped = isSonosGrouped(coordinator)
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+  if(grouped && useProportional) {
+    if(direction > 0) { coordinator.groupVolumeUp() }
+    else { coordinator.groupVolumeDown() }
+  } else if((grouped && !useProportional) || (!grouped && controlIndividually)) {
+    players.each { ChildDeviceWrapper player ->
+      if(direction > 0) { player.volumeUp() }
+      else { player.volumeDown() }
+    }
+  } else if(coordinator) {
+    if(direction > 0) { coordinator.volumeUp() }
+    else { coordinator.volumeDown() }
+  }
+}
+
+void executeGroupMuteCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args, Boolean muted) {
+  Boolean grouped = isSonosGrouped(coordinator)
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+  if(grouped && useProportional) {
+    if(muted) { coordinator.muteGroup() }
+    else { coordinator.unmuteGroup() }
+  } else if((grouped && !useProportional) || (!grouped && controlIndividually)) {
+    players.each { ChildDeviceWrapper player ->
+      if(muted) { player.mute() }
+      else { player.unmute() }
+    }
+  } else if(coordinator) {
+    if(muted) { coordinator.mute() }
+    else { coordinator.unmute() }
+  }
+}
+
+void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
+  if(!coordinator) {
+    logWarn("Cannot refresh ${groupDevice.displayName}: coordinator not found")
+    return
+  }
+
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Map attributes = [:]
+  if(isSonosGrouped(coordinator) && useProportional) {
+    Object volume = coordinator.currentValue('groupVolume', true)
+    Object mute = coordinator.currentValue('groupMute', true)
+    if(volume != null) { attributes.volume = volume; attributes.groupVolume = volume }
+    if(mute != null) { attributes.mute = mute; attributes.groupMute = mute }
+  } else {
+    Integer totalVolume = 0
+    Integer volumeCount = 0
+    Boolean allMuted = !players.isEmpty()
+    players.each { ChildDeviceWrapper player ->
+      Integer volume = player.currentValue('volume', true) as Integer
+      if(volume != null) { totalVolume += volume; volumeCount++ }
+      if(player.currentValue('mute', true) != 'muted') { allMuted = false }
+    }
+    if(volumeCount > 0) {
+      Integer averageVolume = Math.round(totalVolume / volumeCount) as Integer
+      attributes.volume = averageVolume
+      attributes.groupVolume = averageVolume
+    }
+    String mute = allMuted ? 'muted' : 'unmuted'
+    attributes.mute = mute
+    attributes.groupMute = mute
+  }
+
+  ['status', 'transportStatus', 'trackData', 'trackDescription', 'currentTrackDuration',
+   'currentArtistName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
+   'audioSource', 'currentAlbumName', 'currentTrackName', 'currentFavorite', 'currentPlaylist',
+   'currentTrackNumber', 'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
+   'queueTrackTotal', 'queueTrackPosition', 'currentRepeatOneMode', 'currentRepeatAllMode',
+   'currentCrossfadeMode', 'currentShuffleMode'].each { String name ->
+    Object value = coordinator.currentValue(name, true)
+    if(value != null) { attributes[name] = value }
+  }
+
+  Object memberNames = coordinator.currentValue('groupMemberNames', true)
+  if(memberNames != null) {
+    attributes.currentlyJoinedPlayers = memberNames.toString().replaceAll(/^\[|\]$/, '').trim()
+  }
+  if(!attributes.isEmpty()) {
+    // updateBatchPlaybackState() is a local-only group-driver operation.
+    groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+  }
 }
 
 /**
@@ -1792,6 +2344,9 @@ String unEscapeMetaData(String text) {
 @CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
+  if(!coordinatorId || !playersInGroup) {
+    return
+  }
   // Single pass over all children: partition into group devices (for this coordinator)
   // and a RINCON lookup map (for player name resolution). Avoids two separate getChildDevices() calls.
   Map partitioned = getGroupDevicesAndRinconMap(coordinatorId)
@@ -1817,60 +2372,115 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   ChildDeviceWrapper callerDevice = rinconMap[coordinatorId]
   Boolean isCallerActualCoordinator = callerDevice?.getDataValue('isGroupCoordinator') == 'true'
 
-  groupsForCoord.each{gd ->
+  groupsForCoord.each { ChildDeviceWrapper gd ->
     HashSet<String> list1 = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> list2 = new  HashSet<String>(playersInGroup)
     list2.add(coordinatorId)
     Boolean allPlayersAreGrouped = list1.equals(list2)
     Boolean shouldBeActive = allPlayersAreGrouped && isCallerActualCoordinator
-    Boolean wasActive = gd.currentValue('switch') == 'on'
-    if(shouldBeActive) { gd.sendEvent(name: 'switch', value: 'on') }
-    else { gd.sendEvent(name: 'switch', value: 'off') }
-    gd.sendEvent(name: 'currentlyJoinedPlayers', value: joinedPlayersValue)
-    if(shouldBeActive && !wasActive) {
-      notifyGroupDeviceActivated(gd, callerDevice)
+    Map attributes = [
+      switch: shouldBeActive ? 'on' : 'off',
+      currentlyJoinedPlayers: joinedPlayersValue
+    ]
+    // Include the coordinator's current state with an activation update. The
+    // group driver applies this locally after the player callback has returned.
+    if(shouldBeActive && callerDevice != null) {
+      ['albumArtURI', 'status', 'transportStatus', 'currentRepeatOneMode',
+       'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
+       'currentTrackDuration', 'currentArtistName', 'currentAlbumName',
+       'currentTrackName', 'trackDescription', 'trackData', 'currentFavorite',
+       'currentPlaylist', 'nextAlbumName', 'nextArtistName', 'nextTrackName',
+       'nextTrackAlbumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
+       'audioSource', 'currentTrackNumber', 'groupVolume', 'groupMute'].each { String name ->
+        Object value = callerDevice.currentValue(name, true)
+        if(value != null) {
+          attributes[name] = value
+        }
+      }
     }
-    if(!shouldBeActive && wasActive) {
-      notifyGroupDeviceDeactivated(gd)
-    }
+    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes)
   }
 }
 
 /**
- * Notify a group device that it just became active so it can replay any held playback state,
- * then push the coordinator's current playback state to ensure the group device is fully up-to-date.
- * This method is intentionally NOT @CompileStatic so that driver methods resolve dynamically.
+ * Queue a coalesced group-device state update. This is deliberately a one-way
+ * app-to-group boundary: it never calls a group driver while processing a
+ * player callback.
  */
-void notifyGroupDeviceActivated(ChildDeviceWrapper gd, ChildDeviceWrapper coordinator) {
-  if(coordinator) {
-    List<Map> currentStates = coordinator.getCurrentPlayingStatesForGroup()
-    // Include switch:'on' so updateBatchPlaybackState() guard detects the off→on
-    // transition atomically. Parent-to-child sendEvent may not be visible to the
-    // driver's currentValue() yet, but including switch in the batch ensures the
-    // guard processes it via the driver's own sendEvent before checking state.
-    Map attrs = [switch: 'on']
-    currentStates.each { Map entry ->
-      if(entry.value != null) { attrs[(String)entry.name] = entry.value }
-    }
-    String jsonAttrs = JsonOutput.toJson(attrs)
-    gd.updateBatchPlaybackState(jsonAttrs)
-  } else {
-    logWarn("Could not resolve group coordinator while activating ${gd.displayName}; replaying held state only")
-    // No coordinator available; replay any held state directly.
-    // When coordinator IS present, replayHeldState() is called internally
-    // by updateBatchPlaybackState() via the isActive && !wasActive branch,
-    // triggered by the switch:'on' we include in the batch.
-    gd.replayHeldState()
+void queueGroupDeviceState(String groupDni, Map attributes) {
+  if(!groupDni || !attributes || attributes.isEmpty()) {
+    return
   }
+  Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
+      : [:]
+  Map<String, Object> groupState = pending[groupDni] instanceof Map
+      ? pending[groupDni]
+      : [:]
+  attributes.each { String name, Object value ->
+    if(value != null) {
+      groupState[name] = value
+    }
+  }
+  pending[groupDni] = groupState
+  state[PENDING_GROUP_STATE_QUEUE_KEY] = pending
+
+  Map<String, Integer> attempts = state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] instanceof Map
+      ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
+      : [:]
+  attempts.remove(groupDni)
+  state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
+  runIn(1, 'drainGroupStateUpdates', [overwrite: true])
 }
 
 /**
- * Notify a group device that it just became inactive so it can reset playback attributes.
- * This method is intentionally NOT @CompileStatic so that onGroupDeactivated() resolves
- * dynamically against the actual driver instance.
+ * Deliver queued group state after the originating player callback has
+ * returned. A bounded retry protects the app from a transient child-device
+ * invocation failure without recreating the original synchronous call chain.
  */
-void notifyGroupDeviceDeactivated(ChildDeviceWrapper gd) {
-  gd.onGroupDeactivated()
+void drainGroupStateUpdates() {
+  Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
+      : [:]
+  state.remove(PENDING_GROUP_STATE_QUEUE_KEY)
+  if(pending.isEmpty()) {
+    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
+    return
+  }
+
+  Map<String, Integer> attempts = state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] instanceof Map
+      ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
+      : [:]
+  Map<String, Map<String, Object>> retryQueue = [:]
+  pending.each { String groupDni, Map<String, Object> attributes ->
+    ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
+    if(groupDevice == null) {
+      logWarn("drainGroupStateUpdates: no group device found for DNI ${groupDni}")
+      attempts.remove(groupDni)
+      return
+    }
+    try {
+      groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+      attempts.remove(groupDni)
+    } catch(Exception e) {
+      Integer attempt = attempts[groupDni] ?: 0
+      if(attempt < GROUP_STATE_DRAIN_MAX_ATTEMPTS) {
+        attempts[groupDni] = attempt + 1
+        retryQueue[groupDni] = attributes
+        logWarn("Group state delivery to ${groupDni} failed (attempt ${attempt + 1} of ${GROUP_STATE_DRAIN_MAX_ATTEMPTS}): ${e.message}")
+      } else {
+        attempts.remove(groupDni)
+        logError("Giving up group state delivery to ${groupDni} after ${GROUP_STATE_DRAIN_MAX_ATTEMPTS} retries: ${e.message}")
+      }
+    }
+  }
+  if(retryQueue.isEmpty()) {
+    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
+    return
+  }
+  state[PENDING_GROUP_STATE_QUEUE_KEY] = retryQueue
+  state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
+  runIn(1, 'drainGroupStateUpdates', [overwrite: true])
 }
 
 /**
@@ -1894,9 +2504,8 @@ void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAt
   if(combined.isEmpty()) { return }
 
   List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
-  String jsonAttrs = JsonOutput.toJson(combined)
-  groupsForCoord.each { gd ->
-    gd.updateBatchPlaybackState(jsonAttrs)
+  groupsForCoord.each { ChildDeviceWrapper groupDevice ->
+    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), combined)
   }
 }
 

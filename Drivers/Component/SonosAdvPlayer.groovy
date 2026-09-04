@@ -178,6 +178,7 @@ metadata {
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'groupId', 'string'
   attribute 'groupCoordinatorId', 'string'
+  attribute 'playerCommandRequest', 'string'
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
@@ -315,6 +316,7 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
+@Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 // Per-(DNI, sid) subscription mutexes. Previously these were shared static
 // singletons, which caused every driver instance on the hub to serialize
 // through a single permit per sid -- a large contributor to the ZGT retry
@@ -326,6 +328,7 @@ import java.util.concurrent.TimeUnit
 @Field static final Integer SUBSCRIBE_MUTEX_WAIT_SECONDS = 2
 @Field static final Integer SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS = 5
 @Field static final Integer SUBSCRIBE_RETRY_MAX_ATTEMPTS = 3
+@Field static final Integer GROUP_DEVICE_UPDATE_MAX_RETRIES = 3
 @Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
@@ -402,6 +405,7 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+@Field static ConcurrentHashMap<String, Integer> groupDeviceUpdateRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
@@ -672,6 +676,7 @@ void cleanupStaticDriverState() {
     clearedEntries += clearStaticMap(favoriteRetryState)
     clearedEntries += clearStaticMap(playlistRetryState)
     clearedEntries += clearStaticMap(pendingGroupDeviceUpdates)
+    clearedEntries += clearStaticMap(groupDeviceUpdateRetryAttempts)
     clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
@@ -707,6 +712,7 @@ void cleanupStaticDriverState() {
   removedEntries += pruneStaticMapKeys(favoriteRetryState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(playlistRetryState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingGroupDeviceUpdates, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(groupDeviceUpdateRetryAttempts, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
@@ -852,6 +858,7 @@ void clearStaticDriverStateForCurrentDevice() {
       favoriteRetryState?.remove(dni)
       playlistRetryState?.remove(dni)
       pendingGroupDeviceUpdates?.remove(dni)
+      groupDeviceUpdateRetryAttempts?.remove(dni)
       pendingLocalDeviceEvents?.remove(dni)
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
@@ -1305,11 +1312,38 @@ void selectTV() {
   play()
 }
 
+/**
+ * Defer follower-to-coordinator forwarding through the parent app's event
+ * queue. A direct parent call from a player method can deadlock when the app
+ * is already waiting for a child method to return.
+ */
+void requestParentCoordinatorCommand(String command, List args = []) {
+  if(!command) {
+    return
+  }
+  Integer sequence = ((state.parentCommandSequence ?: 0) as Integer) + 1
+  state.parentCommandSequence = sequence
+  Map payload = [
+    playerDni: device.getDeviceNetworkId(),
+    requestId: "${device.getDeviceNetworkId()}-${sequence}",
+    command: command,
+    args: args ?: []
+  ]
+  runIn(1, 'emitParentCoordinatorCommand', [data: [payload: payload]])
+}
+
+void emitParentCoordinatorCommand(Map data) {
+  Map payload = data?.payload instanceof Map ? (Map)data.payload : null
+  if(payload?.command) {
+    sendDeviceEvent(PLAYER_COMMAND_REQUEST_ATTRIBUTE, JsonOutput.toJson(payload))
+  }
+}
+
 void muteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(true)
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.muteGroup()
+    requestParentCoordinatorCommand('muteGroup')
   }
   else { playerSetPlayerMute(true) }
 }
@@ -1317,7 +1351,7 @@ void unmuteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(false)
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.unmuteGroup()
+    requestParentCoordinatorCommand('unmuteGroup')
   }
   else { playerSetPlayerMute(false) }
 }
@@ -1327,7 +1361,7 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGroupedAndNotCoordinator: ${isFollower}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
   if(isFollower) {
     logDebug("setGroupVolume: Delegating to coordinator")
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.setGroupVolume(level, duration)
+    requestParentCoordinatorCommand('setGroupVolume', [level, duration])
     return
   }
   String deviceId = getId()
@@ -1443,7 +1477,7 @@ void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.groupVolumeUp()
+    requestParentCoordinatorCommand('groupVolumeUp')
   }
   else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 }
@@ -1451,7 +1485,7 @@ void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.groupVolumeDown()
+    requestParentCoordinatorCommand('groupVolumeDown')
   }
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
@@ -1610,7 +1644,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
       scheduleFavoriteRetryCallback(initialDelay, retryState?.operationId as String)
     }
   } else if(isGroupedAndNotCoordinator() == true) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    requestParentCoordinatorCommand('loadFavoriteFull', [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
 }
 
@@ -1709,7 +1743,7 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
       schedulePlaylistRetryCallback(PLAYLIST_INITIAL_CHECK_DELAY_SECONDS, retryState?.operationId as String)
     }
   } else if(isGroupedAndNotCoordinator() == true) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    requestParentCoordinatorCommand('loadPlaylistFull', [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
 }
 
@@ -2698,7 +2732,21 @@ void clearCurrentPlayingStates() {
 void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   if(coordinatorId == null || coordinatorId == '') {return}
   if(playersInGroup == null || playersInGroup.size() == 0) {return}
-  parent?.updateGroupDevices(coordinatorId, playersInGroup)
+  // Let the topology callback return before entering the parent app. This
+  // prevents an app->player state read from waiting on the same player method
+  // that is trying to publish the membership change.
+  runIn(1, 'deferredParentUpdateGroupDevices', [
+    overwrite: true,
+    data: [coordinatorId: coordinatorId, playersInGroup: new ArrayList<String>(playersInGroup)]
+  ])
+}
+
+void deferredParentUpdateGroupDevices(Map data) {
+  String coordinatorId = data?.coordinatorId as String
+  List<String> playersInGroup = data?.playersInGroup as List<String>
+  if(coordinatorId && playersInGroup) {
+    parent?.updateGroupDevices(coordinatorId, playersInGroup)
+  }
 }
 
 @CompileStatic
@@ -2971,9 +3019,12 @@ void resetSubscriptionMutexesForDevice() {
   if(dni == null || dni == '') { return }
   ['sid1', 'sid2', 'sid3', 'sid4'].each { String sid ->
     String key = "${dni}-${sid}"
-    subscribeMutexes.put(key, new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS))
+    // Do not replace a semaphore that may still be owned by an in-flight
+    // callback. Replacing it strands the old permit and allows overlapping
+    // subscriptions against the same SID.
+    subscribeMutexes.putIfAbsent(key, new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS))
   }
-  unsubscribeMutexes.put(dni, new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS))
+  unsubscribeMutexes.putIfAbsent(dni, new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS))
 }
 
 String retryAttemptKey(String eventsToRetry) {
@@ -4432,6 +4483,7 @@ void setWebSocketStatus(String status) {
  */
 void queueGroupDeviceUpdate(Map attributes) {
   String dni = device.getDeviceNetworkId()
+  groupDeviceUpdateRetryAttempts.remove(dni)
   if(!pendingGroupDeviceUpdates.containsKey(dni)) {
     pendingGroupDeviceUpdates[dni] = new ConcurrentHashMap<String, Object>()
   }
@@ -4472,6 +4524,7 @@ void flushPendingGroupDeviceUpdates() {
   Boolean isCoordinator = getIsGroupCoordinator()
   if(!isCoordinator) {
     pendingGroupDeviceUpdates.remove(dni)
+    groupDeviceUpdateRetryAttempts.remove(dni)
     return
   }
   Map<String, Object> pendingSnapshot = getPendingGroupDeviceUpdateSnapshot(dni)
@@ -4519,9 +4572,18 @@ void flushPendingGroupDeviceUpdates() {
     Map playbackAttrsForParent = playbackAttrs.isEmpty() ? null : playbackAttrs
     parent?.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrsForParent)
     clearFlushedGroupDeviceUpdates(dni, pendingSnapshot)
+    groupDeviceUpdateRetryAttempts.remove(dni)
   } catch(Exception e) {
     logWarn("Error flushing pending group device updates for ${device.displayName}: ${e.message}")
-    runIn(1, 'flushPendingGroupDeviceUpdates', [overwrite: true])
+    Integer attempt = groupDeviceUpdateRetryAttempts.get(dni) ?: 0
+    if(attempt < GROUP_DEVICE_UPDATE_MAX_RETRIES) {
+      groupDeviceUpdateRetryAttempts.put(dni, attempt + 1)
+      runIn(1, 'flushPendingGroupDeviceUpdates', [overwrite: true])
+    } else {
+      groupDeviceUpdateRetryAttempts.remove(dni)
+      pendingGroupDeviceUpdates.remove(dni)
+      logWarn("Dropping pending group device updates for ${device.displayName} after ${GROUP_DEVICE_UPDATE_MAX_RETRIES} retries")
+    }
   }
 }
 
@@ -5415,6 +5477,18 @@ void httpPostAsync(Map params, String callback = 'localControlCallback') {
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
+String getLocalUpnpHostForGroupOperation() {
+  String localHost = getlocalUpnpHost()
+  if(getIsGrouped() && !getIsGroupCoordinator()) {
+    // A follower can still be invoked directly by an external automation. Use
+    // its local endpoint rather than synchronously looking up the coordinator
+    // through the parent app; the parent-mediated group command path resolves
+    // the actual coordinator before invoking this operation.
+    logDebug("Using local endpoint for grouped follower ${device.displayName}")
+  }
+  return localHost
+}
+
 void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map tts = textToSpeech(text, voice)
@@ -5424,7 +5498,7 @@ void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, Stri
 }
 
 void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("removeAllTracksFromQueue: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5434,7 +5508,7 @@ void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
 }
 
 void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURIAndPlay: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5451,7 +5525,7 @@ void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
 }
 
 void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURI: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5463,7 +5537,7 @@ void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
 }
 
 void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("addURIToQueue: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5514,7 +5588,7 @@ void componentSetBassLocal(BigDecimal level) {
 }
 
 void componentSetBalanceLocal(BigDecimal level) {
-  if(!parent?.hasLeftAndRightChannelsSync(device)) {
+  if(!getRightChannelRincon()) {
     logWarn("Can not set balance on non-stereo pair.")
     return
   }
@@ -5554,36 +5628,33 @@ void componentSetLoudnessLocal(Boolean desiredLoudness) {
 }
 
 void componentMuteGroupLocal(Boolean desiredMute) {
-  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
-  if(coordinator == null) {
-    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group mute")
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(ip == null || ip.isEmpty()) {
+    logWarn("Could not determine local endpoint for ${device.displayName}; skipping local group mute")
     return
   }
-  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredMute: desiredMute]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
   asynchttpPost('localControlCallback', params)
 }
 
 void componentSetGroupRelativeLevelLocal(Integer adjustment) {
-  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
-  if(coordinator == null) {
-    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume adjustment")
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(ip == null || ip.isEmpty()) {
+    logWarn("Could not determine local endpoint for ${device.displayName}; skipping local group volume adjustment")
     return
   }
-  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [Adjustment: adjustment]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
 }
 
 void componentSetGroupLevelLocal(BigDecimal level) {
-  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
-  if(coordinator == null) {
-    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume set")
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(ip == null || ip.isEmpty()) {
+    logWarn("Could not determine local endpoint for ${device.displayName}; skipping local group volume set")
     return
   }
-  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredVolume: level]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
