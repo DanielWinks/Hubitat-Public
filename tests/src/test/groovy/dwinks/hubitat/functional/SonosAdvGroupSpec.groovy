@@ -49,4 +49,13 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'refresh'
     driver.events.empty
   }
+
+  def "setVolumeZero publishes a zero-volume group command without an argument"() {
+    when:
+    driver.setVolumeZero()
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'setVolume'
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args?.level == 0
+  }
 }

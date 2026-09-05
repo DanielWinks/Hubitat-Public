@@ -346,4 +346,17 @@ class SonosAdvPlayerSpec extends Specification {
     !websocketMessages[0].contains('"command":"play"')
     !websocketMessages[0].contains('"command":"pause"')
   }
+
+  def "setVolumeZero sends a direct player volume command with zero"() {
+    when:
+    driver.setVolumeZero()
+
+    then:
+    websocketMessages.size() == 1
+    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
+    payload[0].namespace == 'playerVolume'
+    payload[0].command == 'setVolume'
+    payload[1].volume == 0
+    websocketMessages[0].contains('"volume":0')
+  }
 }

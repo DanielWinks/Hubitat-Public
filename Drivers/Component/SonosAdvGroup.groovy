@@ -87,6 +87,7 @@ metadata {
     command 'ungroupPlayers'
     command 'evictUnlistedPlayers'
     command 'refresh'
+    command 'setVolumeZero'
 
     command 'playHighPriorityTTS', [
       [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
@@ -868,6 +869,15 @@ void previousTrack() {
  */
 void setLevel(BigDecimal level, BigDecimal duration = null) {
   setVolume(level, duration)
+}
+
+/**
+ * Set the group volume to zero without requiring a numeric command argument.
+ * Hubitat's built-in AudioVolume control may reject zero in its UI even though
+ * the capability range is 0-100.
+ */
+void setVolumeZero() {
+  setVolume(0G)
 }
 
 /**

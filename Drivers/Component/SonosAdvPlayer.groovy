@@ -87,6 +87,7 @@ metadata {
 
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
+  command 'setVolumeZero'
   command 'groupVolumeUp'
   command 'groupVolumeDown'
   command 'muteGroup'
@@ -1216,6 +1217,7 @@ Boolean isVolumeFadeInProgress() {
 
 @CompileStatic
 void setVolume(BigDecimal level) { setLevel(level) }
+void setVolumeZero() { setLevel(0G) }
 @CompileStatic
 void setTreble(BigDecimal level) { componentSetTrebleLocal(level)}
 @CompileStatic
