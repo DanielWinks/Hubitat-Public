@@ -39,6 +39,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.clearPlaylistsMap()
     driver.favoriteRetryState.clear()
     driver.playlistRetryState.clear()
+    driver.pendingGroupedPlayerVolumes.clear()
     driver.groupDeviceUpdateRetryAttempts.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
@@ -222,5 +223,34 @@ class SonosAdvPlayerSpec extends Specification {
     driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(0) == 1
     driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.command == 'setGroupVolume'
     websocketMessages.empty
+  }
+
+  def "grouped player volume is staggered without issuing playback commands"() {
+    given:
+    driver.device.currentValues.isGrouped = 'on'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_FIRST,RINCON_TEST,RINCON_THIRD'
+
+    when:
+    driver.setLevel(40G)
+    driver.setLevel(41G)
+
+    then:
+    websocketMessages.empty
+    driver.pendingGroupedPlayerVolumes['RINCON_TEST'] == 41
+    driver.scheduled.find { List call -> call[1] == 'flushPendingGroupedPlayerVolume' } == [
+      500,
+      'flushPendingGroupedPlayerVolume',
+      [overwrite: true]
+    ]
+
+    when:
+    driver.flushPendingGroupedPlayerVolume()
+
+    then:
+    websocketMessages.size() == 1
+    websocketMessages[0].contains('"namespace":"playerVolume"')
+    websocketMessages[0].contains('"command":"setVolume"')
+    !websocketMessages[0].contains('"command":"play"')
+    !websocketMessages[0].contains('"command":"pause"')
   }
 }

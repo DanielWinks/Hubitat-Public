@@ -398,6 +398,11 @@ import java.util.concurrent.TimeUnit
 @Field static final Integer MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES = 2
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
+// Sonos recommends avoiding a burst of individual player-volume commands when
+// a group is active. Keep the individual-player semantics, but serialize a
+// grouped multi-player update by the order Sonos reports the group members.
+@Field static ConcurrentHashMap<String, Integer> pendingGroupedPlayerVolumes = new ConcurrentHashMap<String, Integer>()
+@Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
 
 @Field static final Integer AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS = 600
 @Field static final Integer AUDIO_CLIP_WATCHDOG_MULTIPLIER = 2
@@ -670,6 +675,7 @@ void cleanupStaticDriverState() {
     clearedEntries += clearStaticMap(favoritesMap)
     clearedEntries += clearStaticMap(playlistsMap)
     clearedEntries += clearStaticMap(volumeFadeState)
+    clearedEntries += clearStaticMap(pendingGroupedPlayerVolumes)
     clearedEntries += clearStaticMap(groupVolumeFadeState)
     clearedEntries += clearStaticMap(lastVolumeFadeCallTime)
     clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
@@ -706,6 +712,7 @@ void cleanupStaticDriverState() {
   removedEntries += pruneStaticMapKeys(favoritesMap, activePlayerIds)
   removedEntries += pruneStaticMapKeys(playlistsMap, activePlayerIds)
   removedEntries += pruneStaticMapKeys(volumeFadeState, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(pendingGroupedPlayerVolumes, activePlayerIds)
   removedEntries += pruneStaticMapKeys(groupVolumeFadeState, activePlayerIds)
   removedEntries += pruneStaticMapKeys(lastVolumeFadeCallTime, activePlayerIds)
   removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
@@ -849,6 +856,7 @@ void clearStaticDriverStateForCurrentDevice() {
       favoritesMap?.remove(playerId)
       playlistsMap?.remove(playerId)
       volumeFadeState?.remove(playerId)
+      pendingGroupedPlayerVolumes?.remove(playerId)
       groupVolumeFadeState?.remove(playerId)
       lastVolumeFadeCallTime?.remove(playerId)
       lastGroupVolumeFadeCallTime?.remove(playerId)
@@ -1061,14 +1069,14 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   Integer targetVolume = Math.max(0, Math.min(100, level as Integer))
   if(duration == null || duration <= 0) {
     cancelVolumeFade()
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   // Rapid-call detection: if an external app (e.g. webCoRE) is managing the fade
   // by calling setLevel(level, duration) in a loop, skip our internal fade and set volume directly
   String deviceId = getId()
   if(!deviceId) {
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   Long now = now()
@@ -1076,7 +1084,7 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   if(lastCall != null && (now - lastCall) < 2000) {
     logDebug("Rapid setLevel calls detected (${now - lastCall}ms apart) — setting volume directly to ${targetVolume}")
     cancelVolumeFade()
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   Integer currentVolume = getPlayerVolume()
@@ -1086,7 +1094,7 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   // If the duration is too short for the delta, just send a single command
   if(durationSeconds < 2 || delta <= 1) {
     cancelVolumeFade()
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   // Calculate step interval: at least 1 second between commands
@@ -1122,7 +1130,7 @@ void volumeFadeStep() {
   Integer targetVolume = fadeState.targetVolume as Integer
   if(currentStep >= totalSteps) {
     // Final step: set exact target volume and clean up
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     volumeFadeState.remove(deviceId)
     lastVolumeFadeCallTime.remove(deviceId)
     logInfo("Volume fade complete: volume set to ${targetVolume}")
@@ -1133,7 +1141,7 @@ void volumeFadeStep() {
   BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
   Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
   newVolume = Math.max(0, Math.min(100, newVolume))
-  playerSetPlayerVolume(newVolume)
+  dispatchPlayerVolume(newVolume)
   // Update step counter and schedule next
   fadeState.currentStep = currentStep
   volumeFadeState.put(deviceId, fadeState)
@@ -1143,8 +1151,51 @@ void volumeFadeStep() {
 
 void cancelVolumeFade() {
   String deviceId = getId()
-  if(deviceId) { volumeFadeState.remove(deviceId) }
+  if(deviceId) {
+    volumeFadeState.remove(deviceId)
+    pendingGroupedPlayerVolumes.remove(deviceId)
+  }
   unschedule('volumeFadeStep')
+  unschedule('flushPendingGroupedPlayerVolume')
+}
+
+/**
+ * Send a player-volume command without flooding a currently grouped household.
+ * A direct player-volume command remains the correct operation for the public
+ * player device; only its timing changes when the player is in a multi-player
+ * Sonos group. Group devices that use proportional volume still use the
+ * dedicated groupVolume API through setGroupVolume().
+ */
+void dispatchPlayerVolume(Integer volume) {
+  String playerId = getId()
+  if(playerId == null || playerId == '') {
+    playerSetPlayerVolume(volume)
+    return
+  }
+
+  if(!getIsGrouped()) {
+    pendingGroupedPlayerVolumes.remove(playerId)
+    unschedule('flushPendingGroupedPlayerVolume')
+    playerSetPlayerVolume(volume)
+    return
+  }
+
+  pendingGroupedPlayerVolumes.put(playerId, volume)
+  Integer memberIndex = getGroupPlayerIds().indexOf(playerId)
+  Integer delayMs = memberIndex >= 0 ? (memberIndex + 1) * GROUPED_PLAYER_VOLUME_STAGGER_MS : GROUPED_PLAYER_VOLUME_STAGGER_MS
+  logDebug("Queueing grouped player volume ${volume} for ${delayMs}ms to avoid a command burst")
+  runInMillis(delayMs, 'flushPendingGroupedPlayerVolume', [overwrite: true])
+}
+
+void flushPendingGroupedPlayerVolume() {
+  String playerId = getId()
+  if(playerId == null || playerId == '') {
+    return
+  }
+  Integer volume = pendingGroupedPlayerVolumes.remove(playerId)
+  if(volume != null) {
+    playerSetPlayerVolume(volume)
+  }
 }
 
 @CompileStatic
