@@ -2,6 +2,7 @@ package dwinks.hubitat.functional
 
 import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
+import groovy.json.JsonSlurper
 import spock.lang.Shared
 import spock.lang.Specification
 
@@ -26,6 +27,7 @@ class SonosAdvPlayerSpec extends Specification {
   def setup() {
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
+    driver.events.clear()
     driver.scheduled.clear()
     driver.unschedules.clear()
     websocketMessages.clear()
@@ -180,6 +182,97 @@ class SonosAdvPlayerSpec extends Specification {
       'checkPlaylistPlaybackAndRetry',
       [overwrite: true, data: [operationId: retryState.operationId]]
     ]
+  }
+
+  def "append-and-play sends INSERT with the unchanged Sonos playlist ID"() {
+    when:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
+    payload[0].namespace == 'playlists'
+    payload[0].command == 'loadPlaylist'
+    payload[1].playlistId == 'playlist-963'
+    payload[1].action == 'INSERT'
+    payload[1].playOnCompletion == true
+  }
+
+  def "acknowledged playlist load issues play instead of duplicating the playlist request"() {
+    given:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+    driver.processWebsocketMessage('[{"namespace":"playlists","response":"loadPlaylist","success":true},{}]')
+    websocketMessages.clear()
+    driver.scheduled.clear()
+
+    when:
+    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+
+    then:
+    websocketMessages.count { String message -> message.contains('"command":"play"') } == 1
+    websocketMessages.every { String message -> !message.contains('loadPlaylist') }
+    retryState.playCommandAttempts == 1
+    driver.scheduled.last() == [
+      2,
+      'checkPlaylistPlaybackAndRetry',
+      [overwrite: true, data: [operationId: retryState.operationId]]
+    ]
+
+    when:
+    websocketMessages.clear()
+    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+
+    then:
+    websocketMessages.empty
+    driver.playlistRetryState.isEmpty()
+    driver.events.find { Map event -> event.name == 'lastError' }?.value?.contains('PLAYBACK_NOT_STARTED')
+  }
+
+  def "buffering counts as playlist playback progress and does not reload the playlist"() {
+    given:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+    websocketMessages.clear()
+
+    when:
+    driver.processWebsocketMessage('[{"type":"playbackStatus","namespace":"playback"},{"playbackState":"PLAYBACK_STATE_BUFFERING"}]')
+    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+
+    then:
+    driver.playlistRetryState.isEmpty()
+    websocketMessages.every { String message -> !message.contains('loadPlaylist') && !message.contains('"command":"play"') }
+  }
+
+  def "deterministic playlist load errors are surfaced without retrying"() {
+    given:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+
+    when:
+    driver.processWebsocketMessage('[{"type":"globalError","namespace":"playlists","response":"loadPlaylist","success":false},{"errorCode":"ERROR_INVALID_OBJECT_ID","reason":"Playlist not found"}]')
+
+    then:
+    driver.playlistRetryState.isEmpty()
+    driver.events.find { Map event -> event.name == 'lastError' }?.value == "Playlist 'playlist-963' failed to load: ERROR_INVALID_OBJECT_ID"
+    driver.events.find { Map event -> event.name == 'lastError' }?.descriptionText == 'Playlist not found'
+  }
+
+  def "playlist metadata matches the exact ID before using a unique name fallback"() {
+    given:
+    driver.getPlaylistsMap()['playlist-963'] = [id: 'playlist-963', name: 'Morning Mix']
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'replace', 'off', 'true', 'on')
+    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+
+    when:
+    driver.isPlaylistPlaying([
+      container: [
+        type: 'PLAYLIST',
+        name: 'Different Name',
+        id: [objectId: 'urn:sonos:playlist-963']
+      ]
+    ])
+
+    then:
+    retryState.metadataConfirmed == true
   }
 
   def "stale favorite callbacks cannot act on a newer load operation"() {

@@ -391,11 +391,21 @@ import java.util.concurrent.TimeUnit
 @Field static final Integer AMAZON_FAVORITE_INITIAL_CHECK_DELAY_SECONDS = 12
 
 @Field static final List<Integer> PLAYLIST_RETRY_INTERVALS = [5, 15, 30]
+@Field static final List<String> PLAYLIST_QUEUE_ACTIONS = ['REPLACE', 'APPEND', 'INSERT', 'INSERT_NEXT']
+@Field static final List<String> NON_RETRYABLE_PLAYLIST_ERROR_CODES = [
+  'ERROR_INVALID_PARAMETER',
+  'ERROR_INVALID_OBJECT_ID',
+  'ERROR_MISSING_PARAMETERS',
+  'ERROR_UNSUPPORTED_COMMAND',
+  'ERROR_UNSUPPORTED_NAMESPACE',
+  'ERROR_INVALID_SYNTAX'
+]
 @Field private final String PLAYLIST_RETRY_CALLBACK = 'checkPlaylistPlaybackAndRetry'
 @Field private final String PLAYLIST_RETRY_EVALUATION_CALLBACK = 'evaluatePlaylistPlaybackAndRetry'
 @Field static final Integer PLAYLIST_INITIAL_CHECK_DELAY_SECONDS = 5
 @Field static final Integer PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS = 2
 @Field static final Integer MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES = 2
+@Field static final Integer MAX_PLAYLIST_PLAY_COMMAND_ATTEMPTS = 1
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 // Sonos recommends avoiding a burst of individual player-volume commands when
@@ -1751,7 +1761,15 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 }
 
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  String action = queueMode.toUpperCase()
+  if(playlistId == null || playlistId.trim() == '') {
+    reportPlaylistLoadError(playlistId, 'ERROR_MISSING_PARAMETERS', 'A Sonos playlist ID is required.')
+    return
+  }
+  String action = normalizePlaylistQueueAction(queueMode)
+  if(action == null) {
+    reportPlaylistLoadError(playlistId, 'ERROR_INVALID_PARAMETER', "Unsupported playlist queue mode '${queueMode}'.")
+    return
+  }
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'repeat all'
   Boolean repeatOne = repeatMode == 'repeat one'
@@ -1783,7 +1801,11 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
         playbackObserved: false,
         metadataConfirmed: false,
         loadAcknowledged: false,
-        ambiguousConfirmationPasses: 0
+        ambiguousConfirmationPasses: 0,
+        bufferingObserved: false,
+        playCommandAttempts: 0,
+        loadErrorCode: null,
+        loadErrorReason: null
       ])
     }
 
@@ -1796,6 +1818,13 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
   } else if(isGroupedAndNotCoordinator() == true) {
     requestParentCoordinatorCommand('loadPlaylistFull', [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
+}
+
+@CompileStatic
+String normalizePlaylistQueueAction(String queueMode) {
+  if(queueMode == null || queueMode.trim() == '') { return null }
+  String action = queueMode.trim().toUpperCase()
+  return PLAYLIST_QUEUE_ACTIONS.contains(action) ? action : null
 }
 
 // =============================================================================
@@ -1950,6 +1979,7 @@ void checkPlaylistPlaybackAndRetry(Map data) {
   }
 
   retryState.playbackObserved = false
+  retryState.bufferingObserved = false
   getPlaybackStatus()
   getPlaybackMetadataStatus()
   runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, PLAYLIST_RETRY_EVALUATION_CALLBACK,
@@ -1962,7 +1992,19 @@ void evaluatePlaylistPlaybackAndRetry(Map data) {
   if(retryState == null || !isRetryOperationCurrent(retryState, data)) { return }
 
   Boolean playbackActive = retryState.playbackObserved == true ||
+    retryState.bufferingObserved == true ||
     (retryState.wasPlayingAtStart != true && getTransportStatus() == 'playing')
+
+  String loadErrorCode = retryState.loadErrorCode as String
+  if(loadErrorCode != null && !isRetryablePlaylistError(loadErrorCode)) {
+    reportPlaylistLoadError(
+      retryState.playlistId as String,
+      loadErrorCode,
+      retryState.loadErrorReason as String
+    )
+    clearPlaylistRetryState()
+    return
+  }
 
   if(playbackActive && retryState.metadataConfirmed == true) {
     logInfo("Playlist '${retryState.playlistId}' is now playing successfully")
@@ -1972,6 +2014,22 @@ void evaluatePlaylistPlaybackAndRetry(Map data) {
 
   if(playbackActive && (retryState.loadAcknowledged == true || retryState.wasPlayingAtStart != true)) {
     logInfo("Playback is active after loading playlist '${retryState.playlistId}'; stopping retries while metadata confirmation completes")
+    clearPlaylistRetryState()
+    return
+  }
+
+  if(retryState.loadAcknowledged == true) {
+    Integer playCommandAttempts = (retryState.playCommandAttempts ?: 0) as Integer
+    if(playCommandAttempts < MAX_PLAYLIST_PLAY_COMMAND_ATTEMPTS) {
+      retryState.playCommandAttempts = playCommandAttempts + 1
+      logInfo("Playlist '${retryState.playlistId}' was accepted but playback is not active; issuing a play command without reloading it")
+      playerPlay()
+      schedulePlaylistRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
+      return
+    }
+
+    String notPlayingReason = 'Sonos acknowledged the playlist load, but playback did not become active after the follow-up play command.'
+    reportPlaylistLoadError(retryState.playlistId as String, 'PLAYBACK_NOT_STARTED', notPlayingReason)
     clearPlaylistRetryState()
     return
   }
@@ -2028,11 +2086,30 @@ Boolean isPlaybackCurrentlyActive(String deviceId) {
 
 void resetRetryConfirmationSignals(Map retryState) {
   retryState.playbackObserved = false
+  retryState.bufferingObserved = false
   retryState.metadataConfirmed = false
   retryState.loadAcknowledged = false
+  retryState.playCommandAttempts = 0
+  retryState.loadErrorCode = null
+  retryState.loadErrorReason = null
   retryState.ambiguousConfirmationPasses = 0
   lastPlaybackState.remove(device.getDeviceNetworkId())
   lastMetadataContainerId.remove(device.getDeviceNetworkId())
+}
+
+@CompileStatic
+Boolean isRetryablePlaylistError(String errorCode) {
+  if(errorCode == null || errorCode == '') { return true }
+  return !NON_RETRYABLE_PLAYLIST_ERROR_CODES.contains(errorCode)
+}
+
+void reportPlaylistLoadError(String playlistId, String errorCode, String reason) {
+  String safePlaylistId = playlistId ?: '(unknown)'
+  String safeErrorCode = errorCode ?: 'UNKNOWN'
+  String safeReason = reason ?: 'Sonos rejected the playlist load request.'
+  String message = "Playlist '${safePlaylistId}' failed to load: ${safeErrorCode}"
+  logError("${message}. ${safeReason}")
+  sendEvent(name: 'lastError', value: message, descriptionText: safeReason)
 }
 
 // =============================================================================
@@ -6161,6 +6238,22 @@ void processWebsocketMessage(String message) {
         getDevice().sendEvent(name: 'lastError', value: "Group operation failed: ${eventData?.errorCode}", descriptionText: reason)
       }
     }
+    if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
+      String errorCode = eventData?.errorCode?.toString()
+      String reason = eventData?.reason?.toString()
+      Map retryState = playlistRetryState.get(dni)
+      if(retryState != null) {
+        retryState.loadAcknowledged = false
+        retryState.loadErrorCode = errorCode
+        retryState.loadErrorReason = reason
+      }
+      if(retryState == null || !isRetryablePlaylistError(errorCode)) {
+        reportPlaylistLoadError(retryState?.playlistId as String, errorCode, reason)
+        if(retryState != null) { clearPlaylistRetryState() }
+      } else {
+        logWarn("Playlist '${retryState.playlistId}' load returned retryable error ${errorCode}: ${reason}")
+      }
+    }
   }
 
   if(eventType?.namespace == 'favorites' && eventType?.response == 'loadFavorite') {
@@ -6181,6 +6274,8 @@ void processWebsocketMessage(String message) {
     if(currentState == 'PLAYBACK_STATE_PLAYING') {
       if(favoriteState != null) { favoriteState.playbackObserved = true }
       if(playlistState != null) { playlistState.playbackObserved = true }
+    } else if(currentState == 'PLAYBACK_STATE_BUFFERING') {
+      if(playlistState != null) { playlistState.bufferingObserved = true }
     }
     // Dedup: skip repeated same-state events (common as periodic heartbeats).
     // Retry observation is updated before this return so an explicit playback
@@ -6375,34 +6470,50 @@ void isFavoritePlaying(Map json) {
   setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
 }
 
+@CompileStatic
+List<String> getPlaylistObjectIdCandidates(String objectId) {
+  List<String> candidates = []
+  if(objectId == null || objectId == '') { return candidates }
+  candidates.add(objectId)
+  List<String> tokens = objectId.tokenize(':')
+  if(tokens.size() >= 2) { candidates.add(tokens.get(1)) }
+  if(tokens.size() >= 3) { candidates.add(tokens.get(tokens.size() - 1)) }
+  return candidates
+}
+
 void isPlaylistPlaying(Map json) {
   LinkedHashMap container = (LinkedHashMap)json?.container
   LinkedHashMap id = (LinkedHashMap)container?.id
-  String objectId = id?.objectId
-  if(objectId != null && objectId != '') {
-    List tok = objectId.tokenize(':')
-    if(tok.size() >= 2) { objectId = tok[1] }
-  }
+  String objectId = id?.objectId?.toString()
+  List<String> objectIdCandidates = getPlaylistObjectIdCandidates(objectId)
 
   // For playlists, check container type and name
   String containerType = container?.type
   String containerName = container?.name
 
   // Playlists use simple ID matching since they don't have complex service IDs
-  Boolean isPlaylist = false
-  String foundPlaylistId = null
-  String foundPlaylistName = null
+  LinkedHashMap matchedById = null
+  LinkedHashMap matchedByName = null
+  Integer matchingNameCount = 0
 
   if(containerType == 'playlist' || containerType == 'PLAYLIST') {
-    // Try to match by container name in the playlists map
     playlistsMap.each { key, value ->
-      if(value?.name == containerName || value?.id == objectId) {
-        isPlaylist = true
-        foundPlaylistId = value?.id
-        foundPlaylistName = value?.name
+      String mappedId = value?.id?.toString()
+      String mappedName = value?.name?.toString()
+      if(matchedById == null && mappedId != null && objectIdCandidates.contains(mappedId)) {
+        matchedById = value
+      }
+      if(mappedName != null && mappedName == containerName) {
+        matchingNameCount++
+        matchedByName = value
       }
     }
   }
+
+  LinkedHashMap matchedPlaylist = matchedById ?: (matchingNameCount == 1 ? matchedByName : null)
+  Boolean isPlaylist = matchedPlaylist != null
+  String foundPlaylistId = matchedPlaylist?.id?.toString()
+  String foundPlaylistName = matchedPlaylist?.name?.toString()
 
   Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
   if(retryState != null) {
