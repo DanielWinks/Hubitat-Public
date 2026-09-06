@@ -408,4 +408,22 @@ class SonosAdvPlayerSpec extends Specification {
     payload.event == 'favoriteLoadAck'
     payload.data.success == true
   }
+
+  def "empty groups responses emit a negative topology observation"() {
+    given:
+    driver.registerGroupFavoriteOperation('group-op-4', '42')
+    driver.device.events.clear()
+
+    when:
+    driver.processWebsocketMessage('[{"type":"groups","name":"groups"}, {"groups":[]}]')
+
+    then:
+    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
+    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    payload.event == 'groups'
+    payload.observedAt instanceof Number
+    payload.data.groupId == null
+    payload.data.coordinatorId == null
+    payload.data.playerIds == []
+  }
 }

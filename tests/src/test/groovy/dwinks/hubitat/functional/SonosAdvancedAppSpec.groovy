@@ -114,10 +114,46 @@ class SonosAdvancedAppSpec extends Specification {
     }
   }
 
+  void emitTopologyObservation(String playerId, String groupId, String coordinatorId, String playerIds,
+      Long observedAt = null) {
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: appScript.getActiveGroupOperation().operationId,
+        playerId: playerId,
+        observedAt: observedAt ?: appScript.now(),
+        event: 'groups',
+        data: [
+          groupId: groupId,
+          coordinatorId: coordinatorId,
+          playerIds: playerIds.split(',') as List
+        ]
+      ])
+    ] as Event)
+  }
+
+  void emitRequiredTopology(String groupId = 'GROUP-1', String coordinatorId = 'RINCON_COORD',
+      String playerIds = 'RINCON_COORD,RINCON_FOLLOW') {
+    emitTopologyObservation('RINCON_COORD', groupId, coordinatorId, playerIds)
+    emitTopologyObservation('RINCON_FOLLOW', groupId, coordinatorId, playerIds)
+  }
+
+  void emitPlayback(String playerId, String playbackState, Long observedAt = null) {
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: appScript.getActiveGroupOperation().operationId,
+        playerId: playerId,
+        observedAt: observedAt ?: appScript.now(),
+        event: 'playbackStatus',
+        data: [playbackState: playbackState, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+  }
+
   def "explicit grouping evicts extras without using the additive join operation"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
     appScript.processGroupCommandRequest([request: request('on')])
+    emitRequiredTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
 
     when:
     appScript.advanceGroupFavoriteOperation([operationId: appScript.getActiveGroupOperation().operationId])
@@ -137,16 +173,18 @@ class SonosAdvancedAppSpec extends Specification {
     follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
     follower.dataValues.isGroupCoordinator = 'true'
     appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
+    emitTopologyObservation('RINCON_COORD', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_FOLLOW,RINCON_EXTRA')
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_FOLLOW,RINCON_EXTRA')
 
     when:
     appScript.advanceGroupFavoriteOperation([operationId: appScript.getActiveGroupOperation().operationId])
 
     then:
-    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
-      name: 'playerModifyGroupMembers', add: ['RINCON_FOLLOW'], remove: []
+    follower.commands.find { it.name == 'playerModifyGroupMembers' } == [
+      name: 'playerModifyGroupMembers', add: ['RINCON_COORD'], remove: []
     ]
-    coordinator.commands.every { it.name != 'playerCreateGroup' }
-    coordinator.commands.every { it.name != 'playerModifyGroupMembers' || it.remove == [] }
+    follower.commands.every { it.name != 'playerCreateGroup' }
+    follower.commands.every { it.name != 'playerModifyGroupMembers' || it.remove == [] }
     appScript.getActiveGroupOperation().groupingMode == 'ADDITIVE'
   }
 
@@ -168,6 +206,41 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.isGroupTopologySatisfied(exactOperation, topology)
     appScript.isGroupTopologySatisfied(additiveOperation, topology)
     appScript.isGroupTopologySatisfied(exactOperation, topology + [playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']])
+  }
+
+  def "cached topology is not accepted before a fresh group observation"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
+    Map operation = appScript.getActiveGroupOperation()
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    appScript.getActiveGroupOperation() != null
+    appScript.getActiveGroupOperation().stableObservations == 0
+    coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' } == null
+    coordinator.commands.find { it.name == 'playerGetGroupsFull' } != null
+    follower.commands.find { it.name == 'playerGetGroupsFull' } != null
+  }
+
+  def "a negative group observation prevents stale cached topology from satisfying the operation"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitTopologyObservation('RINCON_FOLLOW', null, null, '')
+
+    when:
+    Map topology = appScript.readGroupOperationTopology(operation)
+
+    then:
+    topology.fresh == true
+    topology.consistent == false
+    topology.observations.find { it.playerId == 'RINCON_FOLLOW' }.groupId == null
+    appScript.getActiveGroupOperation() != null
   }
 
   def "queued group requests preserve grouping-before-Favorite order"() {
@@ -194,6 +267,7 @@ class SonosAdvancedAppSpec extends Specification {
       shuffleMode: 'off', autoPlay: 'true', crossfadeMode: 'on'
     ], 2)])
     Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
     coordinator.commands.clear()
 
     when:
@@ -217,6 +291,7 @@ class SonosAdvancedAppSpec extends Specification {
     group.currentValues.groupingMode = 'ADDITIVE'
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
     Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
 
     when:
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
@@ -250,6 +325,7 @@ class SonosAdvancedAppSpec extends Specification {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
     Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     assert appScript.getActiveGroupOperation().phase == 'WAIT_FOR_FAVORITE'
@@ -267,6 +343,7 @@ class SonosAdvancedAppSpec extends Specification {
         data: [playbackState: 'PLAYBACK_STATE_PLAYING']
       ])
     ] as Event)
+    emitPlayback('RINCON_FOLLOW', 'PLAYBACK_STATE_PLAYING')
     appScript.groupFavoriteOperationEventHandler([
       value: JsonOutput.toJson([
         operationId: operation.operationId, playerId: 'RINCON_COORD', event: 'metadataConfirmed',
@@ -285,6 +362,7 @@ class SonosAdvancedAppSpec extends Specification {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
     Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     coordinator.commands.clear()
@@ -308,6 +386,7 @@ class SonosAdvancedAppSpec extends Specification {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
     Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.groupFavoriteOperationEventHandler([
@@ -331,6 +410,38 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation() != null
     coordinator.commands.find { it.name == 'playerPlay' } == null
     coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' } == null
+    follower.commands.find { it.name == 'getPlaybackStatus' } != null
+  }
+
+  def "Favorite does not complete when a requested follower is not playing"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: operation.operationId, playerId: 'RINCON_COORD', event: 'favoriteLoadAck',
+        data: [success: true, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+    emitPlayback('RINCON_COORD', 'PLAYBACK_STATE_PLAYING')
+    emitPlayback('RINCON_FOLLOW', 'PLAYBACK_STATE_PAUSED')
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: operation.operationId, playerId: 'RINCON_COORD', event: 'metadataConfirmed',
+        data: [favoriteId: '42', confirmed: true, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    appScript.getActiveGroupOperation() != null
+    appScript.getActiveGroupOperation().playerPlaybackStates['RINCON_FOLLOW'].playbackState == 'PLAYBACK_STATE_PAUSED'
+    group.statuses.last().status.status != 'SUCCEEDED'
   }
 
   def "group device state is exact in explicit mode and subset-based in additive mode"() {

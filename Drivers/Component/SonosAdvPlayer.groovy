@@ -1740,6 +1740,7 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
   state.groupFavoriteOperationId = operationId
   state.groupFavoriteOperationFavoriteId = favoriteId
   state.groupFavoriteOperationGroupId = expectedGroupId
+  state.groupFavoriteOperationLoadAt = now()
 
   String action = queueMode.toUpperCase()
   Boolean playOnCompletion = autoPlay == 'true'
@@ -1769,6 +1770,8 @@ void registerGroupFavoriteOperation(String operationId, String favoriteId) {
   if(!operationId) { return }
   state.groupFavoriteOperationId = operationId
   state.groupFavoriteOperationFavoriteId = favoriteId
+  state.remove('groupFavoriteOperationGroupId')
+  state.remove('groupFavoriteOperationLoadAt')
   emitGroupFavoriteOperationEvent('registered', [favoriteId: favoriteId])
 }
 
@@ -1778,6 +1781,7 @@ void clearGroupFavoriteOperation(String operationId = null) {
   state.remove('groupFavoriteOperationId')
   state.remove('groupFavoriteOperationFavoriteId')
   state.remove('groupFavoriteOperationGroupId')
+  state.remove('groupFavoriteOperationLoadAt')
 }
 
 void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
@@ -1787,6 +1791,7 @@ void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
     operationId: operationId,
     event: eventName,
     playerId: getId(),
+    observedAt: now(),
     data: data ?: [:]
   ]
   sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, JsonOutput.toJson(payload))
@@ -5995,6 +6000,12 @@ void processWebsocketMessage(String message) {
         coordinatorId: coordinatorId,
         playerIds: playerIds ?: []
       ])
+    } else {
+      // A successful groups response can contain no groups while a player is
+      // leaving or joining a topology. Publish that negative observation so a
+      // parent operation cannot continue using stale cached group data.
+      logTrace('Groups websocket response contained no group for player ' + getId())
+      emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
     }
   }
 
@@ -6369,7 +6380,8 @@ void processWebsocketMessage(String message) {
     emitGroupFavoriteOperationEvent('favoriteLoadAck', [
       success: eventType?.success == true,
       errorCode: eventData?.errorCode?.toString(),
-      reason: eventData?.reason?.toString()
+      reason: eventData?.reason?.toString(),
+      groupId: getGroupId()
     ])
   }
 
@@ -6389,7 +6401,11 @@ void processWebsocketMessage(String message) {
     } else if(currentState == 'PLAYBACK_STATE_BUFFERING') {
       if(playlistState != null) { playlistState.bufferingObserved = true }
     }
-    emitGroupFavoriteOperationEvent('playbackStatus', [playbackState: currentState])
+    emitGroupFavoriteOperationEvent('playbackStatus', [
+      playbackState: currentState,
+      groupId: getGroupId(),
+      coordinatorId: getGroupCoordinatorId()
+    ])
     // Dedup: skip repeated same-state events (common as periodic heartbeats).
     // Retry observation is updated before this return so an explicit playback
     // poll can still confirm an unchanged PLAYING state.
@@ -6409,7 +6425,10 @@ void processWebsocketMessage(String message) {
     if(containerKey == lastKey && !retryPending && !groupFavoritePending) { return }
     lastMetadataContainerId.put(dni, containerKey)
     checkFavAndPlaylist(eventData)
-    emitGroupFavoriteOperationEvent('metadataStatus', [container: eventData?.container])
+    emitGroupFavoriteOperationEvent('metadataStatus', [
+      container: eventData?.container,
+      groupId: getGroupId()
+    ])
   }
 
   //Process playerVolume events
@@ -6586,7 +6605,8 @@ void isFavoritePlaying(Map json) {
   if(groupOperationId && getIsGroupCoordinator() == true) {
     emitGroupFavoriteOperationEvent('metadataConfirmed', [
       favoriteId: foundFavId,
-      confirmed: (isFav || isFavAlt) && foundFavId == state.groupFavoriteOperationFavoriteId?.toString()
+      confirmed: (isFav || isFavAlt) && foundFavId == state.groupFavoriteOperationFavoriteId?.toString(),
+      groupId: state.groupFavoriteOperationGroupId as String
     ])
   }
 
