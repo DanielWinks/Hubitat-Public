@@ -39,6 +39,26 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled[0][1] == 'emitGroupCommandRequest'
     driver.scheduled[0][2].data.payload.command == 'on'
     driver.scheduled[0][2].data.payload.groupDni == 'SONOS-GROUP-TEST-DNI'
+    driver.scheduled[0][2].data.payload.args.groupingMode == 'EXPLICIT'
+  }
+
+  def "joinPlayersToCoordinator publishes an additive grouping request"() {
+    when:
+    driver.joinPlayersToCoordinator()
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'joinPlayersToCoordinator'
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args?.groupingMode == 'ADDITIVE'
+  }
+
+  def "groupPlayers publishes an explicit request without the legacy ungroup delay"() {
+    when:
+    driver.groupPlayers()
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'groupPlayers'
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args?.groupingMode == 'EXPLICIT'
+    driver.scheduled.every { List call -> call[1] != 'regroupSafetyTimeout' }
   }
 
   def "group refresh is also deferred through the request boundary"() {
@@ -57,5 +77,15 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'setVolume'
     driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args?.level == 0
+  }
+
+  def "group operation status records the selected grouping mode"() {
+    when:
+    driver.updateGroupOperationStatus('{"status":"SUCCEEDED"}', 'ADDITIVE')
+
+    then:
+    driver.state.lastGroupingMode == 'ADDITIVE'
+    driver.events.find { Map event -> event.name == 'groupingMode' }?.value == 'ADDITIVE'
+    driver.events.find { Map event -> event.name == 'groupOperationStatus' }?.value == '{"status":"SUCCEEDED"}'
   }
 }

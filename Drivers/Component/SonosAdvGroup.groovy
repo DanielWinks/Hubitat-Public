@@ -60,6 +60,8 @@ void logDebug(String message) {
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
 @Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'groupCommandRequest'
+@Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
+@Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
 
 metadata {
   definition(
@@ -139,6 +141,8 @@ metadata {
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
+    attribute 'groupingMode', 'enum', [ 'EXPLICIT', 'ADDITIVE' ]
+    attribute 'groupOperationStatus', 'string'
     // Internal asynchronous command bridge to the parent app. Group commands
     // publish requests instead of synchronously calling parent child lookups.
     attribute 'groupCommandRequest', 'string'
@@ -319,7 +323,12 @@ void configure() {
     runIn(2, 'refresh')
   }
 }
-void on() { requestGroupCommand('on', getGroupCommandSettings()) }
+void on() {
+  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  Map args = getGroupCommandSettings()
+  args.groupingMode = GROUPING_MODE_EXPLICIT
+  requestGroupCommand('on', args)
+}
 void off() { requestGroupCommand('off', getGroupCommandSettings()) }
 void setState(String stateName, String stateValue) { state[stateName] = stateValue }
 void clearState() { state.clear() }
@@ -381,7 +390,8 @@ void joinPlayersToCoordinator() {
     logWarn('No followers found to join to coordinator')
     return
   }
-  requestGroupCommand('joinPlayersToCoordinator')
+  state.lastGroupingMode = GROUPING_MODE_ADDITIVE
+  requestGroupCommand('joinPlayersToCoordinator', [groupingMode: GROUPING_MODE_ADDITIVE])
 }
 
 void removePlayersFromCoordinator() {
@@ -399,19 +409,11 @@ void groupPlayers() {
     logWarn('No players found to group')
     return
   }
-  String currentSwitch = device.currentValue('switch')
-  if(currentSwitch != 'on') {
-    // Group is already inactive — no need to ungroup first, just create the group directly
-    requestGroupCommand('createGroup')
-    return
-  }
-
-  // Group is active — ungroup first to ensure the new coordinator is set correctly.
-  // The regroup will be triggered by onGroupDeactivated() when the WebSocket event confirms the ungroup.
-  state.pendingRegroup = true
-  requestGroupCommand('ungroupPlayers')
-  // Safety timeout in case the WebSocket event never arrives
-  runIn(10, 'regroupSafetyTimeout', [overwrite: true])
+  // Exact grouping is owned by the parent app's operation coordinator. Keeping
+  // the mode in the request means this command cannot accidentally take the
+  // additive join path when the current group contains extra players.
+  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  requestGroupCommand('groupPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
 }
 
 void createGroupAfterUngroup() {
@@ -420,7 +422,8 @@ void createGroupAfterUngroup() {
     logWarn('Cannot create group after ungroup - no players found')
     return
   }
-  requestGroupCommand('regroupAfterUngroup')
+  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  requestGroupCommand('regroupAfterUngroup', [groupingMode: GROUPING_MODE_EXPLICIT])
 }
 
 void regroupSafetyTimeout() {
@@ -445,7 +448,23 @@ void evictUnlistedPlayers() {
     logWarn('No players found to manage')
     return
   }
-  requestGroupCommand('evictUnlistedPlayers')
+  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  requestGroupCommand('evictUnlistedPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
+}
+
+/**
+ * Receive operation status from the parent app without making the group
+ * driver responsible for orchestration. The JSON value is intentionally kept
+ * opaque so status additions remain backward compatible.
+ */
+void updateGroupOperationStatus(String statusJson, String groupingMode = null) {
+  if(groupingMode == GROUPING_MODE_EXPLICIT || groupingMode == GROUPING_MODE_ADDITIVE) {
+    state.lastGroupingMode = groupingMode
+    sendEvent(name: 'groupingMode', value: groupingMode)
+  }
+  if(statusJson) {
+    sendEvent(name: 'groupOperationStatus', value: statusJson)
+  }
 }
 
 // =============================================================================

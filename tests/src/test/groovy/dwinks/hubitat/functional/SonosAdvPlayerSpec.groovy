@@ -32,8 +32,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.unschedules.clear()
     websocketMessages.clear()
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.state.clear()
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
+    driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.device.dataValues.groupId = 'GROUP_TEST'
     driver.device.dataValues.isGroupCoordinator = 'true'
@@ -358,5 +360,52 @@ class SonosAdvPlayerSpec extends Specification {
     payload[0].command == 'setVolume'
     payload[1].volume == 0
     websocketMessages[0].contains('"volume":0')
+  }
+
+  def "group Favorite loads use the verified group ID without the per-player Amazon workaround"() {
+    when:
+    driver.loadFavoriteForGroupOperation('42', 'repeat all', 'replace', 'off', 'true', 'on', 'group-op-1', 'GROUP-VERIFIED')
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
+    payload[0].namespace == 'favorites'
+    payload[0].command == 'loadFavorite'
+    payload[0].groupId == 'GROUP-VERIFIED'
+    driver.state.groupFavoriteOperationId == 'group-op-1'
+    driver.scheduled.every { List call -> call[1] != 'playerPlay' }
+  }
+
+  def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {
+    given:
+    driver.getFavoritesMap()['42serviceaccount'] = [id: '42', name: 'Favorite 42', imageUrl: 'https://example.test/cover']
+    driver.registerGroupFavoriteOperation('group-op-2', '42')
+    driver.device.events.clear()
+
+    when:
+    driver.isFavoritePlaying([
+      container: [imageUrl: 'https://example.test/cover', id: [objectId: 'urn:42', serviceId: 'service', accountId: 'account']]
+    ])
+
+    then:
+    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
+    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    payload.event == 'metadataConfirmed'
+    payload.data.favoriteId == '42'
+    payload.data.confirmed == true
+  }
+
+  def "group Favorite acknowledgements are emitted for the parent operation"() {
+    given:
+    driver.registerGroupFavoriteOperation('group-op-3', '42')
+    driver.device.events.clear()
+
+    when:
+    driver.processWebsocketMessage('[{"namespace":"favorites","response":"loadFavorite","success":true},{}]')
+
+    then:
+    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
+    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    payload.event == 'favoriteLoadAck'
+    payload.data.success == true
   }
 }

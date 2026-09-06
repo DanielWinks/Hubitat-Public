@@ -184,6 +184,9 @@ metadata {
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'lastError', 'string'
+  // Internal parent-app bridge for operation-scoped group Favorite
+  // acknowledgements and playback observations.
+  attribute 'groupFavoriteOperation', 'string'
 
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
@@ -318,6 +321,7 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
+@Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 // Per-(DNI, sid) subscription mutexes. Previously these were shared static
 // singletons, which caused every driver instance on the hub to serialize
 // through a single permit per sid -- a large contributor to the ZGT retry
@@ -1660,7 +1664,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  String action = queueMode.toUpperCase()
+  String action = queueMode?.toUpperCase() ?: 'REPLACE'
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'repeat all'
   Boolean repeatOne = repeatMode == 'repeat one'
@@ -1709,6 +1713,83 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   } else if(isGroupedAndNotCoordinator() == true) {
     requestParentCoordinatorCommand('loadFavoriteFull', [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
+}
+
+/**
+ * Load a Favorite as part of the parent app's serialized group operation.
+ * Individual-player Favorite commands retain the existing retry mechanism;
+ * this path deliberately leaves retry ownership with the parent so grouping
+ * and playback cannot race or retry independently.
+ */
+void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
+    String shuffleMode, String autoPlay, String crossfadeMode, String operationId,
+    String expectedGroupId) {
+  if(!operationId || !expectedGroupId) {
+    logWarn('Cannot load group Favorite without an operation ID and verified group ID')
+    return
+  }
+  if(getIsGroupCoordinator() != true) {
+    logWarn("Cannot load group Favorite operation ${operationId}: player is not the group coordinator")
+    emitGroupFavoriteOperationEvent('loadRejected', [reason: 'PLAYER_NOT_COORDINATOR'])
+    return
+  }
+
+  clearFavoriteRetryState()
+  clearPlaylistRetryState()
+  cancelPendingAmazonMusicAutoPlay()
+  state.groupFavoriteOperationId = operationId
+  state.groupFavoriteOperationFavoriteId = favoriteId
+  state.groupFavoriteOperationGroupId = expectedGroupId
+
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = autoPlay == 'true'
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'on'
+  Boolean crossfade = crossfadeMode == 'on'
+  emitGroupFavoriteOperationEvent('loadStarted', [favoriteId: favoriteId, groupId: expectedGroupId])
+  playerLoadFavoriteForGroupOperation(
+    favoriteId,
+    action,
+    repeat,
+    repeatOne,
+    shuffle,
+    crossfade,
+    playOnCompletion,
+    expectedGroupId
+  )
+}
+
+/**
+ * Register a group Favorite operation on a target player before topology or
+ * playback events are observed. The parent app uses this to receive events
+ * from every required player, not only the coordinator.
+ */
+void registerGroupFavoriteOperation(String operationId, String favoriteId) {
+  if(!operationId) { return }
+  state.groupFavoriteOperationId = operationId
+  state.groupFavoriteOperationFavoriteId = favoriteId
+  emitGroupFavoriteOperationEvent('registered', [favoriteId: favoriteId])
+}
+
+void clearGroupFavoriteOperation(String operationId = null) {
+  String currentOperationId = state.groupFavoriteOperationId as String
+  if(!currentOperationId || (operationId && currentOperationId != operationId)) { return }
+  state.remove('groupFavoriteOperationId')
+  state.remove('groupFavoriteOperationFavoriteId')
+  state.remove('groupFavoriteOperationGroupId')
+}
+
+void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
+  String operationId = state.groupFavoriteOperationId as String
+  if(!operationId || !eventName) { return }
+  Map payload = [
+    operationId: operationId,
+    event: eventName,
+    playerId: getId(),
+    data: data ?: [:]
+  ]
+  sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, JsonOutput.toJson(payload))
 }
 
 // Playlist Methods
@@ -5255,10 +5336,23 @@ void getPlaylists() {
 
 @CompileStatic
 void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
+  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, getGroupId(), true)
+}
+
+@CompileStatic
+void playerLoadFavoriteForGroupOperation(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
+    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId) {
+  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, groupId, false)
+}
+
+@CompileStatic
+private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
+    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId,
+    Boolean scheduleAmazonWorkaround) {
   Map command = [
     'namespace':'favorites',
     'command':'loadFavorite',
-    'groupId':"${getGroupId()}"
+    'groupId':"${groupId}"
   ]
   Map args = [
     'favoriteId': favoriteId,
@@ -5276,7 +5370,7 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
   sendWsMessage(json)
 
   // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
-  if(playOnCompletion) {
+  if(playOnCompletion && scheduleAmazonWorkaround) {
     Map favorite = findFavoriteById(favoriteId)
     String serviceName = favorite?.service
     if(isAmazonMusicService(serviceName)) {
@@ -5838,6 +5932,7 @@ void processWebsocketMessage(String message) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
       if(group == null) {
         logTrace("Player ${getId()} not found in any group")
+        emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
         return
       }
 
@@ -5853,6 +5948,11 @@ void processWebsocketMessage(String message) {
       List<String> oldPlayerIds = getGroupPlayerIds()
       if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds) {
         logTrace('Groups websocket event received but group data unchanged, skipping processing')
+        emitGroupFavoriteOperationEvent('groups', [
+          groupId: groupId,
+          coordinatorId: coordinatorId,
+          playerIds: playerIds ?: []
+        ])
         return
       }
 
@@ -5890,6 +5990,11 @@ void processWebsocketMessage(String message) {
           }
         }
       }
+      emitGroupFavoriteOperationEvent('groups', [
+        groupId: groupId,
+        coordinatorId: coordinatorId,
+        playerIds: playerIds ?: []
+      ])
     }
   }
 
@@ -6261,6 +6366,11 @@ void processWebsocketMessage(String message) {
   if(eventType?.namespace == 'favorites' && eventType?.response == 'loadFavorite') {
     Map retryState = favoriteRetryState.get(dni)
     if(retryState != null) { retryState.loadAcknowledged = eventType?.success == true }
+    emitGroupFavoriteOperationEvent('favoriteLoadAck', [
+      success: eventType?.success == true,
+      errorCode: eventData?.errorCode?.toString(),
+      reason: eventData?.reason?.toString()
+    ])
   }
 
   if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
@@ -6279,6 +6389,7 @@ void processWebsocketMessage(String message) {
     } else if(currentState == 'PLAYBACK_STATE_BUFFERING') {
       if(playlistState != null) { playlistState.bufferingObserved = true }
     }
+    emitGroupFavoriteOperationEvent('playbackStatus', [playbackState: currentState])
     // Dedup: skip repeated same-state events (common as periodic heartbeats).
     // Retry observation is updated before this return so an explicit playback
     // poll can still confirm an unchanged PLAYING state.
@@ -6294,9 +6405,11 @@ void processWebsocketMessage(String message) {
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
     Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
-    if(containerKey == lastKey && !retryPending) { return }
+    Boolean groupFavoritePending = state.groupFavoriteOperationId as String
+    if(containerKey == lastKey && !retryPending && !groupFavoritePending) { return }
     lastMetadataContainerId.put(dni, containerKey)
     checkFavAndPlaylist(eventData)
+    emitGroupFavoriteOperationEvent('metadataStatus', [container: eventData?.container])
   }
 
   //Process playerVolume events
@@ -6467,6 +6580,14 @@ void isFavoritePlaying(Map json) {
   Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
   if(retryState != null) {
     retryState.metadataConfirmed = (isFav || isFavAlt) && foundFavId == retryState.favoriteId?.toString()
+  }
+
+  String groupOperationId = state.groupFavoriteOperationId as String
+  if(groupOperationId && getIsGroupCoordinator() == true) {
+    emitGroupFavoriteOperationEvent('metadataConfirmed', [
+      favoriteId: foundFavId,
+      confirmed: (isFav || isFavAlt) && foundFavId == state.groupFavoriteOperationFavoriteId?.toString()
+    ])
   }
 
   setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
