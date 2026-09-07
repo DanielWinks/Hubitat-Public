@@ -25,16 +25,23 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   }
 
   void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
-      String shuffleMode, String autoPlay, String crossfadeMode, String operationId, String groupId) {
+      String shuffleMode, String autoPlay, String crossfadeMode, String operationId, String groupId,
+      String attemptId = null) {
     commands << [
       name: 'loadFavoriteForGroupOperation', favoriteId: favoriteId, repeatMode: repeatMode,
       queueMode: queueMode, shuffleMode: shuffleMode, autoPlay: autoPlay,
-      crossfadeMode: crossfadeMode, operationId: operationId, groupId: groupId
+      crossfadeMode: crossfadeMode, operationId: operationId, groupId: groupId,
+      attemptId: attemptId
     ]
   }
 
   void registerGroupFavoriteOperation(String operationId, String favoriteId) {
     commands << [name: 'registerGroupFavoriteOperation', operationId: operationId, favoriteId: favoriteId]
+  }
+
+  void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String groupId) {
+    commands << [name: 'setGroupFavoriteOperationAttempt', operationId: operationId,
+                 attemptId: attemptId, groupId: groupId]
   }
 
   void clearGroupFavoriteOperation(String operationId = null) {
@@ -137,14 +144,22 @@ class SonosAdvancedAppSpec extends Specification {
     emitTopologyObservation('RINCON_FOLLOW', groupId, coordinatorId, playerIds)
   }
 
-  void emitPlayback(String playerId, String playbackState, Long observedAt = null) {
+  void stabilizePostFavoriteTopology(String groupId = 'GROUP-1', String coordinatorId = 'RINCON_COORD',
+      String playerIds = 'RINCON_COORD,RINCON_FOLLOW') {
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology(groupId, coordinatorId, playerIds)
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology(groupId, coordinatorId, playerIds)
+  }
+
+  void emitPlayback(String playerId, String playbackState, Long observedAt = null, String groupId = 'GROUP-1') {
     appScript.groupFavoriteOperationEventHandler([
       value: JsonOutput.toJson([
         operationId: appScript.getActiveGroupOperation().operationId,
         playerId: playerId,
         observedAt: observedAt ?: appScript.now(),
         event: 'playbackStatus',
-        data: [playbackState: playbackState, groupId: 'GROUP-1']
+        data: [playbackState: playbackState, groupId: groupId]
       ])
     ] as Event)
   }
@@ -282,6 +297,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' }.groupId == 'GROUP-1'
+    coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' }.attemptId == operation.favoriteAttemptId
     appScript.getActiveGroupOperation().phase == 'WAIT_FOR_FAVORITE'
   }
 
@@ -321,6 +337,50 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation().loadAcknowledged == false
   }
 
+  def "stale Favorite attempt events cannot acknowledge a later load attempt"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    String currentAttemptId = operation.favoriteAttemptId
+
+    when:
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: operation.operationId, playerId: 'RINCON_COORD',
+        attemptId: "${operation.operationId}:old", event: 'favoriteLoadAck',
+        data: [success: true, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+
+    then:
+    currentAttemptId == "${operation.operationId}:1"
+    appScript.getActiveGroupOperation().loadAcknowledged == false
+  }
+
+  def "a post-load topology change is recovered instead of completing the Favorite"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('on', [:], 1)])
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 2)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology('GROUP-2')
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    appScript.getActiveGroupOperation() != null
+    appScript.getActiveGroupOperation().phase == 'ENSURE_GROUP'
+    appScript.getActiveGroupOperation().favoriteAttempt == 1
+    appScript.getActiveGroupOperation().favoriteTopologyVerified == false
+    group.statuses.last().status.status != 'SUCCEEDED'
+  }
+
   def "Favorite completes only after coordinator acknowledgement, playback, and exact metadata"() {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
@@ -329,6 +389,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     assert appScript.getActiveGroupOperation().phase == 'WAIT_FOR_FAVORITE'
+    stabilizePostFavoriteTopology()
 
     when:
     appScript.groupFavoriteOperationEventHandler([
@@ -365,6 +426,7 @@ class SonosAdvancedAppSpec extends Specification {
     emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    stabilizePostFavoriteTopology()
     coordinator.commands.clear()
 
     when:
@@ -389,6 +451,7 @@ class SonosAdvancedAppSpec extends Specification {
     emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    stabilizePostFavoriteTopology()
     appScript.groupFavoriteOperationEventHandler([
       value: JsonOutput.toJson([
         operationId: operation.operationId, playerId: 'RINCON_COORD', event: 'favoriteLoadAck',
@@ -420,6 +483,7 @@ class SonosAdvancedAppSpec extends Specification {
     emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    stabilizePostFavoriteTopology()
     appScript.groupFavoriteOperationEventHandler([
       value: JsonOutput.toJson([
         operationId: operation.operationId, playerId: 'RINCON_COORD', event: 'favoriteLoadAck',

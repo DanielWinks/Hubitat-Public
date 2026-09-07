@@ -38,6 +38,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.device.dataValues.groupId = 'GROUP_TEST'
+    driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.isGroupCoordinator = 'true'
     driver.clearFavoritesMap()
     driver.clearPlaylistsMap()
@@ -364,7 +365,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "group Favorite loads use the verified group ID without the per-player Amazon workaround"() {
     when:
-    driver.loadFavoriteForGroupOperation('42', 'repeat all', 'replace', 'off', 'true', 'on', 'group-op-1', 'GROUP-VERIFIED')
+    driver.loadFavoriteForGroupOperation('42', 'repeat all', 'replace', 'off', 'true', 'on', 'group-op-1', 'GROUP-VERIFIED', 'group-op-1:1')
 
     then:
     List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
@@ -372,7 +373,37 @@ class SonosAdvPlayerSpec extends Specification {
     payload[0].command == 'loadFavorite'
     payload[0].groupId == 'GROUP-VERIFIED'
     driver.state.groupFavoriteOperationId == 'group-op-1'
+    driver.state.groupFavoriteOperationAttemptId == 'group-op-1:1'
+    ((Map)new JsonSlurper().parseText(driver.device.events.find { Map event ->
+      event.name == 'groupFavoriteOperation'
+    }.value as String)).attemptId == 'group-op-1:1'
     driver.scheduled.every { List call -> call[1] != 'playerPlay' }
+  }
+
+  def "websocket commands queue until the socket is open and flush in order"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'closed'
+    driver.state.remove('websocketConnectPending')
+
+    when:
+    driver.sendWsMessage('first-command')
+    driver.sendWsMessage('second-command')
+
+    then:
+    websocketMessages.empty
+    driver.state.websocketOutboundQueue*.message == ['first-command', 'second-command']
+
+    when:
+    driver.setWebSocketStatus('open')
+
+    then:
+    Integer firstCommandIndex = websocketMessages.indexOf('first-command')
+    Integer secondCommandIndex = websocketMessages.indexOf('second-command')
+    Integer subscriptionIndex = websocketMessages.findIndexOf { String message -> message.contains('"command":"subscribe"') }
+    subscriptionIndex >= 0
+    firstCommandIndex > subscriptionIndex
+    secondCommandIndex > firstCommandIndex
+    driver.state.websocketOutboundQueue == null
   }
 
   def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {

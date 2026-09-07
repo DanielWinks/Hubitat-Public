@@ -212,6 +212,7 @@ preferences {
 @Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
 @Field static final Integer GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS = 2
 @Field static final Integer GROUP_OPERATION_MAX_PLAY_ATTEMPTS = 1
+@Field static final Integer GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS = 3
 @Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
@@ -2093,6 +2094,16 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     loadErrorReason: null,
     playbackState: null,
     favoriteCommandAt: 0L,
+    favoriteAttemptId: null,
+    favoriteExpectedGroupId: null,
+    favoriteExpectedCoordinatorId: null,
+    favoriteTopologyRefreshAt: 0L,
+    favoriteTopologyObservations: [:],
+    favoriteTopologyAttempt: 0,
+    favoriteTopologyStableObservations: 0,
+    favoriteTopologyLastObservedAt: 0L,
+    favoriteTopologyFingerprint: null,
+    favoriteTopologyVerified: false,
     playerPlaybackStates: [:],
     metadataConfirmed: false,
     exactFavoriteId: null
@@ -2192,6 +2203,16 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   operation.loadErrorReason = null
   operation.playbackState = null
   operation.favoriteCommandAt = now()
+  operation.favoriteAttemptId = null
+  operation.favoriteExpectedGroupId = null
+  operation.favoriteExpectedCoordinatorId = null
+  operation.favoriteTopologyRefreshAt = 0L
+  operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyAttempt = 0
+  operation.favoriteTopologyStableObservations = 0
+  operation.favoriteTopologyLastObservedAt = 0L
+  operation.favoriteTopologyFingerprint = null
+  operation.favoriteTopologyVerified = false
   operation.playerPlaybackStates = [:]
   operation.metadataConfirmed = false
   operation.exactFavoriteId = null
@@ -2224,21 +2245,38 @@ void registerGroupFavoriteOperationOnPlayers(Map operation, Collection ids) {
   }
 }
 
-Map readGroupOperationTopology(Map operation) {
+void setGroupFavoriteOperationAttemptOnPlayers(Map operation, Collection ids) {
+  if(operation == null || !operation.operationId || !operation.favoriteAttemptId) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  normalizeGroupPlayerIds(ids).each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try {
+        player.setGroupFavoriteOperationAttempt(
+          operation.operationId as String,
+          operation.favoriteAttemptId as String,
+          operation.favoriteExpectedGroupId as String
+        )
+      } catch(Exception e) {
+        logDebug("Could not update Favorite attempt ${operation.favoriteAttemptId} on ${playerId}: ${e.message}")
+      }
+    }
+  }
+}
+
+Map readGroupTopologyFromObservations(Map operation, Map recordedObservations, Long refreshAt) {
   List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation?.requiredPlayerIds)
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  Map recordedObservations = operation?.topologyObservations instanceof Map
-      ? (Map)operation.topologyObservations
-      : [:]
-  Long refreshAt = (operation?.topologyRefreshAt ?: 0L) as Long
+  Map observationsByPlayer = recordedObservations instanceof Map ? recordedObservations : [:]
+  Long observationRefreshAt = refreshAt ?: 0L
   List<Map> observations = []
   requiredPlayerIds.each { String playerId ->
     ChildDeviceWrapper player = rinconMap[playerId]
-    Map recorded = recordedObservations[playerId] instanceof Map
-        ? (Map)recordedObservations[playerId]
+    Map recorded = observationsByPlayer[playerId] instanceof Map
+        ? (Map)observationsByPlayer[playerId]
         : null
     Long observedAt = recorded?.observedAt as Long
-    Boolean fresh = recorded != null && observedAt != null && observedAt >= refreshAt
+    Boolean fresh = recorded != null && observedAt != null && observedAt >= observationRefreshAt
     String groupId = fresh
         ? recorded.groupId?.toString()
         : getGroupOperationChildValue(player, 'groupId')?.toString()
@@ -2287,6 +2325,22 @@ Map readGroupOperationTopology(Map operation) {
   ]
 }
 
+Map readGroupOperationTopology(Map operation) {
+  Map observations = operation?.topologyObservations instanceof Map
+      ? (Map)operation.topologyObservations
+      : [:]
+  Long refreshAt = (operation?.topologyRefreshAt ?: 0L) as Long
+  return readGroupTopologyFromObservations(operation, observations, refreshAt)
+}
+
+Map readFavoriteGroupTopology(Map operation) {
+  Map observations = operation?.favoriteTopologyObservations instanceof Map
+      ? (Map)operation.favoriteTopologyObservations
+      : [:]
+  Long refreshAt = (operation?.favoriteTopologyRefreshAt ?: 0L) as Long
+  return readGroupTopologyFromObservations(operation, observations, refreshAt)
+}
+
 String summarizeGroupOperationTopology(Map topology) {
   List<Map> observations = topology?.observations instanceof List
       ? (List<Map>)topology.observations
@@ -2325,6 +2379,44 @@ void updateGroupTopologyStability(Map operation, Map topology) {
     operation.topologyFingerprint = fingerprint
     operation.stableObservations = 1
   }
+}
+
+void updateFavoriteGroupTopologyStability(Map operation, Map topology) {
+  Boolean satisfied = isFavoriteGroupTopologySatisfied(operation, topology)
+  if(!satisfied) {
+    operation.favoriteTopologyStableObservations = 0
+    operation.favoriteTopologyLastObservedAt = 0L
+    operation.favoriteTopologyFingerprint = null
+    return
+  }
+
+  String fingerprint = topology.fingerprint as String
+  Long latestObservedAt = topology.observations instanceof List
+      ? ((List<Map>)topology.observations).collect { Map item -> item.observedAt as Long }
+          .findAll { Long observedAt -> observedAt != null }
+          .max()
+      : null
+  Long previousObservedAt = operation.favoriteTopologyLastObservedAt as Long ?: 0L
+  if(fingerprint && fingerprint == operation.favoriteTopologyFingerprint &&
+      latestObservedAt != null && latestObservedAt > previousObservedAt) {
+    operation.favoriteTopologyStableObservations =
+        ((operation.favoriteTopologyStableObservations ?: 0) as Integer) + 1
+  } else if(fingerprint != operation.favoriteTopologyFingerprint) {
+    operation.favoriteTopologyFingerprint = fingerprint
+    operation.favoriteTopologyStableObservations = 1
+  }
+  if(latestObservedAt != null && latestObservedAt > previousObservedAt) {
+    operation.favoriteTopologyLastObservedAt = latestObservedAt
+  }
+}
+
+Boolean isFavoriteGroupTopologySatisfied(Map operation, Map topology) {
+  if(!isGroupTopologySatisfied(operation, topology)) { return false }
+  String expectedGroupId = operation?.favoriteExpectedGroupId as String
+  String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
+  if(expectedGroupId && topology?.groupId != expectedGroupId) { return false }
+  if(expectedCoordinatorId && topology?.coordinatorId != expectedCoordinatorId) { return false }
+  return true
 }
 
 void sendGroupTopologyCommand(Map operation, Map topology) {
@@ -2423,6 +2515,36 @@ void refreshGroupOperationTopology(Map data = [:]) {
   }
 }
 
+void refreshGroupFavoriteTopology(Map operation, Boolean resetStability = true) {
+  if(operation == null || !operation.favoriteId) { return }
+  operation.favoriteTopologyRefreshAt = now()
+  operation.favoriteTopologyAttempt = ((operation.favoriteTopologyAttempt ?: 0) as Integer) + 1
+  operation.favoriteTopologyObservations = [:]
+  if(resetStability == true) {
+    operation.favoriteTopologyStableObservations = 0
+    operation.favoriteTopologyLastObservedAt = 0L
+    operation.favoriteTopologyFingerprint = null
+  }
+  operation.favoriteTopologyVerified = false
+  saveActiveGroupOperation(operation)
+
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<String> refreshIds = normalizeGroupPlayerIds(
+    normalizeGroupPlayerIds(operation.requiredPlayerIds) +
+    [
+      operation.favoriteExpectedCoordinatorId as String,
+      operation.resolvedCoordinatorId as String
+    ]
+  )
+  refreshIds.each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try { player.playerGetGroupsFull() }
+      catch(Exception e) { logDebug("Could not refresh post-Favorite group topology from ${playerId}: ${e.message}") }
+    }
+  }
+}
+
 void sendGroupFavoriteLoad(Map operation, Map topology) {
   if(!operation.favoriteId || topology?.consistent != true || !topology.groupId || !topology.coordinatorId) {
     return
@@ -2444,27 +2566,59 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
   operation.loadErrorReason = null
   operation.playbackState = null
   operation.favoriteCommandAt = now()
+  operation.favoriteAttemptId = null
+  operation.favoriteExpectedGroupId = null
+  operation.favoriteExpectedCoordinatorId = null
+  operation.favoriteTopologyRefreshAt = 0L
+  operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyAttempt = 0
+  operation.favoriteTopologyStableObservations = 0
+  operation.favoriteTopologyLastObservedAt = 0L
+  operation.favoriteTopologyFingerprint = null
+  operation.favoriteTopologyVerified = false
+  operation.favoriteAttemptId = "${operation.operationId}:${operation.favoriteAttempt}".toString()
+  operation.favoriteExpectedGroupId = topology.groupId as String
+  operation.favoriteExpectedCoordinatorId = coordinatorId
   operation.playerPlaybackStates = [:]
   operation.metadataConfirmed = false
   operation.exactFavoriteId = null
   operation.lastCommandAt = operation.favoriteCommandAt
   saveActiveGroupOperation(operation)
+  setGroupFavoriteOperationAttemptOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'LOADING_FAVORITE')
   try {
-    coordinator.loadFavoriteForGroupOperation(
-      operation.favoriteId as String,
-      operation.repeatMode as String,
-      operation.queueMode as String,
-      operation.shuffleMode as String,
-      operation.autoPlay as String,
-      operation.crossfadeMode as String,
-      operation.operationId as String,
-      topology.groupId as String
-    )
+    try {
+      coordinator.loadFavoriteForGroupOperation(
+        operation.favoriteId as String,
+        operation.repeatMode as String,
+        operation.queueMode as String,
+        operation.shuffleMode as String,
+        operation.autoPlay as String,
+        operation.crossfadeMode as String,
+        operation.operationId as String,
+        topology.groupId as String,
+        operation.favoriteAttemptId as String
+      )
+    } catch(MissingMethodException ignored) {
+      // Permit an app update to coexist briefly with an older child driver.
+      // The legacy call has no attempt token, so the event handler falls back
+      // to its operation/time/group identity checks for that mixed version.
+      coordinator.loadFavoriteForGroupOperation(
+        operation.favoriteId as String,
+        operation.repeatMode as String,
+        operation.queueMode as String,
+        operation.shuffleMode as String,
+        operation.autoPlay as String,
+        operation.crossfadeMode as String,
+        operation.operationId as String,
+        topology.groupId as String
+      )
+    }
   } catch(Exception e) {
     failGroupOperation(operation, 'GROUP_FAVORITE_COMMAND_FAILED', e.message as String)
     return
   }
+  refreshGroupFavoriteTopology(operation)
   runIn(2, 'advanceGroupFavoriteOperation', [
     overwrite: true,
     data: [operationId: operation.operationId]
@@ -2538,6 +2692,58 @@ String summarizeGroupFavoritePlayback(Map operation) {
   }.join('; ')
 }
 
+void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
+  String detail = "The group topology changed after the Favorite load: ${summarizeGroupOperationTopology(topology)}"
+  if(operation.groupingMode == GROUPING_MODE_CURRENT) {
+    failGroupOperation(operation, 'GROUP_CHANGED_DURING_FAVORITE', detail)
+    return
+  }
+  if(((operation.favoriteAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS) {
+    failGroupOperation(operation, 'FAVORITE_TOPOLOGY_CHANGED', detail)
+    return
+  }
+
+  operation.phase = 'ENSURE_GROUP'
+  operation.status = 'ENSURING_TOPOLOGY'
+  operation.loadAcknowledged = false
+  operation.loadErrorCode = null
+  operation.loadErrorReason = null
+  operation.playbackState = null
+  operation.favoriteCommandAt = 0L
+  operation.favoriteAttemptId = null
+  operation.favoriteExpectedGroupId = null
+  operation.favoriteExpectedCoordinatorId = null
+  operation.favoriteTopologyRefreshAt = 0L
+  operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyAttempt = 0
+  operation.favoriteTopologyStableObservations = 0
+  operation.favoriteTopologyLastObservedAt = 0L
+  operation.favoriteTopologyFingerprint = null
+  operation.favoriteTopologyVerified = false
+  operation.playerPlaybackStates = [:]
+  operation.metadataConfirmed = false
+  operation.exactFavoriteId = null
+  operation.topologyAttempt = 0
+  operation.stableObservations = 0
+  operation.topologyFingerprint = null
+  operation.topologyObservations = [:]
+  operation.observedGroupId = null
+  operation.observedCoordinatorId = null
+  operation.observedPlayerIds = []
+  operation.lastTopologyObservations = topology?.observations ?: []
+  operation.lastCommand = 'refreshGroupTopology'
+  operation.lastCommandAt = now()
+  operation.errorCode = null
+  operation.detail = null
+  saveActiveGroupOperation(operation)
+  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+  refreshGroupOperationTopology([operationId: operation.operationId])
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
 Boolean isRetryableGroupFavoriteError(String errorCode) {
   if(!errorCode) { return true }
   return !(errorCode in ['ERROR_INVALID_OBJECT_ID', 'ERROR_NOT_FOUND', 'ERROR_UNSUPPORTED_COMMAND'])
@@ -2554,16 +2760,91 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     return
   }
 
-  Map topology = readGroupOperationTopology(operation)
+  Boolean favoriteLoadInProgress = operation.favoriteId &&
+      ((operation.favoriteAttempt ?: 0) as Integer) > 0 &&
+      operation.phase != 'ENSURE_GROUP'
+  if(favoriteLoadInProgress && ((operation.favoriteTopologyRefreshAt ?: 0L) as Long) <= 0L) {
+    Map knownTopology = readGroupOperationTopology(operation)
+    if(knownTopology?.consistent == true) {
+      operation.favoriteExpectedGroupId = operation.favoriteExpectedGroupId as String ?: knownTopology.groupId as String
+      operation.favoriteExpectedCoordinatorId = operation.favoriteExpectedCoordinatorId as String ?: knownTopology.coordinatorId as String
+    }
+    refreshGroupFavoriteTopology(operation)
+    publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
+    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+      overwrite: true,
+      data: [operationId: operation.operationId]
+    ])
+    return
+  }
+
+  Boolean verifyingFavoriteTopology = favoriteLoadInProgress &&
+      operation.favoriteTopologyVerified != true
+  Map topology = verifyingFavoriteTopology
+      ? readFavoriteGroupTopology(operation)
+      : readGroupOperationTopology(operation)
   operation.observedGroupId = topology.groupId
   operation.observedCoordinatorId = topology.coordinatorId
   operation.observedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
   operation.lastTopologyObservations = topology.observations ?: []
-  if(operation.groupingMode != GROUPING_MODE_EXPLICIT && topology.coordinatorId) {
+  if(!verifyingFavoriteTopology && operation.groupingMode != GROUPING_MODE_EXPLICIT && topology.coordinatorId) {
     operation.resolvedCoordinatorId = topology.coordinatorId as String
     if(operation.favoriteId) {
       registerGroupFavoriteOperationOnPlayers(operation, [topology.coordinatorId as String])
     }
+  }
+
+  if(verifyingFavoriteTopology) {
+    Boolean finalTopologySatisfied = isFavoriteGroupTopologySatisfied(operation, topology)
+    if(topology.fresh != true) {
+      Long refreshAt = operation.favoriteTopologyRefreshAt as Long ?: 0L
+      Boolean waitingForFreshTopology = refreshAt > 0L &&
+          now() < refreshAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L
+      if(!waitingForFreshTopology) {
+        if(((operation.favoriteTopologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS) {
+          failGroupOperation(operation, 'FAVORITE_TOPOLOGY_NOT_CONFIRMED',
+              "Post-Favorite group topology was not observed from every required player: ${summarizeGroupOperationTopology(topology)}")
+          return
+        }
+        refreshGroupFavoriteTopology(operation)
+      }
+      publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+      return
+    }
+    if(!finalTopologySatisfied) {
+      recoverGroupFavoriteAfterTopologyChange(operation, topology)
+      return
+    }
+
+    updateFavoriteGroupTopologyStability(operation, topology)
+    if(((operation.favoriteTopologyStableObservations ?: 0) as Integer) < GROUP_OPERATION_STABILITY_OBSERVATIONS) {
+      if(((operation.favoriteTopologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS) {
+        failGroupOperation(operation, 'FAVORITE_TOPOLOGY_NOT_STABLE',
+            "Post-Favorite group topology did not remain stable: ${summarizeGroupOperationTopology(topology)}")
+        return
+      }
+      refreshGroupFavoriteTopology(operation, false)
+      publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+      return
+    }
+
+    operation.favoriteTopologyVerified = true
+    operation.topologyRefreshAt = operation.favoriteTopologyRefreshAt
+    operation.topologyObservations = operation.favoriteTopologyObservations ?: [:]
+    operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+    operation.topologyFingerprint = topology.fingerprint
+    operation.resolvedCoordinatorId = topology.coordinatorId as String
+    operation.favoriteExpectedGroupId = topology.groupId as String
+    operation.favoriteExpectedCoordinatorId = topology.coordinatorId as String
+    saveActiveGroupOperation(operation)
   }
 
   Boolean topologySatisfied = isGroupTopologySatisfied(operation, topology)
@@ -2755,31 +3036,34 @@ void groupFavoriteOperationEventHandler(Event event) {
   Map eventData = payload.data instanceof Map ? (Map)payload.data : [:]
   String eventPlayerId = payload.playerId as String
   Long eventObservedAt = (payload.observedAt ?: now()) as Long
-  String expectedCoordinatorId = operation.observedCoordinatorId as String ?: operation.resolvedCoordinatorId as String
+  String eventAttemptId = payload.attemptId as String
+  String expectedAttemptId = operation.favoriteAttemptId as String
+  Boolean isExpectedAttempt = expectedAttemptId && (!eventAttemptId || eventAttemptId == expectedAttemptId)
+  String expectedCoordinatorId = operation.favoriteExpectedCoordinatorId as String ?: operation.observedCoordinatorId as String ?: operation.resolvedCoordinatorId as String
   Boolean isCoordinatorEvent = !eventPlayerId || !expectedCoordinatorId || eventPlayerId == expectedCoordinatorId
   Boolean isRequiredPlayer = !eventPlayerId || normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(eventPlayerId)
   Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
   Boolean isAfterFavoriteCommand = favoriteCommandAt <= 0L || eventObservedAt >= favoriteCommandAt
   String eventGroupId = eventData.groupId as String
-  String expectedGroupId = operation.observedGroupId as String
+  String expectedGroupId = operation.favoriteExpectedGroupId as String ?: operation.observedGroupId as String
   Boolean isExpectedGroup = !eventGroupId || !expectedGroupId || eventGroupId == expectedGroupId
   switch(eventName) {
     case 'favoriteLoadAck':
-      if(isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         operation.loadAcknowledged = eventData.success == true
         operation.loadErrorCode = eventData.errorCode as String
         operation.loadErrorReason = eventData.reason as String
       }
       break
     case 'loadRejected':
-      if(isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         operation.loadAcknowledged = false
         operation.loadErrorCode = eventData.reason as String ?: 'PLAYER_REJECTED_LOAD'
         operation.loadErrorReason = eventData.reason as String
       }
       break
     case 'playbackStatus':
-      if(isRequiredPlayer && isAfterFavoriteCommand && isExpectedGroup && eventPlayerId) {
+      if(isExpectedAttempt && isRequiredPlayer && isAfterFavoriteCommand && isExpectedGroup && eventPlayerId) {
         Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
             ? (Map<String, Map>)operation.playerPlaybackStates
             : [:]
@@ -2789,12 +3073,12 @@ void groupFavoriteOperationEventHandler(Event event) {
         ]
         operation.playerPlaybackStates = playbackStates
       }
-      if(isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         operation.playbackState = eventData.playbackState as String
       }
       break
     case 'metadataConfirmed':
-      if(isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         if(eventData.confirmed == true && eventData.favoriteId?.toString() == operation.favoriteId?.toString()) {
           operation.metadataConfirmed = true
           operation.exactFavoriteId = eventData.favoriteId as String
@@ -2816,6 +3100,35 @@ void groupFavoriteOperationEventHandler(Event event) {
           observedAt: eventObservedAt
         ]
         operation.topologyObservations = topologyObservations
+
+        Long favoriteTopologyRefreshAt = (operation.favoriteTopologyRefreshAt ?: 0L) as Long
+        if(favoriteTopologyRefreshAt > 0L && eventObservedAt >= favoriteTopologyRefreshAt) {
+          Map<String, Map> favoriteTopologyObservations = operation.favoriteTopologyObservations instanceof Map
+              ? (Map<String, Map>)operation.favoriteTopologyObservations
+              : [:]
+          favoriteTopologyObservations[eventPlayerId] = topologyObservations[eventPlayerId]
+          operation.favoriteTopologyObservations = favoriteTopologyObservations
+
+          if(operation.favoriteTopologyVerified == true) {
+            Map eventTopology = [
+              fresh: true,
+              consistent: true,
+              groupId: eventData.groupId as String,
+              coordinatorId: eventData.coordinatorId as String,
+              playerIds: normalizeGroupPlayerIds(eventData.playerIds),
+              observations: [favoriteTopologyObservations[eventPlayerId]],
+              fingerprint: ''
+            ]
+            if(!isFavoriteGroupTopologySatisfied(operation, eventTopology)) {
+              operation.favoriteTopologyVerified = false
+              operation.favoriteTopologyStableObservations = 0
+              operation.favoriteTopologyLastObservedAt = 0L
+              operation.favoriteTopologyFingerprint = null
+              operation.favoriteTopologyObservations = [:]
+              refreshGroupFavoriteTopology(operation)
+            }
+          }
+        }
       }
       if(eventData.containsKey('groupId') && eventData.containsKey('coordinatorId')) {
         operation.observedGroupId = eventData.groupId as String
@@ -2854,6 +3167,9 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
     metadataConfirmed: operation.metadataConfirmed == true,
     topologyAttempt: operation.topologyAttempt ?: 0,
     favoriteAttempt: operation.favoriteAttempt ?: 0,
+    favoriteAttemptId: operation.favoriteAttemptId,
+    favoriteTopologyAttempt: operation.favoriteTopologyAttempt ?: 0,
+    favoriteTopologyVerified: operation.favoriteTopologyVerified == true,
     playAttempt: operation.playAttempt ?: 0,
     lastCommand: operation.lastCommand,
     errorCode: operation.errorCode,

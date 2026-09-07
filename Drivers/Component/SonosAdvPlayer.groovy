@@ -322,6 +322,9 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
+@Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
+@Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
+@Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 // Per-(DNI, sid) subscription mutexes. Previously these were shared static
 // singletons, which caused every driver instance on the hub to serialize
 // through a single permit per sid -- a large contributor to the ZGT retry
@@ -1723,11 +1726,16 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
  */
 void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
     String shuffleMode, String autoPlay, String crossfadeMode, String operationId,
-    String expectedGroupId) {
+    String expectedGroupId, String attemptId = null) {
   if(!operationId || !expectedGroupId) {
     logWarn('Cannot load group Favorite without an operation ID and verified group ID')
     return
   }
+  state.groupFavoriteOperationId = operationId
+  state.groupFavoriteOperationFavoriteId = favoriteId
+  state.groupFavoriteOperationAttemptId = attemptId ?: operationId
+  state.groupFavoriteOperationGroupId = expectedGroupId
+  state.groupFavoriteOperationLoadAt = now()
   if(getIsGroupCoordinator() != true) {
     logWarn("Cannot load group Favorite operation ${operationId}: player is not the group coordinator")
     emitGroupFavoriteOperationEvent('loadRejected', [reason: 'PLAYER_NOT_COORDINATOR'])
@@ -1737,10 +1745,6 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
-  state.groupFavoriteOperationId = operationId
-  state.groupFavoriteOperationFavoriteId = favoriteId
-  state.groupFavoriteOperationGroupId = expectedGroupId
-  state.groupFavoriteOperationLoadAt = now()
 
   String action = queueMode.toUpperCase()
   Boolean playOnCompletion = autoPlay == 'true'
@@ -1771,8 +1775,17 @@ void registerGroupFavoriteOperation(String operationId, String favoriteId) {
   state.groupFavoriteOperationId = operationId
   state.groupFavoriteOperationFavoriteId = favoriteId
   state.remove('groupFavoriteOperationGroupId')
+  state.remove('groupFavoriteOperationAttemptId')
   state.remove('groupFavoriteOperationLoadAt')
   emitGroupFavoriteOperationEvent('registered', [favoriteId: favoriteId])
+}
+
+void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String expectedGroupId) {
+  String currentOperationId = state.groupFavoriteOperationId as String
+  if(!currentOperationId || currentOperationId != operationId || !attemptId) { return }
+  state.groupFavoriteOperationAttemptId = attemptId
+  state.groupFavoriteOperationGroupId = expectedGroupId
+  state.groupFavoriteOperationLoadAt = now()
 }
 
 void clearGroupFavoriteOperation(String operationId = null) {
@@ -1781,6 +1794,7 @@ void clearGroupFavoriteOperation(String operationId = null) {
   state.remove('groupFavoriteOperationId')
   state.remove('groupFavoriteOperationFavoriteId')
   state.remove('groupFavoriteOperationGroupId')
+  state.remove('groupFavoriteOperationAttemptId')
   state.remove('groupFavoriteOperationLoadAt')
 }
 
@@ -1791,6 +1805,7 @@ void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
     operationId: operationId,
     event: eventName,
     playerId: getId(),
+    attemptId: state.groupFavoriteOperationAttemptId as String,
     observedAt: now(),
     data: data ?: [:]
   ]
@@ -4686,8 +4701,24 @@ String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 @CompileStatic
 void setWebSocketStatus(String status) {
   setDeviceDataValue('websocketStatus', status)
-  if(status == 'open') { subscribeToWsEvents() }
+  if(status == 'open') {
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    // Keep commands queued while the socket was unavailable behind the
+    // subscriptions re-established below. Temporarily remove the pending
+    // commands so sendWsMessage() can deliver those subscriptions directly;
+    // otherwise its FIFO flush would put a queued operation ahead of them.
+    List<Map> pendingCommands = getWebsocketOutboundQueue()
+    state.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
+    subscribeToWsEvents()
+    List<Map> subscriptionCommands = getWebsocketOutboundQueue()
+    if(!pendingCommands.isEmpty()) {
+      subscriptionCommands.addAll(pendingCommands)
+      state[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
+    }
+    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
+  }
   else {
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
     releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
   }
@@ -4933,20 +4964,92 @@ void retryWebSocketConnection() {
 }
 
 void wsConnect() {
+  if(isWebsocketConnected() || state[WS_CONNECT_PENDING_STATE_KEY] == true) { return }
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
-  interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
-  unschedule('renewWebsocketConnection')
-  scheduleResubscriptionToEvents('renewWebsocketConnection')
+  state[WS_CONNECT_PENDING_STATE_KEY] = true
+  try {
+    interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
+    unschedule('renewWebsocketConnection')
+    unschedule('retryWebSocketConnection')
+    scheduleResubscriptionToEvents('renewWebsocketConnection')
+  } catch(Exception e) {
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    setWebSocketStatus('closed')
+    logWarn("WebSocket connect failed: ${e.message}")
+    scheduleWebSocketReconnect()
+  }
 }
 
 void wsClose() {
   interfaces.webSocket.close()
 }
 
+List<Map> getWebsocketOutboundQueue() {
+  return state[WS_OUTBOUND_QUEUE_STATE_KEY] instanceof List
+      ? (List<Map>)state[WS_OUTBOUND_QUEUE_STATE_KEY]
+      : []
+}
+
+void queueWebsocketMessage(String message, Integer attempts = 0) {
+  if(!message) { return }
+  List<Map> queue = getWebsocketOutboundQueue()
+  queue.add([message: message, attempts: attempts ?: 0])
+  state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+}
+
+void flushWebsocketOutboundQueue() {
+  if(!isWebsocketConnected()) {
+    if(state[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+    return
+  }
+
+  List<Map> queue = getWebsocketOutboundQueue()
+  state.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
+  while(!queue.isEmpty()) {
+    Map entry = (Map)queue.remove(0)
+    String message = entry?.message as String
+    Integer attempts = (entry?.attempts ?: 0) as Integer
+    if(!message) { continue }
+    try {
+      interfaces.webSocket.sendMessage(message)
+    } catch(Exception e) {
+      Integer nextAttempt = attempts + 1
+      if(nextAttempt >= WS_OUTBOUND_MAX_ATTEMPTS) {
+        logError("Dropping WebSocket message after ${WS_OUTBOUND_MAX_ATTEMPTS} attempts: ${e.message}")
+        continue
+      }
+      entry.attempts = nextAttempt
+      queue.add(0, entry)
+      state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      setWebSocketStatus('closed')
+      scheduleWebSocketReconnect()
+      return
+    }
+  }
+}
+
 void sendWsMessage(String message) {
-  Boolean isConnected = isWebsocketConnected()
-  if(!isConnected) { wsConnect() }
-  interfaces.webSocket.sendMessage(message)
+  if(!message) { return }
+  if(!isWebsocketConnected()) {
+    queueWebsocketMessage(message)
+    if(state[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+    return
+  }
+
+  List<Map> queued = getWebsocketOutboundQueue()
+  if(!queued.isEmpty()) {
+    queueWebsocketMessage(message)
+    flushWebsocketOutboundQueue()
+    return
+  }
+  try {
+    interfaces.webSocket.sendMessage(message)
+  } catch(Exception e) {
+    queueWebsocketMessage(message, 1)
+    setWebSocketStatus('closed')
+    logWarn("WebSocket send failed; queued message for retry: ${e.message}")
+    scheduleWebSocketReconnect()
+  }
 }
 
 void initializeWebsocketConnection() { wsConnect() }
