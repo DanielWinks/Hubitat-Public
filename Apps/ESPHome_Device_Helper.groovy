@@ -14,6 +14,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
  **/
 
+import com.hubitat.hub.domain.Event
 import groovy.transform.Field
 import hubitat.scheduling.AsyncResponse
 
@@ -334,7 +335,7 @@ private String stableChildDni(Map record) {
     return normalized ?: "esphome-${Math.abs(source.hashCode())}"
 }
 
-void systemStartHandler(Map event) { startMdnsDiscovery() }
+void systemStartHandler(Event event) { startMdnsDiscovery() }
 
 void startMdnsDiscovery() {
     try {
