@@ -26,6 +26,8 @@ import groovy.transform.CompileStatic
 import com.hubitat.app.ChildDeviceWrapper
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
+import com.hubitat.hub.domain.Event
+import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
 import groovy.util.slurpersupport.GPathResult
 import hubitat.scheduling.AsyncResponse
@@ -3763,7 +3765,6 @@ String unEscapeMetaData(String text) {
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
-@CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
   if(!coordinatorId || !playersInGroup) {
@@ -3809,10 +3810,9 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
         ? configuredPlayers.equals(observedPlayers)
         : observedPlayers.containsAll(configuredPlayers)
     Boolean shouldBeActive = membershipSatisfied && isCallerActualCoordinator
-    Map attributes = [
-      switch: shouldBeActive ? 'on' : 'off',
-      currentlyJoinedPlayers: joinedPlayersValue
-    ]
+    Map<String, Object> attributes = new LinkedHashMap<String, Object>()
+    attributes['switch'] = shouldBeActive ? 'on' : 'off'
+    attributes['currentlyJoinedPlayers'] = joinedPlayersValue
     // Include the coordinator's current state with an activation update. The
     // group driver applies this locally after the player callback has returned.
     if(shouldBeActive && callerDevice != null) {

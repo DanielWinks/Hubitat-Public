@@ -21,6 +21,23 @@
  *  SOFTWARE.
  */
 
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.app.InstalledAppWrapper
+import com.hubitat.app.exception.UnknownDeviceTypeException
+import com.hubitat.hub.domain.Event
+import groovy.json.JsonOutput
+import groovy.transform.CompileStatic
+import groovy.transform.Field
+import groovy.util.slurpersupport.GPathResult
+import hubitat.scheduling.AsyncResponse
+import java.time.Instant
+import java.util.Random
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+
 void logError(String message) {
   if (settings.logEnable != false) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
@@ -56,6 +73,15 @@ void logTrace(String message) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
     if(app) log.trace "${app.label ?: app.name }: ${message}"
   }
+}
+
+// The shared utilities library is intentionally not included in this driver.
+// Keep the small timestamp formatter needed by the legacy SID visibility path
+// local so the standalone driver has the same behavior after publication.
+String formatEpoch(Long epochSeconds) {
+  Date timestamp = new Date(epochSeconds * 1000L)
+  if(location?.timeZone) { return timestamp.format('yyyy-MMM-dd h:mm:ss a', location.timeZone) }
+  return timestamp.format('yyyy-MMM-dd h:mm:ss a')
 }
 
 #include dwinks.SMAPILibrary
@@ -309,10 +335,6 @@ Boolean hasLineInCapability() {
 // =============================================================================
 
 
-
-import java.util.Random
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
 // =============================================================================
 // Fields
 // =============================================================================
@@ -3133,7 +3155,10 @@ Boolean subValid(String sid) {
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   Long exp = eventTimestamps.get(expiryKey)
   if(exp == null) { return false }
-  if((exp - RESUB_INTERVAL / 2) > Instant.now().getEpochSecond() && hasSid(sid) == true) {
+  long expiryEpoch = exp.longValue()
+  long resubHalfInterval = RESUB_INTERVAL.intdiv(2).longValue()
+  long nowEpoch = Instant.now().getEpochSecond()
+  if((expiryEpoch - resubHalfInterval) > nowEpoch && hasSid(sid) == true) {
     return true
   } else {
     return false
@@ -3141,7 +3166,8 @@ Boolean subValid(String sid) {
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
-  Long expiresEpoch = Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)
+  long expiresEpochValue = Instant.now().getEpochSecond() + (2L * RESUB_INTERVAL.longValue())
+  Long expiresEpoch = Long.valueOf(expiresEpochValue)
   // Store expiry in-memory for subValid() checks
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   eventTimestamps.put(expiryKey, expiresEpoch)
@@ -4698,7 +4724,6 @@ Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 
 @CompileStatic
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
-@CompileStatic
 void setWebSocketStatus(String status) {
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
@@ -6000,7 +6025,6 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 // =============================================================================
 // Websocket Incoming Data Processing
 // =============================================================================
-@CompileStatic
 void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
   String dni = device.getDeviceNetworkId()
@@ -6676,7 +6700,6 @@ void audioClipWatchdog() {
   setAudioClipPlaying(false)
 }
 
-@CompileStatic
 void isFavoritePlaying(Map json) {
   LinkedHashMap container = (LinkedHashMap)json?.container
   LinkedHashMap id = (LinkedHashMap)container?.id
