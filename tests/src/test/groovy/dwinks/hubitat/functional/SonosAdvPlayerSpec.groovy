@@ -65,6 +65,43 @@ class SonosAdvPlayerSpec extends Specification {
     )
   }
 
+  def "logging level controls player log output"() {
+    given:
+    driver.settings.logLevel = 'off'
+
+    when:
+    driver.logInfo('hidden')
+    driver.logError('hidden')
+
+    then:
+    driver.logs.empty
+
+    when:
+    driver.settings.logLevel = 'error'
+    driver.logInfo('hidden')
+    driver.logError('visible')
+
+    then:
+    driver.logs.size() == 2
+    driver.logs.every { String entry -> entry.contains('visible') }
+  }
+
+  def "stale audio clip watchdog does not reset active playback state"() {
+    given:
+    driver.binding.setVariable('atomicState', driver.state)
+    driver.state.audioClipPlaying = true
+    driver.state.audioClipQueueStartTime = null
+    driver.state.audioClipQueueTotalDuration = null
+
+    when:
+    driver.audioClipWatchdog()
+
+    then:
+    driver.state.audioClipPlaying == true
+    driver.logs.any { String entry -> entry.contains('Ignoring stale audio clip watchdog callback') }
+    driver.logs.every { String entry -> !entry.contains('Audio clip watchdog fired') }
+  }
+
   def "favorite lookup finds an item by Sonos favorite ID instead of map key"() {
     given:
     driver.getFavoritesMap()['object-service-account'] = [

@@ -25,31 +25,40 @@ import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
 import groovy.json.JsonOutput
 
+@Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+
 void logError(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('error')) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
     if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logWarn(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('warn')) {
     if(device) log.warn "${device.label ?: device.name }: ${message}"
     if(app) log.warn "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logInfo(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('info')) {
     if(device) log.info "${device.label ?: device.name }: ${message}"
     if(app) log.info "${app.label ?: app.name }: ${message}"
   }
 }
 
 void logDebug(String message) {
-  if (settings.logEnable != false && settings.debugLogEnable != false) {
+  if (loggingEnabled('debug')) {
     if(device) log.debug "${device.label ?: device.name }: ${message}"
     if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
+
+void logTrace(String message) {
+  if (loggingEnabled('trace')) {
+    if(device) log.trace "${device.label ?: device.name }: ${message}"
+    if(app) log.trace "${app.label ?: app.name }: ${message}"
   }
 }
 
@@ -198,7 +207,29 @@ metadata {
         description: 'When enabled, playback attributes (track name, artist, album art, etc.) are cleared when the group\'s speakers are no longer grouped together. Shows a clean state on dashboards.',
         required: false, defaultValue: true
     }
+    section('Logging Settings') {
+      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
+    }
   }
+}
+
+String getConfiguredLogLevel() {
+  if(settings.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
+  if(settings.logEnable == false) { return 'off' }
+  if(settings.traceLogEnable == true) { return 'trace' }
+  if(settings.debugLogEnable == true) { return 'debug' }
+  return 'info'
+}
+
+String normalizeLogLevel(String level) {
+  String normalized = level?.toLowerCase()
+  return LOG_LEVELS.contains(normalized) ? normalized : 'info'
+}
+
+Boolean loggingEnabled(String messageLevel) {
+  Integer configuredIndex = LOG_LEVELS.indexOf(getConfiguredLogLevel())
+  Integer messageIndex = LOG_LEVELS.indexOf(messageLevel)
+  return configuredIndex >= 0 && messageIndex >= configuredIndex && messageIndex < LOG_LEVELS.indexOf('off')
 }
 Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
 Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }

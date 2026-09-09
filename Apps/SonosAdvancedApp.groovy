@@ -176,6 +176,7 @@ definition(
 
 preferences {
   page(name: 'mainPage', install: true, uninstall: true)
+  page(name: 'newUiPage')
   page(name: 'localPlayerPage')
   page(name: 'localPlayerSelectionPage')
   page(name: 'groupPage')
@@ -219,6 +220,15 @@ preferences {
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
 @Field static final Integer GROUP_STATE_DRAIN_MAX_ATTEMPTS = 3
+@Field static final String NEW_UI_GROUP_EDITOR_MODE_KEY = 'newUiGroupEditorMode'
+@Field static final String NEW_UI_GROUP_ORIGINAL_NAME_KEY = 'newUiGroupOriginalName'
+@Field static final String NEW_UI_GROUP_DRAFT_KEY = 'newUiGroupDraft'
+@Field static final String NEW_UI_GROUP_AUTO_NAME_KEY = 'newUiGroupAutoName'
+@Field static final String NEW_UI_GROUP_ERROR_KEY = 'newUiGroupError'
+@Field static final String NEW_UI_GROUP_DELETE_KEY = 'pendingNewUiDeleteGroup'
+@Field static final String NEW_UI_GROUP_TABLE_EVENT = 'newUiGroupsTable'
+@Field static final String NEW_UI_GROUP_MODE_CREATE = 'create'
+@Field static final String NEW_UI_GROUP_MODE_EDIT = 'edit'
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -302,6 +312,11 @@ Map mainPage() {
         page: 'groupPage',
         title: 'Sonos Virtual Group Devices',
         description: 'Select to create/delete Sonos group devices'
+      )
+      href (
+        page: 'newUiPage',
+        title: 'New UI - Sonos Speakers',
+        description: 'View discovered Sonos speakers in the new table-based interface'
       )
     }
     section('Update Settings:', hideable: true, hidden: true) {
@@ -393,7 +408,101 @@ Map mainPage() {
   }
 }
 
-Map localPlayerPage() {
+Map newUiPage() {
+  dynamicPage(
+    name: 'newUiPage',
+    title: 'Player Devices',
+    nextPage: 'mainPage',
+    install: false,
+    uninstall: false,
+    refreshInterval: 0
+  ) {
+    section() {
+      if(atomicState.discoveryRunning == true && atomicState.discoveryEndTime) {
+        Long endTime = atomicState.discoveryEndTime as Long
+        Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
+        paragraph "<b>Discovery is running: ${remainingSecs} seconds remaining.</b>"
+      }
+      input 'btnNewUiDiscoverSpeakers', 'button', title: 'Discover Speakers (60 seconds)', submitOnChange: true
+      paragraph displayNewUiSpeakerTable()
+    }
+
+    if(state.pendingNewUiDeletePlayer) {
+      String pendingPlayerKey = state.pendingNewUiDeletePlayer as String
+      Map pendingPlayer = buildNewUiSpeakerRows().find { Map row ->
+        String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
+        rowKey == pendingPlayerKey
+      }
+      String pendingPlayerName = pendingPlayer?.name?.toString() ?: pendingPlayerKey
+      String safePendingPlayerName = escapeNewUiHtml(pendingPlayerName)
+      String safePendingPlayerKey = escapeNewUiHtml(pendingPlayerKey)
+      section() {
+        paragraph "<b style='color:#F44336'>Are you sure you want to remove '${safePendingPlayerName}' (${safePendingPlayerKey})?</b>"
+        input 'btnConfirmNewUiDeletePlayer', 'button', title: 'Yes, Remove Speaker', submitOnChange: true
+        input 'btnCancelNewUiDeletePlayer', 'button', title: 'Cancel', submitOnChange: true
+      }
+    }
+
+    if(state[NEW_UI_GROUP_DELETE_KEY]) {
+      Map pendingGroup = findNewUiGroupByToken(state[NEW_UI_GROUP_DELETE_KEY] as String)
+      String pendingGroupName = pendingGroup?.name?.toString() ?: state[NEW_UI_GROUP_DELETE_KEY].toString()
+      String safePendingGroupName = escapeNewUiHtml(pendingGroupName)
+      section() {
+        paragraph "<b style='color:#F44336'>Are you sure you want to remove the Sonos group '${safePendingGroupName}'?</b>"
+        input 'btnConfirmNewUiDeleteGroup', 'button', title: 'Yes, Remove Group', submitOnChange: true
+        input 'btnCancelNewUiDeleteGroup', 'button', title: 'Cancel', submitOnChange: true
+      }
+    }
+
+    if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
+      Map groupDraft = getNewUiGroupDraft()
+      List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+      Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
+        String id = player.getDataValue('id')?.toString()
+        id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
+      }
+      String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
+      List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
+      Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
+        String id = player.getDataValue('id')?.toString()
+        id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
+      }
+      String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
+      Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
+        id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
+      }
+      String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
+      String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
+      String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
+
+      section(editorTitle) {
+        if(state[NEW_UI_GROUP_ERROR_KEY]) {
+          paragraph "<b style='color:#F44336'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</b>"
+        }
+        if(selectedCoordinator) {
+          paragraph 'Followers cannot include the selected coordinator. Only compatible speakers are listed.'
+        } else {
+          paragraph 'Select one coordinator, then select one or more follower speakers.'
+        }
+        input name: 'newUiGroupName', type: 'text', title: 'Group Name:', required: false,
+            defaultValue: editorName, submitOnChange: true
+        input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator:', multiple: false,
+            options: playerOptions, required: false, defaultValue: selectedCoordinator, submitOnChange: true, offerAll: false
+        input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers:', multiple: true,
+            options: followerOptions, required: false, defaultValue: selectedFollowers, submitOnChange: true, offerAll: false
+        input name: 'btnNewUiSaveGroup', type: 'button', title: 'Save Group', submitOnChange: true
+        input name: 'btnNewUiCancelGroup', type: 'button', title: 'Cancel', submitOnChange: true
+      }
+    }
+
+    section() {
+      paragraph displayNewUiGroupTable()
+      input 'btnNewUiCreateGroup', 'button', title: 'Create Group', submitOnChange: true
+    }
+  }
+}
+
+void startDiscoverySession() {
   if(atomicState.discoveryRunning != true) {
     subscribeToSsdpEvents(location)
     ssdpDiscover()
@@ -403,6 +512,604 @@ Map localPlayerPage() {
     runIn(60, 'stopDiscovery')
     runIn(1, 'updateDiscoveryTimer')
   }
+}
+
+String displayNewUiSpeakerTable() {
+  String css = """
+    <style>
+      #new-ui-speaker-table-wrapper {
+        display: block;
+        overflow-x: auto;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100%;
+      }
+      #new-ui-speaker-table {
+        border: 1px solid #E0E0E0;
+        border-collapse: collapse;
+        border-radius: 4px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        min-width: 720px;
+        width: 100%;
+      }
+      #new-ui-speaker-table th,
+      #new-ui-speaker-table td {
+        border-bottom: 1px solid #EEEEEE;
+        border-right: 1px solid #EEEEEE;
+        font-size: 14px !important;
+        padding: 6px 4px !important;
+        text-align: center;
+      }
+      #new-ui-speaker-table thead {
+        background-color: #F5F5F5;
+      }
+      #new-ui-speaker-table th {
+        border-bottom: 2px solid #E0E0E0;
+        color: #424242;
+        font-size: 14px !important;
+        font-weight: 500;
+        padding: 8px !important;
+        text-align: center;
+        white-space: nowrap;
+      }
+      #new-ui-speaker-table tbody tr:hover {
+        background-color: inherit !important;
+      }
+      #new-ui-speaker-table td:first-child .form-group {
+        display: none;
+      }
+      #new-ui-speaker-table td:first-child .submitOnChange {
+        line-height: 20px;
+        vertical-align: middle;
+      }
+      #new-ui-speaker-table .new-ui-speaker-name {
+        min-width: 170px;
+        text-align: left;
+      }
+      #new-ui-speaker-table .new-ui-speaker-name a {
+        color: #2196F3;
+        text-decoration: none;
+      }
+      #new-ui-speaker-table .new-ui-speaker-name a:hover {
+        text-decoration: underline;
+      }
+      #new-ui-speaker-table .new-ui-speaker-detail {
+        color: #666666;
+        font-size: 11px;
+        margin-top: 3px;
+        text-align: left;
+      }
+      #new-ui-speaker-table .new-ui-secondary-speakers {
+        min-width: 190px;
+        text-align: left;
+      }
+      #new-ui-speaker-table .new-ui-secondary-count {
+        color: #424242;
+        font-size: 11px;
+        font-weight: 600;
+        margin-bottom: 3px;
+        text-align: left;
+      }
+      #new-ui-speaker-table .new-ui-secondary-entry {
+        color: #424242;
+        font-size: 12px;
+        line-height: 1.25;
+        text-align: left;
+      }
+      #new-ui-speaker-table .new-ui-secondary-entry + .new-ui-secondary-entry {
+        border-top: 1px solid #EEEEEE;
+        margin-top: 4px;
+        padding-top: 4px;
+      }
+      #new-ui-speaker-table .new-ui-secondary-detail {
+        color: #757575;
+        font-size: 10px;
+      }
+      #new-ui-speaker-table .new-ui-status {
+        display: inline-block;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      #new-ui-speaker-table .new-ui-status-active {
+        color: #2e7d32;
+      }
+      #new-ui-speaker-table .new-ui-status-inactive {
+        color: #c62828;
+      }
+      #new-ui-speaker-table .new-ui-status-unknown,
+      #new-ui-speaker-table .new-ui-status-na {
+        color: #757575;
+      }
+      #new-ui-speaker-table .new-ui-action-cell {
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+        width: 56px;
+      }
+      #new-ui-speaker-table .new-ui-group-action-cell {
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+        width: 92px;
+      }
+    </style>
+  """
+  String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
+  return "${css}${iconifyScript}<span class='ssr-app-state-${app.id}-newUiSpeakerTable'><div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div></span>"
+}
+
+String renderNewUiSpeakerTableMarkup() {
+  List<Map> rows = buildNewUiSpeakerRows()
+  StringBuilder html = new StringBuilder()
+  html.append("<div style='overflow-x:auto'><table id='new-ui-speaker-table' class='mdl-data-table'>")
+  html.append('<thead><tr>')
+  html.append('<th>Action</th>')
+  html.append('<th>Speaker</th>')
+  html.append('<th>Secondary Speakers</th>')
+  html.append('<th>Network</th>')
+  html.append('<th>Create Group From</th>')
+  html.append('</tr></thead><tbody>')
+
+  if(rows.isEmpty()) {
+    html.append("<tr><td colspan='5'>No primary Sonos speakers have been discovered yet.</td></tr>")
+  } else {
+    rows.each { Map row ->
+      String safeName = escapeNewUiHtml(row.name)
+      String safeModel = escapeNewUiHtml(row.model)
+      String safeId = escapeNewUiHtml(row.id)
+      String safeIp = escapeNewUiHtml(row.ip ?: 'Unknown')
+      String childDeviceId = row.player?.id?.toString()
+      if(row.created == true && childDeviceId) {
+        safeName = "<a href='/device/edit/${escapeNewUiHtml(childDeviceId)}' target='_blank'>${safeName}</a>"
+      }
+      String detail = [safeModel, safeId]
+          .findAll { String value -> value }
+          .join(' &middot; ')
+
+      html.append('<tr>')
+      html.append("<td class='new-ui-action-cell'>${renderNewUiCreatedStatus(row)}</td>")
+      html.append("<td class='new-ui-speaker-name'><strong>${safeName}</strong>")
+      if(detail) {
+        html.append("<div class='new-ui-speaker-detail'>${detail}</div>")
+      }
+      html.append('</td>')
+      html.append("<td class='new-ui-secondary-speakers'>${renderNewUiSecondaryDevices(row)}</td>")
+      html.append("<td>${safeIp}</td>")
+      html.append("<td class='new-ui-group-action-cell'>${renderNewUiCreateGroupStatus(row)}</td>")
+      html.append('</tr>')
+    }
+  }
+
+  html.append('</tbody></table></div>')
+  return html.toString()
+}
+
+List<Map> buildNewUiSpeakerRows() {
+  LinkedHashMap<String, Map> rowsById = new LinkedHashMap<String, Map>()
+
+  discoveredSonoses.each { Object discoveryKey, Object rawInfo ->
+    Map info = rawInfo instanceof Map ? (Map)rawInfo : [:]
+    String discoveryId = discoveryKey?.toString()
+    String playerId = info.id?.toString() ?: discoveryId
+    if(playerId) {
+      rowsById[playerId] = [
+        id: playerId,
+        discoveryKey: discoveryId,
+        name: info.name?.toString() ?: playerId,
+        model: (info.modelDisplayName ?: info.modelName)?.toString(),
+        ip: (info.deviceIp ?: info.ipAddress)?.toString(),
+        secondaryDevices: getNewUiSecondaryDevices(playerId),
+        created: false,
+        player: null
+      ]
+    }
+  }
+
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String playerId = player.getDataValue('id')?.toString() ?: player.getDeviceNetworkId()?.toString()
+    if(playerId) {
+      Map row = rowsById[playerId] ?: [
+        id: playerId,
+        discoveryKey: player.getDeviceNetworkId()?.toString(),
+        name: playerId,
+        model: null,
+        ip: null,
+        secondaryDevices: getNewUiSecondaryDevices(playerId),
+        created: false,
+        player: null
+      ]
+      row.created = true
+      row.player = player
+      row.name = player.getDataValue('name')?.toString() ?: player.label?.toString() ?: row.name
+      row.model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString() ?: row.model
+      row.ip = (player.getDataValue('deviceIp') ?: player.getDataValue('localUpnpHost'))?.toString() ?: row.ip
+      row.discoveryKey = row.discoveryKey ?: player.getDeviceNetworkId()?.toString()
+      row.secondaryDevices = getNewUiSecondaryDevices(playerId)
+      rowsById[playerId] = row
+    }
+  }
+
+  List<Map> rows = new ArrayList<Map>(rowsById.values())
+  rows.sort { Map left, Map right ->
+    left.name.toString().compareToIgnoreCase(right.name.toString())
+  }
+  return rows
+}
+
+List<Map> getNewUiSecondaryDevices(String primaryPlayerId) {
+  List<Map> secondaries = []
+  discoveredSonosSecondaries.each { Object ignored, Object rawInfo ->
+    Map info = rawInfo instanceof Map ? (Map)rawInfo : [:]
+    if(info.primaryDeviceId?.toString() == primaryPlayerId) {
+      secondaries.add(info)
+    }
+  }
+  secondaries.sort { Map left, Map right ->
+    String leftName = (left.modelDisplayName ?: left.modelName ?: left.id ?: '').toString()
+    String rightName = (right.modelDisplayName ?: right.modelName ?: right.id ?: '').toString()
+    leftName.compareToIgnoreCase(rightName)
+  }
+  return secondaries
+}
+
+String renderNewUiSecondaryDevices(Map row) {
+  List<Map> secondaries = row.secondaryDevices instanceof List
+      ? (List<Map>)row.secondaryDevices
+      : []
+  if(secondaries.isEmpty()) {
+    return newUiStatusBadge('—', 'na', 'No discovered secondary speakers')
+  }
+
+  StringBuilder html = new StringBuilder()
+  html.append("<div class='new-ui-secondary-count'>${secondaries.size()} discovered</div>")
+  secondaries.each { Map secondary ->
+    String name = (secondary.modelDisplayName ?: secondary.modelName ?: 'Secondary speaker').toString()
+    String id = secondary.id?.toString()
+    String ip = (secondary.deviceIp ?: secondary.localUpnpHost)?.toString()
+    String detail = [ip, id]
+        .findAll { Object value -> value }
+        .collect { Object value -> escapeNewUiHtml(value) }
+        .join(' &middot; ')
+    html.append("<div class='new-ui-secondary-entry'><strong>${escapeNewUiHtml(name)}</strong>")
+    if(detail) {
+      html.append("<div class='new-ui-secondary-detail'>${detail}</div>")
+    }
+    html.append('</div>')
+  }
+  return html.toString()
+}
+
+String renderNewUiUpnpStatus(Map row, String sid, Boolean groupedOnly = false) {
+  if(row.created != true || row.player == null) {
+    return newUiStatusBadge('Not created', 'na', 'Create the Hubitat player before checking subscriptions')
+  }
+
+  if(groupedOnly) {
+    try {
+      Object grouped = row.player.currentValue('isGrouped', true)
+      if(grouped != null && grouped.toString().toLowerCase() in ['off', 'false']) {
+        return newUiStatusBadge('Not required', 'na', 'This subscription is only needed while grouped')
+      }
+    } catch(Exception ignored) {
+      // Fall through to the subscription validity check when group state is unavailable.
+    }
+  }
+
+  try {
+    Boolean valid = row.player.subValid(sid) as Boolean
+    return valid
+        ? newUiStatusBadge('Active', 'active', "${sid} is within its current renewal window")
+        : newUiStatusBadge('Inactive', 'inactive', "${sid} is not currently valid")
+  } catch(Exception e) {
+    logTrace("Could not read ${sid} status for ${row.id}: ${e.message}")
+    return newUiStatusBadge('Unknown', 'unknown', "${sid} status is unavailable")
+  }
+}
+
+String renderNewUiWebSocketStatus(Map row) {
+  if(row.created != true || row.player == null) {
+    return newUiStatusBadge('Not created', 'na', 'Create the Hubitat player before checking WebSocket state')
+  }
+
+  Object status = null
+  try {
+    status = row.player.getDataValue('websocketStatus')
+    if(!status && row.player.respondsTo('getWebSocketStatus')) {
+      status = row.player.getWebSocketStatus()
+    }
+  } catch(Exception e) {
+    logTrace("Could not read WebSocket status for ${row.id}: ${e.message}")
+  }
+
+  String normalized = status?.toString()?.trim()?.toLowerCase()
+  if(normalized == 'open') {
+    return newUiStatusBadge('Connected', 'active', 'WebSocket is open')
+  }
+  if(normalized in ['closed', 'closing', 'connect timed out']) {
+    return newUiStatusBadge('Disconnected', 'inactive', "WebSocket status: ${status}")
+  }
+  return newUiStatusBadge('Unknown', 'unknown', 'WebSocket status is unavailable')
+}
+
+String renderNewUiCreatedStatus(Map row) {
+  String actionKey = row.discoveryKey?.toString() ?: row.id?.toString()
+  if(row.created == true) {
+    String deleteIcon = "<iconify-icon icon='material-symbols:delete-outline' style='font-size:20px;vertical-align:middle'></iconify-icon>"
+    return newUiButtonLink("newUiDeletePlayer|${actionKey}", deleteIcon, '#F44336', '20px')
+  }
+  String addIcon = "<iconify-icon icon='material-symbols:add-circle-outline-rounded' style='font-size:20px;vertical-align:middle'></iconify-icon>"
+  return newUiButtonLink("newUiCreatePlayer|${actionKey}", addIcon, '#4CAF50', '20px')
+}
+
+String renderNewUiCreateGroupStatus(Map row) {
+  if(row.created != true || !row.id) {
+    return newUiStatusBadge('—', 'na', 'Create the speaker before creating a group from it')
+  }
+  String groupIcon = "<iconify-icon icon='material-symbols:group-add' style='font-size:20px;vertical-align:middle'></iconify-icon>"
+  return newUiButtonLink("newUiCreateGroup|${row.id}", groupIcon, '#4CAF50', '20px')
+}
+
+String newUiButtonLink(String buttonName, String linkText, String color = '#1A77C9', String font = '15px') {
+  return "<div class='form-group'><input type='hidden' name='${buttonName}.type' value='button'></div>" +
+      "<div style='display:inline-block'><div class='submitOnChange' onclick='buttonClick(this)' style='color:${color};cursor:pointer;font-size:${font}'>${linkText}</div></div>" +
+      "<input type='hidden' name='settings[${buttonName}]' value=''>"
+}
+
+String newUiStatusBadge(String label, String statusClass, String title) {
+  String safeLabel = escapeNewUiHtml(label)
+  String safeTitle = escapeNewUiHtml(title)
+  return "<span class='new-ui-status new-ui-status-${statusClass}' title='${safeTitle}'>${safeLabel}</span>"
+}
+
+String escapeNewUiHtml(Object value) {
+  String text = value?.toString() ?: ''
+  return text.replace('&', '&amp;')
+      .replace('<', '&lt;')
+      .replace('>', '&gt;')
+      .replace('"', '&quot;')
+      .replace("'", '&#39;')
+}
+
+String displayNewUiGroupTable() {
+  String css = """
+    <style>
+      #new-ui-group-table-wrapper {
+        display: block;
+        overflow-x: auto;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100%;
+      }
+      .new-ui-group-table-content {
+        display: block;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      .new-ui-group-table-section-title {
+        color: #424242;
+        font-size: 22px !important;
+        font-weight: 400;
+        line-height: 1.2;
+        margin: 0 0 14px !important;
+        padding: 0 !important;
+      }
+      #new-ui-group-table {
+        border: 1px solid #E0E0E0;
+        border-collapse: collapse;
+        border-radius: 4px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        min-width: 760px;
+        width: 100%;
+      }
+      #new-ui-group-table th,
+      #new-ui-group-table td {
+        border-bottom: 1px solid #EEEEEE;
+        border-right: 1px solid #EEEEEE;
+        font-size: 14px !important;
+        padding: 8px 6px !important;
+        text-align: center;
+        vertical-align: middle;
+      }
+      #new-ui-group-table thead {
+        background-color: #F5F5F5;
+      }
+      #new-ui-group-table th {
+        border-bottom: 2px solid #E0E0E0;
+        color: #424242;
+        font-size: 14px !important;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      #new-ui-group-table tbody tr:hover {
+        background-color: inherit !important;
+      }
+      #new-ui-group-table td:first-child .form-group {
+        display: none;
+      }
+      #new-ui-group-table td:first-child .submitOnChange {
+        line-height: 20px;
+        vertical-align: middle;
+      }
+      #new-ui-group-table .new-ui-group-action-cell {
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+        white-space: nowrap;
+        width: 92px;
+      }
+      #new-ui-group-table .new-ui-group-name,
+      #new-ui-group-table .new-ui-group-followers {
+        text-align: left;
+      }
+      #new-ui-group-table .new-ui-group-name {
+        min-width: 180px;
+      }
+      #new-ui-group-table .new-ui-group-name a {
+        color: #2196F3;
+        text-decoration: none;
+      }
+      #new-ui-group-table .new-ui-group-name a:hover {
+        text-decoration: underline;
+      }
+      #new-ui-group-table .new-ui-group-followers br {
+        line-height: 1.7;
+      }
+    </style>
+  """
+  String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
+  return "${css}${iconifyScript}<div class='new-ui-group-table-content'><div class='new-ui-group-table-section-title'>Sonos Groups</div><span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_TABLE_EVENT}'><div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div></span></div>"
+}
+
+String renderNewUiGroupTableMarkup() {
+  List<Map> rows = buildNewUiGroupRows()
+  StringBuilder html = new StringBuilder()
+  html.append("<div style='overflow-x:auto'><table id='new-ui-group-table' class='mdl-data-table'>")
+  html.append('<thead><tr>')
+  html.append('<th>Action</th>')
+  html.append('<th>Group Name</th>')
+  html.append('<th>Coordinator</th>')
+  html.append('<th>Followers</th>')
+  html.append('</tr></thead><tbody>')
+
+  if(rows.isEmpty()) {
+    html.append("<tr><td colspan='4'>No Sonos groups have been created yet.</td></tr>")
+  } else {
+    rows.each { Map row ->
+      String groupName = row.name?.toString() ?: 'Unnamed group'
+      String token = newUiGroupToken(groupName)
+      String editIcon = "<iconify-icon icon='material-symbols:edit' style='font-size:19px;vertical-align:middle;margin-right:6px'></iconify-icon>"
+      String deleteIcon = "<iconify-icon icon='material-symbols:delete-outline' style='font-size:20px;vertical-align:middle'></iconify-icon>"
+      String actionMarkup = newUiButtonLink("newUiEditGroup|${token}", editIcon, '#424242', '19px') +
+          newUiButtonLink("newUiDeleteGroup|${token}", deleteIcon, '#F44336', '20px')
+      String safeName = escapeNewUiHtml(groupName)
+      String groupDeviceId = row.device?.id?.toString()
+      if(groupDeviceId) {
+        safeName = "<a href='/device/edit/${escapeNewUiHtml(groupDeviceId)}' target='_blank'>${safeName}</a>"
+      }
+      String coordinatorName = row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown'
+      String safeCoordinator = escapeNewUiHtml(coordinatorName)
+      String followerMarkup = renderNewUiGroupFollowers(row.followerIds)
+
+      html.append('<tr>')
+      html.append("<td class='new-ui-group-action-cell'>${actionMarkup}</td>")
+      html.append("<td class='new-ui-group-name'><strong>${safeName}</strong></td>")
+      html.append("<td>${safeCoordinator}</td>")
+      html.append("<td class='new-ui-group-followers'>${followerMarkup}</td>")
+      html.append('</tr>')
+    }
+  }
+
+  html.append('</tbody></table></div>')
+  return html.toString()
+}
+
+List<Map> buildNewUiGroupRows() {
+  LinkedHashMap<String, Map> rowsByName = new LinkedHashMap<String, Map>()
+  Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
+
+  configuredGroups.each { Object rawName, Object rawDefinition ->
+    String groupName = rawName?.toString()
+    Map definition = rawDefinition instanceof Map ? (Map)rawDefinition : [:]
+    if(groupName) {
+      rowsByName[groupName] = [
+        name: groupName,
+        coordinatorId: definition.groupCoordinatorId?.toString(),
+        followerIds: normalizeNewUiGroupPlayerIds(definition.playerIds),
+        device: null
+      ]
+    }
+  }
+
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    String groupName = newUiGroupNameFromDeviceNetworkId(groupDevice.getDeviceNetworkId()?.toString())
+    if(!groupName) {
+      return
+    }
+    Map row = rowsByName[groupName] ?: [
+      name: groupName,
+      coordinatorId: null,
+      followerIds: [],
+      device: null
+    ]
+    row.device = groupDevice
+    if(!row.coordinatorId) {
+      row.coordinatorId = groupDevice.getDataValue('groupCoordinatorId')?.toString()
+    }
+    if(!row.followerIds) {
+      row.followerIds = normalizeNewUiGroupPlayerIds(groupDevice.getDataValue('playerIds'))
+    }
+    rowsByName[groupName] = row
+  }
+
+  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+  rowsByName.values().each { Map row ->
+    String coordinatorId = row.coordinatorId?.toString()
+    row.coordinatorName = coordinatorId ? (playerNames[coordinatorId] ?: coordinatorId) : null
+  }
+
+  List<Map> rows = new ArrayList<Map>(rowsByName.values())
+  rows.sort { Map left, Map right ->
+    left.name.toString().compareToIgnoreCase(right.name.toString())
+  }
+  return rows
+}
+
+Map findNewUiGroupByToken(String token) {
+  if(!token) {
+    return null
+  }
+  return buildNewUiGroupRows().find { Map row -> newUiGroupToken(row.name?.toString()) == token }
+}
+
+String newUiGroupToken(String groupName) {
+  String encoded = groupName?.bytes?.encodeBase64()?.toString() ?: ''
+  return encoded.replace('+', '-').replace('/', '_').replace('=', '')
+}
+
+String newUiGroupNameFromDeviceNetworkId(String deviceNetworkId) {
+  String prefix = "${app.id}-SonosGroupDevice-"
+  return deviceNetworkId?.startsWith(prefix) ? deviceNetworkId.substring(prefix.length()) : null
+}
+
+List<String> normalizeNewUiGroupPlayerIds(Object value) {
+  if(value instanceof Collection) {
+    return value.collect { Object id -> id?.toString() }.findAll { String id -> id }
+  }
+  if(value) {
+    return value.toString().split(',').collect { String id -> id.trim() }.findAll { String id -> id }
+  }
+  return []
+}
+
+Map<String, String> getNewUiGroupPlayerNameMap() {
+  return getCurrentPlayerDevices().collectEntries { ChildDeviceWrapper player ->
+    String id = player.getDataValue('id')?.toString()
+    id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
+  }
+}
+
+String renderNewUiGroupFollowers(Object followerIds) {
+  List<String> ids = normalizeNewUiGroupPlayerIds(followerIds)
+  if(ids.isEmpty()) {
+    return newUiStatusBadge('—', 'na', 'No follower speakers configured')
+  }
+  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+  return ids.collect { String id -> escapeNewUiHtml(playerNames[id] ?: id) }.join('<br>')
+}
+
+Map getNewUiGroupDraft() {
+  return state[NEW_UI_GROUP_DRAFT_KEY] instanceof Map ? (Map)state[NEW_UI_GROUP_DRAFT_KEY] : [:]
+}
+
+String getNewUiGroupCoordinator(Map draft) {
+  Object configured = settings.containsKey('newUiGroupCoordinator') ? settings.newUiGroupCoordinator : null
+  return configured != null ? configured.toString() : (draft.coordinatorId?.toString() ?: '')
+}
+
+List<String> getNewUiGroupFollowers(Map draft) {
+  Object configured = settings.containsKey('newUiGroupFollowers') ? settings.newUiGroupFollowers : null
+  return normalizeNewUiGroupPlayerIds(configured != null ? configured : draft.followerIds)
+}
+
+Map localPlayerPage() {
+  startDiscoverySession()
 
   Long endTime = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
   Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
@@ -631,6 +1338,438 @@ void appButtonHandler(String buttonName) {
   }
   if(buttonName == 'btnExtend60') { extendDiscovery(60) }
   if(buttonName == 'btnExtend300') { extendDiscovery(300) }
+  if(buttonName == 'btnNewUiDiscoverSpeakers') {
+    startNewUiDiscoverySession()
+    return
+  }
+
+  if(buttonName?.startsWith('newUiCreateGroup|')) {
+    beginNewUiGroupEditor(buttonName.minus('newUiCreateGroup|'))
+    return
+  }
+  if(buttonName?.startsWith('newUiEditGroup|')) {
+    beginNewUiGroupEdit(buttonName.minus('newUiEditGroup|'))
+    return
+  }
+  if(buttonName?.startsWith('newUiDeleteGroup|')) {
+    requestNewUiGroupDeletion(buttonName.minus('newUiDeleteGroup|'))
+    return
+  }
+  if(buttonName == 'btnNewUiCreateGroup') {
+    beginNewUiGroupEditor(null)
+    return
+  }
+  if(buttonName == 'btnNewUiSaveGroup') {
+    saveNewUiGroup()
+    return
+  }
+  if(buttonName == 'btnNewUiCancelGroup') {
+    cancelNewUiGroupEditor()
+    return
+  }
+  if(buttonName == 'btnConfirmNewUiDeleteGroup') {
+    confirmNewUiGroupDeletion()
+    return
+  }
+  if(buttonName == 'btnCancelNewUiDeleteGroup') {
+    cancelNewUiGroupDeletion()
+    return
+  }
+  if(buttonName.startsWith('newUiCreatePlayer|')) {
+    createNewUiPlayer(buttonName.minus('newUiCreatePlayer|'))
+    return
+  }
+  if(buttonName.startsWith('newUiDeletePlayer|')) {
+    requestNewUiPlayerDeletion(buttonName.minus('newUiDeletePlayer|'))
+    return
+  }
+  if(buttonName == 'btnConfirmNewUiDeletePlayer') {
+    confirmNewUiPlayerDeletion()
+    return
+  }
+  if(buttonName == 'btnCancelNewUiDeletePlayer') {
+    cancelNewUiPlayerDeletion()
+    return
+  }
+}
+
+void createNewUiPlayer(String playerKey) {
+  if(!playerKey) {
+    logWarn('New UI create request did not include a Sonos player identifier')
+    return
+  }
+
+  Map playerRow = buildNewUiSpeakerRows().find { Map row ->
+    String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
+    rowKey == playerKey
+  }
+  if(playerRow == null) {
+    logWarn("New UI create request could not find discovered Sonos player '${playerKey}'")
+    return
+  }
+  if(playerRow.created == true) {
+    logInfo("New UI create request ignored because Sonos player '${playerKey}' already exists")
+    return
+  }
+  if(!discoveredSonoses[playerKey]) {
+    logWarn("New UI create request could not find discovery data for Sonos player '${playerKey}'")
+    return
+  }
+
+  List<String> configuredPlayers = getConfiguredPlayerDeviceKeys()
+  if(!configuredPlayers.contains(playerKey)) {
+    configuredPlayers.add(playerKey)
+  }
+
+  try {
+    Integer createdCount = createPlayerDevices([playerKey])
+    if(createdCount < 1) {
+      logWarn("New UI could not create Sonos player '${playerKey}'")
+      return
+    }
+    app.updateSetting('playerDevices', [type: 'enum', value: configuredPlayers])
+    String playerName = playerRow.name?.toString() ?: playerKey
+    logInfo("New UI created Sonos Advanced Player '${playerName}' (${playerKey})")
+    runIn(3, 'finalizeNewUiPlayerCreation')
+  } catch(Exception e) {
+    logError("New UI failed to create Sonos player '${playerKey}': ${e.message}")
+  }
+}
+
+void finalizeNewUiPlayerCreation() {
+  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+  runIn(1, 'subscribeToGroupCommandRequests')
+  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
+}
+
+void beginNewUiGroupEditor(String coordinatorId) {
+  if(coordinatorId) {
+    ChildDeviceWrapper coordinator = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
+      player.getDataValue('id')?.toString() == coordinatorId
+    }
+    if(coordinator == null) {
+      logWarn("New UI group editor could not find coordinator '${coordinatorId}'")
+      return
+    }
+  }
+
+  clearNewUiGroupSettings()
+  state[NEW_UI_GROUP_EDITOR_MODE_KEY] = NEW_UI_GROUP_MODE_CREATE
+  state.remove(NEW_UI_GROUP_ORIGINAL_NAME_KEY)
+  state[NEW_UI_GROUP_AUTO_NAME_KEY] = true
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  state.remove(NEW_UI_GROUP_DELETE_KEY)
+  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+  String initialName = buildNewUiAutomaticGroupName(coordinatorId, [], playerNames)
+  state[NEW_UI_GROUP_DRAFT_KEY] = [name: initialName, coordinatorId: coordinatorId, followerIds: []]
+  if(coordinatorId) {
+    app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: coordinatorId])
+    app.updateSetting('newUiGroupName', [type: 'text', value: initialName])
+  }
+  logInfo(coordinatorId
+      ? "New UI group creation started from coordinator '${coordinatorId}'"
+      : 'New UI group creation started')
+}
+
+void beginNewUiGroupEdit(String token) {
+  Map group = findNewUiGroupByToken(token)
+  if(group == null) {
+    logWarn("New UI group edit request could not resolve group token '${token}'")
+    return
+  }
+
+  clearNewUiGroupSettings()
+  state[NEW_UI_GROUP_EDITOR_MODE_KEY] = NEW_UI_GROUP_MODE_EDIT
+  state[NEW_UI_GROUP_ORIGINAL_NAME_KEY] = group.name.toString()
+  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+  List<String> existingFollowerIds = normalizeNewUiGroupPlayerIds(group.followerIds)
+  state[NEW_UI_GROUP_AUTO_NAME_KEY] = isNewUiGroupAutomaticName(
+      group.name.toString(), buildNewUiAutomaticGroupName(group.coordinatorId?.toString(), existingFollowerIds, playerNames))
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  state[NEW_UI_GROUP_DRAFT_KEY] = [
+    name: group.name.toString(),
+    coordinatorId: group.coordinatorId?.toString(),
+    followerIds: existingFollowerIds
+  ]
+  app.updateSetting('newUiGroupName', group.name.toString())
+  if(group.coordinatorId) {
+    app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: group.coordinatorId.toString()])
+  }
+  app.updateSetting('newUiGroupFollowers', [type: 'enum', value: normalizeNewUiGroupPlayerIds(group.followerIds)])
+  logInfo("New UI group edit started for '${group.name}'")
+}
+
+void saveNewUiGroup() {
+  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
+    logWarn('New UI group save requested without an active editor')
+    return
+  }
+
+  Map draft = getNewUiGroupDraft()
+  String originalName = state[NEW_UI_GROUP_ORIGINAL_NAME_KEY]?.toString()
+  Object configuredName = settings.containsKey('newUiGroupName') ? settings.newUiGroupName : null
+  String groupName = configuredName != null ? configuredName.toString().trim() : (draft.name?.toString()?.trim() ?: '')
+  String coordinatorId = getNewUiGroupCoordinator(draft)
+  List<String> followerIds = getNewUiGroupFollowers(draft).unique()
+
+  String draftName = draft.name?.toString()?.trim() ?: ''
+  if(configuredName != null && groupName && groupName != draftName) {
+    state[NEW_UI_GROUP_AUTO_NAME_KEY] = false
+  }
+
+  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+  if(!coordinatorId || !playerNames.containsKey(coordinatorId)) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'Select a coordinator before saving the group.'
+    return
+  }
+  if(followerIds.isEmpty()) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'Select at least one follower before saving the group.'
+    return
+  }
+  if(followerIds.contains(coordinatorId)) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'The coordinator cannot also be a follower.'
+    return
+  }
+  if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == true) {
+    groupName = buildNewUiAutomaticGroupName(coordinatorId, followerIds, playerNames)
+  }
+  List<String> unknownFollowers = followerIds.findAll { String id -> !playerNames.containsKey(id) }
+  if(!unknownFollowers.isEmpty()) {
+    state[NEW_UI_GROUP_ERROR_KEY] = "These follower speakers are no longer available: ${unknownFollowers.join(', ')}"
+    return
+  }
+
+  if(!groupName) {
+    groupName = "${playerNames[coordinatorId]} + ${followerIds.size()} others"
+  }
+  Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
+  if(configuredGroups.containsKey(groupName) && groupName != originalName) {
+    state[NEW_UI_GROUP_ERROR_KEY] = "A group named '${groupName}' already exists. Choose a different name."
+    return
+  }
+  if(originalName && originalName != groupName && !renameNewUiGroupDevice(originalName, groupName)) {
+    state[NEW_UI_GROUP_ERROR_KEY] = "The existing group device could not be renamed to '${groupName}'."
+    return
+  }
+
+  if(originalName && originalName != groupName) {
+    configuredGroups.remove(originalName)
+  }
+  configuredGroups[groupName] = [groupCoordinatorId: coordinatorId, playerIds: followerIds]
+  state.userGroups = configuredGroups
+  String mode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
+  clearNewUiGroupSettings()
+  createGroupDevices()
+  state.remove(NEW_UI_GROUP_EDITOR_MODE_KEY)
+  state.remove(NEW_UI_GROUP_ORIGINAL_NAME_KEY)
+  state.remove(NEW_UI_GROUP_DRAFT_KEY)
+  state.remove(NEW_UI_GROUP_AUTO_NAME_KEY)
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  runIn(1, 'subscribeToGroupCommandRequests')
+  app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
+  logInfo("New UI ${mode == NEW_UI_GROUP_MODE_EDIT ? 'updated' : 'created'} Sonos group '${groupName}'")
+}
+
+Boolean renameNewUiGroupDevice(String oldName, String newName) {
+  String oldDni = "${app.id}-SonosGroupDevice-${oldName}"
+  String newDni = "${app.id}-SonosGroupDevice-${newName}"
+  DeviceWrapper existingDevice = getChildDevice(oldDni)
+  if(existingDevice == null) {
+    return true
+  }
+  try {
+    existingDevice.setDeviceNetworkId(newDni)
+    existingDevice.setLabel("Sonos Group: ${newName}")
+    logInfo("Renamed group device from '${oldName}' to '${newName}'")
+    return true
+  } catch(Exception e) {
+    logError("Failed to rename group device from '${oldName}' to '${newName}': ${e.message}")
+    return false
+  }
+}
+
+void clearNewUiGroupSettings() {
+  app.removeSetting('newUiGroupName')
+  app.removeSetting('newUiGroupCoordinator')
+  app.removeSetting('newUiGroupFollowers')
+}
+
+String synchronizeNewUiGroupName(Map draft, String coordinatorId, List<String> followerIds,
+    Map<String, String> playerNames) {
+  String configuredName = settings.containsKey('newUiGroupName') && settings.newUiGroupName != null
+      ? settings.newUiGroupName.toString().trim()
+      : null
+  String previousName = draft.name?.toString()?.trim() ?: ''
+  if(configuredName != null && configuredName != previousName && configuredName != '') {
+    state[NEW_UI_GROUP_AUTO_NAME_KEY] = false
+  }
+
+  String automaticName = buildNewUiAutomaticGroupName(coordinatorId, followerIds, playerNames)
+  if(state[NEW_UI_GROUP_AUTO_NAME_KEY] != false && automaticName) {
+    if(configuredName != automaticName) {
+      app.updateSetting('newUiGroupName', [type: 'text', value: automaticName])
+    }
+    draft.name = automaticName
+    draft.coordinatorId = coordinatorId
+    draft.followerIds = followerIds
+    return automaticName
+  }
+
+  String editorName = configuredName != null ? configuredName : previousName
+  draft.name = editorName
+  draft.coordinatorId = coordinatorId
+  draft.followerIds = followerIds
+  return editorName
+}
+
+String buildNewUiAutomaticGroupName(String coordinatorId, List<String> followerIds,
+    Map<String, String> playerNames) {
+  String coordinatorName = playerNames[coordinatorId]
+  if(!coordinatorName) { return '' }
+  if(followerIds.size() == 1 && playerNames[followerIds[0]]) {
+    return "${coordinatorName} + ${playerNames[followerIds[0]]}"
+  }
+  return "${coordinatorName} + ${followerIds.size()} others"
+}
+
+Boolean isNewUiGroupAutomaticName(String name, String automaticName) {
+  return name && automaticName && name == automaticName
+}
+
+void cancelNewUiGroupEditor() {
+  clearNewUiGroupSettings()
+  state.remove(NEW_UI_GROUP_EDITOR_MODE_KEY)
+  state.remove(NEW_UI_GROUP_ORIGINAL_NAME_KEY)
+  state.remove(NEW_UI_GROUP_DRAFT_KEY)
+  state.remove(NEW_UI_GROUP_AUTO_NAME_KEY)
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  logInfo('Cancelled New UI group edit')
+}
+
+void requestNewUiGroupDeletion(String token) {
+  Map group = findNewUiGroupByToken(token)
+  if(group == null) {
+    logWarn("New UI group delete request could not resolve group token '${token}'")
+    return
+  }
+  state[NEW_UI_GROUP_DELETE_KEY] = token
+  logInfo("New UI delete requested for Sonos group '${group.name}'; awaiting confirmation")
+}
+
+void confirmNewUiGroupDeletion() {
+  String token = state[NEW_UI_GROUP_DELETE_KEY]?.toString()
+  state.remove(NEW_UI_GROUP_DELETE_KEY)
+  Map group = findNewUiGroupByToken(token)
+  if(group == null) {
+    logWarn('New UI group delete confirmation could not resolve the selected group')
+    return
+  }
+
+  String groupName = group.name.toString()
+  try {
+    if(state.userGroups instanceof Map) {
+      state.userGroups.remove(groupName)
+    }
+    String groupDni = "${app.id}-SonosGroupDevice-${groupName}"
+    if(getChildDevice(groupDni) != null) {
+      app.deleteChildDevice(groupDni)
+    }
+    app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
+    if(state[NEW_UI_GROUP_ORIGINAL_NAME_KEY]?.toString() == groupName) {
+      cancelNewUiGroupEditor()
+    }
+    runIn(1, 'subscribeToGroupCommandRequests')
+    app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
+    logInfo("Removed Sonos group '${groupName}'")
+  } catch(Exception e) {
+    logError("Failed to remove Sonos group '${groupName}': ${e.message}")
+  }
+}
+
+void cancelNewUiGroupDeletion() {
+  String token = state[NEW_UI_GROUP_DELETE_KEY]?.toString()
+  state.remove(NEW_UI_GROUP_DELETE_KEY)
+  if(token) {
+    Map group = findNewUiGroupByToken(token)
+    logInfo("Cancelled New UI group delete request for '${group?.name ?: token}'")
+  }
+}
+
+List<String> getConfiguredPlayerDeviceKeys() {
+  if(settings.playerDevices instanceof Collection) {
+    return settings.playerDevices.collect { Object value -> value?.toString() }.findAll { String value -> value }
+  }
+  if(settings.playerDevices) {
+    return [settings.playerDevices.toString()]
+  }
+  return []
+}
+
+void requestNewUiPlayerDeletion(String playerKey) {
+  if(!playerKey) {
+    logWarn('New UI delete request did not include a Sonos player identifier')
+    return
+  }
+  state.pendingNewUiDeletePlayer = playerKey
+  Map playerRow = buildNewUiSpeakerRows().find { Map row ->
+    String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
+    rowKey == playerKey
+  }
+  String playerName = playerRow?.name?.toString() ?: playerKey
+  logInfo("New UI delete requested for Sonos player '${playerName}' (${playerKey}); awaiting confirmation")
+}
+
+void confirmNewUiPlayerDeletion() {
+  String playerKey = state.pendingNewUiDeletePlayer as String
+  state.remove('pendingNewUiDeletePlayer')
+  if(!playerKey) {
+    logWarn('New UI delete confirmation received without a pending Sonos player')
+    return
+  }
+
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    String deviceNetworkId = candidate.getDeviceNetworkId()?.toString()
+    String playerId = candidate.getDataValue('id')?.toString()
+    deviceNetworkId == playerKey || playerId == playerKey
+  }
+  if(player == null) {
+    logWarn("New UI delete confirmation could not find Sonos player '${playerKey}'")
+    return
+  }
+
+  String deviceNetworkId = player.getDeviceNetworkId()?.toString()
+  String playerName = player.getDataValue('name')?.toString() ?: player.label?.toString() ?: playerKey
+  try {
+    logInfo("Removing Sonos Advanced Player '${playerName}' (${deviceNetworkId}) from Hubitat")
+    app.deleteChildDevice(deviceNetworkId)
+    List<String> configuredPlayers = getConfiguredPlayerDeviceKeys()
+    configuredPlayers = configuredPlayers.findAll { String value -> value != deviceNetworkId && value != playerKey }
+    app.updateSetting('playerDevices', [type: 'enum', value: configuredPlayers])
+    runIn(3, 'finalizeNewUiPlayerDeletion')
+  } catch(Exception e) {
+    logError("Failed to remove Sonos Advanced Player '${playerName}': ${e.message}")
+  }
+}
+
+void finalizeNewUiPlayerDeletion() {
+  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
+}
+
+void cancelNewUiPlayerDeletion() {
+  String playerKey = state.pendingNewUiDeletePlayer as String
+  state.remove('pendingNewUiDeletePlayer')
+  if(playerKey) {
+    logInfo("Cancelled New UI delete request for Sonos player '${playerKey}'")
+  }
+}
+
+void startNewUiDiscoverySession() {
+  if(atomicState.discoveryRunning == true) {
+    stopDiscovery()
+  }
+  logInfo('Starting New UI Sonos speaker discovery for 60 seconds')
+  startDiscoverySession()
 }
 
 void applySettingsButton() { configure() }
@@ -941,9 +2080,17 @@ void finalizePlayerRemoval(Map data) {
 }
 
 Integer createPlayerDevices() {
+  return createPlayerDevices(null)
+}
+
+Integer createPlayerDevices(List<String> requestedPlayerDevices) {
   Integer createdCount = 0
-  // Safety check: ensure playerDevices setting exists
-  if(!settings.playerDevices) {
+  List<String> selectedPlayerDevices = requestedPlayerDevices != null
+      ? requestedPlayerDevices
+      : getConfiguredPlayerDeviceKeys()
+
+  // Safety check: ensure playerDevices selection exists
+  if(selectedPlayerDevices.isEmpty()) {
     logWarn("No player devices selected, skipping device creation")
     return createdCount
   }
@@ -958,7 +2105,7 @@ Integer createPlayerDevices() {
     logDebug("Initialized empty discoveredSonosSecondaries map")
   }
 
-  settings.playerDevices.each{ dni ->
+  selectedPlayerDevices.each{ dni ->
     if(!dni) {
       logWarn("Encountered null or empty DNI in playerDevices, skipping")
       return
@@ -1119,14 +2266,19 @@ void runSecondaryConfiguration(Map data) {
 
 void removeOrphans() {
   // Single getChildDevices() call partitioned into groups and players
-  List<ChildDeviceWrapper> allChildren = app.getChildDevices()
+  // Copy the platform collection before deleting any child; Hubitat may return
+  // a live list, and mutating it during iteration can skip devices or throw.
+  List<ChildDeviceWrapper> allChildren = new ArrayList<ChildDeviceWrapper>(app.getChildDevices())
+  List<String> configuredGroupDevices = state.userGroups instanceof Map
+      ? getUserGroupsDNIsFromUserGroups()
+      : normalizeNewUiGroupPlayerIds(settings.groupDevices)
   allChildren.each { child ->
     String id = child.getDataValue('id')
     String dni = child.getDeviceNetworkId()
     if(id == null) {
       // Group device
-      if(!(dni in settings.groupDevices)) {
-        logInfo("Removing group device not found in selected devices list: ${child}")
+      if(!(dni in configuredGroupDevices)) {
+        logInfo("Removing group device not found in selected devices list: ${child} (DNI: ${dni}; configured: ${configuredGroupDevices})")
         app.deleteChildDevice(dni)
       }
     } else if(!settings.skipOrphanRemoval) {
@@ -1512,10 +2664,12 @@ String getFoundSonoses() {
 void sendFoundSonosEvents() {
   if(atomicState.discoveryRunning != true) {
     logDebug("sendFoundSonosEvents: discovery not running, skipping")
+    app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
     return
   }
   app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()} primary, ${discoveredSonosSecondaries.size()} secondary): ")
   app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
+  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
 }
 // =============================================================================
 // End Local Discovery
@@ -1526,6 +2680,16 @@ void sendFoundSonosEvents() {
 // =============================================================================
 // Helper methods
 // =============================================================================
+
+String processServerSideRender(Map event) {
+  if(event?.name == 'newUiSpeakerTable') {
+    return "<div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>"
+  }
+  if(event?.name == NEW_UI_GROUP_TABLE_EVENT) {
+    return "<div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div>"
+  }
+  return ''
+}
 
 /**
  * Wrapper for runIn() to allow calls from @CompileStatic methods.
@@ -3511,21 +4675,23 @@ List<ChildDeviceWrapper> getDevicesFromRincons(List<String> rincons) {
 }
 
 List<String> getCreatedPlayerDevices() {
-  List<ChildDeviceWrapper> childDevices = app.getCurrentPlayerDevices()
+  List<ChildDeviceWrapper> childDevices = getCurrentPlayerDevices()
   List<String> pds = []
   childDevices.each() {cd -> pds.add("${cd.getDeviceNetworkId()}")}
   return pds
 }
 
 List<String> getCreatedGroupDevices() {
-  List<ChildDeviceWrapper> childDevices = app.getCurrentGroupDevices()
+  List<ChildDeviceWrapper> childDevices = getCurrentGroupDevices()
   List<String> pds = []
   childDevices.each() {cd -> pds.add("${cd.getDeviceNetworkId()}")}
   return pds
 }
 
 List<String> getUserGroupsDNIsFromUserGroups() {
-  List<String> dnis = state.userGroups.collect{ k,v -> "${app.id}-SonosGroupDevice-${k}" }
+  List<String> dnis = state.userGroups.collect { Object groupName, Object ignored ->
+    "${app.id}-SonosGroupDevice-${groupName}".toString()
+  }
   return dnis
 }
 
