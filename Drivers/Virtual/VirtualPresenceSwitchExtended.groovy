@@ -82,6 +82,9 @@ metadata {
       ]
       input 'extendedPresentTime', 'enum', title: 'Time to consider "Extended Present"', required: true, defaultValue: 1800, options:
       [
+        180:'3 Minutes',
+        300:'5 Minutes',
+        600:'10 Minutes',
         900:'15 Minutes',
         1200:'20 Minutes',
         1800:'30 Minutes',
@@ -93,6 +96,9 @@ metadata {
       ]
       input 'extendedAwayTime', 'enum', title: 'Time to consider "Extended Away"', required: true, defaultValue: 1800, options:
       [
+        180:'3 Minutes',
+        300:'5 Minutes',
+        600:'10 Minutes',
         900:'15 Minutes',
         1200:'20 Minutes',
         1800:'30 Minutes',
@@ -106,6 +112,8 @@ metadata {
   }
 }
 
+@Field static final List<Long> EXTENDED_TIME_OPTIONS = [180L, 300L, 600L, 900L, 1200L, 1800L, 2700L, 3600L, 5400L, 7200L, 14400L]
+
 // =============================================================================
 // Lifecycle & Scheduling
 // =============================================================================
@@ -115,6 +123,8 @@ void initialize() { configure() }
 void configure() {
   // Nothing to set up beyond clearing any stray schedules when the driver starts.
   unschedule()
+  normalizeExtendedTime('extendedPresentTime', 'justArrivedTime', 'Extended Present')
+  normalizeExtendedTime('extendedAwayTime', 'justDepartedTime', 'Extended Away')
 }
 
 void cancelSchedules() {
@@ -246,6 +256,31 @@ void extendedOff() {
 // =============================================================================
 // Utility Helpers
 // =============================================================================
+
+private void normalizeExtendedTime(String extendedKey, String justKey, String extendedLabel) {
+  if (settings[extendedKey] == null || settings[justKey] == null) {
+    return
+  }
+
+  Long extendedTime = settingAsLong(extendedKey)
+  Long justTime = settingAsLong(justKey)
+  if (extendedTime > justTime) {
+    return
+  }
+
+  Long correctedTime = EXTENDED_TIME_OPTIONS.find { Long option -> option > justTime }
+  if (correctedTime == null) {
+    logWarn("${extendedLabel} time (${extendedTime}s) must be greater than ${justKey} (${justTime}s), but no greater option is available")
+    return
+  }
+
+  logWarn("${extendedLabel} time (${extendedTime}s) must be greater than ${justKey} (${justTime}s); setting it to ${correctedTime}s")
+  device.updateSetting(extendedKey, [type: 'enum', value: correctedTime.toString()])
+}
+
+private void logWarn(String message) {
+  log.warn("${device?.displayName ?: 'Virtual Presence with Switch Extended'}: ${message}")
+}
 
 private Long settingAsLong(String key) {
   Object raw = settings[key]
