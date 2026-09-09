@@ -284,8 +284,8 @@ private void processDeviceTrackerEvent(final String trackerName, final Object va
             return
         }
     }
-    sendEvent(child, [name: 'presence', value: isHome ? 'present' : 'not present',
-                      descriptionText: "${trackerName} is ${isHome ? 'home' : 'away'}"])
+    child.sendEvent([name: 'presence', value: isHome ? 'present' : 'not present',
+                     descriptionText: "${trackerName} is ${isHome ? 'home' : 'away'}"])
 }
 
 private String presenceChildDni(final String trackerName) {

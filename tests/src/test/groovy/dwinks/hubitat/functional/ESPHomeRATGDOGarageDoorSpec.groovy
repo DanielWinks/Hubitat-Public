@@ -91,15 +91,17 @@ class ESPHomeRATGDOGarageDoorSpec extends Specification {
     then:
     driver.children.size() == 1
     driver.children[0].displayName == 'Test Device - daniel_iphone'
-    driver.childEvents == [[device: driver.children[0], name: 'presence', value: 'present',
-                            descriptionText: 'daniel_iphone is home']]
+    driver.children[0].events == [[name: 'presence', value: 'present',
+                                   descriptionText: 'daniel_iphone is home']]
+    !driver.events.any { Map event -> event.name == 'presence' }
 
     when: 'the same tracker reports away'
     driver.parse('{"id":"device-tracker-daniel_iphone","value":false}')
 
     then:
     driver.children.size() == 1
-    driver.childEvents.last() == [device: driver.children[0], name: 'presence', value: 'not present',
-                                  descriptionText: 'daniel_iphone is away']
+    driver.children[0].events.last() == [name: 'presence', value: 'not present',
+                                         descriptionText: 'daniel_iphone is away']
+    !driver.events.any { Map event -> event.name == 'presence' }
   }
 }
