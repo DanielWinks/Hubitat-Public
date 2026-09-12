@@ -35,6 +35,7 @@ class HubitatScriptHarness extends Script {
   List<String> logs = []         // human-readable log lines
   List<Object> hubCommands = []  // HubAction/HubMultiAction instances
   Map<String, Object> updatedSettings = [:]
+  List<List> pageHrefs = []      // rendered page navigation links
 
   /** Mock device. Tests set this via {@code device = new MockDevice(...)}. */
   MockDevice device = new MockDevice()
@@ -133,6 +134,7 @@ class HubitatScriptHarness extends Script {
   String zwaveSecureEncap(hubitat.zwave.Command command) { "secure:${command.formatted}" }
   List<String> delayBetween(List<String> commands, Number delay) { commands }
   void sendHubCommand(Object command) { hubCommands << command }
+  void href(Object... args) { pageHrefs << args.toList() }
 
   // ----- Setting updaters -----
   void updateSetting(String name, Map opts) { updatedSettings[name] = opts.value }

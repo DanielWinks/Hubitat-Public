@@ -274,7 +274,9 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // App Pages
 // =============================================================================
 Map mainPage() {
-  stopDiscovery()
+  if(settings.useOldUi == true) {
+    stopDiscovery()
+  }
   checkForUpdates()
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
@@ -303,23 +305,25 @@ Map mainPage() {
           app.updateLabel('Sonos Advanced Controller')
         }
       }
-
-      href (
-        page: 'localPlayerPage',
-        title: 'Sonos Virtual Player Devices',
-        description: 'Select to create Sonos player devices using local discovery'
-      )
-      href (
-        page: 'groupPage',
-        title: 'Sonos Virtual Group Devices',
-        description: 'Select to create/delete Sonos group devices'
-      )
-      href (
-        page: 'newUiPage',
-        title: 'New UI - Sonos Speakers',
-        description: 'View discovered Sonos speakers in the new table-based interface'
-      )
     }
+
+    if(settings.useOldUi == true) {
+      section() {
+        href (
+          page: 'localPlayerPage',
+          title: 'Sonos Virtual Player Devices',
+          description: 'Select to create Sonos player devices using local discovery'
+        )
+        href (
+          page: 'groupPage',
+          title: 'Sonos Virtual Group Devices',
+          description: 'Select to create/delete Sonos group devices'
+        )
+      }
+    } else {
+      renderNewUiPageContent()
+    }
+
     section('Update Settings:', hideable: true, hidden: true) {
       paragraph "<span style='color: #ff6b6b;'><b>⚠ Warning:</b> The built-in auto-update functionality should not be used if you manage this app through Hubitat Package Manager (HPM). Using both may cause conflicts, or version mismatches. If you installed via HPM, use HPM to manage updates.</span>"
       input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
@@ -404,6 +408,7 @@ Map mainPage() {
       input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
       input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
       input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
+      input 'useOldUi', 'bool', title: 'Use old UI', required: false, defaultValue: false, submitOnChange: true
       // input 'applySettingsButton', 'button', title: 'Apply Settings'
     }
   }
@@ -418,84 +423,88 @@ Map newUiPage() {
     uninstall: false,
     refreshInterval: 0
   ) {
+    renderNewUiPageContent()
+  }
+}
+
+void renderNewUiPageContent() {
+  section() {
+    paragraph "<span class='ssr-app-state-${app.id}-discoveryTimer'>${renderNewUiDiscoveryTimerMarkup()}</span>"
+    input 'btnNewUiDiscoverSpeakers', 'button', title: 'Discover Speakers (60 seconds)', submitOnChange: true
+    paragraph displayNewUiSpeakerTable()
+  }
+
+  if(state.pendingNewUiDeletePlayer) {
+    String pendingPlayerKey = state.pendingNewUiDeletePlayer as String
+    Map pendingPlayer = buildNewUiSpeakerRows().find { Map row ->
+      String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
+      rowKey == pendingPlayerKey
+    }
+    String pendingPlayerName = pendingPlayer?.name?.toString() ?: pendingPlayerKey
+    String safePendingPlayerName = escapeNewUiHtml(pendingPlayerName)
+    String safePendingPlayerKey = escapeNewUiHtml(pendingPlayerKey)
     section() {
-      paragraph "<span class='ssr-app-state-${app.id}-discoveryTimer'>${renderNewUiDiscoveryTimerMarkup()}</span>"
-      input 'btnNewUiDiscoverSpeakers', 'button', title: 'Discover Speakers (60 seconds)', submitOnChange: true
-      paragraph displayNewUiSpeakerTable()
+      paragraph "<b style='color:#F44336'>Are you sure you want to remove '${safePendingPlayerName}' (${safePendingPlayerKey})?</b>"
+      input 'btnConfirmNewUiDeletePlayer', 'button', title: 'Yes, Remove Speaker', submitOnChange: true
+      input 'btnCancelNewUiDeletePlayer', 'button', title: 'Cancel', submitOnChange: true
     }
+  }
 
-    if(state.pendingNewUiDeletePlayer) {
-      String pendingPlayerKey = state.pendingNewUiDeletePlayer as String
-      Map pendingPlayer = buildNewUiSpeakerRows().find { Map row ->
-        String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
-        rowKey == pendingPlayerKey
-      }
-      String pendingPlayerName = pendingPlayer?.name?.toString() ?: pendingPlayerKey
-      String safePendingPlayerName = escapeNewUiHtml(pendingPlayerName)
-      String safePendingPlayerKey = escapeNewUiHtml(pendingPlayerKey)
-      section() {
-        paragraph "<b style='color:#F44336'>Are you sure you want to remove '${safePendingPlayerName}' (${safePendingPlayerKey})?</b>"
-        input 'btnConfirmNewUiDeletePlayer', 'button', title: 'Yes, Remove Speaker', submitOnChange: true
-        input 'btnCancelNewUiDeletePlayer', 'button', title: 'Cancel', submitOnChange: true
-      }
-    }
-
-    if(state[NEW_UI_GROUP_DELETE_KEY]) {
-      Map pendingGroup = findNewUiGroupByToken(state[NEW_UI_GROUP_DELETE_KEY] as String)
-      String pendingGroupName = pendingGroup?.name?.toString() ?: state[NEW_UI_GROUP_DELETE_KEY].toString()
-      String safePendingGroupName = escapeNewUiHtml(pendingGroupName)
-      section() {
-        paragraph "<b style='color:#F44336'>Are you sure you want to remove the Sonos group '${safePendingGroupName}'?</b>"
-        input 'btnConfirmNewUiDeleteGroup', 'button', title: 'Yes, Remove Group', submitOnChange: true
-        input 'btnCancelNewUiDeleteGroup', 'button', title: 'Cancel', submitOnChange: true
-      }
-    }
-
+  if(state[NEW_UI_GROUP_DELETE_KEY]) {
+    Map pendingGroup = findNewUiGroupByToken(state[NEW_UI_GROUP_DELETE_KEY] as String)
+    String pendingGroupName = pendingGroup?.name?.toString() ?: state[NEW_UI_GROUP_DELETE_KEY].toString()
+    String safePendingGroupName = escapeNewUiHtml(pendingGroupName)
     section() {
-      paragraph "<div class='new-ui-group-section-title'>Sonos Groups</div>"
-      if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
-        Map groupDraft = getNewUiGroupDraft()
-        List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
-        Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
-          String id = player.getDataValue('id')?.toString()
-          id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
-        }
-        String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
-        List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
-        Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
-          String id = player.getDataValue('id')?.toString()
-          id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
-        }
-        String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
-        Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
-          id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
-        }
-        String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
-        String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
-        String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
-
-        paragraph "<h3>${editorTitle}</h3>"
-        if(state[NEW_UI_GROUP_ERROR_KEY]) {
-          paragraph "<b style='color:#F44336'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</b>"
-        }
-        if(selectedCoordinator) {
-          paragraph 'Followers cannot include the selected coordinator. Only compatible speakers are listed.'
-        } else {
-          paragraph 'Select one coordinator, then select one or more follower speakers.'
-        }
-        input name: 'newUiGroupName', type: 'text', title: 'Group Name:', required: false,
-            defaultValue: editorName, submitOnChange: true
-        input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator:', multiple: false,
-            options: playerOptions, required: false, defaultValue: selectedCoordinator, submitOnChange: true, offerAll: false
-        input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers:', multiple: true,
-            options: followerOptions, required: false, defaultValue: selectedFollowers, submitOnChange: true, offerAll: false
-        input name: 'btnNewUiSaveGroup', type: 'button', title: 'Save Group', submitOnChange: true
-        input name: 'btnNewUiCancelGroup', type: 'button', title: 'Cancel', submitOnChange: true
-      }
-
-      paragraph displayNewUiGroupTable()
-      input 'btnNewUiCreateGroup', 'button', title: 'Create Group', submitOnChange: true
+      paragraph "<b style='color:#F44336'>Are you sure you want to remove the Sonos group '${safePendingGroupName}'?</b>"
+      input 'btnConfirmNewUiDeleteGroup', 'button', title: 'Yes, Remove Group', submitOnChange: true
+      input 'btnCancelNewUiDeleteGroup', 'button', title: 'Cancel', submitOnChange: true
     }
+  }
+
+  section() {
+    paragraph "<div class='new-ui-group-section-title'>Sonos Groups</div>"
+    if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
+      Map groupDraft = getNewUiGroupDraft()
+      List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+      Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
+        String id = player.getDataValue('id')?.toString()
+        id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
+      }
+      String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
+      List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
+      Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
+        String id = player.getDataValue('id')?.toString()
+        id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
+      }
+      String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
+      Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
+        id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
+      }
+      String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
+      String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
+      String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
+
+      paragraph "<h3>${editorTitle}</h3>"
+      if(state[NEW_UI_GROUP_ERROR_KEY]) {
+        paragraph "<b style='color:#F44336'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</b>"
+      }
+      if(selectedCoordinator) {
+        paragraph 'Followers cannot include the selected coordinator. Only compatible speakers are listed.'
+      } else {
+        paragraph 'Select one coordinator, then select one or more follower speakers.'
+      }
+      input name: 'newUiGroupName', type: 'text', title: 'Group Name:', required: false,
+          defaultValue: editorName, submitOnChange: true
+      input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator:', multiple: false,
+          options: playerOptions, required: false, defaultValue: selectedCoordinator, submitOnChange: true, offerAll: false
+      input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers:', multiple: true,
+          options: followerOptions, required: false, defaultValue: selectedFollowers, submitOnChange: true, offerAll: false
+      input name: 'btnNewUiSaveGroup', type: 'button', title: 'Save Group', submitOnChange: true
+      input name: 'btnNewUiCancelGroup', type: 'button', title: 'Cancel', submitOnChange: true
+    }
+
+    paragraph displayNewUiGroupTable()
+    input 'btnNewUiCreateGroup', 'button', title: 'Create Group', submitOnChange: true
   }
 }
 

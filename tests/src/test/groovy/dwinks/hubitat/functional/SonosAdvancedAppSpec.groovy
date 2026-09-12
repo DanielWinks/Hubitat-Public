@@ -82,6 +82,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.clear()
     appScript.events.clear()
     appScript.scheduled.clear()
+    appScript.pageHrefs.clear()
     appScript.state.clear()
 
     group = new SonosAppGroupDouble(deviceNetworkId: 'GROUP-DNI', displayName: 'Test Group', label: 'Test Group')
@@ -571,6 +572,31 @@ class SonosAdvancedAppSpec extends Specification {
     !markup.contains('Zone Group')
     !markup.contains('WebSocket')
     markup.contains('No primary Sonos speakers have been discovered yet.') == false
+  }
+
+  def "main page defaults to the new UI and switches to the two old UI links"() {
+    given:
+    appScript.atomicState = [discoveryRunning: false]
+    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false, useOldUi: false])
+    appScript.binding.setVariable('autoCheckUpdates', false)
+    appScript.binding.setVariable('autoInstallUpdates', false)
+
+    when:
+    Map newUiPage = appScript.mainPage()
+
+    then:
+    newUiPage.title == 'Sonos Advanced Controller'
+    appScript.pageHrefs.empty
+
+    when:
+    appScript.pageHrefs.clear()
+    appScript.settings.useOldUi = true
+    Map oldUiPage = appScript.mainPage()
+
+    then:
+    oldUiPage.title == 'Sonos Advanced Controller'
+    appScript.pageHrefs.size() == 2
+    appScript.pageHrefs*.first()*.page == ['localPlayerPage', 'groupPage']
   }
 
   def "new UI speaker table restores discovered secondaries after the volatile map is cleared"() {
