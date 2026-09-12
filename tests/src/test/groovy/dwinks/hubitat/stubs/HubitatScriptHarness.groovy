@@ -2,6 +2,8 @@ package dwinks.hubitat.stubs
 
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.hub.domain.Location
 
 /**
  * Base class that supplies the bits of the Hubitat runtime an App or Driver
@@ -33,12 +35,13 @@ class HubitatScriptHarness extends Script {
   List<String> logs = []         // human-readable log lines
   List<Object> hubCommands = []  // HubAction/HubMultiAction instances
   Map<String, Object> updatedSettings = [:]
+  List<List> pageHrefs = []      // rendered page navigation links
 
   /** Mock device. Tests set this via {@code device = new MockDevice(...)}. */
   MockDevice device = new MockDevice()
   MockApp app = new MockApp()
   MockLog log = new MockLog(this)
-  Map location = [name: 'Test Location', mode: 'Day', timeZone: TimeZone.getTimeZone('America/New_York')]
+  Location location = new Location()
   String hubUID = 'TEST-HUB-UID'
   Object zwave = new MockZWave()
 
@@ -115,6 +118,7 @@ class HubitatScriptHarness extends Script {
   Object getChildDevice(String dni) { children.find { it.deviceNetworkId == dni } }
   MockDevice addChildDevice(String namespace, String typeName, String dni, Map props = [:]) {
     MockDevice d = new MockDevice(deviceNetworkId: dni, displayName: props.label ?: typeName, properties: props.properties ?: [:])
+    d.deviceNetworkId = dni
     children << d
     d
   }
@@ -130,6 +134,7 @@ class HubitatScriptHarness extends Script {
   String zwaveSecureEncap(hubitat.zwave.Command command) { "secure:${command.formatted}" }
   List<String> delayBetween(List<String> commands, Number delay) { commands }
   void sendHubCommand(Object command) { hubCommands << command }
+  void href(Object... args) { pageHrefs << args.toList() }
 
   // ----- Setting updaters -----
   void updateSetting(String name, Map opts) { updatedSettings[name] = opts.value }
@@ -148,7 +153,7 @@ class MockLog {
 }
 
 /** Stand-in for a Hubitat DeviceWrapper - tests can pre-populate currentStates. */
-class MockDevice {
+class MockDevice extends ChildDeviceWrapper {
   String deviceNetworkId = 'TEST-DNI'
   String displayName = 'Test Device'
   String label = 'Test Device'
@@ -187,10 +192,17 @@ class MockApp {
   Long id = 42L
   String label = 'Test App'
   List children = []
+  List<Map> events = []
+  Map<String, Object> updatedSettings = [:]
   String getId() { id?.toString() }
   String getLabel() { label }
   List getChildDevices() { children }
   Object getChildDevice(String dni) { children.find { it?.deviceNetworkId == dni } }
+  void deleteChildDevice(String dni) { children.removeAll { it?.deviceNetworkId == dni } }
+  void updateSetting(String name, Map opts) { updatedSettings[name] = opts.value }
+  void updateSetting(String name, Object value) { updatedSettings[name] = value }
+  void removeSetting(String name) { updatedSettings.remove(name) }
+  void sendEvent(Map event) { events << event }
 }
 
 /** Minimal dynamic Z-Wave factory used by driver behavior tests. */

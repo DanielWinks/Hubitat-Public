@@ -38,38 +38,40 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
+@Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+
 void logError(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('error')) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
     if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
 void logWarn(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('warn')) {
     if(device) log.warn "${device.label ?: device.name }: ${message}"
     if(app) log.warn "${app.label ?: app.name }: ${message}"
   }
 }
 void logInfo(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('info')) {
     if(device) log.info "${device.label ?: device.name }: ${message}"
     if(app) log.info "${app.label ?: app.name }: ${message}"
   }
 }
 void logDebug(String message) {
-  if (settings.logEnable != false && settings.debugLogEnable != false) {
+  if (loggingEnabled('debug')) {
     if(device) log.debug "${device.label ?: device.name }: ${message}"
     if(app) log.debug "${app.label ?: app.name }: ${message}"
   }
 }
 void logException(String message) {
-  if (settings.logEnable != false) {
+  if (loggingEnabled('error')) {
     if(device) log.exception "${device.label ?: device.name }: ${message}"
     if(app) log.exception "${app.label ?: app.name }: ${message}"
   }
 }
 void logTrace(String message) {
-  if (settings.logEnable != false && settings.traceLogEnable != false) {
+  if (loggingEnabled('trace')) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
     if(app) log.trace "${app.label ?: app.name }: ${message}"
   }
@@ -256,7 +258,29 @@ metadata {
       input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
       input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
     }
+    section('Logging Settings') {
+      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
+    }
   }
+}
+
+String getConfiguredLogLevel() {
+  if(settings.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
+  if(settings.logEnable == false) { return 'off' }
+  if(settings.traceLogEnable == true) { return 'trace' }
+  if(settings.debugLogEnable == true) { return 'debug' }
+  return 'info'
+}
+
+String normalizeLogLevel(String level) {
+  String normalized = level?.toLowerCase()
+  return LOG_LEVELS.contains(normalized) ? normalized : 'info'
+}
+
+Boolean loggingEnabled(String messageLevel) {
+  Integer configuredIndex = LOG_LEVELS.indexOf(getConfiguredLogLevel())
+  Integer messageIndex = LOG_LEVELS.indexOf(messageLevel)
+  return configuredIndex >= 0 && messageIndex >= configuredIndex && messageIndex < LOG_LEVELS.indexOf('off')
 }
 
 // =============================================================================
@@ -347,6 +371,9 @@ Boolean hasLineInCapability() {
 @Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
+@Field static final Integer WS_CONNECT_TIMEOUT_SECONDS = 20
+@Field static final Integer WS_HEALTH_CHECK_SECONDS = 300
+@Field static final Integer WS_STALE_TIMEOUT_SECONDS = 900
 // Per-(DNI, sid) subscription mutexes. Previously these were shared static
 // singletons, which caused every driver instance on the hub to serialize
 // through a single permit per sid -- a large contributor to the ZGT retry
@@ -477,7 +504,7 @@ void initialize() {
   Integer staggerDelay = getRandomLockRetry(3, 20)
   logDebug("Scheduling full subscription renewal in ${staggerDelay} seconds")
   runIn(staggerDelay, 'fullRenewSubscriptions', [overwrite: true])
-  // runEvery3Hours('fullRenewSubscriptions')
+  scheduleWebsocketHealthCheck()
 }
 void configure() {
   cancelAudioClipWatchdog()
@@ -532,6 +559,17 @@ void fullRenewSubscriptions() {
     return
   }
 
+  // A stored "open" status does not guarantee that the Hubitat WebSocket
+  // object is still usable. Force a new transport during a full renewal so
+  // queued commands such as volume and audio clips cannot be sent to a stale
+  // connection.
+  if(isWebsocketConnected()) {
+    logDebug('Closing existing WebSocket before full subscription renewal')
+    try { wsClose() }
+    catch(Exception e) { logTrace("Could not close existing WebSocket during renewal: ${e.message}") }
+    setWebSocketStatus('closed')
+  }
+
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
   runIn(7, 'subscribeToEvents', [overwrite: true])
   // Re-establish WebSocket and coordinator-specific subscriptions directly.
@@ -539,6 +577,52 @@ void fullRenewSubscriptions() {
   // re-subscription because deduplication guards skip processing when the coordinator
   // and group data haven't changed — which is the common case after renewal.
   runIn(9, 'resubscribeAfterRenewal', [overwrite: true])
+}
+
+void scheduleWebsocketHealthCheck() {
+  runIn(WS_HEALTH_CHECK_SECONDS, 'websocketHealthCheck', [overwrite: true])
+}
+
+void websocketHealthCheck() {
+  try {
+    if(state[WS_CONNECT_PENDING_STATE_KEY] == true) {
+      logWarn('WebSocket connection attempt exceeded timeout; retrying.')
+      state.remove(WS_CONNECT_PENDING_STATE_KEY)
+      setWebSocketStatus('closed')
+      scheduleWebSocketReconnect()
+      return
+    }
+
+    if(!isWebsocketConnected()) {
+      logInfo('WebSocket health check found the connection closed; reconnecting.')
+      scheduleWebSocketReconnect()
+      return
+    }
+
+    Long nowEpoch = (now() / 1000L) as Long
+    Long openedEpoch = (state.websocketOpenedAt ?: nowEpoch) as Long
+    Long lastEventEpoch = getLastWebsocketEventEpoch()
+    Long lastActivityEpoch = lastEventEpoch > 0L ? lastEventEpoch : openedEpoch
+    if((nowEpoch - lastActivityEpoch) > WS_STALE_TIMEOUT_SECONDS) {
+      logWarn("WebSocket health check found no inbound activity for ${nowEpoch - lastActivityEpoch}s; reconnecting.")
+      reconnectWebsocket('stale inbound activity')
+      return
+    }
+
+    // Generate a response that lets the next health check verify the socket.
+    if(getGroupId()) { getPlaybackStatus() }
+  } finally {
+    scheduleWebsocketHealthCheck()
+  }
+}
+
+void reconnectWebsocket(String reason) {
+  logInfo("Reconnecting WebSocket: ${reason}")
+  state.remove(WS_CONNECT_PENDING_STATE_KEY)
+  try { wsClose() }
+  catch(Exception e) { logTrace("Could not close WebSocket during reconnect: ${e.message}") }
+  setWebSocketStatus('closed')
+  runIn(1, 'initializeWebsocketConnection', [overwrite: true])
 }
 
 /**
@@ -1618,6 +1702,10 @@ void stop() {
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
+  if(getTransportStatus() == 'stopped') {
+    logDebug('Ignoring stop command because playback is already stopped')
+    return
+  }
   playerStop()
 }
 @CompileStatic
@@ -3961,7 +4049,7 @@ void releaseFavPlaylistDelegate() {
 
 // WS subscription status helpers — in-memory by default, also written to device data when debug logging is on
 Boolean isDebugLoggingEnabled() {
-  return settings.logEnable != false && settings.debugLogEnable != false
+  return loggingEnabled('debug')
 }
 
 @Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
@@ -4957,6 +5045,8 @@ void webSocketStatus(String message) {
     scheduleWebSocketReconnect()
   }
   else if(message == 'status: open') {
+    unschedule('websocketConnectWatchdog')
+    state.websocketOpenedAt = (now() / 1000L) as Long
     setWebSocketStatus('open')
     atomicState.wsRetryCount = 0 // Reset retry counter on successful connection
   }
@@ -4994,6 +5084,7 @@ void wsConnect() {
   state[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
     interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
+    runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
     unschedule('renewWebsocketConnection')
     unschedule('retryWebSocketConnection')
     scheduleResubscriptionToEvents('renewWebsocketConnection')
@@ -5001,6 +5092,15 @@ void wsConnect() {
     state.remove(WS_CONNECT_PENDING_STATE_KEY)
     setWebSocketStatus('closed')
     logWarn("WebSocket connect failed: ${e.message}")
+    scheduleWebSocketReconnect()
+  }
+}
+
+void websocketConnectWatchdog() {
+  if(state[WS_CONNECT_PENDING_STATE_KEY] == true && !isWebsocketConnected()) {
+    logWarn('WebSocket connection attempt timed out; retrying.')
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    setWebSocketStatus('closed')
     scheduleWebSocketReconnect()
   }
 }
@@ -6039,7 +6139,7 @@ void processWebsocketMessage(String message) {
   Map eventData = (json as List)[1]
   if(eventType == null || eventData == null) {return}
 
-  if(deviceSettings.logEnable != false && deviceSettings.traceLogEnable != false) {
+  if(loggingEnabled('trace')) {
     // Suppress consecutive duplicate WS event log messages to reduce logging load
     String eventSig = eventType.toString()
     String lastSig = lastWsEventLog.put(dni, eventSig)
@@ -6467,6 +6567,9 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
+    if(eventType?.namespace == 'audioClip') {
+      logWarn("Audio clip command '${eventType?.response}' failed: ${eventData}")
+    }
     if(eventType?.namespace == 'playback' && eventType?.response == 'stop') {
       if(eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
         logTrace("Stop command unavailable for current stream, issuing pause command...")
@@ -6691,6 +6794,10 @@ void extendAudioClipWatchdog(Map clipMessage) {
 
 void audioClipWatchdog() {
   if(atomicState.audioClipPlaying != true) { return }
+  if(!atomicState.audioClipQueueStartTime || !atomicState.audioClipQueueTotalDuration) {
+    logTrace('Ignoring stale audio clip watchdog callback because queue timing state is no longer active.')
+    return
+  }
   Integer totalDuration = (atomicState.audioClipQueueTotalDuration ?: AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS) as Integer
   Long startTime = (atomicState.audioClipQueueStartTime ?: 0L) as Long
   Integer elapsed = startTime ? ((now() - startTime) / 1000) as Integer : 0

@@ -91,7 +91,10 @@ class ScriptLoader {
       void metadata(Closure body) {}
       void mappings(Closure body) {}
       void library(Map args) {}
-      Object dynamicPage(Map args, Closure body) { args }
+      Object dynamicPage(Map args, Closure body) {
+        if (body != null) { body.call() }
+        args
+      }
       void section(Object... a) { if (a && a.last() instanceof Closure) ((Closure) a.last()).call() }
       void page(Map args, Closure body = null) { if (body != null) body.call() }
       void input(Object... a) {}

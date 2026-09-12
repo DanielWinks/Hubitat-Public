@@ -16,7 +16,7 @@ class SonosAdvGroupSpec extends Specification {
   }
 
   def setup() {
-    driver.settings = [logEnable: true, debugLogEnable: true]
+    driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
     driver.scheduled.clear()
     driver.unschedules.clear()
@@ -87,5 +87,13 @@ class SonosAdvGroupSpec extends Specification {
     driver.state.lastGroupingMode == 'ADDITIVE'
     driver.events.find { Map event -> event.name == 'groupingMode' }?.value == 'ADDITIVE'
     driver.events.find { Map event -> event.name == 'groupOperationStatus' }?.value == '{"status":"SUCCEEDED"}'
+  }
+
+  def "TTS voice cache update logs successfully"() {
+    when:
+    driver.updateTTSVoiceCache(['Matthew', 'Joanna'], 'Matthew')
+
+    then:
+    driver.logs.any { String entry -> entry.contains('TRACE') && entry.contains('TTS voice cache updated: 2 voices') }
   }
 }
