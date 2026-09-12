@@ -407,13 +407,18 @@ Actions:
 
 2. **Enter API Credentials**:
    - **Gemini API Key**: Paste your API key from Google AI Studio
-   - **Gemini Model**: Select your preferred model (default: `gemini-2.5-flash`)
-     - **gemini-3-pro-preview**: Most powerful, best for complex reasoning
-     - **gemini-3-flash-preview**: Fast, high-scale inference
-     - **gemini-2.5-flash**: Fast and balanced (recommended default)
-     - **gemini-2.5-pro**: Advanced reasoning for complex tasks
-     - **gemini-2.5-flash-lite**: Fastest, most cost-efficient
-     - **gemini-2.0-flash**: Legacy model
+   - **Gemini Model**: Select your preferred model (default: `gemini-3.8-flash`)
+     - **gemini-3.8-flash**: Current recommended stable Flash model
+     - **gemini-3.7-flash**: Stable Flash model for complex coding and multi-step tasks
+     - **gemini-3.6-flash**: Stable Flash model balancing speed and capability
+     - **gemini-3.5-flash**: Stable Flash model for routine, high-throughput work
+     - **gemini-3.5-flash-lite**: Fastest, most cost-efficient stable model
+     - **gemini-3.1-flash-lite**: Cost-efficient stable model
+     - **gemini-2.5-flash**: Stable balanced model
+     - **gemini-2.5-flash-lite**: Stable cost-efficient 2.5 model
+     - **gemini-2.5-pro**: Stable advanced reasoning model
+     - **gemini-3.1-pro-preview**: Preview model for advanced reasoning
+     - **gemini-3-flash-preview**: Preview model for fast, high-capability inference
 
 3. **Configure Generation Parameters**:
    - **Maximum Output Tokens** (50-8192): Controls max length of generated text
@@ -502,14 +507,19 @@ Actions:
 **Gemini Model**
 
 - **Type**: Dropdown selection (required)
-- **Default**: `gemini-2.5-flash`
+- **Default**: `gemini-3.8-flash`
 - **Options**:
-  - `gemini-3-pro-preview`: Cutting-edge reasoning, highest quality, slower
-  - `gemini-3-flash-preview`: Fast inference with excellent quality
-  - `gemini-2.5-flash`: Best balance of speed and quality (recommended)
-  - `gemini-2.5-pro`: Advanced reasoning for complex transformations
-  - `gemini-2.5-flash-lite`: Maximum speed and cost efficiency
-  - `gemini-2.0-flash`: Legacy model for compatibility
+  - `gemini-3.8-flash`: Current recommended stable Flash model
+  - `gemini-3.7-flash`: Stable Flash model for complex coding and multi-step tasks
+  - `gemini-3.6-flash`: Stable Flash model balancing speed and capability
+  - `gemini-3.5-flash`: Stable Flash model for routine, high-throughput work
+  - `gemini-3.5-flash-lite`: Fastest, most cost-efficient stable model
+  - `gemini-3.1-flash-lite`: Cost-efficient stable model
+  - `gemini-2.5-flash`: Stable balanced model
+  - `gemini-2.5-flash-lite`: Stable cost-efficient 2.5 model
+  - `gemini-2.5-pro`: Stable advanced reasoning model
+  - `gemini-3.1-pro-preview`: Preview model for advanced reasoning
+  - `gemini-3-flash-preview`: Preview model for fast, high-capability inference
 - **Cost Impact**: More advanced models may have higher API costs
 - **Access**: Ensure your Google Cloud project has access to selected model
 
@@ -1502,7 +1512,7 @@ Actions:
 
 2. **Check Model Access**:
    - Verify your Google Cloud project has Gemini API enabled
-   - Try switching to `gemini-2.5-flash` (most widely available)
+   - Try switching to `gemini-3.8-flash` (recommended stable model)
    - Check [Google Cloud Console](https://console.cloud.google.com/) for API status
 
 3. **Verify Quota**:
@@ -1524,8 +1534,8 @@ Actions:
 **Solutions**:
 
 1. Switch to a stable, widely-available model:
-   - Recommended: `gemini-2.5-flash`
-   - Alternative: `gemini-2.0-flash`
+   - Recommended: `gemini-3.8-flash`
+   - Alternative: `gemini-2.5-flash`
 
 2. Check Google AI Studio for available models in your region
 
@@ -1666,8 +1676,8 @@ Actions:
 **Solutions**:
 
 1. **Switch to Faster Model**:
-   - Use `gemini-2.5-flash-lite` (fastest)
-   - Or `gemini-2.5-flash` (balanced)
+   - Use `gemini-3.5-flash-lite` (fastest)
+   - Or `gemini-3.8-flash` (balanced and capable)
 
 2. **Reduce Token Limits**:
    - Lower max output tokens to 500 or less
@@ -1771,7 +1781,7 @@ Monthly cost: ~$1.00
 
 **Cost Optimization Tips**:
 
-1. Use `gemini-2.5-flash-lite` for simple rewrites (cheapest)
+1. Use `gemini-3.5-flash-lite` for simple rewrites (most cost-efficient)
 2. Lower `maxTokens` to minimum needed
 3. Cache frequently rewritten phrases locally (custom implementation)
 4. Batch rewrites when possible (process multiple messages per API call)
@@ -1779,12 +1789,12 @@ Monthly cost: ~$1.00
 
 ### Performance Characteristics
 
-**Typical Response Times**:
+**Relative Response Characteristics**:
 
-- **gemini-2.5-flash-lite**: 0.5-1.5 seconds
-- **gemini-2.5-flash**: 1-2 seconds
-- **gemini-2.5-pro**: 2-4 seconds
-- **gemini-3-pro**: 3-6 seconds
+- **gemini-3.5-flash-lite**: Fastest and most cost-efficient for simple rewrites
+- **gemini-3.8-flash**: Recommended balance of speed and capability
+- **gemini-2.5-pro**: More advanced reasoning, typically slower than Flash models
+- **gemini-3.1-pro-preview**: Advanced preview reasoning, typically slower than Flash models
 
 **Factors Affecting Speed**:
 
@@ -1796,7 +1806,7 @@ Monthly cost: ~$1.00
 
 **Optimization Strategies**:
 
-1. **Use Fastest Model**: gemini-2.5-flash-lite for low-latency needs
+1. **Use Fastest Model**: gemini-3.5-flash-lite for low-latency needs
 2. **Reduce Token Limits**: Set maxTokens to realistic minimum
 3. **Parallel Processing**: Process multiple independent requests concurrently
 4. **Local Caching**: Store frequently used rewrites in app state (custom implementation)
@@ -1831,7 +1841,7 @@ Monthly cost: ~$1.00
 ### Configuration Best Practices
 
 1. **Start with Defaults**:
-   - Use `gemini-2.5-flash` model
+   - Use `gemini-3.8-flash` model
    - Temperature: 0.7
    - Max tokens: 1000
    - Adjust only if needed
@@ -2356,12 +2366,17 @@ String prompt = buildSystemPrompt('improve')
 
 ## Version History
 
+### Version 1.1.3 (2026-09-12)
+
+- Updated the model selector to match Google's current Gemini API catalog
+- Removed retired model IDs and automatically migrates existing selections to `gemini-3.8-flash`
+
 ### Version 1.0.0 (2026-01-31)
 
 - Initial release
 - Six predefined rewriting modes (improve, shorten, lengthen, formalize, casual, simplify)
 - Custom mode with user-defined system prompts
-- Support for all current Gemini models (3 Pro, 3 Flash, 2.5 Pro, 2.5 Flash, 2.5 Flash-Lite, 2.0 Flash)
+- Support for the current Gemini text-generation models listed in the app configuration
 - HTTP API endpoints with JSON and plain text responses
 - Location event system for cross-app communication
 - Global variable storage for Rule Machine integration

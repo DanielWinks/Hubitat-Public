@@ -128,7 +128,7 @@ import com.hubitat.app.DeviceWrapper
  */
 definition(
   name: 'Gemini Text Rewriter',
-  version: '1.1.2',
+  version: '1.1.3',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   description: 'Use Google Gemini API to rewrite text snippets with various styles.',
@@ -148,20 +148,30 @@ definition(
 // Base URL for Google Gemini API
 @Field static final String GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models'
 
-// Available Gemini models (updated April 2026)
-// Free tier includes Flash and Flash-Lite variants; Pro models are paid-only
-// since April 1, 2026. gemini-3-pro-preview was shut down March 9, 2026.
+// Available Gemini text-generation models (updated September 2026)
+// Source: https://ai.google.dev/gemini-api/docs/models
 @Field static final Map GEMINI_MODELS = [
-  // Free tier
-  'gemini-2.5-flash': 'Gemini 2.5 Flash (Free Tier - Fast, Balanced - Recommended Default)',
-  'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite (Free Tier - Fastest, Highest Quota)',
-  'gemini-3-flash-preview': 'Gemini 3 Flash Preview (Free Tier - Newest Flash, Preview)',
-  'gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash-Lite Preview (Free Tier - Most Cost-Efficient, Preview)',
-  // Paid tier only
-  'gemini-2.5-pro': 'Gemini 2.5 Pro (PAID - Reasoning, Complex Tasks)',
-  'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview (PAID - Most Powerful Reasoning)',
-  // Legacy
-  'gemini-2.0-flash': 'Gemini 2.0 Flash (Legacy)'
+  // Stable Flash models
+  'gemini-3.8-flash': 'Gemini 3.8 Flash (Stable - Recommended Default)',
+  'gemini-3.7-flash': 'Gemini 3.7 Flash (Stable)',
+  'gemini-3.6-flash': 'Gemini 3.6 Flash (Stable)',
+  'gemini-3.5-flash': 'Gemini 3.5 Flash (Stable)',
+  'gemini-3.5-flash-lite': 'Gemini 3.5 Flash-Lite (Stable - Fastest, Most Cost-Efficient)',
+  'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite (Stable - Cost-Efficient)',
+  // Stable Gemini 2.5 models
+  'gemini-2.5-flash': 'Gemini 2.5 Flash (Stable - Balanced)',
+  'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite (Stable - Cost-Efficient)',
+  'gemini-2.5-pro': 'Gemini 2.5 Pro (Stable - Advanced Reasoning)',
+  // Preview models
+  'gemini-3.1-pro-preview': 'Gemini 3.1 Pro (Preview - Advanced Reasoning)',
+  'gemini-3-flash-preview': 'Gemini 3 Flash (Preview - Fast, High Capability)'
+]
+
+@Field static final String DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash'
+@Field static final List RETIRED_GEMINI_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-3-pro-preview',
+  'gemini-3.1-flash-lite-preview'
 ]
 
 // Predefined rewriting modes
@@ -231,7 +241,7 @@ Map mainPage() {
         title: 'Gemini Model',
         options: GEMINI_MODELS,
         required: true,
-        defaultValue: 'gemini-2.5-flash',
+        defaultValue: DEFAULT_GEMINI_MODEL,
         description: 'Select which Gemini model to use'
       )
 
@@ -484,6 +494,7 @@ paragraph('<b>Rewrite Text Endpoint (JSON Response):</b>')
 void configure() {
   logInfo('Configuring Gemini Text Rewriter')
   unsubscribe()
+  migrateRetiredGeminiModel()
 
   // Subscribe to location events for cross-app communication
   subscribe(location, 'geminiRewriteRequest', 'handleRewriteRequestEvent')
@@ -498,6 +509,17 @@ void configure() {
   }
 
   initialize()
+}
+
+/**
+ * Moves existing installations away from model IDs Google has shut down.
+ */
+void migrateRetiredGeminiModel() {
+  String configuredModel = settings.geminiModel as String
+  if (configuredModel && RETIRED_GEMINI_MODELS.contains(configuredModel)) {
+    logWarn("Gemini model ${configuredModel} is no longer available; switching to ${DEFAULT_GEMINI_MODEL}")
+    app.updateSetting('geminiModel', [value: DEFAULT_GEMINI_MODEL, type: 'enum'])
+  }
 }
 
 /**
@@ -1069,7 +1091,7 @@ Map rewriteText(String text, String mode = null, String customSystemPrompt = nul
     Map requestBody = buildGeminiRequest(systemPrompt, text)
 
     // Build the API endpoint URL
-    String modelName = (settings.geminiModel ?: 'gemini-2.5-flash').trim()
+    String modelName = (settings.geminiModel ?: DEFAULT_GEMINI_MODEL).trim()
     String apiKey = settings.geminiApiKey?.trim()
     String apiUrl = "${GEMINI_API_BASE}/${modelName}:generateContent?key=${apiKey}"
 
