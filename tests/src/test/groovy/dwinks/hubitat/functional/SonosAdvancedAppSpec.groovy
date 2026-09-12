@@ -573,6 +573,28 @@ class SonosAdvancedAppSpec extends Specification {
     markup.contains('No primary Sonos speakers have been discovered yet.') == false
   }
 
+  def "new UI speaker table restores discovered secondaries after the volatile map is cleared"() {
+    given:
+    appScript.discoveredSonoses['AA:BB:CC:DD:EE:01'] = [
+      id: 'RINCON_COORD', name: 'Kitchen', modelDisplayName: 'Arc', deviceIp: '192.168.1.10'
+    ]
+    appScript.discoveredSonosSecondaries['AA:BB:CC:DD:EE:02'] = [
+      id: 'RINCON_SECONDARY', primaryDeviceId: 'RINCON_COORD', modelDisplayName: 'Sub Mini',
+      deviceIp: '192.168.1.11'
+    ]
+    appScript.persistDiscoveredSonosSecondaries()
+    appScript.discoveredSonosSecondaries.clear()
+
+    when:
+    String markup = appScript.renderNewUiSpeakerTableMarkup()
+
+    then:
+    markup.contains('1 discovered')
+    markup.contains('Sub Mini')
+    markup.contains('192.168.1.11')
+    appScript.discoveredSonosSecondaries['AA:BB:CC:DD:EE:02'].id == 'RINCON_SECONDARY'
+  }
+
   def "new UI group table renders group device links, coordinator, followers, and actions"() {
     given:
     String groupName = 'Arc + 1 others'
@@ -754,5 +776,19 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.scheduled.any { List item -> item[0] == 60 && item[1] == 'stopDiscovery' }
     appScript.scheduled.any { List item -> item[1] == 'updateDiscoveryTimer' }
     appScript.logs.any { String entry -> entry.contains('Starting New UI Sonos speaker discovery') }
+  }
+
+  def "new UI discovery timer is rendered through SSR events"() {
+    given:
+    appScript.atomicState = [
+      discoveryRunning: true,
+      discoveryEndTime: appScript.now() + 60000L
+    ]
+
+    when:
+    String timerMarkup = appScript.processServerSideRender([name: 'discoveryTimer'])
+
+    then:
+    timerMarkup ==~ /<b>Discovery is running: [0-9]+ seconds remaining\.<\/b>/
   }
 }

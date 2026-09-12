@@ -187,6 +187,7 @@ preferences {
 // =============================================================================
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
+@Field static final String DISCOVERED_SONOS_SECONDARIES_STATE_KEY = 'discoveredSonosSecondaries'
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
@@ -418,11 +419,7 @@ Map newUiPage() {
     refreshInterval: 0
   ) {
     section() {
-      if(atomicState.discoveryRunning == true && atomicState.discoveryEndTime) {
-        Long endTime = atomicState.discoveryEndTime as Long
-        Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
-        paragraph "<b>Discovery is running: ${remainingSecs} seconds remaining.</b>"
-      }
+      paragraph "<span class='ssr-app-state-${app.id}-discoveryTimer'>${renderNewUiDiscoveryTimerMarkup()}</span>"
       input 'btnNewUiDiscoverSpeakers', 'button', title: 'Discover Speakers (60 seconds)', submitOnChange: true
       paragraph displayNewUiSpeakerTable()
     }
@@ -710,6 +707,7 @@ String renderNewUiSpeakerTableMarkup() {
 }
 
 List<Map> buildNewUiSpeakerRows() {
+  restoreDiscoveredSonosSecondaries()
   LinkedHashMap<String, Map> rowsById = new LinkedHashMap<String, Map>()
 
   discoveredSonoses.each { Object discoveryKey, Object rawInfo ->
@@ -2335,6 +2333,32 @@ void removeOrphans() {
 // - Additional checks prevent duplicates by playerId and IP address
 // - Selection page deduplicates by playerId to handle edge cases
 // =============================================================================
+void persistDiscoveredSonosSecondaries() {
+  LinkedHashMap<String, Map> persistedSecondaries = new LinkedHashMap<String, Map>()
+  discoveredSonosSecondaries.each { Object discoveryKey, Object rawInfo ->
+    if(discoveryKey != null && rawInfo instanceof Map) {
+      persistedSecondaries[discoveryKey.toString()] = new LinkedHashMap<String, Object>((Map)rawInfo)
+    }
+  }
+  state[DISCOVERED_SONOS_SECONDARIES_STATE_KEY] = persistedSecondaries
+}
+
+void restoreDiscoveredSonosSecondaries() {
+  if(discoveredSonosSecondaries == null) {
+    discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
+  }
+  if(!discoveredSonosSecondaries.isEmpty()) { return }
+
+  Object persisted = state[DISCOVERED_SONOS_SECONDARIES_STATE_KEY]
+  if(!(persisted instanceof Map)) { return }
+
+  ((Map)persisted).each { Object discoveryKey, Object rawInfo ->
+    if(discoveryKey != null && rawInfo instanceof Map) {
+      discoveredSonosSecondaries[discoveryKey.toString()] = new LinkedHashMap<String, Object>((Map)rawInfo)
+    }
+  }
+}
+
 void stopDiscovery() {
   if(atomicState.discoveryRunning == true) {
     logInfo('Stopping discovery...')
@@ -2342,6 +2366,7 @@ void stopDiscovery() {
   // Set flags FIRST so all guard checks see the stop immediately
   atomicState.discoveryRunning = false
   atomicState.discoveryEndTime = null
+  app.sendEvent(name: 'discoveryTimer', value: '0')
   // Clean up legacy state keys (migration from state → atomicState)
   state.remove('discoveryRunning')
   state.remove('discoveryEndTime')
@@ -2402,6 +2427,15 @@ void extendDiscovery(Integer seconds) {
   Integer totalRemaining = (Integer)(remainingMillis / 1000L)
   unschedule('stopDiscovery')
   runIn(totalRemaining, 'stopDiscovery')
+}
+
+String renderNewUiDiscoveryTimerMarkup() {
+  if(atomicState.discoveryRunning == true && atomicState.discoveryEndTime) {
+    Long endTime = atomicState.discoveryEndTime as Long
+    Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
+    return "<b>Discovery is running: ${remainingSecs} seconds remaining.</b>"
+  }
+  return '<b>Discovery has stopped.</b>'
 }
 
 void ssdpDiscover() {
@@ -2650,6 +2684,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     }
     if(!secondaryExists) {
       discoveredSonosSecondaries[mac] = discoveredSonosSecondary
+      persistDiscoveredSonosSecondaries()
       logTrace("Found secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
     }
     // Secondary devices should never appear in the main discovered list
@@ -2709,6 +2744,9 @@ void sendFoundSonosEvents() {
 // =============================================================================
 
 String processServerSideRender(Map event) {
+  if(event?.name == 'discoveryTimer') {
+    return renderNewUiDiscoveryTimerMarkup()
+  }
   if(event?.name == 'newUiSpeakerTable') {
     return "<div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>"
   }

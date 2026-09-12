@@ -194,6 +194,31 @@ class SonosAdvPlayerSpec extends Specification {
     ]
   }
 
+  def "stop does not send a request when playback is already stopped"() {
+    given:
+    driver.device.currentValues.transportStatus = 'stopped'
+
+    when:
+    driver.stop()
+
+    then:
+    websocketMessages.empty
+    driver.logs.any { String entry -> entry.contains('playback is already stopped') }
+  }
+
+  def "stop sends a playback stop request when playback is active"() {
+    given:
+    driver.device.currentValues.transportStatus = 'playing'
+
+    when:
+    driver.stop()
+
+    then:
+    websocketMessages.size() == 1
+    websocketMessages[0].contains('"namespace":"playback"')
+    websocketMessages[0].contains('"command":"stop"')
+  }
+
   def "playlist confirmation also polls before performing a bounded reload"() {
     given:
     driver.loadPlaylistFull('playlist-7', 'repeat all', 'replace', 'off', 'true', 'on')

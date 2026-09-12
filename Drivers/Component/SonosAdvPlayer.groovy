@@ -1702,6 +1702,10 @@ void stop() {
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
+  if(getTransportStatus() == 'stopped') {
+    logDebug('Ignoring stop command because playback is already stopped')
+    return
+  }
   playerStop()
 }
 @CompileStatic
