@@ -23,7 +23,6 @@
     }
   ],
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
-  "licenseFile": "https://github.com/DanielWinks/Hubitat-Public/blob/main/license.txt",
   "minimumHEVersion": "2.3.4",
   "packageName": "Gemini Text Rewriter",
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",

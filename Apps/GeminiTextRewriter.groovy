@@ -81,6 +81,39 @@ private void tryCreateAccessToken() {
   }
 }
 
+/**
+ * Hubitat lifecycle callbacks kept local so the app is standalone.
+ */
+void installed() {
+  initialize()
+}
+
+void updated() {
+  configure()
+}
+
+void uninstalled() {
+  unschedule()
+  removeChildDevice()
+}
+
+/**
+ * Legacy logging callbacks retained for compatibility with existing schedules.
+ */
+void logsOff() {
+  if (app) {
+    logWarn("Logging disabled for ${app}")
+    app.updateSetting('logEnable', [value: 'false', type: 'bool'])
+  }
+}
+
+void debugLogsOff() {
+  if (app) {
+    logWarn("Debug logging disabled for ${app}")
+    app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'])
+  }
+}
+
 // Import required Groovy/Java classes for HTTP operations and JSON parsing
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
