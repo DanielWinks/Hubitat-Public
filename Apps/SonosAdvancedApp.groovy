@@ -2870,10 +2870,24 @@ void groupCommandRequestHandler(Event event) {
     return
   }
 
+  enqueueGroupCommandRequest(request)
+}
+
+/**
+ * Queue a group command request received directly from a child driver. The
+ * group driver calls this from its deferred callback, preserving the same
+ * ordering boundary as the legacy event subscription without storing the
+ * request as a device current-state attribute.
+ */
+void enqueueGroupCommandRequest(Map request) {
+  if(!(request instanceof Map)) {
+    return
+  }
+
   String groupDni = request?.groupDni as String
   String command = request?.command as String
   if(!groupDni || !command || getChildDevice(groupDni) == null) {
-    logWarn("Ignoring group command request with invalid target or command: ${rawRequest}")
+    logWarn("Ignoring group command request with invalid target or command: ${JsonOutput.toJson(request)}")
     return
   }
 
@@ -3322,6 +3336,7 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     topologyFingerprint: null,
     topologyRefreshAt: startTime,
     topologyObservations: [:],
+    topologyMutationSent: false,
     lastCommandAt: 0L,
     lastCommand: null,
     registeredPlayerIds: [],
@@ -3412,7 +3427,8 @@ void startGroupFavoriteOperation(ChildDeviceWrapper groupDevice, Map rawSpec) {
 
   Map context = getFreshGroupingContext(groupDni)
   String contextMode = normalizeGroupOperationMode(context?.mode, GROUPING_MODE_CURRENT)
-  String deviceMode = normalizeGroupOperationMode(groupDevice.currentValue('groupingMode', true), GROUPING_MODE_CURRENT)
+  Object storedMode = groupDevice.getDataValue('lastGroupingMode') ?: groupDevice.currentValue('groupingMode', true)
+  String deviceMode = normalizeGroupOperationMode(storedMode, GROUPING_MODE_CURRENT)
   String groupingMode = contextMode != GROUPING_MODE_CURRENT ? contextMode : deviceMode
   Map target = buildGroupOperationTarget(groupDevice, groupingMode)
   if(!target.requiredPlayerIds || target.requiredPlayerIds.isEmpty()) {
@@ -3591,6 +3607,32 @@ String summarizeGroupOperationTopology(Map topology) {
   }.join('; ')
 }
 
+/**
+ * Return membership from the topology view that belongs to the coordinator
+ * selected for an additive operation. When the required players are in
+ * different groups, combining every observation would incorrectly make those
+ * separate groups look like one group. The selected coordinator's cached
+ * membership is the safe fallback until a fresh, consistent snapshot arrives.
+ */
+List<String> getAdditiveObservedPlayerIds(Map operation, Map topology) {
+  if(topology?.consistent == true) {
+    return normalizeGroupPlayerIds(topology.playerIds)
+  }
+  String coordinatorId = operation?.resolvedCoordinatorId as String
+  List<Map> observations = topology?.observations instanceof List
+      ? (List<Map>)topology.observations
+      : []
+  Map coordinatorObservation = observations.find { Map item ->
+    item.playerId?.toString() == coordinatorId
+  }
+  if(coordinatorObservation == null && operation?.desiredCoordinatorId) {
+    coordinatorObservation = observations.find { Map item ->
+      item.playerId?.toString() == operation.desiredCoordinatorId.toString()
+    }
+  }
+  return normalizeGroupPlayerIds(coordinatorObservation?.playerIds)
+}
+
 Boolean isGroupTopologySatisfied(Map operation, Map topology) {
   if(operation == null || topology?.consistent != true) { return false }
   Set<String> required = new HashSet<String>(normalizeGroupPlayerIds(operation.requiredPlayerIds))
@@ -3684,11 +3726,9 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       coordinator.playerCreateGroup(requiredPlayerIds)
     }
   } else {
-    if(topology?.fresh != true) {
-      // Additive and CURRENT operations must not use cached membership or a
-      // cached coordinator to mutate topology. Request a fresh groups
-      // snapshot and let the next operation pass decide whether a follower
-      // is actually missing.
+    if(operation.groupingMode == GROUPING_MODE_CURRENT && topology?.fresh != true) {
+      // CURRENT is explicitly read-only. It may wait for a fresh snapshot,
+      // but it must never mutate membership from cached data.
       operation.lastCommand = 'refreshGroupTopology'
       operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
       operation.lastCommandAt = now()
@@ -3696,21 +3736,46 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       refreshGroupOperationTopology([operationId: operation.operationId])
       return
     }
+    if(topology?.fresh != true && operation.topologyMutationSent == true) {
+      // Do not send the same join repeatedly while Sonos is still applying the
+      // previous mutation and its topology response is delayed.
+      operation.lastCommand = 'refreshGroupTopology'
+      operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+      operation.lastCommandAt = now()
+      saveActiveGroupOperation(operation)
+      refreshGroupOperationTopology([operationId: operation.operationId])
+      return
+    }
+    // A fresh, consistent snapshot is preferred. If a speaker's WebSocket
+    // response is delayed or unavailable, use the selected coordinator's
+    // cached membership instead of refusing to send the join command. Using
+    // only that coordinator's view is important: Arc and Kitchen can each
+    // report a valid standalone group, and unioning those views would hide the
+    // missing join.
+    List<String> coordinatorObservedPlayerIds = getAdditiveObservedPlayerIds(operation, topology)
     if(topology?.consistent == true && topology.coordinatorId) {
       operation.resolvedCoordinatorId = topology.coordinatorId as String
       coordinatorId = operation.resolvedCoordinatorId as String
       coordinator = rinconMap[coordinatorId]
+      coordinatorObservedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
       if(operation.favoriteId) {
         registerGroupFavoriteOperationOnPlayers(operation, [coordinatorId])
       }
+    }
+    if(topology?.fresh == true) {
+      operation.topologyMutationSent = false
     }
     if(coordinator == null) {
       logWarn("Could not resolve additive coordinator for group operation ${operation.operationId}")
       return
     }
-    List<String> followersToAdd = requiredPlayerIds.findAll { String id -> id != coordinatorId && !observedPlayerIds.contains(id) }
+    List<String> followersToAdd = requiredPlayerIds.findAll { String id ->
+      id != coordinatorId && !coordinatorObservedPlayerIds.contains(id)
+    }
     operation.lastCommand = 'addMissingPlayers'
+    logDebug("Sending additive group mutation for ${operation.operationId}: coordinator=${coordinatorId}, group=${coordinator.getDataValue('groupId')}, add=${followersToAdd}")
     if(followersToAdd) {
+      operation.topologyMutationSent = true
       coordinator.playerModifyGroupMembers(followersToAdd, [])
     } else {
       // The topology may be mid-transition or the player cache may be stale.
@@ -3967,6 +4032,7 @@ void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   operation.stableObservations = 0
   operation.topologyFingerprint = null
   operation.topologyObservations = [:]
+  operation.topologyMutationSent = false
   operation.observedGroupId = null
   operation.observedCoordinatorId = null
   operation.observedPlayerIds = []
@@ -4720,8 +4786,9 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
     attributes.currentlyJoinedPlayers = memberNames.toString().replaceAll(/^\[|\]$/, '').trim()
   }
   if(!attributes.isEmpty()) {
-    // updateBatchPlaybackState() is a local-only group-driver operation.
-    groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+    // Explicit refreshes retain the legacy behavior of hydrating all playback
+    // states even when the configured group is currently inactive.
+    groupDevice.applyRefreshedPlaybackState(JsonOutput.toJson(attributes))
   }
 }
 
@@ -5044,7 +5111,7 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
     observedPlayers.add(coordinatorId)
     String rememberedMode = getFreshGroupingContext(gd.getDeviceNetworkId())?.mode as String
-    String deviceMode = gd.currentValue('groupingMode', true)?.toString()
+    String deviceMode = (gd.getDataValue('lastGroupingMode') ?: gd.currentValue('groupingMode', true))?.toString()
     String groupingMode = normalizeGroupOperationMode(rememberedMode ?: deviceMode, GROUPING_MODE_EXPLICIT)
     Boolean membershipSatisfied = groupingMode == GROUPING_MODE_EXPLICIT
         ? configuredPlayers.equals(observedPlayers)

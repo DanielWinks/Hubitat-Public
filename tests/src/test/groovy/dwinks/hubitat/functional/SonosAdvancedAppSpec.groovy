@@ -57,6 +57,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 class SonosAppGroupDouble extends ChildDeviceWrapper {
   Long id = 201L
   List<Map> statuses = []
+  List<String> refreshedPlaybackUpdates = []
+
+  void applyRefreshedPlaybackState(String json) {
+    refreshedPlaybackUpdates << json
+  }
 
   void updateGroupOperationStatus(String statusJson, String groupingMode = null) {
     Map status = (Map)new JsonSlurper().parseText(statusJson)
@@ -167,6 +172,22 @@ class SonosAdvancedAppSpec extends Specification {
     ] as Event)
   }
 
+  def "explicit group refresh hydrates legacy playback states while inactive"() {
+    given:
+    coordinator.currentValues.status = 'playing'
+    coordinator.currentValues.currentTrackName = 'Only the Good Die Young'
+    coordinator.currentValues.currentArtistName = 'Billy Joel'
+
+    when:
+    appScript.processGroupCommandRequest([request: request('refresh')])
+
+    then:
+    group.refreshedPlaybackUpdates.size() == 1
+    group.refreshedPlaybackUpdates[0].contains('"status":"playing"')
+    group.refreshedPlaybackUpdates[0].contains('"currentTrackName":"Only the Good Die Young"')
+    group.refreshedPlaybackUpdates[0].contains('"currentArtistName":"Billy Joel"')
+  }
+
   def "explicit grouping evicts extras without using the additive join operation"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
@@ -204,6 +225,28 @@ class SonosAdvancedAppSpec extends Specification {
     follower.commands.every { it.name != 'playerCreateGroup' }
     follower.commands.every { it.name != 'playerModifyGroupMembers' || it.remove == [] }
     appScript.getActiveGroupOperation().groupingMode == 'ADDITIVE'
+  }
+
+  def "additive grouping sends the join when fresh topology responses are unavailable"() {
+    given:
+    coordinator.dataValues.groupId = 'GROUP-COORD'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    follower.dataValues.groupId = 'GROUP-FOLLOW'
+    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
+    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
+    Map operation = appScript.getActiveGroupOperation()
+    operation.lastCommandAt = appScript.now() - 4000L
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
+      name: 'playerModifyGroupMembers', add: ['RINCON_FOLLOW'], remove: []
+    ]
+    coordinator.commands.every { it.name != 'playerCreateGroup' }
   }
 
   def "topology satisfaction uses exact equality for explicit mode and subset matching for additive mode"() {

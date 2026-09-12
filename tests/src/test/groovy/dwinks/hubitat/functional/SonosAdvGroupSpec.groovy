@@ -2,8 +2,17 @@ package dwinks.hubitat.functional
 
 import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
+import groovy.json.JsonOutput
 import spock.lang.Shared
 import spock.lang.Specification
+
+class SonosGroupParentDouble {
+  List<Map> requests = []
+
+  void enqueueGroupCommandRequest(Map request) {
+    requests << request
+  }
+}
 
 class SonosAdvGroupSpec extends Specification {
 
@@ -70,6 +79,20 @@ class SonosAdvGroupSpec extends Specification {
     driver.events.empty
   }
 
+  def "deferred group commands use the parent queue without creating a current-state event"() {
+    given:
+    SonosGroupParentDouble parent = new SonosGroupParentDouble()
+    driver.binding.setVariable('parent', parent)
+    Map payload = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'request-1', command: 'refresh', args: [:]]
+
+    when:
+    driver.emitGroupCommandRequest([payload: payload])
+
+    then:
+    parent.requests == [payload]
+    driver.events.empty
+  }
+
   def "setVolumeZero publishes a zero-volume group command without an argument"() {
     when:
     driver.setVolumeZero()
@@ -85,8 +108,45 @@ class SonosAdvGroupSpec extends Specification {
 
     then:
     driver.state.lastGroupingMode == 'ADDITIVE'
-    driver.events.find { Map event -> event.name == 'groupingMode' }?.value == 'ADDITIVE'
-    driver.events.find { Map event -> event.name == 'groupOperationStatus' }?.value == '{"status":"SUCCEEDED"}'
+    driver.device.dataValues.lastGroupingMode == 'ADDITIVE'
+    driver.events.find { Map event -> event.name == 'groupingMode' } == null
+    driver.events.find { Map event -> event.name == 'groupOperationStatus' } == null
+  }
+
+  def "explicit refresh hydrates legacy playback states while group is inactive"() {
+    given:
+    driver.settings.onlyUpdateWhenActive = true
+    driver.device.currentValues.switch = 'off'
+
+    when:
+    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
+      status: 'playing', currentTrackName: 'Only the Good Die Young',
+      currentArtistName: 'Billy Joel', volume: 26, mute: 'unmuted'
+    ]))
+
+    then:
+    driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
+    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Only the Good Die Young'
+    driver.events.find { Map event -> event.name == 'currentArtistName' }?.value == 'Billy Joel'
+    driver.events.find { Map event -> event.name == 'volume' }?.value == 26
+    driver.events.find { Map event -> event.name == 'groupVolume' }?.value == 26
+    driver.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
+    driver.events.find { Map event -> event.name == 'groupMute' }?.value == 'unmuted'
+  }
+
+  def "deprecated diagnostic states are removed during initialization"() {
+    given:
+    driver.device.currentValues.groupCommandRequest = '{"command":"refresh"}'
+    driver.device.currentValues.groupingMode = 'ADDITIVE'
+    driver.device.currentValues.groupOperationStatus = '{"status":"FAILED"}'
+
+    when:
+    driver.initialize()
+
+    then:
+    !driver.device.currentValues.containsKey('groupCommandRequest')
+    !driver.device.currentValues.containsKey('groupingMode')
+    !driver.device.currentValues.containsKey('groupOperationStatus')
   }
 
   def "TTS voice cache update logs successfully"() {

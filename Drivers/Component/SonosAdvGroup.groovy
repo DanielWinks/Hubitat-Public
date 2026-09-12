@@ -23,7 +23,6 @@
 
 import groovy.transform.Field
 import java.util.concurrent.ConcurrentHashMap
-import groovy.json.JsonOutput
 
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 
@@ -68,9 +67,13 @@ void logTrace(String message) {
 @Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
-@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'groupCommandRequest'
 @Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
+@Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
+  'groupCommandRequest',
+  'groupingMode',
+  'groupOperationStatus'
+]
 
 metadata {
   definition(
@@ -150,11 +153,6 @@ metadata {
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
-    attribute 'groupingMode', 'enum', [ 'EXPLICIT', 'ADDITIVE' ]
-    attribute 'groupOperationStatus', 'string'
-    // Internal asynchronous command bridge to the parent app. Group commands
-    // publish requests instead of synchronously calling parent child lookups.
-    attribute 'groupCommandRequest', 'string'
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
@@ -208,7 +206,12 @@ metadata {
         required: false, defaultValue: true
     }
     section('Logging Settings') {
-      input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
+      input 'logLevel', 'enum',
+        title: 'Logging level',
+        options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
+        required: false,
+        defaultValue: 'info',
+        submitOnChange: true
     }
   }
 }
@@ -237,6 +240,26 @@ Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolum
 Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
 Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
 
+void setLastGroupingMode(String groupingMode) {
+  if(groupingMode != GROUPING_MODE_EXPLICIT && groupingMode != GROUPING_MODE_ADDITIVE) {
+    return
+  }
+  state.lastGroupingMode = groupingMode
+  // Keep the mode available to the parent app without creating a device
+  // current-state attribute. Data values are not rendered as current states.
+  device.updateDataValue('lastGroupingMode', groupingMode)
+}
+
+void removeDeprecatedGroupStates() {
+  DEPRECATED_GROUP_STATE_ATTRIBUTES.each { String attributeName ->
+    try {
+      device.deleteCurrentState(attributeName)
+    } catch(Exception e) {
+      logDebug("Could not remove deprecated group state ${attributeName}: ${e.message}")
+    }
+  }
+}
+
 Map getGroupCommandSettings() {
   return [
     useProportionalVolume: getUseProportionalVolumeSetting(),
@@ -245,10 +268,10 @@ Map getGroupCommandSettings() {
 }
 
 /**
- * Publish a group command for the parent app to process after this driver
- * invocation returns. Keeping the bridge event-based prevents a group command
- * from holding the group driver's platform method slot while it waits for the
- * parent app to look up and invoke another child device.
+ * Queue a group command for the parent app to process after this driver
+ * invocation returns. The scheduled boundary prevents a group command from
+ * holding the group driver's platform method slot while the parent app looks
+ * up and invokes another child device, without persisting a bridge attribute.
  */
 void requestGroupCommand(String command, Map args = [:]) {
   if(!command) {
@@ -268,7 +291,15 @@ void requestGroupCommand(String command, Map args = [:]) {
 void emitGroupCommandRequest(Map data) {
   Map payload = data?.payload instanceof Map ? (Map)data.payload : null
   if(payload?.command) {
-    sendEvent(name: GROUP_COMMAND_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+    try {
+      if(parent != null) {
+        parent.enqueueGroupCommandRequest(payload)
+      } else {
+        logWarn("Could not dispatch group command ${payload.command}: parent app is unavailable")
+      }
+    } catch(Exception e) {
+      logWarn("Could not dispatch group command ${payload.command}: ${e.message}")
+    }
   }
 }
 
@@ -338,13 +369,31 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 
 
 void initialize() {
+  removeDeprecatedGroupStates()
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
   if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
   if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
   // Initialize volume/mute state from coordinator
   runIn(5, 'refresh')
 }
+
+void installed() { initialize() }
+
+void updated() {
+  initialize()
+  configure()
+}
+
+void uninstalled() {
+  unschedule()
+  String dni = device.getDeviceNetworkId()
+  groupDeviceVolumeFadeState.remove(dni)
+  lastGroupDeviceVolumeFadeCallTime.remove(dni)
+  heldPlaybackState.remove(dni)
+}
+
 void configure() {
+  removeDeprecatedGroupStates()
   Boolean wasGuarded = state.lastOnlyUpdateWhenActive != false
   Boolean isGuarded = getOnlyUpdateWhenActiveSetting()
   state.lastOnlyUpdateWhenActive = isGuarded
@@ -355,7 +404,7 @@ void configure() {
   }
 }
 void on() {
-  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   Map args = getGroupCommandSettings()
   args.groupingMode = GROUPING_MODE_EXPLICIT
   requestGroupCommand('on', args)
@@ -421,7 +470,7 @@ void joinPlayersToCoordinator() {
     logWarn('No followers found to join to coordinator')
     return
   }
-  state.lastGroupingMode = GROUPING_MODE_ADDITIVE
+  setLastGroupingMode(GROUPING_MODE_ADDITIVE)
   requestGroupCommand('joinPlayersToCoordinator', [groupingMode: GROUPING_MODE_ADDITIVE])
 }
 
@@ -443,7 +492,7 @@ void groupPlayers() {
   // Exact grouping is owned by the parent app's operation coordinator. Keeping
   // the mode in the request means this command cannot accidentally take the
   // additive join path when the current group contains extra players.
-  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   requestGroupCommand('groupPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
 }
 
@@ -453,7 +502,7 @@ void createGroupAfterUngroup() {
     logWarn('Cannot create group after ungroup - no players found')
     return
   }
-  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   requestGroupCommand('regroupAfterUngroup', [groupingMode: GROUPING_MODE_EXPLICIT])
 }
 
@@ -479,7 +528,7 @@ void evictUnlistedPlayers() {
     logWarn('No players found to manage')
     return
   }
-  state.lastGroupingMode = GROUPING_MODE_EXPLICIT
+  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   requestGroupCommand('evictUnlistedPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
 }
 
@@ -490,11 +539,7 @@ void evictUnlistedPlayers() {
  */
 void updateGroupOperationStatus(String statusJson, String groupingMode = null) {
   if(groupingMode == GROUPING_MODE_EXPLICIT || groupingMode == GROUPING_MODE_ADDITIVE) {
-    state.lastGroupingMode = groupingMode
-    sendEvent(name: 'groupingMode', value: groupingMode)
-  }
-  if(statusJson) {
-    sendEvent(name: 'groupOperationStatus', value: statusJson)
+    setLastGroupingMode(groupingMode)
   }
 }
 
@@ -698,6 +743,19 @@ void refresh() {
  * @param jsonAttributes JSON string of attribute name-value pairs
  */
 void updateBatchPlaybackState(String jsonAttributes) {
+  processBatchPlaybackState(jsonAttributes, false)
+}
+
+/**
+ * Apply an explicit refresh from the parent app. Refresh historically copied
+ * the coordinator's complete playback state even while the configured group
+ * was inactive, so it must not be blocked by onlyUpdateWhenActive.
+ */
+void applyRefreshedPlaybackState(String jsonAttributes) {
+  processBatchPlaybackState(jsonAttributes, true)
+}
+
+private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlaybackUpdate) {
   Map attributes = (Map)parseJson(jsonAttributes)
 
   // Separate membership keys (always processed) from playback keys (guarded)
@@ -722,6 +780,12 @@ void updateBatchPlaybackState(String jsonAttributes) {
   Boolean isActive = membershipAttrs.containsKey('switch')
       ? membershipAttrs['switch'] == 'on'
       : wasActive
+
+  if(forcePlaybackUpdate) {
+    applyPlaybackAttributes(playbackAttrs)
+    clearHeldState()
+    return
+  }
 
   // If guard is off, always apply playback state
   if(!getOnlyUpdateWhenActiveSetting()) {
