@@ -112,7 +112,7 @@ class HubitatScriptHarness extends Script {
   // ----- Child device stubs (override in spec for richer behavior) -----
   List<MockDevice> children = []
   List<MockDevice> getChildDevices() { children }
-  MockDevice getChildDevice(String dni) { children.find { it.deviceNetworkId == dni } }
+  Object getChildDevice(String dni) { children.find { it.deviceNetworkId == dni } }
   MockDevice addChildDevice(String namespace, String typeName, String dni, Map props = [:]) {
     MockDevice d = new MockDevice(deviceNetworkId: dni, displayName: props.label ?: typeName, properties: props.properties ?: [:])
     children << d
@@ -158,6 +158,7 @@ class MockDevice {
   Map<String, String> dataValues = [:]
   Map<String, Object> currentValues = [:]
   Map<String, Object> updatedSettings = [:]
+  List<Map> events = []
 
   Object currentValue(String n, boolean skipCache = false) { currentValues[n] }
   void   updateSetting(String n, Object v) { updatedSettings[n] = v }
@@ -171,6 +172,10 @@ class MockDevice {
   String getDataValue(String name) { dataValues[name] }
   void updateDataValue(String name, String value) { dataValues[name] = value }
   void removeDataValue(String name) { dataValues.remove(name) }
+  void sendEvent(Map event) {
+    events << event
+    if(event?.name) { currentValues[event.name as String] = event.value }
+  }
   List<Map> getCurrentStates() {
     currentValues.collect { String n, Object v -> [name: n, value: v] }
   }
@@ -181,8 +186,11 @@ class MockDevice {
 class MockApp {
   Long id = 42L
   String label = 'Test App'
+  List children = []
   String getId() { id?.toString() }
   String getLabel() { label }
+  List getChildDevices() { children }
+  Object getChildDevice(String dni) { children.find { it?.deviceNetworkId == dni } }
 }
 
 /** Minimal dynamic Z-Wave factory used by driver behavior tests. */

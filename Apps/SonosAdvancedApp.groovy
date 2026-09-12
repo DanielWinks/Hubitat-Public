@@ -26,6 +26,8 @@ import groovy.transform.CompileStatic
 import com.hubitat.app.ChildDeviceWrapper
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
+import com.hubitat.hub.domain.Event
+import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
 import groovy.util.slurpersupport.GPathResult
 import hubitat.scheduling.AsyncResponse
@@ -194,6 +196,29 @@ preferences {
 // on the same device back to back.
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
+@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'groupCommandRequest'
+@Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
+@Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
+@Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
+@Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
+@Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
+@Field static final String DEFERRED_GROUP_COMMANDS_STATE_KEY = 'deferredGroupOperationCommands'
+@Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
+@Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
+@Field static final String GROUPING_MODE_CURRENT = 'CURRENT'
+@Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
+@Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
+@Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
+@Field static final Integer GROUP_OPERATION_STABILITY_OBSERVATIONS = 2
+@Field static final Integer GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS = 4
+@Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
+@Field static final Integer GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS = 2
+@Field static final Integer GROUP_OPERATION_MAX_PLAY_ATTEMPTS = 1
+@Field static final Integer GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS = 3
+@Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
+@Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
+@Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
+@Field static final Integer GROUP_STATE_DRAIN_MAX_ATTEMPTS = 3
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -649,6 +674,7 @@ void saveGroup() {
   app.removeSetting('editDeleteGroup')
 
   createGroupDevices()
+  runIn(1, 'subscribeToGroupCommandRequests')
 }
 
 void deleteGroup() {
@@ -669,6 +695,7 @@ void deleteGroup() {
   // Update groupDevices setting to match remaining groups so removeOrphans() can detect the orphaned device
   app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
   removeOrphans()
+  runIn(1, 'subscribeToGroupCommandRequests')
 }
 
 void cancelGroupEdit() {
@@ -704,6 +731,20 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  subscribeToGroupCommandRequests()
+  Map activeGroupOperation = getActiveGroupOperation()
+  if(activeGroupOperation != null) {
+    if(!activeGroupOperation.favoriteId || activeGroupOperation.phase == 'ENSURE_GROUP') {
+      refreshGroupOperationTopology([operationId: activeGroupOperation.operationId])
+    }
+    runIn(1, 'advanceGroupFavoriteOperation', [
+      overwrite: true,
+      data: [operationId: activeGroupOperation.operationId]
+    ])
+  }
+  if(state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map) {
+    runIn(1, 'drainGroupCommandRequests', [overwrite: true])
+  }
 
   state.remove('favs')
   unschedule('appGetFavoritesLocal')
@@ -825,6 +866,22 @@ void createGroupDevices() {
   removeOrphans()
 }
 
+/**
+ * Group devices publish command requests as an attribute event. Subscribing
+ * the parent app to that event gives commands a one-way boundary: the group
+ * driver never has to synchronously call parent.getDeviceFromRincon() while a
+ * parent callback may be updating group state.
+ */
+void subscribeToGroupCommandRequests() {
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    subscribe(groupDevice, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
+  }
+  getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
+    subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
+    subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
+  }
+}
+
 void createPlayerDevicesWithFeedback() {
   List<String> willBeCreated = settings.playerDevices ? (settings.playerDevices - getCreatedPlayerDevices()) : []
   if(willBeCreated.size() == 0) {
@@ -841,6 +898,7 @@ void createPlayerDevicesWithFeedback() {
 
 void finalizePlayerCreation(Map data) {
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
+  runIn(1, 'subscribeToGroupCommandRequests')
   Integer createdCount = data.createdCount as Integer
   Integer expectedCount = data.expectedCount as Integer
   if(createdCount == expectedCount) {
@@ -1161,7 +1219,8 @@ void extendDiscovery(Integer seconds) {
   Long currentEnd = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
   Long newEnd = Math.max(currentEnd, now()) + (seconds * 1000L)
   atomicState.discoveryEndTime = newEnd
-  Integer totalRemaining = (Integer)(((newEnd) - now()) / 1000)
+  Long remainingMillis = newEnd - now()
+  Integer totalRemaining = (Integer)(remainingMillis / 1000L)
   unschedule('stopDiscovery')
   runIn(totalRemaining, 'stopDiscovery')
 }
@@ -1502,13 +1561,1930 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return app.getChildDevices().find { it.getDataValue('id') == rincon }
 }
 
+/**
+ * Queue a child event so player callbacks never synchronously fan out into
+ * another child device. The queue is keyed by target DNI and attribute, so a
+ * burst of state changes keeps only the newest value for each attribute.
+ */
 void sendChildEvent(String dni, Map event) {
-  ChildDeviceWrapper child = getChildDevice(dni)
-  if(child == null) {
-    logWarn("sendChildEvent: no child device found for DNI ${dni}")
+  if(!dni || !event?.name) {
     return
   }
-  child.sendEvent(event)
+  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
+      : [:]
+  Map<String, Object> childEvents = pending[dni] instanceof Map
+      ? pending[dni]
+      : [:]
+  childEvents[event.name as String] = event.value
+  pending[dni] = childEvents
+  state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
+  runIn(1, 'drainQueuedChildEvents', [overwrite: true])
+}
+
+/**
+ * Deliver queued child events after the originating player callback has
+ * returned. This method intentionally performs only the final child event
+ * delivery and never calls back into a player or group command.
+ */
+void drainQueuedChildEvents() {
+  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
+      : [:]
+  state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
+  if(pending.isEmpty()) {
+    return
+  }
+
+  pending.each { String dni, Map<String, Object> eventsForChild ->
+    ChildDeviceWrapper child = getChildDevice(dni)
+    if(child == null) {
+      logWarn("drainQueuedChildEvents: no child device found for DNI ${dni}")
+      return
+    }
+    eventsForChild.each { String name, Object value ->
+      if(value != null) {
+        child.sendEvent(name: name, value: value)
+      }
+    }
+  }
+}
+
+/**
+ * Receive a command request emitted by a Sonos Advanced Group device. Group
+ * drivers deliberately publish requests instead of synchronously traversing
+ * back through the parent app. The app owns child-device lookup and forwards
+ * only to player devices, so this handler cannot form an app -> group -> app
+ * call cycle.
+ */
+void groupCommandRequestHandler(Event event) {
+  String rawRequest = event?.value?.toString()
+  if(!rawRequest) {
+    logWarn('Ignoring empty group command request')
+    return
+  }
+
+  Map request
+  try {
+    request = (Map)parseJson(rawRequest)
+  } catch(Exception e) {
+    logWarn("Ignoring malformed group command request: ${e.message}")
+    return
+  }
+
+  String groupDni = request?.groupDni as String
+  String command = request?.command as String
+  if(!groupDni || !command || getChildDevice(groupDni) == null) {
+    logWarn("Ignoring group command request with invalid target or command: ${rawRequest}")
+    return
+  }
+
+  // Requests from a group device can arrive in the same scheduler tick as a
+  // Favorite request. Drain them in request-sequence order so an explicit or
+  // additive grouping request is attached to the following Favorite load
+  // instead of racing it.
+  Map<String, List<Map>> pending = state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[GROUP_COMMAND_QUEUE_STATE_KEY]
+      : [:]
+  List<Map> groupRequests = pending[groupDni] instanceof List
+      ? (List<Map>)pending[groupDni]
+      : []
+  groupRequests.add(request)
+  pending[groupDni] = groupRequests
+  state[GROUP_COMMAND_QUEUE_STATE_KEY] = pending
+  runIn(1, 'drainGroupCommandRequests', [overwrite: true])
+}
+
+void drainGroupCommandRequests() {
+  Map<String, List<Map>> pending = state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[GROUP_COMMAND_QUEUE_STATE_KEY]
+      : [:]
+  state.remove(GROUP_COMMAND_QUEUE_STATE_KEY)
+  pending.each { String groupDni, List<Map> requests ->
+    List<Map> ordered = (requests ?: []).sort { Map request -> groupCommandRequestSequence(request) }
+    ordered.each { Map request -> processGroupCommandRequest([request: request]) }
+  }
+}
+
+Integer groupCommandRequestSequence(Map request) {
+  String requestId = request?.requestId as String
+  if(!requestId) { return Integer.MAX_VALUE }
+  String sequenceText = requestId.contains('-')
+      ? requestId.substring(requestId.lastIndexOf('-') + 1)
+      : requestId
+  try {
+    return sequenceText.toInteger()
+  } catch(Exception ignored) {
+    return Integer.MAX_VALUE
+  }
+}
+
+void processGroupCommandRequest(Map data) {
+  Map request = data?.request instanceof Map ? (Map)data.request : null
+  String groupDni = request?.groupDni as String
+  String command = request?.command as String
+  if(!groupDni || !command) {
+    return
+  }
+
+  ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
+  if(groupDevice == null) {
+    logWarn("Group command ${command} ignored because ${groupDni} no longer exists")
+    return
+  }
+
+  Map args = request.args instanceof Map ? (Map)request.args : [:]
+  String requestId = request.requestId as String
+  logDebug("Processing group command ${command} for ${groupDni}${requestId ? " (${requestId})" : ''}")
+
+  if(isGroupOperationCommand(command)) {
+    Map activeOperation = getActiveGroupOperation()
+    if(activeOperation && activeOperation.groupDni as String != groupDni) {
+      deferGroupCommandRequest(request)
+      return
+    }
+  }
+
+  try {
+    Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+    String coordinatorId = groupDevice.getDataValue('groupCoordinatorId')
+    List<String> playerIds = getAllPlayersForGroupDevice(groupDevice).unique()
+    ChildDeviceWrapper configuredCoordinator = coordinatorId ? rinconMap[coordinatorId] : null
+    ChildDeviceWrapper coordinator = resolveGroupCommandCoordinator(configuredCoordinator, playerIds, rinconMap)
+    String resolvedCoordinatorId = coordinator?.getDataValue('id') ?: coordinatorId
+    List<String> followerIds = playerIds.findAll { String id -> id != resolvedCoordinatorId }
+    List<ChildDeviceWrapper> playerDevices = playerIds.collect { String id -> rinconMap[id] }.findAll { it != null }
+
+    switch(command) {
+      case 'on':
+      case 'evictUnlistedPlayers':
+      case 'regroupAfterUngroup':
+      case 'createGroup':
+      case 'groupPlayers':
+        startGroupTopologyOperation(groupDevice, GROUPING_MODE_EXPLICIT, args)
+        break
+
+      case 'off':
+      case 'removePlayersFromCoordinator':
+      case 'ungroupPlayers':
+        cancelActiveGroupOperation(groupDni, "${command.toUpperCase()}_REQUESTED")
+        if(coordinator && followerIds) {
+          coordinator.playerModifyGroupMembers([], followerIds)
+        } else if(!coordinator) {
+          logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
+        }
+        break
+
+      case 'joinPlayersToCoordinator':
+        startGroupTopologyOperation(groupDevice, GROUPING_MODE_ADDITIVE, args)
+        break
+
+      case 'refresh':
+        refreshGroupDeviceState(groupDevice, coordinator, playerDevices, args)
+        break
+
+      case 'playAudioClip':
+        cancelActiveGroupOperation(groupDni, 'AUDIO_CLIP_REQUESTED')
+        playerDevices.each { ChildDeviceWrapper player ->
+          player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume))
+        }
+        break
+
+      case 'playHighPriorityTrack':
+        cancelActiveGroupOperation(groupDni, 'HIGH_PRIORITY_TRACK_REQUESTED')
+        playerDevices.each { ChildDeviceWrapper player ->
+          player.playerLoadAudioClipHighPriority(args.uri as String, toBigDecimal(args.volume))
+        }
+        break
+
+      case 'enqueueLowPriorityTrack':
+        cancelActiveGroupOperation(groupDni, 'LOW_PRIORITY_TRACK_REQUESTED')
+        playerDevices.each { ChildDeviceWrapper player ->
+          player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume))
+        }
+        break
+
+      case 'play':
+        cancelActiveGroupOperation(groupDni, 'PLAY_REQUESTED')
+        if(coordinator) { coordinator.play() }
+        break
+      case 'pause':
+        cancelActiveGroupOperation(groupDni, 'PAUSE_REQUESTED')
+        if(coordinator) { coordinator.pause() }
+        break
+      case 'stop':
+        cancelActiveGroupOperation(groupDni, 'STOP_REQUESTED')
+        if(coordinator) { coordinator.stop() }
+        break
+      case 'nextTrack':
+        cancelActiveGroupOperation(groupDni, 'NEXT_TRACK_REQUESTED')
+        if(coordinator) { coordinator.nextTrack() }
+        break
+      case 'previousTrack':
+        cancelActiveGroupOperation(groupDni, 'PREVIOUS_TRACK_REQUESTED')
+        if(coordinator) { coordinator.previousTrack() }
+        break
+      case 'playTrack':
+        cancelActiveGroupOperation(groupDni, 'PLAY_TRACK_REQUESTED')
+        if(coordinator) { coordinator.playTrack(args.uri as String, toBigDecimal(args.volume)) }
+        break
+      case 'setTrack':
+        cancelActiveGroupOperation(groupDni, 'SET_TRACK_REQUESTED')
+        if(coordinator) { coordinator.setTrack(args.uri as String) }
+        break
+
+      case 'setVolume':
+        executeGroupVolumeCommand(coordinator, playerDevices, args)
+        break
+      case 'volumeUp':
+        executeGroupRelativeVolumeCommand(coordinator, playerDevices, args, 1)
+        break
+      case 'volumeDown':
+        executeGroupRelativeVolumeCommand(coordinator, playerDevices, args, -1)
+        break
+      case 'mute':
+        executeGroupMuteCommand(coordinator, playerDevices, args, true)
+        break
+      case 'unmute':
+        executeGroupMuteCommand(coordinator, playerDevices, args, false)
+        break
+
+      case 'setRepeatMode':
+        if(coordinator) { coordinator.setRepeatMode(args.mode as String) }
+        break
+      case 'repeatOne':
+        if(coordinator) { coordinator.repeatOne() }
+        break
+      case 'repeatAll':
+        if(coordinator) { coordinator.repeatAll() }
+        break
+      case 'repeatNone':
+        if(coordinator) { coordinator.repeatNone() }
+        break
+      case 'setShuffle':
+        if(coordinator) { coordinator.setShuffle(args.mode as String) }
+        break
+      case 'shuffleOn':
+        if(coordinator) { coordinator.shuffleOn() }
+        break
+      case 'shuffleOff':
+        if(coordinator) { coordinator.shuffleOff() }
+        break
+      case 'setCrossfade':
+        if(coordinator) { coordinator.setCrossfade(args.mode as String) }
+        break
+      case 'enableCrossfade':
+        if(coordinator) { coordinator.enableCrossfade() }
+        break
+      case 'disableCrossfade':
+        if(coordinator) { coordinator.disableCrossfade() }
+        break
+      case 'getFavorites':
+        if(coordinator) { coordinator.getFavorites() }
+        break
+      case 'loadFavorite':
+        startGroupFavoriteOperation(groupDevice, [
+          favoriteId: args.favoriteId as String,
+          repeatMode: 'off',
+          queueMode: 'replace',
+          shuffleMode: 'off',
+          autoPlay: 'true',
+          crossfadeMode: 'on'
+        ])
+        break
+      case 'loadFavoriteFull':
+        startGroupFavoriteOperation(groupDevice, [
+          favoriteId: args.favoriteId as String,
+          repeatMode: args.repeatMode as String,
+          queueMode: args.queueMode as String,
+          shuffleMode: args.shuffleMode as String,
+          autoPlay: args.autoPlay as String,
+          crossfadeMode: args.crossfadeMode as String
+        ])
+        break
+      case 'getPlaylists':
+        if(coordinator) { coordinator.getPlaylists() }
+        break
+      case 'loadPlaylist':
+        cancelActiveGroupOperation(groupDni, 'PLAYLIST_REQUESTED')
+        if(coordinator) { coordinator.loadPlaylist(args.playlistId as String) }
+        break
+      case 'loadPlaylistFull':
+        cancelActiveGroupOperation(groupDni, 'PLAYLIST_REQUESTED')
+        if(coordinator) {
+          coordinator.loadPlaylistFull(
+            args.playlistId as String,
+            args.repeatMode as String,
+            args.queueMode as String,
+            args.shuffleMode as String,
+            args.autoPlay as String,
+            args.crossfadeMode as String
+          )
+        }
+        break
+      default:
+        logWarn("Unsupported group command '${command}'")
+    }
+  } catch(Exception e) {
+    logWarn("Group command ${command} failed for ${groupDni}: ${e.message}")
+  }
+}
+
+Boolean isGroupOperationCommand(String command) {
+  return command in [
+    'on', 'groupPlayers', 'createGroup', 'regroupAfterUngroup',
+    'evictUnlistedPlayers', 'joinPlayersToCoordinator',
+    'loadFavorite', 'loadFavoriteFull',
+    'off', 'removePlayersFromCoordinator', 'ungroupPlayers'
+  ]
+}
+
+Map getActiveGroupOperation() {
+  return state[GROUP_OPERATION_STATE_KEY] instanceof Map
+      ? (Map)state[GROUP_OPERATION_STATE_KEY]
+      : null
+}
+
+void saveActiveGroupOperation(Map operation) {
+  if(operation != null) {
+    state[GROUP_OPERATION_STATE_KEY] = operation
+  }
+}
+
+String newGroupOperationId() {
+  Integer sequence = ((state.groupOperationSequence ?: 0) as Integer) + 1
+  state.groupOperationSequence = sequence
+  return "${app.id ?: 'sonos'}-${now()}-${sequence}"
+}
+
+String normalizeGroupOperationMode(Object value, String defaultMode = GROUPING_MODE_CURRENT) {
+  String normalized = value?.toString()?.trim()?.toUpperCase()
+  if(normalized in [GROUPING_MODE_EXPLICIT, GROUPING_MODE_ADDITIVE, GROUPING_MODE_CURRENT]) {
+    return normalized
+  }
+  return defaultMode
+}
+
+String normalizeGroupOperationValue(Object value, String defaultValue) {
+  String normalized = value?.toString()?.trim()
+  return normalized ? normalized : defaultValue
+}
+
+Map normalizeGroupFavoriteSpec(Map rawSpec) {
+  Map spec = rawSpec ?: [:]
+  return [
+    favoriteId: spec.favoriteId?.toString(),
+    repeatMode: normalizeGroupOperationValue(spec.repeatMode, 'off').toLowerCase(),
+    queueMode: normalizeGroupOperationValue(spec.queueMode, 'replace').toLowerCase(),
+    shuffleMode: normalizeGroupOperationValue(spec.shuffleMode, 'off').toLowerCase(),
+    autoPlay: normalizeGroupOperationValue(spec.autoPlay, 'true').toLowerCase(),
+    crossfadeMode: normalizeGroupOperationValue(spec.crossfadeMode, 'on').toLowerCase()
+  ]
+}
+
+Map getFreshGroupingContext(String groupDni) {
+  Map contexts = state[GROUPING_CONTEXTS_STATE_KEY] instanceof Map
+      ? (Map)state[GROUPING_CONTEXTS_STATE_KEY]
+      : [:]
+  Map context = contexts[groupDni] instanceof Map ? (Map)contexts[groupDni] : null
+  if(context == null) { return null }
+  Long expiresAt = context.expiresAt as Long
+  if(expiresAt != null && expiresAt < now()) {
+    contexts.remove(groupDni)
+    state[GROUPING_CONTEXTS_STATE_KEY] = contexts
+    return null
+  }
+  return context
+}
+
+void storeGroupingContext(Map operation) {
+  if(operation == null || !operation.groupDni || !operation.groupingMode || operation.favoriteId) {
+    return
+  }
+  Map contexts = state[GROUPING_CONTEXTS_STATE_KEY] instanceof Map
+      ? (Map)state[GROUPING_CONTEXTS_STATE_KEY]
+      : [:]
+  contexts[operation.groupDni as String] = [
+    mode: operation.groupingMode as String,
+    requiredPlayerIds: normalizeGroupPlayerIds(operation.requiredPlayerIds),
+    coordinatorId: operation.resolvedCoordinatorId as String,
+    expiresAt: now() + GROUPING_CONTEXT_TTL_SECONDS * 1000L
+  ]
+  state[GROUPING_CONTEXTS_STATE_KEY] = contexts
+}
+
+void deferGroupCommandRequest(Map request) {
+  if(!(request instanceof Map)) { return }
+  List<Map> deferred = state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_GROUP_COMMANDS_STATE_KEY]
+      : []
+  deferred.add(request)
+  state[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferred
+  logInfo("Deferring group command ${request.command} for ${request.groupDni} until the current group operation completes")
+}
+
+void drainDeferredGroupOperationCommands() {
+  if(getActiveGroupOperation() != null) {
+    return
+  }
+  List<Map> deferred = state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_GROUP_COMMANDS_STATE_KEY]
+      : []
+  state.remove(DEFERRED_GROUP_COMMANDS_STATE_KEY)
+  if(deferred.isEmpty()) { return }
+
+  Map nextRequest = deferred.remove(0)
+  if(!deferred.isEmpty()) {
+    state[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferred
+  }
+  processGroupCommandRequest([request: nextRequest])
+  if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List && !getActiveGroupOperation()) {
+    runIn(1, 'drainDeferredGroupOperationCommands', [overwrite: true])
+  }
+}
+
+List<String> normalizeGroupPlayerIds(Object raw) {
+  List<String> ids = []
+  if(raw instanceof Collection) {
+    ((Collection)raw).each { Object value ->
+      String id = value?.toString()?.trim()
+      if(id) { ids.add(id) }
+    }
+  } else if(raw != null) {
+    raw.toString().split(',').each { String value ->
+      String id = value?.trim()
+      if(id) { ids.add(id) }
+    }
+  }
+  return ids.unique().sort()
+}
+
+Object getGroupOperationChildValue(ChildDeviceWrapper player, String name) {
+  if(player == null) { return null }
+  Object value = player.getDataValue(name)
+  if(value == null || value.toString().trim() == '') {
+    try {
+      value = player.currentValue(name, true)
+    } catch(Exception ignored) {
+      value = player.currentValue(name)
+    }
+  }
+  return value
+}
+
+Map buildGroupOperationTarget(ChildDeviceWrapper groupDevice, String groupingMode) {
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<String> requiredPlayerIds = getAllPlayersForGroupDevice(groupDevice).collect { String id -> id?.trim() }
+      .findAll { String id -> id }
+      .unique()
+      .sort()
+  String configuredCoordinatorId = groupDevice.getDataValue('groupCoordinatorId') as String
+  ChildDeviceWrapper configuredCoordinator = configuredCoordinatorId ? rinconMap[configuredCoordinatorId] : null
+  ChildDeviceWrapper activeCoordinator = resolveGroupCommandCoordinator(configuredCoordinator, requiredPlayerIds, rinconMap)
+  ChildDeviceWrapper selectedCoordinator
+  if(groupingMode == GROUPING_MODE_EXPLICIT) {
+    selectedCoordinator = configuredCoordinator ?: activeCoordinator
+  } else {
+    // Additive/current operations continue using the live coordinator when
+    // one of the configured players identifies it. They never change the
+    // coordinator merely to satisfy the configured group definition.
+    selectedCoordinator = activeCoordinator ?: configuredCoordinator
+  }
+  String selectedId = selectedCoordinator?.getDataValue('id') as String
+  return [
+    requiredPlayerIds: requiredPlayerIds,
+    configuredCoordinatorId: configuredCoordinatorId,
+    desiredCoordinatorId: configuredCoordinatorId ?: selectedId,
+    resolvedCoordinatorId: selectedId,
+    missingPlayerIds: requiredPlayerIds.findAll { String id -> rinconMap[id] == null },
+    playerIdsWithDevices: requiredPlayerIds.findAll { String id -> rinconMap[id] != null }
+  ]
+}
+
+Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map target,
+    Map favoriteSpec = null) {
+  Long startTime = now()
+  Map operation = [
+    operationId: newGroupOperationId(),
+    groupDni: groupDevice.getDeviceNetworkId(),
+    groupingMode: groupingMode,
+    requiredPlayerIds: target.requiredPlayerIds ?: [],
+    desiredCoordinatorId: target.desiredCoordinatorId,
+    resolvedCoordinatorId: target.resolvedCoordinatorId,
+    allowExtraPlayers: groupingMode != GROUPING_MODE_EXPLICIT,
+    mutateTopology: groupingMode != GROUPING_MODE_CURRENT,
+    phase: 'ENSURE_GROUP',
+    status: 'ENSURING_TOPOLOGY',
+    createdAt: startTime,
+    deadlineAt: startTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L,
+    topologyAttempt: 0,
+    favoriteAttempt: 0,
+    playAttempt: 0,
+    stableObservations: 0,
+    topologyFingerprint: null,
+    topologyRefreshAt: startTime,
+    topologyObservations: [:],
+    lastCommandAt: 0L,
+    lastCommand: null,
+    registeredPlayerIds: [],
+    observedPlayerIds: [],
+    observedGroupId: null,
+    observedCoordinatorId: null,
+    lastTopologyObservations: [],
+    loadAcknowledged: false,
+    loadErrorCode: null,
+    loadErrorReason: null,
+    playbackState: null,
+    favoriteCommandAt: 0L,
+    favoriteAttemptId: null,
+    favoriteExpectedGroupId: null,
+    favoriteExpectedCoordinatorId: null,
+    favoriteTopologyRefreshAt: 0L,
+    favoriteTopologyObservations: [:],
+    favoriteTopologyAttempt: 0,
+    favoriteTopologyStableObservations: 0,
+    favoriteTopologyLastObservedAt: 0L,
+    favoriteTopologyFingerprint: null,
+    favoriteTopologyVerified: false,
+    playerPlaybackStates: [:],
+    metadataConfirmed: false,
+    exactFavoriteId: null
+  ]
+  if(favoriteSpec != null) {
+    operation.putAll(normalizeGroupFavoriteSpec(favoriteSpec))
+  }
+  return operation
+}
+
+void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map args = [:]) {
+  String groupDni = groupDevice?.getDeviceNetworkId()
+  if(!groupDni) { return }
+  String normalizedMode = normalizeGroupOperationMode(groupingMode, GROUPING_MODE_EXPLICIT)
+  Map active = getActiveGroupOperation()
+  if(active && active.groupDni as String == groupDni) {
+    if(!active.favoriteId && active.groupingMode == normalizedMode && active.phase != 'COMPLETE') {
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: active.operationId]
+      ])
+      return
+    }
+    cancelActiveGroupOperation(groupDni, 'SUPERSEDED_BY_GROUPING_REQUEST')
+  }
+
+  Map target = buildGroupOperationTarget(groupDevice, normalizedMode)
+  if(!target.requiredPlayerIds || target.requiredPlayerIds.isEmpty()) {
+    logWarn("Group operation for ${groupDni} has no configured players")
+    return
+  }
+  if(target.missingPlayerIds && !target.missingPlayerIds.isEmpty()) {
+    logWarn("Group operation for ${groupDni} is missing child devices for ${target.missingPlayerIds}")
+  }
+
+  Map operation = buildNewGroupOperation(groupDevice, normalizedMode, target)
+  saveActiveGroupOperation(operation)
+  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+  refreshGroupOperationTopology([operationId: operation.operationId])
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void startGroupFavoriteOperation(ChildDeviceWrapper groupDevice, Map rawSpec) {
+  String groupDni = groupDevice?.getDeviceNetworkId()
+  Map favoriteSpec = normalizeGroupFavoriteSpec(rawSpec)
+  if(!groupDni || !favoriteSpec.favoriteId) {
+    logWarn("Ignoring group Favorite request for ${groupDni ?: 'unknown group'} without a Favorite ID")
+    return
+  }
+
+  Map active = getActiveGroupOperation()
+  if(active && active.groupDni as String == groupDni) {
+    if(!active.favoriteId && active.groupingMode in [GROUPING_MODE_EXPLICIT, GROUPING_MODE_ADDITIVE]) {
+      attachFavoriteToGroupOperation(active, favoriteSpec)
+      return
+    }
+    if(active.favoriteId?.toString() == favoriteSpec.favoriteId?.toString() && active.phase != 'COMPLETE') {
+      return
+    }
+    cancelActiveGroupOperation(groupDni, 'SUPERSEDED_BY_FAVORITE_REQUEST')
+  }
+
+  Map context = getFreshGroupingContext(groupDni)
+  String contextMode = normalizeGroupOperationMode(context?.mode, GROUPING_MODE_CURRENT)
+  String deviceMode = normalizeGroupOperationMode(groupDevice.currentValue('groupingMode', true), GROUPING_MODE_CURRENT)
+  String groupingMode = contextMode != GROUPING_MODE_CURRENT ? contextMode : deviceMode
+  Map target = buildGroupOperationTarget(groupDevice, groupingMode)
+  if(!target.requiredPlayerIds || target.requiredPlayerIds.isEmpty()) {
+    logWarn("Group Favorite ${favoriteSpec.favoriteId} has no configured players for ${groupDni}")
+    return
+  }
+
+  Map operation = buildNewGroupOperation(groupDevice, groupingMode, target, favoriteSpec)
+  saveActiveGroupOperation(operation)
+  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+  refreshGroupOperationTopology([operationId: operation.operationId])
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
+  if(operation == null || operation.favoriteId) { return }
+  Map favoriteSpec = normalizeGroupFavoriteSpec(rawSpec)
+  if(!favoriteSpec.favoriteId) { return }
+  operation.putAll(favoriteSpec)
+  operation.favoriteAttempt = 0
+  operation.playAttempt = 0
+  operation.loadAcknowledged = false
+  operation.loadErrorCode = null
+  operation.loadErrorReason = null
+  operation.playbackState = null
+  operation.favoriteCommandAt = now()
+  operation.favoriteAttemptId = null
+  operation.favoriteExpectedGroupId = null
+  operation.favoriteExpectedCoordinatorId = null
+  operation.favoriteTopologyRefreshAt = 0L
+  operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyAttempt = 0
+  operation.favoriteTopologyStableObservations = 0
+  operation.favoriteTopologyLastObservedAt = 0L
+  operation.favoriteTopologyFingerprint = null
+  operation.favoriteTopologyVerified = false
+  operation.playerPlaybackStates = [:]
+  operation.metadataConfirmed = false
+  operation.exactFavoriteId = null
+  operation.deadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
+  saveActiveGroupOperation(operation)
+  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+  refreshGroupOperationTopology([operationId: operation.operationId])
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void registerGroupFavoriteOperationOnPlayers(Map operation, Collection ids) {
+  if(operation == null || !operation.operationId) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<String> registered = normalizeGroupPlayerIds(operation.registeredPlayerIds)
+  normalizeGroupPlayerIds(ids).each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player == null || registered.contains(playerId)) { return }
+    registered.add(playerId)
+    operation.registeredPlayerIds = registered
+    saveActiveGroupOperation(operation)
+    try {
+      player.registerGroupFavoriteOperation(operation.operationId as String, operation.favoriteId as String)
+    } catch(Exception e) {
+      logWarn("Could not register group Favorite operation ${operation.operationId} on ${playerId}: ${e.message}")
+    }
+  }
+}
+
+void setGroupFavoriteOperationAttemptOnPlayers(Map operation, Collection ids) {
+  if(operation == null || !operation.operationId || !operation.favoriteAttemptId) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  normalizeGroupPlayerIds(ids).each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try {
+        player.setGroupFavoriteOperationAttempt(
+          operation.operationId as String,
+          operation.favoriteAttemptId as String,
+          operation.favoriteExpectedGroupId as String
+        )
+      } catch(Exception e) {
+        logDebug("Could not update Favorite attempt ${operation.favoriteAttemptId} on ${playerId}: ${e.message}")
+      }
+    }
+  }
+}
+
+Map readGroupTopologyFromObservations(Map operation, Map recordedObservations, Long refreshAt) {
+  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation?.requiredPlayerIds)
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  Map observationsByPlayer = recordedObservations instanceof Map ? recordedObservations : [:]
+  Long observationRefreshAt = refreshAt ?: 0L
+  List<Map> observations = []
+  requiredPlayerIds.each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    Map recorded = observationsByPlayer[playerId] instanceof Map
+        ? (Map)observationsByPlayer[playerId]
+        : null
+    Long observedAt = recorded?.observedAt as Long
+    Boolean fresh = recorded != null && observedAt != null && observedAt >= observationRefreshAt
+    String groupId = fresh
+        ? recorded.groupId?.toString()
+        : getGroupOperationChildValue(player, 'groupId')?.toString()
+    String coordinatorId = fresh
+        ? recorded.coordinatorId?.toString()
+        : getGroupOperationChildValue(player, 'groupCoordinatorId')?.toString()
+    List<String> playerIds = fresh
+        ? normalizeGroupPlayerIds(recorded.playerIds)
+        : normalizeGroupPlayerIds(getGroupOperationChildValue(player, 'groupPlayerIds'))
+    if(player == null) {
+      groupId = null
+      coordinatorId = null
+      playerIds = []
+    }
+    observations.add([
+      playerId: playerId,
+      groupId: groupId,
+      coordinatorId: coordinatorId,
+      playerIds: playerIds,
+      fresh: fresh,
+      observedAt: observedAt
+    ])
+  }
+
+  Boolean fresh = !observations.isEmpty() && observations.every { Map item -> item.fresh == true }
+  Boolean complete = fresh && observations.every { Map item ->
+    item.groupId && item.coordinatorId && item.playerIds && !item.playerIds.isEmpty()
+  }
+  Boolean consistent = complete && observations.every { Map item ->
+    item.groupId == observations[0].groupId &&
+      item.coordinatorId == observations[0].coordinatorId &&
+      normalizeGroupPlayerIds(item.playerIds) == normalizeGroupPlayerIds(observations[0].playerIds)
+  }
+  Map first = observations ? observations[0] : [:]
+  String fingerprint = observations.collect { Map item ->
+    "${item.playerId}:${item.groupId ?: ''}:${item.coordinatorId ?: ''}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
+  }.join('|')
+  return [
+    fresh: fresh,
+    consistent: consistent,
+    groupId: consistent ? first.groupId as String : null,
+    coordinatorId: consistent ? first.coordinatorId as String : null,
+    playerIds: consistent ? normalizeGroupPlayerIds(first.playerIds) : [],
+    observations: observations,
+    fingerprint: fingerprint
+  ]
+}
+
+Map readGroupOperationTopology(Map operation) {
+  Map observations = operation?.topologyObservations instanceof Map
+      ? (Map)operation.topologyObservations
+      : [:]
+  Long refreshAt = (operation?.topologyRefreshAt ?: 0L) as Long
+  return readGroupTopologyFromObservations(operation, observations, refreshAt)
+}
+
+Map readFavoriteGroupTopology(Map operation) {
+  Map observations = operation?.favoriteTopologyObservations instanceof Map
+      ? (Map)operation.favoriteTopologyObservations
+      : [:]
+  Long refreshAt = (operation?.favoriteTopologyRefreshAt ?: 0L) as Long
+  return readGroupTopologyFromObservations(operation, observations, refreshAt)
+}
+
+String summarizeGroupOperationTopology(Map topology) {
+  List<Map> observations = topology?.observations instanceof List
+      ? (List<Map>)topology.observations
+      : []
+  if(observations.isEmpty()) { return 'No configured player topology was available.' }
+  return observations.collect { Map item ->
+    "${item.playerId}: group=${item.groupId ?: 'unknown'}, coordinator=${item.coordinatorId ?: 'unknown'}, members=${normalizeGroupPlayerIds(item.playerIds).join(',') ?: 'unknown'}"
+  }.join('; ')
+}
+
+Boolean isGroupTopologySatisfied(Map operation, Map topology) {
+  if(operation == null || topology?.consistent != true) { return false }
+  Set<String> required = new HashSet<String>(normalizeGroupPlayerIds(operation.requiredPlayerIds))
+  Set<String> observed = new HashSet<String>(normalizeGroupPlayerIds(topology.playerIds))
+  if(required.isEmpty() || !topology.coordinatorId || !topology.groupId) { return false }
+  if(operation.groupingMode == GROUPING_MODE_EXPLICIT) {
+    String desiredCoordinatorId = operation.desiredCoordinatorId as String
+    return required == observed && topology.coordinatorId == desiredCoordinatorId
+  }
+  // ADDITIVE and CURRENT deliberately accept extra members. The actual
+  // coordinator is observed rather than changed by these modes.
+  return observed.containsAll(required)
+}
+
+void updateGroupTopologyStability(Map operation, Map topology) {
+  Boolean satisfied = isGroupTopologySatisfied(operation, topology)
+  if(!satisfied) {
+    operation.stableObservations = 0
+    operation.topologyFingerprint = null
+    return
+  }
+  String fingerprint = topology.fingerprint as String
+  if(fingerprint && fingerprint == operation.topologyFingerprint) {
+    operation.stableObservations = ((operation.stableObservations ?: 0) as Integer) + 1
+  } else {
+    operation.topologyFingerprint = fingerprint
+    operation.stableObservations = 1
+  }
+}
+
+void updateFavoriteGroupTopologyStability(Map operation, Map topology) {
+  Boolean satisfied = isFavoriteGroupTopologySatisfied(operation, topology)
+  if(!satisfied) {
+    operation.favoriteTopologyStableObservations = 0
+    operation.favoriteTopologyLastObservedAt = 0L
+    operation.favoriteTopologyFingerprint = null
+    return
+  }
+
+  String fingerprint = topology.fingerprint as String
+  Long latestObservedAt = topology.observations instanceof List
+      ? ((List<Map>)topology.observations).collect { Map item -> item.observedAt as Long }
+          .findAll { Long observedAt -> observedAt != null }
+          .max()
+      : null
+  Long previousObservedAt = operation.favoriteTopologyLastObservedAt as Long ?: 0L
+  if(fingerprint && fingerprint == operation.favoriteTopologyFingerprint &&
+      latestObservedAt != null && latestObservedAt > previousObservedAt) {
+    operation.favoriteTopologyStableObservations =
+        ((operation.favoriteTopologyStableObservations ?: 0) as Integer) + 1
+  } else if(fingerprint != operation.favoriteTopologyFingerprint) {
+    operation.favoriteTopologyFingerprint = fingerprint
+    operation.favoriteTopologyStableObservations = 1
+  }
+  if(latestObservedAt != null && latestObservedAt > previousObservedAt) {
+    operation.favoriteTopologyLastObservedAt = latestObservedAt
+  }
+}
+
+Boolean isFavoriteGroupTopologySatisfied(Map operation, Map topology) {
+  if(!isGroupTopologySatisfied(operation, topology)) { return false }
+  String expectedGroupId = operation?.favoriteExpectedGroupId as String
+  String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
+  if(expectedGroupId && topology?.groupId != expectedGroupId) { return false }
+  if(expectedCoordinatorId && topology?.coordinatorId != expectedCoordinatorId) { return false }
+  return true
+}
+
+void sendGroupTopologyCommand(Map operation, Map topology) {
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  String coordinatorId = operation.resolvedCoordinatorId as String
+  ChildDeviceWrapper coordinator = coordinatorId ? rinconMap[coordinatorId] : null
+  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
+  List<String> observedPlayerIds = normalizeGroupPlayerIds(topology?.playerIds)
+  if(operation.groupingMode == GROUPING_MODE_EXPLICIT) {
+    coordinatorId = operation.desiredCoordinatorId as String ?: coordinatorId
+    coordinator = coordinatorId ? rinconMap[coordinatorId] : coordinator
+    Boolean canEvictExtras = topology?.consistent == true &&
+        topology.coordinatorId == coordinatorId &&
+        new HashSet<String>(observedPlayerIds).containsAll(new HashSet<String>(requiredPlayerIds))
+    if(coordinator == null) {
+      failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE', "Could not resolve explicit coordinator ${coordinatorId}")
+      return
+    }
+    if(canEvictExtras && observedPlayerIds.size() > requiredPlayerIds.size()) {
+      List<String> extras = observedPlayerIds.findAll { String id -> !requiredPlayerIds.contains(id) }
+      operation.lastCommand = 'removeExtraPlayers'
+      coordinator.playerModifyGroupMembers([], extras)
+    } else {
+      operation.lastCommand = 'createExactGroup'
+      coordinator.playerCreateGroup(requiredPlayerIds)
+    }
+  } else {
+    if(topology?.fresh != true) {
+      // Additive and CURRENT operations must not use cached membership or a
+      // cached coordinator to mutate topology. Request a fresh groups
+      // snapshot and let the next operation pass decide whether a follower
+      // is actually missing.
+      operation.lastCommand = 'refreshGroupTopology'
+      operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+      operation.lastCommandAt = now()
+      saveActiveGroupOperation(operation)
+      refreshGroupOperationTopology([operationId: operation.operationId])
+      return
+    }
+    if(topology?.consistent == true && topology.coordinatorId) {
+      operation.resolvedCoordinatorId = topology.coordinatorId as String
+      coordinatorId = operation.resolvedCoordinatorId as String
+      coordinator = rinconMap[coordinatorId]
+      if(operation.favoriteId) {
+        registerGroupFavoriteOperationOnPlayers(operation, [coordinatorId])
+      }
+    }
+    if(coordinator == null) {
+      logWarn("Could not resolve additive coordinator for group operation ${operation.operationId}")
+      return
+    }
+    List<String> followersToAdd = requiredPlayerIds.findAll { String id -> id != coordinatorId && !observedPlayerIds.contains(id) }
+    operation.lastCommand = 'addMissingPlayers'
+    if(followersToAdd) {
+      coordinator.playerModifyGroupMembers(followersToAdd, [])
+    } else {
+      // The topology may be mid-transition or the player cache may be stale.
+      // Refresh group data without changing membership; extras are preserved.
+      coordinator.playerGetGroupsFull()
+    }
+  }
+  operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+  operation.lastCommandAt = now()
+  saveActiveGroupOperation(operation)
+  runIn(1, 'refreshGroupOperationTopology', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void refreshGroupOperationTopology(Map data = [:]) {
+  Map operation = getActiveGroupOperation()
+  String callbackOperationId = data?.operationId as String
+  if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId) || operation.favoriteId && operation.phase != 'ENSURE_GROUP') {
+    return
+  }
+  operation.topologyRefreshAt = now()
+  operation.topologyObservations = [:]
+  operation.stableObservations = 0
+  operation.topologyFingerprint = null
+  operation.observedGroupId = null
+  operation.observedCoordinatorId = null
+  operation.observedPlayerIds = []
+  saveActiveGroupOperation(operation)
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<String> refreshIds = normalizeGroupPlayerIds(
+    normalizeGroupPlayerIds(operation.requiredPlayerIds) +
+    [operation.desiredCoordinatorId as String, operation.resolvedCoordinatorId as String]
+  )
+  refreshIds.each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try { player.playerGetGroupsFull() }
+      catch(Exception e) { logDebug("Could not refresh group topology from ${playerId}: ${e.message}") }
+    }
+  }
+}
+
+void refreshGroupFavoriteTopology(Map operation, Boolean resetStability = true) {
+  if(operation == null || !operation.favoriteId) { return }
+  operation.favoriteTopologyRefreshAt = now()
+  operation.favoriteTopologyAttempt = ((operation.favoriteTopologyAttempt ?: 0) as Integer) + 1
+  operation.favoriteTopologyObservations = [:]
+  if(resetStability == true) {
+    operation.favoriteTopologyStableObservations = 0
+    operation.favoriteTopologyLastObservedAt = 0L
+    operation.favoriteTopologyFingerprint = null
+  }
+  operation.favoriteTopologyVerified = false
+  saveActiveGroupOperation(operation)
+
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<String> refreshIds = normalizeGroupPlayerIds(
+    normalizeGroupPlayerIds(operation.requiredPlayerIds) +
+    [
+      operation.favoriteExpectedCoordinatorId as String,
+      operation.resolvedCoordinatorId as String
+    ]
+  )
+  refreshIds.each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try { player.playerGetGroupsFull() }
+      catch(Exception e) { logDebug("Could not refresh post-Favorite group topology from ${playerId}: ${e.message}") }
+    }
+  }
+}
+
+void sendGroupFavoriteLoad(Map operation, Map topology) {
+  if(!operation.favoriteId || topology?.consistent != true || !topology.groupId || !topology.coordinatorId) {
+    return
+  }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  String coordinatorId = topology.coordinatorId as String
+  ChildDeviceWrapper coordinator = rinconMap[coordinatorId]
+  if(coordinator == null) {
+    failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE', "Could not resolve live coordinator ${coordinatorId}")
+    return
+  }
+  operation.resolvedCoordinatorId = coordinatorId
+  registerGroupFavoriteOperationOnPlayers(operation, [coordinatorId])
+  operation.phase = 'WAIT_FOR_FAVORITE'
+  operation.status = 'LOADING_FAVORITE'
+  operation.favoriteAttempt = ((operation.favoriteAttempt ?: 0) as Integer) + 1
+  operation.loadAcknowledged = false
+  operation.loadErrorCode = null
+  operation.loadErrorReason = null
+  operation.playbackState = null
+  operation.favoriteCommandAt = now()
+  operation.favoriteAttemptId = null
+  operation.favoriteExpectedGroupId = null
+  operation.favoriteExpectedCoordinatorId = null
+  operation.favoriteTopologyRefreshAt = 0L
+  operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyAttempt = 0
+  operation.favoriteTopologyStableObservations = 0
+  operation.favoriteTopologyLastObservedAt = 0L
+  operation.favoriteTopologyFingerprint = null
+  operation.favoriteTopologyVerified = false
+  operation.favoriteAttemptId = "${operation.operationId}:${operation.favoriteAttempt}".toString()
+  operation.favoriteExpectedGroupId = topology.groupId as String
+  operation.favoriteExpectedCoordinatorId = coordinatorId
+  operation.playerPlaybackStates = [:]
+  operation.metadataConfirmed = false
+  operation.exactFavoriteId = null
+  operation.lastCommandAt = operation.favoriteCommandAt
+  saveActiveGroupOperation(operation)
+  setGroupFavoriteOperationAttemptOnPlayers(operation, operation.requiredPlayerIds)
+  publishGroupOperationStatus(operation, 'LOADING_FAVORITE')
+  try {
+    try {
+      coordinator.loadFavoriteForGroupOperation(
+        operation.favoriteId as String,
+        operation.repeatMode as String,
+        operation.queueMode as String,
+        operation.shuffleMode as String,
+        operation.autoPlay as String,
+        operation.crossfadeMode as String,
+        operation.operationId as String,
+        topology.groupId as String,
+        operation.favoriteAttemptId as String
+      )
+    } catch(MissingMethodException ignored) {
+      // Permit an app update to coexist briefly with an older child driver.
+      // The legacy call has no attempt token, so the event handler falls back
+      // to its operation/time/group identity checks for that mixed version.
+      coordinator.loadFavoriteForGroupOperation(
+        operation.favoriteId as String,
+        operation.repeatMode as String,
+        operation.queueMode as String,
+        operation.shuffleMode as String,
+        operation.autoPlay as String,
+        operation.crossfadeMode as String,
+        operation.operationId as String,
+        topology.groupId as String
+      )
+    }
+  } catch(Exception e) {
+    failGroupOperation(operation, 'GROUP_FAVORITE_COMMAND_FAILED', e.message as String)
+    return
+  }
+  refreshGroupFavoriteTopology(operation)
+  runIn(2, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void pollGroupFavoritePlayback(Map operation) {
+  if(!operation?.favoriteId) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  normalizeGroupPlayerIds(operation.requiredPlayerIds).each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try { player.getPlaybackStatus() } catch(Exception ignored) { }
+    }
+  }
+  ChildDeviceWrapper coordinator = rinconMap[operation.resolvedCoordinatorId as String]
+  if(coordinator != null) {
+    try { coordinator.getPlaybackMetadataStatus() } catch(Exception ignored) { }
+  }
+}
+
+void updateGroupFavoriteSignalsFromState(Map operation) {
+  if(!operation?.favoriteId) { return }
+  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
+      ? (Map<String, Map>)operation.playerPlaybackStates
+      : [:]
+  Map coordinatorState = playbackStates[operation.resolvedCoordinatorId as String]
+  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
+  Long observedAt = coordinatorState?.observedAt as Long ?: 0L
+  if(coordinatorState != null && observedAt >= favoriteCommandAt) {
+    operation.playbackState = coordinatorState.playbackState as String
+  }
+}
+
+Boolean areRequiredPlayersPlaying(Map operation) {
+  if(!operation?.favoriteId) { return false }
+  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
+  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
+      ? (Map<String, Map>)operation.playerPlaybackStates
+      : [:]
+  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
+  return !requiredPlayerIds.isEmpty() && requiredPlayerIds.every { String playerId ->
+    Map playerState = playbackStates[playerId]
+    Long observedAt = playerState?.observedAt as Long ?: 0L
+    observedAt >= favoriteCommandAt && playerState?.playbackState == 'PLAYBACK_STATE_PLAYING'
+  }
+}
+
+Boolean haveRequiredPlaybackObservations(Map operation) {
+  if(!operation?.favoriteId) { return false }
+  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
+  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
+      ? (Map<String, Map>)operation.playerPlaybackStates
+      : [:]
+  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
+  return !requiredPlayerIds.isEmpty() && requiredPlayerIds.every { String playerId ->
+    Map playerState = playbackStates[playerId]
+    Long observedAt = playerState?.observedAt as Long ?: 0L
+    observedAt >= favoriteCommandAt && playerState?.containsKey('playbackState')
+  }
+}
+
+String summarizeGroupFavoritePlayback(Map operation) {
+  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation?.requiredPlayerIds)
+  Map<String, Map> playbackStates = operation?.playerPlaybackStates instanceof Map
+      ? (Map<String, Map>)operation.playerPlaybackStates
+      : [:]
+  return requiredPlayerIds.collect { String playerId ->
+    Map playerState = playbackStates[playerId]
+    playerId + ': ' + (playerState?.playbackState ?: 'not observed')
+  }.join('; ')
+}
+
+void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
+  String detail = "The group topology changed after the Favorite load: ${summarizeGroupOperationTopology(topology)}"
+  if(operation.groupingMode == GROUPING_MODE_CURRENT) {
+    failGroupOperation(operation, 'GROUP_CHANGED_DURING_FAVORITE', detail)
+    return
+  }
+  if(((operation.favoriteAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS) {
+    failGroupOperation(operation, 'FAVORITE_TOPOLOGY_CHANGED', detail)
+    return
+  }
+
+  operation.phase = 'ENSURE_GROUP'
+  operation.status = 'ENSURING_TOPOLOGY'
+  operation.loadAcknowledged = false
+  operation.loadErrorCode = null
+  operation.loadErrorReason = null
+  operation.playbackState = null
+  operation.favoriteCommandAt = 0L
+  operation.favoriteAttemptId = null
+  operation.favoriteExpectedGroupId = null
+  operation.favoriteExpectedCoordinatorId = null
+  operation.favoriteTopologyRefreshAt = 0L
+  operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyAttempt = 0
+  operation.favoriteTopologyStableObservations = 0
+  operation.favoriteTopologyLastObservedAt = 0L
+  operation.favoriteTopologyFingerprint = null
+  operation.favoriteTopologyVerified = false
+  operation.playerPlaybackStates = [:]
+  operation.metadataConfirmed = false
+  operation.exactFavoriteId = null
+  operation.topologyAttempt = 0
+  operation.stableObservations = 0
+  operation.topologyFingerprint = null
+  operation.topologyObservations = [:]
+  operation.observedGroupId = null
+  operation.observedCoordinatorId = null
+  operation.observedPlayerIds = []
+  operation.lastTopologyObservations = topology?.observations ?: []
+  operation.lastCommand = 'refreshGroupTopology'
+  operation.lastCommandAt = now()
+  operation.errorCode = null
+  operation.detail = null
+  saveActiveGroupOperation(operation)
+  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+  refreshGroupOperationTopology([operationId: operation.operationId])
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+Boolean isRetryableGroupFavoriteError(String errorCode) {
+  if(!errorCode) { return true }
+  return !(errorCode in ['ERROR_INVALID_OBJECT_ID', 'ERROR_NOT_FOUND', 'ERROR_UNSUPPORTED_COMMAND'])
+}
+
+void advanceGroupFavoriteOperation(Map data = [:]) {
+  Map operation = getActiveGroupOperation()
+  String callbackOperationId = data?.operationId as String
+  if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId)) {
+    return
+  }
+  if((operation.deadlineAt as Long ?: 0L) <= now()) {
+    failGroupOperation(operation, 'GROUP_OPERATION_TIMEOUT', "The live Sonos topology or playback confirmation did not stabilize before the deadline. Last topology: ${summarizeGroupOperationTopology([observations: operation.lastTopologyObservations])}")
+    return
+  }
+
+  Boolean favoriteLoadInProgress = operation.favoriteId &&
+      ((operation.favoriteAttempt ?: 0) as Integer) > 0 &&
+      operation.phase != 'ENSURE_GROUP'
+  if(favoriteLoadInProgress && ((operation.favoriteTopologyRefreshAt ?: 0L) as Long) <= 0L) {
+    Map knownTopology = readGroupOperationTopology(operation)
+    if(knownTopology?.consistent == true) {
+      operation.favoriteExpectedGroupId = operation.favoriteExpectedGroupId as String ?: knownTopology.groupId as String
+      operation.favoriteExpectedCoordinatorId = operation.favoriteExpectedCoordinatorId as String ?: knownTopology.coordinatorId as String
+    }
+    refreshGroupFavoriteTopology(operation)
+    publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
+    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+      overwrite: true,
+      data: [operationId: operation.operationId]
+    ])
+    return
+  }
+
+  Boolean verifyingFavoriteTopology = favoriteLoadInProgress &&
+      operation.favoriteTopologyVerified != true
+  Map topology = verifyingFavoriteTopology
+      ? readFavoriteGroupTopology(operation)
+      : readGroupOperationTopology(operation)
+  operation.observedGroupId = topology.groupId
+  operation.observedCoordinatorId = topology.coordinatorId
+  operation.observedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
+  operation.lastTopologyObservations = topology.observations ?: []
+  if(!verifyingFavoriteTopology && operation.groupingMode != GROUPING_MODE_EXPLICIT && topology.coordinatorId) {
+    operation.resolvedCoordinatorId = topology.coordinatorId as String
+    if(operation.favoriteId) {
+      registerGroupFavoriteOperationOnPlayers(operation, [topology.coordinatorId as String])
+    }
+  }
+
+  if(verifyingFavoriteTopology) {
+    Boolean finalTopologySatisfied = isFavoriteGroupTopologySatisfied(operation, topology)
+    if(topology.fresh != true) {
+      Long refreshAt = operation.favoriteTopologyRefreshAt as Long ?: 0L
+      Boolean waitingForFreshTopology = refreshAt > 0L &&
+          now() < refreshAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L
+      if(!waitingForFreshTopology) {
+        if(((operation.favoriteTopologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS) {
+          failGroupOperation(operation, 'FAVORITE_TOPOLOGY_NOT_CONFIRMED',
+              "Post-Favorite group topology was not observed from every required player: ${summarizeGroupOperationTopology(topology)}")
+          return
+        }
+        refreshGroupFavoriteTopology(operation)
+      }
+      publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+      return
+    }
+    if(!finalTopologySatisfied) {
+      recoverGroupFavoriteAfterTopologyChange(operation, topology)
+      return
+    }
+
+    updateFavoriteGroupTopologyStability(operation, topology)
+    if(((operation.favoriteTopologyStableObservations ?: 0) as Integer) < GROUP_OPERATION_STABILITY_OBSERVATIONS) {
+      if(((operation.favoriteTopologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS) {
+        failGroupOperation(operation, 'FAVORITE_TOPOLOGY_NOT_STABLE',
+            "Post-Favorite group topology did not remain stable: ${summarizeGroupOperationTopology(topology)}")
+        return
+      }
+      refreshGroupFavoriteTopology(operation, false)
+      publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+      return
+    }
+
+    operation.favoriteTopologyVerified = true
+    operation.topologyRefreshAt = operation.favoriteTopologyRefreshAt
+    operation.topologyObservations = operation.favoriteTopologyObservations ?: [:]
+    operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+    operation.topologyFingerprint = topology.fingerprint
+    operation.resolvedCoordinatorId = topology.coordinatorId as String
+    operation.favoriteExpectedGroupId = topology.groupId as String
+    operation.favoriteExpectedCoordinatorId = topology.coordinatorId as String
+    saveActiveGroupOperation(operation)
+  }
+
+  Boolean topologySatisfied = isGroupTopologySatisfied(operation, topology)
+  if(!topologySatisfied) {
+    operation.stableObservations = 0
+    operation.topologyFingerprint = null
+    if(operation.groupingMode == GROUPING_MODE_CURRENT && topology.fresh == true) {
+      failGroupOperation(operation, 'CURRENT_TOPOLOGY_NOT_SATISFIED', 'The current group does not contain all configured players; no topology mutation was requested.')
+      return
+    }
+    operation.phase = 'ENSURE_GROUP'
+    operation.status = 'ENSURING_TOPOLOGY'
+    Long refreshAt = operation.topologyRefreshAt as Long ?: 0L
+    Long commandAt = operation.lastCommandAt as Long ?: 0L
+    Long waitFrom = commandAt > 0L ? commandAt : refreshAt
+    Boolean waitingForFreshTopology = topology.fresh != true && waitFrom > 0L &&
+      now() < waitFrom + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L
+    if(!waitingForFreshTopology) {
+      if(((operation.topologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS) {
+        failGroupOperation(operation, 'TOPOLOGY_NOT_STABLE', "The requested group topology could not be confirmed: ${summarizeGroupOperationTopology(topology)}")
+        return
+      }
+      try {
+        sendGroupTopologyCommand(operation, topology)
+      } catch(Exception e) {
+        failGroupOperation(operation, 'GROUP_COMMAND_FAILED', e.message as String)
+        return
+      }
+      if(getActiveGroupOperation()?.operationId?.toString() != operation.operationId?.toString()) {
+        return
+      }
+    }
+    saveActiveGroupOperation(operation)
+    publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+      overwrite: true,
+      data: [operationId: operation.operationId]
+    ])
+    return
+  }
+
+  updateGroupTopologyStability(operation, topology)
+  if(((operation.stableObservations ?: 0) as Integer) < GROUP_OPERATION_STABILITY_OBSERVATIONS) {
+    saveActiveGroupOperation(operation)
+    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+      overwrite: true,
+      data: [operationId: operation.operationId]
+    ])
+    return
+  }
+
+  if(!operation.favoriteId) {
+    completeGroupOperation(operation)
+    return
+  }
+
+  if(operation.phase == 'ENSURE_GROUP') {
+    sendGroupFavoriteLoad(operation, topology)
+    return
+  }
+
+  updateGroupFavoriteSignalsFromState(operation)
+  if(operation.loadErrorCode && !isRetryableGroupFavoriteError(operation.loadErrorCode as String)) {
+    failGroupOperation(operation, operation.loadErrorCode as String, operation.loadErrorReason as String)
+    return
+  }
+
+  Long favoriteCommandAt = operation.lastCommandAt as Long ?: 0L
+  Boolean favoriteRetryDue = operation.loadErrorCode ||
+      (operation.loadAcknowledged != true && now() >= favoriteCommandAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L)
+  if(favoriteRetryDue) {
+    if(((operation.favoriteAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS) {
+      // Retry only the Favorite load; topology has already been verified and
+      // no grouping command is repeated for a media acknowledgement failure.
+      operation.phase = 'ENSURE_GROUP'
+      operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+      operation.lastCommandAt = 0L
+      saveActiveGroupOperation(operation)
+      sendGroupFavoriteLoad(operation, topology)
+      return
+    }
+    failGroupOperation(
+      operation,
+      operation.loadErrorCode as String ?: 'FAVORITE_LOAD_NOT_ACKNOWLEDGED',
+      operation.loadErrorReason as String ?: 'Sonos did not acknowledge the Favorite load.'
+    )
+    return
+  }
+
+  Boolean autoPlay = operation.autoPlay?.toString() == 'true'
+  Boolean playbackInProgress = operation.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']
+  if(operation.loadAcknowledged == true && !autoPlay) {
+    completeGroupOperation(operation)
+    return
+  }
+  if(operation.loadAcknowledged == true && operation.playbackState == 'PLAYBACK_STATE_PLAYING' &&
+      areRequiredPlayersPlaying(operation) &&
+      operation.metadataConfirmed == true && operation.exactFavoriteId?.toString() == operation.favoriteId?.toString()) {
+    completeGroupOperation(operation)
+    return
+  }
+
+  Long lastCommandAt = operation.lastCommandAt as Long ?: 0L
+  Boolean allPlaybackObserved = haveRequiredPlaybackObservations(operation)
+  Boolean partialPlaybackObserved = allPlaybackObserved &&
+      operation.playbackState == 'PLAYBACK_STATE_PLAYING' &&
+      !areRequiredPlayersPlaying(operation)
+  if(operation.loadAcknowledged == true && partialPlaybackObserved &&
+      now() >= lastCommandAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L) {
+    if(((operation.playAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_PLAY_ATTEMPTS) {
+      Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+      ChildDeviceWrapper coordinator = rinconMap[operation.resolvedCoordinatorId as String]
+      if(coordinator != null) {
+        operation.playAttempt = ((operation.playAttempt ?: 0) as Integer) + 1
+        operation.phase = 'WAIT_FOR_PLAYBACK'
+        operation.lastCommand = 'play'
+        operation.lastCommandAt = now()
+        saveActiveGroupOperation(operation)
+        try { coordinator.playerPlay() } catch(Exception e) {
+          failGroupOperation(operation, 'GROUP_PLAY_COMMAND_FAILED', e.message as String)
+          return
+        }
+      }
+    } else {
+      failGroupOperation(
+        operation,
+        'PARTIAL_PLAYBACK',
+        'The coordinator is playing but one or more requested players are not: ' + summarizeGroupFavoritePlayback(operation)
+      )
+      return
+    }
+  }
+  if(operation.loadAcknowledged == true && !playbackInProgress &&
+      now() >= lastCommandAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L) {
+    if(((operation.playAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_PLAY_ATTEMPTS) {
+      Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+      ChildDeviceWrapper coordinator = rinconMap[operation.resolvedCoordinatorId as String]
+      if(coordinator != null) {
+        operation.playAttempt = ((operation.playAttempt ?: 0) as Integer) + 1
+        operation.phase = 'WAIT_FOR_PLAYBACK'
+        operation.lastCommand = 'play'
+        operation.lastCommandAt = now()
+        saveActiveGroupOperation(operation)
+        try { coordinator.playerPlay() } catch(Exception e) {
+          failGroupOperation(operation, 'GROUP_PLAY_COMMAND_FAILED', e.message as String)
+          return
+        }
+      }
+    } else if(((operation.favoriteAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS &&
+        !playbackInProgress) {
+      // A second load is bounded and only occurs after the acknowledged load
+      // failed to start playback. Once playback is active, never interrupt it
+      // with another Favorite request merely because metadata is late.
+      operation.phase = 'ENSURE_GROUP'
+      operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+      operation.lastCommandAt = 0L
+      saveActiveGroupOperation(operation)
+      sendGroupFavoriteLoad(operation, topology)
+      return
+    } else if(!playbackInProgress) {
+      failGroupOperation(operation, 'PLAYBACK_NOT_STARTED', 'Sonos acknowledged the Favorite but playback did not become active.')
+      return
+    }
+  }
+
+  pollGroupFavoritePlayback(operation)
+  saveActiveGroupOperation(operation)
+  runIn(2, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void groupFavoriteOperationEventHandler(Event event) {
+  String rawEvent = event?.value?.toString()
+  if(!rawEvent) { return }
+  Map payload
+  try {
+    payload = (Map)parseJson(rawEvent)
+  } catch(Exception e) {
+    logWarn("Ignoring malformed group Favorite operation event: ${e.message}")
+    return
+  }
+  Map operation = getActiveGroupOperation()
+  if(operation == null || payload.operationId?.toString() != operation.operationId?.toString()) {
+    return
+  }
+  String eventName = payload.event as String
+  Map eventData = payload.data instanceof Map ? (Map)payload.data : [:]
+  String eventPlayerId = payload.playerId as String
+  Long eventObservedAt = (payload.observedAt ?: now()) as Long
+  String eventAttemptId = payload.attemptId as String
+  String expectedAttemptId = operation.favoriteAttemptId as String
+  Boolean isExpectedAttempt = expectedAttemptId && (!eventAttemptId || eventAttemptId == expectedAttemptId)
+  String expectedCoordinatorId = operation.favoriteExpectedCoordinatorId as String ?: operation.observedCoordinatorId as String ?: operation.resolvedCoordinatorId as String
+  Boolean isCoordinatorEvent = !eventPlayerId || !expectedCoordinatorId || eventPlayerId == expectedCoordinatorId
+  Boolean isRequiredPlayer = !eventPlayerId || normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(eventPlayerId)
+  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
+  Boolean isAfterFavoriteCommand = favoriteCommandAt <= 0L || eventObservedAt >= favoriteCommandAt
+  String eventGroupId = eventData.groupId as String
+  String expectedGroupId = operation.favoriteExpectedGroupId as String ?: operation.observedGroupId as String
+  Boolean isExpectedGroup = !eventGroupId || !expectedGroupId || eventGroupId == expectedGroupId
+  switch(eventName) {
+    case 'favoriteLoadAck':
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+        operation.loadAcknowledged = eventData.success == true
+        operation.loadErrorCode = eventData.errorCode as String
+        operation.loadErrorReason = eventData.reason as String
+      }
+      break
+    case 'loadRejected':
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+        operation.loadAcknowledged = false
+        operation.loadErrorCode = eventData.reason as String ?: 'PLAYER_REJECTED_LOAD'
+        operation.loadErrorReason = eventData.reason as String
+      }
+      break
+    case 'playbackStatus':
+      if(isExpectedAttempt && isRequiredPlayer && isAfterFavoriteCommand && isExpectedGroup && eventPlayerId) {
+        Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
+            ? (Map<String, Map>)operation.playerPlaybackStates
+            : [:]
+        playbackStates[eventPlayerId] = [
+          playbackState: eventData.playbackState as String,
+          observedAt: eventObservedAt
+        ]
+        operation.playerPlaybackStates = playbackStates
+      }
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+        operation.playbackState = eventData.playbackState as String
+      }
+      break
+    case 'metadataConfirmed':
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
+        if(eventData.confirmed == true && eventData.favoriteId?.toString() == operation.favoriteId?.toString()) {
+          operation.metadataConfirmed = true
+          operation.exactFavoriteId = eventData.favoriteId as String
+        } else {
+          operation.metadataConfirmed = false
+          operation.exactFavoriteId = eventData.favoriteId as String
+        }
+      }
+      break
+    case 'groups':
+      if(eventPlayerId && isRequiredPlayer) {
+        Map<String, Map> topologyObservations = operation.topologyObservations instanceof Map
+            ? (Map<String, Map>)operation.topologyObservations
+            : [:]
+        topologyObservations[eventPlayerId] = [
+          groupId: eventData.groupId?.toString(),
+          coordinatorId: eventData.coordinatorId?.toString(),
+          playerIds: normalizeGroupPlayerIds(eventData.playerIds),
+          observedAt: eventObservedAt
+        ]
+        operation.topologyObservations = topologyObservations
+
+        Long favoriteTopologyRefreshAt = (operation.favoriteTopologyRefreshAt ?: 0L) as Long
+        if(favoriteTopologyRefreshAt > 0L && eventObservedAt >= favoriteTopologyRefreshAt) {
+          Map<String, Map> favoriteTopologyObservations = operation.favoriteTopologyObservations instanceof Map
+              ? (Map<String, Map>)operation.favoriteTopologyObservations
+              : [:]
+          favoriteTopologyObservations[eventPlayerId] = topologyObservations[eventPlayerId]
+          operation.favoriteTopologyObservations = favoriteTopologyObservations
+
+          if(operation.favoriteTopologyVerified == true) {
+            Map eventTopology = [
+              fresh: true,
+              consistent: true,
+              groupId: eventData.groupId as String,
+              coordinatorId: eventData.coordinatorId as String,
+              playerIds: normalizeGroupPlayerIds(eventData.playerIds),
+              observations: [favoriteTopologyObservations[eventPlayerId]],
+              fingerprint: ''
+            ]
+            if(!isFavoriteGroupTopologySatisfied(operation, eventTopology)) {
+              operation.favoriteTopologyVerified = false
+              operation.favoriteTopologyStableObservations = 0
+              operation.favoriteTopologyLastObservedAt = 0L
+              operation.favoriteTopologyFingerprint = null
+              operation.favoriteTopologyObservations = [:]
+              refreshGroupFavoriteTopology(operation)
+            }
+          }
+        }
+      }
+      if(eventData.containsKey('groupId') && eventData.containsKey('coordinatorId')) {
+        operation.observedGroupId = eventData.groupId as String
+        operation.observedCoordinatorId = eventData.coordinatorId as String
+        operation.observedPlayerIds = normalizeGroupPlayerIds(eventData.playerIds)
+      }
+      break
+    default:
+      break
+  }
+  saveActiveGroupOperation(operation)
+  runIn(1, 'advanceGroupFavoriteOperation', [
+    overwrite: true,
+    data: [operationId: operation.operationId]
+  ])
+}
+
+void publishGroupOperationStatus(Map operation, String status, String errorCode = null, String detail = null) {
+  if(operation == null) { return }
+  operation.status = status
+  if(errorCode != null) { operation.errorCode = errorCode }
+  if(detail != null) { operation.detail = detail }
+  saveActiveGroupOperation(operation)
+  Map statusData = [
+    operationId: operation.operationId,
+    status: status,
+    groupingMode: operation.groupingMode,
+    phase: operation.phase,
+    favoriteId: operation.favoriteId,
+    groupId: operation.observedGroupId,
+    coordinatorId: operation.observedCoordinatorId ?: operation.resolvedCoordinatorId,
+    playerIds: normalizeGroupPlayerIds(operation.observedPlayerIds),
+    observations: operation.lastTopologyObservations ?: [],
+    playbackStates: operation.playerPlaybackStates ?: [:],
+    favoriteAcknowledged: operation.loadAcknowledged == true,
+    metadataConfirmed: operation.metadataConfirmed == true,
+    topologyAttempt: operation.topologyAttempt ?: 0,
+    favoriteAttempt: operation.favoriteAttempt ?: 0,
+    favoriteAttemptId: operation.favoriteAttemptId,
+    favoriteTopologyAttempt: operation.favoriteTopologyAttempt ?: 0,
+    favoriteTopologyVerified: operation.favoriteTopologyVerified == true,
+    playAttempt: operation.playAttempt ?: 0,
+    lastCommand: operation.lastCommand,
+    errorCode: operation.errorCode,
+    detail: operation.detail,
+    updatedAt: now()
+  ]
+  ChildDeviceWrapper groupDevice = getChildDevice(operation.groupDni as String)
+  if(groupDevice == null) { return }
+  try {
+    String mode = operation.groupingMode in [GROUPING_MODE_EXPLICIT, GROUPING_MODE_ADDITIVE]
+        ? operation.groupingMode as String
+        : null
+    groupDevice.updateGroupOperationStatus(JsonOutput.toJson(statusData), mode)
+  } catch(Exception e) {
+    logWarn("Could not publish group operation status for ${operation.groupDni}: ${e.message}")
+  }
+}
+
+void clearRegisteredGroupFavoriteOperations(Map operation) {
+  if(operation == null) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  normalizeGroupPlayerIds(operation.registeredPlayerIds).each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null) {
+      try { player.clearGroupFavoriteOperation(operation.operationId as String) }
+      catch(Exception e) { logWarn("Could not clear group Favorite operation on ${playerId}: ${e.message}") }
+    }
+  }
+}
+
+void finishGroupOperation(Map operation, String status, String errorCode = null, String detail = null) {
+  if(operation == null) { return }
+  operation.phase = 'COMPLETE'
+  operation.completedAt = now()
+  publishGroupOperationStatus(operation, status, errorCode, detail)
+  clearRegisteredGroupFavoriteOperations(operation)
+  if(status == 'SUCCEEDED' && !operation.favoriteId) {
+    storeGroupingContext(operation)
+  }
+  state.remove(GROUP_OPERATION_STATE_KEY)
+  if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List) {
+    runIn(1, 'drainDeferredGroupOperationCommands', [overwrite: true])
+  }
+}
+
+void completeGroupOperation(Map operation) {
+  logInfo("Group operation ${operation.operationId} completed successfully")
+  finishGroupOperation(operation, 'SUCCEEDED')
+}
+
+void failGroupOperation(Map operation, String errorCode, String detail = null) {
+  if(operation == null) { return }
+  logWarn("Group operation ${operation.operationId} failed: ${errorCode}${detail ? " (${detail})" : ''}")
+  finishGroupOperation(operation, 'FAILED', errorCode, detail)
+}
+
+void cancelActiveGroupOperation(String groupDni, String reason = 'CANCELLED') {
+  Map operation = getActiveGroupOperation()
+  if(operation != null && operation.groupDni as String == groupDni) {
+    finishGroupOperation(operation, 'CANCELLED', reason, 'A newer user command superseded the operation.')
+  }
+}
+
+ChildDeviceWrapper resolveGroupCommandCoordinator(ChildDeviceWrapper configuredCoordinator,
+    List<String> playerIds, Map<String, ChildDeviceWrapper> rinconMap) {
+  ChildDeviceWrapper activeCoordinator = playerIds.collect { String id -> rinconMap[id] }
+    .find { ChildDeviceWrapper player ->
+      player != null && (player.getDataValue('isGroupCoordinator') == 'true' ||
+        player.currentValue('isGroupCoordinator', true) == 'on')
+    }
+  return activeCoordinator ?: configuredCoordinator
+}
+
+/**
+ * Receive a deferred player-to-parent command. Player drivers use this bridge
+ * when a command is addressed to a follower; the event is emitted after the
+ * follower method returns so the player never waits on the parent app's child
+ * lookup semaphore.
+ */
+void playerCommandRequestHandler(Event event) {
+  String rawRequest = event?.value?.toString()
+  if(!rawRequest) {
+    logWarn('Ignoring empty player command request')
+    return
+  }
+
+  Map request
+  try {
+    request = (Map)parseJson(rawRequest)
+  } catch(Exception e) {
+    logWarn("Ignoring malformed player command request: ${e.message}")
+    return
+  }
+
+  String playerDni = request?.playerDni as String
+  String command = request?.command as String
+  if(!playerDni || !command || getChildDevice(playerDni) == null) {
+    logWarn("Ignoring player command request with invalid target or command: ${rawRequest}")
+    return
+  }
+  runIn(1, 'processPlayerCommandRequest', [data: [request: request]])
+}
+
+void processPlayerCommandRequest(Map data) {
+  Map request = data?.request instanceof Map ? (Map)data.request : null
+  String playerDni = request?.playerDni as String
+  String command = request?.command as String
+  if(!playerDni || !command) {
+    return
+  }
+
+  ChildDeviceWrapper source = getChildDevice(playerDni)
+  if(source == null) {
+    logWarn("Player command ${command} ignored because ${playerDni} no longer exists")
+    return
+  }
+  List args = request.args instanceof List ? (List)request.args : []
+
+  try {
+    Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+    String configuredCoordinatorId = source.getDataValue('groupCoordinatorId')
+    List<String> candidateIds = source.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+    if(!candidateIds && source.getDataValue('id')) {
+      candidateIds.add(source.getDataValue('id'))
+    }
+    ChildDeviceWrapper coordinator = candidateIds.collect { String id -> rinconMap[id] }
+      .find { ChildDeviceWrapper player ->
+        player != null && (player.getDataValue('isGroupCoordinator') == 'true' ||
+          player.currentValue('isGroupCoordinator', true) == 'on')
+      }
+    if(coordinator == null && configuredCoordinatorId) {
+      coordinator = rinconMap[configuredCoordinatorId]
+    }
+    if(coordinator == null) {
+      logWarn("Player command ${command} could not resolve a coordinator for ${playerDni}")
+      return
+    }
+
+    switch(command) {
+      case 'muteGroup':
+        coordinator.muteGroup()
+        break
+      case 'unmuteGroup':
+        coordinator.unmuteGroup()
+        break
+      case 'setGroupVolume':
+        coordinator.setGroupVolume(toBigDecimal(args.size() > 0 ? args[0] : null), toBigDecimal(args.size() > 1 ? args[1] : null))
+        break
+      case 'groupVolumeUp':
+        coordinator.groupVolumeUp()
+        break
+      case 'groupVolumeDown':
+        coordinator.groupVolumeDown()
+        break
+      case 'loadFavoriteFull':
+        coordinator.loadFavoriteFull(
+          args.size() > 0 ? args[0] as String : null,
+          args.size() > 1 ? args[1] as String : null,
+          args.size() > 2 ? args[2] as String : null,
+          args.size() > 3 ? args[3] as String : null,
+          args.size() > 4 ? args[4] as String : null,
+          args.size() > 5 ? args[5] as String : null
+        )
+        break
+      case 'loadPlaylistFull':
+        coordinator.loadPlaylistFull(
+          args.size() > 0 ? args[0] as String : null,
+          args.size() > 1 ? args[1] as String : null,
+          args.size() > 2 ? args[2] as String : null,
+          args.size() > 3 ? args[3] as String : null,
+          args.size() > 4 ? args[4] as String : null,
+          args.size() > 5 ? args[5] as String : null
+        )
+        break
+      default:
+        logWarn("Unsupported deferred player command '${command}'")
+    }
+  } catch(Exception e) {
+    logWarn("Deferred player command ${command} failed for ${playerDni}: ${e.message}")
+  }
+}
+
+BigDecimal toBigDecimal(Object value) {
+  if(value == null || value.toString().trim() == '') {
+    return null
+  }
+  try {
+    return value instanceof BigDecimal ? (BigDecimal)value : new BigDecimal(value.toString())
+  } catch(Exception e) {
+    logWarn("Ignoring invalid numeric group command value '${value}'")
+    return null
+  }
+}
+
+Boolean groupCommandBoolean(Object value, Boolean defaultValue) {
+  if(value == null) { return defaultValue }
+  if(value instanceof Boolean) { return (Boolean)value }
+  return value.toString().toBoolean()
+}
+
+Boolean isSonosGrouped(ChildDeviceWrapper coordinator) {
+  return coordinator?.currentValue('isGrouped', true) == 'on' &&
+      coordinator?.currentValue('isGroupCoordinator', true) == 'on'
+}
+
+void executeGroupVolumeCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
+  BigDecimal level = toBigDecimal(args.level)
+  if(level == null) {
+    logWarn('Ignoring group volume command without a valid level')
+    return
+  }
+  BigDecimal duration = toBigDecimal(args.duration)
+  Boolean grouped = isSonosGrouped(coordinator)
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+
+  if(grouped && useProportional) {
+    coordinator.setGroupVolume(level, duration)
+  } else if((grouped && !useProportional) || (!grouped && controlIndividually)) {
+    players.each { ChildDeviceWrapper player -> player.setLevel(level) }
+  } else if(coordinator) {
+    coordinator.setLevel(level)
+  } else {
+    logWarn('Cannot execute group volume command without a coordinator')
+  }
+}
+
+void executeGroupRelativeVolumeCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args, Integer direction) {
+  Boolean grouped = isSonosGrouped(coordinator)
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+  if(grouped && useProportional) {
+    if(direction > 0) { coordinator.groupVolumeUp() }
+    else { coordinator.groupVolumeDown() }
+  } else if((grouped && !useProportional) || (!grouped && controlIndividually)) {
+    players.each { ChildDeviceWrapper player ->
+      if(direction > 0) { player.volumeUp() }
+      else { player.volumeDown() }
+    }
+  } else if(coordinator) {
+    if(direction > 0) { coordinator.volumeUp() }
+    else { coordinator.volumeDown() }
+  }
+}
+
+void executeGroupMuteCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args, Boolean muted) {
+  Boolean grouped = isSonosGrouped(coordinator)
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+  if(grouped && useProportional) {
+    if(muted) { coordinator.muteGroup() }
+    else { coordinator.unmuteGroup() }
+  } else if((grouped && !useProportional) || (!grouped && controlIndividually)) {
+    players.each { ChildDeviceWrapper player ->
+      if(muted) { player.mute() }
+      else { player.unmute() }
+    }
+  } else if(coordinator) {
+    if(muted) { coordinator.mute() }
+    else { coordinator.unmute() }
+  }
+}
+
+void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
+  if(!coordinator) {
+    logWarn("Cannot refresh ${groupDevice.displayName}: coordinator not found")
+    return
+  }
+
+  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
+  Map attributes = [:]
+  if(isSonosGrouped(coordinator) && useProportional) {
+    Object volume = coordinator.currentValue('groupVolume', true)
+    Object mute = coordinator.currentValue('groupMute', true)
+    if(volume != null) { attributes.volume = volume; attributes.groupVolume = volume }
+    if(mute != null) { attributes.mute = mute; attributes.groupMute = mute }
+  } else {
+    Integer totalVolume = 0
+    Integer volumeCount = 0
+    Boolean allMuted = !players.isEmpty()
+    players.each { ChildDeviceWrapper player ->
+      Integer volume = player.currentValue('volume', true) as Integer
+      if(volume != null) { totalVolume += volume; volumeCount++ }
+      if(player.currentValue('mute', true) != 'muted') { allMuted = false }
+    }
+    if(volumeCount > 0) {
+      Integer averageVolume = Math.round(totalVolume / volumeCount) as Integer
+      attributes.volume = averageVolume
+      attributes.groupVolume = averageVolume
+    }
+    String mute = allMuted ? 'muted' : 'unmuted'
+    attributes.mute = mute
+    attributes.groupMute = mute
+  }
+
+  ['status', 'transportStatus', 'trackData', 'trackDescription', 'currentTrackDuration',
+   'currentArtistName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
+   'audioSource', 'currentAlbumName', 'currentTrackName', 'currentFavorite', 'currentPlaylist',
+   'currentTrackNumber', 'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
+   'queueTrackTotal', 'queueTrackPosition', 'currentRepeatOneMode', 'currentRepeatAllMode',
+   'currentCrossfadeMode', 'currentShuffleMode'].each { String name ->
+    Object value = coordinator.currentValue(name, true)
+    if(value != null) { attributes[name] = value }
+  }
+
+  Object memberNames = coordinator.currentValue('groupMemberNames', true)
+  if(memberNames != null) {
+    attributes.currentlyJoinedPlayers = memberNames.toString().replaceAll(/^\[|\]$/, '').trim()
+  }
+  if(!attributes.isEmpty()) {
+    // updateBatchPlaybackState() is a local-only group-driver operation.
+    groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+  }
 }
 
 /**
@@ -1789,9 +3765,11 @@ String unEscapeMetaData(String text) {
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
-@CompileStatic
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logTrace('updateGroupDevices')
+  if(!coordinatorId || !playersInGroup) {
+    return
+  }
   // Single pass over all children: partition into group devices (for this coordinator)
   // and a RINCON lookup map (for player name resolution). Avoids two separate getChildDevices() calls.
   Map partitioned = getGroupDevicesAndRinconMap(coordinatorId)
@@ -1804,7 +3782,11 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     ChildDeviceWrapper playerDev = rinconMap[rincon]
     if(playerDev != null) {
       String name = playerDev.getDataValue('name')
-      if(name != null && name != '') { joinedPlayerNames.add(name) }
+      joinedPlayerNames.add(name != null && name != '' ? name : rincon)
+    } else {
+      // Preserve the complete live membership even when a player is not
+      // currently represented by a SAC child device.
+      joinedPlayerNames.add(rincon)
     }
   }
   String joinedPlayersValue = joinedPlayerNames.join(', ')
@@ -1817,60 +3799,119 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   ChildDeviceWrapper callerDevice = rinconMap[coordinatorId]
   Boolean isCallerActualCoordinator = callerDevice?.getDataValue('isGroupCoordinator') == 'true'
 
-  groupsForCoord.each{gd ->
-    HashSet<String> list1 = new HashSet<String>(getAllPlayersForGroupDevice(gd))
-    HashSet<String> list2 = new  HashSet<String>(playersInGroup)
-    list2.add(coordinatorId)
-    Boolean allPlayersAreGrouped = list1.equals(list2)
-    Boolean shouldBeActive = allPlayersAreGrouped && isCallerActualCoordinator
-    Boolean wasActive = gd.currentValue('switch') == 'on'
-    if(shouldBeActive) { gd.sendEvent(name: 'switch', value: 'on') }
-    else { gd.sendEvent(name: 'switch', value: 'off') }
-    gd.sendEvent(name: 'currentlyJoinedPlayers', value: joinedPlayersValue)
-    if(shouldBeActive && !wasActive) {
-      notifyGroupDeviceActivated(gd, callerDevice)
+  groupsForCoord.each { ChildDeviceWrapper gd ->
+    HashSet<String> configuredPlayers = new HashSet<String>(getAllPlayersForGroupDevice(gd))
+    HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
+    observedPlayers.add(coordinatorId)
+    String rememberedMode = getFreshGroupingContext(gd.getDeviceNetworkId())?.mode as String
+    String deviceMode = gd.currentValue('groupingMode', true)?.toString()
+    String groupingMode = normalizeGroupOperationMode(rememberedMode ?: deviceMode, GROUPING_MODE_EXPLICIT)
+    Boolean membershipSatisfied = groupingMode == GROUPING_MODE_EXPLICIT
+        ? configuredPlayers.equals(observedPlayers)
+        : observedPlayers.containsAll(configuredPlayers)
+    Boolean shouldBeActive = membershipSatisfied && isCallerActualCoordinator
+    Map<String, Object> attributes = new LinkedHashMap<String, Object>()
+    attributes['switch'] = shouldBeActive ? 'on' : 'off'
+    attributes['currentlyJoinedPlayers'] = joinedPlayersValue
+    // Include the coordinator's current state with an activation update. The
+    // group driver applies this locally after the player callback has returned.
+    if(shouldBeActive && callerDevice != null) {
+      ['albumArtURI', 'status', 'transportStatus', 'currentRepeatOneMode',
+       'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
+       'currentTrackDuration', 'currentArtistName', 'currentAlbumName',
+       'currentTrackName', 'trackDescription', 'trackData', 'currentFavorite',
+       'currentPlaylist', 'nextAlbumName', 'nextArtistName', 'nextTrackName',
+       'nextTrackAlbumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
+       'audioSource', 'currentTrackNumber', 'groupVolume', 'groupMute'].each { String name ->
+        Object value = callerDevice.currentValue(name, true)
+        if(value != null) {
+          attributes[name] = value
+        }
+      }
     }
-    if(!shouldBeActive && wasActive) {
-      notifyGroupDeviceDeactivated(gd)
-    }
+    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes)
   }
 }
 
 /**
- * Notify a group device that it just became active so it can replay any held playback state,
- * then push the coordinator's current playback state to ensure the group device is fully up-to-date.
- * This method is intentionally NOT @CompileStatic so that driver methods resolve dynamically.
+ * Queue a coalesced group-device state update. This is deliberately a one-way
+ * app-to-group boundary: it never calls a group driver while processing a
+ * player callback.
  */
-void notifyGroupDeviceActivated(ChildDeviceWrapper gd, ChildDeviceWrapper coordinator) {
-  if(coordinator) {
-    List<Map> currentStates = coordinator.getCurrentPlayingStatesForGroup()
-    // Include switch:'on' so updateBatchPlaybackState() guard detects the off→on
-    // transition atomically. Parent-to-child sendEvent may not be visible to the
-    // driver's currentValue() yet, but including switch in the batch ensures the
-    // guard processes it via the driver's own sendEvent before checking state.
-    Map attrs = [switch: 'on']
-    currentStates.each { Map entry ->
-      if(entry.value != null) { attrs[(String)entry.name] = entry.value }
-    }
-    String jsonAttrs = JsonOutput.toJson(attrs)
-    gd.updateBatchPlaybackState(jsonAttrs)
-  } else {
-    logWarn("Could not resolve group coordinator while activating ${gd.displayName}; replaying held state only")
-    // No coordinator available; replay any held state directly.
-    // When coordinator IS present, replayHeldState() is called internally
-    // by updateBatchPlaybackState() via the isActive && !wasActive branch,
-    // triggered by the switch:'on' we include in the batch.
-    gd.replayHeldState()
+void queueGroupDeviceState(String groupDni, Map attributes) {
+  if(!groupDni || !attributes || attributes.isEmpty()) {
+    return
   }
+  Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
+      : [:]
+  Map<String, Object> groupState = pending[groupDni] instanceof Map
+      ? pending[groupDni]
+      : [:]
+  attributes.each { String name, Object value ->
+    if(value != null) {
+      groupState[name] = value
+    }
+  }
+  pending[groupDni] = groupState
+  state[PENDING_GROUP_STATE_QUEUE_KEY] = pending
+
+  Map<String, Integer> attempts = state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] instanceof Map
+      ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
+      : [:]
+  attempts.remove(groupDni)
+  state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
+  runIn(1, 'drainGroupStateUpdates', [overwrite: true])
 }
 
 /**
- * Notify a group device that it just became inactive so it can reset playback attributes.
- * This method is intentionally NOT @CompileStatic so that onGroupDeactivated() resolves
- * dynamically against the actual driver instance.
+ * Deliver queued group state after the originating player callback has
+ * returned. A bounded retry protects the app from a transient child-device
+ * invocation failure without recreating the original synchronous call chain.
  */
-void notifyGroupDeviceDeactivated(ChildDeviceWrapper gd) {
-  gd.onGroupDeactivated()
+void drainGroupStateUpdates() {
+  Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
+      : [:]
+  state.remove(PENDING_GROUP_STATE_QUEUE_KEY)
+  if(pending.isEmpty()) {
+    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
+    return
+  }
+
+  Map<String, Integer> attempts = state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] instanceof Map
+      ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
+      : [:]
+  Map<String, Map<String, Object>> retryQueue = [:]
+  pending.each { String groupDni, Map<String, Object> attributes ->
+    ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
+    if(groupDevice == null) {
+      logWarn("drainGroupStateUpdates: no group device found for DNI ${groupDni}")
+      attempts.remove(groupDni)
+      return
+    }
+    try {
+      groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+      attempts.remove(groupDni)
+    } catch(Exception e) {
+      Integer attempt = attempts[groupDni] ?: 0
+      if(attempt < GROUP_STATE_DRAIN_MAX_ATTEMPTS) {
+        attempts[groupDni] = attempt + 1
+        retryQueue[groupDni] = attributes
+        logWarn("Group state delivery to ${groupDni} failed (attempt ${attempt + 1} of ${GROUP_STATE_DRAIN_MAX_ATTEMPTS}): ${e.message}")
+      } else {
+        attempts.remove(groupDni)
+        logError("Giving up group state delivery to ${groupDni} after ${GROUP_STATE_DRAIN_MAX_ATTEMPTS} retries: ${e.message}")
+      }
+    }
+  }
+  if(retryQueue.isEmpty()) {
+    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
+    return
+  }
+  state[PENDING_GROUP_STATE_QUEUE_KEY] = retryQueue
+  state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
+  runIn(1, 'drainGroupStateUpdates', [overwrite: true])
 }
 
 /**
@@ -1894,9 +3935,8 @@ void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAt
   if(combined.isEmpty()) { return }
 
   List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
-  String jsonAttrs = JsonOutput.toJson(combined)
-  groupsForCoord.each { gd ->
-    gd.updateBatchPlaybackState(jsonAttrs)
+  groupsForCoord.each { ChildDeviceWrapper groupDevice ->
+    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), combined)
   }
 }
 

@@ -2,6 +2,7 @@ package dwinks.hubitat.functional
 
 import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
+import groovy.json.JsonSlurper
 import spock.lang.Shared
 import spock.lang.Specification
 
@@ -26,19 +27,25 @@ class SonosAdvPlayerSpec extends Specification {
   def setup() {
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
+    driver.events.clear()
     driver.scheduled.clear()
     driver.unschedules.clear()
     websocketMessages.clear()
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.state.clear()
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
+    driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.device.dataValues.groupId = 'GROUP_TEST'
+    driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.isGroupCoordinator = 'true'
     driver.clearFavoritesMap()
     driver.clearPlaylistsMap()
     driver.favoriteRetryState.clear()
     driver.playlistRetryState.clear()
+    driver.pendingGroupedPlayerVolumes.clear()
+    driver.groupDeviceUpdateRetryAttempts.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
   }
@@ -180,6 +187,97 @@ class SonosAdvPlayerSpec extends Specification {
     ]
   }
 
+  def "append-and-play sends INSERT with the unchanged Sonos playlist ID"() {
+    when:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
+    payload[0].namespace == 'playlists'
+    payload[0].command == 'loadPlaylist'
+    payload[1].playlistId == 'playlist-963'
+    payload[1].action == 'INSERT'
+    payload[1].playOnCompletion == true
+  }
+
+  def "acknowledged playlist load issues play instead of duplicating the playlist request"() {
+    given:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+    driver.processWebsocketMessage('[{"namespace":"playlists","response":"loadPlaylist","success":true},{}]')
+    websocketMessages.clear()
+    driver.scheduled.clear()
+
+    when:
+    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+
+    then:
+    websocketMessages.count { String message -> message.contains('"command":"play"') } == 1
+    websocketMessages.every { String message -> !message.contains('loadPlaylist') }
+    retryState.playCommandAttempts == 1
+    driver.scheduled.last() == [
+      2,
+      'checkPlaylistPlaybackAndRetry',
+      [overwrite: true, data: [operationId: retryState.operationId]]
+    ]
+
+    when:
+    websocketMessages.clear()
+    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+
+    then:
+    websocketMessages.empty
+    driver.playlistRetryState.isEmpty()
+    driver.events.find { Map event -> event.name == 'lastError' }?.value?.contains('PLAYBACK_NOT_STARTED')
+  }
+
+  def "buffering counts as playlist playback progress and does not reload the playlist"() {
+    given:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+    websocketMessages.clear()
+
+    when:
+    driver.processWebsocketMessage('[{"type":"playbackStatus","namespace":"playback"},{"playbackState":"PLAYBACK_STATE_BUFFERING"}]')
+    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+
+    then:
+    driver.playlistRetryState.isEmpty()
+    websocketMessages.every { String message -> !message.contains('loadPlaylist') && !message.contains('"command":"play"') }
+  }
+
+  def "deterministic playlist load errors are surfaced without retrying"() {
+    given:
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
+
+    when:
+    driver.processWebsocketMessage('[{"type":"globalError","namespace":"playlists","response":"loadPlaylist","success":false},{"errorCode":"ERROR_INVALID_OBJECT_ID","reason":"Playlist not found"}]')
+
+    then:
+    driver.playlistRetryState.isEmpty()
+    driver.events.find { Map event -> event.name == 'lastError' }?.value == "Playlist 'playlist-963' failed to load: ERROR_INVALID_OBJECT_ID"
+    driver.events.find { Map event -> event.name == 'lastError' }?.descriptionText == 'Playlist not found'
+  }
+
+  def "playlist metadata matches the exact ID before using a unique name fallback"() {
+    given:
+    driver.getPlaylistsMap()['playlist-963'] = [id: 'playlist-963', name: 'Morning Mix']
+    driver.loadPlaylistFull('playlist-963', 'repeat all', 'replace', 'off', 'true', 'on')
+    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+
+    when:
+    driver.isPlaylistPlaying([
+      container: [
+        type: 'PLAYLIST',
+        name: 'Different Name',
+        id: [objectId: 'urn:sonos:playlist-963']
+      ]
+    ])
+
+    then:
+    retryState.metadataConfirmed == true
+  }
+
   def "stale favorite callbacks cannot act on a newer load operation"() {
     given:
     driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
@@ -195,5 +293,168 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.empty
     driver.scheduled.empty
     driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
+  }
+
+  def "topology membership updates are deferred until the player callback returns"() {
+    when:
+    driver.parentUpdateGroupDevices('RINCON_COORD', ['RINCON_FOLLOW'])
+
+    then:
+    driver.scheduled == [[
+      1,
+      'deferredParentUpdateGroupDevices',
+      [overwrite: true, data: [coordinatorId: 'RINCON_COORD', playersInGroup: ['RINCON_FOLLOW']]]
+    ]]
+  }
+
+  def "follower group volume forwarding is deferred through the parent boundary"() {
+    given:
+    driver.device.dataValues.isGroupCoordinator = 'false'
+    driver.device.currentValues.isGrouped = 'on'
+
+    when:
+    driver.setGroupVolume(40G)
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(0) == 1
+    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.command == 'setGroupVolume'
+    websocketMessages.empty
+  }
+
+  def "grouped player volume is staggered without issuing playback commands"() {
+    given:
+    driver.device.currentValues.isGrouped = 'on'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_FIRST,RINCON_TEST,RINCON_THIRD'
+
+    when:
+    driver.setLevel(40G)
+    driver.setLevel(41G)
+
+    then:
+    websocketMessages.empty
+    driver.pendingGroupedPlayerVolumes['RINCON_TEST'] == 41
+    driver.scheduled.find { List call -> call[1] == 'flushPendingGroupedPlayerVolume' } == [
+      500,
+      'flushPendingGroupedPlayerVolume',
+      [overwrite: true]
+    ]
+
+    when:
+    driver.flushPendingGroupedPlayerVolume()
+
+    then:
+    websocketMessages.size() == 1
+    websocketMessages[0].contains('"namespace":"playerVolume"')
+    websocketMessages[0].contains('"command":"setVolume"')
+    !websocketMessages[0].contains('"command":"play"')
+    !websocketMessages[0].contains('"command":"pause"')
+  }
+
+  def "setVolumeZero sends a direct player volume command with zero"() {
+    when:
+    driver.setVolumeZero()
+
+    then:
+    websocketMessages.size() == 1
+    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
+    payload[0].namespace == 'playerVolume'
+    payload[0].command == 'setVolume'
+    payload[1].volume == 0
+    websocketMessages[0].contains('"volume":0')
+  }
+
+  def "group Favorite loads use the verified group ID without the per-player Amazon workaround"() {
+    when:
+    driver.loadFavoriteForGroupOperation('42', 'repeat all', 'replace', 'off', 'true', 'on', 'group-op-1', 'GROUP-VERIFIED', 'group-op-1:1')
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
+    payload[0].namespace == 'favorites'
+    payload[0].command == 'loadFavorite'
+    payload[0].groupId == 'GROUP-VERIFIED'
+    driver.state.groupFavoriteOperationId == 'group-op-1'
+    driver.state.groupFavoriteOperationAttemptId == 'group-op-1:1'
+    ((Map)new JsonSlurper().parseText(driver.device.events.find { Map event ->
+      event.name == 'groupFavoriteOperation'
+    }.value as String)).attemptId == 'group-op-1:1'
+    driver.scheduled.every { List call -> call[1] != 'playerPlay' }
+  }
+
+  def "websocket commands queue until the socket is open and flush in order"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'closed'
+    driver.state.remove('websocketConnectPending')
+
+    when:
+    driver.sendWsMessage('first-command')
+    driver.sendWsMessage('second-command')
+
+    then:
+    websocketMessages.empty
+    driver.state.websocketOutboundQueue*.message == ['first-command', 'second-command']
+
+    when:
+    driver.setWebSocketStatus('open')
+
+    then:
+    Integer firstCommandIndex = websocketMessages.indexOf('first-command')
+    Integer secondCommandIndex = websocketMessages.indexOf('second-command')
+    Integer subscriptionIndex = websocketMessages.findIndexOf { String message -> message.contains('"command":"subscribe"') }
+    subscriptionIndex >= 0
+    firstCommandIndex > subscriptionIndex
+    secondCommandIndex > firstCommandIndex
+    driver.state.websocketOutboundQueue == null
+  }
+
+  def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {
+    given:
+    driver.getFavoritesMap()['42serviceaccount'] = [id: '42', name: 'Favorite 42', imageUrl: 'https://example.test/cover']
+    driver.registerGroupFavoriteOperation('group-op-2', '42')
+    driver.device.events.clear()
+
+    when:
+    driver.isFavoritePlaying([
+      container: [imageUrl: 'https://example.test/cover', id: [objectId: 'urn:42', serviceId: 'service', accountId: 'account']]
+    ])
+
+    then:
+    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
+    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    payload.event == 'metadataConfirmed'
+    payload.data.favoriteId == '42'
+    payload.data.confirmed == true
+  }
+
+  def "group Favorite acknowledgements are emitted for the parent operation"() {
+    given:
+    driver.registerGroupFavoriteOperation('group-op-3', '42')
+    driver.device.events.clear()
+
+    when:
+    driver.processWebsocketMessage('[{"namespace":"favorites","response":"loadFavorite","success":true},{}]')
+
+    then:
+    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
+    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    payload.event == 'favoriteLoadAck'
+    payload.data.success == true
+  }
+
+  def "empty groups responses emit a negative topology observation"() {
+    given:
+    driver.registerGroupFavoriteOperation('group-op-4', '42')
+    driver.device.events.clear()
+
+    when:
+    driver.processWebsocketMessage('[{"type":"groups","name":"groups"}, {"groups":[]}]')
+
+    then:
+    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
+    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    payload.event == 'groups'
+    payload.observedAt instanceof Number
+    payload.data.groupId == null
+    payload.data.coordinatorId == null
+    payload.data.playerIds == []
   }
 }

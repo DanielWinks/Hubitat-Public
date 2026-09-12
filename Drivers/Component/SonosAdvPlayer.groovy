@@ -21,6 +21,23 @@
  *  SOFTWARE.
  */
 
+import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.DeviceWrapper
+import com.hubitat.app.InstalledAppWrapper
+import com.hubitat.app.exception.UnknownDeviceTypeException
+import com.hubitat.hub.domain.Event
+import groovy.json.JsonOutput
+import groovy.transform.CompileStatic
+import groovy.transform.Field
+import groovy.util.slurpersupport.GPathResult
+import hubitat.scheduling.AsyncResponse
+import java.time.Instant
+import java.util.Random
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+
 void logError(String message) {
   if (settings.logEnable != false) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
@@ -58,6 +75,15 @@ void logTrace(String message) {
   }
 }
 
+// The shared utilities library is intentionally not included in this driver.
+// Keep the small timestamp formatter needed by the legacy SID visibility path
+// local so the standalone driver has the same behavior after publication.
+String formatEpoch(Long epochSeconds) {
+  Date timestamp = new Date(epochSeconds * 1000L)
+  if(location?.timeZone) { return timestamp.format('yyyy-MMM-dd h:mm:ss a', location.timeZone) }
+  return timestamp.format('yyyy-MMM-dd h:mm:ss a')
+}
+
 #include dwinks.SMAPILibrary
 
 metadata {
@@ -87,6 +113,7 @@ metadata {
 
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
+  command 'setVolumeZero'
   command 'groupVolumeUp'
   command 'groupVolumeDown'
   command 'muteGroup'
@@ -178,10 +205,14 @@ metadata {
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'groupId', 'string'
   attribute 'groupCoordinatorId', 'string'
+  attribute 'playerCommandRequest', 'string'
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'lastError', 'string'
+  // Internal parent-app bridge for operation-scoped group Favorite
+  // acknowledgements and playback observations.
+  attribute 'groupFavoriteOperation', 'string'
 
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
@@ -304,10 +335,6 @@ Boolean hasLineInCapability() {
 // =============================================================================
 
 
-
-import java.util.Random
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
 // =============================================================================
 // Fields
 // =============================================================================
@@ -315,6 +342,11 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
+@Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
+@Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
+@Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
+@Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
+@Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 // Per-(DNI, sid) subscription mutexes. Previously these were shared static
 // singletons, which caused every driver instance on the hub to serialize
 // through a single permit per sid -- a large contributor to the ZGT retry
@@ -326,6 +358,7 @@ import java.util.concurrent.TimeUnit
 @Field static final Integer SUBSCRIBE_MUTEX_WAIT_SECONDS = 2
 @Field static final Integer SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS = 5
 @Field static final Integer SUBSCRIBE_RETRY_MAX_ATTEMPTS = 3
+@Field static final Integer GROUP_DEVICE_UPDATE_MAX_RETRIES = 3
 @Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>> statesRegistry = new ConcurrentHashMap<String, LinkedHashMap<String,LinkedHashMap>>()
@@ -388,13 +421,28 @@ import java.util.concurrent.TimeUnit
 @Field static final Integer AMAZON_FAVORITE_INITIAL_CHECK_DELAY_SECONDS = 12
 
 @Field static final List<Integer> PLAYLIST_RETRY_INTERVALS = [5, 15, 30]
+@Field static final List<String> PLAYLIST_QUEUE_ACTIONS = ['REPLACE', 'APPEND', 'INSERT', 'INSERT_NEXT']
+@Field static final List<String> NON_RETRYABLE_PLAYLIST_ERROR_CODES = [
+  'ERROR_INVALID_PARAMETER',
+  'ERROR_INVALID_OBJECT_ID',
+  'ERROR_MISSING_PARAMETERS',
+  'ERROR_UNSUPPORTED_COMMAND',
+  'ERROR_UNSUPPORTED_NAMESPACE',
+  'ERROR_INVALID_SYNTAX'
+]
 @Field private final String PLAYLIST_RETRY_CALLBACK = 'checkPlaylistPlaybackAndRetry'
 @Field private final String PLAYLIST_RETRY_EVALUATION_CALLBACK = 'evaluatePlaylistPlaybackAndRetry'
 @Field static final Integer PLAYLIST_INITIAL_CHECK_DELAY_SECONDS = 5
 @Field static final Integer PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS = 2
 @Field static final Integer MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES = 2
+@Field static final Integer MAX_PLAYLIST_PLAY_COMMAND_ATTEMPTS = 1
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
+// Sonos recommends avoiding a burst of individual player-volume commands when
+// a group is active. Keep the individual-player semantics, but serialize a
+// grouped multi-player update by the order Sonos reports the group members.
+@Field static ConcurrentHashMap<String, Integer> pendingGroupedPlayerVolumes = new ConcurrentHashMap<String, Integer>()
+@Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
 
 @Field static final Integer AUDIO_CLIP_DEFAULT_WATCHDOG_SECONDS = 600
 @Field static final Integer AUDIO_CLIP_WATCHDOG_MULTIPLIER = 2
@@ -402,6 +450,7 @@ import java.util.concurrent.TimeUnit
 @Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+@Field static ConcurrentHashMap<String, Integer> groupDeviceUpdateRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
@@ -666,12 +715,14 @@ void cleanupStaticDriverState() {
     clearedEntries += clearStaticMap(favoritesMap)
     clearedEntries += clearStaticMap(playlistsMap)
     clearedEntries += clearStaticMap(volumeFadeState)
+    clearedEntries += clearStaticMap(pendingGroupedPlayerVolumes)
     clearedEntries += clearStaticMap(groupVolumeFadeState)
     clearedEntries += clearStaticMap(lastVolumeFadeCallTime)
     clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
     clearedEntries += clearStaticMap(favoriteRetryState)
     clearedEntries += clearStaticMap(playlistRetryState)
     clearedEntries += clearStaticMap(pendingGroupDeviceUpdates)
+    clearedEntries += clearStaticMap(groupDeviceUpdateRetryAttempts)
     clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
@@ -701,12 +752,14 @@ void cleanupStaticDriverState() {
   removedEntries += pruneStaticMapKeys(favoritesMap, activePlayerIds)
   removedEntries += pruneStaticMapKeys(playlistsMap, activePlayerIds)
   removedEntries += pruneStaticMapKeys(volumeFadeState, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(pendingGroupedPlayerVolumes, activePlayerIds)
   removedEntries += pruneStaticMapKeys(groupVolumeFadeState, activePlayerIds)
   removedEntries += pruneStaticMapKeys(lastVolumeFadeCallTime, activePlayerIds)
   removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
   removedEntries += pruneStaticMapKeys(favoriteRetryState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(playlistRetryState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingGroupDeviceUpdates, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(groupDeviceUpdateRetryAttempts, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
@@ -843,6 +896,7 @@ void clearStaticDriverStateForCurrentDevice() {
       favoritesMap?.remove(playerId)
       playlistsMap?.remove(playerId)
       volumeFadeState?.remove(playerId)
+      pendingGroupedPlayerVolumes?.remove(playerId)
       groupVolumeFadeState?.remove(playerId)
       lastVolumeFadeCallTime?.remove(playerId)
       lastGroupVolumeFadeCallTime?.remove(playerId)
@@ -852,6 +906,7 @@ void clearStaticDriverStateForCurrentDevice() {
       favoriteRetryState?.remove(dni)
       playlistRetryState?.remove(dni)
       pendingGroupDeviceUpdates?.remove(dni)
+      groupDeviceUpdateRetryAttempts?.remove(dni)
       pendingLocalDeviceEvents?.remove(dni)
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
@@ -1054,14 +1109,14 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   Integer targetVolume = Math.max(0, Math.min(100, level as Integer))
   if(duration == null || duration <= 0) {
     cancelVolumeFade()
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   // Rapid-call detection: if an external app (e.g. webCoRE) is managing the fade
   // by calling setLevel(level, duration) in a loop, skip our internal fade and set volume directly
   String deviceId = getId()
   if(!deviceId) {
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   Long now = now()
@@ -1069,7 +1124,7 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   if(lastCall != null && (now - lastCall) < 2000) {
     logDebug("Rapid setLevel calls detected (${now - lastCall}ms apart) — setting volume directly to ${targetVolume}")
     cancelVolumeFade()
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   Integer currentVolume = getPlayerVolume()
@@ -1079,7 +1134,7 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   // If the duration is too short for the delta, just send a single command
   if(durationSeconds < 2 || delta <= 1) {
     cancelVolumeFade()
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     return
   }
   // Calculate step interval: at least 1 second between commands
@@ -1115,7 +1170,7 @@ void volumeFadeStep() {
   Integer targetVolume = fadeState.targetVolume as Integer
   if(currentStep >= totalSteps) {
     // Final step: set exact target volume and clean up
-    playerSetPlayerVolume(targetVolume)
+    dispatchPlayerVolume(targetVolume)
     volumeFadeState.remove(deviceId)
     lastVolumeFadeCallTime.remove(deviceId)
     logInfo("Volume fade complete: volume set to ${targetVolume}")
@@ -1126,7 +1181,7 @@ void volumeFadeStep() {
   BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
   Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
   newVolume = Math.max(0, Math.min(100, newVolume))
-  playerSetPlayerVolume(newVolume)
+  dispatchPlayerVolume(newVolume)
   // Update step counter and schedule next
   fadeState.currentStep = currentStep
   volumeFadeState.put(deviceId, fadeState)
@@ -1136,8 +1191,51 @@ void volumeFadeStep() {
 
 void cancelVolumeFade() {
   String deviceId = getId()
-  if(deviceId) { volumeFadeState.remove(deviceId) }
+  if(deviceId) {
+    volumeFadeState.remove(deviceId)
+    pendingGroupedPlayerVolumes.remove(deviceId)
+  }
   unschedule('volumeFadeStep')
+  unschedule('flushPendingGroupedPlayerVolume')
+}
+
+/**
+ * Send a player-volume command without flooding a currently grouped household.
+ * A direct player-volume command remains the correct operation for the public
+ * player device; only its timing changes when the player is in a multi-player
+ * Sonos group. Group devices that use proportional volume still use the
+ * dedicated groupVolume API through setGroupVolume().
+ */
+void dispatchPlayerVolume(Integer volume) {
+  String playerId = getId()
+  if(playerId == null || playerId == '') {
+    playerSetPlayerVolume(volume)
+    return
+  }
+
+  if(!getIsGrouped()) {
+    pendingGroupedPlayerVolumes.remove(playerId)
+    unschedule('flushPendingGroupedPlayerVolume')
+    playerSetPlayerVolume(volume)
+    return
+  }
+
+  pendingGroupedPlayerVolumes.put(playerId, volume)
+  Integer memberIndex = getGroupPlayerIds().indexOf(playerId)
+  Integer delayMs = memberIndex >= 0 ? (memberIndex + 1) * GROUPED_PLAYER_VOLUME_STAGGER_MS : GROUPED_PLAYER_VOLUME_STAGGER_MS
+  logDebug("Queueing grouped player volume ${volume} for ${delayMs}ms to avoid a command burst")
+  runInMillis(delayMs, 'flushPendingGroupedPlayerVolume', [overwrite: true])
+}
+
+void flushPendingGroupedPlayerVolume() {
+  String playerId = getId()
+  if(playerId == null || playerId == '') {
+    return
+  }
+  Integer volume = pendingGroupedPlayerVolumes.remove(playerId)
+  if(volume != null) {
+    playerSetPlayerVolume(volume)
+  }
 }
 
 @CompileStatic
@@ -1148,6 +1246,7 @@ Boolean isVolumeFadeInProgress() {
 
 @CompileStatic
 void setVolume(BigDecimal level) { setLevel(level) }
+void setVolumeZero() { setLevel(0G) }
 @CompileStatic
 void setTreble(BigDecimal level) { componentSetTrebleLocal(level)}
 @CompileStatic
@@ -1305,11 +1404,38 @@ void selectTV() {
   play()
 }
 
+/**
+ * Defer follower-to-coordinator forwarding through the parent app's event
+ * queue. A direct parent call from a player method can deadlock when the app
+ * is already waiting for a child method to return.
+ */
+void requestParentCoordinatorCommand(String command, List args = []) {
+  if(!command) {
+    return
+  }
+  Integer sequence = ((state.parentCommandSequence ?: 0) as Integer) + 1
+  state.parentCommandSequence = sequence
+  Map payload = [
+    playerDni: device.getDeviceNetworkId(),
+    requestId: "${device.getDeviceNetworkId()}-${sequence}",
+    command: command,
+    args: args ?: []
+  ]
+  runIn(1, 'emitParentCoordinatorCommand', [data: [payload: payload]])
+}
+
+void emitParentCoordinatorCommand(Map data) {
+  Map payload = data?.payload instanceof Map ? (Map)data.payload : null
+  if(payload?.command) {
+    sendDeviceEvent(PLAYER_COMMAND_REQUEST_ATTRIBUTE, JsonOutput.toJson(payload))
+  }
+}
+
 void muteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(true)
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.muteGroup()
+    requestParentCoordinatorCommand('muteGroup')
   }
   else { playerSetPlayerMute(true) }
 }
@@ -1317,7 +1443,7 @@ void unmuteGroup(){
   if(isGroupedAndCoordinator()) {
     playerSetGroupMute(false)
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.unmuteGroup()
+    requestParentCoordinatorCommand('unmuteGroup')
   }
   else { playerSetPlayerMute(false) }
 }
@@ -1327,7 +1453,7 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGroupedAndNotCoordinator: ${isFollower}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
   if(isFollower) {
     logDebug("setGroupVolume: Delegating to coordinator")
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.setGroupVolume(level, duration)
+    requestParentCoordinatorCommand('setGroupVolume', [level, duration])
     return
   }
   String deviceId = getId()
@@ -1443,7 +1569,7 @@ void groupVolumeUp() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.groupVolumeUp()
+    requestParentCoordinatorCommand('groupVolumeUp')
   }
   else { playerSetPlayerRelativeVolume(getPlayerVolumeAdjAmount()) }
 }
@@ -1451,7 +1577,7 @@ void groupVolumeDown() {
   if(isGroupedAndCoordinator()) {
     playerSetGroupRelativeVolume(-getGroupVolumeAdjAmount())
   } else if(isGroupedAndNotCoordinator()) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.groupVolumeDown()
+    requestParentCoordinatorCommand('groupVolumeDown')
   }
   else { playerSetPlayerRelativeVolume(-getPlayerVolumeAdjAmount()) }
 }
@@ -1563,7 +1689,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  String action = queueMode.toUpperCase()
+  String action = queueMode?.toUpperCase() ?: 'REPLACE'
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'repeat all'
   Boolean repeatOne = repeatMode == 'repeat one'
@@ -1610,8 +1736,102 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
       scheduleFavoriteRetryCallback(initialDelay, retryState?.operationId as String)
     }
   } else if(isGroupedAndNotCoordinator() == true) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    requestParentCoordinatorCommand('loadFavoriteFull', [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
+}
+
+/**
+ * Load a Favorite as part of the parent app's serialized group operation.
+ * Individual-player Favorite commands retain the existing retry mechanism;
+ * this path deliberately leaves retry ownership with the parent so grouping
+ * and playback cannot race or retry independently.
+ */
+void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
+    String shuffleMode, String autoPlay, String crossfadeMode, String operationId,
+    String expectedGroupId, String attemptId = null) {
+  if(!operationId || !expectedGroupId) {
+    logWarn('Cannot load group Favorite without an operation ID and verified group ID')
+    return
+  }
+  state.groupFavoriteOperationId = operationId
+  state.groupFavoriteOperationFavoriteId = favoriteId
+  state.groupFavoriteOperationAttemptId = attemptId ?: operationId
+  state.groupFavoriteOperationGroupId = expectedGroupId
+  state.groupFavoriteOperationLoadAt = now()
+  if(getIsGroupCoordinator() != true) {
+    logWarn("Cannot load group Favorite operation ${operationId}: player is not the group coordinator")
+    emitGroupFavoriteOperationEvent('loadRejected', [reason: 'PLAYER_NOT_COORDINATOR'])
+    return
+  }
+
+  clearFavoriteRetryState()
+  clearPlaylistRetryState()
+  cancelPendingAmazonMusicAutoPlay()
+
+  String action = queueMode.toUpperCase()
+  Boolean playOnCompletion = autoPlay == 'true'
+  Boolean repeat = repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'on'
+  Boolean crossfade = crossfadeMode == 'on'
+  emitGroupFavoriteOperationEvent('loadStarted', [favoriteId: favoriteId, groupId: expectedGroupId])
+  playerLoadFavoriteForGroupOperation(
+    favoriteId,
+    action,
+    repeat,
+    repeatOne,
+    shuffle,
+    crossfade,
+    playOnCompletion,
+    expectedGroupId
+  )
+}
+
+/**
+ * Register a group Favorite operation on a target player before topology or
+ * playback events are observed. The parent app uses this to receive events
+ * from every required player, not only the coordinator.
+ */
+void registerGroupFavoriteOperation(String operationId, String favoriteId) {
+  if(!operationId) { return }
+  state.groupFavoriteOperationId = operationId
+  state.groupFavoriteOperationFavoriteId = favoriteId
+  state.remove('groupFavoriteOperationGroupId')
+  state.remove('groupFavoriteOperationAttemptId')
+  state.remove('groupFavoriteOperationLoadAt')
+  emitGroupFavoriteOperationEvent('registered', [favoriteId: favoriteId])
+}
+
+void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String expectedGroupId) {
+  String currentOperationId = state.groupFavoriteOperationId as String
+  if(!currentOperationId || currentOperationId != operationId || !attemptId) { return }
+  state.groupFavoriteOperationAttemptId = attemptId
+  state.groupFavoriteOperationGroupId = expectedGroupId
+  state.groupFavoriteOperationLoadAt = now()
+}
+
+void clearGroupFavoriteOperation(String operationId = null) {
+  String currentOperationId = state.groupFavoriteOperationId as String
+  if(!currentOperationId || (operationId && currentOperationId != operationId)) { return }
+  state.remove('groupFavoriteOperationId')
+  state.remove('groupFavoriteOperationFavoriteId')
+  state.remove('groupFavoriteOperationGroupId')
+  state.remove('groupFavoriteOperationAttemptId')
+  state.remove('groupFavoriteOperationLoadAt')
+}
+
+void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
+  String operationId = state.groupFavoriteOperationId as String
+  if(!operationId || !eventName) { return }
+  Map payload = [
+    operationId: operationId,
+    event: eventName,
+    playerId: getId(),
+    attemptId: state.groupFavoriteOperationAttemptId as String,
+    observedAt: now(),
+    data: data ?: [:]
+  ]
+  sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, JsonOutput.toJson(payload))
 }
 
 // Playlist Methods
@@ -1666,7 +1886,15 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 }
 
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  String action = queueMode.toUpperCase()
+  if(playlistId == null || playlistId.trim() == '') {
+    reportPlaylistLoadError(playlistId, 'ERROR_MISSING_PARAMETERS', 'A Sonos playlist ID is required.')
+    return
+  }
+  String action = normalizePlaylistQueueAction(queueMode)
+  if(action == null) {
+    reportPlaylistLoadError(playlistId, 'ERROR_INVALID_PARAMETER', "Unsupported playlist queue mode '${queueMode}'.")
+    return
+  }
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'repeat all'
   Boolean repeatOne = repeatMode == 'repeat one'
@@ -1698,7 +1926,11 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
         playbackObserved: false,
         metadataConfirmed: false,
         loadAcknowledged: false,
-        ambiguousConfirmationPasses: 0
+        ambiguousConfirmationPasses: 0,
+        bufferingObserved: false,
+        playCommandAttempts: 0,
+        loadErrorCode: null,
+        loadErrorReason: null
       ])
     }
 
@@ -1709,8 +1941,15 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
       schedulePlaylistRetryCallback(PLAYLIST_INITIAL_CHECK_DELAY_SECONDS, retryState?.operationId as String)
     }
   } else if(isGroupedAndNotCoordinator() == true) {
-    parent?.getDeviceFromRincon(getGroupCoordinatorId())?.loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
+    requestParentCoordinatorCommand('loadPlaylistFull', [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
+}
+
+@CompileStatic
+String normalizePlaylistQueueAction(String queueMode) {
+  if(queueMode == null || queueMode.trim() == '') { return null }
+  String action = queueMode.trim().toUpperCase()
+  return PLAYLIST_QUEUE_ACTIONS.contains(action) ? action : null
 }
 
 // =============================================================================
@@ -1865,6 +2104,7 @@ void checkPlaylistPlaybackAndRetry(Map data) {
   }
 
   retryState.playbackObserved = false
+  retryState.bufferingObserved = false
   getPlaybackStatus()
   getPlaybackMetadataStatus()
   runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, PLAYLIST_RETRY_EVALUATION_CALLBACK,
@@ -1877,7 +2117,19 @@ void evaluatePlaylistPlaybackAndRetry(Map data) {
   if(retryState == null || !isRetryOperationCurrent(retryState, data)) { return }
 
   Boolean playbackActive = retryState.playbackObserved == true ||
+    retryState.bufferingObserved == true ||
     (retryState.wasPlayingAtStart != true && getTransportStatus() == 'playing')
+
+  String loadErrorCode = retryState.loadErrorCode as String
+  if(loadErrorCode != null && !isRetryablePlaylistError(loadErrorCode)) {
+    reportPlaylistLoadError(
+      retryState.playlistId as String,
+      loadErrorCode,
+      retryState.loadErrorReason as String
+    )
+    clearPlaylistRetryState()
+    return
+  }
 
   if(playbackActive && retryState.metadataConfirmed == true) {
     logInfo("Playlist '${retryState.playlistId}' is now playing successfully")
@@ -1887,6 +2139,22 @@ void evaluatePlaylistPlaybackAndRetry(Map data) {
 
   if(playbackActive && (retryState.loadAcknowledged == true || retryState.wasPlayingAtStart != true)) {
     logInfo("Playback is active after loading playlist '${retryState.playlistId}'; stopping retries while metadata confirmation completes")
+    clearPlaylistRetryState()
+    return
+  }
+
+  if(retryState.loadAcknowledged == true) {
+    Integer playCommandAttempts = (retryState.playCommandAttempts ?: 0) as Integer
+    if(playCommandAttempts < MAX_PLAYLIST_PLAY_COMMAND_ATTEMPTS) {
+      retryState.playCommandAttempts = playCommandAttempts + 1
+      logInfo("Playlist '${retryState.playlistId}' was accepted but playback is not active; issuing a play command without reloading it")
+      playerPlay()
+      schedulePlaylistRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
+      return
+    }
+
+    String notPlayingReason = 'Sonos acknowledged the playlist load, but playback did not become active after the follow-up play command.'
+    reportPlaylistLoadError(retryState.playlistId as String, 'PLAYBACK_NOT_STARTED', notPlayingReason)
     clearPlaylistRetryState()
     return
   }
@@ -1943,11 +2211,30 @@ Boolean isPlaybackCurrentlyActive(String deviceId) {
 
 void resetRetryConfirmationSignals(Map retryState) {
   retryState.playbackObserved = false
+  retryState.bufferingObserved = false
   retryState.metadataConfirmed = false
   retryState.loadAcknowledged = false
+  retryState.playCommandAttempts = 0
+  retryState.loadErrorCode = null
+  retryState.loadErrorReason = null
   retryState.ambiguousConfirmationPasses = 0
   lastPlaybackState.remove(device.getDeviceNetworkId())
   lastMetadataContainerId.remove(device.getDeviceNetworkId())
+}
+
+@CompileStatic
+Boolean isRetryablePlaylistError(String errorCode) {
+  if(errorCode == null || errorCode == '') { return true }
+  return !NON_RETRYABLE_PLAYLIST_ERROR_CODES.contains(errorCode)
+}
+
+void reportPlaylistLoadError(String playlistId, String errorCode, String reason) {
+  String safePlaylistId = playlistId ?: '(unknown)'
+  String safeErrorCode = errorCode ?: 'UNKNOWN'
+  String safeReason = reason ?: 'Sonos rejected the playlist load request.'
+  String message = "Playlist '${safePlaylistId}' failed to load: ${safeErrorCode}"
+  logError("${message}. ${safeReason}")
+  sendEvent(name: 'lastError', value: message, descriptionText: safeReason)
 }
 
 // =============================================================================
@@ -2698,7 +2985,21 @@ void clearCurrentPlayingStates() {
 void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   if(coordinatorId == null || coordinatorId == '') {return}
   if(playersInGroup == null || playersInGroup.size() == 0) {return}
-  parent?.updateGroupDevices(coordinatorId, playersInGroup)
+  // Let the topology callback return before entering the parent app. This
+  // prevents an app->player state read from waiting on the same player method
+  // that is trying to publish the membership change.
+  runIn(1, 'deferredParentUpdateGroupDevices', [
+    overwrite: true,
+    data: [coordinatorId: coordinatorId, playersInGroup: new ArrayList<String>(playersInGroup)]
+  ])
+}
+
+void deferredParentUpdateGroupDevices(Map data) {
+  String coordinatorId = data?.coordinatorId as String
+  List<String> playersInGroup = data?.playersInGroup as List<String>
+  if(coordinatorId && playersInGroup) {
+    parent?.updateGroupDevices(coordinatorId, playersInGroup)
+  }
 }
 
 @CompileStatic
@@ -2854,7 +3155,10 @@ Boolean subValid(String sid) {
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   Long exp = eventTimestamps.get(expiryKey)
   if(exp == null) { return false }
-  if((exp - RESUB_INTERVAL / 2) > Instant.now().getEpochSecond() && hasSid(sid) == true) {
+  long expiryEpoch = exp.longValue()
+  long resubHalfInterval = RESUB_INTERVAL.intdiv(2).longValue()
+  long nowEpoch = Instant.now().getEpochSecond()
+  if((expiryEpoch - resubHalfInterval) > nowEpoch && hasSid(sid) == true) {
     return true
   } else {
     return false
@@ -2862,7 +3166,8 @@ Boolean subValid(String sid) {
 }
 @CompileStatic
 void updateSid(String sid, Map headers) {
-  Long expiresEpoch = Instant.now().getEpochSecond() + (2*RESUB_INTERVAL)
+  long expiresEpochValue = Instant.now().getEpochSecond() + (2L * RESUB_INTERVAL.longValue())
+  Long expiresEpoch = Long.valueOf(expiresEpochValue)
   // Store expiry in-memory for subValid() checks
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   eventTimestamps.put(expiryKey, expiresEpoch)
@@ -2971,9 +3276,12 @@ void resetSubscriptionMutexesForDevice() {
   if(dni == null || dni == '') { return }
   ['sid1', 'sid2', 'sid3', 'sid4'].each { String sid ->
     String key = "${dni}-${sid}"
-    subscribeMutexes.put(key, new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS))
+    // Do not replace a semaphore that may still be owned by an in-flight
+    // callback. Replacing it strands the old permit and allows overlapping
+    // subscriptions against the same SID.
+    subscribeMutexes.putIfAbsent(key, new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS))
   }
-  unsubscribeMutexes.put(dni, new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS))
+  unsubscribeMutexes.putIfAbsent(dni, new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS))
 }
 
 String retryAttemptKey(String eventsToRetry) {
@@ -4416,11 +4724,26 @@ Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 
 @CompileStatic
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
-@CompileStatic
 void setWebSocketStatus(String status) {
   setDeviceDataValue('websocketStatus', status)
-  if(status == 'open') { subscribeToWsEvents() }
+  if(status == 'open') {
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    // Keep commands queued while the socket was unavailable behind the
+    // subscriptions re-established below. Temporarily remove the pending
+    // commands so sendWsMessage() can deliver those subscriptions directly;
+    // otherwise its FIFO flush would put a queued operation ahead of them.
+    List<Map> pendingCommands = getWebsocketOutboundQueue()
+    state.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
+    subscribeToWsEvents()
+    List<Map> subscriptionCommands = getWebsocketOutboundQueue()
+    if(!pendingCommands.isEmpty()) {
+      subscriptionCommands.addAll(pendingCommands)
+      state[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
+    }
+    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
+  }
   else {
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
     releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
   }
@@ -4432,6 +4755,7 @@ void setWebSocketStatus(String status) {
  */
 void queueGroupDeviceUpdate(Map attributes) {
   String dni = device.getDeviceNetworkId()
+  groupDeviceUpdateRetryAttempts.remove(dni)
   if(!pendingGroupDeviceUpdates.containsKey(dni)) {
     pendingGroupDeviceUpdates[dni] = new ConcurrentHashMap<String, Object>()
   }
@@ -4472,6 +4796,7 @@ void flushPendingGroupDeviceUpdates() {
   Boolean isCoordinator = getIsGroupCoordinator()
   if(!isCoordinator) {
     pendingGroupDeviceUpdates.remove(dni)
+    groupDeviceUpdateRetryAttempts.remove(dni)
     return
   }
   Map<String, Object> pendingSnapshot = getPendingGroupDeviceUpdateSnapshot(dni)
@@ -4519,9 +4844,18 @@ void flushPendingGroupDeviceUpdates() {
     Map playbackAttrsForParent = playbackAttrs.isEmpty() ? null : playbackAttrs
     parent?.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrsForParent)
     clearFlushedGroupDeviceUpdates(dni, pendingSnapshot)
+    groupDeviceUpdateRetryAttempts.remove(dni)
   } catch(Exception e) {
     logWarn("Error flushing pending group device updates for ${device.displayName}: ${e.message}")
-    runIn(1, 'flushPendingGroupDeviceUpdates', [overwrite: true])
+    Integer attempt = groupDeviceUpdateRetryAttempts.get(dni) ?: 0
+    if(attempt < GROUP_DEVICE_UPDATE_MAX_RETRIES) {
+      groupDeviceUpdateRetryAttempts.put(dni, attempt + 1)
+      runIn(1, 'flushPendingGroupDeviceUpdates', [overwrite: true])
+    } else {
+      groupDeviceUpdateRetryAttempts.remove(dni)
+      pendingGroupDeviceUpdates.remove(dni)
+      logWarn("Dropping pending group device updates for ${device.displayName} after ${GROUP_DEVICE_UPDATE_MAX_RETRIES} retries")
+    }
   }
 }
 
@@ -4655,20 +4989,92 @@ void retryWebSocketConnection() {
 }
 
 void wsConnect() {
+  if(isWebsocketConnected() || state[WS_CONNECT_PENDING_STATE_KEY] == true) { return }
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
-  interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
-  unschedule('renewWebsocketConnection')
-  scheduleResubscriptionToEvents('renewWebsocketConnection')
+  state[WS_CONNECT_PENDING_STATE_KEY] = true
+  try {
+    interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
+    unschedule('renewWebsocketConnection')
+    unschedule('retryWebSocketConnection')
+    scheduleResubscriptionToEvents('renewWebsocketConnection')
+  } catch(Exception e) {
+    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    setWebSocketStatus('closed')
+    logWarn("WebSocket connect failed: ${e.message}")
+    scheduleWebSocketReconnect()
+  }
 }
 
 void wsClose() {
   interfaces.webSocket.close()
 }
 
+List<Map> getWebsocketOutboundQueue() {
+  return state[WS_OUTBOUND_QUEUE_STATE_KEY] instanceof List
+      ? (List<Map>)state[WS_OUTBOUND_QUEUE_STATE_KEY]
+      : []
+}
+
+void queueWebsocketMessage(String message, Integer attempts = 0) {
+  if(!message) { return }
+  List<Map> queue = getWebsocketOutboundQueue()
+  queue.add([message: message, attempts: attempts ?: 0])
+  state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+}
+
+void flushWebsocketOutboundQueue() {
+  if(!isWebsocketConnected()) {
+    if(state[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+    return
+  }
+
+  List<Map> queue = getWebsocketOutboundQueue()
+  state.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
+  while(!queue.isEmpty()) {
+    Map entry = (Map)queue.remove(0)
+    String message = entry?.message as String
+    Integer attempts = (entry?.attempts ?: 0) as Integer
+    if(!message) { continue }
+    try {
+      interfaces.webSocket.sendMessage(message)
+    } catch(Exception e) {
+      Integer nextAttempt = attempts + 1
+      if(nextAttempt >= WS_OUTBOUND_MAX_ATTEMPTS) {
+        logError("Dropping WebSocket message after ${WS_OUTBOUND_MAX_ATTEMPTS} attempts: ${e.message}")
+        continue
+      }
+      entry.attempts = nextAttempt
+      queue.add(0, entry)
+      state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      setWebSocketStatus('closed')
+      scheduleWebSocketReconnect()
+      return
+    }
+  }
+}
+
 void sendWsMessage(String message) {
-  Boolean isConnected = isWebsocketConnected()
-  if(!isConnected) { wsConnect() }
-  interfaces.webSocket.sendMessage(message)
+  if(!message) { return }
+  if(!isWebsocketConnected()) {
+    queueWebsocketMessage(message)
+    if(state[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+    return
+  }
+
+  List<Map> queued = getWebsocketOutboundQueue()
+  if(!queued.isEmpty()) {
+    queueWebsocketMessage(message)
+    flushWebsocketOutboundQueue()
+    return
+  }
+  try {
+    interfaces.webSocket.sendMessage(message)
+  } catch(Exception e) {
+    queueWebsocketMessage(message, 1)
+    setWebSocketStatus('closed')
+    logWarn("WebSocket send failed; queued message for retry: ${e.message}")
+    scheduleWebSocketReconnect()
+  }
 }
 
 void initializeWebsocketConnection() { wsConnect() }
@@ -5063,10 +5469,23 @@ void getPlaylists() {
 
 @CompileStatic
 void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
+  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, getGroupId(), true)
+}
+
+@CompileStatic
+void playerLoadFavoriteForGroupOperation(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
+    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId) {
+  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, groupId, false)
+}
+
+@CompileStatic
+private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
+    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId,
+    Boolean scheduleAmazonWorkaround) {
   Map command = [
     'namespace':'favorites',
     'command':'loadFavorite',
-    'groupId':"${getGroupId()}"
+    'groupId':"${groupId}"
   ]
   Map args = [
     'favoriteId': favoriteId,
@@ -5084,7 +5503,7 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
   sendWsMessage(json)
 
   // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
-  if(playOnCompletion) {
+  if(playOnCompletion && scheduleAmazonWorkaround) {
     Map favorite = findFavoriteById(favoriteId)
     String serviceName = favorite?.service
     if(isAmazonMusicService(serviceName)) {
@@ -5415,6 +5834,18 @@ void httpPostAsync(Map params, String callback = 'localControlCallback') {
 // =============================================================================
 // Local Control Component Methods
 // =============================================================================
+String getLocalUpnpHostForGroupOperation() {
+  String localHost = getlocalUpnpHost()
+  if(getIsGrouped() && !getIsGroupCoordinator()) {
+    // A follower can still be invoked directly by an external automation. Use
+    // its local endpoint rather than synchronously looking up the coordinator
+    // through the parent app; the parent-mediated group command path resolves
+    // the actual coordinator before invoking this operation.
+    logDebug("Using local endpoint for grouped follower ${device.displayName}")
+  }
+  return localHost
+}
+
 void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
   Map tts = textToSpeech(text, voice)
@@ -5424,7 +5855,7 @@ void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, Stri
 }
 
 void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("removeAllTracksFromQueue: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5434,7 +5865,7 @@ void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
 }
 
 void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURIAndPlay: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5451,7 +5882,7 @@ void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
 }
 
 void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURI: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5463,7 +5894,7 @@ void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
 }
 
 void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
-  String ip = parent?.getLocalUpnpHostForCoordinatorId(device.currentValue('groupCoordinatorId', true))
+  String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("addURIToQueue: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
     return
@@ -5514,7 +5945,7 @@ void componentSetBassLocal(BigDecimal level) {
 }
 
 void componentSetBalanceLocal(BigDecimal level) {
-  if(!parent?.hasLeftAndRightChannelsSync(device)) {
+  if(!getRightChannelRincon()) {
     logWarn("Can not set balance on non-stereo pair.")
     return
   }
@@ -5554,36 +5985,33 @@ void componentSetLoudnessLocal(Boolean desiredLoudness) {
 }
 
 void componentMuteGroupLocal(Boolean desiredMute) {
-  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
-  if(coordinator == null) {
-    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group mute")
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(ip == null || ip.isEmpty()) {
+    logWarn("Could not determine local endpoint for ${device.displayName}; skipping local group mute")
     return
   }
-  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredMute: desiredMute]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
   asynchttpPost('localControlCallback', params)
 }
 
 void componentSetGroupRelativeLevelLocal(Integer adjustment) {
-  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
-  if(coordinator == null) {
-    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume adjustment")
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(ip == null || ip.isEmpty()) {
+    logWarn("Could not determine local endpoint for ${device.displayName}; skipping local group volume adjustment")
     return
   }
-  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [Adjustment: adjustment]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
 }
 
 void componentSetGroupLevelLocal(BigDecimal level) {
-  DeviceWrapper coordinator = parent?.getGroupCoordinatorForPlayerDeviceLocal(device)
-  if(coordinator == null) {
-    logWarn("Could not determine group coordinator for ${device.displayName}; skipping local group volume set")
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(ip == null || ip.isEmpty()) {
+    logWarn("Could not determine local endpoint for ${device.displayName}; skipping local group volume set")
     return
   }
-  String ip = coordinator.getDataValue('localUpnpHost')
   Map controlValues = [DesiredVolume: level]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
   asynchttpPost('localControlCallback', params)
@@ -5597,7 +6025,6 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 // =============================================================================
 // Websocket Incoming Data Processing
 // =============================================================================
-@CompileStatic
 void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
   String dni = device.getDeviceNetworkId()
@@ -5637,6 +6064,7 @@ void processWebsocketMessage(String message) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
       if(group == null) {
         logTrace("Player ${getId()} not found in any group")
+        emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
         return
       }
 
@@ -5652,6 +6080,11 @@ void processWebsocketMessage(String message) {
       List<String> oldPlayerIds = getGroupPlayerIds()
       if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds) {
         logTrace('Groups websocket event received but group data unchanged, skipping processing')
+        emitGroupFavoriteOperationEvent('groups', [
+          groupId: groupId,
+          coordinatorId: coordinatorId,
+          playerIds: playerIds ?: []
+        ])
         return
       }
 
@@ -5689,6 +6122,17 @@ void processWebsocketMessage(String message) {
           }
         }
       }
+      emitGroupFavoriteOperationEvent('groups', [
+        groupId: groupId,
+        coordinatorId: coordinatorId,
+        playerIds: playerIds ?: []
+      ])
+    } else {
+      // A successful groups response can contain no groups while a player is
+      // leaving or joining a topology. Publish that negative observation so a
+      // parent operation cannot continue using stale cached group data.
+      logTrace('Groups websocket response contained no group for player ' + getId())
+      emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
     }
   }
 
@@ -6039,11 +6483,33 @@ void processWebsocketMessage(String message) {
         getDevice().sendEvent(name: 'lastError', value: "Group operation failed: ${eventData?.errorCode}", descriptionText: reason)
       }
     }
+    if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
+      String errorCode = eventData?.errorCode?.toString()
+      String reason = eventData?.reason?.toString()
+      Map retryState = playlistRetryState.get(dni)
+      if(retryState != null) {
+        retryState.loadAcknowledged = false
+        retryState.loadErrorCode = errorCode
+        retryState.loadErrorReason = reason
+      }
+      if(retryState == null || !isRetryablePlaylistError(errorCode)) {
+        reportPlaylistLoadError(retryState?.playlistId as String, errorCode, reason)
+        if(retryState != null) { clearPlaylistRetryState() }
+      } else {
+        logWarn("Playlist '${retryState.playlistId}' load returned retryable error ${errorCode}: ${reason}")
+      }
+    }
   }
 
   if(eventType?.namespace == 'favorites' && eventType?.response == 'loadFavorite') {
     Map retryState = favoriteRetryState.get(dni)
     if(retryState != null) { retryState.loadAcknowledged = eventType?.success == true }
+    emitGroupFavoriteOperationEvent('favoriteLoadAck', [
+      success: eventType?.success == true,
+      errorCode: eventData?.errorCode?.toString(),
+      reason: eventData?.reason?.toString(),
+      groupId: getGroupId()
+    ])
   }
 
   if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
@@ -6059,7 +6525,14 @@ void processWebsocketMessage(String message) {
     if(currentState == 'PLAYBACK_STATE_PLAYING') {
       if(favoriteState != null) { favoriteState.playbackObserved = true }
       if(playlistState != null) { playlistState.playbackObserved = true }
+    } else if(currentState == 'PLAYBACK_STATE_BUFFERING') {
+      if(playlistState != null) { playlistState.bufferingObserved = true }
     }
+    emitGroupFavoriteOperationEvent('playbackStatus', [
+      playbackState: currentState,
+      groupId: getGroupId(),
+      coordinatorId: getGroupCoordinatorId()
+    ])
     // Dedup: skip repeated same-state events (common as periodic heartbeats).
     // Retry observation is updated before this return so an explicit playback
     // poll can still confirm an unchanged PLAYING state.
@@ -6075,9 +6548,14 @@ void processWebsocketMessage(String message) {
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
     Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
-    if(containerKey == lastKey && !retryPending) { return }
+    Boolean groupFavoritePending = state.groupFavoriteOperationId as String
+    if(containerKey == lastKey && !retryPending && !groupFavoritePending) { return }
     lastMetadataContainerId.put(dni, containerKey)
     checkFavAndPlaylist(eventData)
+    emitGroupFavoriteOperationEvent('metadataStatus', [
+      container: eventData?.container,
+      groupId: getGroupId()
+    ])
   }
 
   //Process playerVolume events
@@ -6222,7 +6700,6 @@ void audioClipWatchdog() {
   setAudioClipPlaying(false)
 }
 
-@CompileStatic
 void isFavoritePlaying(Map json) {
   LinkedHashMap container = (LinkedHashMap)json?.container
   LinkedHashMap id = (LinkedHashMap)container?.id
@@ -6250,37 +6727,62 @@ void isFavoritePlaying(Map json) {
     retryState.metadataConfirmed = (isFav || isFavAlt) && foundFavId == retryState.favoriteId?.toString()
   }
 
+  String groupOperationId = state.groupFavoriteOperationId as String
+  if(groupOperationId && getIsGroupCoordinator() == true) {
+    emitGroupFavoriteOperationEvent('metadataConfirmed', [
+      favoriteId: foundFavId,
+      confirmed: (isFav || isFavAlt) && foundFavId == state.groupFavoriteOperationFavoriteId?.toString(),
+      groupId: state.groupFavoriteOperationGroupId as String
+    ])
+  }
+
   setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
+}
+
+@CompileStatic
+List<String> getPlaylistObjectIdCandidates(String objectId) {
+  List<String> candidates = []
+  if(objectId == null || objectId == '') { return candidates }
+  candidates.add(objectId)
+  List<String> tokens = objectId.tokenize(':')
+  if(tokens.size() >= 2) { candidates.add(tokens.get(1)) }
+  if(tokens.size() >= 3) { candidates.add(tokens.get(tokens.size() - 1)) }
+  return candidates
 }
 
 void isPlaylistPlaying(Map json) {
   LinkedHashMap container = (LinkedHashMap)json?.container
   LinkedHashMap id = (LinkedHashMap)container?.id
-  String objectId = id?.objectId
-  if(objectId != null && objectId != '') {
-    List tok = objectId.tokenize(':')
-    if(tok.size() >= 2) { objectId = tok[1] }
-  }
+  String objectId = id?.objectId?.toString()
+  List<String> objectIdCandidates = getPlaylistObjectIdCandidates(objectId)
 
   // For playlists, check container type and name
   String containerType = container?.type
   String containerName = container?.name
 
   // Playlists use simple ID matching since they don't have complex service IDs
-  Boolean isPlaylist = false
-  String foundPlaylistId = null
-  String foundPlaylistName = null
+  LinkedHashMap matchedById = null
+  LinkedHashMap matchedByName = null
+  Integer matchingNameCount = 0
 
   if(containerType == 'playlist' || containerType == 'PLAYLIST') {
-    // Try to match by container name in the playlists map
     playlistsMap.each { key, value ->
-      if(value?.name == containerName || value?.id == objectId) {
-        isPlaylist = true
-        foundPlaylistId = value?.id
-        foundPlaylistName = value?.name
+      String mappedId = value?.id?.toString()
+      String mappedName = value?.name?.toString()
+      if(matchedById == null && mappedId != null && objectIdCandidates.contains(mappedId)) {
+        matchedById = value
+      }
+      if(mappedName != null && mappedName == containerName) {
+        matchingNameCount++
+        matchedByName = value
       }
     }
   }
+
+  LinkedHashMap matchedPlaylist = matchedById ?: (matchingNameCount == 1 ? matchedByName : null)
+  Boolean isPlaylist = matchedPlaylist != null
+  String foundPlaylistId = matchedPlaylist?.id?.toString()
+  String foundPlaylistName = matchedPlaylist?.name?.toString()
 
   Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
   if(retryState != null) {
