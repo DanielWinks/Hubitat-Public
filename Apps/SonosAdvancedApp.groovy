@@ -454,28 +454,30 @@ Map newUiPage() {
       }
     }
 
-    if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
-      Map groupDraft = getNewUiGroupDraft()
-      List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
-      Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
-        String id = player.getDataValue('id')?.toString()
-        id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
-      }
-      String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
-      List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
-      Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
-        String id = player.getDataValue('id')?.toString()
-        id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
-      }
-      String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
-      Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
-        id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
-      }
-      String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
-      String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
-      String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
+    section() {
+      paragraph "<div class='new-ui-group-section-title'>Sonos Groups</div>"
+      if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
+        Map groupDraft = getNewUiGroupDraft()
+        List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+        Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
+          String id = player.getDataValue('id')?.toString()
+          id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
+        }
+        String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
+        List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
+        Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
+          String id = player.getDataValue('id')?.toString()
+          id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
+        }
+        String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
+        Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
+          id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
+        }
+        String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
+        String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
+        String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
 
-      section(editorTitle) {
+        paragraph "<h3>${editorTitle}</h3>"
         if(state[NEW_UI_GROUP_ERROR_KEY]) {
           paragraph "<b style='color:#F44336'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</b>"
         }
@@ -493,9 +495,7 @@ Map newUiPage() {
         input name: 'btnNewUiSaveGroup', type: 'button', title: 'Save Group', submitOnChange: true
         input name: 'btnNewUiCancelGroup', type: 'button', title: 'Cancel', submitOnChange: true
       }
-    }
 
-    section() {
       paragraph displayNewUiGroupTable()
       input 'btnNewUiCreateGroup', 'button', title: 'Create Group', submitOnChange: true
     }
@@ -520,9 +520,36 @@ String displayNewUiSpeakerTable() {
       #new-ui-speaker-table-wrapper {
         display: block;
         overflow-x: auto;
-        margin: 0 !important;
+        margin: -64px 0 0 0 !important;
         padding: 0 !important;
         width: 100%;
+      }
+
+      /* Keep only the group editor's action buttons on one row. */
+      .form-group:has(input[name='btnNewUiSaveGroup']),
+      .form-group:has(input[name='btnNewUiCancelGroup']) {
+        display: inline-block !important;
+        width: auto !important;
+        margin: 8px 8px 0 0 !important;
+        vertical-align: top;
+      }
+
+      .mdl-cell:has(input[name='btnNewUiSaveGroup']),
+      .mdl-cell:has(input[name='btnNewUiCancelGroup']),
+      .mdl-cell:has(button[name='btnNewUiSaveGroup']),
+      .mdl-cell:has(button[name='btnNewUiCancelGroup']) {
+        display: inline-block !important;
+        width: auto !important;
+        margin: 8px 8px 0 0 !important;
+        vertical-align: top;
+      }
+
+      input[name='btnNewUiSaveGroup'],
+      input[name='btnNewUiCancelGroup'],
+      button[name='btnNewUiSaveGroup'],
+      button[name='btnNewUiCancelGroup'] {
+        display: inline-block !important;
+        width: auto !important;
       }
       #new-ui-speaker-table {
         border: 1px solid #E0E0E0;
@@ -880,15 +907,15 @@ String displayNewUiGroupTable() {
       }
       .new-ui-group-table-content {
         display: block;
-        margin: 0 !important;
+        margin: -56px 0 0 0 !important;
         padding: 0 !important;
       }
-      .new-ui-group-table-section-title {
+      .new-ui-group-section-title {
         color: #424242;
-        font-size: 22px !important;
+        font-size: 18px !important;
         font-weight: 400;
         line-height: 1.2;
-        margin: 0 0 14px !important;
+        margin: 0 0 12px !important;
         padding: 0 !important;
       }
       #new-ui-group-table {
@@ -954,7 +981,7 @@ String displayNewUiGroupTable() {
     </style>
   """
   String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-  return "${css}${iconifyScript}<div class='new-ui-group-table-content'><div class='new-ui-group-table-section-title'>Sonos Groups</div><span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_TABLE_EVENT}'><div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div></span></div>"
+  return "${css}${iconifyScript}<div class='new-ui-group-table-content'><span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_TABLE_EVENT}'><div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div></span></div>"
 }
 
 String renderNewUiGroupTableMarkup() {
