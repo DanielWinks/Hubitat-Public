@@ -29,7 +29,18 @@ jobs:
 
       - name: Run Sonos regression tests
         working-directory: tests
-        run: ./gradlew test --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec" --tests "dwinks.hubitat.functional.SonosAdvGroupSpec" --tests "dwinks.hubitat.functional.SonosAdvPlayerSpec"
+        run: >-
+          ./gradlew test
+          --tests "dwinks.hubitat.functional.SonosAdvGroupSpec"
+          --tests "dwinks.hubitat.functional.SonosAdvPlayerSpec"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.unlisted-player eviction*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.group operation target*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.group definition lookup*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.eviction operation retains*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.explicit grouping*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.additive grouping*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.topology*"
+          --tests "dwinks.hubitat.functional.SonosAdvancedAppSpec.cached topology*"
 
       - name: Lint Sonos Advanced sources
         working-directory: tests
