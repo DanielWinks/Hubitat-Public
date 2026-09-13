@@ -1,14 +1,14 @@
 name: Create Sonos Advanced Controller Bundle
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "sonos-beta"]
     paths:
       - Libraries/SMAPILibrary.groovy
       - Libraries/UtilitiesAndLoggingLibrary.groovy
   workflow_dispatch:
 
 concurrency:
-  group: bundle-commit-to-main
+  group: bundle-commit-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
