@@ -188,6 +188,136 @@ class SonosAdvancedAppSpec extends Specification {
     group.refreshedPlaybackUpdates[0].contains('"currentArtistName":"Billy Joel"')
   }
 
+  def "unlisted-player eviction removes extras without rebuilding or changing coordinator"() {
+    given:
+    makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
+    Map operation = [
+      operationId: 'evict-op-1', evictUnlistedOnly: true,
+      configuredCoordinatorId: 'RINCON_COORD', desiredCoordinatorId: 'RINCON_COORD',
+      resolvedCoordinatorId: 'RINCON_COORD', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      topologyAttempt: 0
+    ]
+    Map topology = [
+      fresh: true, consistent: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
+      name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_EXTRA']
+    ]
+    coordinator.commands.every { it.name != 'playerCreateGroup' }
+    follower.commands.every { it.name != 'playerModifyGroupMembers' && it.name != 'playerCreateGroup' }
+  }
+
+  def "unlisted-player eviction waits for a stable snapshot instead of creating a group"() {
+    given:
+    Map operation = [
+      operationId: 'evict-op-2', evictUnlistedOnly: true,
+      configuredCoordinatorId: 'RINCON_COORD', desiredCoordinatorId: 'RINCON_COORD',
+      resolvedCoordinatorId: 'RINCON_COORD', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      topologyAttempt: 0
+    ]
+    Map topology = [
+      fresh: false, consistent: false, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.every { it.name != 'playerCreateGroup' && it.name != 'playerModifyGroupMembers' }
+    coordinator.commands.find { it.name == 'playerGetGroupsFull' } != null
+  }
+
+  def "unlisted-player eviction read refresh does not reset the observation window"() {
+    given:
+    Map operation = [
+      operationId: 'evict-op-read', evictUnlistedOnly: true,
+      configuredCoordinatorId: 'RINCON_COORD', desiredCoordinatorId: 'RINCON_COORD',
+      resolvedCoordinatorId: 'RINCON_COORD', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      topologyAttempt: 0
+    ]
+    Map topology = [
+      fresh: false, consistent: false, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.find { it.name == 'playerGetGroupsFull' } != null
+    operation.topologyMutationSent == null
+    appScript.scheduled.find { List call -> call[1] == 'refreshGroupOperationTopology' } == null
+  }
+
+  def "unlisted-player eviction reads live membership from the configured coordinator"() {
+    given:
+    coordinator.dataValues.groupId = 'GROUP-1'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_EXTRA,RINCON_FOLLOW'
+    coordinator.dataValues.isGroupCoordinator = 'true'
+    Map operation = [
+      configuredCoordinatorId: 'RINCON_COORD', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
+    ]
+
+    when:
+    Map topology = appScript.readEvictionCoordinatorTopology(operation)
+
+    then:
+    topology.fresh == true
+    topology.coordinatorId == 'RINCON_COORD'
+    topology.playerIds == ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
+  }
+
+  def "group operation target recovers missing group device data from its saved definition"() {
+    given:
+    group.deviceNetworkId = '42-SonosGroupDevice-Arc + Kitchen'
+    group.dataValues.remove('groupCoordinatorId')
+    group.dataValues.remove('playerIds')
+    appScript.state.userGroups = [
+      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
+    ]
+
+    expect:
+    appScript.getAllPlayersForGroupDevice(group) == ['RINCON_COORD', 'RINCON_FOLLOW']
+    appScript.buildGroupOperationTarget(group, 'EXPLICIT').configuredCoordinatorId == 'RINCON_COORD'
+  }
+
+  def "group definition lookup uses the group name encoded in the device DNI"() {
+    given:
+    group.deviceNetworkId = 'different-app-id-SonosGroupDevice-Arc + Kitchen'
+    appScript.state.userGroups = [
+      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
+    ]
+
+    expect:
+    appScript.getConfiguredGroupDefinition(group).groupCoordinatorId == 'RINCON_COORD'
+  }
+
+  def "eviction operation retains the recovered configured coordinator"() {
+    given:
+    group.deviceNetworkId = 'different-app-id-SonosGroupDevice-Arc + Kitchen'
+    group.dataValues.remove('groupCoordinatorId')
+    group.dataValues.remove('playerIds')
+    appScript.state.userGroups = [
+      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
+    ]
+
+    when:
+    appScript.startGroupTopologyOperation(group, 'EXPLICIT', [evictUnlistedOnly: true])
+
+    then:
+    appScript.getActiveGroupOperation().configuredCoordinatorId == 'RINCON_COORD'
+    appScript.getActiveGroupOperation().requiredPlayerIds == ['RINCON_COORD', 'RINCON_FOLLOW']
+    appScript.getActiveGroupOperation().evictUnlistedOnly == true
+  }
+
   def "explicit grouping evicts extras without using the additive join operation"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')

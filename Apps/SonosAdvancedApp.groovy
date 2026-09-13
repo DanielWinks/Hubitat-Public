@@ -208,12 +208,14 @@ preferences {
 @Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
 @Field static final String GROUPING_MODE_CURRENT = 'CURRENT'
+@Field static final String GROUP_DEVICE_DNI_MARKER = '-SonosGroupDevice-'
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
 @Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_STABILITY_OBSERVATIONS = 2
 @Field static final Integer GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS = 4
 @Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
+@Field static final Integer GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS = 10
 @Field static final Integer GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS = 2
 @Field static final Integer GROUP_OPERATION_MAX_PLAY_ATTEMPTS = 1
 @Field static final Integer GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS = 3
@@ -2969,11 +2971,18 @@ void processGroupCommandRequest(Map data) {
 
     switch(command) {
       case 'on':
-      case 'evictUnlistedPlayers':
       case 'regroupAfterUngroup':
       case 'createGroup':
       case 'groupPlayers':
         startGroupTopologyOperation(groupDevice, GROUPING_MODE_EXPLICIT, args)
+        break
+
+      case 'evictUnlistedPlayers':
+        // Eviction is never a generic explicit-group rebuild. Force the
+        // removal-only safety path even when an older group driver does not
+        // include the marker in its request payload.
+        startGroupTopologyOperation(groupDevice, GROUPING_MODE_EXPLICIT,
+            args + [evictUnlistedOnly: true])
         break
 
       case 'off':
@@ -3290,7 +3299,16 @@ Map buildGroupOperationTarget(ChildDeviceWrapper groupDevice, String groupingMod
       .findAll { String id -> id }
       .unique()
       .sort()
-  String configuredCoordinatorId = groupDevice.getDataValue('groupCoordinatorId') as String
+  Map configuredGroup = getConfiguredGroupDefinition(groupDevice)
+  String configuredCoordinatorId = groupDevice.getDataValue('groupCoordinatorId') as String ?:
+      configuredGroup.groupCoordinatorId as String
+  if(configuredCoordinatorId && !requiredPlayerIds.contains(configuredCoordinatorId)) {
+    requiredPlayerIds.add(configuredCoordinatorId)
+    requiredPlayerIds = requiredPlayerIds.unique().sort()
+  }
+  if(configuredGroup.playerIds instanceof Collection) {
+    requiredPlayerIds = (requiredPlayerIds + normalizeGroupPlayerIds(configuredGroup.playerIds)).unique().sort()
+  }
   ChildDeviceWrapper configuredCoordinator = configuredCoordinatorId ? rinconMap[configuredCoordinatorId] : null
   ChildDeviceWrapper activeCoordinator = resolveGroupCommandCoordinator(configuredCoordinator, requiredPlayerIds, rinconMap)
   ChildDeviceWrapper selectedCoordinator
@@ -3321,6 +3339,7 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     groupDni: groupDevice.getDeviceNetworkId(),
     groupingMode: groupingMode,
     requiredPlayerIds: target.requiredPlayerIds ?: [],
+    configuredCoordinatorId: target.configuredCoordinatorId,
     desiredCoordinatorId: target.desiredCoordinatorId,
     resolvedCoordinatorId: target.resolvedCoordinatorId,
     allowExtraPlayers: groupingMode != GROUPING_MODE_EXPLICIT,
@@ -3361,7 +3380,8 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     favoriteTopologyVerified: false,
     playerPlaybackStates: [:],
     metadataConfirmed: false,
-    exactFavoriteId: null
+    exactFavoriteId: null,
+    evictUnlistedOnly: false
   ]
   if(favoriteSpec != null) {
     operation.putAll(normalizeGroupFavoriteSpec(favoriteSpec))
@@ -3395,6 +3415,8 @@ void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String grouping
   }
 
   Map operation = buildNewGroupOperation(groupDevice, normalizedMode, target)
+  operation.evictUnlistedOnly = args?.evictUnlistedOnly == true ||
+      args?.evictUnlistedOnly?.toString() == 'true'
   saveActiveGroupOperation(operation)
   registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
@@ -3607,6 +3629,52 @@ String summarizeGroupOperationTopology(Map topology) {
   }.join('; ')
 }
 
+Map readEvictionCoordinatorTopology(Map operation) {
+  String configuredCoordinatorId = operation?.configuredCoordinatorId as String
+  if(!configuredCoordinatorId) {
+    return null
+  }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  ChildDeviceWrapper coordinator = rinconMap[configuredCoordinatorId]
+  if(coordinator == null) {
+    return null
+  }
+
+  String liveCoordinatorId = getGroupOperationChildValue(coordinator, 'groupCoordinatorId')?.toString()
+  String groupId = getGroupOperationChildValue(coordinator, 'groupId')?.toString()
+  List<String> playerIds = normalizeGroupPlayerIds(
+    getGroupOperationChildValue(coordinator, 'groupPlayerIds')
+  )
+  Boolean isCoordinator = coordinator.getDataValue('isGroupCoordinator') == 'true'
+  if(!isCoordinator) {
+    try {
+      isCoordinator = coordinator.currentValue('isGroupCoordinator', true) == 'on'
+    } catch(Exception ignored) {
+      isCoordinator = false
+    }
+  }
+  if(liveCoordinatorId != configuredCoordinatorId || !groupId || playerIds.isEmpty() || !isCoordinator) {
+    return null
+  }
+
+  return [
+    fresh: true,
+    consistent: true,
+    groupId: groupId,
+    coordinatorId: liveCoordinatorId,
+    playerIds: playerIds,
+    observations: [[
+      playerId: configuredCoordinatorId,
+      groupId: groupId,
+      coordinatorId: liveCoordinatorId,
+      playerIds: playerIds,
+      fresh: true,
+      observedAt: now()
+    ]],
+    fingerprint: "${groupId}:${liveCoordinatorId}:${playerIds.join(',')}"
+  ]
+}
+
 /**
  * Return membership from the topology view that belongs to the coordinator
  * selected for an additive operation. When the required players are in
@@ -3703,6 +3771,59 @@ Boolean isFavoriteGroupTopologySatisfied(Map operation, Map topology) {
 
 void sendGroupTopologyCommand(Map operation, Map topology) {
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  if(operation.evictUnlistedOnly == true) {
+    Boolean topologyMutationSentNow = false
+    String configuredCoordinatorId = operation.configuredCoordinatorId as String
+    ChildDeviceWrapper configuredCoordinator = configuredCoordinatorId
+        ? rinconMap[configuredCoordinatorId]
+        : null
+    if(!configuredCoordinatorId || configuredCoordinator == null) {
+      Map configuredGroup = getConfiguredGroupDefinitionByDni(operation.groupDni as String)
+      failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE',
+          "Could not resolve the configured coordinator ${configuredCoordinatorId ?: '(none)'} for unlisted-player eviction (group=${extractGroupNameFromDni(operation.groupDni as String) ?: '(unknown)'}, savedDefinitionFields=${configuredGroup.keySet()})")
+      return
+    }
+
+    Boolean topologyCanBeChanged = topology?.fresh == true &&
+        topology?.consistent == true &&
+        topology.coordinatorId == configuredCoordinatorId &&
+        topology.groupId && topology.playerIds
+    if(!topologyCanBeChanged) {
+      // Eviction is deliberately removal-only. Never create/rebuild a group
+      // from an incomplete snapshot because that can transfer coordination
+      // away from the configured AirPlay/source player.
+      operation.lastCommand = 'refreshGroupTopology'
+      logDebug("Waiting for a fresh topology with configured coordinator ${configuredCoordinatorId} before evicting unlisted players")
+      configuredCoordinator.playerGetGroupsFull()
+    } else {
+      List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
+      List<String> observedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
+      List<String> extras = observedPlayerIds.findAll { String id -> !requiredPlayerIds.contains(id) }
+      if(extras) {
+        operation.lastCommand = 'removeExtraPlayers'
+        logInfo("Evicting unlisted players ${extras} from group ${topology.groupId} using configured coordinator ${configuredCoordinatorId}")
+        configuredCoordinator.playerModifyGroupMembers([], extras)
+        topologyMutationSentNow = true
+      } else {
+        operation.lastCommand = 'refreshGroupTopology'
+        configuredCoordinator.playerGetGroupsFull()
+      }
+    }
+    operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+    operation.lastCommandAt = now()
+    saveActiveGroupOperation(operation)
+    if(topologyMutationSentNow) {
+      // A mutation changes the group ID/membership, so start a new observation
+      // window for its result. Read-only getGroups requests must not reset the
+      // current window or their responses can be discarded as stale.
+      runIn(1, 'refreshGroupOperationTopology', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+    }
+    return
+  }
+
   String coordinatorId = operation.resolvedCoordinatorId as String
   ChildDeviceWrapper coordinator = coordinatorId ? rinconMap[coordinatorId] : null
   List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
@@ -4089,6 +4210,15 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   Map topology = verifyingFavoriteTopology
       ? readFavoriteGroupTopology(operation)
       : readGroupOperationTopology(operation)
+  if(operation.evictUnlistedOnly == true && !verifyingFavoriteTopology) {
+    Map coordinatorTopology = readEvictionCoordinatorTopology(operation)
+    if(coordinatorTopology != null) {
+      // The configured coordinator's groupPlayerIds data value is updated by
+      // its live group event stream and is authoritative for removal-only
+      // eviction. A follower event is not required before acting.
+      topology = coordinatorTopology
+    }
+  }
   operation.observedGroupId = topology.groupId
   operation.observedCoordinatorId = topology.coordinatorId
   operation.observedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
@@ -4166,9 +4296,12 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     Long refreshAt = operation.topologyRefreshAt as Long ?: 0L
     Long commandAt = operation.lastCommandAt as Long ?: 0L
     Long waitFrom = commandAt > 0L ? commandAt : refreshAt
+    Boolean topologyMutationRecentlySent = commandAt > 0L &&
+      operation.lastCommand in ['removeExtraPlayers', 'createExactGroup', 'addMissingPlayers'] &&
+      now() < commandAt + GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS * 1000L
     Boolean waitingForFreshTopology = topology.fresh != true && waitFrom > 0L &&
       now() < waitFrom + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L
-    if(!waitingForFreshTopology) {
+    if(!waitingForFreshTopology && !topologyMutationRecentlySent) {
       if(((operation.topologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS) {
         failGroupOperation(operation, 'TOPOLOGY_NOT_STABLE', "The requested group topology could not be confirmed: ${summarizeGroupOperationTopology(topology)}")
         return
@@ -4889,16 +5022,56 @@ Map getGroupDevicesAndRinconMap(String coordinatorId) {
 }
 
 List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
-  String coordinatorId = device.getDataValue('groupCoordinatorId')
-  String playerIdsStr = device.getDataValue('playerIds')
+  Map configuredGroup = getConfiguredGroupDefinition(device)
+  String coordinatorId = device.getDataValue('groupCoordinatorId') as String ?: configuredGroup.groupCoordinatorId as String
+  String playerIdsStr = device.getDataValue('playerIds') as String
   List<String> playerIds = []
   if(coordinatorId) {
     playerIds.add(coordinatorId)
   }
   if(playerIdsStr) {
     playerIds.addAll(playerIdsStr.tokenize(','))
+  } else if(configuredGroup.playerIds != null) {
+    playerIds.addAll(normalizeGroupPlayerIds(configuredGroup.playerIds))
   }
   return playerIds
+}
+
+/**
+ * Recover the persisted definition for a group device when an older app or
+ * device migration did not copy its coordinator/player data values. This is
+ * intentionally limited to the exact child-device DNI; it never infers a
+ * coordinator from live topology.
+ */
+Map getConfiguredGroupDefinition(DeviceWrapper groupDevice) {
+  return getConfiguredGroupDefinitionByDni(groupDevice?.getDeviceNetworkId())
+}
+
+Map getConfiguredGroupDefinitionByDni(String groupDni) {
+  if(!groupDni || !(state.userGroups instanceof Map)) {
+    return [:]
+  }
+  String groupName = extractGroupNameFromDni(groupDni)
+  if(groupName && state.userGroups[groupName] instanceof Map) {
+    return (Map)state.userGroups[groupName]
+  }
+  Map definition = null
+  state.userGroups.each { Object savedGroupName, Object groupValue ->
+    String expectedDni = "${app.id}-SonosGroupDevice-${savedGroupName}"
+    if(expectedDni == groupDni && groupValue instanceof Map) {
+      definition = (Map)groupValue
+    }
+  }
+  return definition ?: [:]
+}
+
+String extractGroupNameFromDni(String groupDni) {
+  Integer markerIndex = groupDni?.indexOf(GROUP_DEVICE_DNI_MARKER) ?: -1
+  if(markerIndex < 0) {
+    return null
+  }
+  String groupName = groupDni.substring(markerIndex + GROUP_DEVICE_DNI_MARKER.length())
+  return groupName?.trim() ?: null
 }
 
 LinkedHashMap getPlayerInfoLocalSync(String ipAddress) {

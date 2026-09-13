@@ -213,7 +213,8 @@ metadata {
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'lastError', 'string'
   // Internal parent-app bridge for operation-scoped group Favorite
-  // acknowledgements and playback observations.
+  // acknowledgements and playback observations. This is a transient event
+  // bridge and must not remain in the device's current states.
   attribute 'groupFavoriteOperation', 'string'
 
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
@@ -510,6 +511,10 @@ void configure() {
   cancelAudioClipWatchdog()
   atomicState.wsRetryCount = 0
   migrationCleanup()
+  // Remove the transient parent-app bridge attribute from existing devices as
+  // well as from any event emitted during normal operation. It is consumed by
+  // the parent app, but is not a user-facing device state.
+  clearGroupFavoriteOperationCurrentState()
   // Apply child device preferences synchronously (no-ops when devices already exist)
   createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
@@ -1906,6 +1911,7 @@ void clearGroupFavoriteOperation(String operationId = null) {
   state.remove('groupFavoriteOperationGroupId')
   state.remove('groupFavoriteOperationAttemptId')
   state.remove('groupFavoriteOperationLoadAt')
+  clearGroupFavoriteOperationCurrentState()
 }
 
 void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
@@ -1920,6 +1926,18 @@ void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
     data: data ?: [:]
   ]
   sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, JsonOutput.toJson(payload))
+  // The event is still delivered to the parent app and retained in the event
+  // history, but the bridge value is intentionally not exposed as current
+  // state on the player device page.
+  clearGroupFavoriteOperationCurrentState()
+}
+
+void clearGroupFavoriteOperationCurrentState() {
+  try {
+    device.deleteCurrentState(GROUP_FAVORITE_OPERATION_ATTRIBUTE)
+  } catch(Exception e) {
+    logDebug("Could not remove transient group Favorite operation state: ${e.message}")
+  }
 }
 
 // Playlist Methods

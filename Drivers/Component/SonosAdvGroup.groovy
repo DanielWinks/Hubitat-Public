@@ -529,7 +529,10 @@ void evictUnlistedPlayers() {
     return
   }
   setLastGroupingMode(GROUPING_MODE_EXPLICIT)
-  requestGroupCommand('evictUnlistedPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
+  requestGroupCommand('evictUnlistedPlayers', [
+    groupingMode: GROUPING_MODE_EXPLICIT,
+    evictUnlistedOnly: true
+  ])
 }
 
 /**

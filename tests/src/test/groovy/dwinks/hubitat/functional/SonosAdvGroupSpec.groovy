@@ -70,6 +70,17 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.every { List call -> call[1] != 'regroupSafetyTimeout' }
   }
 
+  def "evictUnlistedPlayers marks the request as removal-only"() {
+    when:
+    driver.evictUnlistedPlayers()
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'evictUnlistedPlayers'
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args == [
+      groupingMode: 'EXPLICIT', evictUnlistedOnly: true
+    ]
+  }
+
   def "group refresh is also deferred through the request boundary"() {
     when:
     driver.refresh()

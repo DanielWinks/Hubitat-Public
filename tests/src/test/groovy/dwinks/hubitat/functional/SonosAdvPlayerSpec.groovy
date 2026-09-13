@@ -439,7 +439,19 @@ class SonosAdvPlayerSpec extends Specification {
     ((Map)new JsonSlurper().parseText(driver.device.events.find { Map event ->
       event.name == 'groupFavoriteOperation'
     }.value as String)).attemptId == 'group-op-1:1'
+    !driver.device.currentValues.containsKey('groupFavoriteOperation')
     driver.scheduled.every { List call -> call[1] != 'playerPlay' }
+  }
+
+  def "stale group Favorite bridge state is removable"() {
+    given:
+    driver.device.currentValues.groupFavoriteOperation = '{"event":"stale"}'
+
+    when:
+    driver.clearGroupFavoriteOperationCurrentState()
+
+    then:
+    !driver.device.currentValues.containsKey('groupFavoriteOperation')
   }
 
   def "websocket commands queue until the socket is open and flush in order"() {
