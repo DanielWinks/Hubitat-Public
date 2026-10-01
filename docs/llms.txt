@@ -1,0 +1,16 @@
+# Hubitat Elevation developer reference
+
+Agent-readable Hubitat API documentation generated from `docs/hubitat.json`.
+
+## Start here
+
+- [Reference index](hubitat-reference/README.md)
+- [Apps](hubitat-reference/apps/README.md)
+- [Drivers](hubitat-reference/drivers/README.md)
+- [Shared APIs](hubitat-reference/shared/README.md)
+- [Protocols](hubitat-reference/protocols/README.md)
+- [Structured source](hubitat.json)
+
+Search section indexes and page files for API names. Each page includes its ID, class, usage, inheritance, methods, and properties.
+
+Firmware snapshot: `2.5.2.128`.
