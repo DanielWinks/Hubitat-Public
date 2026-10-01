@@ -17,10 +17,10 @@
  *
  *  KEY STATISTICS CALCULATED:
  *
- *  A. ROLLING AVERAGES (Simple Moving Averages):
- *     - Fast Rolling Average: Average of last 10-50 readings (responsive to changes)
- *     - Slow Rolling Average: Average of last 50-200 readings (stable baseline)
- *     These smooth out sensor noise and provide a "normal" humidity baseline
+ *  A. TIME-WEIGHTED EXPONENTIAL MOVING AVERAGES:
+ *     - Fast EMA: Responsive to recent humidity changes
+ *     - Slow EMA: Stable baseline for detecting unusual humidity
+ *     These smooth out sensor noise while accounting for irregular reporting intervals
  *
  *  B. TIME-WEIGHTED AVERAGES:
  *     - Overall Time-Weighted Average: Accounts for how long each humidity level lasted
@@ -76,15 +76,42 @@
 // BigDecimal: Precise decimal number type for accurate calculations
 import java.math.BigDecimal
 
-// CompileStatic: Annotation for compile-time type checking
-import groovy.transform.CompileStatic
-
 // Field: Annotation for constants shared by the driver script
 import groovy.transform.Field
 
 @Field static final Long RATE_WINDOW_MILLISECONDS = 300000L
 @Field static final Long GAP_THRESHOLD_MILLISECONDS = 900000L
 @Field static final Integer MAX_RATE_HISTORY_ENTRIES = 32
+@Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+
+void logError(String message) { writeLog('error', message) }
+void logWarn(String message) { writeLog('warn', message) }
+void logInfo(String message) { writeLog('info', message) }
+void logDebug(String message) { writeLog('debug', message) }
+void logTrace(String message) { writeLog('trace', message) }
+
+private void writeLog(String level, String message) {
+  String configured = settings?.logLevel?.toString()
+  if (!LOG_LEVELS.contains(configured)) {
+    configured = 'info'
+  }
+  if (configured == 'off' || LOG_LEVELS.indexOf(level) < LOG_LEVELS.indexOf(configured)) {
+    return
+  }
+
+  String prefix = device?.displayName ?: 'Humidity Statistics'
+  if (level == 'error') {
+    log.error("${prefix}: ${message}")
+  } else if (level == 'warn') {
+    log.warn("${prefix}: ${message}")
+  } else if (level == 'info') {
+    log.info("${prefix}: ${message}")
+  } else if (level == 'debug') {
+    log.debug("${prefix}: ${message}")
+  } else {
+    log.trace("${prefix}: ${message}")
+  }
+}
 
 // Standalone helpers used by this driver
 void clearAllStates() {
@@ -334,12 +361,7 @@ metadata {
 // USER PREFERENCES - Configuration options shown in device settings
 // ============================================================================
 preferences {
-  // Legacy sample-count preferences (kept for backward compatibility, no longer used)
-  input name: 'numSamplesFast', title: 'Fast Moving Average Samples (legacy, not used)', type: 'NUMBER', required: true, defaultValue: 10, range: 10..50
-
-  input name: 'numSamplesSlow', title: 'Slow Moving Average Samples (legacy, not used)', type: 'NUMBER', required: true, defaultValue: 50, range: 50..200
-
-  // Time constants for time-weighted EMA (replaces sample-count averages)
+  // Time constants for time-weighted EMA
   // tauFast: Time constant in minutes for the fast-moving EMA
   // Lower = more responsive, higher = more stable
   input name: 'tauFastMinutes', title: 'Fast EMA Time Constant (minutes)', type: 'NUMBER', required: true, defaultValue: 30, range: 5..120
@@ -354,6 +376,10 @@ preferences {
   // humidityThreshold: Humidity level above which "time above threshold" accumulates (mold risk metric)
   // 0 to disable tracking
   input name: 'humidityThreshold', title: 'High Humidity Threshold for Daily Accumulator (%)', type: 'NUMBER', required: true, defaultValue: 60, range: 0..90
+
+  section('Logging') {
+    input name: 'logLevel', type: 'enum', title: 'Logging level', options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'], defaultValue: 'info', submitOnChange: true
+  }
 }
 
 // =============================================================================
@@ -386,18 +412,22 @@ preferences {
  * These schedules persist even if the hub restarts.
  */
 void installed() {
+  logInfo('Installed')
   configure()
 }
 
 void updated() {
+  logInfo('Updated configuration')
   configure()
 }
 
 void uninstalled() {
+  logInfo('Uninstalled')
   unschedule()
 }
 
 void configure() {
+  logDebug('Configuring daily and weekly statistic resets')
   unschedule()
 
   // Schedule daily reset: runs at midnight (00:00:00) every day
@@ -407,6 +437,7 @@ void configure() {
   // Schedule weekly reset: runs at midnight on Sundays
   // This allows tracking of weekly humidity patterns
   schedule('0 0 0 ? * SUN', 'resetWeeklyTWAverages')
+  logTrace('Scheduled daily and weekly statistic resets')
 }
 
 /**
@@ -428,6 +459,7 @@ void configure() {
  * WARNING: This is irreversible! All historical data is lost.
  */
 void resetAllStatistics() {
+  logInfo('Resetting all humidity statistics')
   // Delete all state variables and current device attribute values.
   clearAllStates()
 }
@@ -459,6 +491,7 @@ void resetAllStatistics() {
  * - slowRollingAverage (continues tracking)
  */
 void resetTimeWeightedStatistics() {
+  logInfo('Resetting time-weighted humidity statistics')
   // List of attribute names to delete
   // The .each {} loop processes each item in the list
   [
@@ -527,6 +560,7 @@ void resetTimeWeightedStatistics() {
  */
 void resetDailyTWAverages() {
   Long currentTime = getCurrentTime()
+  logDebug("Resetting daily statistics at ${currentTime}")
   state.dailyPeriodStart = getDayStart(currentTime)
   state.dailyTimeWeightedHumidity = BigDecimal.ZERO
   state.dailyElapsedTime = 0L
@@ -563,6 +597,7 @@ void resetDailyTWAverages() {
  */
 void resetWeeklyTWAverages() {
   Long currentTime = getCurrentTime()
+  logDebug("Resetting weekly statistics at ${currentTime}")
   state.weeklyPeriodStart = getWeekStart(currentTime)
   state.weeklyTimeWeightedHumidity = BigDecimal.ZERO
   state.weeklyElapsedTime = 0L
@@ -585,6 +620,7 @@ void resetWeeklyTWAverages() {
  * @param frozen 'true' to freeze, 'false' to unfreeze
  */
 void setBaselineFreeze(String frozen) {
+  logInfo("Baseline freeze set to ${frozen}")
   emitEvent('baselineFrozen', frozen, null, null)
 }
 
@@ -596,6 +632,7 @@ void setBaselineFreeze(String frozen) {
  * @param humidity The humidity reading at the time the fan was turned on
  */
 void recordFanStart(BigDecimal humidity) {
+  logDebug("Recording fan start at ${humidity}% humidity")
   emitEvent('lastFanStartHumidity', humidity, null, null)
   emitEvent('currentSpikePeak', humidity, null, null)
 }
@@ -609,10 +646,13 @@ void recordFanStart(BigDecimal humidity) {
  */
 void recordFanStop(BigDecimal humidity, BigDecimal durationMinutes) {
   BigDecimal startHumidity = getDeviceCurrentValue('lastFanStartHumidity') as BigDecimal
+  logDebug("Recording fan stop at ${humidity}% humidity after ${durationMinutes} minutes")
   emitEvent('lastFanEndHumidity', humidity, null, null)
   emitEvent('lastFanRunDurationMinutes', durationMinutes, null, null)
   if (startHumidity != null) {
     emitEvent('lastFanHumidityDrop', startHumidity - humidity, null, null)
+  } else {
+    logWarn('Recorded fan stop without a matching fan start')
   }
 }
 
@@ -623,6 +663,7 @@ void recordFanStop(BigDecimal humidity, BigDecimal durationMinutes) {
  * @param humidity The household sensor humidity reading
  */
 void setHouseholdHumidity(BigDecimal humidity) {
+  logTrace("Updating household humidity to ${humidity}%")
   emitEvent('householdHumidity', humidity, null, null)
   // Recompute differential if we have a current bathroom reading
   BigDecimal current = getDeviceCurrentValue('humidityCurrent') as BigDecimal
@@ -665,10 +706,9 @@ void setHouseholdHumidity(BigDecimal humidity) {
  * - Accumulates these products to get accurate average over time
  * - Calculates overall time-weighted average
  *
- * PHASE 3: ROLLING AVERAGES
- * - Updates fast-moving average (10-50 samples)
- * - Updates slow-moving average (50-200 samples)
- * - Uses exponential smoothing for efficiency
+ * PHASE 3: TIME-WEIGHTED EXPONENTIAL MOVING AVERAGES
+ * - Updates the fast and slow averages using elapsed time
+ * - Uses exponential smoothing for efficient, responsive tracking
  *
  * PHASE 4: TREND DETECTION
  * - Compares current humidity to previous
@@ -695,10 +735,19 @@ void setHouseholdHumidity(BigDecimal humidity) {
  * - All timestamps are Unix time (milliseconds since Jan 1, 1970)
  * - BigDecimal used for precision (avoids floating point errors)
  * - null checks ensure first reading initializes correctly
- * - Rolling averages use formula: new = old - old/N + current/N
- *   (This is exponential smoothing, very efficient!)
+ * - EMAs use a time-adjusted smoothing factor so irregular reporting intervals
+ *   do not bias the averages.
  */
 void logHumidityEvent(BigDecimal humidityCurrent) {
+  if (humidityCurrent == null) {
+    logError('Ignoring humidity event with no value')
+    return
+  }
+  if (humidityCurrent < 0G || humidityCurrent > 100G) {
+    logError("Ignoring humidity event outside the valid range: ${humidityCurrent}")
+    return
+  }
+  logTrace("Processing humidity reading: ${humidityCurrent}%")
   // ============================================================================
   // PHASE 1: TIME TRACKING
   // ============================================================================
@@ -737,6 +786,9 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // Example: If previous was 5 minutes ago, this = 300000 milliseconds
   BigDecimal elapsedTimeSinceLastUpdate = unixTimeCurrent - unixTimePrevious
   Boolean measurementGap = elapsedTimeSinceLastUpdate > GAP_THRESHOLD_MILLISECONDS
+  if (measurementGap) {
+    logWarn("Humidity reporting gap detected: ${elapsedTimeSinceLastUpdate / 60000G} minutes")
+  }
 
   // Get midnight of today for daily tracking
   // timeToday() is a Hubitat function that returns a Date object for today at specified time
@@ -859,7 +911,7 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // ============================================================================
   // PHASE 4+5: TIME-WEIGHTED EXPONENTIAL MOVING AVERAGES (EMA)
   // ============================================================================
-  // Replaces old sample-count based rolling averages with time-weighted EMAs.
+  // Updates the fast and slow rolling-average attributes using time-weighted EMAs.
   // This fixes bias from irregular sensor reporting intervals.
   //
   // FORMULA:  α = 1 - exp(-elapsedMs / tauMs)
@@ -1056,6 +1108,9 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
     BigDecimal differential = humidityCurrent - householdHum
     emitEvent('bathroomDifferential', differential.setScale(1, BigDecimal.ROUND_HALF_UP), null, null)
   }
+
+  logDebug("Humidity statistics updated: current=${humidityCurrent}%, rateOfChange=${currentRoc ?: 'n/a'}%/min, gap=${measurementGap}, baselineFrozen=${baselineFrozen == 'true'}")
+  logTrace('Humidity reading processing complete')
 
   // ============================================================================
   // CALCULATION COMPLETE

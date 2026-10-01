@@ -24,47 +24,54 @@
 import groovy.transform.Field
 
 
-@Field static final Map deviceModelNames =
-  ["7000:A002":"ZEN72", "7000:A007":"ZEN77"]
-@Field static final Map LOG_LEVELS = [0:"Error", 1:"Warn", 2:"Info", 3:"Debug", 4:"Trace"]
-@Field static final Map LOG_TIMES = [0:"Indefinitely", 30:"30 Minutes", 60:"1 Hour", 120:"2 Hours", 180:"3 Hours", 360:"6 Hours", 720:"12 Hours", 1440:"24 Hours"]
+@Field static final Map DEVICE_MODEL_NAMES = [
+  '7000:A002': 'ZEN72',
+  '7000:A007': 'ZEN77'
+]
+@Field static final Map LOG_LEVELS = [0: 'Error', 1: 'Warn', 2: 'Info', 3: 'Debug', 4: 'Trace']
+@Field static final Map LOG_TIMES = [0: 'Indefinitely', 30: '30 Minutes', 60: '1 Hour', 120: '2 Hours', 180: '3 Hours', 360: '6 Hours', 720: '12 Hours', 1440: '24 Hours']
 
 metadata {
-  definition (
-    name: "Zooz ZEN Dimmer Advanced",
-    namespace: "dwinks",
-    author: "Daniel Winks",
-    importUrl: "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/ZWave/ZoozZen72.groovy"
+  definition(
+    name: 'Zooz ZEN72 ZEN77',
+    namespace: 'dwinks',
+    author: 'Daniel Winks',
+    importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/ZWave/ZoozZen72.groovy'
   ) {
-    capability "Actuator"
-    capability "Switch"
-    capability "SwitchLevel"
-    capability "ChangeLevel"
-    capability "Configuration"
-    capability "Refresh"
-    capability "PushableButton"
-    capability "HoldableButton"
-    capability "ReleasableButton"
-    capability "DoubleTapableButton"
-    capability "Flash"
+    capability 'Actuator'
+    capability 'Switch'
+    capability 'SwitchLevel'
+    capability 'ChangeLevel'
+    capability 'Configuration'
+    capability 'Refresh'
+    capability 'PushableButton'
+    capability 'HoldableButton'
+    capability 'ReleasableButton'
+    capability 'DoubleTapableButton'
+    command 'startLevelChange', [
+      [name: 'Direction*', description: 'Direction for level change request', type: 'ENUM', constraints: ['up', 'down']],
+      [name: 'Duration', type: 'NUMBER', description: 'Transition duration in seconds']
+    ]
 
-    command "startLevelChange", [
-      [name:"Direction*", description:"Direction for level change request", type: "ENUM", constraints: ["up","down"]],
-      [name:"Duration", type:"NUMBER", description:"Transition duration in seconds"] ]
+    command 'setLED', [
+      [name: 'Select Color*', description: 'Select the color for the LED', type: 'ENUM', constraints: LED_COLOR_OPTIONS]
+    ]
+    command 'setLEDMode', [
+      [name: 'Select Mode*', description: 'This sets preference 2', type: 'ENUM', constraints: LED_MODE_OPTIONS]
+    ]
+    command 'setParameter', [
+      [name: 'parameterNumber*', type: 'NUMBER', description: 'Parameter number'],
+      [name: 'value*', type: 'NUMBER', description: 'Parameter value'],
+      [name: 'size', type: 'NUMBER', description: 'Parameter size']
+    ]
+    command 'enableLocalControl'
+    command 'disableLocalControl'
 
-    command "setLED", [
-      [name:"Select Color*", description:"Select the color for the LED", type: "ENUM", constraints: ledColorOptions] ]
-    command "setLEDMode", [
-      [name:"Select Mode*", description:"This Sets Preference (#2)*", type: "ENUM", constraints: ledModeCmdOptions] ]
-    command "setParameter",[[name:"parameterNumber*",type:"NUMBER", description:"Parameter Number"],
-      [name:"value*",type:"NUMBER", description:"Parameter Value"],
-      [name:"size",type:"NUMBER", description:"Parameter Size"]]
 
+    attribute 'syncStatus', 'string'
 
-    attribute "syncStatus", "string"
-
-    fingerprint mfr:"027A", prod:"7000", deviceId:"A002", inClusters:"0x5E,0x26,0x70,0x5B,0x85,0x8E,0x59,0x55,0x86,0x72,0x5A,0x87,0x73,0x9F,0x6C,0x7A"
-    fingerprint mfr:"027A", prod:"7000", deviceId:"A007", inClusters:"0x5E,0x26,0x70,0x5B,0x85,0x8E,0x59,0x55,0x86,0x72,0x5A,0x87,0x73,0x9F,0x6C,0x7A"
+    fingerprint mfr: '027A', prod: '7000', deviceId: 'A002', inClusters: '0x5E,0x26,0x70,0x5B,0x85,0x8E,0x59,0x55,0x86,0x72,0x5A,0x87,0x73,0x9F,0x6C,0x7A'
+    fingerprint mfr: '027A', prod: '7000', deviceId: 'A007', inClusters: '0x5E,0x26,0x70,0x5B,0x85,0x8E,0x59,0x55,0x86,0x72,0x5A,0x87,0x73,0x9F,0x6C,0x7A'
   }
 
   preferences {
@@ -73,7 +80,7 @@ metadata {
         Integer paramVal = getParamValue(param)
         if (param.options) {
           input "configParam${param.num}", "enum",
-            title: fmtTitle("${param.title}"),
+            title: fmtTitle(param.title),
             description: fmtDesc("• Parameter #${param.num}, Selected: ${paramVal}" + (param?.description ? "<br>• ${param?.description}" : '')),
             defaultValue: paramVal,
             options: param.options,
@@ -81,7 +88,7 @@ metadata {
         }
         else if (param.range) {
           input "configParam${param.num}", "number",
-            title: fmtTitle("${param.title}"),
+            title: fmtTitle(param.title),
             description: fmtDesc("• Parameter #${param.num}, Range: ${(param.range).toString()}, DEFAULT: ${param.defaultVal}" + (param?.description ? "<br>• ${param?.description}" : '')),
             defaultValue: paramVal,
             range: param.range,
@@ -90,40 +97,35 @@ metadata {
       }
     }
 
-    for(int i in 2..maxAssocGroups) {
-      input "assocDNI$i", "string",
-        title: fmtTitle("Device Associations - Group $i"),
-        description: fmtDesc("Supports up to ${maxAssocNodes} Hex Device IDs separated by commas. Check device documentation for more info. Save as blank or 0 to clear."),
+    for (Integer i in 2..MAX_ASSOCIATION_GROUPS) {
+      input "assocDNI${i}", 'string',
+        title: fmtTitle("Device associations - group ${i}"),
+        description: fmtDesc("Supports up to ${MAX_ASSOCIATION_NODES} hexadecimal device IDs separated by commas. Save blank or 0 to clear."),
         required: false
     }
 
-    input "supervisionGetEncap", "bool",
-      title: fmtTitle("Supervision Encapsulation") + "<em> (Experimental)</em>",
-      description: fmtDesc("This can increase reliability when the device is paired with security, but may not work correctly on all models."),
-      defaultValue: false
-
     if (hardwareLevelCorrection()) {
-      input "levelCorrection", "hidden", 
-        title: fmtTitle("Brightness Correction"),
-        description: fmtDesc("This feature is implimented within the hardware and cannot be changed"),
+      input 'levelCorrection', 'hidden',
+        title: fmtTitle('Brightness correction'),
+        description: fmtDesc('This feature is implemented in the hardware and cannot be changed.'),
         defaultValue: false
     }
     else {
-      input "levelCorrection", "bool",
-        title: fmtTitle("Brightness Correction"),
-        description: fmtDesc("Brightness level set on dimmer is converted to fall within the min/max range but shown with the full range of 1-100%"),
+      input 'levelCorrection', 'bool',
+        title: fmtTitle('Brightness correction'),
+        description: fmtDesc('Brightness set on the dimmer is converted to the configured minimum and maximum range while displayed as 1-100%.'),
         defaultValue: false
     }
 
-    input "sceneReverse", "bool",
-      title: fmtTitle("Scene Up-Down Reversal"),
-      description: fmtDesc("If the button numbers and up/down descriptions are backwards in the scene button events change this setting to fix it!"),
+    input 'sceneReverse', 'bool',
+      title: fmtTitle('Scene up/down reversal'),
+      description: fmtDesc('Enable this if the button numbers or up/down descriptions are reversed in scene events.'),
       defaultValue: false
 
-    input name: "logLevel", type: "enum", title: fmtTitle("Logging Level"),
-      description: fmtDesc("Logs selected level and above"), defaultValue: 3, options: LOG_LEVELS
-    input name: "logLevelTime", type: "enum", title: fmtTitle("Logging Level Time"),
-      description: fmtDesc("Time to enable Debug/Trace logging"), defaultValue: 30, options: LOG_TIMES
+    input name: 'logLevel', type: 'enum', title: fmtTitle('Logging level'),
+      description: fmtDesc('Logs selected level and above.'), defaultValue: 3, options: LOG_LEVELS
+    input name: 'logLevelTime', type: 'enum', title: fmtTitle('Logging level duration'),
+      description: fmtDesc('Duration for debug and trace logging.'), defaultValue: 30, options: LOG_TIMES
   }
 }
 
@@ -162,15 +164,15 @@ Map getLogLevelInfo() {
 }
 
 void debugLogsOff() {
-  logWarn("Debug logging toggle disabled...")
-  device.removeSetting("logEnable")
-  device.updateSetting("debugEnable", [value:false, type:"bool"])
+  logWarn('Debug logging disabled')
+  device.removeSetting('logEnable')
+  device.updateSetting('debugEnable', [value: false, type: 'bool'])
 }
 
 void logsOff() {
-  logWarn("Debug and Trace logging disabled...")
+  logWarn('Debug and trace logging disabled')
   if (getLogLevelInfo().level >= 3) {
-    device.updateSetting("logLevel", [value:"2", type:"enum"])
+    device.updateSetting('logLevel', [value: '2', type: 'enum'])
   }
 }
 
@@ -201,21 +203,12 @@ void logTrace(String msg) {
     log.trace("${device.displayName}: ${msg}")
   }
 }
+@Field static final Integer MAX_ASSOCIATION_GROUPS = 4
+@Field static final Integer MAX_ASSOCIATION_NODES = 5
 
-
-void debugShowVars() {
-  logDebug("settings ${settings.hashCode()} ${settings}")
-  logDebug("paramsList ${paramsList.hashCode()} ${paramsList}")
-  logDebug("paramsMap ${paramsMap.hashCode()} ${paramsMap}")
-}
-
-
-@Field static final int maxAssocGroups = 4
-@Field static final int maxAssocNodes = 5
-
-@Field static final Map ledModeCmdOptions = [0:"Default", 1:"Reverse", 2:"Off", 3:"On"]
-@Field static final Map ledColorOptions = [0:"White", 1:"Blue", 2:"Green", 3:"Red"]
-@Field static Map<String, Long> turningOn = new java.util.concurrent.ConcurrentHashMap()
+@Field static final Map LED_MODE_OPTIONS = [0: 'Default', 1: 'Reverse', 2: 'Off', 3: 'On']
+@Field static final Map LED_COLOR_OPTIONS = [0: 'White', 1: 'Blue', 2: 'Green', 3: 'Red']
+@Field static Map<String, Long> TURNING_ON = new java.util.concurrent.ConcurrentHashMap()
 
 @Field static Map<String, Map> paramsMap =
 [
@@ -333,9 +326,10 @@ void debugShowVars() {
     changes: [72:[num:31, firmVer:2.20, firmVerM:[10:40]]]
   ],
   loadControl: [ num: 15,
-    title: "Smart Bulb Mode - Load Control",
+    title: "Local and Z-Wave Control",
+    description: "Enable or disable physical paddle and Z-Wave control of the load.",
     size: 1, defaultVal: 1,
-    options: [1:"Enable Paddle and Z-Wave", 0:"Disable Paddle Control", 2:"Disable Paddle and Z-Wave Control"],
+    options: [1:"Enable Local and Z-Wave Control", 0:"Disable Local Control", 2:"Disable Local and Z-Wave Control"],
   ],
   smartBulbBehavior: [ num: 21,
     title: "Smart Bulb - On/Off when Paddle Disabled",
@@ -385,15 +379,6 @@ void debugShowVars() {
     changes: [72:[], 77:[firmVer:2.10, firmVerM:[10:20]]
     ],
   ],
-  ledFlash: [ num: null,
-    title: "LED Flash when Settings Changed",
-    size: 1, defaultVal: 0,
-    options: [0:"Flash Enabled", 1:"Flash Disabled"],
-    changes: [
-      72:[num:32, firmVer:2.20, firmVerM:[10:40]],
-      77:[num:32, firmVer:3.20, firmVerM:[10:40, 2:30]]
-    ]
-  ],
   associationReports: [ num: 7,
     title: "Send Status Report to Associations",
     size: 1, defaultVal: 15,
@@ -408,10 +393,9 @@ void debugShowVars() {
   ],
 ]
 
-@Field static final Map commandClassVersions = [
+@Field static final Map COMMAND_CLASS_VERSIONS = [
   0x26: 2,
   0x5B: 3,
-  0x6C: 1,
   0x70: 1,
   0x85: 2,
   0x86: 2,
@@ -420,65 +404,64 @@ void debugShowVars() {
 
 
 void installed() {
-  logInfo("Installed Zooz ZEN Dimmer Advanced")
+  logInfo('Installed Zooz ZEN Dimmer Advanced')
   initialize()
 }
 
 void initialize() {
-  logWarn("initialize...")
+  logDebug('Initializing driver')
   refresh()
 }
 
 void configure() {
-  logWarn("configure...")
+  logDebug('Configuring device')
   if (!pendingChanges || state.resyncAll == null) {
-    logDebug("Enabling Full Re-Sync")
+    logDebug('Enabling full resynchronization')
     clearVariables()
     state.resyncAll = true
   }
+  state.associationReportParts = [:]
 
   updateSyncingStatus(6)
-  runIn(1, "executeRefreshCmds")
-  runIn(4, "executeConfigureCmds")
+  runIn(1, 'executeRefreshCmds')
+  runIn(4, 'executeConfigureCmds')
 }
 
 void updated() {
-  logDebug("updated...")
-  runIn(1, "executeConfigureCmds")
+  logDebug('Preferences updated')
+  runIn(1, 'executeConfigureCmds')
 }
 
 void refresh() {
-  logDebug("refresh...")
+  logDebug('Refreshing device state')
   executeRefreshCmds()
 }
 
 
 String on() {
-  logDebug("on...")
-  flashStop()
-  if (turningOn[device.id] > (new Date()).time) {
-    logWarn("on() blocked, already adjusting")
+  logDebug('Turning on')
+  if (TURNING_ON[device.id] > (new Date()).time) {
+    logWarn('On command ignored while the level is changing')
     return
   }
   return getOnOffCmds(0xFF)
 }
 
 String off() {
-  logDebug("off...")
-  flashStop()
+  logDebug('Turning off')
   return getOnOffCmds(0x00)
 }
 
 String setLevel(Number level, Number duration=null) {
-  logDebug("setLevel($level, $duration)...")
-  turningOn[device.id] = (new Date()).time + 1000
+  logDebug("Setting level ${level} with duration ${duration}")
+  TURNING_ON[device.id] = (new Date()).time + 1000
   return getSetLevelCmds(level, duration)
 }
 
 List<String> startLevelChange(String direction, Number duration = null) {
-  Boolean upDown = (direction == "down") ? true : false
-  Integer durationVal = validateRange(duration, getParamValue("holdRampRate") as Integer, 0, 127)
-  logDebug("startLevelChange($direction) for ${durationVal}s")
+  Boolean upDown = (direction == 'down')
+  Integer durationVal = validateRange(duration, getParamValue('holdRampRate') as Integer, 0, 127)
+  logDebug("Starting level change ${direction} for ${durationVal} seconds")
   List<String> cmds = [switchMultilevelStartLvChCmd(upDown, durationVal)]
 
 
@@ -486,64 +469,37 @@ List<String> startLevelChange(String direction, Number duration = null) {
 }
 
 String stopLevelChange() {
-  logDebug("stopLevelChange()")
+  logDebug('Stopping level change')
   return switchMultilevelStopLvChCmd()
 }
 
-void push(Integer buttonId) { sendBasicButtonEvent(buttonId, "pushed") }
-void hold(Integer buttonId) { sendBasicButtonEvent(buttonId, "held") }
-void release(Integer buttonId) { sendBasicButtonEvent(buttonId, "released") }
-void doubleTap(Integer buttonId) { sendBasicButtonEvent(buttonId, "doubleTapped") }
-
-void flash(Integer rateToFlash = null) {
-  if (!rateToFlash) rateToFlash = state.flashRate
-  rateToFlash = validateRange(rateToFlash, 1500, 750, 30000)
-  Integer maxRun = 30 * 60
-  state.flashNext = (device.currentValue("switch")=="on" ? "off" : "on")
-  state.flashRate = rateToFlash
-
-  logInfo("Flashing started with rate of ${rateToFlash}ms")
-  runIn(maxRun, "flashStop", [data:true])
-  flashHandler(rateToFlash)
+void push(Integer buttonId) {
+  sendBasicButtonEvent(buttonId, 'pushed')
 }
 
-void flashStop(Boolean turnOn = false) {
-  if (state.flashNext != null) {
-    logInfo("Flashing stopped...")
-    unschedule("flashHandler")
-    unschedule("flashStop")
-    state.remove("flashNext")
-    if (turnOn) { runIn(1, "on") }
-  }
+void hold(Integer buttonId) {
+  sendBasicButtonEvent(buttonId, 'held')
 }
 
-void flashHandler(Integer rateToFlash) {
-  if (state.flashNext == "on") {
-    logDebug("Flash On")
-    state.flashNext = "off"
-    runInMillis(rateToFlash, "flashHandler", [data:rateToFlash])
-    sendCommands(getSetLevelCmds(0xFF, 0))
-  }
-  else if (state.flashNext == "off") {
-    logDebug("Flash Off")
-    state.flashNext = "on"
-    runInMillis(rateToFlash, "flashHandler", [data:rateToFlash])
-    sendCommands(getSetLevelCmds(0x00, 0))
-  }
+void release(Integer buttonId) {
+  sendBasicButtonEvent(buttonId, 'released')
 }
 
+void doubleTap(Integer buttonId) {
+  sendBasicButtonEvent(buttonId, 'doubleTapped')
+}
 
 void setLED(String colorName) {
   Map param = getParam("ledColor")
 
   if (param?.num && state.deviceModel in ["ZEN72", "ZEN77"]) {
-    Short paramVal = ledColorOptions.find{ colorName.equalsIgnoreCase(it.value) }.key
+    Short paramVal = LED_COLOR_OPTIONS.find{ colorName.equalsIgnoreCase(it.value) }.key
     logDebug("Indicator Color Value [${colorName} : ${paramVal}]")
     device.updateSetting("configParam${param.num}",[value:"${paramVal}", type:"enum"])
     sendCommands(configSetGetCmd(param, paramVal))
   }
   else {
-    logWarn("Indicator Color can only be changed on ZEN72/77 models")
+    logWarn('LED color is only supported on ZEN72 and ZEN77 devices')
   }
 }
 
@@ -551,19 +507,39 @@ void setLEDMode(String modeName) {
   Map param = getParam("ledMode")
 
   if (param?.num) {
-    Short paramVal = ledModeCmdOptions.find{ modeName.equalsIgnoreCase(it.value) }.key
+    Short paramVal = LED_MODE_OPTIONS.find{ modeName.equalsIgnoreCase(it.value) }.key
     logDebug("Indicator Value [${modeName} : ${paramVal}]")
     device.updateSetting("configParam${param.num}",[value:"${paramVal}", type:"enum"])
     sendCommands(configSetGetCmd(param, paramVal))
   }
   else {
-    logWarn("There is No LED Indicator Parameter Found for this model")
+    logWarn('LED mode is not available for this device')
   }
+}
+
+void enableLocalControl() {
+  sendCommands(setLocalControl(1))
+}
+
+void disableLocalControl() {
+  sendCommands(setLocalControl(0))
+}
+
+List<String> setLocalControl(Integer value) {
+  Map param = getParam('loadControl')
+  if (!param?.num) {
+    logWarn('Local control parameter is not available for this device')
+    return []
+  }
+
+  device.updateSetting("configParam${param.num}", [value: "${value}", type: 'enum'])
+  logInfo(value == 1 ? 'Local control enabled' : 'Local control disabled')
+  return configSetGetCmd(param, value)
 }
 
 void refreshParams() {
   List<String> cmds = []
-  for (int i = 1; i <= maxAssocGroups; i++) {
+  for (Integer i = 1; i <= MAX_ASSOCIATION_GROUPS; i++) {
     cmds << associationGetCmd(i)
   }
 
@@ -579,8 +555,8 @@ String setParameter(Integer paramNum, Integer value, Integer size = null) {
   if (param && !size) { size = param.size  }
 
   if (paramNum == null || value == null || size == null) {
-    logWarn("Incomplete parameter list supplied...")
-    logWarn("Syntax: setParameter(paramNum, value, size)")
+    logWarn('Parameter number, value, and size are required')
+    logWarn('Use setParameter(parameterNumber, value, size)')
     return
   }
   logDebug("setParameter ( number: $paramNum, value: $value, size: $size )" + (param ? " [${param.name}]" : ""))
@@ -596,26 +572,6 @@ void parse(String description) {
 void zwaveEvent(hubitat.zwave.commands.multichannelv3.MultiChannelCmdEncap cmd) {
   zwaveMultiChannel(cmd)
 }
-void zwaveEvent(hubitat.zwave.commands.supervisionv1.SupervisionGet cmd, Integer ep = 0) {
-  zwaveSupervision(cmd,ep)
-}
-
-void zwaveEvent(hubitat.zwave.commands.supervisionv1.SupervisionReport cmd, Integer ep = 0) {
-  logDebug("Supervision Report - SessionID: ${cmd.sessionID}, Status: ${cmd.status}")
-  if (supervisedPackets["${device.id}"] == null) { supervisedPackets["${device.id}"] = [:] }
-
-  switch (cmd.status as Integer) {
-    case 0x00:
-    case 0x01:
-    case 0x02:
-      logWarn("Supervision NOT Successful - SessionID: ${cmd.sessionID}, Status: ${cmd.status}")
-      break
-    case 0xFF:
-      supervisedPackets["${device.id}"].remove(cmd.sessionID)
-      break
-  }
-}
-
 void zwaveEvent(hubitat.zwave.commands.configurationv1.ConfigurationReport cmd) {
   logTrace("${cmd}")
   updateSyncingStatus()
@@ -639,31 +595,63 @@ void zwaveEvent(hubitat.zwave.commands.associationv2.AssociationReport cmd) {
   logTrace("${cmd}")
   updateSyncingStatus()
 
-  Integer grp = cmd.groupingIdentifier
+  updateAssociationReport(cmd.groupingIdentifier as Integer, cmd.nodeId ?: [], cmd.reportsToFollow as Integer ?: 0, 'standard')
+}
+
+void zwaveEvent(hubitat.zwave.commands.multichannelassociationv3.MultiChannelAssociationReport cmd) {
+  logTrace("${cmd}")
+  updateSyncingStatus()
+
+  List nodeIds = (cmd.nodeId ?: []).collect { Object nodeId -> nodeId as Integer }
+  nodeIds += (cmd.multiChannelNodeIds ?: []).collect { Map node -> node.nodeId as Integer }
+  updateAssociationReport(cmd.groupingIdentifier as Integer, nodeIds, cmd.reportsToFollow as Integer ?: 0, 'multiChannel')
+}
+
+void updateAssociationReport(Integer grp, List reportedNodeIds, Integer reportsToFollow, String source) {
+  Map partialReports = state.associationReportParts ?: [:]
+  String reportKey = "${source}-${grp}"
+  List nodeIds = ((partialReports[reportKey] ?: []) + reportedNodeIds).collect { Object nodeId -> nodeId as Integer }.unique().sort()
+
+  if (reportsToFollow > 0) {
+    partialReports[reportKey] = nodeIds
+    state.associationReportParts = partialReports
+    logDebug("Received a partial ${source} association report for group ${grp}")
+    return
+  }
+
+  partialReports.remove(reportKey)
+  state.associationReportParts = partialReports
+
+  Map associationReports = state.associationReports ?: [:]
+  Map groupReports = associationReports["${grp}"] ?: [:]
+  groupReports[source] = nodeIds
+  associationReports["${grp}"] = groupReports
+  state.associationReports = associationReports
+
+  List actualNodeIds = groupReports.values().flatten().unique().sort()
 
   if (grp == 1) {
-    logDebug("Lifeline Association: ${cmd.nodeId}")
-    state.group1Assoc = (cmd.nodeId == [zwaveHubNodeId]) ? true : false
+    logDebug("Lifeline association: ${actualNodeIds}")
+    state.group1Assoc = (actualNodeIds == [zwaveHubNodeId])
   }
-  else if (grp > 1 && grp <= maxAssocGroups) {
-    logDebug("Group $grp Association: ${cmd.nodeId}")
-    if (cmd.nodeId.size() > 0) {
-      state["assocNodes$grp"] = cmd.nodeId
+  else if (grp > 1 && grp <= MAX_ASSOCIATION_GROUPS) {
+    logDebug("Group ${grp} association: ${actualNodeIds}")
+    if (actualNodeIds) {
+      state["assocNodes${grp}"] = actualNodeIds
     } else {
-      state.remove("assocNodes$grp".toString())
+      state.remove("assocNodes${grp}")
     }
 
-    String dnis = convertIntListToHexList(cmd.nodeId)?.join(", ")
-    device.updateSetting("assocDNI$grp", [value:"${dnis}", type:"string"])
+    String dnis = convertIntListToHexList(actualNodeIds)?.join(', ')
+    device.updateSetting("assocDNI${grp}", [value: dnis ?: '', type: 'string'])
   }
   else {
-    logDebug("Unhandled Group: $cmd")
+    logDebug("Unhandled association group: ${grp}")
   }
 }
 
 void zwaveEvent(hubitat.zwave.commands.basicv1.BasicReport cmd, Integer ep = 0) {
   logTrace("${cmd} (ep ${ep})")
-  flashStop()
   sendSwitchEvents(cmd.value, "physical", ep)
 }
 
@@ -750,7 +738,7 @@ void sendSwitchEvents(Object rawVal, String type, Integer ep = 0) {
   String value = (rawVal ? "on" : "off")
   String desc = "switch is turned ${value}" + (type ? " (${type})" : "")
   sendEventLog(name:"switch", value:value, type:type, desc:desc, ep)
-  turningOn[device.id] = 0
+  TURNING_ON[device.id] = 0
 
   if (rawVal) {
     Integer level = (rawVal == 99 ? 100 : rawVal)
@@ -787,7 +775,7 @@ void executeConfigureCmds() {
 
     if ((paramVal != null) && (state.resyncAll || (storedVal != paramVal))) {
       logDebug("Changing ${param.name} - ${param.title} (#${param.num}) from ${storedVal} to ${paramVal}")
-      cmds += configSetGetCmd(param, paramVal)
+      cmds += param.name == 'loadControl' ? setLocalControl(paramVal) : configSetGetCmd(param, paramVal)
     }
   }
 
@@ -809,7 +797,7 @@ void executeRefreshCmds() {
   sendCommands(cmds)
 }
 
-List<String> getConfigureAssocsCmds() {
+List<String> getConfigureAssocsCmds(Boolean queryAssociations = true) {
   List<String> cmds = []
 
   if (!state.group1Assoc || state.resyncAll) {
@@ -817,10 +805,13 @@ List<String> getConfigureAssocsCmds() {
       logDebug("Adding missing lifeline association...")
     }
     cmds << associationSetCmd(1, [zwaveHubNodeId])
+  }
+  if (queryAssociations) {
     cmds << associationGetCmd(1)
+    cmds << mcAssociationGetCmd(1)
   }
 
-  for (int i = 2; i <= maxAssocGroups; i++) {
+  for (Integer i = 2; i <= MAX_ASSOCIATION_GROUPS; i++) {
     List<String> cmdsEach = []
     List settingNodeIds = getAssocDNIsSettingNodeIds(i)
 
@@ -837,8 +828,12 @@ List<String> getConfigureAssocsCmds() {
     }
 
     if (cmdsEach || state.resyncAll) {
-      cmdsEach << associationGetCmd(i)
       cmds += cmdsEach
+    }
+
+    if (queryAssociations) {
+      cmds << associationGetCmd(i)
+      cmds << mcAssociationGetCmd(i)
     }
   }
 
@@ -874,7 +869,7 @@ String getSetLevelCmds(Number level, Number duration = null, Integer endPoint = 
 
 
 void fixParamsMap() {
-  paramsMap.ledColor.options << ledColorOptions
+  paramsMap.ledColor.options << LED_COLOR_OPTIONS
   paramsMap.autoOffInterval.options << autoOnOffIntervalOptions
   paramsMap.autoOnInterval.options << autoOnOffIntervalOptions
   paramsMap.rampRate.options << rampRateOptions
@@ -922,7 +917,7 @@ void checkSceneReverse() {
 
 
 void zwaveParse(String description) {
-  hubitat.zwave.Command cmd = zwave.parse(description, commandClassVersions)
+  hubitat.zwave.Command cmd = zwave.parse(description, COMMAND_CLASS_VERSIONS)
 
   if (cmd) {
     logTrace("parse: ${description} --PARSED-- ${cmd}")
@@ -934,25 +929,13 @@ void zwaveParse(String description) {
 }
 
 void zwaveMultiChannel(hubitat.zwave.commands.multichannelv3.MultiChannelCmdEncap cmd) {
-  hubitat.zwave.Command encapsulatedCmd = cmd.encapsulatedCommand(commandClassVersions)
+  hubitat.zwave.Command encapsulatedCmd = cmd.encapsulatedCommand(COMMAND_CLASS_VERSIONS)
   logTrace("${cmd} --ENCAP-- ${encapsulatedCmd}")
   if (encapsulatedCmd) {
     zwaveEvent(encapsulatedCmd, cmd.sourceEndPoint as Integer)
   } else {
     logWarn("Unable to extract encapsulated cmd from $cmd")
   }
-}
-
-void zwaveSupervision(hubitat.zwave.commands.supervisionv1.SupervisionGet cmd, Integer ep = 0) {
-  hubitat.zwave.Command encapsulatedCmd = cmd.encapsulatedCommand(commandClassVersions)
-  logTrace("${cmd} --ENCAP-- ${encapsulatedCmd}")
-  if (encapsulatedCmd) {
-    zwaveEvent(encapsulatedCmd, ep)
-  } else {
-    logWarn("Unable to extract encapsulated cmd from $cmd")
-  }
-
-  sendCommands(secureCmd(zwave.supervisionV1.supervisionReport(sessionID: cmd.sessionID, reserved: 0, moreStatusUpdates: false, status: 0xFF, duration: 0), ep))
 }
 
 void zwaveEvent(hubitat.zwave.commands.versionv2.VersionReport cmd) {
@@ -973,13 +956,6 @@ void zwaveEvent(hubitat.zwave.Command cmd, Integer ep = 0) {
 
 
 void sendCommands(List<String> cmds, Long delay=200) {
-  Integer packetsCount = supervisedPackets?."${device.id}"?.size()
-  if (packetsCount > 0) {
-    Integer delayTotal = (cmds.size() * delay) + 2000
-    logDebug("Setting supervisionCheck to ${delayTotal}ms | ${packetsCount} | ${cmds.size()} | ${delay}")
-    runInMillis(delayTotal, "supervisionCheck", [data:1])
-  }
-
   sendHubCommand(new hubitat.device.HubMultiAction(delayBetween(cmds, delay), hubitat.device.Protocol.ZWAVE))
 }
 
@@ -988,11 +964,11 @@ void sendCommands(String cmd) {
 }
 
 String associationSetCmd(Integer group, List<Integer> nodes) {
-  return supervisionEncap(zwave.associationV2.associationSet(groupingIdentifier: group, nodeId: nodes))
+  return secureCmd(zwave.associationV2.associationSet(groupingIdentifier: group, nodeId: nodes))
 }
 
 String associationRemoveCmd(Integer group, List<Integer> nodes) {
-  return supervisionEncap(zwave.associationV2.associationRemove(groupingIdentifier: group, nodeId: nodes))
+  return secureCmd(zwave.associationV2.associationRemove(groupingIdentifier: group, nodeId: nodes))
 }
 
 String associationGetCmd(Integer group) {
@@ -1008,7 +984,7 @@ String versionGetCmd() {
 }
 
 String switchBinarySetCmd(Integer value, Integer ep=0) {
-  return supervisionEncap(zwave.switchBinaryV1.switchBinarySet(switchValue: value), ep)
+  return secureCmd(zwave.switchBinaryV1.switchBinarySet(switchValue: value), ep)
 }
 
 String switchBinaryGetCmd(Integer ep=0) {
@@ -1016,7 +992,7 @@ String switchBinaryGetCmd(Integer ep=0) {
 }
 
 String switchMultilevelSetCmd(Integer value, Integer duration, Integer ep=0) {
-  return supervisionEncap(zwave.switchMultilevelV2.switchMultilevelSet(dimmingDuration: duration, value: value), ep)
+  return secureCmd(zwave.switchMultilevelV2.switchMultilevelSet(dimmingDuration: duration, value: value), ep)
 }
 
 String switchMultilevelGetCmd(Integer ep=0) {
@@ -1024,11 +1000,11 @@ String switchMultilevelGetCmd(Integer ep=0) {
 }
 
 String switchMultilevelStartLvChCmd(Boolean upDown, Integer duration, Integer ep=0) {
-  return supervisionEncap(zwave.switchMultilevelV2.switchMultilevelStartLevelChange(upDown: upDown, ignoreStartLevel:1, dimmingDuration: duration), ep)
+  return secureCmd(zwave.switchMultilevelV2.switchMultilevelStartLevelChange(upDown: upDown, ignoreStartLevel:1, dimmingDuration: duration), ep)
 }
 
 String switchMultilevelStopLvChCmd(Integer ep=0) {
-  return supervisionEncap(zwave.switchMultilevelV2.switchMultilevelStopLevelChange(), ep)
+  return secureCmd(zwave.switchMultilevelV2.switchMultilevelStopLevelChange(), ep)
 }
 
 String meterGetCmd(Map meter, Integer ep = 0) {
@@ -1068,7 +1044,7 @@ String configSetCmd(Map param, Integer value) {
   Long sizeFactor = Math.pow(256,param.size).round()
   if (value >= sizeFactor/2) { value -= sizeFactor }
 
-  return supervisionEncap(zwave.configurationV1.configurationSet(parameterNumber: param.num, size: param.size, scaledConfigurationValue: value))
+  return secureCmd(zwave.configurationV1.configurationSet(parameterNumber: param.num, size: param.size, scaledConfigurationValue: value))
 }
 
 String configGetCmd(Map param) {
@@ -1096,62 +1072,6 @@ String multiChannelEncap(hubitat.zwave.Command cmd, Integer ep) {
     cmd = zwave.multiChannelV3.multiChannelCmdEncap(destinationEndPoint:ep).encapsulate(cmd)
   }
   return cmd.format()
-}
-
-@Field static Map<String, Map<Short, String>> supervisedPackets = new java.util.concurrent.ConcurrentHashMap()
-@Field static Map<String, Short> sessionIDs = new java.util.concurrent.ConcurrentHashMap()
-
-String supervisionEncap(hubitat.zwave.Command cmd, Integer ep = 0) {
-  if (settings.supervisionGetEncap) {
-    Short sessId = getSessionId()
-    hubitat.zwave.Command supervisedCmd = zwave.supervisionV1.supervisionGet(sessionID: sessId).encapsulate(cmd)
-
-    String cmdEncap = multiChannelEncap(supervisedCmd, ep)
-
-    logDebug("New Supervised Packet for Session: ${sessId}")
-    if (supervisedPackets["${device.id}"] == null) { supervisedPackets["${device.id}"] = [:] }
-    supervisedPackets["${device.id}"][sessId] = cmdEncap
-
-    Integer packetsCount = supervisedPackets?."${device.id}"?.size()
-    Integer delayTotal = (packetsCount * 500) + 2000
-    runInMillis(delayTotal, "supervisionCheck", [data:1])
-
-    return secureCmd(cmdEncap)
-  }
-  else {
-    return secureCmd(cmd, ep)
-  }
-}
-
-Short getSessionId() {
-  Short sessId = sessionIDs["${device.id}"] ?: state.lastSupervision ?: 0
-  sessId = (sessId + 1) % 64
-  state.lastSupervision = sessId
-  sessionIDs["${device.id}"] = sessId
-
-  return sessId
-}
-
-void supervisionCheck(Integer num) {
-  Integer packetsCount = supervisedPackets?."${device.id}"?.size()
-  logDebug("Supervision Check #${num} - Packet Count: ${packetsCount}")
-  if (packetsCount > 0 ) {
-    List<String> cmds = []
-    supervisedPackets["${device.id}"].each { sid, cmd ->
-      logWarn("Re-Sending Supervised Session: ${sid} (Retry #${num})")
-      cmds << secureCmd(cmd)
-    }
-    sendCommands(cmds)
-
-    if (num >= 3) {
-      logWarn("Supervision MAX RETIES (${num}) Reached")
-      supervisedPackets["${device.id}"].clear()
-    }
-    else {
-      Integer delayTotal = (packetsCount * 500) + 2000
-      runInMillis(delayTotal, "supervisionCheck", [data:num+1])
-    }
-  }
 }
 
 @Field static Map<String, Map> configsList = new java.util.concurrent.ConcurrentHashMap()
@@ -1324,7 +1244,7 @@ Integer getPendingChanges() {
     Integer paramVal = getParamValueAdj(param)
     ((paramVal != null) && (paramVal != getParamStoredValue(param.num)))
   }
-  Integer pendingAssocs = Math.ceil(getConfigureAssocsCmds()?.size()/2) ?: 0
+  Integer pendingAssocs = Math.ceil(getConfigureAssocsCmds(false)?.size()/2) ?: 0
   return (!state.resyncAll ? (configChanges + pendingAssocs) : configChanges)
 }
 
@@ -1340,8 +1260,8 @@ List<Integer> getAssocDNIsSettingNodeIds(Integer grp) {
   if (dni && !nodeIds) {
     logWarn("'${dni}' is not a valid value for the 'Device Associations - Group ${grp}' setting.  All z-wave devices have a 2 character Device Network ID and if you're entering more than 1, use commas to separate them.")
   }
-  else if (nodeIds.size() > maxAssocNodes) {
-    logWarn("The 'Device Associations - Group ${grp}' setting contains more than ${maxAssocNodes} IDs so some (or all) may not get associated.")
+  else if (nodeIds.size() > MAX_ASSOCIATION_NODES) {
+    logWarn("The 'Device Associations - Group ${grp}' setting contains more than ${MAX_ASSOCIATION_NODES} IDs so some (or all) may not get associated.")
   }
 
   return nodeIds
@@ -1370,7 +1290,7 @@ String setDevModel(BigDecimal firmware) {
     safeToInt(device.getDataValue("deviceType")),
     safeToInt(device.getDataValue("deviceId"))
   ], 4)
-  String devModel = deviceModelNames[devTypeId.join(":")] ?: "UNK00"
+  String devModel = DEVICE_MODEL_NAMES[devTypeId.join(':')] ?: 'UNK00'
   if (!firmware) { firmware = firmwareVersion }
 
   state.deviceModel = devModel
