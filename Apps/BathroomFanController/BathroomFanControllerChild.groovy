@@ -297,6 +297,8 @@ Map mainPage() {
 @Field static final Long HOUSEHOLD_FRESHNESS_MILLISECONDS = 6L * 60L * 60L * 1000L
 @Field static final Long CONTROL_BASELINE_TAU_MILLISECONDS = 360L * 60L * 1000L
 @Field static final double CONTROL_BASELINE_MAX_ALPHA = 0.25d
+@Field static final Integer CONTROL_BASELINE_SCALE = 2
+@Field static final Integer CONTROL_BASELINE_PARSE_SCALE = 4
 
 String getHumidityStatSensor() {
   return "${app.id}-${humidityStaticSensor}"
@@ -505,7 +507,7 @@ void setFanSpeed(BigDecimal currentHumidity, BigDecimal baseline) {
   Integer highSpeed = (getSetting('highSpeedLevel') ?: 100) as Integer
   Integer threshold = (getSetting('highSpeedThreshold') ?: 10) as Integer
 
-  BigDecimal delta = currentHumidity - baseline
+  BigDecimal delta = (currentHumidity - baseline).setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
   Integer level = delta >= threshold ? highSpeed : lowSpeed
 
   logDebug("Setting fan speed to ${level}% (delta: ${delta}, threshold: ${threshold})")
@@ -579,11 +581,13 @@ BigDecimal calculateStableControlBaseline(
   BigDecimal candidate,
   Long elapsedMilliseconds
 ) {
-  if (candidate == null) {
-    return previousBaseline
+  BigDecimal normalizedCandidate = normalizeControlBaseline(candidate)
+  BigDecimal normalizedPrevious = normalizeControlBaseline(previousBaseline)
+  if (normalizedCandidate == null) {
+    return normalizedPrevious
   }
-  if (previousBaseline == null || elapsedMilliseconds == null || elapsedMilliseconds <= 0L) {
-    return previousBaseline == null ? candidate : previousBaseline
+  if (normalizedPrevious == null || elapsedMilliseconds == null || elapsedMilliseconds <= 0L) {
+    return normalizedPrevious == null ? normalizedCandidate : normalizedPrevious
   }
 
   double alpha = 1.0d - Math.exp(-elapsedMilliseconds.doubleValue() / CONTROL_BASELINE_TAU_MILLISECONDS.doubleValue())
@@ -591,7 +595,43 @@ BigDecimal calculateStableControlBaseline(
     alpha = CONTROL_BASELINE_MAX_ALPHA
   }
   BigDecimal smoothing = BigDecimal.valueOf(alpha)
-  return previousBaseline + ((candidate - previousBaseline) * smoothing)
+  BigDecimal result = normalizedPrevious + ((normalizedCandidate - normalizedPrevious) * smoothing)
+  return result.setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
+}
+
+/**
+ * Keeps the app-owned baseline bounded and makes recovery from older
+ * installations safe. Earlier versions persisted the complete BigDecimal
+ * result after every update, so the fractional scale could grow indefinitely.
+ * Only a few fractional digits are needed to round the value to the control
+ * scale; truncate the input before parsing so an already oversized state value
+ * cannot force another expensive BigDecimal allocation.
+ */
+@CompileStatic
+BigDecimal normalizeControlBaseline(Object value) {
+  if (value == null) {
+    return null
+  }
+
+  String raw = value.toString().trim()
+  if (raw.length() == 0 || !raw.matches('[+-]?(?:[0-9]{1,3}(?:\\.[0-9]*)?|\\.[0-9]+)')) {
+    return null
+  }
+
+  Integer decimalIndex = raw.indexOf('.')
+  if (decimalIndex >= 0 && raw.length() - decimalIndex - 1 > CONTROL_BASELINE_PARSE_SCALE) {
+    raw = raw.substring(0, decimalIndex + CONTROL_BASELINE_PARSE_SCALE + 1)
+  }
+
+  try {
+    BigDecimal parsed = new BigDecimal(raw)
+    if (parsed < BigDecimal.ZERO || parsed > 100G) {
+      return null
+    }
+    return parsed.setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
+  } catch (Exception ignored) {
+    return null
+  }
 }
 
 /**
@@ -629,11 +669,13 @@ BigDecimal getFreshHouseholdHumidity(Long currentTime) {
 BigDecimal updateControlBaseline(BigDecimal bathroomBaseline, Long currentTime) {
   BigDecimal householdHumidity = getFreshHouseholdHumidity(currentTime)
   BigDecimal candidate = selectControlBaselineCandidate(bathroomBaseline, householdHumidity)
+  String previousBaselineString = getStateVar(CONTROL_BASELINE) as String
   BigDecimal previousBaseline
-  try {
-    previousBaseline = new BigDecimal(getStateVar(CONTROL_BASELINE) as String)
-  } catch (Exception ignored) {
-    previousBaseline = null
+  previousBaseline = normalizeControlBaseline(previousBaselineString)
+  if (previousBaseline != null && previousBaselineString != previousBaseline.toString()) {
+    // Migrate an oversized value from older versions immediately, including
+    // while the fan is running and baseline adaptation is intentionally frozen.
+    setStateVar(CONTROL_BASELINE, previousBaseline.toString())
   }
 
   // Do not adapt the control baseline while the fan is running. The child
@@ -842,9 +884,10 @@ void evaluateFanDecision(
     }
 
     // Turn on the fan
+    BigDecimal triggerDelta = (currentHumidity - baseline).setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
     String triggerReason = ceilingReached ?
       "absolute ceiling ${ceiling}% reached" :
-      "humidity rose ${currentHumidity - baseline}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min"
+      "humidity rose ${triggerDelta}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min"
     logDebug("${triggerReason}; turning on fan")
     setStateVar(TRIGGERED_BY_APP, 'true')  // Feature 3: track auto-trigger
     setStateVar(FAN_START_HUMIDITY, currentHumidity.toString())  // Feature 8: track start humidity
