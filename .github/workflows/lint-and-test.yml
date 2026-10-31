@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
 
 jobs:
   lint:
@@ -46,8 +44,179 @@ jobs:
         run: |
           gradle run --no-daemon -Pargs="../Apps ../Drivers ../Libraries"
 
+  select-tests:
+    name: Select relevant Spock tests
+    runs-on: ubuntu-latest
+    outputs:
+      has_tests: ${{ steps.select.outputs.has_tests }}
+      patterns: ${{ steps.select.outputs.patterns }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed files
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PUSH_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "full_suite=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base_sha="$PR_BASE_SHA"
+            head_sha="$PR_HEAD_SHA"
+          else
+            base_sha="$BEFORE_SHA"
+            head_sha="$PUSH_SHA"
+          fi
+
+          if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]]; then
+            git diff-tree --root --no-commit-id --name-only -r "$head_sha" > changed-files.txt
+          else
+            git diff --name-only "$base_sha" "$head_sha" > changed-files.txt
+          fi
+          echo "full_suite=false" >> "$GITHUB_OUTPUT"
+
+      - name: Select test filters
+        id: select
+        env:
+          FULL_SUITE: ${{ steps.diff.outputs.full_suite }}
+        run: |
+          python3 - <<'PY'
+          import fnmatch
+          import json
+          import os
+          from pathlib import Path
+
+          suites = {
+              'dwinks.hubitat.functional.BathroomFanControllerSpec': [
+                  'Apps/BathroomFanController/**',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/BathroomFanControllerSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.ESPHomeRATGDOGarageDoorSpec': [
+                  'Drivers/HTTP/ESPHomeRATGDOGarageDoor.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/ESPHomeRATGDOGarageDoorSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.GenericZWaveAssociationSpec': [
+                  'Drivers/ZWave/GenericZWaveAssociation.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/GenericZWaveAssociationSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.HumidityStatisticsSpec': [
+                  'Drivers/Component/HumidityStatistics.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/HumidityStatisticsSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.MorningAnnouncementSpec': [
+                  'Apps/MorningAnnouncement.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/MorningAnnouncementSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.SolarShadeWindowAdvisorSpec': [
+                  'Apps/SolarShadeWindowAdvisor/**',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/SolarShadeWindowAdvisorSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.SonosAdvGroupSpec': [
+                  'Drivers/Component/SonosAdvGroup.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/SonosAdvGroupSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.SonosAdvPlayerSpec': [
+                  'Drivers/Component/SonosAdvPlayer.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/SonosAdvPlayerSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.SonosAdvPlaylistSpec': [
+                  'Drivers/Component/SonosAdvPlaylist.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/SonosAdvPlaylistSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.SonosAdvancedAppSpec': [
+                  'Apps/SonosAdvancedApp.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/SonosAdvancedAppSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.SunPositionLibrarySpec': [
+                  'Libraries/SunPositionLibrary.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/SunPositionLibrarySpec.groovy',
+              ],
+              'dwinks.hubitat.functional.ThermalModelStatisticsSpec': [
+                  'Drivers/Component/ThermalModelStatistics.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/ThermalModelStatisticsSpec.groovy',
+              ],
+              'dwinks.hubitat.functional.UtilitiesAndLoggingLibrarySpec': [
+                  'Libraries/UtilitiesAndLoggingLibrary.groovy',
+                  'tests/src/test/groovy/dwinks/hubitat/functional/UtilitiesAndLoggingLibrarySpec.groovy',
+              ],
+          }
+
+          lint_pattern = 'dwinks.hubitat.lint.*Spec'
+          all_patterns = list(suites) + [lint_pattern]
+          full_suite = os.environ.get('FULL_SUITE') == 'true'
+          changed = [] if full_suite else Path('changed-files.txt').read_text().splitlines()
+
+          shared_test_patterns = [
+              'tests/build.gradle',
+              'tests/settings.gradle',
+              'tests/gradle.properties',
+              'tests/gradle/**',
+              'tests/gradlew',
+              'tests/src/test/groovy/dwinks/hubitat/stubs/**',
+              'tests/src/test/groovy/com/hubitat/**',
+              'tests/src/test/groovy/hubitat/**',
+              'tests/src/test/groovy/groovy/util/**',
+              'tests/src/test/groovy/groovyx/**',
+          ]
+          all_functional = any(path.startswith('Libraries/') for path in changed)
+          run_all = full_suite or any(
+              fnmatch.fnmatchcase(path, pattern)
+              for path in changed
+              for pattern in shared_test_patterns
+          )
+
+          selected = set(all_patterns if run_all else [])
+          if not run_all:
+              for class_name, patterns in suites.items():
+                  if any(fnmatch.fnmatchcase(path, pattern) for path in changed for pattern in patterns):
+                      selected.add(class_name)
+              if all_functional:
+                  selected.update(suites)
+
+              known_spec_paths = {
+                  f"tests/src/test/groovy/{class_name.replace('.', '/')}.groovy"
+                  for class_name in suites
+              }
+              if any(
+                  path.startswith('tests/src/test/groovy/dwinks/hubitat/functional/')
+                  and path.endswith('Spec.groovy')
+                  and path not in known_spec_paths
+                  for path in changed
+              ):
+                  selected.update(suites)
+
+              lint_patterns = [
+                  'tests/src/main/groovy/dwinks/hubitat/lint/**',
+                  'tests/src/main/resources/**',
+                  'tests/src/test/groovy/dwinks/hubitat/lint/**',
+              ]
+              if any(fnmatch.fnmatchcase(path, pattern) for path in changed for pattern in lint_patterns):
+                  selected.add(lint_pattern)
+
+              if '.github/workflows/lint-and-test.yml' in changed:
+                  selected.update(all_patterns)
+
+          patterns = [pattern for pattern in all_patterns if pattern in selected]
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f"has_tests={'true' if patterns else 'false'}\n")
+              output.write(f"patterns={json.dumps(patterns, separators=(',', ':'))}\n")
+          print(f"Selected {len(patterns)} Spock filter(s): {', '.join(patterns) if patterns else 'none'}")
+          PY
+
   test:
     name: Spock Tests
+    needs: select-tests
+    if: needs.select-tests.outputs.has_tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -62,9 +231,22 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Run tests
+      - name: Run selected tests
         working-directory: tests
-        run: gradle test --no-daemon
+        env:
+          TEST_PATTERNS: ${{ needs.select-tests.outputs.patterns }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          patterns = json.loads(os.environ['TEST_PATTERNS'])
+          command = ['gradle', 'test', '--no-daemon']
+          for pattern in patterns:
+              command.extend(['--tests', pattern])
+          raise SystemExit(subprocess.run(command, check=False).returncode)
+          PY
 
       - name: Upload test report
         if: always()
