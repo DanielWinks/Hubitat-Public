@@ -185,6 +185,7 @@ Map mainPage() {
       input "maxRuntime", "number", title: "Max run time (minutes, 0 to disable, max 720)", required: true, defaultValue: 60, range: '0..720'
       input "minRuntime", "number", title: "Minimum fan run time (minutes, 0 to disable, max 30)", required: false, defaultValue: 5, range: '0..30'
       input "cooldownPeriod", "number", title: "Re-trigger delay after fan turns off (minutes, 0 to disable, max 30)", required: false, defaultValue: 3, range: '0..30'
+      input "rearmTimeout", "number", title: "Re-arm timeout (minutes, 0 to disable, max 720)", required: false, defaultValue: 60, range: '0..720'
 
       input "doorSensor", "capability.contactSensor", title: "Door Sensor (optional)", required: false, submitOnChange: true
       if (settings.doorSensor) {
@@ -290,7 +291,7 @@ Map mainPage() {
 @Field static final BigDecimal MIN_RISE_ACCELERATION = new BigDecimal('0.05')
 @Field static final BigDecimal MIN_FALL_RATE = new BigDecimal('0.05')
 @Field static final BigDecimal HIGH_CERTAINTY_MULTIPLIER = new BigDecimal('1.5')
-@Field static final BigDecimal REARM_DELTA = new BigDecimal('0.5')
+@Field static final BigDecimal REARM_DELTA = new BigDecimal('10.0')
 @Field static final BigDecimal PEAK_DROP_TO_STOP = new BigDecimal('2.0')
 @Field static final Integer RISE_CONFIRMATION_SAMPLES = 2
 @Field static final Integer DECLINE_CONFIRMATION_SAMPLES = 2
@@ -851,16 +852,28 @@ void evaluateFanDecision(
       (highCertainty && accelerationQualified) ||
       riseCandidateCount >= RISE_CONFIRMATION_SAMPLES))
 
-  // Once a run ends, require the humidity to come back close to baseline
-  // before accepting another automatic start. This is separate from the
-  // time-based cooldown and prevents on/off/on chatter while humidity is
-  // still elevated.
+  // Once a run ends, require a meaningful humidity drop before accepting
+  // another automatic start. A 10-point allowance avoids keeping the fan
+  // disarmed through a later shower when the room has not fully dried.
   Boolean rearmRequired = getStateVar(REARM_REQUIRED) == 'true'
   if (fanState != 'on' && rearmRequired && !ceilingReached) {
-    if (currentHumidity <= baseline + REARM_DELTA) {
+    String fanOffSinceString = getStateVar(FAN_OFF_SINCE) as String
+    Long fanOffSince = null
+    try {
+      fanOffSince = fanOffSinceString as Long
+    } catch (Exception ignored) {
+      fanOffSince = null
+    }
+    Integer configuredRearmTimeout = getSetting('rearmTimeout') as Integer
+    Integer rearmTimeoutMinutes = configuredRearmTimeout == null ? 60 : configuredRearmTimeout
+    Long rearmTimeoutMilliseconds = rearmTimeoutMinutes > 0 ? rearmTimeoutMinutes * 60000L : 0L
+    Boolean rearmTimedOut = rearmTimeoutMilliseconds > 0L && fanOffSince != null &&
+      (getCurrentTime() - fanOffSince) >= rearmTimeoutMilliseconds
+    if (currentHumidity <= baseline + REARM_DELTA || rearmTimedOut) {
       removeStateVar(REARM_REQUIRED)
       rearmRequired = false
-      logDebug('Humidity returned close to baseline; automatic fan starts are re-armed')
+      String rearmReason = rearmTimedOut ? 're-arm timeout elapsed' : "humidity returned within ${REARM_DELTA}% of baseline"
+      logDebug("${rearmReason}; automatic fan starts are re-armed")
     } else {
       shouldTurnOn = false
       setStateVar(RISE_CANDIDATE_COUNT, 0)
