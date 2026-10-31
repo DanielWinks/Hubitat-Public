@@ -1,0 +1,146 @@
+name: Release Sonos Advanced Controller Beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_increment:
+        description: "Version increment type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+      release_notes:
+        description: "Release notes for this beta version"
+        required: true
+        type: string
+
+jobs:
+  release-beta:
+    name: Release Sonos Advanced Controller Beta
+    if: github.ref == 'refs/heads/sonos-beta'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout beta branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Calculate beta version and update source metadata
+        id: version
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest_path = Path("PackageManifests/SonosAdvancedController/packageManifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          old_version = manifest["version"]
+          major, minor, patch = (int(part) for part in old_version.split("."))
+
+          if "${{ inputs.version_increment }}" == "minor":
+              minor += 1
+              patch = 0
+          else:
+              patch += 1
+
+          new_version = f"{major}.{minor}.{patch}"
+          source_files = [
+              "Apps/SonosAdvancedApp.groovy",
+              "Drivers/Component/SonosAdvPlayer.groovy",
+              "Drivers/Component/SonosAdvGroup.groovy",
+              "Drivers/Component/SonosAdvSnapshot.groovy",
+              "Drivers/Component/SonosAdvBatteryStats.groovy",
+              "Drivers/Component/SonosAdvFavorites.groovy",
+              "Drivers/Component/SonosAdvSecondaries.groovy",
+              "Drivers/Component/SonosAdvPlaylist.groovy",
+              "Libraries/SMAPILibrary.groovy",
+              "Libraries/UtilitiesAndLoggingLibrary.groovy",
+          ]
+
+          for source_name in source_files:
+              source_path = Path(source_name)
+              source = source_path.read_text()
+              source = source.replace(f"version: '{old_version}'", f"version: '{new_version}'")
+              source_path.write_text(source)
+
+          manifest["version"] = new_version
+          manifest["releaseNotes"] = f"{new_version} beta {os.environ['RELEASE_NOTES']}"
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as output:
+              output.write(f"old_version={old_version}\n")
+              output.write(f"new_version={new_version}\n")
+          PY
+
+      - name: Build beta bundle
+        run: |
+          mkdir -p Bundles/SonosAdvancedController
+          cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosAdvancedController/dwinks.UtilitiesAndLoggingLibrary.groovy
+          cp Libraries/SMAPILibrary.groovy Bundles/SonosAdvancedController/dwinks.SMAPILibrary.groovy
+          printf '%s\n' "dwinks" "Sonos Advanced Controller" "library dwinks.UtilitiesAndLoggingLibrary.groovy" "library dwinks.SMAPILibrary.groovy" > Bundles/SonosAdvancedController/install.txt
+          cp Bundles/SonosAdvancedController/install.txt Bundles/SonosAdvancedController/update.txt
+          rm -f Bundles/SonosAdvancedController.zip
+          (cd Bundles/SonosAdvancedController && zip -q -r ../SonosAdvancedController.zip .)
+
+      - name: Commit beta sources and bundle
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: |
+            Apps/SonosAdvancedApp.groovy
+            Drivers/Component/SonosAdvPlayer.groovy
+            Drivers/Component/SonosAdvGroup.groovy
+            Drivers/Component/SonosAdvSnapshot.groovy
+            Drivers/Component/SonosAdvBatteryStats.groovy
+            Drivers/Component/SonosAdvFavorites.groovy
+            Drivers/Component/SonosAdvSecondaries.groovy
+            Drivers/Component/SonosAdvPlaylist.groovy
+            Libraries/SMAPILibrary.groovy
+            Libraries/UtilitiesAndLoggingLibrary.groovy
+            PackageManifests/SonosAdvancedController/packageManifest.json
+            Bundles/SonosAdvancedController.zip
+            Bundles/SonosAdvancedController/
+          message: "Release Sonos Advanced beta ${{ steps.version.outputs.new_version }}"
+          push: true
+
+      - name: Update stable manifest beta pointer
+        uses: actions/github-script@v7
+        env:
+          BETA_VERSION: ${{ steps.version.outputs.new_version }}
+          BETA_RELEASE_NOTES: ${{ inputs.release_notes }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const path = 'PackageManifests/SonosAdvancedController/packageManifest.json';
+            const response = await github.rest.repos.getContent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path,
+              ref: 'main'
+            });
+            const current = JSON.parse(Buffer.from(response.data.content, 'base64').toString('utf8'));
+            current.betaVersion = process.env.BETA_VERSION;
+            current.betaReleaseNotes = `${process.env.BETA_VERSION} beta: ${process.env.BETA_RELEASE_NOTES}`;
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path,
+              branch: 'main',
+              sha: response.data.sha,
+              message: `Advertise Sonos Advanced beta ${process.env.BETA_VERSION}`,
+              content: Buffer.from(`${JSON.stringify(current, null, 2)}\n`).toString('base64')
+            });

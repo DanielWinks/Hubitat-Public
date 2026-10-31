@@ -24,7 +24,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Playlist',
-    version: '0.11.7',
+    version: '0.11.8',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
@@ -122,7 +122,8 @@ void loadPlaylistNoCrossfade(String playlistId) {
 }
 
 void loadPlaylistAppendAndPlay(String playlistId) {
-  parent?.loadPlaylistFull(playlistId, 'repeat all', 'append', 'off', 'true', 'on')
+  // Sonos INSERT appends the playlist and moves the queue head to its first item.
+  parent?.loadPlaylistFull(playlistId, 'repeat all', 'insert', 'off', 'true', 'on')
 }
 
 void loadPlaylistShuffleNoRepeat(String playlistId) {
