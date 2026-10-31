@@ -819,7 +819,7 @@ class SonosAdvancedAppSpec extends Specification {
     markup.contains("newUiEditGroup|${token}")
     markup.contains("newUiDeleteGroup|${token}")
     markup.contains('material-symbols:delete-outline')
-    groupTable.contains("class='new-ui-group-section-title'>Sonos Groups</div>")
+    groupTable.contains("<div id='new-ui-group-table-wrapper'>")
   }
 
   def "new UI group creation persists a name, coordinator, followers, and child device"() {
