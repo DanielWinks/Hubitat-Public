@@ -81,6 +81,14 @@ Typical runtime flow:
 - Utilize @Field for static constants to improve performance and clarity.
 - Utilize @CompileStatic where possible to improve performance and catch type errors at compile time.
 
+## Pull request review guidance
+
+- Prioritize concrete defects, behavior regressions, security problems, and compatibility risks over style preferences.
+- Preserve public Hubitat contracts: mappings, state keys, setting names and types, lifecycle hooks, scheduling, subscriptions, and the `dwinks` namespace.
+- Treat generated files under `Bundles/` as outputs. Fix their source files and let the bundle workflows regenerate them.
+- For Groovy changes, consider the Hubitat Groovy 2.4 runtime and sandbox restrictions. Check the tests and lint rules under `tests/` when a change affects behavior or static compatibility.
+- Report only actionable findings, with the file and line and a concrete failure scenario. If no actionable issue is found, say so and note relevant review gaps.
+
 ## What to update when adding a new package
 
 1. Add Groovy file(s) under `Apps/` or `Drivers/` and corresponding `Libraries/` if needed.

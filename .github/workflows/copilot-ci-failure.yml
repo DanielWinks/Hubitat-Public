@@ -1,0 +1,107 @@
+name: Assign CI failures to Copilot
+
+# On a failed build or release run, create or update a tracking issue and
+# assign it to GitHub Copilot's cloud agent so it can prepare a pull request.
+on:
+  workflow_run:
+    workflows:
+      - "Create ThirdReality Bundle"
+      - "Create Sonos Advanced Controller Bundle"
+      - "Create UtilitiesAndLoggingLibrary Bundle"
+      - "Release Sonos Advanced Controller"
+      - "Release Gemini Text Rewriter"
+    types: [completed]
+
+concurrency:
+  group: ci-failure-copilot
+  cancel-in-progress: false
+
+jobs:
+  assign_issue:
+    name: Create and assign CI failure issue
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Create or update failure issue
+        id: issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const wf = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+            const title = `[CI failure] ${wf.name} on ${wf.head_branch} (${wf.head_sha.slice(0, 7)})`;
+            const body = [
+              `Automated follow-up for a failed GitHub Actions run.`,
+              ``,
+              `- **Workflow:** \`${wf.name}\``,
+              `- **Branch:** \`${wf.head_branch}\``,
+              `- **Commit:** \`${wf.head_sha}\``,
+              `- **Triggering event:** \`${wf.event}\``,
+              `- **Conclusion:** \`${wf.conclusion}\``,
+              `- **Run:** ${wf.html_url}`,
+              `- **Subject:** ${wf.display_title}`,
+              ``,
+              `Investigate the failed run and relevant repository files. Fix the underlying cause, run the relevant checks, and open a pull request targeting \`${wf.head_branch}\`. Do not edit generated files under \`Bundles/\`; update their source and let the bundle workflow regenerate them. If the failure is transient or the cause is unclear, report the evidence and stop without guessing.`,
+            ].join('\n');
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const existing = open.find(i => !i.pull_request && i.title === title);
+
+            if (existing) {
+              core.info(`Updating existing issue #${existing.number}.`);
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `A new run failed.\n\n${body}`,
+              });
+              core.setOutput('issue_number', existing.number);
+              core.setOutput('copilot_assigned', String(existing.assignees.some(a => a.login === 'copilot-swe-agent[bot]')));
+            } else {
+              const created = await github.rest.issues.create({ owner, repo, title, body });
+              core.info(`Created issue #${created.data.number}.`);
+              core.setOutput('issue_number', created.data.number);
+              core.setOutput('copilot_assigned', 'false');
+            }
+
+      - name: Assign issue to Copilot cloud agent
+        if: steps.issue.outputs.copilot_assigned != 'true'
+        uses: actions/github-script@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.issue_number }}
+        with:
+          github-token: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          script: |
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const response = await fetch(
+              `https://api.github.com/repos/${context.repo.owner}/${context.repo.repo}/issues/${issueNumber}/assignees`,
+              {
+                method: 'POST',
+                headers: {
+                  'Accept': 'application/vnd.github+json',
+                  'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`,
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  assignees: ['copilot-swe-agent[bot]'],
+                  agent_assignment: {
+                    target_repo: `${context.repo.owner}/${context.repo.repo}`,
+                    base_branch: context.payload.workflow_run.head_branch,
+                    model: 'gpt-6-luna',
+                    reasoning_effort: 'medium',
+                    custom_instructions: 'Follow repository AGENTS.md and .github/copilot-instructions.md. Inspect the failed run logs. Do not edit generated Bundles files; fix source files and regenerate through the existing workflows. Run relevant checks and open a pull request with a concise explanation.',
+                  },
+                }),
+              },
+            );
+            if (!response.ok) {
+              const details = await response.text();
+              core.setFailed(`Copilot issue assignment failed (${response.status}): ${details}`);
+              return;
+            }
+            core.info(`Assigned issue #${issueNumber} to Copilot.`);
