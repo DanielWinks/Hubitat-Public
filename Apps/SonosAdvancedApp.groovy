@@ -2801,6 +2801,122 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return app.getChildDevices().find { it.getDataValue('id') == rincon }
 }
 
+/** Resolve the public add-player argument against managed primary-player devices. */
+ChildDeviceWrapper resolvePlayerIdentifier(String identifier) {
+  String value = identifier?.trim()
+  if(!value) {
+    logWarn('Cannot resolve an empty Sonos player identifier')
+    return null
+  }
+
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  String upperValue = value.toUpperCase()
+  List<ChildDeviceWrapper> matches = players.findAll { ChildDeviceWrapper player ->
+    player.getDataValue('id')?.toString()?.toUpperCase() == upperValue
+  }
+  if(!matches) {
+    String normalizedMac = normalizePlayerMac(value)
+    if(normalizedMac) {
+      matches = players.findAll { ChildDeviceWrapper player ->
+        normalizePlayerMac(player.getDeviceNetworkId()?.toString()) == normalizedMac
+      }
+    }
+  }
+  if(!matches) {
+    String normalizedIp = normalizePlayerIp(value)
+    if(normalizedIp) {
+      matches = players.findAll { ChildDeviceWrapper player ->
+        normalizePlayerIp(player.getDataValue('deviceIp')?.toString()) == normalizedIp ||
+            normalizePlayerIp(player.getDataValue('localUpnpHost')?.toString()) == normalizedIp
+      }
+    }
+  }
+  if(!matches) {
+    matches = players.findAll { ChildDeviceWrapper player ->
+      player.getDataValue('name')?.toString()?.equalsIgnoreCase(value)
+    }
+  }
+
+  if(matches.size() > 1) {
+    logWarn("Player identifier '${value}' is ambiguous; no group membership was changed")
+    return null
+  }
+  if(matches.isEmpty()) {
+    logWarn("Could not resolve Sonos player identifier '${value}'")
+    return null
+  }
+  return matches[0]
+}
+
+String normalizePlayerMac(String value) {
+  if(!value) { return null }
+  String normalized = value.replaceAll(/[^A-Fa-f0-9]/, '').toUpperCase()
+  return normalized.size() == 12 ? normalized : null
+}
+
+String normalizePlayerIp(String value) {
+  if(!value) { return null }
+  String normalized = value.trim().replaceFirst(/^https?:\/\//, '')
+  normalized = normalized.replaceFirst(/:\d+$/, '')
+  return normalized
+}
+
+/** Add one player to the live group identified by its coordinator. */
+void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerIdentifier) {
+  if(coordinator == null) {
+    logWarn('Cannot add player because the Sonos group coordinator could not be resolved')
+    return
+  }
+  ChildDeviceWrapper target = resolvePlayerIdentifier(playerIdentifier)
+  if(target == null) { return }
+
+  String coordinatorId = coordinator.getDataValue('id')?.toString()
+  String targetId = target.getDataValue('id')?.toString()
+  if(!coordinatorId || !targetId) {
+    logWarn("Cannot add '${playerIdentifier}': coordinator or target has no RINCON ID")
+    return
+  }
+  if(coordinatorId == targetId) {
+    logDebug("${targetId} is already the requested coordinator; no group change needed")
+    return
+  }
+
+  String coordinatorHousehold = coordinator.getDataValue('householdId')?.toString()
+  String targetHousehold = target.getDataValue('householdId')?.toString()
+  if(coordinatorHousehold && targetHousehold && coordinatorHousehold != targetHousehold) {
+    logWarn("Cannot add '${playerIdentifier}': players belong to different Sonos households")
+    return
+  }
+
+  String groupId = coordinator.getDataValue('groupId')?.toString()
+  if(!groupId) {
+    // Sonos represents a standalone player as a one-member group. If local
+    // membership confirms that singleton, create the two-player group with
+    // the current coordinator first. Never use this fallback for a coordinator
+    // that may already lead a larger group.
+    List<String> coordinatorMembers = coordinator.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+    if(coordinatorMembers.size() == 1 && coordinatorMembers[0] == coordinatorId &&
+        coordinator.currentValue('isGrouped', true) == 'off') {
+      logInfo("Creating a group with ${coordinatorId} as coordinator and adding ${targetId}")
+      coordinator.playerCreateGroup([coordinatorId, targetId])
+      return
+    }
+    coordinator.playerGetGroupsFull()
+    logWarn("Cannot add '${playerIdentifier}' yet: requested a fresh group topology for ${coordinatorId}; retry after it updates")
+    return
+  }
+
+  String targetGroupId = target.getDataValue('groupId')?.toString()
+  List<String> coordinatorMembers = coordinator.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+  if(targetGroupId == groupId || coordinatorMembers.contains(targetId)) {
+    logDebug("${targetId} is already in group ${groupId}; no group change needed")
+    return
+  }
+
+  logInfo("Adding ${targetId} to group ${groupId} through coordinator ${coordinatorId}")
+  coordinator.playerModifyGroupMembers([targetId], [])
+}
+
 /**
  * Queue a child event so player callbacks never synchronously fan out into
  * another child device. The queue is keyed by target DNI and attribute, so a
@@ -2998,6 +3114,15 @@ void processGroupCommandRequest(Map data) {
 
       case 'joinPlayersToCoordinator':
         startGroupTopologyOperation(groupDevice, GROUPING_MODE_ADDITIVE, args)
+        break
+
+      case 'addPlayerToGroup':
+        // This is intentionally a one-player membership mutation. Do not route
+        // through startGroupTopologyOperation(), which operates on the full
+        // configured roster when a group device is inactive.
+        ChildDeviceWrapper anchor = configuredCoordinator
+        ChildDeviceWrapper anchorCoordinator = resolveLiveGroupCoordinator(anchor, rinconMap)
+        addPlayerToCoordinatorGroup(anchorCoordinator, args.playerIdentifier as String)
         break
 
       case 'refresh':
@@ -4682,6 +4807,14 @@ ChildDeviceWrapper resolveGroupCommandCoordinator(ChildDeviceWrapper configuredC
   return activeCoordinator ?: configuredCoordinator
 }
 
+ChildDeviceWrapper resolveLiveGroupCoordinator(ChildDeviceWrapper anchor,
+    Map<String, ChildDeviceWrapper> rinconMap) {
+  if(anchor == null) { return null }
+  String liveCoordinatorId = anchor.getDataValue('groupCoordinatorId')?.toString()
+  ChildDeviceWrapper liveCoordinator = liveCoordinatorId ? rinconMap[liveCoordinatorId] : null
+  return liveCoordinator ?: anchor
+}
+
 /**
  * Receive a deferred player-to-parent command. Player drivers use this bridge
  * when a command is addressed to a follower; the event is emitted after the
@@ -4762,6 +4895,9 @@ void processPlayerCommandRequest(Map data) {
         break
       case 'groupVolumeDown':
         coordinator.groupVolumeDown()
+        break
+      case 'addPlayerToGroup':
+        addPlayerToCoordinatorGroup(coordinator, args.size() > 0 ? args[0]?.toString() : null)
         break
       case 'loadFavoriteFull':
         coordinator.loadFavoriteFull(

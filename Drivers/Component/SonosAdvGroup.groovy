@@ -97,6 +97,7 @@ metadata {
 
     command 'groupPlayers'
     command 'joinPlayersToCoordinator'
+    command 'addPlayerToGroup', [[name: 'Player', type: 'STRING', description: 'RINCON ID, player name, IP address, MAC address, or Device Network ID']]
     command 'removePlayersFromCoordinator'
     command 'ungroupPlayers'
     command 'evictUnlistedPlayers'
@@ -472,6 +473,16 @@ void joinPlayersToCoordinator() {
   }
   setLastGroupingMode(GROUPING_MODE_ADDITIVE)
   requestGroupCommand('joinPlayersToCoordinator', [groupingMode: GROUPING_MODE_ADDITIVE])
+}
+
+/** Add one player to this group's coordinator without regrouping its roster. */
+void addPlayerToGroup(String playerIdentifier) {
+  String identifier = playerIdentifier?.trim()
+  if(!identifier) {
+    logWarn('Cannot add player to group without a player identifier')
+    return
+  }
+  requestGroupCommand('addPlayerToGroup', [playerIdentifier: identifier])
 }
 
 void removePlayersFromCoordinator() {

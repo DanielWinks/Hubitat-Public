@@ -112,6 +112,7 @@ metadata {
   command 'shuffleOn'
   command 'shuffleOff'
   command 'ungroupPlayer'
+  command 'addPlayerToGroup', [[name: 'Player', type: 'STRING', description: 'RINCON ID, player name, IP address, MAC address, or Device Network ID']]
 
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
@@ -1106,6 +1107,16 @@ void shuffleOff() { setShuffle('off') }
 
 @CompileStatic
 void ungroupPlayer() { playerCreateNewGroup() }
+
+/** Add one resolved player to this player's current Sonos group. */
+void addPlayerToGroup(String playerIdentifier) {
+  String identifier = playerIdentifier?.trim()
+  if(!identifier) {
+    logWarn('Cannot add player to group without a player identifier')
+    return
+  }
+  requestParentCoordinatorCommand('addPlayerToGroup', [identifier])
+}
 
 @CompileStatic
 void playText(String text, BigDecimal volume = null) {

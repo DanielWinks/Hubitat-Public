@@ -60,6 +60,15 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args?.groupingMode == 'ADDITIVE'
   }
 
+  def "addPlayerToGroup queues only the supplied player identifier"() {
+    when:
+    driver.addPlayerToGroup('Bedroom')
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.command == 'addPlayerToGroup'
+    driver.scheduled.find { List call -> call[1] == 'emitGroupCommandRequest' }?.getAt(2)?.data?.payload?.args == [playerIdentifier: 'Bedroom']
+  }
+
   def "groupPlayers publishes an explicit request without the legacy ungroup delay"() {
     when:
     driver.groupPlayers()

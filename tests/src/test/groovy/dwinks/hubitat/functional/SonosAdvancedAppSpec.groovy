@@ -379,6 +379,100 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.every { it.name != 'playerCreateGroup' }
   }
 
+  def "addPlayerToGroup resolves a case-insensitive player name and adds only that player through the configured coordinator"() {
+    given:
+    extra.dataValues.name = 'Bedroom'
+    extra.dataValues.deviceIp = '192.168.1.33'
+    extra.deviceNetworkId = 'AABBCCDDEEFF'
+    extra.dataValues.groupId = 'GROUP-EXTRA'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
+    appScript.processGroupCommandRequest([request: request('addPlayerToGroup', [playerIdentifier: 'bedroom'])])
+
+    expect:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
+      name: 'playerModifyGroupMembers', add: ['RINCON_EXTRA'], remove: []
+    ]
+    coordinator.commands.every { it.name != 'playerCreateGroup' }
+    follower.commands.empty
+    extra.commands.empty
+  }
+
+  def "inactive group add targets only the requested player on its coordinator"() {
+    given:
+    extra.dataValues.groupId = 'GROUP-EXTRA'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
+    group.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    group.dataValues.playerIds = 'RINCON_FOLLOW,RINCON_EXTRA'
+    group.currentValues.switch = 'off'
+
+    when:
+    appScript.processGroupCommandRequest([request: request('addPlayerToGroup', [playerIdentifier: 'RINCON_EXTRA'])])
+
+    then:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_EXTRA']
+    coordinator.commands.every { it.name != 'playerCreateGroup' && it.name != 'playerPlay' }
+    follower.commands.empty
+    extra.commands.empty
+  }
+
+  def "player add request from a follower is dispatched through its current coordinator"() {
+    given:
+    extra.dataValues.groupId = 'GROUP-EXTRA'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
+
+    when:
+    appScript.processPlayerCommandRequest([request: [
+      playerDni: follower.deviceNetworkId, command: 'addPlayerToGroup', args: ['RINCON_EXTRA']
+    ]])
+
+    then:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_EXTRA']
+    follower.commands.empty
+  }
+
+  def "player identifier resolver accepts MAC DNI and IP forms"() {
+    given:
+    extra.dataValues.deviceIp = '192.168.1.33'
+    extra.deviceNetworkId = 'AA:BB:CC:DD:EE:FF'
+
+    expect:
+    appScript.resolvePlayerIdentifier('rincon_extra') == extra
+    appScript.resolvePlayerIdentifier('AA-BB-CC-DD-EE-FF') == extra
+    appScript.resolvePlayerIdentifier('AABBCCDDEEFF') == extra
+    appScript.resolvePlayerIdentifier('192.168.1.33:1400') == extra
+  }
+
+  def "ambiguous player names do not change group membership"() {
+    given:
+    follower.dataValues.name = 'Bedroom'
+    extra.dataValues.name = 'Bedroom'
+
+    when:
+    appScript.processGroupCommandRequest([request: request('addPlayerToGroup', [playerIdentifier: 'bedroom'])])
+
+    then:
+    coordinator.commands.empty
+    appScript.logs.any { String entry -> entry.contains('ambiguous') }
+  }
+
+  def "standalone coordinator creates a group with itself first when group ID is unavailable"() {
+    given:
+    coordinator.dataValues.groupId = ''
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    coordinator.currentValues.isGrouped = 'off'
+    extra.dataValues.groupId = 'GROUP-EXTRA'
+
+    when:
+    appScript.processGroupCommandRequest([request: request('addPlayerToGroup', [playerIdentifier: 'RINCON_EXTRA'])])
+
+    then:
+    coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds == ['RINCON_COORD', 'RINCON_EXTRA']
+    coordinator.commands.every { it.name != 'playerModifyGroupMembers' }
+  }
+
   def "topology satisfaction uses exact equality for explicit mode and subset matching for additive mode"() {
     given:
     Map exactOperation = [

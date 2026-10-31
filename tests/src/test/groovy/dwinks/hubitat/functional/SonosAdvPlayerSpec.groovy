@@ -383,6 +383,16 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.empty
   }
 
+  def "addPlayerToGroup forwards the requested identifier through the parent boundary"() {
+    when:
+    driver.addPlayerToGroup('  Bedroom  ')
+
+    then:
+    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.command == 'addPlayerToGroup'
+    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.args == ['Bedroom']
+    websocketMessages.empty
+  }
+
   def "grouped player volume is staggered without issuing playback commands"() {
     given:
     driver.device.currentValues.isGrouped = 'on'
