@@ -479,6 +479,8 @@ void processContactSensors() {
     if (hasRATGDO()) {
         String ratgdoState = ratgdoDoor.currentValue(ATTR_DOOR)?.toString() ?: STATE_UNKNOWN
         String currentChildState = doorController.currentValue(ATTR_DOOR)?.toString() ?: STATE_UNKNOWN
+        alertRATGDODisagreement(ratgdoState, contactDoorState, currentChildState,
+                                upperSensorTrippedCount, lowerSensorTrippedCount)
         doorState = resolveRATGDODoorState(ratgdoState, contactDoorState, currentChildState)
         logInfo("Door state resolved: '${doorState}' (ratgdo=${ratgdoState}, contacts=${contactDoorState}, upperTripped=${upperSensorTrippedCount}, lowerTripped=${lowerSensorTrippedCount})")
     } else {
@@ -496,6 +498,34 @@ void processContactSensors() {
     // also works as a contact sensor for apps that use that capability.
     if (doorState == STATE_OPEN || doorState == STATE_CLOSED) {
         sendEvent(doorController, [name: ATTR_CONTACT, value: doorState])
+    }
+}
+
+/**
+ * Notifies configured devices when a settled RATGDO endpoint conflicts with
+ * the state derived from the contact sensors. Repeated sensor/RATGDO events
+ * for the same mismatch are suppressed until the readings agree again.
+ */
+void alertRATGDODisagreement(String ratgdoState, String contactDoorState, String currentChildState,
+                             Integer upperSensorTrippedCount, Integer lowerSensorTrippedCount) {
+    Boolean ratgdoAtEndpoint = ratgdoState == STATE_OPEN || ratgdoState == STATE_CLOSED
+    Boolean staleEndpointDuringMotion =
+        (currentChildState == STATE_OPENING && ratgdoState == STATE_CLOSED && contactDoorState != STATE_CLOSED) ||
+        (currentChildState == STATE_CLOSING && ratgdoState == STATE_OPEN && contactDoorState != STATE_OPEN)
+    Boolean disagreement = ratgdoAtEndpoint && ratgdoState != contactDoorState && !staleEndpointDuringMotion
+    if (!disagreement) {
+        state.remove('ratgdoSensorDisagreement')
+        return
+    }
+
+    String disagreementKey = "${ratgdoState}:${contactDoorState}"
+    if (state.ratgdoSensorDisagreement == disagreementKey) { return }
+    state.ratgdoSensorDisagreement = disagreementKey
+
+    String message = "Garage door sensor mismatch: RATGDO reports ${ratgdoState}, but the contact/tilt sensors indicate ${contactDoorState} (upper sensors tripped: ${upperSensorTrippedCount}, lower sensors tripped: ${lowerSensorTrippedCount}). Check the tilt sensors."
+    logWarn(message)
+    if (notificationDevices) {
+        notificationDevices*.deviceNotification(message)
     }
 }
 
@@ -524,11 +554,14 @@ String resolveRATGDODoorState(String ratgdoState, String contactDoorState, Strin
         return STATE_CLOSING
     }
 
+    // RATGDO reports the actual cover endpoint. Contact sensors can disagree
+    // because of a stale or misaligned tilt sensor; that disagreement must
+    // not turn a confirmed open/closed RATGDO state into UNKNOWN.
     if (ratgdoState == STATE_OPEN) {
-        return contactDoorState == STATE_UNKNOWN ? STATE_UNKNOWN : contactDoorState
+        return STATE_OPEN
     }
     if (ratgdoState == STATE_CLOSED) {
-        return contactDoorState == STATE_CLOSED ? STATE_CLOSED : STATE_UNKNOWN
+        return STATE_CLOSED
     }
 
     return contactDoorState
