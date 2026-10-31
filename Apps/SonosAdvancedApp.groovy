@@ -560,27 +560,32 @@ String displayNewUiSpeakerTable() {
         width: auto !important;
       }
       #new-ui-speaker-table {
-        border: 1px solid #E0E0E0;
+        background-color: var(--surface-card, var(--surface-a, #ffffff));
+        border: 1px solid var(--surface-border, #E0E0E0);
         border-collapse: collapse;
         border-radius: 4px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        color: var(--text-color, #424242);
         min-width: 720px;
         width: 100%;
       }
       #new-ui-speaker-table th,
       #new-ui-speaker-table td {
-        border-bottom: 1px solid #EEEEEE;
-        border-right: 1px solid #EEEEEE;
+        background-color: var(--surface-card, var(--surface-a, #ffffff));
+        border-bottom: 1px solid var(--surface-border, #EEEEEE);
+        border-right: 1px solid var(--surface-border, #EEEEEE);
+        color: var(--text-color, #424242);
         font-size: 14px !important;
         padding: 6px 4px !important;
         text-align: center;
       }
       #new-ui-speaker-table thead {
-        background-color: #F5F5F5;
+        background-color: var(--surface-b, #F5F5F5);
       }
       #new-ui-speaker-table th {
-        border-bottom: 2px solid #E0E0E0;
-        color: #424242;
+        background-color: var(--surface-b, #F5F5F5);
+        border-bottom: 2px solid var(--surface-border, #E0E0E0);
+        color: var(--text-color, #424242);
         font-size: 14px !important;
         font-weight: 500;
         padding: 8px !important;
@@ -609,7 +614,7 @@ String displayNewUiSpeakerTable() {
         text-decoration: underline;
       }
       #new-ui-speaker-table .new-ui-speaker-detail {
-        color: #666666;
+        color: var(--text-color-secondary, #666666);
         font-size: 11px;
         margin-top: 3px;
         text-align: left;
@@ -619,25 +624,25 @@ String displayNewUiSpeakerTable() {
         text-align: left;
       }
       #new-ui-speaker-table .new-ui-secondary-count {
-        color: #424242;
+        color: var(--text-color, #424242);
         font-size: 11px;
         font-weight: 600;
         margin-bottom: 3px;
         text-align: left;
       }
       #new-ui-speaker-table .new-ui-secondary-entry {
-        color: #424242;
+        color: var(--text-color, #424242);
         font-size: 12px;
         line-height: 1.25;
         text-align: left;
       }
       #new-ui-speaker-table .new-ui-secondary-entry + .new-ui-secondary-entry {
-        border-top: 1px solid #EEEEEE;
+        border-top: 1px solid var(--surface-border, #EEEEEE);
         margin-top: 4px;
         padding-top: 4px;
       }
       #new-ui-speaker-table .new-ui-secondary-detail {
-        color: #757575;
+        color: var(--text-color-secondary, #757575);
         font-size: 10px;
       }
       #new-ui-speaker-table .new-ui-status {
@@ -653,7 +658,7 @@ String displayNewUiSpeakerTable() {
       }
       #new-ui-speaker-table .new-ui-status-unknown,
       #new-ui-speaker-table .new-ui-status-na {
-        color: #757575;
+        color: var(--text-color-secondary, #757575);
       }
       #new-ui-speaker-table .new-ui-action-cell {
         padding-left: 4px !important;
@@ -920,7 +925,7 @@ String displayNewUiGroupTable() {
         padding: 0 !important;
       }
       .new-ui-group-section-title {
-        color: #424242;
+        color: var(--text-color, #424242);
         font-size: 18px !important;
         font-weight: 400;
         line-height: 1.2;
@@ -928,28 +933,33 @@ String displayNewUiGroupTable() {
         padding: 0 !important;
       }
       #new-ui-group-table {
-        border: 1px solid #E0E0E0;
+        background-color: var(--surface-card, var(--surface-a, #ffffff));
+        border: 1px solid var(--surface-border, #E0E0E0);
         border-collapse: collapse;
         border-radius: 4px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        color: var(--text-color, #424242);
         min-width: 760px;
         width: 100%;
       }
       #new-ui-group-table th,
       #new-ui-group-table td {
-        border-bottom: 1px solid #EEEEEE;
-        border-right: 1px solid #EEEEEE;
+        background-color: var(--surface-card, var(--surface-a, #ffffff));
+        border-bottom: 1px solid var(--surface-border, #EEEEEE);
+        border-right: 1px solid var(--surface-border, #EEEEEE);
+        color: var(--text-color, #424242);
         font-size: 14px !important;
         padding: 8px 6px !important;
         text-align: center;
         vertical-align: middle;
       }
       #new-ui-group-table thead {
-        background-color: #F5F5F5;
+        background-color: var(--surface-b, #F5F5F5);
       }
       #new-ui-group-table th {
-        border-bottom: 2px solid #E0E0E0;
-        color: #424242;
+        background-color: var(--surface-b, #F5F5F5);
+        border-bottom: 2px solid var(--surface-border, #E0E0E0);
+        color: var(--text-color, #424242);
         font-size: 14px !important;
         font-weight: 500;
         white-space: nowrap;
@@ -1012,7 +1022,7 @@ String renderNewUiGroupTableMarkup() {
       String token = newUiGroupToken(groupName)
       String editIcon = "<iconify-icon icon='material-symbols:edit' style='font-size:19px;vertical-align:middle;margin-right:6px'></iconify-icon>"
       String deleteIcon = "<iconify-icon icon='material-symbols:delete-outline' style='font-size:20px;vertical-align:middle'></iconify-icon>"
-      String actionMarkup = newUiButtonLink("newUiEditGroup|${token}", editIcon, '#424242', '19px') +
+      String actionMarkup = newUiButtonLink("newUiEditGroup|${token}", editIcon, 'var(--text-color, #424242)', '19px') +
           newUiButtonLink("newUiDeleteGroup|${token}", deleteIcon, '#F44336', '20px')
       String safeName = escapeNewUiHtml(groupName)
       String groupDeviceId = row.device?.id?.toString()
