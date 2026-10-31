@@ -27,7 +27,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout 🛎️
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -49,6 +49,6 @@ jobs:
           mv Bundles/ThirdReality/ThirdReality.zip Bundles/ThirdReality.zip
 
       - name: Commit changes
-        uses: EndBug/add-and-commit@v9
+        uses: EndBug/add-and-commit@v10
         with:
           pull: '--rebase --autostash'

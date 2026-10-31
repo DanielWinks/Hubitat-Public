@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout beta branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -98,7 +98,7 @@ jobs:
           (cd Bundles/SonosAdvancedController && zip -q -r ../SonosAdvancedController.zip .)
 
       - name: Commit beta sources and bundle
-        uses: EndBug/add-and-commit@v9
+        uses: EndBug/add-and-commit@v10
         with:
           add: |
             Apps/SonosAdvancedApp.groovy
