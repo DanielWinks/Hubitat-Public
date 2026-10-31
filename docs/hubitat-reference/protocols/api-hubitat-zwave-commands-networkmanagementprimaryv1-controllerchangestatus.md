@@ -1,0 +1,37 @@
+# ControllerChangeStatus
+
+- **ID:** `api-hubitat-zwave-commands-networkmanagementprimaryv1-controllerchangestatus`
+- **Section:** Protocols
+- **Class:** `hubitat.zwave.commands.networkmanagementprimaryv1.ControllerChangeStatus`
+
+> Use this protocol type to create, inspect, or parse protocol data in driver code.
+
+## Inheritance
+
+- Extends `hubitat.zwave.Command`
+- [Command](../protocols/api-hubitat-zwave-command.md)
+- [Command](../protocols/api-hubitat-zwave-command.md)
+
+## Methods
+
+| Name | Signature | Description |
+|---|---|---|
+| `getCMD` | `String getCMD()` | Returns this command frame identifier in hexadecimal form. Returns: hexadecimal command class and command identifier |
+| `getPayload` | `List<Short> getPayload()` | Returns no payload values for this command. Returns: an empty list |
+
+## Properties
+
+| Name | Type | Description |
+|---|---|---|
+| `basicDeviceClass` | `Short` | — |
+| `capability` | `Short` | — |
+| `commandClass` | `List<Short>` | — |
+| `genericDeviceClass` | `Short` | — |
+| `listening` | `Boolean` | — |
+| `newNodeId` | `Short` | — |
+| `nodeInfoLength` | `Short` | — |
+| `opt` | `Boolean` | — |
+| `security` | `Short` | — |
+| `seqNo` | `Short` | — |
+| `specificDeviceClass` | `Short` | — |
+| `status` | `Short` | — |

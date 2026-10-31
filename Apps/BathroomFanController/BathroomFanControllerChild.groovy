@@ -185,6 +185,7 @@ Map mainPage() {
       input "maxRuntime", "number", title: "Max run time (minutes, 0 to disable, max 720)", required: true, defaultValue: 60, range: '0..720'
       input "minRuntime", "number", title: "Minimum fan run time (minutes, 0 to disable, max 30)", required: false, defaultValue: 5, range: '0..30'
       input "cooldownPeriod", "number", title: "Re-trigger delay after fan turns off (minutes, 0 to disable, max 30)", required: false, defaultValue: 3, range: '0..30'
+      input "rearmTimeout", "number", title: "Re-arm timeout (minutes, 0 to disable, max 720)", required: false, defaultValue: 60, range: '0..720'
 
       input "doorSensor", "capability.contactSensor", title: "Door Sensor (optional)", required: false, submitOnChange: true
       if (settings.doorSensor) {
@@ -290,13 +291,15 @@ Map mainPage() {
 @Field static final BigDecimal MIN_RISE_ACCELERATION = new BigDecimal('0.05')
 @Field static final BigDecimal MIN_FALL_RATE = new BigDecimal('0.05')
 @Field static final BigDecimal HIGH_CERTAINTY_MULTIPLIER = new BigDecimal('1.5')
-@Field static final BigDecimal REARM_DELTA = new BigDecimal('0.5')
+@Field static final BigDecimal REARM_DELTA = new BigDecimal('10.0')
 @Field static final BigDecimal PEAK_DROP_TO_STOP = new BigDecimal('2.0')
 @Field static final Integer RISE_CONFIRMATION_SAMPLES = 2
 @Field static final Integer DECLINE_CONFIRMATION_SAMPLES = 2
 @Field static final Long HOUSEHOLD_FRESHNESS_MILLISECONDS = 6L * 60L * 60L * 1000L
 @Field static final Long CONTROL_BASELINE_TAU_MILLISECONDS = 360L * 60L * 1000L
 @Field static final double CONTROL_BASELINE_MAX_ALPHA = 0.25d
+@Field static final Integer CONTROL_BASELINE_SCALE = 2
+@Field static final Integer CONTROL_BASELINE_PARSE_SCALE = 4
 
 String getHumidityStatSensor() {
   return "${app.id}-${humidityStaticSensor}"
@@ -505,7 +508,7 @@ void setFanSpeed(BigDecimal currentHumidity, BigDecimal baseline) {
   Integer highSpeed = (getSetting('highSpeedLevel') ?: 100) as Integer
   Integer threshold = (getSetting('highSpeedThreshold') ?: 10) as Integer
 
-  BigDecimal delta = currentHumidity - baseline
+  BigDecimal delta = (currentHumidity - baseline).setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
   Integer level = delta >= threshold ? highSpeed : lowSpeed
 
   logDebug("Setting fan speed to ${level}% (delta: ${delta}, threshold: ${threshold})")
@@ -579,11 +582,13 @@ BigDecimal calculateStableControlBaseline(
   BigDecimal candidate,
   Long elapsedMilliseconds
 ) {
-  if (candidate == null) {
-    return previousBaseline
+  BigDecimal normalizedCandidate = normalizeControlBaseline(candidate)
+  BigDecimal normalizedPrevious = normalizeControlBaseline(previousBaseline)
+  if (normalizedCandidate == null) {
+    return normalizedPrevious
   }
-  if (previousBaseline == null || elapsedMilliseconds == null || elapsedMilliseconds <= 0L) {
-    return previousBaseline == null ? candidate : previousBaseline
+  if (normalizedPrevious == null || elapsedMilliseconds == null || elapsedMilliseconds <= 0L) {
+    return normalizedPrevious == null ? normalizedCandidate : normalizedPrevious
   }
 
   double alpha = 1.0d - Math.exp(-elapsedMilliseconds.doubleValue() / CONTROL_BASELINE_TAU_MILLISECONDS.doubleValue())
@@ -591,7 +596,43 @@ BigDecimal calculateStableControlBaseline(
     alpha = CONTROL_BASELINE_MAX_ALPHA
   }
   BigDecimal smoothing = BigDecimal.valueOf(alpha)
-  return previousBaseline + ((candidate - previousBaseline) * smoothing)
+  BigDecimal result = normalizedPrevious + ((normalizedCandidate - normalizedPrevious) * smoothing)
+  return result.setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
+}
+
+/**
+ * Keeps the app-owned baseline bounded and makes recovery from older
+ * installations safe. Earlier versions persisted the complete BigDecimal
+ * result after every update, so the fractional scale could grow indefinitely.
+ * Only a few fractional digits are needed to round the value to the control
+ * scale; truncate the input before parsing so an already oversized state value
+ * cannot force another expensive BigDecimal allocation.
+ */
+@CompileStatic
+BigDecimal normalizeControlBaseline(Object value) {
+  if (value == null) {
+    return null
+  }
+
+  String raw = value.toString().trim()
+  if (raw.length() == 0 || !raw.matches('[+-]?(?:[0-9]{1,3}(?:\\.[0-9]*)?|\\.[0-9]+)')) {
+    return null
+  }
+
+  Integer decimalIndex = raw.indexOf('.')
+  if (decimalIndex >= 0 && raw.length() - decimalIndex - 1 > CONTROL_BASELINE_PARSE_SCALE) {
+    raw = raw.substring(0, decimalIndex + CONTROL_BASELINE_PARSE_SCALE + 1)
+  }
+
+  try {
+    BigDecimal parsed = new BigDecimal(raw)
+    if (parsed < BigDecimal.ZERO || parsed > 100G) {
+      return null
+    }
+    return parsed.setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
+  } catch (Exception ignored) {
+    return null
+  }
 }
 
 /**
@@ -629,11 +670,13 @@ BigDecimal getFreshHouseholdHumidity(Long currentTime) {
 BigDecimal updateControlBaseline(BigDecimal bathroomBaseline, Long currentTime) {
   BigDecimal householdHumidity = getFreshHouseholdHumidity(currentTime)
   BigDecimal candidate = selectControlBaselineCandidate(bathroomBaseline, householdHumidity)
+  String previousBaselineString = getStateVar(CONTROL_BASELINE) as String
   BigDecimal previousBaseline
-  try {
-    previousBaseline = new BigDecimal(getStateVar(CONTROL_BASELINE) as String)
-  } catch (Exception ignored) {
-    previousBaseline = null
+  previousBaseline = normalizeControlBaseline(previousBaselineString)
+  if (previousBaseline != null && previousBaselineString != previousBaseline.toString()) {
+    // Migrate an oversized value from older versions immediately, including
+    // while the fan is running and baseline adaptation is intentionally frozen.
+    setStateVar(CONTROL_BASELINE, previousBaseline.toString())
   }
 
   // Do not adapt the control baseline while the fan is running. The child
@@ -809,16 +852,28 @@ void evaluateFanDecision(
       (highCertainty && accelerationQualified) ||
       riseCandidateCount >= RISE_CONFIRMATION_SAMPLES))
 
-  // Once a run ends, require the humidity to come back close to baseline
-  // before accepting another automatic start. This is separate from the
-  // time-based cooldown and prevents on/off/on chatter while humidity is
-  // still elevated.
+  // Once a run ends, require a meaningful humidity drop before accepting
+  // another automatic start. A 10-point allowance avoids keeping the fan
+  // disarmed through a later shower when the room has not fully dried.
   Boolean rearmRequired = getStateVar(REARM_REQUIRED) == 'true'
   if (fanState != 'on' && rearmRequired && !ceilingReached) {
-    if (currentHumidity <= baseline + REARM_DELTA) {
+    String fanOffSinceString = getStateVar(FAN_OFF_SINCE) as String
+    Long fanOffSince = null
+    try {
+      fanOffSince = fanOffSinceString as Long
+    } catch (Exception ignored) {
+      fanOffSince = null
+    }
+    Integer configuredRearmTimeout = getSetting('rearmTimeout') as Integer
+    Integer rearmTimeoutMinutes = configuredRearmTimeout == null ? 60 : configuredRearmTimeout
+    Long rearmTimeoutMilliseconds = rearmTimeoutMinutes > 0 ? rearmTimeoutMinutes * 60000L : 0L
+    Boolean rearmTimedOut = rearmTimeoutMilliseconds > 0L && fanOffSince != null &&
+      (getCurrentTime() - fanOffSince) >= rearmTimeoutMilliseconds
+    if (currentHumidity <= baseline + REARM_DELTA || rearmTimedOut) {
       removeStateVar(REARM_REQUIRED)
       rearmRequired = false
-      logDebug('Humidity returned close to baseline; automatic fan starts are re-armed')
+      String rearmReason = rearmTimedOut ? 're-arm timeout elapsed' : "humidity returned within ${REARM_DELTA}% of baseline"
+      logDebug("${rearmReason}; automatic fan starts are re-armed")
     } else {
       shouldTurnOn = false
       setStateVar(RISE_CANDIDATE_COUNT, 0)
@@ -842,9 +897,10 @@ void evaluateFanDecision(
     }
 
     // Turn on the fan
+    BigDecimal triggerDelta = (currentHumidity - baseline).setScale(CONTROL_BASELINE_SCALE, BigDecimal.ROUND_HALF_UP)
     String triggerReason = ceilingReached ?
       "absolute ceiling ${ceiling}% reached" :
-      "humidity rose ${currentHumidity - baseline}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min"
+      "humidity rose ${triggerDelta}% above baseline at ${shortTermRate?.setScale(2, BigDecimal.ROUND_HALF_UP)}%/min"
     logDebug("${triggerReason}; turning on fan")
     setStateVar(TRIGGERED_BY_APP, 'true')  // Feature 3: track auto-trigger
     setStateVar(FAN_START_HUMIDITY, currentHumidity.toString())  // Feature 8: track start humidity

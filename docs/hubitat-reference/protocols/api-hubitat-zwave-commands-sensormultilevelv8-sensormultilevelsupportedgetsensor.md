@@ -1,0 +1,20 @@
+# SensorMultilevelSupportedGetSensor
+
+- **ID:** `api-hubitat-zwave-commands-sensormultilevelv8-sensormultilevelsupportedgetsensor`
+- **Section:** Protocols
+- **Class:** `hubitat.zwave.commands.sensormultilevelv8.SensorMultilevelSupportedGetSensor`
+
+> Use this protocol type to create, inspect, or parse protocol data in driver code.
+
+## Inheritance
+
+- Extends `hubitat.zwave.commands.sensormultilevelv7.SensorMultilevelSupportedGetSensor`
+- [SensorMultilevelSupportedGetSensor](../protocols/api-hubitat-zwave-commands-sensormultilevelv7-sensormultilevelsupportedgetsensor.md)
+- [SensorMultilevelSupportedGetSensor](../protocols/api-hubitat-zwave-commands-sensormultilevelv7-sensormultilevelsupportedgetsensor.md)
+
+## Methods
+
+| Name | Signature | Description |
+|---|---|---|
+| `SensorMultilevelSupportedGetSensor` | `SensorMultilevelSupportedGetSensor()` | Creates the command with its declared field defaults. |
+| `SensorMultilevelSupportedGetSensor` | `SensorMultilevelSupportedGetSensor(String payload)` | Passes the payload to the superclass constructors; that constructor chain ignores it and keeps the declared field defaults. Parameters: payload - payload string passed to the super |

@@ -37,7 +37,16 @@ class BathroomFanControllerSpec extends Specification {
     BigDecimal result = app.calculateStableControlBaseline(52.5G, 60G, 8L * 60L * 60L * 1000L)
 
     then:
-    result == 54.375G
+    result == 54.38G
+    result.scale() == 2
+  }
+
+  def "legacy oversized baseline values are normalized before parsing"() {
+    given:
+    String oversized = '76.7869' + ('9' * 10000)
+
+    expect:
+    app.normalizeControlBaseline(oversized) == 76.79G
   }
 
   def "stale household readings are not used as the external floor"() {

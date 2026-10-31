@@ -1,0 +1,37 @@
+# ThermostatOperatingLoggingSupportedReport
+
+- **ID:** `api-hubitat-zwave-commands-thermostatoperatingstatev2-thermostatoperatingloggingsupportedreport`
+- **Section:** Protocols
+- **Class:** `hubitat.zwave.commands.thermostatoperatingstatev2.ThermostatOperatingLoggingSupportedReport`
+
+> Use this protocol type to create, inspect, or parse protocol data in driver code.
+
+## Inheritance
+
+- Extends `hubitat.zwave.Command`
+- [Command](../protocols/api-hubitat-zwave-command.md)
+- [Command](../protocols/api-hubitat-zwave-command.md)
+
+## Methods
+
+| Name | Signature | Description |
+|---|---|---|
+| `getCMD` | `String getCMD()` | Returns this command frame identifier in hexadecimal form. Returns: hexadecimal command class and command identifier |
+| `getPayload` | `List<Short> getPayload()` | Returns no payload values for this command. Returns: an empty list |
+| `ThermostatOperatingLoggingSupportedReport` | `ThermostatOperatingLoggingSupportedReport()` | Creates the command with its declared field defaults. |
+| `ThermostatOperatingLoggingSupportedReport` | `ThermostatOperatingLoggingSupportedReport(String payload)` | Accepts the supplied payload but does not read it or change command fields. Parameters: payload - unused payload value |
+
+## Properties
+
+| Name | Type | Description |
+|---|---|---|
+| `auxHeating` | `Boolean` | — |
+| `cooling` | `Boolean` | — |
+| `fanOnly` | `Boolean` | — |
+| `heating` | `Boolean` | — |
+| `idle` | `Boolean` | — |
+| `pendingCool` | `Boolean` | — |
+| `pendingHeat` | `Boolean` | — |
+| `secondStageCooling` | `Boolean` | — |
+| `secondStageHeating` | `Boolean` | — |
+| `venteconomizer` | `Boolean` | — |

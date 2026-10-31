@@ -1,0 +1,22 @@
+{
+  "favoriteId": "14",
+  "playlistId": "1",
+    "trackUri": "x-sonos-http:song%3a933958518.mp4?sid=204&flags=8232&sn=9",
+    "ttsText": "Sonos Advanced Controller group automated test",
+  "volume": 20,
+  "groupVolume": 20,
+  "commands": {
+    "loadFavoriteFull": ["14", "NORMAL", 1, 0],
+    "loadPlaylistFull": ["1", "repeat all", "replace", "off", "true", "off"],
+    "playHighPriorityTrack": ["x-sonos-http:song%3a933958518.mp4?sid=204&flags=8232&sn=9", 20],
+    "playHighPriorityTTS": ["Sonos Advanced Controller group automated test", 20, "Matthew"],
+    "speak": ["Sonos Advanced Controller group automated test", 20, "Matthew"],
+    "enqueueLowPriorityTrack": ["x-sonos-http:song%3a933958518.mp4?sid=204&flags=8232&sn=9", 20],
+    "playTrack": ["x-sonos-http:song%3a933958518.mp4?sid=204&flags=8232&sn=9", 20],
+    "setVolume": [20],
+    "setLevel": [20, 0],
+    "setVolumeZero": [0],
+    "setGroupVolume": [20, 0],
+    "setGroupMute": ["unmuted"]
+  }
+}
