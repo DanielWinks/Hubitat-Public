@@ -40,7 +40,7 @@ void logWarn(String message) {
 metadata {
   definition(
     name: 'Sonos Advanced Secondaries',
-    version: '0.11.7',
+    version: '0.11.8',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
