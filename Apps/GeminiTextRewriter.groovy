@@ -68,6 +68,14 @@ private void logDebug(String message) {
     if(app) log.debug "${app.label ?: app.name }: ${message}"
   }
 }
+void logsOff() {
+  logWarn('Logging disabled after 30 minutes')
+  app.updateSetting('logEnable', [value: 'false', type: 'bool'])
+}
+void debugLogsOff() {
+  logWarn('Debug logging disabled after 30 minutes')
+  app.updateSetting('debugLogEnable', [value: 'false', type: 'bool'])
+}
 @SuppressWarnings('unused')
 private void tryCreateAccessToken() {
   if (state.accessToken == null) {
