@@ -4,6 +4,7 @@ package com.hubitat.hub.domain
 class Event {
   String name
   Object value
+  String data
   String unit
   String descriptionText
   Object device

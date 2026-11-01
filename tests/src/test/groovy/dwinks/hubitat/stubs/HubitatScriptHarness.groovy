@@ -26,6 +26,7 @@ class HubitatScriptHarness extends Script {
 
   /** Per-call recordings the spec can assert against. */
   List<Map> events = []
+  List<Map> locationEvents = []
   List<Map> childEvents = []
   List<List> scheduled = []      // [[secondsOrMs, methodName, opts]]
   List<List> cronSchedules = []  // [[expr, method]]
@@ -85,9 +86,11 @@ class HubitatScriptHarness extends Script {
   }
   void unsubscribe()              { subscriptions.clear() }
   void unsubscribe(Object target) { subscriptions.removeAll { it[0] == target } }
+  void unsubscribe(Object target, String attribute, String handler) { subscriptions.removeAll { it == [target, attribute, handler] } }
 
   // ----- Event stubs -----
   void sendEvent(Map event) { events << event }
+  void sendLocationEvent(Map event) { locationEvents << event }
   void sendEvent(Object dev, Map event) { childEvents << ([device: dev] + event) }
 
   // ----- HTTP stubs (capture rather than execute) -----
@@ -196,6 +199,7 @@ class MockApp {
   Map<String, Object> updatedSettings = [:]
   String getId() { id?.toString() }
   String getLabel() { label }
+  void updateLabel(String value) { label = value }
   List getChildDevices() { children }
   Object getChildDevice(String dni) { children.find { it?.deviceNetworkId == dni } }
   void deleteChildDevice(String dni) { children.removeAll { it?.deviceNetworkId == dni } }

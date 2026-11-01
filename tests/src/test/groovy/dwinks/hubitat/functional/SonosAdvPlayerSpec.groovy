@@ -28,6 +28,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
     driver.events.clear()
+    driver.locationEvents.clear()
     driver.scheduled.clear()
     driver.unschedules.clear()
     websocketMessages.clear()
@@ -46,6 +47,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.playlistRetryState.clear()
     driver.pendingGroupedPlayerVolumes.clear()
     driver.groupDeviceUpdateRetryAttempts.clear()
+    driver.pendingGroupDeviceUpdates.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
   }
@@ -141,7 +143,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     websocketMessages.size() == 2
-    websocketMessages.any { String message -> message.contains('getPlayback') }
+    websocketMessages.any { String message -> message.contains('getPlaybackStatus') }
     websocketMessages.any { String message -> message.contains('getMetadataStatus') }
     websocketMessages.every { String message -> !message.contains('loadFavorite') }
     driver.scheduled.last() == [
@@ -231,7 +233,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     websocketMessages.size() == 2
-    websocketMessages.any { String message -> message.contains('getPlayback') }
+    websocketMessages.any { String message -> message.contains('getPlaybackStatus') }
     websocketMessages.any { String message -> message.contains('getMetadataStatus') }
     websocketMessages.every { String message -> !message.contains('loadPlaylist') }
 
@@ -369,6 +371,32 @@ class SonosAdvPlayerSpec extends Specification {
     ]]
   }
 
+  def "deferred membership updates publish a location event"() {
+    when:
+    driver.deferredParentUpdateGroupDevices([coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST']])
+
+    then:
+    driver.locationEvents.size() == 1
+    driver.locationEvents[0].name == 'dwinksSonosAdvancedPlayerState'
+    driver.locationEvents[0].data == [kind: 'membership', coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST'], playerDni: 'SONOS-TEST-DNI']
+  }
+
+  def "group state flush publishes one batched location event"() {
+    given:
+    driver.queueGroupDeviceUpdate([status: 'playing', _groupVolume: 25, _groupMute: 'unmuted'])
+
+    when:
+    driver.flushPendingGroupDeviceUpdates()
+
+    then:
+    driver.locationEvents.size() == 1
+    driver.locationEvents[0].data.kind == 'state'
+    driver.locationEvents[0].data.followerAttrs == [status: 'playing', groupVolume: 25, groupMute: 'unmuted']
+    driver.locationEvents[0].data.volumeAttrs == [volume: 25, mute: 'unmuted']
+    driver.locationEvents[0].data.playbackAttrs == [status: 'playing']
+    driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
+  }
+
   def "follower group volume forwarding is deferred through the parent boundary"() {
     given:
     driver.device.dataValues.isGroupCoordinator = 'false'
@@ -378,8 +406,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.setGroupVolume(40G)
 
     then:
-    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(0) == 1
-    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.command == 'setGroupVolume'
+    driver.scheduled.find { List call -> call[1] == 'drainParentCoordinatorCommandQueue' }?.getAt(0) == 1
+    driver.state.pendingParentCoordinatorCommands[0].command == 'setGroupVolume'
     websocketMessages.empty
   }
 
@@ -388,9 +416,26 @@ class SonosAdvPlayerSpec extends Specification {
     driver.addPlayerToGroup('  Bedroom  ')
 
     then:
-    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.command == 'addPlayerToGroup'
-    driver.scheduled.find { List call -> call[1] == 'emitParentCoordinatorCommand' }?.getAt(2)?.data?.payload?.args == ['Bedroom']
+    driver.state.pendingParentCoordinatorCommands[0].command == 'addPlayerToGroup'
+    driver.state.pendingParentCoordinatorCommands[0].args == ['Bedroom']
     websocketMessages.empty
+  }
+
+  def "parent command queue waits for controller acknowledgement before sending the next request"() {
+    given:
+    driver.requestParentCoordinatorCommand('muteGroup')
+    driver.requestParentCoordinatorCommand('unmuteGroup')
+
+    when:
+    driver.drainParentCoordinatorCommandQueue()
+    Map first = (Map)driver.state.activeParentCoordinatorCommand
+    driver.acknowledgeParentCommand(first.requestId as String)
+
+    then:
+    first.command == 'muteGroup'
+    driver.state.pendingParentCoordinatorCommands.size() == 1
+    !driver.state.activeParentCoordinatorCommand
+    driver.scheduled.any { List call -> call[1] == 'drainParentCoordinatorCommandQueue' }
   }
 
   def "grouped player volume is staggered without issuing playback commands"() {

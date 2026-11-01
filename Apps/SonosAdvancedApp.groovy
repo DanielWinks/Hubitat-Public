@@ -35,34 +35,72 @@ import hubitat.scheduling.AsyncResponse
 // =============================================================================
 // Library: Utilities and Logging (inlined)
 // =============================================================================
+@Field static final List<String> APP_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+
 void logError(String message) {
-  if (settings.logEnable != false) {
-    if(device) log.error "${device.label ?: device.name }: ${message}"
-    if(app) log.error "${app.label ?: app.name }: ${message}"
+  if(loggingEnabled('error')) {
+    if(app) { log.error("${app.label ?: app.name}: ${message}") }
   }
 }
 void logWarn(String message) {
-  if (settings.logEnable != false) {
-    if(device) log.warn "${device.label ?: device.name }: ${message}"
-    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  if(loggingEnabled('warn')) {
+    if(app) { log.warn("${app.label ?: app.name}: ${message}") }
   }
 }
 void logInfo(String message) {
-  if (settings.logEnable != false) {
-    if(device) log.info "${device.label ?: device.name }: ${message}"
-    if(app) log.info "${app.label ?: app.name }: ${message}"
+  if(loggingEnabled('info')) {
+    if(app) { log.info("${app.label ?: app.name}: ${message}") }
   }
 }
 void logDebug(String message) {
-  if (settings.logEnable != false && settings.debugLogEnable != false) {
-    if(device) log.debug "${device.label ?: device.name }: ${message}"
-    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  if(loggingEnabled('debug')) {
+    if(app) { log.debug("${app.label ?: app.name}: ${message}") }
   }
 }
 void logTrace(String message) {
-  if (settings.logEnable != false && settings.traceLogEnable != false) {
-    if(device) log.trace "${device.label ?: device.name }: ${message}"
-    if(app) log.trace "${app.label ?: app.name }: ${message}"
+  if(loggingEnabled('trace')) {
+    if(app) { log.trace("${app.label ?: app.name}: ${message}") }
+  }
+}
+
+String getConfiguredLogLevel() {
+  if(settings?.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
+  if(settings?.logEnable == false) { return 'off' }
+  if(settings?.traceLogEnable == true) { return 'trace' }
+  if(settings?.debugLogEnable == true) { return 'debug' }
+  return 'info'
+}
+
+String normalizeLogLevel(String level) {
+  String normalized = level?.toLowerCase()
+  return APP_LOG_LEVELS.contains(normalized) ? normalized : 'info'
+}
+
+Boolean loggingEnabled(String messageLevel) {
+  Integer configuredRank = APP_LOG_LEVELS.indexOf(getConfiguredLogLevel())
+  Integer messageRank = APP_LOG_LEVELS.indexOf(messageLevel)
+  return configuredRank >= 0 && messageRank >= configuredRank && messageRank < APP_LOG_LEVELS.indexOf('off')
+}
+
+/** Apply a changed preference during the submitOnChange page refresh. */
+void applyLogLevelChange() {
+  String selectedLevel = getConfiguredLogLevel()
+  if(state.logLevel == null) {
+    // Use the previous boolean preferences as the migration baseline.
+    state.logLevel = selectedLevel
+    return
+  }
+
+  String previousLevel = normalizeLogLevel(state.logLevel.toString())
+  if(previousLevel == selectedLevel) { return }
+
+  state.logLevel = selectedLevel
+  String changeMessage = "Logging level changed from ${previousLevel} to ${selectedLevel}"
+  switch(selectedLevel) {
+    case 'warn': log.warn("${app.label ?: app.name}: ${changeMessage}"); break
+    case 'error': log.error("${app.label ?: app.name}: ${changeMessage}"); break
+    case 'off': log.warn("${app.label ?: app.name}: ${changeMessage}"); break
+    default: log.info("${app.label ?: app.name}: ${changeMessage}")
   }
 }
 
@@ -198,8 +236,12 @@ preferences {
 // on the same device back to back.
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
-@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'groupCommandRequest'
+@Field static final String GROUP_COMMAND_REQUEST_EVENT = 'dwinksSonosAdvancedGroupCommand'
+@Field static final String PLAYER_STATE_UPDATE_EVENT = 'dwinksSonosAdvancedPlayerState'
+@Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
+@Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
+@Field static final String PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY = 'receivedPlayerCommandRequestIds'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
@@ -276,6 +318,7 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // App Pages
 // =============================================================================
 Map mainPage() {
+  applyLogLevelChange()
   if(settings.useOldUi == true) {
     stopDiscovery()
   }
@@ -328,6 +371,9 @@ Map mainPage() {
 
     section('Update Settings:', hideable: true, hidden: true) {
       paragraph "<span style='color: #ff6b6b;'><b>⚠ Warning:</b> The built-in auto-update functionality should not be used if you manage this app through Hubitat Package Manager (HPM). Using both may cause conflicts, or version mismatches. If you installed via HPM, use HPM to manage updates.</span>"
+      paragraph 'If Hub Login Security is enabled, enter the local hub credentials used by this app.'
+      input 'hubSecurityUsername', 'text', title: 'Hub Login Security username', required: false
+      input 'hubSecurityPassword', 'password', title: 'Hub Login Security password', required: false
       input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
       if(autoCheckUpdates) {
         input 'updateCheckFrequency', 'enum', title: 'Check frequency', required: false, defaultValue: 'Daily',
@@ -406,12 +452,13 @@ Map mainPage() {
     }
 
     section('Logging Settings:', hideable: true) {
-      input 'logEnable', 'bool', title: 'Enable Logging', required: false, defaultValue: true
-      input 'debugLogEnable', 'bool', title: 'Enable debug logging', required: false, defaultValue: false
-      input 'traceLogEnable', 'bool', title: 'Enable trace logging', required: false, defaultValue: false
-      input 'descriptionTextEnable', 'bool', title: 'Enable descriptionText logging', required: false, defaultValue: true
+      input 'logLevel', 'enum', title: 'Logging level',
+        options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
+        required: false, defaultValue: getConfiguredLogLevel(), submitOnChange: true
+    }
+
+    section('Interface Settings:', hideable: true) {
       input 'useOldUi', 'bool', title: 'Use old UI', required: false, defaultValue: false, submitOnChange: true
-      // input 'applySettingsButton', 'button', title: 'Apply Settings'
     }
   }
 }
@@ -1900,6 +1947,7 @@ void cancelGroupEdit() {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
+  applyLogLevelChange()
   logInfo("${app.name} updated")
   unsubscribe()
   scheduleUpdateCheck()
@@ -1907,9 +1955,6 @@ void configure() {
 
   // Initialize settings with defaults
   if(settings.skipOrphanRemoval == null) { settings.skipOrphanRemoval = false }
-  if(settings.logEnable == null) { settings.logEnable = true }
-  if(settings.debugLogEnable == null) { settings.debugLogEnable = false }
-  if(settings.traceLogEnable == null) { settings.traceLogEnable = false }
   if(settings.descriptionTextEnable == null) { settings.descriptionTextEnable = true }
 
   try { createPlayerDevices() }
@@ -1953,35 +1998,41 @@ void refreshTTSVoiceCache() {
       logWarn('getTTSVoices() returned empty list, skipping cache refresh')
       return
     }
-    String defaultVoice = 'Matthew'
-    try {
-      Map params = [
-        uri: "http://127.0.0.1:8080/hub/details/json?reloadAccounts=false",
-        contentType: 'application/json',
-        requestContentType: 'application/json',
-        timeout: 10
-      ]
-      httpGet(params) { resp ->
-        if(resp.status == 200) {
-          Map json = resp.data
-          defaultVoice = json?.ttsCurrent ? json.ttsCurrent : 'Matthew'
-        }
-      }
-    } catch (Exception e) {
-      logWarn("Could not retrieve current TTS voice from hub: ${e.message}")
-    }
-    getCurrentPlayerDevices().each { ChildDeviceWrapper cd ->
-      try { cd.updateTTSVoiceCache(voiceNames, defaultVoice) }
-      catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
-    }
-    getCurrentGroupDevices().each { ChildDeviceWrapper cd ->
-      try { cd.updateTTSVoiceCache(voiceNames, defaultVoice) }
-      catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
-    }
-    logInfo("TTS voice cache refreshed: ${voiceNames.size()} voices, default: ${defaultVoice}")
-  } catch (Exception e) {
+    String requestId = UUID.randomUUID().toString()
+    state.ttsVoiceRefreshRequestId = requestId
+    asynchttpGet('refreshTTSVoiceCacheCallback', [
+      uri: 'http://127.0.0.1:8080/hub/details/json?reloadAccounts=false',
+      contentType: 'application/json', requestContentType: 'application/json', timeout: 10
+    ], [requestId: requestId, voiceNames: voiceNames])
+  } catch(Exception e) {
     logError("Error refreshing TTS voice cache: ${e.message}")
   }
+}
+
+void refreshTTSVoiceCacheCallback(AsyncResponse response, Map data) {
+  if(!data?.requestId || data.requestId != state.ttsVoiceRefreshRequestId) { return }
+  state.remove('ttsVoiceRefreshRequestId')
+  String defaultVoice = 'Matthew'
+  try {
+    if(response != null && !response.hasError() && response.status == 200) {
+      Object json = response.getJson()
+      if(json instanceof Map && ((Map)json).ttsCurrent) { defaultVoice = ((Map)json).ttsCurrent.toString() }
+    } else {
+      logWarn('Could not retrieve current TTS voice from hub')
+    }
+  } catch(Exception e) {
+    logWarn("Could not retrieve current TTS voice from hub: ${e.message}")
+  }
+  List<String> voiceNames = data.voiceNames instanceof List ? (List<String>)data.voiceNames : []
+  getCurrentPlayerDevices().each { ChildDeviceWrapper cd ->
+    try { cd.updateTTSVoiceCache(voiceNames, defaultVoice) }
+    catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper cd ->
+    try { cd.updateTTSVoiceCache(voiceNames, defaultVoice) }
+    catch (Exception e) { logDebug("Failed to update TTS cache for ${cd.label}: ${e.message}") }
+  }
+  logInfo("TTS voice cache refreshed: ${voiceNames.size()} voices, default: ${defaultVoice}")
 }
 void refreshFavoritesAndPlaylists() {
   logDebug('Refreshing favorites and playlists...')
@@ -2052,15 +2103,14 @@ void createGroupDevices() {
 }
 
 /**
- * Group devices publish command requests as an attribute event. Subscribing
- * the parent app to that event gives commands a one-way boundary: the group
- * driver never has to synchronously call parent.getDeviceFromRincon() while a
- * parent callback may be updating group state.
+ * Group devices publish command requests as location events, keeping the
+ * group driver from synchronously entering the app while holding its gate.
  */
 void subscribeToGroupCommandRequests() {
-  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
-    subscribe(groupDevice, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
-  }
+  unsubscribe(location, GROUP_COMMAND_REQUEST_EVENT, 'groupCommandRequestHandler')
+  subscribe(location, GROUP_COMMAND_REQUEST_EVENT, 'groupCommandRequestHandler')
+  unsubscribe(location, PLAYER_STATE_UPDATE_EVENT, 'playerStateUpdateHandler')
+  subscribe(location, PLAYER_STATE_UPDATE_EVENT, 'playerStateUpdateHandler')
   getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
@@ -2976,6 +3026,86 @@ void drainQueuedChildEvents() {
   }
 }
 
+/** Receive a player state batch without holding the player callback open. */
+void playerStateUpdateHandler(Event event) {
+  Map payload
+  try {
+    payload = (Map)parseJson(event?.data?.toString())
+  } catch(Exception e) {
+    logWarn("Ignoring malformed player state update: ${e.message}")
+    return
+  }
+  if(!(payload instanceof Map)) { return }
+  String playerDni = payload.playerDni as String
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  if(player == null || !player.getDataValue('id')) { return }
+  if(payload.kind == 'wsRetry') {
+    Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
+    offlinePlayers[playerDni] = [id: player.getDataValue('id'), name: player.displayName,
+      retryDelay: (payload.retryDelay ?: 30) as Integer]
+    state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+    return
+  }
+  if(payload.kind == 'wsConnected') {
+    Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
+    offlinePlayers.remove(playerDni)
+    state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+    return
+  }
+  if(payload.kind == 'householdPresence') {
+    resetLongBackoffPlayersSeenInHousehold(payload.players)
+    return
+  }
+  String coordinatorId = payload.coordinatorId as String
+  String kind = payload.kind as String
+  if(kind == 'membership') {
+    if(coordinatorId && payload.playersInGroup instanceof List) {
+      updateGroupDevices(coordinatorId, (List<String>)payload.playersInGroup)
+    }
+    return
+  }
+  if(!(kind in ['state', 'followers'])) { return }
+  if(payload.followerDNIs instanceof List && payload.followerAttrs instanceof Map) {
+    ((List)payload.followerDNIs).each { Object dni ->
+      if(dni != null && getChildDevice(dni.toString()) != null) {
+        ((Map)payload.followerAttrs).each { Object name, Object value ->
+          if(name != null && value != null) { sendChildEvent(dni.toString(), [name: name.toString(), value: value]) }
+        }
+      }
+    }
+  }
+  if(kind == 'state' && coordinatorId == player.getDataValue('id')) {
+    flushGroupDeviceState(coordinatorId, payload.volumeAttrs instanceof Map ? (Map)payload.volumeAttrs : null,
+      payload.playbackAttrs instanceof Map ? (Map)payload.playbackAttrs : null)
+  }
+}
+
+void resetLongBackoffPlayersSeenInHousehold(Object observedPlayers) {
+  if(!(observedPlayers instanceof Collection)) { return }
+  Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
+  if(offlinePlayers.isEmpty()) { return }
+
+  Set<String> observedIds = ((Collection)observedPlayers).findAll { Object item -> item instanceof Map }
+      .collect { Object item -> ((Map)item).id?.toString() }.findAll { String id -> id } as Set<String>
+  offlinePlayers.each { String dni, Map offlineInfo ->
+    Integer retryDelay = (offlineInfo.retryDelay ?: 30) as Integer
+    String rinconId = offlineInfo.id?.toString()
+    if(retryDelay > 30 && rinconId && observedIds.contains(rinconId)) {
+      ChildDeviceWrapper offlinePlayer = getChildDevice(dni)
+      if(offlinePlayer != null) {
+        if(offlinePlayer.restartWebSocketBackoff() == true) {
+          logInfo("Household update shows offline player ${offlineInfo.name} (${rinconId}); restarting its WebSocket retry interval at 30 seconds")
+          offlineInfo.retryDelay = 30
+        }
+      }
+    }
+  }
+  state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+}
+
 /**
  * Receive a command request emitted by a Sonos Advanced Group device. Group
  * drivers deliberately publish requests instead of synchronously traversing
@@ -3002,10 +3132,7 @@ void groupCommandRequestHandler(Event event) {
 }
 
 /**
- * Queue a group command request received directly from a child driver. The
- * group driver calls this from its deferred callback, preserving the same
- * ordering boundary as the legacy event subscription without storing the
- * request as a device current-state attribute.
+ * Queue a group command request received through the location event subscription.
  */
 void enqueueGroupCommandRequest(Map request) {
   if(!(request instanceof Map)) {
@@ -3014,8 +3141,22 @@ void enqueueGroupCommandRequest(Map request) {
 
   String groupDni = request?.groupDni as String
   String command = request?.command as String
-  if(!groupDni || !command || getChildDevice(groupDni) == null) {
+  if(!groupDni || !command) {
     logWarn("Ignoring group command request with invalid target or command: ${JsonOutput.toJson(request)}")
+    return
+  }
+  // Location events are hub-wide; another app instance may own this group.
+  if(getChildDevice(groupDni) == null) { return }
+
+  String requestId = request.requestId as String
+  Map<String, List<String>> receivedRequests = state.receivedGroupCommandRequestIds instanceof Map
+      ? (Map<String, List<String>>)state.receivedGroupCommandRequestIds
+      : [:]
+  List<String> receivedForGroup = receivedRequests[groupDni] instanceof List
+      ? (List<String>)receivedRequests[groupDni]
+      : []
+  if(requestId && receivedForGroup.contains(requestId)) {
+    acknowledgeGroupCommandRequest(groupDni, requestId)
     return
   }
 
@@ -3032,7 +3173,21 @@ void enqueueGroupCommandRequest(Map request) {
   groupRequests.add(request)
   pending[groupDni] = groupRequests
   state[GROUP_COMMAND_QUEUE_STATE_KEY] = pending
+  if(requestId) {
+    receivedForGroup.add(requestId)
+    if(receivedForGroup.size() > 200) { receivedForGroup = receivedForGroup.takeRight(200) }
+    receivedRequests[groupDni] = receivedForGroup
+    state.receivedGroupCommandRequestIds = receivedRequests
+    acknowledgeGroupCommandRequest(groupDni, requestId)
+  }
   runIn(1, 'drainGroupCommandRequests', [overwrite: true])
+}
+
+void acknowledgeGroupCommandRequest(String groupDni, String requestId) {
+  ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
+  if(groupDevice == null) { return }
+  groupDevice.acknowledgeGroupCommand(requestId)
+  logTrace("Acknowledged receipt of group command ${requestId} for ${groupDni}")
 }
 
 void drainGroupCommandRequests() {
@@ -3141,15 +3296,27 @@ void processGroupCommandRequest(Map data) {
 
       case 'playAudioClip':
         cancelActiveGroupOperation(groupDni, 'AUDIO_CLIP_REQUESTED')
-        playerDevices.each { ChildDeviceWrapper player ->
-          player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume))
+        String correlationId = args.correlationId as String ?: requestId ?: UUID.randomUUID().toString()
+        Integer clipDuration = toBigDecimal(args.duration)?.intValue() ?: 0
+        if(isGroupDeviceRosterActivelyGrouped(coordinator, playerIds)) {
+          logDebug("Playing shared audio clip for active Sonos group ${groupDni}")
+          playerDevices.each { ChildDeviceWrapper player ->
+            player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume), clipDuration, correlationId)
+          }
+        } else {
+          logDebug("Preparing shared audio clip for ungrouped Sonos players ${playerIds}; releasing playback together")
+          playerDevices.each { ChildDeviceWrapper player ->
+            player.playerPrepareAudioClipForSynchronizedStart(args.uri as String, toBigDecimal(args.volume), correlationId, clipDuration)
+          }
         }
         break
 
       case 'playHighPriorityTrack':
         cancelActiveGroupOperation(groupDni, 'HIGH_PRIORITY_TRACK_REQUESTED')
+        String correlationId = args.correlationId as String ?: requestId ?: UUID.randomUUID().toString()
+        Integer clipDuration = toBigDecimal(args.duration)?.intValue() ?: 0
         playerDevices.each { ChildDeviceWrapper player ->
-          player.playerLoadAudioClipHighPriority(args.uri as String, toBigDecimal(args.volume))
+          player.playerLoadAudioClipHighPriority(args.uri as String, toBigDecimal(args.volume), correlationId, clipDuration)
         }
         break
 
@@ -3308,9 +3475,7 @@ void saveActiveGroupOperation(Map operation) {
 }
 
 String newGroupOperationId() {
-  Integer sequence = ((state.groupOperationSequence ?: 0) as Integer) + 1
-  state.groupOperationSequence = sequence
-  return "${app.id ?: 'sonos'}-${now()}-${sequence}"
+  return UUID.randomUUID().toString()
 }
 
 String normalizeGroupOperationMode(Object value, String defaultMode = GROUPING_MODE_CURRENT) {
@@ -3491,19 +3656,27 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     topologyRefreshAt: startTime,
     topologyObservations: [:],
     topologyMutationSent: false,
+    topologyRequestId: null,
+    topologyCheckRequestId: null,
     lastCommandAt: 0L,
     lastCommand: null,
     registeredPlayerIds: [],
+    registrationRequestIds: [:],
+    registrationRequestedAt: [:],
+    registrationEventPlayerIds: [],
     observedPlayerIds: [],
     observedGroupId: null,
     observedCoordinatorId: null,
     lastTopologyObservations: [],
     loadAcknowledged: false,
+    favoriteCommandDelivered: false,
     loadErrorCode: null,
     loadErrorReason: null,
     playbackState: null,
     favoriteCommandAt: 0L,
     favoriteAttemptId: null,
+    favoriteRequestId: null,
+    playRequestId: null,
     favoriteExpectedGroupId: null,
     favoriteExpectedCoordinatorId: null,
     favoriteTopologyRefreshAt: 0L,
@@ -3612,11 +3785,15 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   operation.favoriteAttempt = 0
   operation.playAttempt = 0
   operation.loadAcknowledged = false
+  operation.favoriteCommandDelivered = false
+  operation.playCommandDelivered = false
   operation.loadErrorCode = null
   operation.loadErrorReason = null
   operation.playbackState = null
   operation.favoriteCommandAt = now()
   operation.favoriteAttemptId = null
+  operation.favoriteRequestId = null
+  operation.playRequestId = null
   operation.favoriteExpectedGroupId = null
   operation.favoriteExpectedCoordinatorId = null
   operation.favoriteTopologyRefreshAt = 0L
@@ -3644,18 +3821,40 @@ void registerGroupFavoriteOperationOnPlayers(Map operation, Collection ids) {
   if(operation == null || !operation.operationId) { return }
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
   List<String> registered = normalizeGroupPlayerIds(operation.registeredPlayerIds)
+  Map<String, String> requestIds = operation.registrationRequestIds instanceof Map
+      ? (Map<String, String>)operation.registrationRequestIds
+      : [:]
+  Map<String, Long> requestedAt = operation.registrationRequestedAt instanceof Map
+      ? (Map<String, Long>)operation.registrationRequestedAt
+      : [:]
   normalizeGroupPlayerIds(ids).each { String playerId ->
     ChildDeviceWrapper player = rinconMap[playerId]
     if(player == null || registered.contains(playerId)) { return }
-    registered.add(playerId)
-    operation.registeredPlayerIds = registered
-    saveActiveGroupOperation(operation)
+    String requestId = requestIds[playerId]
+    if(!requestId) {
+      requestId = UUID.randomUUID().toString()
+      requestIds[playerId] = requestId
+    }
+    Long lastRequestedAt = requestedAt[playerId] ?: 0L
+    if(lastRequestedAt > 0L && now() < lastRequestedAt + 5000L) { return }
     try {
-      player.registerGroupFavoriteOperation(operation.operationId as String, operation.favoriteId as String)
+      player.registerGroupFavoriteOperation(
+        operation.operationId as String,
+        operation.favoriteId as String,
+        requestId
+      )
+      registered.add(playerId)
+      requestedAt[playerId] = now()
+      logTrace("Registered operation ${operation.operationId} on ${playerId} with request ${requestId}")
     } catch(Exception e) {
+      requestedAt[playerId] = now()
       logWarn("Could not register group Favorite operation ${operation.operationId} on ${playerId}: ${e.message}")
     }
   }
+  operation.registeredPlayerIds = registered.unique().sort()
+  operation.registrationRequestIds = requestIds
+  operation.registrationRequestedAt = requestedAt
+  saveActiveGroupOperation(operation)
 }
 
 void setGroupFavoriteOperationAttemptOnPlayers(Map operation, Collection ids) {
@@ -3668,7 +3867,8 @@ void setGroupFavoriteOperationAttemptOnPlayers(Map operation, Collection ids) {
         player.setGroupFavoriteOperationAttempt(
           operation.operationId as String,
           operation.favoriteAttemptId as String,
-          operation.favoriteExpectedGroupId as String
+          operation.favoriteExpectedGroupId as String,
+          operation.favoriteRequestId as String
         )
       } catch(Exception e) {
         logDebug("Could not update Favorite attempt ${operation.favoriteAttemptId} on ${playerId}: ${e.message}")
@@ -3936,6 +4136,8 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       List<String> extras = observedPlayerIds.findAll { String id -> !requiredPlayerIds.contains(id) }
       if(extras) {
         operation.lastCommand = 'removeExtraPlayers'
+        operation.topologyRequestId = UUID.randomUUID().toString()
+        logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         logInfo("Evicting unlisted players ${extras} from group ${topology.groupId} using configured coordinator ${configuredCoordinatorId}")
         configuredCoordinator.playerModifyGroupMembers([], extras)
         topologyMutationSentNow = true
@@ -3976,9 +4178,13 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
     if(canEvictExtras && observedPlayerIds.size() > requiredPlayerIds.size()) {
       List<String> extras = observedPlayerIds.findAll { String id -> !requiredPlayerIds.contains(id) }
       operation.lastCommand = 'removeExtraPlayers'
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       coordinator.playerModifyGroupMembers([], extras)
     } else {
       operation.lastCommand = 'createExactGroup'
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       coordinator.playerCreateGroup(requiredPlayerIds)
     }
   } else {
@@ -4032,10 +4238,14 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
     logDebug("Sending additive group mutation for ${operation.operationId}: coordinator=${coordinatorId}, group=${coordinator.getDataValue('groupId')}, add=${followersToAdd}")
     if(followersToAdd) {
       operation.topologyMutationSent = true
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       coordinator.playerModifyGroupMembers(followersToAdd, [])
     } else {
       // The topology may be mid-transition or the player cache may be stale.
       // Refresh group data without changing membership; extras are preserved.
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Dispatching topology check ${operation.topologyRequestId} for group operation ${operation.operationId}")
       coordinator.playerGetGroupsFull()
     }
   }
@@ -4055,6 +4265,8 @@ void refreshGroupOperationTopology(Map data = [:]) {
     return
   }
   operation.topologyRefreshAt = now()
+  operation.topologyCheckRequestId = UUID.randomUUID().toString()
+  logTrace("Starting topology observation ${operation.topologyCheckRequestId} for operation ${operation.operationId}")
   operation.topologyObservations = [:]
   operation.stableObservations = 0
   operation.topologyFingerprint = null
@@ -4079,6 +4291,8 @@ void refreshGroupOperationTopology(Map data = [:]) {
 void refreshGroupFavoriteTopology(Map operation, Boolean resetStability = true) {
   if(operation == null || !operation.favoriteId) { return }
   operation.favoriteTopologyRefreshAt = now()
+  operation.favoriteTopologyRequestId = UUID.randomUUID().toString()
+  logTrace("Starting post-Favorite topology observation ${operation.favoriteTopologyRequestId} for operation ${operation.operationId}")
   operation.favoriteTopologyAttempt = ((operation.favoriteTopologyAttempt ?: 0) as Integer) + 1
   operation.favoriteTopologyObservations = [:]
   if(resetStability == true) {
@@ -4123,11 +4337,15 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
   operation.status = 'LOADING_FAVORITE'
   operation.favoriteAttempt = ((operation.favoriteAttempt ?: 0) as Integer) + 1
   operation.loadAcknowledged = false
+  operation.favoriteCommandDelivered = false
+  operation.playCommandDelivered = false
   operation.loadErrorCode = null
   operation.loadErrorReason = null
   operation.playbackState = null
   operation.favoriteCommandAt = now()
   operation.favoriteAttemptId = null
+  operation.favoriteRequestId = null
+  operation.playRequestId = null
   operation.favoriteExpectedGroupId = null
   operation.favoriteExpectedCoordinatorId = null
   operation.favoriteTopologyRefreshAt = 0L
@@ -4137,7 +4355,8 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
   operation.favoriteTopologyLastObservedAt = 0L
   operation.favoriteTopologyFingerprint = null
   operation.favoriteTopologyVerified = false
-  operation.favoriteAttemptId = "${operation.operationId}:${operation.favoriteAttempt}".toString()
+  operation.favoriteAttemptId = UUID.randomUUID().toString()
+  operation.favoriteRequestId = UUID.randomUUID().toString()
   operation.favoriteExpectedGroupId = topology.groupId as String
   operation.favoriteExpectedCoordinatorId = coordinatorId
   operation.playerPlaybackStates = [:]
@@ -4158,7 +4377,8 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
         operation.crossfadeMode as String,
         operation.operationId as String,
         topology.groupId as String,
-        operation.favoriteAttemptId as String
+        operation.favoriteAttemptId as String,
+        operation.favoriteRequestId as String
       )
     } catch(MissingMethodException ignored) {
       // Permit an app update to coexist briefly with an older child driver.
@@ -4172,7 +4392,8 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
         operation.autoPlay as String,
         operation.crossfadeMode as String,
         operation.operationId as String,
-        topology.groupId as String
+        topology.groupId as String,
+        operation.favoriteAttemptId as String
       )
     }
   } catch(Exception e) {
@@ -4267,6 +4488,8 @@ void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   operation.phase = 'ENSURE_GROUP'
   operation.status = 'ENSURING_TOPOLOGY'
   operation.loadAcknowledged = false
+  operation.favoriteCommandDelivered = false
+  operation.playCommandDelivered = false
   operation.loadErrorCode = null
   operation.loadErrorReason = null
   operation.playbackState = null
@@ -4321,6 +4544,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     failGroupOperation(operation, 'GROUP_OPERATION_TIMEOUT', "The live Sonos topology or playback confirmation did not stabilize before the deadline. Last topology: ${summarizeGroupOperationTopology([observations: operation.lastTopologyObservations])}")
     return
   }
+  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
 
   Boolean favoriteLoadInProgress = operation.favoriteId &&
       ((operation.favoriteAttempt ?: 0) as Integer) > 0 &&
@@ -4537,7 +4761,10 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
         operation.lastCommand = 'play'
         operation.lastCommandAt = now()
         saveActiveGroupOperation(operation)
-        try { coordinator.playerPlay() } catch(Exception e) {
+        operation.playRequestId = UUID.randomUUID().toString()
+        saveActiveGroupOperation(operation)
+        try { coordinator.playerPlayForGroupOperation(operation.operationId as String,
+          operation.favoriteAttemptId as String, operation.playRequestId as String) } catch(Exception e) {
           failGroupOperation(operation, 'GROUP_PLAY_COMMAND_FAILED', e.message as String)
           return
         }
@@ -4562,7 +4789,10 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
         operation.lastCommand = 'play'
         operation.lastCommandAt = now()
         saveActiveGroupOperation(operation)
-        try { coordinator.playerPlay() } catch(Exception e) {
+        operation.playRequestId = UUID.randomUUID().toString()
+        saveActiveGroupOperation(operation)
+        try { coordinator.playerPlayForGroupOperation(operation.operationId as String,
+          operation.favoriteAttemptId as String, operation.playRequestId as String) } catch(Exception e) {
           failGroupOperation(operation, 'GROUP_PLAY_COMMAND_FAILED', e.message as String)
           return
         }
@@ -4621,7 +4851,32 @@ void groupFavoriteOperationEventHandler(Event event) {
   String eventGroupId = eventData.groupId as String
   String expectedGroupId = operation.favoriteExpectedGroupId as String ?: operation.observedGroupId as String
   Boolean isExpectedGroup = !eventGroupId || !expectedGroupId || eventGroupId == expectedGroupId
+  if(eventName == 'registered' && isRequiredPlayer && eventPlayerId) {
+    Map expectedRegistrationIds = operation.registrationRequestIds instanceof Map
+        ? (Map)operation.registrationRequestIds
+        : [:]
+    String expectedRegistrationId = expectedRegistrationIds[eventPlayerId]?.toString()
+    if(!expectedRegistrationId || payload.requestId?.toString() == expectedRegistrationId) {
+      List<String> eventRegisteredPlayers = normalizeGroupPlayerIds(operation.registrationEventPlayerIds)
+      eventRegisteredPlayers.add(eventPlayerId)
+      operation.registrationEventPlayerIds = eventRegisteredPlayers.unique().sort()
+      logTrace("Player ${eventPlayerId} acknowledged registration request ${payload.requestId ?: '(legacy)'} for operation ${operation.operationId}")
+    }
+  }
   switch(eventName) {
+    case 'loadStarted':
+      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand &&
+          payload.requestId?.toString() == operation.favoriteRequestId?.toString()) {
+        operation.favoriteCommandDelivered = true
+        logDebug("Favorite load request ${operation.favoriteRequestId} for operation ${operation.operationId} was handed to player ${eventPlayerId}")
+      }
+      break
+    case 'playStarted':
+      if(isExpectedAttempt && isCoordinatorEvent && payload.requestId?.toString() == operation.playRequestId?.toString()) {
+        operation.playCommandDelivered = true
+        logDebug("Play request ${operation.playRequestId} for operation ${operation.operationId} was handed to player ${eventPlayerId}")
+      }
+      break
     case 'favoriteLoadAck':
       if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         operation.loadAcknowledged = eventData.success == true
@@ -4742,6 +4997,15 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
     topologyAttempt: operation.topologyAttempt ?: 0,
     favoriteAttempt: operation.favoriteAttempt ?: 0,
     favoriteAttemptId: operation.favoriteAttemptId,
+    favoriteRequestId: operation.favoriteRequestId,
+    favoriteCommandDelivered: operation.favoriteCommandDelivered == true,
+    playRequestId: operation.playRequestId,
+    playCommandDelivered: operation.playCommandDelivered == true,
+    topologyRequestId: operation.topologyRequestId,
+    topologyCheckRequestId: operation.topologyCheckRequestId,
+    favoriteTopologyRequestId: operation.favoriteTopologyRequestId,
+    registrationRequestIds: operation.registrationRequestIds ?: [:],
+    registrationEventPlayerIds: operation.registrationEventPlayerIds ?: [],
     favoriteTopologyAttempt: operation.favoriteTopologyAttempt ?: 0,
     favoriteTopologyVerified: operation.favoriteTopologyVerified == true,
     playAttempt: operation.playAttempt ?: 0,
@@ -4846,13 +5110,82 @@ void playerCommandRequestHandler(Event event) {
     return
   }
 
+  enqueuePlayerCommandRequest(request)
+}
+
+void enqueuePlayerCommandRequest(Map request) {
   String playerDni = request?.playerDni as String
   String command = request?.command as String
-  if(!playerDni || !command || getChildDevice(playerDni) == null) {
-    logWarn("Ignoring player command request with invalid target or command: ${rawRequest}")
+  ChildDeviceWrapper source = playerDni ? getChildDevice(playerDni) : null
+  if(!playerDni || !command || source == null) {
+    logWarn("Ignoring player command request with invalid target or command: ${JsonOutput.toJson(request)}")
     return
   }
-  runIn(1, 'processPlayerCommandRequest', [data: [request: request]])
+  String requestId = request.requestId as String
+  Map<String, List<String>> received = state[PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY] instanceof Map
+      ? (Map<String, List<String>>)state[PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY]
+      : [:]
+  List<String> receivedForPlayer = received[playerDni] instanceof List
+      ? (List<String>)received[playerDni]
+      : []
+  if(requestId && receivedForPlayer.contains(requestId)) {
+    acknowledgePlayerCommandRequest(source, requestId)
+    return
+  }
+
+  Map<String, List<Map>> pending = state[PLAYER_COMMAND_QUEUE_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[PLAYER_COMMAND_QUEUE_STATE_KEY]
+      : [:]
+  List<Map> playerRequests = pending[playerDni] instanceof List
+      ? (List<Map>)pending[playerDni]
+      : []
+  playerRequests.add(request)
+  pending[playerDni] = playerRequests
+  state[PLAYER_COMMAND_QUEUE_STATE_KEY] = pending
+  if(requestId) {
+    receivedForPlayer.add(requestId)
+    if(receivedForPlayer.size() > 200) { receivedForPlayer = receivedForPlayer.takeRight(200) }
+    received[playerDni] = receivedForPlayer
+    state[PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY] = received
+    acknowledgePlayerCommandRequest(source, requestId)
+  }
+  runIn(1, 'drainPlayerCommandRequests', [overwrite: true])
+}
+
+void acknowledgePlayerCommandRequest(ChildDeviceWrapper source, String requestId) {
+  source.acknowledgeParentCommand(requestId)
+  logTrace("Acknowledged receipt of parent command ${requestId} for ${source.getDeviceNetworkId()}")
+}
+
+void drainPlayerCommandRequests() {
+  Map<String, List<Map>> pending = state[PLAYER_COMMAND_QUEUE_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[PLAYER_COMMAND_QUEUE_STATE_KEY]
+      : [:]
+  state.remove(PLAYER_COMMAND_QUEUE_STATE_KEY)
+  pending.each { String playerDni, List<Map> requests ->
+    List<Map> ordered = (requests ?: []).sort { Map request -> playerCommandRequestSequence(request) }
+    ordered.each { Map request -> processPlayerCommandRequest([request: request]) }
+  }
+}
+
+Integer playerCommandRequestSequence(Map request) {
+  if(request?.sequence != null) {
+    try {
+      return request.sequence.toString().toInteger()
+    } catch(Exception ignored) {
+      return Integer.MAX_VALUE
+    }
+  }
+  String requestId = request?.requestId as String
+  if(!requestId) { return Integer.MAX_VALUE }
+  String sequenceText = requestId.contains('-')
+      ? requestId.substring(requestId.lastIndexOf('-') + 1)
+      : requestId
+  try {
+    return sequenceText.toInteger()
+  } catch(Exception ignored) {
+    return Integer.MAX_VALUE
+  }
 }
 
 void processPlayerCommandRequest(Map data) {
@@ -4958,6 +5291,16 @@ Boolean groupCommandBoolean(Object value, Boolean defaultValue) {
 Boolean isSonosGrouped(ChildDeviceWrapper coordinator) {
   return coordinator?.currentValue('isGrouped', true) == 'on' &&
       coordinator?.currentValue('isGroupCoordinator', true) == 'on'
+}
+
+/** True when every configured target is currently a member of the live group. */
+Boolean isGroupDeviceRosterActivelyGrouped(ChildDeviceWrapper coordinator, List<String> playerIds) {
+  if(!isSonosGrouped(coordinator) || !playerIds) { return false }
+  String groupId = getGroupOperationChildValue(coordinator, 'groupId')?.toString()
+  List<String> activePlayerIds = normalizeGroupPlayerIds(
+      getGroupOperationChildValue(coordinator, 'groupPlayerIds'))
+  return groupId != null && !groupId.trim().isEmpty() &&
+      activePlayerIds.containsAll(normalizeGroupPlayerIds(playerIds))
 }
 
 void executeGroupVolumeCommand(ChildDeviceWrapper coordinator, List<ChildDeviceWrapper> players, Map args) {
@@ -5806,7 +6149,7 @@ String getInstalledDriverVersion(String driverName, String namespace) {
   try {
     // Get authentication cookie
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       logWarn('Failed to authenticate with hub')
       return null
     }
@@ -5815,7 +6158,7 @@ String getInstalledDriverVersion(String driverName, String namespace) {
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/device/drivers',
-      headers: [Cookie: cookie]
+      headers: hubCookieHeaders(cookie)
     ]
 
     httpGet(params) { resp ->
@@ -5842,7 +6185,7 @@ String getInstalledDriverVersion(String driverName, String namespace) {
           Map codeParams = [
             uri: "http://127.0.0.1:8080",
             path: '/driver/ajax/code',
-            headers: [Cookie: cookie],
+            headers: hubCookieHeaders(cookie),
             query: [id: driverId]
           ]
 
@@ -5889,7 +6232,7 @@ Map getInstalledLibraryVersionWithValidation(Integer libraryId, String expectedN
     logInfo("Getting library version for ID ${libraryId}...")
     // Get authentication cookie
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       result.error = 'Failed to authenticate with hub'
       logWarn(result.error)
       return result
@@ -5942,13 +6285,13 @@ String getDriverVersionForUpdate(String driverName, String namespace) {
 
   try {
     String cookie = login()
-    if(!cookie) { return null }
+    if(cookie == null) { return null }
 
     // Get list of installed drivers
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/device/drivers',
-      headers: [Cookie: cookie]
+      headers: hubCookieHeaders(cookie)
     ]
 
     httpGet(params) { resp ->
@@ -5961,7 +6304,7 @@ String getDriverVersionForUpdate(String driverName, String namespace) {
         Map codeParams = [
           uri: "http://127.0.0.1:8080",
           path: '/driver/ajax/code',
-          headers: [Cookie: cookie],
+          headers: hubCookieHeaders(cookie),
           query: [id: driver.id]
         ]
 
@@ -6211,7 +6554,7 @@ Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version
   try {
     // Get authentication cookie
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       logWarn("Failed to authenticate with hub for library publish")
       return false
     }
@@ -6233,8 +6576,7 @@ Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/library/ajax/update',
-      headers: [
-        'Cookie': cookie,
+      headers: hubCookieHeaders(cookie) + [
         'Content-Type': 'application/x-www-form-urlencoded'
       ],
       body: body,
@@ -6281,7 +6623,7 @@ Map getLibraryCode(Integer libraryId, String cookie) {
       uri: "http://127.0.0.1:8080",
       path: '/library/ajax/code',
       query: [id: libraryId.toString()],
-      headers: ['Cookie': cookie],
+      headers: hubCookieHeaders(cookie),
       timeout: 15,
       ignoreSSLIssues: true
     ]
@@ -6316,7 +6658,7 @@ Map getLibraryCode(Integer libraryId, String cookie) {
 void uploadBundle(Map bundle) {
   try {
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       logError('Failed to authenticate with hub')
       return
     }
@@ -6349,8 +6691,7 @@ void uploadBundle(Map bundle) {
       uri: "http://127.0.0.1:8080",
       path: "/hub/fileManager/upload",
       query: ['folder': '/'],
-      headers: [
-        'Cookie': cookie,
+      headers: hubCookieHeaders(cookie) + [
         'Content-Type': "multipart/form-data; boundary=${boundary}"
       ],
       body: """--${boundary}\nContent-Disposition: form-data; name="uploadFile"; filename="${zipFilename}"\nContent-Type: application/zip\n\n${new String(zipData, 'ISO-8859-1')}\n\n--${boundary}\nContent-Disposition: form-data; name="folder"\n\n\n--${boundary}--""",
@@ -6404,6 +6745,8 @@ Map buildLocalControlCallbackData(Object existingData, String requestMethod, Str
   }
   callbackData[LOCAL_CONTROL_RETRY_DATA_KEY] = [
     requestId: requestId ?: UUID.randomUUID().toString(),
+    attemptId: UUID.randomUUID().toString(),
+    attemptNumber: isRetryAttempt ? (((state[LOCAL_CONTROL_RETRY_STATE_KEY] ?: 0) as Integer) + 1) : 1,
     method: requestMethod,
     callbackMethod: callbackMethod,
     params: new LinkedHashMap(params),
@@ -6434,6 +6777,9 @@ void sendLocalCommandAsync(Map args) {
     }
     callbackData = buildLocalControlCallbackData(args.data, 'POST', callbackMethod, params, retryable)
   }
+  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
+      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
+  logDebug("Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}")
   logTrace("sendLocalCommandAsync: ${params}")
   asynchttpPost(callbackMethod, params, callbackData)
 }
@@ -6477,6 +6823,9 @@ void sendLocalQueryAsync(Map args) {
     }
     callbackData = buildLocalControlCallbackData(args.data, 'GET', callbackMethod, params, true)
   }
+  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
+      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
+  logDebug("Dispatching local HTTP GET request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}")
   logTrace("sendLocalQueryAsync: ${params}")
   asynchttpGet(callbackMethod, params, callbackData)
 }
@@ -6503,6 +6852,9 @@ void sendLocalJsonAsync(Map args) {
     }
     callbackData = buildLocalControlCallbackData(args.data, 'POST', callbackMethod, params, retryable)
   }
+  Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
+      ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
+  logDebug("Dispatching local HTTP POST request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}")
   logTrace("sendLocalJsonAsync: ${params}")
   asynchttpPost(callbackMethod, params, callbackData)
 }
@@ -6510,7 +6862,21 @@ void sendLocalJsonAsync(Map args) {
 void localControlCallback(AsyncResponse response, Map data) {
   Map retryRequest = data?.get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map ? data[LOCAL_CONTROL_RETRY_DATA_KEY] as Map : null
   Map scheduledRetryRequest = state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] instanceof Map ? state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] as Map : null
-  Boolean requestMatchesScheduledRetry = retryRequest?.requestId != null && scheduledRetryRequest?.requestId == retryRequest?.requestId
+  String requestId = retryRequest?.requestId as String
+  String attemptId = retryRequest?.attemptId as String
+  Boolean requestMatchesScheduledRetry = requestId != null && scheduledRetryRequest?.requestId == requestId
+  Boolean attemptMatchesScheduledRetry = requestMatchesScheduledRetry &&
+      (!scheduledRetryRequest?.activeAttemptId || scheduledRetryRequest.activeAttemptId == attemptId)
+  Integer statusCode = response?.status as Integer
+  logDebug("Local HTTP callback request=${requestId ?: 'untracked'} attempt=${retryRequest?.attemptNumber ?: 1} attemptId=${attemptId ?: 'untracked'} status=${statusCode ?: 'none'} error=${response?.hasError() == true} receivedAt=${now()}")
+  if(retryRequest?.retryable == true && scheduledRetryRequest != null && !attemptMatchesScheduledRetry) {
+    logWarn("Ignoring stale local HTTP callback request=${requestId ?: 'unknown'} attemptId=${attemptId ?: 'unknown'}; activeRequest=${scheduledRetryRequest.requestId} activeAttempt=${scheduledRetryRequest.activeAttemptId ?: 'unknown'}")
+    return
+  }
+  if(retryRequest?.retryAttempt == true && scheduledRetryRequest == null) {
+    logWarn("Ignoring late local HTTP retry callback request=${requestId ?: 'unknown'} attemptId=${attemptId ?: 'unknown'}; no retry is active")
+    return
+  }
   if (response?.status != 200 || response.hasError()) {
     logError("Request returned HTTP status ${response.status}")
     logError("Request error message: ${response.getErrorMessage()}")
@@ -6519,21 +6885,22 @@ void localControlCallback(AsyncResponse response, Map data) {
     try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
     Boolean retryScheduled = false
     if(retryRequest?.retryable == true) {
-      if(scheduledRetryRequest == null || requestMatchesScheduledRetry) {
+      if(scheduledRetryRequest == null || attemptMatchesScheduledRetry) {
+        retryRequest.activeAttemptId = attemptId
         state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] = retryRequest
         retryScheduled = handleAsyncHttpFailureWithRetry(response, 'executeLocalControlRetry', LOCAL_CONTROL_RETRY_STATE_KEY)
       } else {
         logWarn("Skipping local control auto-retry for ${retryRequest.method} ${retryRequest?.params?.uri} because another retry is already pending")
       }
     }
-    if(retryScheduled == false && (scheduledRetryRequest == null || requestMatchesScheduledRetry)) {
+    if(retryScheduled == false && (scheduledRetryRequest == null || attemptMatchesScheduledRetry)) {
       state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
       resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
     }
     return
   }
   if(response?.status == 200 && response && response.hasError() == false) {
-    if(retryRequest?.retryable == true && (scheduledRetryRequest == null || scheduledRetryRequest?.requestId == retryRequest?.requestId)) {
+    if(retryRequest?.retryable == true && (scheduledRetryRequest == null || attemptMatchesScheduledRetry)) {
       state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
       resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
     }
@@ -6552,7 +6919,10 @@ void executeLocalControlRetry() {
 
   Map params = new LinkedHashMap(retryRequest.params as Map)
   Map callbackData = buildLocalControlCallbackData(null, retryRequest.method as String, retryRequest.callbackMethod as String, params, retryRequest.retryable == true, true, retryRequest.requestId as String)
-  logInfo("Retrying local control ${retryRequest.method} request to ${params.uri}")
+  Map retryAttemptData = callbackData.get(LOCAL_CONTROL_RETRY_DATA_KEY) as Map
+  retryRequest.activeAttemptId = retryAttemptData.attemptId
+  state[LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY] = retryRequest
+  logInfo("Retrying local control ${retryRequest.method} request=${retryRequest.requestId} attempt=${retryAttemptData.attemptNumber} attemptId=${retryAttemptData.attemptId} uri=${params.uri}")
 
   if(retryRequest.method == 'GET') {
     asynchttpGet(retryRequest.callbackMethod as String, params, callbackData)
@@ -6614,7 +6984,7 @@ String getCurrentVersion() {
 String getActualInstalledAppVersion() {
   try {
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       logWarn('Failed to authenticate to get app version')
       return getCurrentVersion() // Fallback to instance version
     }
@@ -6632,7 +7002,7 @@ String getActualInstalledAppVersion() {
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/app/ajax/code',
-      headers: ['Cookie': cookie],
+      headers: hubCookieHeaders(cookie),
       query: [id: targetApp.id],
       timeout: 15,
       ignoreSSLIssues: true
@@ -6677,70 +7047,144 @@ void checkForUpdates(Boolean manual = false) {
     if(updateCheckFrequency == 'Weekly' && (now - lastCheck) < weekInMs) { return }
   }
 
+  Long startedAt = state.updateCheckStartedAt instanceof Number ? (state.updateCheckStartedAt as Long) : 0L
+  if(!manual && state.updateCheckRequestId && now() - startedAt < 60000L) { return }
+  String requestId = UUID.randomUUID().toString()
+  state.updateCheckRequestId = requestId
+  state.updateCheckStartedAt = now()
   try {
-    String manifestUrl = 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json'
+    asynchttpGet('updateCheckCallback', [
+      uri: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json',
+      contentType: 'application/json', timeout: 15
+    ], [requestId: requestId, manual: manual])
+  } catch(Exception e) {
+    state.remove('updateCheckRequestId')
+    state.remove('updateCheckStartedAt')
+    logError("Error checking for updates: ${e.message}")
+  }
+}
 
-    Map params = [
-      uri: manifestUrl,
-      contentType: 'application/json',
-      timeout: 15
-    ]
-
-    httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data) {
-        Map manifest = resp.data
-        String latestVersion = manifest.version ?: null
-
-        if(latestVersion) {
-          String currentVersion = getActualInstalledAppVersion()
-          Integer comparison = compareVersions(currentVersion, latestVersion)
-
-          state.lastUpdateCheck = now()
-          state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
-
-          if(comparison < 0) {
-            // Update available
-            state.updateAvailable = true
-            state.latestVersion = latestVersion
-            state.latestManifest = manifest
-            state.latestReleaseDate = manifest.releaseDate ?: 'Unknown'
-            state.latestReleaseUrl = "https://github.com/DanielWinks/Hubitat-Public/releases/tag/v${latestVersion}"
-
-            // Update app label - keep simple since updateLabel doesn't render HTML
-            app.updateLabel("Sonos Advanced Controller [Update Available]")
-
-            logInfo("Update available: ${latestVersion} (current: ${currentVersion})")
-
-            if(manual) {
-              // Force page refresh to show update notification
-              runIn(1, 'refreshPage')
-            }
-
-            // Auto-install if enabled
-            if(autoInstallUpdates == true && !manual) {
-              scheduleAutoInstall()
-            }
-          } else {
-            state.updateAvailable = false
-            state.latestVersion = null
-            state.latestManifest = null
-            state.latestReleaseDate = null
-            state.latestReleaseUrl = null
-
-            // Clear update label
-            app.updateLabel("Sonos Advanced Controller")
-
-            if(manual) {
-              logInfo("No updates available. Current version ${currentVersion} is up to date.")
-            }
-          }
-        }
-      }
+void updateCheckCallback(AsyncResponse response, Map data) {
+  if(!data?.requestId || state.updateCheckRequestId != data.requestId) { return }
+  try {
+    if(response == null || response.hasError() || response.status != 200) {
+      logWarn("Update check failed: ${response?.status ?: response?.errorMessage}")
+      finishUpdateCheckRequest()
+      return
+    }
+    Object parsed = response.getJson()
+    if(!(parsed instanceof Map) || !((Map)parsed).version) {
+      logWarn('Update check returned an invalid manifest')
+      finishUpdateCheckRequest()
+      return
+    }
+    Map next = [requestId: data.requestId, manual: data.manual, manifest: parsed]
+    Long cookieAge = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+    if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
+      state.updateCheckCookie = state.hubCookie
+      requestUpdateCheckAppList(next)
+    } else {
+      asynchttpPost('updateCheckLoginCallback', [uri: 'http://127.0.0.1:8080', path: '/login',
+        requestContentType: 'application/x-www-form-urlencoded',
+        body: [username: settings.hubSecurityUsername?.toString() ?: '', password: settings.hubSecurityPassword?.toString() ?: '', submit: 'Login'],
+        followRedirects: false, textParser: true, timeout: 15], next)
     }
   } catch(Exception e) {
-    logError("Error checking for updates: ${e.message}")
-    state.lastUpdateCheck = now()
-    state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
+    logError("Error processing update check: ${e.message}")
+    finishUpdateCheckRequest()
+  }
+}
+
+void finishUpdateCheckRequest() {
+  state.remove('updateCheckRequestId')
+  state.remove('updateCheckStartedAt')
+  state.remove('updateCheckCookie')
+}
+
+void updateCheckLoginCallback(AsyncResponse response, Map data) {
+  if(!data?.requestId || state.updateCheckRequestId != data.requestId) { return }
+  if(response == null || !(response.status in [200, 302])) {
+    completeUpdateCheck(data, getCurrentVersion())
+    return
+  }
+  Object header = getResponseHeaderIgnoreCase(response.headers, 'Set-Cookie')
+  if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
+  String value = null
+  if(header != null) {
+    try { value = header.value?.toString() } catch(Exception ignored) { value = null }
+    if(!value) { value = header.toString() }
+  }
+  state.updateCheckCookie = value ? value.split(';')[0] : ''
+  requestUpdateCheckAppList(data)
+}
+
+void requestUpdateCheckAppList(Map data) {
+  try {
+    asynchttpGet('updateCheckAppListCallback', [uri: 'http://127.0.0.1:8080', path: '/hub2/userAppTypes',
+      headers: hubCookieHeaders(state.updateCheckCookie as String), timeout: 15, ignoreSSLIssues: true], data)
+  } catch(Exception e) { completeUpdateCheck(data, getCurrentVersion()) }
+}
+
+void updateCheckAppListCallback(AsyncResponse response, Map data) {
+  if(!data?.requestId || state.updateCheckRequestId != data.requestId) { return }
+  try {
+    Object parsed = response != null && !response.hasError() && response.status == 200 ? response.getJson() : null
+    if(!(parsed instanceof Collection)) {
+      state.remove('hubCookie')
+      state.remove('hubCookieTime')
+      completeUpdateCheck(data, getCurrentVersion())
+      return
+    }
+    state.hubCookie = state.updateCheckCookie
+    state.hubCookieTime = now()
+    Map target = parsed instanceof Collection ? (Map)((Collection)parsed).find { it instanceof Map && it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' } : null
+    if(target?.id == null) { completeUpdateCheck(data, getCurrentVersion()); return }
+    asynchttpGet('updateCheckAppCodeCallback', [uri: 'http://127.0.0.1:8080', path: '/app/ajax/code',
+      headers: hubCookieHeaders(state.updateCheckCookie as String), query: [id: target.id], timeout: 15, ignoreSSLIssues: true], data)
+  } catch(Exception e) { completeUpdateCheck(data, getCurrentVersion()) }
+}
+
+void updateCheckAppCodeCallback(AsyncResponse response, Map data) {
+  if(!data?.requestId || state.updateCheckRequestId != data.requestId) { return }
+  String version = null
+  try {
+    Object parsed = response != null && !response.hasError() && response.status == 200 ? response.getJson() : null
+    if(parsed instanceof Map && ((Map)parsed).source) {
+      def matcher = ((Map)parsed).source.toString() =~ /version:\s*['"]([^'"]+)['"]/
+      if(matcher) { version = matcher[0][1] }
+    }
+  } catch(Exception e) { logDebug("Could not read installed app version: ${e.message}") }
+  completeUpdateCheck(data, version ?: getCurrentVersion())
+}
+
+void completeUpdateCheck(Map data, String currentVersion) {
+  if(!data?.requestId || state.updateCheckRequestId != data.requestId) { return }
+  finishUpdateCheckRequest()
+  Map manifest = data.manifest instanceof Map ? (Map)data.manifest : [:]
+  if(!manifest.version) { return }
+  String latestVersion = manifest.version.toString()
+  Boolean manual = data.manual == true
+  Integer comparison = compareVersions(currentVersion, latestVersion)
+  state.lastUpdateCheck = now()
+  state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
+  if(comparison < 0) {
+    state.updateAvailable = true
+    state.latestVersion = latestVersion
+    state.latestManifest = manifest
+    state.latestReleaseDate = manifest.releaseDate ?: 'Unknown'
+    state.latestReleaseUrl = "https://github.com/DanielWinks/Hubitat-Public/releases/tag/v${latestVersion}"
+    app.updateLabel('Sonos Advanced Controller [Update Available]')
+    logInfo("Update available: ${latestVersion} (current: ${currentVersion})")
+    if(manual) { runIn(1, 'refreshPage') }
+    if(settings.autoInstallUpdates == true && !manual) { scheduleAutoInstall() }
+  } else {
+    state.updateAvailable = false
+    state.latestVersion = null
+    state.latestManifest = null
+    state.latestReleaseDate = null
+    state.latestReleaseUrl = null
+    app.updateLabel('Sonos Advanced Controller')
+    if(manual) { logInfo("No updates available. Current version ${currentVersion} is up to date.") }
   }
 }
 
@@ -6923,7 +7367,7 @@ String downloadFile(String uri) {
 Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
   try {
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       logError('Failed to authenticate with hub')
       return false
     }
@@ -6953,7 +7397,7 @@ Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
       uri: "http://127.0.0.1:8080",
       path: '/app/ajax/code',
       requestContentType: 'application/x-www-form-urlencoded',
-      headers: ['Cookie': cookie],
+      headers: hubCookieHeaders(cookie),
       query: [id: appCodeId],
       timeout: 300,
       ignoreSSLIssues: true
@@ -6987,10 +7431,7 @@ Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
       uri: "http://127.0.0.1:8080",
       path: '/app/ajax/update',
       requestContentType: 'application/x-www-form-urlencoded',
-      headers: [
-        'Connection': 'keep-alive',
-        'Cookie': cookie
-      ],
+      headers: hubCookieHeaders(cookie) + ['Connection': 'keep-alive'],
       body: [
         id: appCodeId,
         version: currentHubVersion,
@@ -7022,7 +7463,7 @@ Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
 Boolean updateDriver(String driverName, String namespace, String sourceCode, String newVersionForLogging) {
   try {
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       logError('Failed to authenticate with hub')
       return false
     }
@@ -7041,9 +7482,7 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
         uri: "http://127.0.0.1:8080",
         path: '/driver/save',
         requestContentType: 'application/x-www-form-urlencoded',
-        headers: [
-          'Cookie': cookie
-        ],
+        headers: hubCookieHeaders(cookie),
         body: [
           id: '',
           version: '',
@@ -7080,9 +7519,7 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
       uri: "http://127.0.0.1:8080",
       path: '/driver/ajax/update',
       requestContentType: 'application/x-www-form-urlencoded',
-      headers: [
-        'Cookie': cookie
-      ],
+      headers: hubCookieHeaders(cookie),
       body: [
         id: targetDriver.id,
         version: currentHubVersion,
@@ -7114,14 +7551,12 @@ Boolean updateDriver(String driverName, String namespace, String sourceCode, Str
 List getDriverList() {
   try {
     String cookie = login()
-    if(!cookie) { return [] }
+    if(cookie == null) { return [] }
 
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/device/drivers',
-      headers: [
-        'Cookie': cookie
-      ],
+      headers: hubCookieHeaders(cookie),
       timeout: 15
     ]
 
@@ -7145,15 +7580,13 @@ List getDriverList() {
 List getAppCodeList() {
   try {
     String cookie = login()
-    if(!cookie) { return [] }
+    if(cookie == null) { return [] }
 
     // Use /hub2/userAppTypes endpoint like HPM does (requires 2.3.6+)
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: '/hub2/userAppTypes',
-      headers: [
-        'Cookie': cookie
-      ],
+      headers: hubCookieHeaders(cookie),
       timeout: 15,
       ignoreSSLIssues: true
     ]
@@ -7181,7 +7614,7 @@ Map findAndRemoveDuplicates() {
 
   try {
     String cookie = login()
-    if(!cookie) {
+    if(cookie == null) {
       results.errors << "Failed to authenticate"
       return results
     }
@@ -7255,9 +7688,7 @@ Boolean uninstallAppCode(String appCodeId, String cookie) {
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: "/app/edit/deleteJsonSafe/${appCodeId}",
-      headers: [
-        'Cookie': cookie
-      ],
+      headers: hubCookieHeaders(cookie),
       timeout: 300,
       ignoreSSLIssues: true
     ]
@@ -7282,9 +7713,7 @@ Boolean uninstallDriverCode(String driverCodeId, String cookie) {
     Map params = [
       uri: "http://127.0.0.1:8080",
       path: "/driver/editor/deleteJson/${driverCodeId}",
-      headers: [
-        'Cookie': cookie
-      ],
+      headers: hubCookieHeaders(cookie),
       timeout: 300,
       ignoreSSLIssues: true
     ]
@@ -7307,7 +7736,7 @@ String login() {
   // hub sessions expire, and a cookie trusted forever breaks version checks and
   // library publishing until it is manually cleared.
   Long cookieAgeMs = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
-  if(state.hubCookie && cookieAgeMs != null && cookieAgeMs < HUB_COOKIE_MAX_AGE_MS) {
+  if(state.hubCookie != null && cookieAgeMs != null && cookieAgeMs < HUB_COOKIE_MAX_AGE_MS) {
     logDebug("Reusing existing cookie")
     return state.hubCookie
   }
@@ -7320,8 +7749,8 @@ String login() {
       path: '/login',
       requestContentType: 'application/x-www-form-urlencoded',
       body: [
-        username: '',
-        password: '',
+        username: settings.hubSecurityUsername?.toString() ?: '',
+        password: settings.hubSecurityPassword?.toString() ?: '',
         submit: 'Login'
       ],
       followRedirects: false,
@@ -7334,22 +7763,42 @@ String login() {
     httpPost(params) { resp ->
       logDebug("Login response status: ${resp?.status}")
       if(resp?.status == 200 || resp?.status == 302) {
-        def setCookieHeader = resp.headers['Set-Cookie']
-        if(setCookieHeader) {
-          String cookieValue = setCookieHeader.value ?: setCookieHeader.toString()
+        Object setCookieHeader = getResponseHeaderIgnoreCase(resp?.headers, 'Set-Cookie')
+        String cookieValue = null
+        if(setCookieHeader instanceof Collection) {
+          cookieValue = ((Collection)setCookieHeader).find { it != null }?.toString()
+        } else if(setCookieHeader != null) {
+          try {
+            cookieValue = setCookieHeader.value?.toString()
+          } catch(Exception ignored) {
+            cookieValue = null
+          }
+          if(!cookieValue) {
+            cookieValue = setCookieHeader.toString()
+          }
+        }
+
+        if(cookieValue) {
           cookie = cookieValue.split(';')[0]
           state.hubCookie = cookie  // Store for reuse like HPM
           state.hubCookieTime = now()
           logDebug("Got cookie: ${cookie?.take(20)}...")
         } else {
-          logWarn("No Set-Cookie header in login response")
+          if(hasUnauthenticatedHubAccess()) {
+            cookie = ''
+            state.hubCookie = cookie
+            state.hubCookieTime = now()
+            logDebug("Hub API access does not require a login cookie")
+          } else {
+            logWarn("No Set-Cookie header in login response")
+          }
         }
       } else {
         logWarn("Unexpected login status: ${resp?.status}")
       }
     }
 
-    if(!cookie) {
+    if(cookie == null) {
       logWarn("Failed to get authentication cookie")
     }
     return cookie
@@ -7357,6 +7806,44 @@ String login() {
     logError("Login error: ${e.message}")
     return null
   }
+}
+
+Boolean hasUnauthenticatedHubAccess() {
+  try {
+    Map params = [
+      uri: "http://127.0.0.1:8080",
+      path: '/hub2/userAppTypes',
+      timeout: 15,
+      ignoreSSLIssues: true
+    ]
+
+    Boolean accessible = false
+    httpGet(params) { resp ->
+      accessible = resp?.status == 200 && resp.data instanceof Collection
+    }
+    return accessible
+  } catch(Exception e) {
+    logDebug("Unable to check unauthenticated hub access: ${e.message}")
+    return false
+  }
+}
+
+Object getResponseHeaderIgnoreCase(Object headers, String headerName) {
+  if(!(headers instanceof Map)) {
+    return null
+  }
+
+  Object headerValue = null
+  ((Map)headers).each { key, value ->
+    if(key != null && key.toString().equalsIgnoreCase(headerName)) {
+      headerValue = value
+    }
+  }
+  return headerValue
+}
+
+Map hubCookieHeaders(String cookie) {
+  return cookie ? ['Cookie': cookie] : [:]
 }
 
 void scheduleUpdateCheck() {

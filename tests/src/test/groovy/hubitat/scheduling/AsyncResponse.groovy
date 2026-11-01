@@ -14,6 +14,7 @@ class AsyncResponse {
 
   Integer getStatus()         { status }
   String  getData()           { data }
+  Object getJson()            { new groovy.json.JsonSlurper().parseText(data) }
   String  getErrorMessage()   { errorMessage }
   String  getErrorData()      { errorMessage }
   Map     getHeaders()        { headers }

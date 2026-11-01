@@ -22,6 +22,7 @@
  */
 
 import groovy.transform.Field
+import groovy.json.JsonOutput
 import java.util.concurrent.ConcurrentHashMap
 
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
@@ -103,6 +104,9 @@ metadata {
     command 'evictUnlistedPlayers'
     command 'refresh'
     command 'setVolumeZero'
+    command 'acknowledgeGroupCommand', [
+      [name: 'Request ID*', type: 'STRING', description: 'Parent controller receipt acknowledgement']
+    ]
 
     command 'playHighPriorityTTS', [
       [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
@@ -269,10 +273,7 @@ Map getGroupCommandSettings() {
 }
 
 /**
- * Queue a group command for the parent app to process after this driver
- * invocation returns. The scheduled boundary prevents a group command from
- * holding the group driver's platform method slot while the parent app looks
- * up and invokes another child device, without persisting a bridge attribute.
+ * Queue a group command for delivery through the app's event subscription.
  */
 void requestGroupCommand(String command, Map args = [:]) {
   if(!command) {
@@ -286,22 +287,46 @@ void requestGroupCommand(String command, Map args = [:]) {
     command: command,
     args: args ?: [:]
   ]
-  runIn(1, 'emitGroupCommandRequest', [data: [payload: payload]])
+  List<Map> pending = state.pendingGroupCommands instanceof List ? (List<Map>)state.pendingGroupCommands : []
+  pending.add(payload)
+  state.pendingGroupCommands = pending
+  logDebug("Queued group command ${command} (${payload.requestId}); pending=${pending.size()}")
+  runIn(1, 'drainGroupCommandQueue', [overwrite: true])
+}
+
+void drainGroupCommandQueue() {
+  if(state.activeGroupCommandRequest instanceof Map) { return }
+  List<Map> pending = state.pendingGroupCommands instanceof List ? (List<Map>)state.pendingGroupCommands : []
+  if(pending.isEmpty()) { return }
+  Map payload = pending.remove(0)
+  state.pendingGroupCommands = pending
+  state.activeGroupCommandRequest = payload
+  emitGroupCommandRequest(payload)
 }
 
 void emitGroupCommandRequest(Map data) {
-  Map payload = data?.payload instanceof Map ? (Map)data.payload : null
-  if(payload?.command) {
-    try {
-      if(parent != null) {
-        parent.enqueueGroupCommandRequest(payload)
-      } else {
-        logWarn("Could not dispatch group command ${payload.command}: parent app is unavailable")
-      }
-    } catch(Exception e) {
-      logWarn("Could not dispatch group command ${payload.command}: ${e.message}")
-    }
+  Map payload = data?.payload instanceof Map ? (Map)data.payload : data
+  if(!(payload instanceof Map) || !payload.command) { return }
+  sendLocationEvent(name: 'dwinksSonosAdvancedGroupCommand', value: JsonOutput.toJson(payload), isStateChange: true)
+  logDebug("Delivered group command ${payload.command} (${payload.requestId}); waiting for parent acknowledgement")
+  runIn(5, 'retryActiveGroupCommandRequest', [overwrite: true])
+}
+
+void retryActiveGroupCommandRequest() {
+  Map payload = state.activeGroupCommandRequest instanceof Map ? (Map)state.activeGroupCommandRequest : null
+  if(payload) {
+    logWarn("Retrying unacknowledged group command ${payload.command} (${payload.requestId})")
+    emitGroupCommandRequest(payload)
   }
+}
+
+void acknowledgeGroupCommand(String requestId) {
+  Map active = state.activeGroupCommandRequest instanceof Map ? (Map)state.activeGroupCommandRequest : null
+  if(!active || !requestId || requestId != active.requestId) { return }
+  unschedule('retryActiveGroupCommandRequest')
+  state.remove('activeGroupCommandRequest')
+  logDebug("Parent acknowledged group command ${active.command} (${requestId})")
+  runIn(1, 'drainGroupCommandQueue', [overwrite: true])
 }
 
 private void sendVolumeStateEvents(Integer volumeLevel) {
@@ -426,7 +451,9 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
       logWarn('Failed to generate TTS URI')
       return
     }
-    requestGroupCommand('playAudioClip', [uri: ttsMap.uri as String, volume: volume?.toString()])
+    String correlationId = UUID.randomUUID().toString()
+    requestGroupCommand('playAudioClip', [uri: ttsMap.uri as String, volume: volume?.toString(),
+      correlationId: correlationId, duration: ttsMap.duration])
   } catch (Exception e) {
     logError("Error playing text: ${e.message}")
   }
@@ -443,7 +470,9 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
       logWarn('Failed to generate TTS URI')
       return
     }
-    requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: volume?.toString()])
+    String correlationId = UUID.randomUUID().toString()
+    requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: volume?.toString(),
+      correlationId: correlationId, duration: ttsMap.duration])
   } catch (Exception e) {
     logError("Error playing high priority TTS: ${e.message}")
   }

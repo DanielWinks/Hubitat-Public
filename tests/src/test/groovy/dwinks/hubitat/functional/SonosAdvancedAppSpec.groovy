@@ -6,12 +6,16 @@ import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import hubitat.scheduling.AsyncResponse
 import spock.lang.Shared
 import spock.lang.Specification
 
 class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Long id = 101L
   List<Map> commands = []
+  List<String> acknowledgedParentRequests = []
+
+  void acknowledgeParentCommand(String requestId) { acknowledgedParentRequests << requestId }
 
   void playerCreateGroup(List<String> playerIds) {
     commands << [name: 'playerCreateGroup', playerIds: playerIds]
@@ -27,22 +31,22 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
       String shuffleMode, String autoPlay, String crossfadeMode, String operationId, String groupId,
-      String attemptId = null) {
+      String attemptId = null, String requestId = null) {
     commands << [
       name: 'loadFavoriteForGroupOperation', favoriteId: favoriteId, repeatMode: repeatMode,
       queueMode: queueMode, shuffleMode: shuffleMode, autoPlay: autoPlay,
       crossfadeMode: crossfadeMode, operationId: operationId, groupId: groupId,
-      attemptId: attemptId
+      attemptId: attemptId, requestId: requestId
     ]
   }
 
-  void registerGroupFavoriteOperation(String operationId, String favoriteId) {
-    commands << [name: 'registerGroupFavoriteOperation', operationId: operationId, favoriteId: favoriteId]
+  void registerGroupFavoriteOperation(String operationId, String favoriteId, String requestId = null) {
+    commands << [name: 'registerGroupFavoriteOperation', operationId: operationId, favoriteId: favoriteId, requestId: requestId]
   }
 
-  void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String groupId) {
+  void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String groupId, String requestId = null) {
     commands << [name: 'setGroupFavoriteOperationAttempt', operationId: operationId,
-                 attemptId: attemptId, groupId: groupId]
+                 attemptId: attemptId, groupId: groupId, requestId: requestId]
   }
 
   void clearGroupFavoriteOperation(String operationId = null) {
@@ -52,12 +56,24 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   void getPlaybackStatus() { commands << [name: 'getPlaybackStatus'] }
   void getPlaybackMetadataStatus() { commands << [name: 'getPlaybackMetadataStatus'] }
   void playerPlay() { commands << [name: 'playerPlay'] }
+  void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {
+    commands << [name: 'playerPlayForGroupOperation', operationId: operationId,
+      attemptId: attemptId, requestId: requestId]
+  }
 }
 
 class SonosAppGroupDouble extends ChildDeviceWrapper {
   Long id = 201L
   List<Map> statuses = []
   List<String> refreshedPlaybackUpdates = []
+  List<Map> voiceUpdates = []
+  List<String> acknowledgedGroupRequests = []
+
+  void acknowledgeGroupCommand(String requestId) { acknowledgedGroupRequests << requestId }
+
+  void updateTTSVoiceCache(List<String> names, String defaultVoice) {
+    voiceUpdates << [names: names, defaultVoice: defaultVoice]
+  }
 
   void applyRefreshedPlaybackState(String json) {
     refreshedPlaybackUpdates << json
@@ -118,6 +134,105 @@ class SonosAdvancedAppSpec extends Specification {
 
   Map request(String command, Map args = [:], Integer sequence = 1) {
     [groupDni: 'GROUP-DNI', requestId: "GROUP-DNI-${sequence}", command: command, args: args]
+  }
+
+  def "update checks issue an asynchronous request and ignore stale responses"() {
+    when:
+    appScript.checkForUpdates(true)
+    Map first = appScript.asyncCalls.last()
+    appScript.checkForUpdates(true)
+    Map second = appScript.asyncCalls.last()
+    appScript.updateCheckCallback(new AsyncResponse(status: 503), first.data as Map)
+
+    then:
+    first.cb == 'updateCheckCallback'
+    first.data.requestId != second.data.requestId
+    appScript.state.updateCheckRequestId == second.data.requestId
+
+    when:
+    appScript.updateCheckCallback(new AsyncResponse(status: 503), second.data as Map)
+
+    then:
+    !appScript.state.containsKey('updateCheckRequestId')
+    appScript.logs.any { it.contains('Update check failed') }
+  }
+
+  def "update check reads the installed version through asynchronous hub requests"() {
+    given:
+    appScript.checkForUpdates(true)
+    Map manifestRequest = appScript.asyncCalls.last()
+
+    when:
+    appScript.updateCheckCallback(new AsyncResponse(data: '{"version":"99.0.0"}'), manifestRequest.data as Map)
+    Map loginRequest = appScript.asyncCalls.last()
+    appScript.updateCheckLoginCallback(new AsyncResponse(status: 302, headers: ['Set-Cookie': 'sid=abc; Path=/']), loginRequest.data as Map)
+    Map listRequest = appScript.asyncCalls.last()
+    appScript.updateCheckAppListCallback(new AsyncResponse(data: '[{"id":42,"name":"Sonos Advanced Controller","namespace":"dwinks"}]'), listRequest.data as Map)
+    Map codeRequest = appScript.asyncCalls.last()
+    appScript.updateCheckAppCodeCallback(new AsyncResponse(data: '{"source":"version: \'98.0.0\'"}'), codeRequest.data as Map)
+
+    then:
+    loginRequest.cb == 'updateCheckLoginCallback'
+    listRequest.cb == 'updateCheckAppListCallback'
+    listRequest.params.headers.Cookie == 'sid=abc'
+    codeRequest.cb == 'updateCheckAppCodeCallback'
+    appScript.state.updateAvailable == true
+    appScript.state.latestVersion == '99.0.0'
+    !appScript.state.containsKey('updateCheckRequestId')
+  }
+
+  def "TTS voice refresh ignores stale responses and applies the current voice"() {
+    given:
+    appScript.state.ttsVoiceRefreshRequestId = 'new'
+
+    when:
+    appScript.refreshTTSVoiceCacheCallback(new AsyncResponse(data: '{"ttsCurrent":"Joanna"}'),
+      [requestId: 'old', voiceNames: ['Joanna']])
+
+    then:
+    group.voiceUpdates.empty
+
+    when:
+    appScript.refreshTTSVoiceCacheCallback(new AsyncResponse(data: '{"ttsCurrent":"Joanna"}'),
+      [requestId: 'new', voiceNames: ['Joanna']])
+
+    then:
+    group.voiceUpdates == [[names: ['Joanna'], defaultVoice: 'Joanna']]
+    !appScript.state.containsKey('ttsVoiceRefreshRequestId')
+  }
+
+  def "local HTTP retries retain a request GUID and reject callbacks from an older attempt"() {
+    when:
+    appScript.sendLocalQueryAsync([params: [uri: 'http://sonos.local/test']])
+    Map firstCall = appScript.asyncCalls.last()
+    Map firstData = (Map)firstCall.data
+    Map firstRetryData = (Map)firstData._localControlRetryRequest
+    appScript.localControlCallback(new AsyncResponse(status: 503, error: true, errorMessage: 'unavailable'), firstData)
+    appScript.executeLocalControlRetry()
+    Map retryCall = appScript.asyncCalls.last()
+    Map retryData = (Map)retryCall.data
+    Map retryMetadata = (Map)retryData._localControlRetryRequest
+
+    then:
+    UUID.fromString(firstRetryData.requestId).toString() == firstRetryData.requestId
+    UUID.fromString(firstRetryData.attemptId).toString() == firstRetryData.attemptId
+    retryMetadata.requestId == firstRetryData.requestId
+    retryMetadata.attemptId != firstRetryData.attemptId
+    retryMetadata.attemptNumber == 2
+
+    when:
+    appScript.localControlCallback(new AsyncResponse(status: 200), firstData)
+
+    then:
+    appScript.state.lastLocalControlRetryRequest.activeAttemptId == retryMetadata.attemptId
+    appScript.state.localControlRetryAttemptCount == 1
+
+    when:
+    appScript.localControlCallback(new AsyncResponse(status: 200), retryData)
+
+    then:
+    !appScript.state.containsKey('lastLocalControlRetryRequest')
+    appScript.state.localControlRetryAttemptCount == 0
   }
 
   void makeTopology(String groupId, String coordinatorId, String playerIds) {
@@ -433,6 +548,26 @@ class SonosAdvancedAppSpec extends Specification {
     follower.commands.empty
   }
 
+  def "player parent requests are acknowledged after enqueue and duplicate deliveries are deduplicated"() {
+    given:
+    Map playerRequest = [playerDni: follower.deviceNetworkId, requestId: "${follower.deviceNetworkId}-1",
+      command: 'addPlayerToGroup', args: ['RINCON_EXTRA']]
+
+    when:
+    appScript.enqueuePlayerCommandRequest(playerRequest)
+    appScript.enqueuePlayerCommandRequest(playerRequest)
+
+    then:
+    appScript.state.pendingPlayerCommandRequests[follower.deviceNetworkId].size() == 1
+    follower.acknowledgedParentRequests == [playerRequest.requestId, playerRequest.requestId]
+
+    when:
+    appScript.drainPlayerCommandRequests()
+
+    then:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_EXTRA']
+  }
+
   def "player identifier resolver accepts MAC DNI and IP forms"() {
     given:
     extra.dataValues.deviceIp = '192.168.1.33'
@@ -544,6 +679,53 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation().registeredPlayerIds.containsAll(['RINCON_COORD', 'RINCON_FOLLOW'])
   }
 
+  def "location requests from another app instance are ignored"() {
+    when:
+    appScript.groupCommandRequestHandler([
+      value: JsonOutput.toJson([groupDni: 'OTHER-GROUP', requestId: 'OTHER-GROUP-1', command: 'on', args: [:]])
+    ] as Event)
+
+    then:
+    !appScript.state.groupCommandRequests
+    !appScript.scheduled.any { it[1] == 'drainGroupCommandRequests' }
+  }
+
+  def "group requests are acknowledged once and duplicate deliveries are not re-enqueued"() {
+    given:
+    Map groupRequest = request('refresh', [:], 1)
+
+    when:
+    appScript.enqueueGroupCommandRequest(groupRequest)
+    appScript.enqueueGroupCommandRequest(groupRequest)
+
+    then:
+    appScript.state.pendingGroupCommandRequests['GROUP-DNI'].size() == 1
+    group.acknowledgedGroupRequests == [groupRequest.requestId, groupRequest.requestId]
+  }
+
+  def "player location state batches queue follower and group updates"() {
+    given:
+    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      followerDNIs: [follower.deviceNetworkId], followerAttrs: [status: 'playing'],
+      playbackAttrs: [status: 'playing']]
+
+    when:
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
+
+    then:
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
+    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
+  }
+
+  def "repeated subscription setup keeps one location command subscription"() {
+    when:
+    appScript.subscribeToGroupCommandRequests()
+    appScript.subscribeToGroupCommandRequests()
+
+    then:
+    appScript.subscriptions.count { it == [appScript.location, 'dwinksSonosAdvancedGroupCommand', 'groupCommandRequestHandler'] } == 1
+  }
+
   def "Favorite is not loaded until the requested topology is stable twice"() {
     given:
     appScript.processGroupCommandRequest([request: request('on', [:], 1)])
@@ -626,7 +808,8 @@ class SonosAdvancedAppSpec extends Specification {
     ] as Event)
 
     then:
-    currentAttemptId == "${operation.operationId}:1"
+    UUID.fromString(currentAttemptId).toString() == currentAttemptId
+    currentAttemptId != operation.operationId
     appScript.getActiveGroupOperation().loadAcknowledged == false
   }
 
