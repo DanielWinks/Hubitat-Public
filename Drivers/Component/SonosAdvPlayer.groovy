@@ -1158,9 +1158,13 @@ BigDecimal coerceVolume(Object volume) {
 }
 
 @CompileStatic
-void setTrack(String uri) { componentSetStreamUrlLocal(uri) }
+void setTrack(String uri) {
+  if(deferCommandToParentDuringGroupOperation('setTrack', [uri])) { return }
+  componentSetStreamUrlLocal(uri)
+}
 @CompileStatic
 void playTrack(String uri, BigDecimal volume = null) {
+  if(deferCommandToParentDuringGroupOperation('playTrack', [uri, volume])) { return }
   if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
   else{ componentLoadStreamUrlLocal(uri, volume) }
 }
@@ -1170,6 +1174,7 @@ void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudio
 void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
+  if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) { return }
   LinkedHashMap tts = textToSpeech(text, voice)
   if(hasAudioClipCapability() == true) {
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
@@ -1182,6 +1187,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
 }
 
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
+  if(deferCommandToParentDuringGroupOperation('playHighPriorityTTS', [text, volume, voice])) { return }
   if(hasAudioClipCapability() == true) {
     LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
@@ -1201,6 +1207,7 @@ void playHighPriorityTrack(String uri, BigDecimal volume = null) {
 }
 
 void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
+  if(deferCommandToParentDuringGroupOperation('speakNoRestore', [text, volume, voice])) { return }
   if(volume) { volume += getTTSBoostAmount() }
   else { volume = getPlayerVolume() + getTTSBoostAmount() }
   componentPlayTextNoRestoreLocal(text, volume, voice)
@@ -1488,6 +1495,7 @@ private String resolveRinconFromSiblingByLabelSubstring(String value) {
 }
 
 void selectLineIn(String sourceIdentifier = null) {
+  if(deferCommandToParentDuringGroupOperation('selectLineIn', [sourceIdentifier])) { return }
   String rinconId = resolveSourceRincon(sourceIdentifier)
   if (rinconId == null) { return }
   String lineInURI = "x-rincon-stream:${rinconId}"
@@ -1500,6 +1508,7 @@ void selectLineIn(String sourceIdentifier = null) {
 }
 
 void selectTV() {
+  if(deferCommandToParentDuringGroupOperation('selectTV')) { return }
   if(!hasHTPlaybackCapability()) {
     logWarn("TV input is only supported on Sonos home theater speakers")
     return
@@ -1539,6 +1548,14 @@ void requestParentCoordinatorCommand(String command, List args = []) {
   state.pendingParentCoordinatorCommands = pending
   logDebug("Queued parent command ${command} (${payload.requestId}); pending=${pending.size()}")
   runIn(1, 'drainParentCoordinatorCommandQueue', [overwrite: true])
+}
+
+/** Route media commands through the app while this player is registered with
+ * an active topology-only operation, allowing deferral by the operation roster. */
+Boolean deferCommandToParentDuringGroupOperation(String command, List args = []) {
+  if(!state.groupFavoriteOperationId || state.groupFavoriteOperationFavoriteId) { return false }
+  requestParentCoordinatorCommand(command, args)
+  return true
 }
 
 void drainParentCoordinatorCommandQueue() {
@@ -1760,9 +1777,13 @@ Integer getGroupVolumeAdjAmount() {
 }
 
 @CompileStatic
-void play() { playerPlay() }
+void play() {
+  if(deferCommandToParentDuringGroupOperation('play')) { return }
+  playerPlay()
+}
 @CompileStatic
 void stop() {
+  if(deferCommandToParentDuringGroupOperation('stop')) { return }
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
@@ -1774,15 +1795,22 @@ void stop() {
 }
 @CompileStatic
 void pause() {
+  if(deferCommandToParentDuringGroupOperation('pause')) { return }
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
   playerPause()
 }
 @CompileStatic
-void nextTrack() { playerSkipToNextTrack() }
+void nextTrack() {
+  if(deferCommandToParentDuringGroupOperation('nextTrack')) { return }
+  playerSkipToNextTrack()
+}
 @CompileStatic
-void previousTrack() { playerSkipToPreviousTrack() }
+void previousTrack() {
+  if(deferCommandToParentDuringGroupOperation('previousTrack')) { return }
+  playerSkipToPreviousTrack()
+}
 @CompileStatic
 void subscribeToEvents() {
   subscribeToZgtEvents()
@@ -1841,6 +1869,8 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
+  if(deferCommandToParentDuringGroupOperation('loadFavoriteFull',
+      [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])) { return }
   String action = queueMode?.toUpperCase() ?: 'REPLACE'
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'repeat all'
@@ -2071,6 +2101,8 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 }
 
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
+  if(deferCommandToParentDuringGroupOperation('loadPlaylistFull',
+      [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])) { return }
   if(playlistId == null || playlistId.trim() == '') {
     reportPlaylistLoadError(playlistId, 'ERROR_MISSING_PARAMETERS', 'A Sonos playlist ID is required.')
     return
@@ -5875,6 +5907,7 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null, String correlationId = null,
     Integer duration = 0) {
+  if(deferCommandToParentDuringGroupOperation('loadHighPriorityAudioClip', [uri, volume, correlationId, duration])) { return }
   logTrace('playerLoadAudioClipHighPriority')
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
 
@@ -5925,6 +5958,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 
 @CompileStatic
 void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0, String correlationId = null) {
+  if(deferCommandToParentDuringGroupOperation('loadAudioClip', [uri, volume, duration, correlationId])) { return }
   logTrace('playerLoadAudioClip')
   if(getIsMuted()) {
     logTrace('Skipping loadAudioClip notification because player is muted.')

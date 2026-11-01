@@ -550,6 +550,9 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "player parent requests are acknowledged after enqueue and duplicate deliveries are deduplicated"() {
     given:
+    extra.dataValues.groupId = 'GROUP-OTHER'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
     Map playerRequest = [playerDni: follower.deviceNetworkId, requestId: "${follower.deviceNetworkId}-1",
       command: 'addPlayerToGroup', args: ['RINCON_EXTRA']]
 

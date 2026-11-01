@@ -247,6 +247,7 @@ preferences {
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
 @Field static final String DEFERRED_GROUP_COMMANDS_STATE_KEY = 'deferredGroupOperationCommands'
+@Field static final String DEFERRED_PLAYER_COMMANDS_STATE_KEY = 'deferredGroupPlayerCommands'
 @Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
 @Field static final String GROUPING_MODE_CURRENT = 'CURRENT'
@@ -3232,12 +3233,21 @@ void processGroupCommandRequest(Map data) {
   String requestId = request.requestId as String
   logDebug("Processing group command ${command} for ${groupDni}${requestId ? " (${requestId})" : ''}")
 
-  if(isGroupOperationCommand(command)) {
-    Map activeOperation = getActiveGroupOperation()
-    if(activeOperation && activeOperation.groupDni as String != groupDni) {
-      deferGroupCommandRequest(request)
-      return
-    }
+  Map activeOperation = getActiveGroupOperation()
+  if(activeOperation && activeOperation.groupDni as String == groupDni &&
+      !activeOperation.favoriteId && activeOperation.phase != 'COMPLETE' &&
+      isPlaybackCommandThatWaitsForTopology(command)) {
+    // Piston runs commonly send media or transport commands immediately after
+    // explicit group activation. Hold commands that would cancel topology until
+    // the group operation completes; explicit ungroup/removal commands remain
+    // able to supersede it, and Favorite loads retain their attach behavior.
+    logTrace("Waiting for topology change to complete before processing group command ${command} for ${groupDni}")
+    deferGroupCommandRequest(request)
+    return
+  }
+  if(isGroupOperationCommand(command) && activeOperation && activeOperation.groupDni as String != groupDni) {
+    deferGroupCommandRequest(request)
+    return
   }
 
   try {
@@ -3459,6 +3469,23 @@ Boolean isGroupOperationCommand(String command) {
     'evictUnlistedPlayers', 'joinPlayersToCoordinator',
     'loadFavorite', 'loadFavoriteFull',
     'off', 'removePlayersFromCoordinator', 'ungroupPlayers'
+  ]
+}
+
+Boolean isPlaybackCommandThatWaitsForTopology(String command) {
+  return command in [
+    'play', 'pause', 'stop', 'nextTrack', 'previousTrack', 'playTrack', 'setTrack',
+    'playAudioClip', 'playHighPriorityTrack', 'enqueueLowPriorityTrack',
+    'loadPlaylist', 'loadPlaylistFull'
+  ]
+}
+
+Boolean isPlayerPlaybackCommandThatWaitsForGroupOperation(String command) {
+  return command in [
+    'play', 'pause', 'stop', 'nextTrack', 'previousTrack', 'setTrack', 'selectLineIn', 'selectTV', 'playTrack',
+    'playHighPriorityTrack', 'loadAudioClip', 'loadHighPriorityAudioClip',
+    'speak', 'speakNoRestore', 'playHighPriorityTTS',
+    'loadFavoriteFull', 'loadPlaylistFull'
   ]
 }
 
@@ -5051,6 +5078,9 @@ void finishGroupOperation(Map operation, String status, String errorCode = null,
   if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List) {
     runIn(1, 'drainDeferredGroupOperationCommands', [overwrite: true])
   }
+  if(state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] instanceof List) {
+    runIn(1, 'drainDeferredGroupPlayerCommands', [overwrite: true])
+  }
 }
 
 void completeGroupOperation(Map operation) {
@@ -5068,6 +5098,32 @@ void cancelActiveGroupOperation(String groupDni, String reason = 'CANCELLED') {
   Map operation = getActiveGroupOperation()
   if(operation != null && operation.groupDni as String == groupDni) {
     finishGroupOperation(operation, 'CANCELLED', reason, 'A newer user command superseded the operation.')
+  }
+}
+
+void deferGroupPlayerCommand(Map request) {
+  if(!(request instanceof Map)) { return }
+  List<Map> deferred = state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_PLAYER_COMMANDS_STATE_KEY]
+      : []
+  deferred.add(request)
+  state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] = deferred
+  logInfo("Deferring player command ${request.command} from ${request.playerDni} until the active group operation completes")
+}
+
+void drainDeferredGroupPlayerCommands() {
+  if(getActiveGroupOperation() != null) { return }
+  List<Map> deferred = state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_PLAYER_COMMANDS_STATE_KEY]
+      : []
+  state.remove(DEFERRED_PLAYER_COMMANDS_STATE_KEY)
+  if(deferred.isEmpty()) { return }
+
+  Map nextRequest = deferred.remove(0)
+  if(!deferred.isEmpty()) { state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] = deferred }
+  processPlayerCommandRequest([request: nextRequest])
+  if(state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] instanceof List && !getActiveGroupOperation()) {
+    runIn(1, 'drainDeferredGroupPlayerCommands', [overwrite: true])
   }
 }
 
@@ -5202,6 +5258,15 @@ void processPlayerCommandRequest(Map data) {
     return
   }
   List args = request.args instanceof List ? (List)request.args : []
+  Map activeOperation = getActiveGroupOperation()
+  String sourcePlayerId = source.getDataValue('id') as String
+  if(activeOperation && !activeOperation.favoriteId && activeOperation.phase != 'COMPLETE' &&
+      normalizeGroupPlayerIds(activeOperation.requiredPlayerIds).contains(sourcePlayerId) &&
+      isPlayerPlaybackCommandThatWaitsForGroupOperation(command)) {
+    logTrace("Waiting for topology change to complete before processing player command ${command} from ${playerDni}")
+    deferGroupPlayerCommand(request)
+    return
+  }
 
   try {
     Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
@@ -5224,6 +5289,36 @@ void processPlayerCommandRequest(Map data) {
     }
 
     switch(command) {
+      case 'play':
+        coordinator.playerPlay()
+        break
+      case 'pause':
+        coordinator.clearFavoriteRetryState()
+        coordinator.clearPlaylistRetryState()
+        coordinator.cancelPendingAmazonMusicAutoPlay()
+        coordinator.playerPause()
+        break
+      case 'stop':
+        coordinator.clearFavoriteRetryState()
+        coordinator.clearPlaylistRetryState()
+        coordinator.cancelPendingAmazonMusicAutoPlay()
+        coordinator.playerStop()
+        break
+      case 'nextTrack':
+        coordinator.playerSkipToNextTrack()
+        break
+      case 'previousTrack':
+        coordinator.playerSkipToPreviousTrack()
+        break
+      case 'setTrack':
+        source.componentSetStreamUrlLocal(args.size() > 0 ? args[0] as String : null)
+        break
+      case 'selectLineIn':
+        source.selectLineIn(args.size() > 0 ? args[0] as String : null)
+        break
+      case 'selectTV':
+        source.selectTV()
+        break
       case 'muteGroup':
         coordinator.muteGroup()
         break
@@ -5260,6 +5355,55 @@ void processPlayerCommandRequest(Map data) {
           args.size() > 3 ? args[3] as String : null,
           args.size() > 4 ? args[4] as String : null,
           args.size() > 5 ? args[5] as String : null
+        )
+        break
+      case 'playTrack':
+        source.playTrack(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null)
+        )
+        break
+      case 'playHighPriorityTrack':
+        source.playHighPriorityTrack(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null)
+        )
+        break
+      case 'loadAudioClip':
+        source.playerLoadAudioClip(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null),
+          args.size() > 2 ? (args[2] as Integer) : 0,
+          args.size() > 3 ? args[3] as String : null
+        )
+        break
+      case 'loadHighPriorityAudioClip':
+        source.playerLoadAudioClipHighPriority(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null),
+          args.size() > 2 ? args[2] as String : null,
+          args.size() > 3 ? (args[3] as Integer) : 0
+        )
+        break
+      case 'speak':
+        source.devicePlayText(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null),
+          args.size() > 2 ? args[2] as String : null
+        )
+        break
+      case 'speakNoRestore':
+        source.devicePlayTextNoRestore(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null),
+          args.size() > 2 ? args[2] as String : null
+        )
+        break
+      case 'playHighPriorityTTS':
+        source.playHighPriorityTTS(
+          args.size() > 0 ? args[0] as String : null,
+          toBigDecimal(args.size() > 1 ? args[1] : null),
+          args.size() > 2 ? args[2] as String : null
         )
         break
       default:

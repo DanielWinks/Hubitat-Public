@@ -100,7 +100,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.state.audioClipPlaying == true
-    driver.logs.any { String entry -> entry.contains('Ignoring stale audio clip watchdog callback') }
+    driver.logs.any { String entry -> entry.contains('Ignoring stale audio clip watchdog guid=unknown watchdog=unknown') }
     driver.logs.every { String entry -> !entry.contains('Audio clip watchdog fired') }
   }
 
