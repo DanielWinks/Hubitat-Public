@@ -21,8 +21,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
     commands << [name: 'playerCreateGroup', playerIds: playerIds]
   }
 
-  void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = []) {
-    commands << [name: 'playerModifyGroupMembers', add: playerIdsToAdd, remove: playerIdsToRemove]
+  void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = [],
+      Map<String, Map> expectedTopology = null) {
+    Map command = [name: 'playerModifyGroupMembers', add: playerIdsToAdd, remove: playerIdsToRemove]
+    if(expectedTopology != null) { command.expectedTopology = expectedTopology }
+    commands << command
   }
 
   void playerGetGroupsFull() {
@@ -53,6 +56,10 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   void registerGroupFavoriteOperation(String operationId, String favoriteId, String requestId = null) {
     commands << [name: 'registerGroupFavoriteOperation', operationId: operationId, favoriteId: favoriteId, requestId: requestId]
+  }
+
+  void registerGroupTopologyOperation(String operationId, String requestId = null) {
+    commands << [name: 'registerGroupTopologyOperation', operationId: operationId, requestId: requestId]
   }
 
   void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String groupId, String requestId = null) {
@@ -483,7 +490,11 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     follower.commands.find { it.name == 'playerModifyGroupMembers' } == [
-      name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_Z_COORD']
+      name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_Z_COORD'],
+      expectedTopology: [
+        'RINCON_A_FOLLOW': [coordinatorId: 'RINCON_Z_COORD', memberIds: ['RINCON_A_FOLLOW', 'RINCON_Z_COORD']],
+        'RINCON_Z_COORD': [coordinatorId: 'RINCON_Z_COORD', memberIds: ['RINCON_A_FOLLOW', 'RINCON_Z_COORD']]
+      ]
     ]
     coordinator.commands.every { it.name != 'playerCreateGroup' }
     operation.coordinatorTransferStarted == true
@@ -513,26 +524,56 @@ class SonosAdvancedAppSpec extends Specification {
     operation.coordinatorTransferStarted == false
   }
 
-  def "additive grouping adds missing configured followers and never removes extras"() {
+  def "additive grouping transfers coordination to the configured coordinator and preserves extras"() {
     given:
     follower.dataValues.groupId = 'GROUP-2'
     follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
     follower.dataValues.isGroupCoordinator = 'true'
     appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
-    emitTopologyObservation('RINCON_COORD', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_FOLLOW,RINCON_EXTRA')
-    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_FOLLOW,RINCON_EXTRA')
+    emitTopologyObservation('RINCON_COORD', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
+    Map operation = appScript.getActiveGroupOperation()
 
     when:
     appScript.advanceGroupFavoriteOperation([operationId: appScript.getActiveGroupOperation().operationId])
 
     then:
     follower.commands.find { it.name == 'playerModifyGroupMembers' } == [
-      name: 'playerModifyGroupMembers', add: ['RINCON_COORD'], remove: []
+      name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_COORD'],
+      expectedTopology: [
+        RINCON_COORD: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
+        RINCON_FOLLOW: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
+        RINCON_EXTRA: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']]
+      ]
     ]
+    operation.coordinatorTransferStarted == true
+    operation.coordinatorTransferPlayerIds == ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
     follower.commands.every { it.name != 'playerCreateGroup' }
-    follower.commands.every { it.name != 'playerModifyGroupMembers' || it.remove == [] }
     appScript.getActiveGroupOperation().groupingMode == 'ADDITIVE'
+  }
+
+  def "additive coordinator transfer recreates the preserved roster with configured coordinator first"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
+    Map operation = appScript.getActiveGroupOperation()
+    operation.coordinatorTransferStarted = true
+    operation.coordinatorTransferGroupCreated = false
+    operation.coordinatorTransferPlayerIds = ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    operation.coordinatorTransferPreviousCoordinatorId = 'RINCON_FOLLOW'
+    Map<String, Map> topology = [
+      fresh: true,
+      observations: [[playerId: 'RINCON_COORD', fresh: true, coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
+        ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    operation.coordinatorTransferGroupCreated == true
+    operation.resolvedCoordinatorId == 'RINCON_COORD'
   }
 
   def "additive grouping sends the join when fresh topology responses are unavailable"() {
@@ -681,7 +722,8 @@ class SonosAdvancedAppSpec extends Specification {
       desiredCoordinatorId: 'RINCON_COORD'
     ]
     Map additiveOperation = [
-      groupingMode: 'ADDITIVE', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
+      groupingMode: 'ADDITIVE', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      desiredCoordinatorId: 'RINCON_COORD'
     ]
     Map topology = [
       consistent: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
@@ -691,6 +733,7 @@ class SonosAdvancedAppSpec extends Specification {
     expect:
     !appScript.isGroupTopologySatisfied(exactOperation, topology)
     appScript.isGroupTopologySatisfied(additiveOperation, topology)
+    !appScript.isGroupTopologySatisfied(additiveOperation, topology + [coordinatorId: 'RINCON_FOLLOW'])
     appScript.isGroupTopologySatisfied(exactOperation, topology + [playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']])
   }
 

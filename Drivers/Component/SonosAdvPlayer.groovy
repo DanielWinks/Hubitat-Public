@@ -27,6 +27,7 @@ import com.hubitat.app.InstalledAppWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.hub.domain.Event
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 import groovy.transform.Field
 import groovy.util.slurpersupport.GPathResult
@@ -209,19 +210,10 @@ metadata {
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'groupId', 'string'
   attribute 'groupCoordinatorId', 'string'
-  attribute 'playerCommandRequest', 'string'
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'lastError', 'string'
-  // Internal parent-app bridge for operation-scoped group Favorite
-  // acknowledgements and playback observations. This is a transient event
-  // bridge and must not remain in the device's current states.
-  attribute 'groupFavoriteOperation', 'string'
-  // Historical dispatch and Sonos playback status correlated by clip GUID.
-  // The event is transient and is not retained as a current device state.
-  attribute 'audioClipPlaybackProgress', 'string'
-
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
   }
@@ -369,6 +361,13 @@ Boolean hasLineInCapability() {
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+// Expected topology is stored as a device data value on each affected player,
+// so driver instances can coordinate without exposing it in Current States.
+@Field static ConcurrentHashMap<String, String> pendingTopologyXmlByDni = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, String> pendingTopologyWebsocketByDni = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
+@Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -506,6 +505,7 @@ Boolean hasLineInCapability() {
 // Initialize and Configure
 // =============================================================================
 void initialize() {
+  migrateLegacyRuntimeState()
   cancelAudioClipWatchdog()
   resetSubscriptionMutexesForDevice()
   maybeCleanupStaticDriverState()
@@ -517,13 +517,16 @@ void initialize() {
   scheduleWebsocketHealthCheck()
 }
 void configure() {
+  migrateLegacyRuntimeState()
   cancelAudioClipWatchdog()
-  atomicState.wsRetryCount = 0
+  runtimeState.wsRetryCount = 0
   migrationCleanup()
-  // Remove the transient parent-app bridge attribute from existing devices as
-  // well as from any event emitted during normal operation. It is consumed by
-  // the parent app, but is not a user-facing device state.
+  // Remove transient parent-app bridge attributes from existing devices.
   clearGroupFavoriteOperationCurrentState()
+  clearPlayerCommandRequestCurrentState()
+  // Remove the retired audio clip progress state from devices upgraded from
+  // versions that exposed it as a current state.
+  clearAudioClipPlaybackProgressCurrentState()
   // Apply child device preferences synchronously (no-ops when devices already exist)
   createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
@@ -548,6 +551,33 @@ void configure() {
     groupsRegistryInitialization()
     favoritesMapInitialization()
   }
+}
+
+ConcurrentHashMap<String, Object> getRuntimeState() {
+  String dni = device?.getDeviceNetworkId()
+  if(!dni) { return new ConcurrentHashMap<String, Object>() }
+  ConcurrentHashMap<String, Object> runtime = runtimeStateByDni.get(dni)
+  if(runtime != null) { return runtime }
+  ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
+  ConcurrentHashMap<String, Object> existing = runtimeStateByDni.putIfAbsent(dni, created)
+  return existing ?: created
+}
+
+void migrateLegacyRuntimeState() {
+  Map<String, Object> legacy = [:]
+  try {
+    legacy.putAll(state as Map<String, Object>)
+    legacy.putAll(atomicState as Map<String, Object>)
+  } catch(Exception e) {
+    logWarn("Could not read legacy device state for migration: ${e.message}")
+    return
+  }
+  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
+  legacy.each { String key, Object value ->
+    if(value != null) { runtime.putIfAbsent(key, value) }
+  }
+  state.clear()
+  atomicState.clear()
 }
 
 void registerRinconId() {
@@ -599,9 +629,9 @@ void scheduleWebsocketHealthCheck() {
 
 void websocketHealthCheck() {
   try {
-    if(state[WS_CONNECT_PENDING_STATE_KEY] == true) {
+    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
       logWarn('WebSocket connection attempt exceeded timeout; retrying.')
-      state.remove(WS_CONNECT_PENDING_STATE_KEY)
+      runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
       setWebSocketStatus('closed')
       scheduleWebSocketReconnect()
       return
@@ -614,7 +644,7 @@ void websocketHealthCheck() {
     }
 
     Long nowEpoch = (now() / 1000L) as Long
-    Long openedEpoch = (state.websocketOpenedAt ?: nowEpoch) as Long
+    Long openedEpoch = (runtimeState.websocketOpenedAt ?: nowEpoch) as Long
     Long lastEventEpoch = getLastWebsocketEventEpoch()
     Long lastActivityEpoch = lastEventEpoch > 0L ? lastEventEpoch : openedEpoch
     if((nowEpoch - lastActivityEpoch) > WS_STALE_TIMEOUT_SECONDS) {
@@ -632,7 +662,7 @@ void websocketHealthCheck() {
 
 void reconnectWebsocket(String reason) {
   logInfo("Reconnecting WebSocket: ${reason}")
-  state.remove(WS_CONNECT_PENDING_STATE_KEY)
+  runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
   try { wsClose() }
   catch(Exception e) { logTrace("Could not close WebSocket during reconnect: ${e.message}") }
   setWebSocketStatus('closed')
@@ -805,6 +835,7 @@ void cleanupStaticDriverState() {
 
   if(activePlayerIds.isEmpty() && activePlayerDnis.isEmpty()) {
     Integer clearedEntries = clearStaticMap(audioClipQueue)
+    clearedEntries += clearStaticMap(runtimeStateByDni)
     clearedEntries += clearStaticMap(audioClipQueueHighPriority)
     clearedEntries += clearStaticMap(audioClipQueueSaved)
     clearedEntries += clearStaticMap(audioClipQueueTimers)
@@ -826,6 +857,9 @@ void cleanupStaticDriverState() {
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
     clearedEntries += clearStaticMap(lastZgtXmlHash)
+    clearedEntries += clearStaticMap(pendingTopologyXmlByDni)
+    clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
+    clearedEntries += clearStaticMap(pendingTopologyKindByDni)
     clearedEntries += clearStaticMap(wsSubscriptionStatus)
     clearedEntries += clearStaticMap(jsonSlurpers)
     clearedEntries += clearStaticMap(eventTimestamps)
@@ -842,6 +876,7 @@ void cleanupStaticDriverState() {
 
   Integer removedEntries = 0
   removedEntries += pruneStaticMapKeys(audioClipQueue, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(runtimeStateByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(audioClipQueueHighPriority, activePlayerIds)
   removedEntries += pruneStaticMapKeys(audioClipQueueSaved, activePlayerIds)
   removedEntries += pruneStaticMapKeys(audioClipQueueTimers, activePlayerIds)
@@ -863,6 +898,9 @@ void cleanupStaticDriverState() {
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastZgtXmlHash, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingTopologyXmlByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
   removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
   removedEntries += pruneEventTimestampKeys(activePlayerDnis)
@@ -1001,6 +1039,7 @@ void clearStaticDriverStateForCurrentDevice() {
     }
 
     if(dni != null && dni != '') {
+      runtimeStateByDni?.remove(dni)
       favoriteRetryState?.remove(dni)
       playlistRetryState?.remove(dni)
       pendingGroupDeviceUpdates?.remove(dni)
@@ -1076,6 +1115,7 @@ void checkSubscriptions() {}
 @CompileStatic
 void setRepeatMode(String mode) {
   logDebug("Setting repeat mode to ${mode}")
+  if(routeGroupedPlaybackCommandToCoordinator('setRepeatMode', [mode])) { return }
   Map playModes = [
     'repeat': false,
     'repeatOne': false
@@ -1094,6 +1134,7 @@ void repeatNone() { setRepeatMode('off') }
 @CompileStatic
 void setCrossfade(String mode) {
   logDebug("Setting crossfade mode to ${mode}")
+  if(routeGroupedPlaybackCommandToCoordinator('setCrossfade', [mode])) { return }
   Map playModes = mode == 'on' ? [ 'crossfade': true ] : [ 'crossfade': false ]
   playerSetPlayModes(playModes)
 }
@@ -1105,6 +1146,7 @@ void disableCrossfade() { setCrossfade('off') }
 @CompileStatic
 void setShuffle(String mode) {
   logDebug("Setting shuffle mode to ${mode}")
+  if(routeGroupedPlaybackCommandToCoordinator('setShuffle', [mode])) { return }
   Map playModes = mode == 'on' ? [ 'shuffle': true ] : [ 'shuffle': false ]
   playerSetPlayModes(playModes)
 }
@@ -1160,11 +1202,13 @@ BigDecimal coerceVolume(Object volume) {
 @CompileStatic
 void setTrack(String uri) {
   if(deferCommandToParentDuringGroupOperation('setTrack', [uri])) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('setTrack', [uri])) { return }
   componentSetStreamUrlLocal(uri)
 }
 @CompileStatic
 void playTrack(String uri, BigDecimal volume = null) {
   if(deferCommandToParentDuringGroupOperation('playTrack', [uri, volume])) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('playTrack', [uri, volume])) { return }
   if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
   else{ componentLoadStreamUrlLocal(uri, volume) }
 }
@@ -1496,6 +1540,7 @@ private String resolveRinconFromSiblingByLabelSubstring(String value) {
 
 void selectLineIn(String sourceIdentifier = null) {
   if(deferCommandToParentDuringGroupOperation('selectLineIn', [sourceIdentifier])) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('selectLineIn', [sourceIdentifier])) { return }
   String rinconId = resolveSourceRincon(sourceIdentifier)
   if (rinconId == null) { return }
   String lineInURI = "x-rincon-stream:${rinconId}"
@@ -1509,6 +1554,7 @@ void selectLineIn(String sourceIdentifier = null) {
 
 void selectTV() {
   if(deferCommandToParentDuringGroupOperation('selectTV')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('selectTV')) { return }
   if(!hasHTPlaybackCapability()) {
     logWarn("TV input is only supported on Sonos home theater speakers")
     return
@@ -1532,8 +1578,8 @@ void requestParentCoordinatorCommand(String command, List args = []) {
   if(!command) {
     return
   }
-  Integer sequence = ((state.parentCommandSequence ?: 0) as Integer) + 1
-  state.parentCommandSequence = sequence
+  Integer sequence = ((runtimeState.parentCommandSequence ?: 0) as Integer) + 1
+  runtimeState.parentCommandSequence = sequence
   Map payload = [
     playerDni: device.getDeviceNetworkId(),
     requestId: UUID.randomUUID().toString(),
@@ -1541,46 +1587,54 @@ void requestParentCoordinatorCommand(String command, List args = []) {
     command: command,
     args: args ?: []
   ]
-  List<Map> pending = state.pendingParentCoordinatorCommands instanceof List
-      ? (List<Map>)state.pendingParentCoordinatorCommands
+  List<Map> pending = runtimeState.pendingParentCoordinatorCommands instanceof List
+      ? (List<Map>)runtimeState.pendingParentCoordinatorCommands
       : []
   pending.add(payload)
-  state.pendingParentCoordinatorCommands = pending
+  runtimeState.pendingParentCoordinatorCommands = pending
   logDebug("Queued parent command ${command} (${payload.requestId}); pending=${pending.size()}")
   runIn(1, 'drainParentCoordinatorCommandQueue', [overwrite: true])
+}
+
+/** Route group-wide playback changes from a follower to its current coordinator. */
+Boolean routeGroupedPlaybackCommandToCoordinator(String command, List args = []) {
+  if(!isGroupedAndNotCoordinator()) { return false }
+  requestParentCoordinatorCommand(command, args)
+  return true
 }
 
 /** Route media commands through the app while this player is registered with
  * an active topology-only operation, allowing deferral by the operation roster. */
 Boolean deferCommandToParentDuringGroupOperation(String command, List args = []) {
-  if(!state.groupFavoriteOperationId || state.groupFavoriteOperationFavoriteId) { return false }
+  if(!runtimeState.groupTopologyOperationId &&
+      (!runtimeState.groupFavoriteOperationId || runtimeState.groupFavoriteOperationFavoriteId)) { return false }
   requestParentCoordinatorCommand(command, args)
   return true
 }
 
 void drainParentCoordinatorCommandQueue() {
-  if(state.activeParentCoordinatorCommand instanceof Map) { return }
-  List<Map> pending = state.pendingParentCoordinatorCommands instanceof List
-      ? (List<Map>)state.pendingParentCoordinatorCommands
+  if(runtimeState.activeParentCoordinatorCommand instanceof Map) { return }
+  List<Map> pending = runtimeState.pendingParentCoordinatorCommands instanceof List
+      ? (List<Map>)runtimeState.pendingParentCoordinatorCommands
       : []
   if(pending.isEmpty()) { return }
   Map payload = pending.remove(0)
-  state.pendingParentCoordinatorCommands = pending
-  state.activeParentCoordinatorCommand = payload
+  runtimeState.pendingParentCoordinatorCommands = pending
+  runtimeState.activeParentCoordinatorCommand = payload
   emitParentCoordinatorCommand(payload)
 }
 
 void emitParentCoordinatorCommand(Map data) {
   Map payload = data?.payload instanceof Map ? (Map)data.payload : data
   if(payload?.command) {
-    sendDeviceEvent(PLAYER_COMMAND_REQUEST_ATTRIBUTE, JsonOutput.toJson(payload))
+    sendDeviceEvent(PLAYER_COMMAND_REQUEST_ATTRIBUTE, hideCurrentStateValue(JsonOutput.toJson(payload)))
     logDebug("Delivered parent command ${payload.command} (${payload.requestId}); waiting for controller acknowledgement")
     runIn(5, 'retryParentCoordinatorCommand', [overwrite: true])
   }
 }
 
 void retryParentCoordinatorCommand() {
-  Map payload = state.activeParentCoordinatorCommand instanceof Map ? (Map)state.activeParentCoordinatorCommand : null
+  Map payload = runtimeState.activeParentCoordinatorCommand instanceof Map ? (Map)runtimeState.activeParentCoordinatorCommand : null
   if(payload) {
     logWarn("Retrying unacknowledged parent command ${payload.command} (${payload.requestId})")
     emitParentCoordinatorCommand(payload)
@@ -1588,10 +1642,10 @@ void retryParentCoordinatorCommand() {
 }
 
 void acknowledgeParentCommand(String requestId) {
-  Map active = state.activeParentCoordinatorCommand instanceof Map ? (Map)state.activeParentCoordinatorCommand : null
+  Map active = runtimeState.activeParentCoordinatorCommand instanceof Map ? (Map)runtimeState.activeParentCoordinatorCommand : null
   if(!active || !requestId || requestId != active.requestId) { return }
   unschedule('retryParentCoordinatorCommand')
-  state.remove('activeParentCoordinatorCommand')
+  runtimeState.remove('activeParentCoordinatorCommand')
   logDebug("Controller acknowledged parent command ${active.command} (${requestId})")
   runIn(1, 'drainParentCoordinatorCommandQueue', [overwrite: true])
 }
@@ -1779,11 +1833,13 @@ Integer getGroupVolumeAdjAmount() {
 @CompileStatic
 void play() {
   if(deferCommandToParentDuringGroupOperation('play')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('play')) { return }
   playerPlay()
 }
 @CompileStatic
 void stop() {
   if(deferCommandToParentDuringGroupOperation('stop')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('stop')) { return }
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
@@ -1796,6 +1852,7 @@ void stop() {
 @CompileStatic
 void pause() {
   if(deferCommandToParentDuringGroupOperation('pause')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('pause')) { return }
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
@@ -1804,11 +1861,13 @@ void pause() {
 @CompileStatic
 void nextTrack() {
   if(deferCommandToParentDuringGroupOperation('nextTrack')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('nextTrack')) { return }
   playerSkipToNextTrack()
 }
 @CompileStatic
 void previousTrack() {
   if(deferCommandToParentDuringGroupOperation('previousTrack')) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('previousTrack')) { return }
   playerSkipToPreviousTrack()
 }
 @CompileStatic
@@ -1935,12 +1994,14 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
     logWarn('Cannot load group Favorite without an operation ID and verified group ID')
     return
   }
-  state.groupFavoriteOperationId = operationId
-  state.groupFavoriteOperationFavoriteId = favoriteId
-  state.groupFavoriteOperationAttemptId = attemptId ?: operationId
-  state.groupFavoriteOperationRequestId = requestId ?: attemptId ?: operationId
-  state.groupFavoriteOperationGroupId = expectedGroupId
-  state.groupFavoriteOperationLoadAt = now()
+  runtimeState.groupFavoriteOperationId = operationId
+  runtimeState.groupFavoriteOperationFavoriteId = favoriteId
+  runtimeState.groupFavoriteOperationAttemptId = attemptId ?: operationId
+  runtimeState.groupFavoriteOperationRequestId = requestId ?: attemptId ?: operationId
+  runtimeState.groupFavoriteOperationGroupId = expectedGroupId
+  runtimeState.groupFavoriteOperationLoadAt = now()
+  runtimeState.remove('groupTopologyOperationId')
+  runtimeState.remove('groupTopologyOperationRequestId')
   if(getIsGroupCoordinator() != true) {
     logWarn("Cannot load group Favorite operation ${operationId}: player is not the group coordinator")
     emitGroupFavoriteOperationEvent('loadRejected', [reason: 'PLAYER_NOT_COORDINATOR'])
@@ -1958,7 +2019,7 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
   Boolean shuffle = shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   emitGroupFavoriteOperationEvent('loadStarted', [favoriteId: favoriteId, groupId: expectedGroupId,
-    requestId: state.groupFavoriteOperationRequestId])
+    requestId: runtimeState.groupFavoriteOperationRequestId])
   playerLoadFavoriteForGroupOperation(
     favoriteId,
     action,
@@ -1978,67 +2039,98 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
  */
 void registerGroupFavoriteOperation(String operationId, String favoriteId, String requestId = null) {
   if(!operationId) { return }
-  state.groupFavoriteOperationId = operationId
-  state.groupFavoriteOperationFavoriteId = favoriteId
-  state.groupFavoriteOperationRequestId = requestId ?: operationId
-  state.remove('groupFavoriteOperationGroupId')
-  state.remove('groupFavoriteOperationAttemptId')
-  state.remove('groupFavoriteOperationLoadAt')
+  runtimeState.remove('groupTopologyOperationId')
+  runtimeState.remove('groupTopologyOperationRequestId')
+  runtimeState.groupFavoriteOperationId = operationId
+  if(favoriteId) {
+    runtimeState.groupFavoriteOperationFavoriteId = favoriteId
+  } else {
+    runtimeState.remove('groupFavoriteOperationFavoriteId')
+  }
+  runtimeState.groupFavoriteOperationRequestId = requestId ?: operationId
+  runtimeState.remove('groupFavoriteOperationGroupId')
+  runtimeState.remove('groupFavoriteOperationAttemptId')
+  runtimeState.remove('groupFavoriteOperationLoadAt')
   emitGroupFavoriteOperationEvent('registered', [favoriteId: favoriteId,
-    requestId: state.groupFavoriteOperationRequestId])
+    requestId: runtimeState.groupFavoriteOperationRequestId])
+}
+
+/** Register a topology-only group operation without creating Favorite state. */
+void registerGroupTopologyOperation(String operationId, String requestId = null) {
+  if(!operationId) { return }
+  runtimeState.remove('groupFavoriteOperationId')
+  runtimeState.remove('groupFavoriteOperationFavoriteId')
+  runtimeState.remove('groupFavoriteOperationAttemptId')
+  runtimeState.remove('groupFavoriteOperationRequestId')
+  runtimeState.remove('groupFavoriteOperationGroupId')
+  runtimeState.remove('groupFavoriteOperationLoadAt')
+  runtimeState.groupTopologyOperationId = operationId
+  runtimeState.groupTopologyOperationRequestId = requestId ?: operationId
+  emitGroupFavoriteOperationEvent('registered', [requestId: runtimeState.groupTopologyOperationRequestId])
 }
 
 void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String expectedGroupId,
     String requestId = null) {
-  String currentOperationId = state.groupFavoriteOperationId as String
+  String currentOperationId = runtimeState.groupFavoriteOperationId as String
   if(!currentOperationId || currentOperationId != operationId || !attemptId) { return }
-  state.groupFavoriteOperationAttemptId = attemptId
-  state.groupFavoriteOperationRequestId = requestId ?: attemptId
-  state.groupFavoriteOperationGroupId = expectedGroupId
-  state.groupFavoriteOperationLoadAt = now()
+  runtimeState.groupFavoriteOperationAttemptId = attemptId
+  runtimeState.groupFavoriteOperationRequestId = requestId ?: attemptId
+  runtimeState.groupFavoriteOperationGroupId = expectedGroupId
+  runtimeState.groupFavoriteOperationLoadAt = now()
 }
 
 /** Issue a play command with a local request ID tied to the active group operation. */
 void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {
-  if(!operationId || !attemptId || !requestId || state.groupFavoriteOperationId?.toString() != operationId ||
-      state.groupFavoriteOperationAttemptId?.toString() != attemptId) {
+  if(!operationId || !attemptId || !requestId || runtimeState.groupFavoriteOperationId?.toString() != operationId ||
+      runtimeState.groupFavoriteOperationAttemptId?.toString() != attemptId) {
     logWarn('Ignoring group operation play command with stale or incomplete correlation IDs')
     return
   }
-  state.groupFavoriteOperationRequestId = requestId
+  runtimeState.groupFavoriteOperationRequestId = requestId
   emitGroupFavoriteOperationEvent('playStarted', [requestId: requestId])
   playerPlay()
 }
 
-void clearGroupFavoriteOperation(String operationId = null) {
-  String currentOperationId = state.groupFavoriteOperationId as String
+void clearGroupOperation(String operationId = null) {
+  String currentOperationId = (runtimeState.groupFavoriteOperationId ?:
+      runtimeState.groupTopologyOperationId) as String
   if(!currentOperationId || (operationId && currentOperationId != operationId)) { return }
-  state.remove('groupFavoriteOperationId')
-  state.remove('groupFavoriteOperationFavoriteId')
-  state.remove('groupFavoriteOperationGroupId')
-  state.remove('groupFavoriteOperationAttemptId')
-  state.remove('groupFavoriteOperationRequestId')
-  state.remove('groupFavoriteOperationLoadAt')
+  runtimeState.remove('groupFavoriteOperationId')
+  runtimeState.remove('groupFavoriteOperationFavoriteId')
+  runtimeState.remove('groupFavoriteOperationGroupId')
+  runtimeState.remove('groupFavoriteOperationAttemptId')
+  runtimeState.remove('groupFavoriteOperationRequestId')
+  runtimeState.remove('groupFavoriteOperationLoadAt')
+  runtimeState.remove('groupTopologyOperationId')
+  runtimeState.remove('groupTopologyOperationRequestId')
   clearGroupFavoriteOperationCurrentState()
 }
 
+/** Backward-compatible alias for existing parent app deployments. */
+void clearGroupFavoriteOperation(String operationId = null) {
+  clearGroupOperation(operationId)
+}
+
 void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
-  String operationId = state.groupFavoriteOperationId as String
+  String topologyOperationId = runtimeState.groupTopologyOperationId as String
+  String operationId = topologyOperationId ?: runtimeState.groupFavoriteOperationId as String
   if(!operationId || !eventName) { return }
   Map payload = [
     operationId: operationId,
-    requestId: data?.requestId?.toString() ?: (state.groupFavoriteOperationRequestId as String),
+    requestId: data?.requestId?.toString() ?: (topologyOperationId
+        ? runtimeState.groupTopologyOperationRequestId as String
+        : runtimeState.groupFavoriteOperationRequestId as String),
     event: eventName,
     playerId: getId(),
-    attemptId: state.groupFavoriteOperationAttemptId as String,
+    attemptId: topologyOperationId ? null : runtimeState.groupFavoriteOperationAttemptId as String,
     observedAt: now(),
     data: data ?: [:]
   ]
-  sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, JsonOutput.toJson(payload))
-  // The event is still delivered to the parent app and retained in the event
-  // history, but the bridge value is intentionally not exposed as current
-  // state on the player device page.
-  clearGroupFavoriteOperationCurrentState()
+  sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, hideCurrentStateValue(JsonOutput.toJson(payload)))
+}
+
+String hideCurrentStateValue(String value) {
+  return "<span style=\"display:none\">${value ?: ''}</span>"
 }
 
 void clearGroupFavoriteOperationCurrentState() {
@@ -2046,6 +2138,14 @@ void clearGroupFavoriteOperationCurrentState() {
     device.deleteCurrentState(GROUP_FAVORITE_OPERATION_ATTRIBUTE)
   } catch(Exception e) {
     logDebug("Could not remove transient group Favorite operation state: ${e.message}")
+  }
+}
+
+void clearPlayerCommandRequestCurrentState() {
+  try {
+    device.deleteCurrentState(PLAYER_COMMAND_REQUEST_ATTRIBUTE)
+  } catch(Exception e) {
+    logDebug("Could not remove transient player command request state: ${e.message}")
   }
 }
 
@@ -2899,13 +2999,7 @@ void parse(String raw) {
         // not become the dedup baseline or count as a healthy inbound event.
         String zgtDni = device.getDeviceNetworkId()
         Integer xmlHash = xmlBody.hashCode()
-        Integer prevHash = lastZgtXmlHash.get(zgtDni)
-        if(prevHash != null && prevHash == xmlHash) { return }
-        LinkedHashSet<String> oldGroupedRincons = new LinkedHashSet<String>(getGroupPlayerIds())
-        if(processZoneGroupTopologyMessages(xmlBody, oldGroupedRincons)) {
-          lastZgtXmlHash.put(zgtDni, xmlHash)
-          setLastInboundZgtEvent()
-        }
+        deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, xmlHash)
       } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
     }
     else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
@@ -2918,6 +3012,164 @@ void parse(String raw) {
       logDebug("Could not determine service type for message: ${message}")
     }
   } catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
+}
+
+void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash = null) {
+  String deviceDni = dni ?: device.getDeviceNetworkId()
+  if(!deviceDni || !xmlBody) { return }
+  Integer payloadHash = xmlHash != null ? xmlHash : xmlBody.hashCode()
+  Integer previousHash = lastZgtXmlHash.get(deviceDni)
+  if(previousHash != null && previousHash == payloadHash) { return }
+
+  Map topology = getZoneGroupTopologyForPlayer(xmlBody, getId())
+  if(shouldHoldTopologyUpdate(topology)) {
+    String previousPendingXml = pendingTopologyXmlByDni.put(deviceDni, xmlBody)
+    pendingTopologyKindByDni.put(deviceDni, 'zgt')
+    if(previousPendingXml != xmlBody) {
+      logTrace('Holding topology update until the affected player reaches its expected topology')
+    }
+    scheduleTopologyTimeoutFlush()
+    return
+  }
+
+  applyZoneGroupTopologyPayload(deviceDni, xmlBody, payloadHash)
+}
+
+void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash) {
+  LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
+  if(processZoneGroupTopologyMessages(xmlBody, previousMembers)) {
+    lastZgtXmlHash.put(dni, xmlHash)
+    setLastInboundZgtEvent()
+  }
+}
+
+void flushPendingZoneGroupTopology() {
+  flushPendingTopologyUpdates()
+}
+
+void flushPendingTopologyUpdates() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  String expectedJson = getDeviceDataValue('expectedGroupTopology')
+  if(expectedJson) {
+    try {
+      Map expected = (Map)new JsonSlurper().parseText(expectedJson)
+      Long expiresAt = expected.expiresAt as Long
+      if(expiresAt != null && expiresAt > (now() as Long)) {
+        scheduleTopologyTimeoutFlush()
+        return
+      }
+    } catch(Exception ignored) { }
+  }
+  setDeviceDataValue('expectedGroupTopology', '')
+  String pendingKind = pendingTopologyKindByDni.remove(dni)
+  String pendingXml = pendingTopologyXmlByDni.remove(dni)
+  String pendingWs = pendingTopologyWebsocketByDni.remove(dni)
+  if(pendingKind == 'ws' && pendingWs) {
+    processWebsocketMessage(pendingWs)
+    logTrace('Published the latest groups websocket topology snapshot after its hold window elapsed')
+  } else if(pendingKind == 'zgt' && pendingXml) {
+    applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode())
+    logTrace('Published the latest ZoneGroupTopology snapshot after its hold window elapsed')
+  } else {
+    return
+  }
+}
+
+Boolean shouldHoldTopologyUpdate(Map topology) {
+  String expectedJson = getDeviceDataValue('expectedGroupTopology')
+  if(!expectedJson) { return false }
+  Map expected
+  try {
+    expected = (Map)new JsonSlurper().parseText(expectedJson)
+  } catch(Exception e) {
+    setDeviceDataValue('expectedGroupTopology', '')
+    clearPendingTopologyForDevice()
+    return false
+  }
+  Long expiresAt = expected.expiresAt as Long
+  if(expiresAt == null || expiresAt <= (now() as Long)) {
+    setDeviceDataValue('expectedGroupTopology', '')
+    clearPendingTopologyForDevice()
+    return false
+  }
+  if(topology != null && topology.coordinatorId == expected.coordinatorId &&
+     topology.memberIds == expected.memberIds) {
+    setDeviceDataValue('expectedGroupTopology', '')
+    clearPendingTopologyForDevice()
+    logTrace('Observed expected topology for this player; releasing the update')
+    return false
+  }
+  return true
+}
+
+void clearPendingTopologyForDevice() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  pendingTopologyXmlByDni.remove(dni)
+  pendingTopologyWebsocketByDni.remove(dni)
+  pendingTopologyKindByDni.remove(dni)
+}
+
+void scheduleTopologyTimeoutFlush() {
+  String expectedJson = getDeviceDataValue('expectedGroupTopology')
+  if(!expectedJson) { return }
+  try {
+    Map expected = (Map)new JsonSlurper().parseText(expectedJson)
+    Long expiresAt = expected.expiresAt as Long
+    Integer remaining = Math.max(1, Math.ceil((expiresAt - (now() as Long)) / 1000.0d) as Integer)
+    runIn(remaining, 'flushPendingTopologyUpdates', [overwrite: true])
+  } catch(Exception e) {
+    runIn(1, 'flushPendingTopologyUpdates', [overwrite: true])
+  }
+}
+
+void markGroupTopologyChangeInProcess(Map<String, Map> expectedByRincon) {
+  if(expectedByRincon == null || expectedByRincon.isEmpty()) { return }
+  String operationId = UUID.randomUUID().toString()
+  Long expiresAt = (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L
+  Map<String, Map> expected = [:]
+  expectedByRincon.each { String playerId, Map topology ->
+    if(playerId && topology != null) {
+      expected[playerId] = [
+        coordinatorId: topology.coordinatorId,
+        memberIds: ((Collection<String>)topology.memberIds).toList().sort()
+      ]
+    }
+  }
+  if(expected.containsKey(getId())) {
+    Map own = expected[getId()]
+    own.expiresAt = expiresAt
+    own.operationId = operationId
+    setDeviceDataValue('expectedGroupTopology', JsonOutput.toJson(own))
+  }
+  try {
+    parent?.setExpectedTopologyForPlayers(expected, operationId, expiresAt)
+  } catch(Exception e) {
+    logWarn("Could not mark related players for topology suppression: ${e.message}")
+  }
+}
+
+Map getZoneGroupTopologyForPlayer(String xmlString, String playerId) {
+  if(!playerId || !isPlausibleXmlPayload(xmlString)) { return null }
+  try {
+    XmlSlurper parser = new XmlSlurper()
+    GPathResult propertyset = parser.parseText(xmlString)
+    String stateXml = ((GPathResult)propertyset['property']['ZoneGroupState']).text()
+    String unescaped = unEscapeLastChangeXML(stateXml)
+    if(!isPlausibleXmlPayload(unescaped)) { return null }
+    GPathResult stateXmlParsed = parser.parseText(unescaped)
+    GPathResult zoneGroups = (GPathResult)stateXmlParsed['ZoneGroups']
+    GPathResult member = zoneGroups.children().children().find { it['@UUID'] == playerId }
+    if(member == null) { return null }
+    GPathResult group = member.parent()
+    List<String> memberIds = group.children().findAll { it['@Invisible'] != '1' }
+      .collect { it['@UUID'].toString() }.sort()
+    return [coordinatorId: group['@Coordinator'].toString(), memberIds: memberIds]
+  } catch(Exception e) {
+    logDebug("Could not inspect ZGT topology for ${playerId}: ${e.message}")
+    return null
+  }
 }
 
 LinkedHashMap getMapForRaw(String raw) {
@@ -3119,10 +3371,14 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
     logTrace("No grouped rincons found!")
   }
 
-  String currentGroupCoordinatorName = myZonePlayer['@ZoneName']
-  if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
-
   String currentGroupCoordinatorRincon = myGroup['@Coordinator']
+  GPathResult coordinatorZonePlayer = zoneGroups.children().children().find {
+    it['@UUID'] == currentGroupCoordinatorRincon
+  }
+  String currentGroupCoordinatorName = coordinatorZonePlayer != null
+      ? coordinatorZonePlayer['@ZoneName'].toString()
+      : null
+  if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
   if(currentGroupCoordinatorRincon) {setGroupCoordinatorId(currentGroupCoordinatorRincon)}
 
   Boolean isGroupCoordinator = currentGroupCoordinatorRincon == getId()
@@ -4225,11 +4481,12 @@ String getChildDeviceDataValue(DeviceWrapper child, String name) {
 String getDeviceDNI() { return this.device.getDeviceNetworkId() }
 
 Object getAtomicStateValue(String name) {
-  return atomicState[name]
+  return runtimeState[name]
 }
 
 void setAtomicStateValue(String name, Object value) {
-  atomicState[name] = value
+  if(value == null) { runtimeState.remove(name) }
+  else { runtimeState[name] = value }
 }
 
 @CompileStatic
@@ -4649,7 +4906,7 @@ void setPlayerVolume(Integer volume) {
   if(volume == oldVolume) { return }
   sendEvent(name:'level', value: volume)
   sendEvent(name:'volume', value: volume)
-  if(volume > 0) { state.restoreLevelAfterUnmute = volume }
+  if(volume > 0) { runtimeState.restoreLevelAfterUnmute = volume }
 }
 void setBalance(Integer balance) {
   Integer oldBalance = this.device.currentValue('balance') as Integer
@@ -4666,8 +4923,8 @@ void setMuteState(String muted) {
   String previousMutedState = getMuteState() != null ? getMuteState() : 'unmuted'
   if(muted == previousMutedState) { return }
   if(muted == 'unmuted' && previousMutedState == 'muted' && getEnableAirPlayUnmuteVolumeFix()) {
-    logDebug("Restoring volume after unmute event to level: ${state.restoreLevelAfterUnmute}")
-    setLevel(state.restoreLevelAfterUnmute as Integer)
+    logDebug("Restoring volume after unmute event to level: ${runtimeState.restoreLevelAfterUnmute}")
+    setLevel(runtimeState.restoreLevelAfterUnmute as Integer)
   }
   sendEvent(name:'mute', value: muted)
 }
@@ -4905,7 +5162,7 @@ void saveRegularAudioClipQueue() {
   savedQueue.clear()
 
   // First, save the currently playing clip if there is one
-  Map currentlyPlayingClip = atomicState.currentlyPlayingClip as Map
+  Map currentlyPlayingClip = runtimeState.currentlyPlayingClip as Map
   if(currentlyPlayingClip) {
     savedQueue.add(currentlyPlayingClip)
     logDebug('Saved currently playing clip to be restarted')
@@ -4956,18 +5213,18 @@ void rotateAudioClipCorrelationId(Map clipMessage) {
 }
 
 void interruptActiveAudioClipForHighPriority() {
-  String activeGuid = atomicState.activeAudioClipCorrelationId as String
+  String activeGuid = runtimeState.activeAudioClipCorrelationId as String
   if(!activeGuid) { return }
   removeQueuedAudioClipCommand(activeGuid)
-  Map<String, Map> clipProgress = atomicState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)atomicState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[activeGuid]
   if(progress instanceof Map) {
     progress.phase = 'INTERRUPTED_BY_HIGH_PRIORITY'
     progress.interruptedAt = now()
     clipProgress[activeGuid] = progress
-    atomicState.audioClipProgressByCorrelationId = clipProgress
+    runtimeState.audioClipProgressByCorrelationId = clipProgress
     publishAudioClipProgressEvent(progress, null)
   }
   logInfo("Suspending regular audio clip ${activeGuid} for high-priority playback")
@@ -4980,8 +5237,8 @@ void removeQueuedAudioClipCommand(String correlationId) {
     !(entry?.kind == 'audioClip' && entry?.correlationId?.toString() == correlationId)
   }
   if(retained.size() != queued.size()) {
-    if(retained.isEmpty()) { state.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-    else { state[WS_OUTBOUND_QUEUE_STATE_KEY] = retained }
+    if(retained.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
+    else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained }
     logDebug("Removed unsent audio clip ${correlationId} from the WebSocket outbound queue for priority preemption")
   }
 }
@@ -4995,30 +5252,30 @@ String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 void setWebSocketStatus(String status) {
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
-    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     // Keep commands queued while the socket was unavailable behind the
     // subscriptions re-established below. Temporarily remove the pending
     // commands so sendWsMessage() can deliver those subscriptions directly;
     // otherwise its FIFO flush would put a queued operation ahead of them.
     List<Map> pendingCommands = getWebsocketOutboundQueue()
-    state.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
+    runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
     subscribeToWsEvents()
     List<Map> subscriptionCommands = getWebsocketOutboundQueue()
     if(!pendingCommands.isEmpty()) {
       subscriptionCommands.addAll(pendingCommands)
-      state[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
+      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
     }
     if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
   }
   else {
-    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
-    state.audioClipSubscriptionRequestPending = false
-    if(atomicState.audioClipCommandSent == true && atomicState.activeAudioClipCorrelationId) {
-      atomicState.audioClipHadDisconnectAfterSend = true
+    runtimeState.audioClipSubscriptionRequestPending = false
+    if(runtimeState.audioClipCommandSent == true && runtimeState.activeAudioClipCorrelationId) {
+      runtimeState.audioClipHadDisconnectAfterSend = true
       pauseAudioClipWatchdog()
-      logWarn("WebSocket disconnected while audio clip ${atomicState.activeAudioClipCorrelationId} awaited playback status; command will not be resent")
+      logWarn("WebSocket disconnected while audio clip ${runtimeState.activeAudioClipCorrelationId} awaited playback status; command will not be resent")
     }
   }
 }
@@ -5232,11 +5489,11 @@ void webSocketStatus(String message) {
   }
   else if(message == 'status: open') {
     unschedule('websocketConnectWatchdog')
-    state.websocketOpenedAt = (now() / 1000L) as Long
-    state.remove(WS_DISCONNECTED_SINCE_KEY)
-    state.remove(WS_RETRY_SCHEDULED_KEY)
+    runtimeState.websocketOpenedAt = (now() / 1000L) as Long
+    runtimeState.remove(WS_DISCONNECTED_SINCE_KEY)
+    runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
     setWebSocketStatus('open')
-    atomicState.wsRetryCount = 0 // Reset retry counter on successful connection
+    runtimeState.wsRetryCount = 0 // Reset retry counter on successful connection
     publishPlayerStateUpdate([kind: 'wsConnected'])
   }
   else if(message == 'status: closing') {
@@ -5250,15 +5507,15 @@ void webSocketStatus(String message) {
 }
 
 void scheduleWebSocketReconnect() {
-  if(state[WS_RETRY_SCHEDULED_KEY] == true) { return }
-  if(state[WS_DISCONNECTED_SINCE_KEY] == null) { state[WS_DISCONNECTED_SINCE_KEY] = now() }
+  if(runtimeState[WS_RETRY_SCHEDULED_KEY] == true) { return }
+  if(runtimeState[WS_DISCONNECTED_SINCE_KEY] == null) { runtimeState[WS_DISCONNECTED_SINCE_KEY] = now() }
 
-  Long disconnectedSince = state[WS_DISCONNECTED_SINCE_KEY] as Long
+  Long disconnectedSince = runtimeState[WS_DISCONNECTED_SINCE_KEY] as Long
   Long elapsedSeconds = Math.max(0L, (now() - disconnectedSince).intdiv(1000L))
   Integer delaySeconds = webSocketRetryIntervalSeconds(elapsedSeconds)
-  Integer retryCount = (atomicState.wsRetryCount ?: 0) as Integer
-  atomicState.wsRetryCount = retryCount + 1
-  state[WS_RETRY_SCHEDULED_KEY] = true
+  Integer retryCount = (runtimeState.wsRetryCount ?: 0) as Integer
+  runtimeState.wsRetryCount = retryCount + 1
+  runtimeState[WS_RETRY_SCHEDULED_KEY] = true
 
   logInfo("WebSocket connection failed. Retry ${retryCount + 1} in ${delaySeconds} seconds...")
   publishPlayerStateUpdate([kind: 'wsRetry', retryDelay: delaySeconds])
@@ -5266,11 +5523,11 @@ void scheduleWebSocketReconnect() {
 }
 
 Boolean restartWebSocketBackoff() {
-  if(isWebsocketConnected() || state[WS_CONNECT_PENDING_STATE_KEY] == true || state[WS_DISCONNECTED_SINCE_KEY] == null) { return false }
+  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true || runtimeState[WS_DISCONNECTED_SINCE_KEY] == null) { return false }
   unschedule('retryWebSocketConnection')
-  state.remove(WS_RETRY_SCHEDULED_KEY)
-  state[WS_DISCONNECTED_SINCE_KEY] = now()
-  atomicState.wsRetryCount = 0
+  runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
+  runtimeState[WS_DISCONNECTED_SINCE_KEY] = now()
+  runtimeState.wsRetryCount = 0
   scheduleWebSocketReconnect()
   return true
 }
@@ -5286,15 +5543,15 @@ Integer webSocketRetryIntervalSeconds(Long elapsedSeconds) {
 }
 
 void retryWebSocketConnection() {
-  state.remove(WS_RETRY_SCHEDULED_KEY)
+  runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
   logDebug("Attempting WebSocket reconnection...")
   wsConnect()
 }
 
 void wsConnect() {
-  if(isWebsocketConnected() || state[WS_CONNECT_PENDING_STATE_KEY] == true) { return }
+  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) { return }
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
-  state[WS_CONNECT_PENDING_STATE_KEY] = true
+  runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
     interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
@@ -5302,7 +5559,7 @@ void wsConnect() {
     unschedule('retryWebSocketConnection')
     scheduleResubscriptionToEvents('renewWebsocketConnection')
   } catch(Exception e) {
-    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     setWebSocketStatus('closed')
     logWarn("WebSocket connect failed: ${e.message}")
     scheduleWebSocketReconnect()
@@ -5310,9 +5567,9 @@ void wsConnect() {
 }
 
 void websocketConnectWatchdog() {
-  if(state[WS_CONNECT_PENDING_STATE_KEY] == true && !isWebsocketConnected()) {
+  if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true && !isWebsocketConnected()) {
     logWarn('WebSocket connection attempt timed out; retrying.')
-    state.remove(WS_CONNECT_PENDING_STATE_KEY)
+    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     setWebSocketStatus('closed')
     scheduleWebSocketReconnect()
   }
@@ -5323,8 +5580,8 @@ void wsClose() {
 }
 
 List<Map> getWebsocketOutboundQueue() {
-  return state[WS_OUTBOUND_QUEUE_STATE_KEY] instanceof List
-      ? (List<Map>)state[WS_OUTBOUND_QUEUE_STATE_KEY]
+  return runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] instanceof List
+      ? (List<Map>)runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY]
       : []
 }
 
@@ -5334,17 +5591,17 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
   Map entry = [message: message, attempts: attempts ?: 0]
   if(metadata instanceof Map && !metadata.isEmpty()) { entry.putAll(metadata) }
   queue.add(entry)
-  state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
 }
 
 void flushWebsocketOutboundQueue() {
   if(!isWebsocketConnected()) {
-    if(state[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
     return
   }
 
   List<Map> queue = getWebsocketOutboundQueue()
-  state.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
+  runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
   while(!queue.isEmpty()) {
     Map entry = (Map)queue.remove(0)
     String message = entry?.message as String
@@ -5352,8 +5609,8 @@ void flushWebsocketOutboundQueue() {
     if(!message) { continue }
     if(entry?.kind == 'audioClip' && !isCurrentlySubcribedToAudioClipWS()) {
       queue.add(0, entry)
-      state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-      if(state.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
+      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
       return
     }
     try {
@@ -5367,7 +5624,7 @@ void flushWebsocketOutboundQueue() {
         if(entry?.kind in ['audioClip', 'audioClipSubscribe']) {
           entry.attempts = nextAttempt
           queue.add(0, entry)
-          state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+          runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
           logWarn("Keeping unsent audio clip WebSocket message (${entry.kind}, ${entry.correlationId ?: 'subscription'}) queued after ${nextAttempt} send attempts: ${e.message}")
           setWebSocketStatus('closed')
           scheduleWebSocketReconnect()
@@ -5378,7 +5635,7 @@ void flushWebsocketOutboundQueue() {
       }
       entry.attempts = nextAttempt
       queue.add(0, entry)
-      state[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
       setWebSocketStatus('closed')
       scheduleWebSocketReconnect()
       return
@@ -5390,7 +5647,7 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
   if(!message) { return false }
   if(!isWebsocketConnected()) {
     queueWebsocketMessage(message, 0, metadata)
-    if(state[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
     return false
   }
 
@@ -5402,7 +5659,7 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
   }
   if(metadata?.kind == 'audioClip' && !isCurrentlySubcribedToAudioClipWS()) {
     queueWebsocketMessage(message, 0, metadata)
-    if(state.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
+    if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
     return false
   }
   try {
@@ -5492,7 +5749,7 @@ void subscribeToPlaylists() {
 }
 
 void subscribeToAudioClip() {
-  if(state.audioClipSubscriptionRequestPending == true) { return }
+  if(runtimeState.audioClipSubscriptionRequestPending == true) { return }
   Map command = [
     'namespace':'audioClip',
     'command':'subscribe',
@@ -5501,7 +5758,7 @@ void subscribeToAudioClip() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  state.audioClipSubscriptionRequestPending = true
+  runtimeState.audioClipSubscriptionRequestPending = true
   if(!isWebsocketConnected()) {
     sendWsMessage(json, [kind: 'audioClipSubscribe'])
     return
@@ -5509,7 +5766,7 @@ void subscribeToAudioClip() {
   try {
     interfaces.webSocket.sendMessage(json)
   } catch(Exception e) {
-    state.audioClipSubscriptionRequestPending = false
+    runtimeState.audioClipSubscriptionRequestPending = false
     queueWebsocketMessage(json, 1, [kind: 'audioClipSubscribe'])
     setWebSocketStatus('closed')
     logWarn("Audio clip subscription send failed; queued for reconnect: ${e.message}")
@@ -5518,8 +5775,8 @@ void subscribeToAudioClip() {
 }
 
 void retryAudioClipSubscription() {
-  if(atomicState.audioClipPlaying == true && atomicState.activeAudioClipCorrelationId &&
-      isCurrentlySubcribedToAudioClipWS() != true && state.audioClipSubscriptionRequestPending != true && isWebsocketConnected()) {
+  if(runtimeState.audioClipPlaying == true && runtimeState.activeAudioClipCorrelationId &&
+      isCurrentlySubcribedToAudioClipWS() != true && runtimeState.audioClipSubscriptionRequestPending != true && isWebsocketConnected()) {
     subscribeToAudioClip()
   }
 }
@@ -6050,13 +6307,13 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
   queue.add(audioClip)
-  if(atomicState.audioClipPlaying != true) {
+  if(runtimeState.audioClipPlaying != true) {
     runInMillis(100, 'startPreparedAudioClip', [overwrite: true])
   }
 }
 
 void startPreparedAudioClip() {
-  if(atomicState.audioClipPlaying != true) { dequeueAudioClip() }
+  if(runtimeState.audioClipPlaying != true) { dequeueAudioClip() }
 }
 
 
@@ -6097,7 +6354,7 @@ void enqueueAudioClip(Map clipMessage) {
   queue.add(clipMessage)
   logDebug("Queued audio clip ${clipMessage.correlationId} (${clipMessage.origin}) at ${clipMessage.enqueuedAt}; regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
 
-  if(atomicState.audioClipPlaying != true) {
+  if(runtimeState.audioClipPlaying != true) {
     dequeueAudioClip()
   }
 }
@@ -6122,12 +6379,12 @@ void dequeueAudioClip() {
 
   if(!clipMessage) {
     logTrace('No more audio clips to dequeue.')
-    atomicState.currentlyPlayingClip = null
-    atomicState.activeAudioClipCorrelationId = null
-    atomicState.activeAudioClipSonosId = null
-    atomicState.activeAudioClipMessage = null
-    atomicState.audioClipCommandSent = false
-    atomicState.audioClipHadDisconnectAfterSend = false
+    runtimeState.remove('currentlyPlayingClip')
+    runtimeState.remove('activeAudioClipCorrelationId')
+    runtimeState.remove('activeAudioClipSonosId')
+    runtimeState.remove('activeAudioClipMessage')
+    runtimeState.audioClipCommandSent = false
+    runtimeState.audioClipHadDisconnectAfterSend = false
     return
   }
 
@@ -6140,18 +6397,18 @@ void dequeueAudioClip() {
   // Save currently playing clip (only if it's NOT high priority)
   // High priority clips shouldn't be saved for replay
   if(clipMessage?.priority != 'HIGH') {
-    atomicState.currentlyPlayingClip = clipMessage
+    runtimeState.currentlyPlayingClip = clipMessage
   } else {
-    atomicState.currentlyPlayingClip = null
+    runtimeState.remove('currentlyPlayingClip')
   }
 
-  atomicState.activeAudioClipCorrelationId = clipMessage.correlationId
-  atomicState.activeAudioClipMessage = clipMessage
-  atomicState.activeAudioClipSonosId = null
-  atomicState.audioClipCommandSent = false
-  atomicState.audioClipHadDisconnectAfterSend = false
-  Map<String, Map> clipProgress = atomicState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)atomicState.audioClipProgressByCorrelationId)
+  runtimeState.activeAudioClipCorrelationId = clipMessage.correlationId
+  runtimeState.activeAudioClipMessage = clipMessage
+  runtimeState.remove('activeAudioClipSonosId')
+  runtimeState.audioClipCommandSent = false
+  runtimeState.audioClipHadDisconnectAfterSend = false
+  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
       : new LinkedHashMap<String, Map>()
   clipProgress[clipMessage.correlationId as String] = [
     correlationId: clipMessage.correlationId,
@@ -6164,15 +6421,15 @@ void dequeueAudioClip() {
   ]
   while(clipProgress.size() > 50) {
     String oldestGuid = clipProgress.find { String guid, Map item ->
-      guid != (clipMessage.correlationId as String) && guid != (atomicState.activeAudioClipCorrelationId as String)
+      guid != (clipMessage.correlationId as String) && guid != (runtimeState.activeAudioClipCorrelationId as String)
     }?.key as String
     if(!oldestGuid) { break }
     clipProgress.remove(oldestGuid)
   }
-  atomicState.audioClipProgressByCorrelationId = clipProgress
+  runtimeState.audioClipProgressByCorrelationId = clipProgress
   publishAudioClipProgressEvent(clipProgress[clipMessage.correlationId as String], null)
   logInfo("Dispatching audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, dispatchedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
-  atomicState.audioClipPlaying = true
+  runtimeState.audioClipPlaying = true
   if(!isCurrentlySubcribedToAudioClipWS()) { subscribeToAudioClip() }
   sendWsMessage(clipMessage.leftChannel, [kind: 'audioClip', correlationId: clipMessage.correlationId as String])
   if(clipMessage.rightChannel && rightChannel) {
@@ -6205,12 +6462,36 @@ void playerGetGroupsFull() {
 
 @CompileStatic
 void playerCreateNewGroup() {
-  List playerIds = ["${getId()}".toString()]
-  playerCreateGroup(playerIds)
+  List<String> playerIds = [getId()]
+  List<String> affectedPlayerIds = new ArrayList<String>(getGroupPlayerIds())
+  affectedPlayerIds.add(getId())
+  Map<String, Map> expected = [:]
+  affectedPlayerIds.unique().each { String playerId ->
+    expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]]
+  }
+  markGroupTopologyChangeInProcess(expected)
+  sendCreateGroupRequest(playerIds)
 }
 
 @CompileStatic
 void playerCreateGroup(List<String> playerIds) {
+  List<String> requestedPlayers = (playerIds ?: []).findAll { String id -> id }.unique()
+  String coordinatorId = requestedPlayers ? requestedPlayers[0] : getId()
+  Map<String, Map> expected = [:]
+  requestedPlayers.each { String playerId ->
+    expected[playerId] = [coordinatorId: coordinatorId, memberIds: requestedPlayers]
+  }
+  getGroupPlayerIds().each { String playerId ->
+    if(!expected.containsKey(playerId)) {
+      expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]]
+    }
+  }
+  markGroupTopologyChangeInProcess(expected)
+  sendCreateGroupRequest(requestedPlayers)
+}
+
+@CompileStatic
+void sendCreateGroupRequest(List<String> playerIds) {
   Map command = [
     'namespace':'groups',
     'command':'createGroup',
@@ -6226,7 +6507,32 @@ void playerCreateGroup(List<String> playerIds) {
 }
 
 @CompileStatic
-void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = []) {
+void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = [],
+    Map<String, Map> expectedTopology = null) {
+  List<String> playersToAdd = playerIdsToAdd != null ? playerIdsToAdd : new ArrayList<String>()
+  List<String> playersToRemove = playerIdsToRemove != null ? playerIdsToRemove : new ArrayList<String>()
+  List<String> resultingMembers = new ArrayList<String>(getGroupPlayerIds())
+  resultingMembers.removeAll(playersToRemove)
+  resultingMembers.addAll(playersToAdd)
+  resultingMembers = resultingMembers.unique()
+  String expectedCoordinator = getGroupCoordinatorId()
+  if(!resultingMembers.contains(expectedCoordinator)) {
+    expectedCoordinator = resultingMembers ? resultingMembers[0] : getId()
+  }
+  Map<String, Map> expected = expectedTopology != null
+      ? expectedTopology
+      : [:]
+  if(expectedTopology == null) {
+    resultingMembers.each { String playerId ->
+      expected[playerId] = [coordinatorId: expectedCoordinator, memberIds: resultingMembers]
+    }
+    playersToRemove.each { String playerId ->
+      if(!expected.containsKey(playerId)) {
+        expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]]
+      }
+    }
+  }
+  markGroupTopologyChangeInProcess(expected)
   Map command = [
     'namespace':'groups',
     'command':'modifyGroupMembers',
@@ -6527,13 +6833,13 @@ void processWebsocketMessage(String message) {
       setWsSubscriptionValue("${eventType?.namespace}", 'Subscribed')
     }
     if(eventType?.namespace == 'audioClip') {
-      state.audioClipSubscriptionRequestPending = false
+      runtimeState.audioClipSubscriptionRequestPending = false
       if(eventType?.success == true) {
-        state.audioClipSubscriptionRetryCount = 0
+        runtimeState.audioClipSubscriptionRetryCount = 0
         flushWebsocketOutboundQueue()
         resumeAudioClipAfterSubscription()
-      } else if(atomicState.activeAudioClipCorrelationId && atomicState.audioClipPlaying == true) {
-        logWarn("Audio clip subscription failed while clip ${atomicState.activeAudioClipCorrelationId} is pending; retrying subscription")
+      } else if(runtimeState.activeAudioClipCorrelationId && runtimeState.audioClipPlaying == true) {
+        logWarn("Audio clip subscription failed while clip ${runtimeState.activeAudioClipCorrelationId} is pending; retrying subscription")
         runIn(5, 'retryAudioClipSubscription', [overwrite: true])
       }
     }
@@ -6546,6 +6852,14 @@ void processWebsocketMessage(String message) {
     if(groups != null && groups.size() > 0) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
       if(group == null) {
+        if(shouldHoldTopologyUpdate([coordinatorId: null, memberIds: []])) {
+          pendingTopologyWebsocketByDni.put(dni, message)
+          pendingTopologyKindByDni.put(dni, 'ws')
+          publishGroupTopologyUpdate(null, null, [])
+          scheduleTopologyTimeoutFlush()
+          logTrace('Holding groups websocket topology update until the affected player reaches its expected topology')
+          return
+        }
         logTrace("Player ${getId()} not found in any group")
         publishGroupTopologyUpdate(null, null, [])
         emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
@@ -6557,6 +6871,22 @@ void processWebsocketMessage(String message) {
       String groupName = group?.name?.toString()
       ArrayList<String> playerIds = (ArrayList<String>)group?.playerIds
       String coordinatorId = group?.coordinatorId?.toString()
+
+      Map websocketTopology = [
+        coordinatorId: coordinatorId,
+        memberIds: (playerIds ?: []).toList().sort()
+      ]
+      if(shouldHoldTopologyUpdate(websocketTopology)) {
+        pendingTopologyWebsocketByDni.put(dni, message)
+        pendingTopologyKindByDni.put(dni, 'ws')
+        // This location event feeds the parent's operation observer only; it
+        // does not update player current states or publish membership to group
+        // devices while the topology is between the requested start and end.
+        publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
+        scheduleTopologyTimeoutFlush()
+        logTrace('Holding groups websocket topology update until the affected player reaches its expected topology')
+        return
+      }
 
       // Deduplicate: skip processing if nothing has changed
       String oldGroupId = getGroupId()
@@ -6943,24 +7273,24 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
     ArrayList<Map> audioClips = (ArrayList<Map>)eventData?.audioClips
     String callbackId = UUID.randomUUID().toString()
-    String activeClipId = atomicState.activeAudioClipCorrelationId as String ?: 'none'
+    String activeClipId = runtimeState.activeAudioClipCorrelationId as String ?: 'none'
     List<String> statuses = audioClips?.collect { Map clip ->
       "${clip?.status ?: 'unknown'}:sonosId=${clip?.id ?: 'unknown'}:name=${clip?.name ?: 'unknown'}"
     } ?: []
     logDebug("Audio clip status callback ${callbackId} receivedAt=${now()}, activeClip=${activeClipId}, statuses=${statuses}")
-    Map<String, Map> clipProgress = atomicState.audioClipProgressByCorrelationId instanceof Map
-        ? new LinkedHashMap<String, Map>((Map<String, Map>)atomicState.audioClipProgressByCorrelationId)
+    Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+        ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
         : new LinkedHashMap<String, Map>()
     Boolean matchedCurrentClip = false
     String matchedCurrentStatus = null
-    String callbackActiveClipId = atomicState.activeAudioClipCorrelationId as String
+    String callbackActiveClipId = runtimeState.activeAudioClipCorrelationId as String
     audioClips?.each { Map clip ->
       String clipGuid = clip?.name?.toString()
       if(!clipGuid) { return }
       Map progress = clipProgress[clipGuid]
       if(progress == null && clipGuid == callbackActiveClipId) {
         progress = [correlationId: clipGuid, origin: 'audio-clip', phase: 'DISPATCHED',
-          dispatchedAt: atomicState.audioClipQueueStartTime ?: now()]
+          dispatchedAt: runtimeState.audioClipQueueStartTime ?: now()]
       }
       if(progress == null) { return }
       String clipStatus = clip?.status?.toString()
@@ -6988,21 +7318,21 @@ void processWebsocketMessage(String message) {
       if(clipGuid == callbackActiveClipId) {
         matchedCurrentClip = true
         matchedCurrentStatus = clipStatus
-        if(clip?.id != null) { atomicState.activeAudioClipSonosId = clip.id.toString() }
+        if(clip?.id != null) { runtimeState.activeAudioClipSonosId = clip.id.toString() }
         if(clipStatus == 'ERROR') { logWarn("Audio clip ${clipGuid} returned ERROR status: ${clip}") }
       }
     }
     while(clipProgress.size() > 50) {
       String oldestGuid = clipProgress.find { String guid, Map item ->
-        guid != (atomicState.activeAudioClipCorrelationId as String) && item?.phase != 'DISPATCHED'
+        guid != (runtimeState.activeAudioClipCorrelationId as String) && item?.phase != 'DISPATCHED'
       }?.key as String
       if(!oldestGuid) { break }
       clipProgress.remove(oldestGuid)
     }
-    atomicState.audioClipProgressByCorrelationId = clipProgress
+    runtimeState.audioClipProgressByCorrelationId = clipProgress
     if(matchedCurrentStatus == 'ACTIVE') {
       setAudioClipPlaying(true)
-      atomicState.audioClipHadDisconnectAfterSend = false
+      runtimeState.audioClipHadDisconnectAfterSend = false
       Map activeProgress = clipProgress[callbackActiveClipId]
       Integer activeDuration = coerceClipDuration(activeProgress?.duration)
       if(activeDuration != null && activeDuration > 0) {
@@ -7020,7 +7350,7 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
     if(eventType?.namespace == 'audioClip') {
-      logWarn("Audio clip command '${eventType?.response}' failed for active clip ${atomicState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
+      logWarn("Audio clip command '${eventType?.response}' failed for active clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
     }
     if(eventType?.namespace == 'playback' && eventType?.response == 'stop') {
       if(eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
@@ -7103,7 +7433,8 @@ void processWebsocketMessage(String message) {
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
     Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
-    Boolean groupFavoritePending = state.groupFavoriteOperationId as String
+    Boolean groupFavoritePending = runtimeState.groupFavoriteOperationId as String ||
+        runtimeState.groupTopologyOperationId as String
     if(containerKey == lastKey && !retryPending && !groupFavoritePending) { return }
     lastMetadataContainerId.put(dni, containerKey)
     checkFavAndPlaylist(eventData)
@@ -7206,12 +7537,12 @@ void setChildPlaylists(String html) {
 }
 
 void setAudioClipPlaying(Boolean s) {
-  atomicState.audioClipPlaying = s
+  runtimeState.audioClipPlaying = s
   if(s == false) {
-    logDebug("Audio clip completion/reset for ${atomicState.activeAudioClipCorrelationId ?: 'unknown'} at ${now()}")
+    logDebug("Audio clip completion/reset for ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'} at ${now()}")
     pauseAudioClipWatchdog()
     // Clear currently playing clip when playback finishes successfully
-    atomicState.currentlyPlayingClip = null
+    runtimeState.remove('currentlyPlayingClip')
     dequeueAudioClip()
   }
 }
@@ -7226,44 +7557,28 @@ void addAudioClipCorrelation(Map clipMessage) {
 
 void publishAudioClipProgressEvent(Map progress, String callbackId) {
   if(!(progress instanceof Map) || !progress.correlationId) { return }
-  Map payload = [
-    correlationId: progress.correlationId,
-    origin: progress.origin,
-    phase: progress.phase,
-    sonosStatus: progress.lastStatus,
-    sonosClipId: progress.sonosClipId,
-    callbackId: callbackId ?: progress.lastCallbackId,
-    duration: progress.duration,
-    dispatchCount: progress.dispatchCount,
-    enqueuedAt: progress.enqueuedAt,
-    queuedForSendAt: progress.queuedForSendAt,
-    dispatchedAt: progress.dispatchedAt,
-    sentAt: progress.sentAt,
-    activeAt: progress.activeAt,
-    completedAt: progress.completedAt,
-    failureReason: progress.failureReason,
-    interruptedAt: progress.interruptedAt,
-    observedAt: progress.lastObservedAt ?: now()
-  ]
-  sendDeviceEvent('audioClipPlaybackProgress', JsonOutput.toJson(payload))
+  logTrace("Audio clip ${progress.correlationId} progress: phase=${progress.phase}, status=${progress.lastStatus}, callback=${callbackId ?: progress.lastCallbackId ?: 'n/a'}")
+}
+
+void clearAudioClipPlaybackProgressCurrentState() {
   try {
     device.deleteCurrentState('audioClipPlaybackProgress')
   } catch(Exception e) {
-    logDebug("Could not remove transient audio clip progress state: ${e.message}")
+    logDebug("Could not remove retired audio clip progress state: ${e.message}")
   }
 }
 
 void cancelAudioClipWatchdog() {
   pauseAudioClipWatchdog()
-  atomicState.audioClipPlaying = false
-  atomicState.audioClipCommandSent = false
+  runtimeState.audioClipPlaying = false
+  runtimeState.audioClipCommandSent = false
 }
 
 void pauseAudioClipWatchdog() {
   unschedule('audioClipWatchdog')
-  state.remove('audioClipWatchdogRequestId')
-  atomicState.audioClipQueueStartTime = null
-  atomicState.audioClipQueueTotalDuration = null
+  runtimeState.remove('audioClipWatchdogRequestId')
+  runtimeState.remove('audioClipQueueStartTime')
+  runtimeState.remove('audioClipQueueTotalDuration')
 }
 
 // textToSpeech() returns duration as a String on some TTS providers, so a raw
@@ -7278,14 +7593,14 @@ private Integer coerceClipDuration(Object raw) {
 }
 
 void audioClipCommandSent(String correlationId) {
-  if(!correlationId || correlationId != (atomicState.activeAudioClipCorrelationId as String)) { return }
-  if(atomicState.audioClipCommandSent == true) { return }
+  if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
+  if(runtimeState.audioClipCommandSent == true) { return }
   Long sentAt = now()
-  atomicState.audioClipCommandSent = true
-  atomicState.audioClipSentAt = sentAt
-  atomicState.audioClipQueueStartTime = sentAt
-  Map<String, Map> clipProgress = atomicState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)atomicState.audioClipProgressByCorrelationId)
+  runtimeState.audioClipCommandSent = true
+  runtimeState.audioClipSentAt = sentAt
+  runtimeState.audioClipQueueStartTime = sentAt
+  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId]
   if(progress == null) { progress = [correlationId: correlationId] }
@@ -7293,10 +7608,10 @@ void audioClipCommandSent(String correlationId) {
   progress.dispatchedAt = sentAt
   progress.sentAt = sentAt
   clipProgress[correlationId] = progress
-  atomicState.audioClipProgressByCorrelationId = clipProgress
+  runtimeState.audioClipProgressByCorrelationId = clipProgress
   publishAudioClipProgressEvent(progress, null)
   logInfo("Sent audio clip ${correlationId} over WebSocket at ${sentAt}; waiting ${AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS}s for matching ACTIVE status")
-  if(atomicState.audioClipHadDisconnectAfterSend != true) {
+  if(runtimeState.audioClipHadDisconnectAfterSend != true) {
     scheduleAudioClipWatchdog(correlationId, 'WAITING_FOR_ACTIVE', sentAt + (AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS * 1000L))
   }
 }
@@ -7308,27 +7623,27 @@ void scheduleAudioClipDoneWatchdog(String correlationId, Long startAt, Integer d
 }
 
 void scheduleAudioClipWatchdog(String correlationId, String phase, Long deadline) {
-  if(!correlationId || correlationId != (atomicState.activeAudioClipCorrelationId as String)) { return }
+  if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
   String watchdogId = UUID.randomUUID().toString()
   Long deadlineAt = deadline ?: now()
   Integer delaySeconds = Math.max(1, (int)Math.ceil((deadlineAt - now()) / 1000.0d))
-  state.audioClipWatchdogRequestId = watchdogId
-  atomicState.audioClipQueueStartTime = phase == 'WAITING_FOR_ACTIVE'
-      ? (atomicState.audioClipSentAt as Long) : (atomicState.audioClipQueueStartTime as Long)
-  atomicState.audioClipQueueTotalDuration = delaySeconds
+  runtimeState.audioClipWatchdogRequestId = watchdogId
+  runtimeState.audioClipQueueStartTime = phase == 'WAITING_FOR_ACTIVE'
+      ? (runtimeState.audioClipSentAt as Long) : (runtimeState.audioClipQueueStartTime as Long)
+  runtimeState.audioClipQueueTotalDuration = delaySeconds
   logDebug("Scheduled audio clip watchdog guid=${correlationId} phase=${phase} watchdog=${watchdogId} deadline=${deadlineAt} firesIn=${delaySeconds}s")
   runIn(delaySeconds, 'audioClipWatchdog', [overwrite: true,
     data: [correlationId: correlationId, watchdogId: watchdogId, phase: phase]])
 }
 
 void resumeAudioClipAfterSubscription() {
-  String correlationId = atomicState.activeAudioClipCorrelationId as String
-  if(!correlationId || atomicState.audioClipPlaying != true || atomicState.audioClipCommandSent != true) { return }
+  String correlationId = runtimeState.activeAudioClipCorrelationId as String
+  if(!correlationId || runtimeState.audioClipPlaying != true || runtimeState.audioClipCommandSent != true) { return }
   Long connectedAt = now()
-  Boolean wasDisconnectedAfterSend = atomicState.audioClipHadDisconnectAfterSend == true
-  atomicState.audioClipHadDisconnectAfterSend = false
-  Map<String, Map> clipProgress = atomicState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)atomicState.audioClipProgressByCorrelationId)
+  Boolean wasDisconnectedAfterSend = runtimeState.audioClipHadDisconnectAfterSend == true
+  runtimeState.audioClipHadDisconnectAfterSend = false
+  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId] ?: [:]
   Integer duration = coerceClipDuration(progress.duration)
@@ -7347,7 +7662,7 @@ void resumeAudioClipAfterSubscription() {
   if(duration != null && duration > 0) {
     // The command was already sent before disconnection. Reconcile by GUID,
     // then wait through its expected playback window; never resend it.
-    scheduleAudioClipDoneWatchdog(correlationId, (atomicState.audioClipSentAt ?: connectedAt) as Long, duration)
+    scheduleAudioClipDoneWatchdog(correlationId, (runtimeState.audioClipSentAt ?: connectedAt) as Long, duration)
   } else {
     scheduleAudioClipWatchdog(correlationId, 'WAITING_FOR_ACTIVE',
       connectedAt + (AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS * 1000L))
@@ -7358,21 +7673,21 @@ void audioClipWatchdog(Map data = [:]) {
   String correlationId = data?.correlationId as String
   String watchdogId = data?.watchdogId as String
   String phase = data?.phase as String
-  if(atomicState.audioClipPlaying != true || !correlationId ||
-      correlationId != (atomicState.activeAudioClipCorrelationId as String) ||
-      !watchdogId || watchdogId != state.audioClipWatchdogRequestId) {
+  if(runtimeState.audioClipPlaying != true || !correlationId ||
+      correlationId != (runtimeState.activeAudioClipCorrelationId as String) ||
+      !watchdogId || watchdogId != runtimeState.audioClipWatchdogRequestId) {
     logTrace("Ignoring stale audio clip watchdog guid=${correlationId ?: 'unknown'} watchdog=${watchdogId ?: 'unknown'}")
     return
   }
   if(!isWebsocketConnected()) {
-    atomicState.audioClipHadDisconnectAfterSend = atomicState.audioClipCommandSent == true
+    runtimeState.audioClipHadDisconnectAfterSend = runtimeState.audioClipCommandSent == true
     pauseAudioClipWatchdog()
     logDebug("Pausing audio clip watchdog for ${correlationId} while WebSocket is disconnected")
     return
   }
   if(phase == 'WAITING_FOR_ACTIVE') {
-    Map<String, Map> progressMap = atomicState.audioClipProgressByCorrelationId instanceof Map
-        ? (Map<String, Map>)atomicState.audioClipProgressByCorrelationId : [:]
+    Map<String, Map> progressMap = runtimeState.audioClipProgressByCorrelationId instanceof Map
+        ? (Map<String, Map>)runtimeState.audioClipProgressByCorrelationId : [:]
     Map progress = progressMap[correlationId]
     if(progress?.phase in ['ACTIVE', 'DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) { return }
     markAudioClipWatchdogFailure(correlationId, 'FAILED_ACTIVE_TIMEOUT',
@@ -7380,8 +7695,8 @@ void audioClipWatchdog(Map data = [:]) {
     return
   }
   if(phase == 'WAITING_FOR_DONE') {
-    Map<String, Map> progressMap = atomicState.audioClipProgressByCorrelationId instanceof Map
-        ? (Map<String, Map>)atomicState.audioClipProgressByCorrelationId : [:]
+    Map<String, Map> progressMap = runtimeState.audioClipProgressByCorrelationId instanceof Map
+        ? (Map<String, Map>)runtimeState.audioClipProgressByCorrelationId : [:]
     Map progress = progressMap[correlationId]
     if(progress?.phase in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) { return }
     markAudioClipWatchdogFailure(correlationId, 'FAILED_DONE_TIMEOUT', 'No matching DONE status before the expected-duration deadline')
@@ -7389,15 +7704,15 @@ void audioClipWatchdog(Map data = [:]) {
 }
 
 void markAudioClipWatchdogFailure(String correlationId, String phase, String detail) {
-  Map<String, Map> clipProgress = atomicState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)atomicState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId] ?: [correlationId: correlationId]
   progress.phase = phase
   progress.failureReason = detail
   progress.completedAt = now()
   clipProgress[correlationId] = progress
-  atomicState.audioClipProgressByCorrelationId = clipProgress
+  runtimeState.audioClipProgressByCorrelationId = clipProgress
   publishAudioClipProgressEvent(progress, null)
   logWarn("Audio clip ${correlationId} ${phase}: ${detail}; advancing queue without replay")
   setAudioClipPlaying(false)
@@ -7430,12 +7745,12 @@ void isFavoritePlaying(Map json) {
     retryState.metadataConfirmed = (isFav || isFavAlt) && foundFavId == retryState.favoriteId?.toString()
   }
 
-  String groupOperationId = state.groupFavoriteOperationId as String
-  if(groupOperationId && getIsGroupCoordinator() == true) {
+  String groupOperationId = runtimeState.groupFavoriteOperationId as String
+  if(groupOperationId && runtimeState.groupFavoriteOperationFavoriteId && getIsGroupCoordinator() == true) {
     emitGroupFavoriteOperationEvent('metadataConfirmed', [
       favoriteId: foundFavId,
-      confirmed: (isFav || isFavAlt) && foundFavId == state.groupFavoriteOperationFavoriteId?.toString(),
-      groupId: state.groupFavoriteOperationGroupId as String
+      confirmed: (isFav || isFavAlt) && foundFavId == runtimeState.groupFavoriteOperationFavoriteId?.toString(),
+      groupId: runtimeState.groupFavoriteOperationGroupId as String
     ])
   }
 

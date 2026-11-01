@@ -2,6 +2,7 @@ package dwinks.hubitat.functional
 
 import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
+import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import spock.lang.Shared
 import spock.lang.Specification
@@ -33,7 +34,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.unschedules.clear()
     websocketMessages.clear()
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.runtimeState.clear()
     driver.state.clear()
+    driver.binding.setVariable('atomicState', [:])
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
     driver.device.events.clear()
@@ -48,8 +51,15 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingGroupedPlayerVolumes.clear()
     driver.groupDeviceUpdateRetryAttempts.clear()
     driver.pendingGroupDeviceUpdates.clear()
+    driver.pendingTopologyXmlByDni.clear()
+    driver.pendingTopologyWebsocketByDni.clear()
+    driver.pendingTopologyKindByDni.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
+  }
+
+  def cleanup() {
+    GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
   }
 
   def "ZGT XML guards reject blank outer and nested payloads"() {
@@ -65,6 +75,120 @@ class SonosAdvPlayerSpec extends Specification {
       '<propertyset><property><ZoneGroupState>   </ZoneGroupState></property></propertyset>',
       new LinkedHashSet<String>()
     )
+  }
+
+  def "topology change holds only affected player until its expected topology arrives"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.markGroupTopologyChangeInProcess([
+      'RINCON_TEST': [coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST']],
+      'RINCON_OTHER': [coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER']]
+    ])
+    driver.metaClass.getZoneGroupTopologyForPlayer = { String xml, String playerId ->
+      xml == '<topology>final</topology>'
+        ? [coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST']]
+        : [coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER']]
+    }
+    driver.metaClass.processZoneGroupTopologyMessages = { String xml, LinkedHashSet oldMembers ->
+      driver.runtimeState.appliedTopologyXml = xml
+      true
+    }
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>intermediate</topology>')
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>final</topology>')
+
+    then:
+    driver.runtimeState.appliedTopologyXml == '<topology>final</topology>'
+    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+    driver.device.dataValues.expectedGroupTopology == ''
+  }
+
+  def "coordinator transfer retains the requested final topology expectation"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_OLD_COORD'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_OLD_COORD'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_OLD_COORD,RINCON_NEW_COORD'
+    Map<String, Map> finalTopology = [
+      'RINCON_OLD_COORD': [coordinatorId: 'RINCON_NEW_COORD', memberIds: ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']],
+      'RINCON_NEW_COORD': [coordinatorId: 'RINCON_NEW_COORD', memberIds: ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']]
+    ]
+
+    when:
+    driver.playerModifyGroupMembers([], ['RINCON_NEW_COORD'], finalTopology)
+
+    then:
+    Map expected = new JsonSlurper().parseText(driver.device.dataValues.expectedGroupTopology) as Map
+    expected.coordinatorId == 'RINCON_NEW_COORD'
+    expected.memberIds == ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']
+    expected.expiresAt > driver.now()
+    websocketMessages.any { String message -> message.contains('modifyGroupMembers') }
+  }
+
+  def "unrelated player's topology updates are not held"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.device.dataValues.id = 'RINCON_UNRELATED'
+    driver.metaClass.processZoneGroupTopologyMessages = { String xml, LinkedHashSet oldMembers ->
+      driver.runtimeState.appliedTopologyXml = xml
+      true
+    }
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>unrelated-current</topology>')
+
+    then:
+    driver.runtimeState.appliedTopologyXml == '<topology>unrelated-current</topology>'
+    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+  }
+
+  def "expired expected topology releases the most recent pending snapshot"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.device.dataValues.expectedGroupTopology = groovy.json.JsonOutput.toJson([
+      coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: (driver.now() as Long) - 1L
+    ])
+    driver.pendingTopologyXmlByDni['SONOS-TEST-DNI'] = '<topology>latest</topology>'
+    driver.pendingTopologyKindByDni['SONOS-TEST-DNI'] = 'zgt'
+    driver.metaClass.processZoneGroupTopologyMessages = { String xml, LinkedHashSet oldMembers ->
+      driver.runtimeState.appliedTopologyXml = xml
+      true
+    }
+
+    when:
+    driver.flushPendingTopologyUpdates()
+
+    then:
+    driver.runtimeState.appliedTopologyXml == '<topology>latest</topology>'
+    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+    driver.device.dataValues.expectedGroupTopology == ''
+  }
+
+  def "held groups websocket topology is reported to the parent without publishing player states"() {
+    given:
+    driver.device.currentValues.groupCoordinatorId = 'RINCON_OLD_COORD'
+    driver.device.currentValues.isGrouped = 'on'
+    driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson([
+      coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER', 'RINCON_TEST'],
+      expiresAt: (driver.now() as Long) + 15000L
+    ])
+    String message = JsonOutput.toJson([
+      [namespace: 'groups', name: 'groups', type: 'groups'],
+      [groups: [[id: 'RINCON_TEST:100', coordinatorId: 'RINCON_TEST',
+        playerIds: ['RINCON_TEST'], name: 'Test Player']], players: []]
+    ])
+
+    when:
+    driver.processWebsocketMessage(message)
+
+    then:
+    driver.device.currentValues.groupCoordinatorId == 'RINCON_OLD_COORD'
+    driver.device.currentValues.isGrouped == 'on'
+    Map topologyReport = driver.locationEvents.find { Map event -> event.data?.kind == 'topology' }?.data
+    topologyReport.groupId == 'RINCON_TEST:100'
+    topologyReport.coordinatorId == 'RINCON_TEST'
+    topologyReport.playerIds == ['RINCON_TEST']
+    driver.device.events.every { Map event -> event.name != 'groupCoordinatorId' }
   }
 
   def "logging level controls player log output"() {
@@ -90,18 +214,34 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "stale audio clip watchdog does not reset active playback state"() {
     given:
-    driver.binding.setVariable('atomicState', driver.state)
-    driver.state.audioClipPlaying = true
-    driver.state.audioClipQueueStartTime = null
-    driver.state.audioClipQueueTotalDuration = null
+    driver.runtimeState.audioClipPlaying = true
+    driver.runtimeState.remove('audioClipQueueStartTime')
+    driver.runtimeState.remove('audioClipQueueTotalDuration')
 
     when:
     driver.audioClipWatchdog()
 
     then:
-    driver.state.audioClipPlaying == true
+    driver.runtimeState.audioClipPlaying == true
     driver.logs.any { String entry -> entry.contains('Ignoring stale audio clip watchdog guid=unknown watchdog=unknown') }
     driver.logs.every { String entry -> !entry.contains('Audio clip watchdog fired') }
+  }
+
+  def "legacy player state migrates to the DNI runtime map and is cleared from Hubitat state"() {
+    given:
+    driver.state.audioClipPlaying = true
+    driver.state.parentCommandSequence = 4
+    driver.binding.setVariable('atomicState', [wsRetryCount: 2])
+
+    when:
+    driver.migrateLegacyRuntimeState()
+
+    then:
+    driver.runtimeState.audioClipPlaying == true
+    driver.runtimeState.parentCommandSequence == 4
+    driver.runtimeState.wsRetryCount == 2
+    driver.state.empty
+    driver.binding.getVariable('atomicState').empty
   }
 
   def "favorite lookup finds an item by Sonos favorite ID instead of map key"() {
@@ -407,7 +547,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.scheduled.find { List call -> call[1] == 'drainParentCoordinatorCommandQueue' }?.getAt(0) == 1
-    driver.state.pendingParentCoordinatorCommands[0].command == 'setGroupVolume'
+    driver.runtimeState.pendingParentCoordinatorCommands[0].command == 'setGroupVolume'
     websocketMessages.empty
   }
 
@@ -416,8 +556,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.addPlayerToGroup('  Bedroom  ')
 
     then:
-    driver.state.pendingParentCoordinatorCommands[0].command == 'addPlayerToGroup'
-    driver.state.pendingParentCoordinatorCommands[0].args == ['Bedroom']
+    driver.runtimeState.pendingParentCoordinatorCommands[0].command == 'addPlayerToGroup'
+    driver.runtimeState.pendingParentCoordinatorCommands[0].args == ['Bedroom']
     websocketMessages.empty
   }
 
@@ -428,13 +568,13 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.drainParentCoordinatorCommandQueue()
-    Map first = (Map)driver.state.activeParentCoordinatorCommand
+    Map first = (Map)driver.runtimeState.activeParentCoordinatorCommand
     driver.acknowledgeParentCommand(first.requestId as String)
 
     then:
     first.command == 'muteGroup'
-    driver.state.pendingParentCoordinatorCommands.size() == 1
-    !driver.state.activeParentCoordinatorCommand
+    driver.runtimeState.pendingParentCoordinatorCommands.size() == 1
+    !driver.runtimeState.activeParentCoordinatorCommand
     driver.scheduled.any { List call -> call[1] == 'drainParentCoordinatorCommandQueue' }
   }
 
@@ -489,12 +629,14 @@ class SonosAdvPlayerSpec extends Specification {
     payload[0].namespace == 'favorites'
     payload[0].command == 'loadFavorite'
     payload[0].groupId == 'GROUP-VERIFIED'
-    driver.state.groupFavoriteOperationId == 'group-op-1'
-    driver.state.groupFavoriteOperationAttemptId == 'group-op-1:1'
-    ((Map)new JsonSlurper().parseText(driver.device.events.find { Map event ->
+    driver.runtimeState.groupFavoriteOperationId == 'group-op-1'
+    driver.runtimeState.groupFavoriteOperationAttemptId == 'group-op-1:1'
+    String bridgeValue = driver.device.events.find { Map event ->
       event.name == 'groupFavoriteOperation'
-    }.value as String)).attemptId == 'group-op-1:1'
-    !driver.device.currentValues.containsKey('groupFavoriteOperation')
+    }.value as String
+    ((Map)new JsonSlurper().parseText(bridgeValue.replaceAll('(?is)<[^>]+>', ''))).attemptId == 'group-op-1:1'
+    driver.device.currentValues.groupFavoriteOperation == bridgeValue
+    bridgeValue.startsWith('<span style="display:none">')
     driver.scheduled.every { List call -> call[1] != 'playerPlay' }
   }
 
@@ -512,7 +654,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "websocket commands queue until the socket is open and flush in order"() {
     given:
     driver.device.dataValues.websocketStatus = 'closed'
-    driver.state.remove('websocketConnectPending')
+    driver.runtimeState.remove('websocketConnectPending')
 
     when:
     driver.sendWsMessage('first-command')
@@ -520,7 +662,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     websocketMessages.empty
-    driver.state.websocketOutboundQueue*.message == ['first-command', 'second-command']
+    driver.runtimeState.websocketOutboundQueue*.message == ['first-command', 'second-command']
 
     when:
     driver.setWebSocketStatus('open')
@@ -532,7 +674,7 @@ class SonosAdvPlayerSpec extends Specification {
     subscriptionIndex >= 0
     firstCommandIndex > subscriptionIndex
     secondCommandIndex > firstCommandIndex
-    driver.state.websocketOutboundQueue == null
+    driver.runtimeState.websocketOutboundQueue == null
   }
 
   def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {

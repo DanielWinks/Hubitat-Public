@@ -32,6 +32,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.unschedules.clear()
     driver.events.clear()
     driver.locationEvents.clear()
+    driver.runtimeState.clear()
     driver.state.clear()
     driver.device.deviceNetworkId = 'SONOS-GROUP-TEST-DNI'
     driver.device.dataValues.clear()
@@ -48,9 +49,9 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.size() == 1
     driver.scheduled[0][0] == 1
     driver.scheduled[0][1] == 'drainGroupCommandQueue'
-    driver.state.pendingGroupCommands[0].command == 'on'
-    driver.state.pendingGroupCommands[0].groupDni == 'SONOS-GROUP-TEST-DNI'
-    driver.state.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
+    driver.runtimeState.pendingGroupCommands[0].command == 'on'
+    driver.runtimeState.pendingGroupCommands[0].groupDni == 'SONOS-GROUP-TEST-DNI'
+    driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
   }
 
   def "joinPlayersToCoordinator publishes an additive grouping request"() {
@@ -58,8 +59,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.joinPlayersToCoordinator()
 
     then:
-    driver.state.pendingGroupCommands[0].command == 'joinPlayersToCoordinator'
-    driver.state.pendingGroupCommands[0].args.groupingMode == 'ADDITIVE'
+    driver.runtimeState.pendingGroupCommands[0].command == 'joinPlayersToCoordinator'
+    driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'ADDITIVE'
   }
 
   def "addPlayerToGroup queues only the supplied player identifier"() {
@@ -67,8 +68,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.addPlayerToGroup('Bedroom')
 
     then:
-    driver.state.pendingGroupCommands[0].command == 'addPlayerToGroup'
-    driver.state.pendingGroupCommands[0].args == [playerIdentifier: 'Bedroom']
+    driver.runtimeState.pendingGroupCommands[0].command == 'addPlayerToGroup'
+    driver.runtimeState.pendingGroupCommands[0].args == [playerIdentifier: 'Bedroom']
   }
 
   def "groupPlayers publishes an explicit request without the legacy ungroup delay"() {
@@ -76,8 +77,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.groupPlayers()
 
     then:
-    driver.state.pendingGroupCommands[0].command == 'groupPlayers'
-    driver.state.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
+    driver.runtimeState.pendingGroupCommands[0].command == 'groupPlayers'
+    driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
     driver.scheduled.every { List call -> call[1] != 'regroupSafetyTimeout' }
   }
 
@@ -86,8 +87,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.evictUnlistedPlayers()
 
     then:
-    driver.state.pendingGroupCommands[0].command == 'evictUnlistedPlayers'
-    driver.state.pendingGroupCommands[0].args == [
+    driver.runtimeState.pendingGroupCommands[0].command == 'evictUnlistedPlayers'
+    driver.runtimeState.pendingGroupCommands[0].args == [
       groupingMode: 'EXPLICIT', evictUnlistedOnly: true
     ]
   }
@@ -97,7 +98,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.refresh()
 
     then:
-    driver.state.pendingGroupCommands[0].command == 'refresh'
+    driver.runtimeState.pendingGroupCommands[0].command == 'refresh'
     driver.events.empty
   }
 
@@ -126,13 +127,13 @@ class SonosAdvGroupSpec extends Specification {
 
     when:
     driver.drainGroupCommandQueue()
-    Map first = (Map)driver.state.activeGroupCommandRequest
+    Map first = (Map)driver.runtimeState.activeGroupCommandRequest
     driver.acknowledgeGroupCommand(first.requestId as String)
 
     then:
     first.command == 'speak'
-    driver.state.pendingGroupCommands.size() == 1
-    !driver.state.activeGroupCommandRequest
+    driver.runtimeState.pendingGroupCommands.size() == 1
+    !driver.runtimeState.activeGroupCommandRequest
     driver.scheduled.any { List call -> call[1] == 'drainGroupCommandQueue' }
   }
 
@@ -141,8 +142,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.setVolumeZero()
 
     then:
-    driver.state.pendingGroupCommands[0].command == 'setVolume'
-    driver.state.pendingGroupCommands[0].args.level == 0
+    driver.runtimeState.pendingGroupCommands[0].command == 'setVolume'
+    driver.runtimeState.pendingGroupCommands[0].args.level == 0
   }
 
   def "group operation status records the selected grouping mode"() {
@@ -150,10 +151,39 @@ class SonosAdvGroupSpec extends Specification {
     driver.updateGroupOperationStatus('{"status":"SUCCEEDED"}', 'ADDITIVE')
 
     then:
-    driver.state.lastGroupingMode == 'ADDITIVE'
+    driver.runtimeState.lastGroupingMode == 'ADDITIVE'
     driver.device.dataValues.lastGroupingMode == 'ADDITIVE'
     driver.events.find { Map event -> event.name == 'groupingMode' } == null
     driver.events.find { Map event -> event.name == 'groupOperationStatus' } == null
+  }
+
+  def "legacy group state migrates to the DNI runtime map and is cleared from Hubitat state"() {
+    given:
+    driver.state.groupCommandSequence = 7
+    driver.state.pendingRegroup = true
+
+    when:
+    driver.migrateLegacyRuntimeState()
+
+    then:
+    driver.runtimeState.groupCommandSequence == 7
+    driver.runtimeState.pendingRegroup == true
+    driver.state.empty
+  }
+
+  def "refresh migrates legacy group variables before queuing its parent request"() {
+    given:
+    driver.state.groupCommandSequence = 8
+    driver.state.pendingRegroup = true
+
+    when:
+    driver.refresh()
+
+    then:
+    driver.state.empty
+    driver.runtimeState.groupCommandSequence == 8
+    driver.runtimeState.pendingRegroup == true
+    driver.runtimeState.pendingGroupCommands.last().command == 'refresh'
   }
 
   def "explicit refresh hydrates legacy playback states while group is inactive"() {

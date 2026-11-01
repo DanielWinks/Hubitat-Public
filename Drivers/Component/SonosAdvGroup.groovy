@@ -63,6 +63,7 @@ void logTrace(String message) {
 }
 
 @Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, Long> lastGroupDeviceVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Map<String, Object>> heldPlaybackState = new ConcurrentHashMap<String, Map<String, Object>>()
 @Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
@@ -249,7 +250,7 @@ void setLastGroupingMode(String groupingMode) {
   if(groupingMode != GROUPING_MODE_EXPLICIT && groupingMode != GROUPING_MODE_ADDITIVE) {
     return
   }
-  state.lastGroupingMode = groupingMode
+  runtimeState.lastGroupingMode = groupingMode
   // Keep the mode available to the parent app without creating a device
   // current-state attribute. Data values are not rendered as current states.
   device.updateDataValue('lastGroupingMode', groupingMode)
@@ -279,28 +280,28 @@ void requestGroupCommand(String command, Map args = [:]) {
   if(!command) {
     return
   }
-  Integer sequence = ((state.groupCommandSequence ?: 0) as Integer) + 1
-  state.groupCommandSequence = sequence
+  Integer sequence = ((runtimeState.groupCommandSequence ?: 0) as Integer) + 1
+  runtimeState.groupCommandSequence = sequence
   Map payload = [
     groupDni: device.getDeviceNetworkId(),
     requestId: "${device.getDeviceNetworkId()}-${sequence}",
     command: command,
     args: args ?: [:]
   ]
-  List<Map> pending = state.pendingGroupCommands instanceof List ? (List<Map>)state.pendingGroupCommands : []
+  List<Map> pending = runtimeState.pendingGroupCommands instanceof List ? (List<Map>)runtimeState.pendingGroupCommands : []
   pending.add(payload)
-  state.pendingGroupCommands = pending
+  runtimeState.pendingGroupCommands = pending
   logDebug("Queued group command ${command} (${payload.requestId}); pending=${pending.size()}")
   runIn(1, 'drainGroupCommandQueue', [overwrite: true])
 }
 
 void drainGroupCommandQueue() {
-  if(state.activeGroupCommandRequest instanceof Map) { return }
-  List<Map> pending = state.pendingGroupCommands instanceof List ? (List<Map>)state.pendingGroupCommands : []
+  if(runtimeState.activeGroupCommandRequest instanceof Map) { return }
+  List<Map> pending = runtimeState.pendingGroupCommands instanceof List ? (List<Map>)runtimeState.pendingGroupCommands : []
   if(pending.isEmpty()) { return }
   Map payload = pending.remove(0)
-  state.pendingGroupCommands = pending
-  state.activeGroupCommandRequest = payload
+  runtimeState.pendingGroupCommands = pending
+  runtimeState.activeGroupCommandRequest = payload
   emitGroupCommandRequest(payload)
 }
 
@@ -313,7 +314,7 @@ void emitGroupCommandRequest(Map data) {
 }
 
 void retryActiveGroupCommandRequest() {
-  Map payload = state.activeGroupCommandRequest instanceof Map ? (Map)state.activeGroupCommandRequest : null
+  Map payload = runtimeState.activeGroupCommandRequest instanceof Map ? (Map)runtimeState.activeGroupCommandRequest : null
   if(payload) {
     logWarn("Retrying unacknowledged group command ${payload.command} (${payload.requestId})")
     emitGroupCommandRequest(payload)
@@ -321,10 +322,10 @@ void retryActiveGroupCommandRequest() {
 }
 
 void acknowledgeGroupCommand(String requestId) {
-  Map active = state.activeGroupCommandRequest instanceof Map ? (Map)state.activeGroupCommandRequest : null
+  Map active = runtimeState.activeGroupCommandRequest instanceof Map ? (Map)runtimeState.activeGroupCommandRequest : null
   if(!active || !requestId || requestId != active.requestId) { return }
   unschedule('retryActiveGroupCommandRequest')
-  state.remove('activeGroupCommandRequest')
+  runtimeState.remove('activeGroupCommandRequest')
   logDebug("Parent acknowledged group command ${active.command} (${requestId})")
   runIn(1, 'drainGroupCommandQueue', [overwrite: true])
 }
@@ -395,6 +396,7 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 
 
 void initialize() {
+  migrateLegacyRuntimeState()
   removeDeprecatedGroupStates()
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
   if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
@@ -413,21 +415,48 @@ void updated() {
 void uninstalled() {
   unschedule()
   String dni = device.getDeviceNetworkId()
+  runtimeStateByDni.remove(dni)
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
   heldPlaybackState.remove(dni)
 }
 
 void configure() {
+  migrateLegacyRuntimeState()
   removeDeprecatedGroupStates()
-  Boolean wasGuarded = state.lastOnlyUpdateWhenActive != false
+  Boolean wasGuarded = runtimeState.lastOnlyUpdateWhenActive != false
   Boolean isGuarded = getOnlyUpdateWhenActiveSetting()
-  state.lastOnlyUpdateWhenActive = isGuarded
+  runtimeState.lastOnlyUpdateWhenActive = isGuarded
   if(!isGuarded && wasGuarded) {
     // Guard just disabled — clear held state and refresh to populate skipped attributes
     clearHeldState()
     runIn(2, 'refresh')
   }
+}
+
+ConcurrentHashMap<String, Object> getRuntimeState() {
+  String dni = device?.getDeviceNetworkId()
+  if(!dni) { return new ConcurrentHashMap<String, Object>() }
+  ConcurrentHashMap<String, Object> runtime = runtimeStateByDni.get(dni)
+  if(runtime != null) { return runtime }
+  ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
+  ConcurrentHashMap<String, Object> existing = runtimeStateByDni.putIfAbsent(dni, created)
+  return existing ?: created
+}
+
+void migrateLegacyRuntimeState() {
+  Map<String, Object> legacy = [:]
+  try {
+    legacy.putAll(state as Map<String, Object>)
+  } catch(Exception e) {
+    logWarn("Could not read legacy group device state for migration: ${e.message}")
+    return
+  }
+  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
+  legacy.each { String key, Object value ->
+    if(value != null) { runtime.putIfAbsent(key, value) }
+  }
+  state.clear()
 }
 void on() {
   setLastGroupingMode(GROUPING_MODE_EXPLICIT)
@@ -436,8 +465,11 @@ void on() {
   requestGroupCommand('on', args)
 }
 void off() { requestGroupCommand('off', getGroupCommandSettings()) }
-void setState(String stateName, String stateValue) { state[stateName] = stateValue }
-void clearState() { state.clear() }
+void setState(String stateName, String stateValue) {
+  if(stateValue == null) { runtimeState.remove(stateName) }
+  else { runtimeState[stateName] = stateValue }
+}
+void clearState() { runtimeState.clear() }
 void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
@@ -547,8 +579,8 @@ void createGroupAfterUngroup() {
 }
 
 void regroupSafetyTimeout() {
-  if(!state.pendingRegroup) { return }
-  state.remove('pendingRegroup')
+  if(!runtimeState.pendingRegroup) { return }
+  runtimeState.remove('pendingRegroup')
   logWarn('Regroup safety timeout reached — WebSocket group event did not arrive within 10 seconds. Attempting regroup anyway.')
   createGroupAfterUngroup()
 }
@@ -775,6 +807,7 @@ void unmute() {
  * otherwise calculates average from individual player volumes
  */
 void refresh() {
+  migrateLegacyRuntimeState()
   requestGroupCommand('refresh', getGroupCommandSettings())
 }
 
@@ -952,8 +985,8 @@ private void resetPlaybackAttributes() {
 }
 
 private void handleLocalGroupDeactivation() {
-  if(state.pendingRegroup) {
-    state.remove('pendingRegroup')
+  if(runtimeState.pendingRegroup) {
+    runtimeState.remove('pendingRegroup')
     unschedule('regroupSafetyTimeout')
     createGroupAfterUngroup()
   }

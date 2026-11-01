@@ -3510,7 +3510,8 @@ Boolean isPlaybackCommandThatWaitsForTopology(String command) {
   return command in [
     'play', 'pause', 'stop', 'nextTrack', 'previousTrack', 'playTrack', 'setTrack',
     'playAudioClip', 'playHighPriorityTrack', 'enqueueLowPriorityTrack',
-    'loadPlaylist', 'loadPlaylistFull'
+    'loadPlaylist', 'loadPlaylistFull', 'setRepeatMode', 'repeatOne', 'repeatAll', 'repeatNone',
+    'setShuffle', 'shuffleOn', 'shuffleOff', 'setCrossfade', 'enableCrossfade', 'disableCrossfade'
   ]
 }
 
@@ -3519,7 +3520,8 @@ Boolean isPlayerPlaybackCommandThatWaitsForGroupOperation(String command) {
     'play', 'pause', 'stop', 'nextTrack', 'previousTrack', 'setTrack', 'selectLineIn', 'selectTV', 'playTrack',
     'playHighPriorityTrack', 'loadAudioClip', 'loadHighPriorityAudioClip',
     'speak', 'speakNoRestore', 'playHighPriorityTTS',
-    'loadFavoriteFull', 'loadPlaylistFull'
+    'loadFavoriteFull', 'loadPlaylistFull', 'setRepeatMode', 'repeatOne', 'repeatAll', 'repeatNone',
+    'setShuffle', 'shuffleOn', 'shuffleOff', 'setCrossfade', 'enableCrossfade', 'disableCrossfade'
   ]
 }
 
@@ -3673,12 +3675,12 @@ Map buildGroupOperationTarget(ChildDeviceWrapper groupDevice, String groupingMod
   ChildDeviceWrapper configuredCoordinator = configuredCoordinatorId ? rinconMap[configuredCoordinatorId] : null
   ChildDeviceWrapper activeCoordinator = resolveGroupCommandCoordinator(configuredCoordinator, requiredPlayerIds, rinconMap)
   ChildDeviceWrapper selectedCoordinator
-  if(groupingMode == GROUPING_MODE_EXPLICIT) {
+  if(groupingMode in [GROUPING_MODE_EXPLICIT, GROUPING_MODE_ADDITIVE]) {
+    // Both saved-group commands have a configured coordinator. Additive
+    // membership may preserve extra players, but it must not select a
+    // different coordinator just because another member is currently leader.
     selectedCoordinator = configuredCoordinator ?: activeCoordinator
   } else {
-    // Additive/current operations continue using the live coordinator when
-    // one of the configured players identifies it. They never change the
-    // coordinator merely to satisfy the configured group definition.
     selectedCoordinator = activeCoordinator ?: configuredCoordinator
   }
   String selectedId = selectedCoordinator?.getDataValue('id') as String
@@ -3759,6 +3761,65 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
   return operation
 }
 
+/**
+ * Store the expected end topology on each affected player device. Device data
+ * values are shared with that device's driver instance and are hidden from the
+ * Current States table.
+ */
+void setExpectedTopologyForPlayers(Map<String, Map> expectedByRincon, String operationId, Long expiresAt) {
+  if(expectedByRincon == null || expectedByRincon.isEmpty()) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  Map<String, Map> completeExpectation = [:]
+  expectedByRincon.each { String playerId, Map topology ->
+    if(playerId && topology != null) {
+      completeExpectation[playerId] = new LinkedHashMap(topology)
+    }
+  }
+
+  // When moving one or more members out of their previous groups, retain an
+  // expectation for the members left behind too. Their remaining group should
+  // not be held open or briefly published with the moved players still listed.
+  Set<String> transitioningPlayers = new LinkedHashSet<String>(completeExpectation.keySet())
+  transitioningPlayers.toList().each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player == null) { return }
+    List<String> previousMembers = normalizeGroupPlayerIds(player.getDataValue('groupPlayerIds'))
+    List<String> remainingMembers = previousMembers.findAll { String memberId ->
+      !transitioningPlayers.contains(memberId)
+    }
+    if(remainingMembers.isEmpty()) { return }
+    String previousCoordinatorId = player.getDataValue('groupCoordinatorId')?.toString()
+    String remainingCoordinator = remainingMembers.contains(previousCoordinatorId)
+        ? previousCoordinatorId
+        : remainingMembers[0]
+    remainingMembers.each { String remainingPlayerId ->
+      if(!completeExpectation.containsKey(remainingPlayerId)) {
+        completeExpectation[remainingPlayerId] = [
+          coordinatorId: remainingCoordinator,
+          memberIds: remainingMembers
+        ]
+      }
+    }
+  }
+
+  completeExpectation.each { String playerId, Map topology ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    if(player != null && topology != null) {
+      Map expected = [
+        operationId: operationId,
+        expiresAt: expiresAt,
+        coordinatorId: topology.coordinatorId,
+        memberIds: ((Collection<String>)topology.memberIds).toList().sort()
+      ]
+      try {
+        player.updateDataValue('expectedGroupTopology', JsonOutput.toJson(expected))
+      } catch(Exception e) {
+        logWarn("Could not store expected topology for ${playerId}: ${e.message}")
+      }
+    }
+  }
+}
+
 void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map args = [:]) {
   String groupDni = groupDevice?.getDeviceNetworkId()
   if(!groupDni) { return }
@@ -3788,7 +3849,7 @@ void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String grouping
   operation.evictUnlistedOnly = args?.evictUnlistedOnly == true ||
       args?.evictUnlistedOnly?.toString() == 'true'
   saveActiveGroupOperation(operation)
-  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
   refreshGroupOperationTopology([operationId: operation.operationId])
   runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
@@ -3830,7 +3891,7 @@ void startGroupFavoriteOperation(ChildDeviceWrapper groupDevice, Map rawSpec) {
 
   Map operation = buildNewGroupOperation(groupDevice, groupingMode, target, favoriteSpec)
   saveActiveGroupOperation(operation)
-  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
   refreshGroupOperationTopology([operationId: operation.operationId])
   runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
@@ -3869,8 +3930,13 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   operation.metadataConfirmed = false
   operation.exactFavoriteId = null
   operation.deadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
+  clearRegisteredGroupOperations(operation)
+  operation.registeredPlayerIds = []
+  operation.registrationRequestIds = [:]
+  operation.registrationRequestedAt = [:]
+  operation.registrationEventPlayerIds = []
   saveActiveGroupOperation(operation)
-  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
   refreshGroupOperationTopology([operationId: operation.operationId])
   runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
@@ -3879,7 +3945,7 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   ])
 }
 
-void registerGroupFavoriteOperationOnPlayers(Map operation, Collection ids) {
+void registerGroupOperationOnPlayers(Map operation, Collection ids) {
   if(operation == null || !operation.operationId) { return }
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
   List<String> registered = normalizeGroupPlayerIds(operation.registeredPlayerIds)
@@ -3900,17 +3966,21 @@ void registerGroupFavoriteOperationOnPlayers(Map operation, Collection ids) {
     Long lastRequestedAt = requestedAt[playerId] ?: 0L
     if(lastRequestedAt > 0L && now() < lastRequestedAt + 5000L) { return }
     try {
-      player.registerGroupFavoriteOperation(
-        operation.operationId as String,
-        operation.favoriteId as String,
-        requestId
-      )
+      if(operation.favoriteId) {
+        player.registerGroupFavoriteOperation(
+          operation.operationId as String,
+          operation.favoriteId as String,
+          requestId
+        )
+      } else {
+        player.registerGroupTopologyOperation(operation.operationId as String, requestId)
+      }
       registered.add(playerId)
       requestedAt[playerId] = now()
       logTrace("Registered operation ${operation.operationId} on ${playerId} with request ${requestId}")
     } catch(Exception e) {
       requestedAt[playerId] = now()
-      logWarn("Could not register group Favorite operation ${operation.operationId} on ${playerId}: ${e.message}")
+      logWarn("Could not register group operation ${operation.operationId} on ${playerId}: ${e.message}")
     }
   }
   operation.registeredPlayerIds = registered.unique().sort()
@@ -4140,9 +4210,12 @@ Boolean isGroupTopologySatisfied(Map operation, Map topology) {
     String desiredCoordinatorId = operation.desiredCoordinatorId as String
     return required == observed && topology.coordinatorId == desiredCoordinatorId
   }
-  // ADDITIVE and CURRENT deliberately accept extra members. The actual
-  // coordinator is observed rather than changed by these modes.
-  return observed.containsAll(required)
+  // ADDITIVE accepts extra members, but saved-group additive requests still
+  // require the saved coordinator. CURRENT remains a read-only observation.
+  if(!observed.containsAll(required)) { return false }
+  String desiredCoordinatorId = operation.desiredCoordinatorId as String
+  return operation.groupingMode != GROUPING_MODE_ADDITIVE ||
+      !desiredCoordinatorId || topology.coordinatorId == desiredCoordinatorId
 }
 
 void updateGroupTopologyStability(Map operation, Map topology) {
@@ -4213,6 +4286,108 @@ Boolean isFavoriteGroupTopologySatisfied(Map operation, Map topology) {
   if(expectedGroupId && topology?.groupId != expectedGroupId) { return false }
   if(expectedCoordinatorId && topology?.coordinatorId != expectedCoordinatorId) { return false }
   return true
+}
+
+void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
+    Map<String, ChildDeviceWrapper> rinconMap, List<String> requiredPlayerIds) {
+  String coordinatorId = operation.desiredCoordinatorId as String ?: operation.configuredCoordinatorId as String
+  ChildDeviceWrapper coordinator = coordinatorId ? rinconMap[coordinatorId] : null
+  if(coordinator == null) {
+    failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE',
+        "Could not resolve the configured coordinator ${coordinatorId ?: '(none)'} for additive grouping")
+    return
+  }
+  operation.resolvedCoordinatorId = coordinatorId
+
+  List<Map> observations = topology?.observations instanceof List
+      ? (List<Map>)topology.observations
+      : []
+
+  if(operation.coordinatorTransferStarted == true) {
+    if(operation.coordinatorTransferGroupCreated == true) {
+      operation.lastCommand = 'refreshGroupTopology'
+      coordinator.playerGetGroupsFull()
+      ChildDeviceWrapper previousCoordinator = rinconMap[operation.coordinatorTransferPreviousCoordinatorId as String]
+      if(previousCoordinator != null && previousCoordinator != coordinator) {
+        previousCoordinator.playerGetGroupsFull()
+      }
+    } else {
+      Map coordinatorObservation = observations.find { Map item ->
+        item.playerId?.toString() == coordinatorId && item.fresh == true
+      }
+      List<String> coordinatorMembers = normalizeGroupPlayerIds(coordinatorObservation?.playerIds)
+      if(coordinatorObservation?.coordinatorId?.toString() == coordinatorId &&
+          coordinatorMembers == [coordinatorId]) {
+        List<String> transferPlayerIds = normalizeGroupPlayerIds(operation.coordinatorTransferPlayerIds)
+        if(!transferPlayerIds.contains(coordinatorId)) { transferPlayerIds.add(0, coordinatorId) }
+        List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
+            transferPlayerIds.findAll { String playerId -> playerId != coordinatorId }
+        operation.lastCommand = 'createAdditiveGroupAfterTransfer'
+        operation.topologyRequestId = UUID.randomUUID().toString()
+        logDebug("Dispatching additive coordinator restoration ${operation.topologyRequestId} for group operation ${operation.operationId}")
+        coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
+        operation.coordinatorTransferGroupCreated = true
+        operation.topologyMutationSent = true
+      } else {
+        operation.lastCommand = 'refreshGroupTopology'
+        coordinator.playerGetGroupsFull()
+        ChildDeviceWrapper previousCoordinator = rinconMap[operation.coordinatorTransferPreviousCoordinatorId as String]
+        if(previousCoordinator != null && previousCoordinator != coordinator) {
+          previousCoordinator.playerGetGroupsFull()
+        }
+      }
+    }
+  } else if(topology?.fresh == true && topology?.consistent == true &&
+      topology.coordinatorId != coordinatorId &&
+      normalizeGroupPlayerIds(topology.playerIds).contains(coordinatorId)) {
+    ChildDeviceWrapper previousCoordinator = rinconMap[topology.coordinatorId as String]
+    if(previousCoordinator == null) {
+      failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE',
+          "Could not resolve current Sonos coordinator ${topology.coordinatorId} to transfer coordination to ${coordinatorId}")
+      return
+    }
+    List<String> transferPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
+    Map<String, Map> finalTopologyExpectation = [:]
+    transferPlayerIds.each { String playerId ->
+      finalTopologyExpectation[playerId] = [coordinatorId: coordinatorId, memberIds: transferPlayerIds]
+    }
+    operation.coordinatorTransferStarted = true
+    operation.coordinatorTransferGroupCreated = false
+    operation.coordinatorTransferPlayerIds = transferPlayerIds
+    operation.coordinatorTransferPreviousCoordinatorId = topology.coordinatorId as String
+    operation.lastCommand = 'transferCoordinator'
+    operation.topologyRequestId = UUID.randomUUID().toString()
+    logInfo("Moving additive group coordination from ${topology.coordinatorId} to configured coordinator ${coordinatorId}")
+    logDebug("Dispatching additive coordinator transfer ${operation.topologyRequestId} for group operation ${operation.operationId}")
+    previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
+    operation.topologyMutationSent = true
+  } else {
+    List<String> coordinatorObservedPlayerIds = getAdditiveObservedPlayerIds(operation, topology)
+    if(topology?.consistent == true && topology.coordinatorId == coordinatorId) {
+      coordinatorObservedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
+    }
+    if(topology?.fresh == true) { operation.topologyMutationSent = false }
+    List<String> followersToAdd = requiredPlayerIds.findAll { String playerId ->
+      playerId != coordinatorId && !coordinatorObservedPlayerIds.contains(playerId)
+    }
+    operation.lastCommand = 'addMissingPlayers'
+    if(followersToAdd) {
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Sending additive group mutation for ${operation.operationId}: configuredCoordinator=${coordinatorId}, add=${followersToAdd}")
+      logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+      coordinator.playerModifyGroupMembers(followersToAdd, [])
+      operation.topologyMutationSent = true
+    } else {
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Dispatching topology check ${operation.topologyRequestId} for group operation ${operation.operationId}")
+      coordinator.playerGetGroupsFull()
+    }
+  }
+
+  operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+  operation.lastCommandAt = now()
+  saveActiveGroupOperation(operation)
+  runIn(1, 'refreshGroupOperationTopology', [overwrite: true, data: [operationId: operation.operationId]])
 }
 
 void sendGroupTopologyCommand(Map operation, Map topology) {
@@ -4322,7 +4497,14 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       logInfo("Moving group coordination from ${topology.coordinatorId} to configured coordinator ${coordinatorId}")
-      previousCoordinator.playerModifyGroupMembers([], [coordinatorId])
+      Map<String, Map> finalTopologyExpectation = [:]
+      requiredPlayerIds.each { String playerId ->
+        finalTopologyExpectation[playerId] = [
+          coordinatorId: coordinatorId,
+          memberIds: requiredPlayerIds
+        ]
+      }
+      previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
       operation.coordinatorTransferStarted = true
       operation.topologyMutationSent = true
       operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
@@ -4356,6 +4538,9 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
       operation.topologyMutationSent = true
     }
+  } else if(operation.groupingMode == GROUPING_MODE_ADDITIVE) {
+    sendAdditiveGroupTopologyCommand(operation, topology, rinconMap, requiredPlayerIds)
+    return
   } else {
     if(operation.groupingMode == GROUPING_MODE_CURRENT && topology?.fresh != true) {
       // CURRENT is explicitly read-only. It may wait for a fresh snapshot,
@@ -4390,7 +4575,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       coordinator = rinconMap[coordinatorId]
       coordinatorObservedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
       if(operation.favoriteId) {
-        registerGroupFavoriteOperationOnPlayers(operation, [coordinatorId])
+        registerGroupOperationOnPlayers(operation, [coordinatorId])
       }
     }
     if(topology?.fresh == true) {
@@ -4504,7 +4689,7 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
     return
   }
   operation.resolvedCoordinatorId = coordinatorId
-  registerGroupFavoriteOperationOnPlayers(operation, [coordinatorId])
+  registerGroupOperationOnPlayers(operation, [coordinatorId])
   operation.phase = 'WAIT_FOR_FAVORITE'
   operation.status = 'LOADING_FAVORITE'
   operation.favoriteAttempt = ((operation.favoriteAttempt ?: 0) as Integer) + 1
@@ -4716,7 +4901,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     failGroupOperation(operation, 'GROUP_OPERATION_TIMEOUT', "The live Sonos topology or playback confirmation did not stabilize before the deadline. Last topology: ${summarizeGroupOperationTopology([observations: operation.lastTopologyObservations])}")
     return
   }
-  registerGroupFavoriteOperationOnPlayers(operation, operation.requiredPlayerIds)
+  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
 
   Boolean favoriteLoadInProgress = operation.favoriteId &&
       ((operation.favoriteAttempt ?: 0) as Integer) > 0 &&
@@ -4754,10 +4939,10 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   operation.observedCoordinatorId = topology.coordinatorId
   operation.observedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
   operation.lastTopologyObservations = topology.observations ?: []
-  if(!verifyingFavoriteTopology && operation.groupingMode != GROUPING_MODE_EXPLICIT && topology.coordinatorId) {
+  if(!verifyingFavoriteTopology && operation.groupingMode == GROUPING_MODE_CURRENT && topology.coordinatorId) {
     operation.resolvedCoordinatorId = topology.coordinatorId as String
     if(operation.favoriteId) {
-      registerGroupFavoriteOperationOnPlayers(operation, [topology.coordinatorId as String])
+      registerGroupOperationOnPlayers(operation, [topology.coordinatorId as String])
     }
   }
 
@@ -4861,7 +5046,8 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     Long commandAt = operation.lastCommandAt as Long ?: 0L
     Long waitFrom = commandAt > 0L ? commandAt : refreshAt
     Boolean topologyMutationRecentlySent = commandAt > 0L &&
-      operation.lastCommand in ['removeExtraPlayers', 'createExactGroup', 'addMissingPlayers'] &&
+      operation.lastCommand in ['removeExtraPlayers', 'createExactGroup', 'addMissingPlayers',
+        'transferCoordinator', 'createAdditiveGroupAfterTransfer'] &&
       now() < commandAt + GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS * 1000L
     Boolean waitingForFreshTopology = topology.fresh != true && waitFrom > 0L &&
       now() < waitFrom + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L
@@ -5032,7 +5218,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
 }
 
 void groupFavoriteOperationEventHandler(Event event) {
-  String rawEvent = event?.value?.toString()
+  String rawEvent = stripHiddenBridgeValue(event?.value?.toString())
   if(!rawEvent) { return }
   Map payload
   try {
@@ -5235,14 +5421,14 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
   }
 }
 
-void clearRegisteredGroupFavoriteOperations(Map operation) {
+void clearRegisteredGroupOperations(Map operation) {
   if(operation == null) { return }
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
   normalizeGroupPlayerIds(operation.registeredPlayerIds).each { String playerId ->
     ChildDeviceWrapper player = rinconMap[playerId]
     if(player != null) {
       try { player.clearGroupFavoriteOperation(operation.operationId as String) }
-      catch(Exception e) { logWarn("Could not clear group Favorite operation on ${playerId}: ${e.message}") }
+      catch(Exception e) { logWarn("Could not clear group operation on ${playerId}: ${e.message}") }
     }
   }
 }
@@ -5252,7 +5438,7 @@ void finishGroupOperation(Map operation, String status, String errorCode = null,
   operation.phase = 'COMPLETE'
   operation.completedAt = now()
   publishGroupOperationStatus(operation, status, errorCode, detail)
-  clearRegisteredGroupFavoriteOperations(operation)
+  clearRegisteredGroupOperations(operation)
   if(status == 'SUCCEEDED' && !operation.favoriteId) {
     storeGroupingContext(operation)
   }
@@ -5334,7 +5520,7 @@ ChildDeviceWrapper resolveLiveGroupCoordinator(ChildDeviceWrapper anchor,
  * lookup semaphore.
  */
 void playerCommandRequestHandler(Event event) {
-  String rawRequest = event?.value?.toString()
+  String rawRequest = stripHiddenBridgeValue(event?.value?.toString())
   if(!rawRequest) {
     logWarn('Ignoring empty player command request')
     return
@@ -5349,6 +5535,15 @@ void playerCommandRequestHandler(Event event) {
   }
 
   enqueuePlayerCommandRequest(request)
+}
+
+/** Remove the hidden current-state presentation wrapper before parsing a
+ * player bridge payload. The wrapper keeps internal event data off the device
+ * page while remaining available to this parent app subscription. */
+String stripHiddenBridgeValue(String value) {
+  if(!value) { return value }
+  return value.replaceAll('(?is)<span[^>]*display\\s*:\\s*none[^>]*>', '')
+      .replaceAll('(?is)</span\\s*>', '')
 }
 
 void enqueuePlayerCommandRequest(Map request) {
@@ -5493,13 +5688,13 @@ void processPlayerCommandRequest(Map data) {
         coordinator.playerSkipToPreviousTrack()
         break
       case 'setTrack':
-        source.componentSetStreamUrlLocal(args.size() > 0 ? args[0] as String : null)
+        coordinator.setTrack(args.size() > 0 ? args[0] as String : null)
         break
       case 'selectLineIn':
-        source.selectLineIn(args.size() > 0 ? args[0] as String : null)
+        coordinator.selectLineIn(args.size() > 0 ? args[0] as String : null)
         break
       case 'selectTV':
-        source.selectTV()
+        coordinator.selectTV()
         break
       case 'muteGroup':
         coordinator.muteGroup()
@@ -5539,8 +5734,38 @@ void processPlayerCommandRequest(Map data) {
           args.size() > 5 ? args[5] as String : null
         )
         break
+      case 'setRepeatMode':
+        coordinator.setRepeatMode(args.size() > 0 ? args[0] as String : null)
+        break
+      case 'repeatOne':
+        coordinator.repeatOne()
+        break
+      case 'repeatAll':
+        coordinator.repeatAll()
+        break
+      case 'repeatNone':
+        coordinator.repeatNone()
+        break
+      case 'setShuffle':
+        coordinator.setShuffle(args.size() > 0 ? args[0] as String : null)
+        break
+      case 'shuffleOn':
+        coordinator.shuffleOn()
+        break
+      case 'shuffleOff':
+        coordinator.shuffleOff()
+        break
+      case 'setCrossfade':
+        coordinator.setCrossfade(args.size() > 0 ? args[0] as String : null)
+        break
+      case 'enableCrossfade':
+        coordinator.enableCrossfade()
+        break
+      case 'disableCrossfade':
+        coordinator.disableCrossfade()
+        break
       case 'playTrack':
-        source.playTrack(
+        coordinator.playTrack(
           args.size() > 0 ? args[0] as String : null,
           toBigDecimal(args.size() > 1 ? args[1] : null)
         )
