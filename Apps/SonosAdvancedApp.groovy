@@ -3067,6 +3067,39 @@ void playerStateUpdateHandler(Event event) {
     }
     return
   }
+  if(kind == 'topology') {
+    Map operation = getActiveGroupOperation()
+    String playerId = player.getDataValue('id')?.toString()
+    if(operation != null && playerId && normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(playerId)) {
+      Long observedAt = (payload.observedAt ?: now()) as Long
+      Map<String, Map> observations = operation.topologyObservations instanceof Map
+          ? (Map<String, Map>)operation.topologyObservations
+          : [:]
+      observations[playerId] = [
+        groupId: payload.groupId?.toString(),
+        coordinatorId: payload.coordinatorId?.toString(),
+        playerIds: normalizeGroupPlayerIds(payload.playerIds),
+        observedAt: observedAt
+      ]
+      operation.topologyObservations = observations
+
+      Long favoriteRefreshAt = (operation.favoriteTopologyRefreshAt ?: 0L) as Long
+      if(favoriteRefreshAt > 0L && observedAt >= favoriteRefreshAt) {
+        Map<String, Map> favoriteObservations = operation.favoriteTopologyObservations instanceof Map
+            ? (Map<String, Map>)operation.favoriteTopologyObservations
+            : [:]
+        favoriteObservations[playerId] = observations[playerId]
+        operation.favoriteTopologyObservations = favoriteObservations
+      }
+      logTrace("Received topology report from ${playerId} for operation ${operation.operationId} at ${observedAt}")
+      saveActiveGroupOperation(operation)
+      runIn(1, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+    }
+    return
+  }
   if(!(kind in ['state', 'followers'])) { return }
   if(payload.followerDNIs instanceof List && payload.followerAttrs instanceof Map) {
     ((List)payload.followerDNIs).each { Object dni ->
@@ -3309,9 +3342,10 @@ void processGroupCommandRequest(Map data) {
         String correlationId = args.correlationId as String ?: requestId ?: UUID.randomUUID().toString()
         Integer clipDuration = toBigDecimal(args.duration)?.intValue() ?: 0
         if(isGroupDeviceRosterActivelyGrouped(coordinator, playerIds)) {
-          logDebug("Playing shared audio clip for active Sonos group ${groupDni}")
+          logDebug("Preparing shared audio clip for active Sonos group ${groupDni}")
           playerDevices.each { ChildDeviceWrapper player ->
-            player.playerLoadAudioClip(args.uri as String, toBigDecimal(args.volume), clipDuration, correlationId)
+            player.playerPrepareAudioClipForSynchronizedStart(
+              args.uri as String, toBigDecimal(args.volume), correlationId, clipDuration)
           }
         } else {
           logDebug("Preparing shared audio clip for ungrouped Sonos players ${playerIds}; releasing playback together")
@@ -3680,6 +3714,7 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     playAttempt: 0,
     stableObservations: 0,
     topologyFingerprint: null,
+    topologyLastObservedAt: 0L,
     topologyRefreshAt: startTime,
     topologyObservations: [:],
     topologyMutationSent: false,
@@ -3970,7 +4005,40 @@ Map readGroupOperationTopology(Map operation) {
       ? (Map)operation.topologyObservations
       : [:]
   Long refreshAt = (operation?.topologyRefreshAt ?: 0L) as Long
-  return readGroupTopologyFromObservations(operation, observations, refreshAt)
+  Map topology = readGroupTopologyFromObservations(operation, observations, refreshAt)
+  if(operation?.groupingMode != GROUPING_MODE_EXPLICIT) {
+    return topology
+  }
+
+  // A fresh groups response from the configured coordinator describes its
+  // complete group roster. Do not require a second response from every member:
+  // a member can miss the request while the coordinator already confirms the
+  // exact group topology.
+  String coordinatorId = operation?.desiredCoordinatorId as String
+  Map coordinatorObservation = topology.observations instanceof List
+      ? ((List<Map>)topology.observations).find { Map item ->
+          item.playerId?.toString() == coordinatorId && item.fresh == true
+        }
+      : null
+  if(coordinatorObservation == null || !coordinatorObservation.groupId ||
+      !coordinatorObservation.coordinatorId || !coordinatorObservation.playerIds) {
+    return topology
+  }
+
+  List<String> playerIds = normalizeGroupPlayerIds(coordinatorObservation.playerIds)
+  if(playerIds.isEmpty()) {
+    return topology
+  }
+  String groupId = coordinatorObservation.groupId as String
+  String observedCoordinatorId = coordinatorObservation.coordinatorId as String
+  topology.fresh = true
+  topology.consistent = true
+  topology.groupId = groupId
+  topology.coordinatorId = observedCoordinatorId
+  topology.playerIds = playerIds
+  topology.authorityPlayerId = coordinatorId
+  topology.fingerprint = "${coordinatorId}:${groupId}:${observedCoordinatorId}:${playerIds.join(',')}"
+  return topology
 }
 
 Map readFavoriteGroupTopology(Map operation) {
@@ -3987,7 +4055,7 @@ String summarizeGroupOperationTopology(Map topology) {
       : []
   if(observations.isEmpty()) { return 'No configured player topology was available.' }
   return observations.collect { Map item ->
-    "${item.playerId}: group=${item.groupId ?: 'unknown'}, coordinator=${item.coordinatorId ?: 'unknown'}, members=${normalizeGroupPlayerIds(item.playerIds).join(',') ?: 'unknown'}"
+    "${item.playerId}: fresh=${item.fresh == true}, group=${item.groupId ?: 'unknown'}, coordinator=${item.coordinatorId ?: 'unknown'}, members=${normalizeGroupPlayerIds(item.playerIds).join(',') ?: 'unknown'}"
   }.join('; ')
 }
 
@@ -4082,14 +4150,30 @@ void updateGroupTopologyStability(Map operation, Map topology) {
   if(!satisfied) {
     operation.stableObservations = 0
     operation.topologyFingerprint = null
+    operation.topologyLastObservedAt = 0L
+    return
+  }
+  Long latestObservedAt = topology.observations instanceof List
+      ? ((List<Map>)topology.observations).findAll { Map item -> item.fresh == true }
+          .collect { Map item -> item.observedAt as Long }
+          .findAll { Long observedAt -> observedAt != null }
+          .max()
+      : null
+  if(latestObservedAt == null) {
+    operation.stableObservations = 0
+    operation.topologyFingerprint = null
+    operation.topologyLastObservedAt = 0L
     return
   }
   String fingerprint = topology.fingerprint as String
-  if(fingerprint && fingerprint == operation.topologyFingerprint) {
+  Long previousObservedAt = operation.topologyLastObservedAt as Long ?: 0L
+  if(fingerprint && fingerprint == operation.topologyFingerprint && latestObservedAt > previousObservedAt) {
     operation.stableObservations = ((operation.stableObservations ?: 0) as Integer) + 1
-  } else {
+    operation.topologyLastObservedAt = latestObservedAt
+  } else if(fingerprint != operation.topologyFingerprint) {
     operation.topologyFingerprint = fingerprint
     operation.stableObservations = 1
+    operation.topologyLastObservedAt = latestObservedAt
   }
 }
 
@@ -4195,24 +4279,82 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
   if(operation.groupingMode == GROUPING_MODE_EXPLICIT) {
     coordinatorId = operation.desiredCoordinatorId as String ?: coordinatorId
     coordinator = coordinatorId ? rinconMap[coordinatorId] : coordinator
-    Boolean canEvictExtras = topology?.consistent == true &&
-        topology.coordinatorId == coordinatorId &&
-        new HashSet<String>(observedPlayerIds).containsAll(new HashSet<String>(requiredPlayerIds))
     if(coordinator == null) {
       failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE', "Could not resolve explicit coordinator ${coordinatorId}")
       return
     }
+    if(operation.coordinatorTransferStarted == true) {
+      if(topology?.fresh == true && topology.coordinatorId == coordinatorId) {
+        // The configured coordinator has left the old group. It can now
+        // create the requested group without Sonos retaining the old leader.
+        operation.coordinatorTransferStarted = false
+      } else {
+        // Wait for Sonos to publish the split before issuing the second step.
+        // Repeating createGroup against the still-joined players preserves the
+        // existing coordinator and cannot complete a coordinator transfer.
+        operation.lastCommand = 'refreshGroupTopology'
+        operation.lastCommandAt = now()
+        operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+        saveActiveGroupOperation(operation)
+        coordinator.playerGetGroupsFull()
+        ChildDeviceWrapper previousCoordinator = topology?.coordinatorId
+            ? rinconMap[topology.coordinatorId as String]
+            : null
+        if(previousCoordinator != null && previousCoordinator != coordinator) {
+          previousCoordinator.playerGetGroupsFull()
+        }
+        return
+      }
+    }
+    Boolean coordinatorTransferNeeded = topology?.fresh == true &&
+        topology?.consistent == true &&
+        topology.coordinatorId != coordinatorId &&
+        observedPlayerIds.contains(coordinatorId) &&
+        new HashSet<String>(observedPlayerIds).containsAll(new HashSet<String>(requiredPlayerIds))
+    if(coordinatorTransferNeeded) {
+      ChildDeviceWrapper previousCoordinator = rinconMap[topology.coordinatorId as String]
+      if(previousCoordinator == null) {
+        failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE',
+            "Could not resolve current Sonos coordinator ${topology.coordinatorId} to transfer coordination to ${coordinatorId}")
+        return
+      }
+      operation.lastCommand = 'transferCoordinator'
+      operation.topologyRequestId = UUID.randomUUID().toString()
+      logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+      logInfo("Moving group coordination from ${topology.coordinatorId} to configured coordinator ${coordinatorId}")
+      previousCoordinator.playerModifyGroupMembers([], [coordinatorId])
+      operation.coordinatorTransferStarted = true
+      operation.topologyMutationSent = true
+      operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+      operation.lastCommandAt = now()
+      saveActiveGroupOperation(operation)
+      runIn(1, 'refreshGroupOperationTopology', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
+      return
+    }
+    Boolean canEvictExtras = topology?.consistent == true &&
+        topology.coordinatorId == coordinatorId &&
+        new HashSet<String>(observedPlayerIds).containsAll(new HashSet<String>(requiredPlayerIds))
     if(canEvictExtras && observedPlayerIds.size() > requiredPlayerIds.size()) {
       List<String> extras = observedPlayerIds.findAll { String id -> !requiredPlayerIds.contains(id) }
       operation.lastCommand = 'removeExtraPlayers'
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       coordinator.playerModifyGroupMembers([], extras)
+      operation.topologyMutationSent = true
     } else {
       operation.lastCommand = 'createExactGroup'
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-      coordinator.playerCreateGroup(requiredPlayerIds)
+      // Sonos elects the first player in CreateGroup's member list as the
+      // coordinator. Keep the target set normalized for comparisons, but put
+      // the desired coordinator first in the command payload.
+      List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
+          requiredPlayerIds.findAll { String playerId -> playerId != coordinatorId }
+      coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
+      operation.topologyMutationSent = true
     }
   } else {
     if(operation.groupingMode == GROUPING_MODE_CURRENT && topology?.fresh != true) {
@@ -4285,7 +4427,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
   ])
 }
 
-void refreshGroupOperationTopology(Map data = [:]) {
+void refreshGroupOperationTopology(Map data = [:], Boolean resetStability = true) {
   Map operation = getActiveGroupOperation()
   String callbackOperationId = data?.operationId as String
   if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId) || operation.favoriteId && operation.phase != 'ENSURE_GROUP') {
@@ -4295,8 +4437,11 @@ void refreshGroupOperationTopology(Map data = [:]) {
   operation.topologyCheckRequestId = UUID.randomUUID().toString()
   logTrace("Starting topology observation ${operation.topologyCheckRequestId} for operation ${operation.operationId}")
   operation.topologyObservations = [:]
-  operation.stableObservations = 0
-  operation.topologyFingerprint = null
+  if(resetStability == true) {
+    operation.stableObservations = 0
+    operation.topologyFingerprint = null
+    operation.topologyLastObservedAt = 0L
+  }
   operation.observedGroupId = null
   operation.observedCoordinatorId = null
   operation.observedPlayerIds = []
@@ -4671,10 +4816,43 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
 
   Boolean topologySatisfied = isGroupTopologySatisfied(operation, topology)
   if(!topologySatisfied) {
-    operation.stableObservations = 0
-    operation.topologyFingerprint = null
+    if(topology.fresh == true) {
+      operation.stableObservations = 0
+      operation.topologyFingerprint = null
+      operation.topologyLastObservedAt = 0L
+      if(operation.groupingMode == GROUPING_MODE_EXPLICIT) {
+        // A fresh coordinator report disproves the requested exact topology,
+        // so a corrective createGroup command is now safe to consider.
+        operation.topologyMutationSent = false
+      }
+    }
     if(operation.groupingMode == GROUPING_MODE_CURRENT && topology.fresh == true) {
       failGroupOperation(operation, 'CURRENT_TOPOLOGY_NOT_SATISFIED', 'The current group does not contain all configured players; no topology mutation was requested.')
+      return
+    }
+    if(operation.groupingMode == GROUPING_MODE_EXPLICIT && topology.fresh != true &&
+        (operation.topologyMutationSent == true || ((operation.stableObservations ?: 0) as Integer) > 0)) {
+      Long commandAt = operation.lastCommandAt as Long ?: 0L
+      Boolean waitingForTopologyResponse = commandAt > 0L &&
+          now() < commandAt + GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS * 1000L
+      if(!waitingForTopologyResponse) {
+        if(((operation.topologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS) {
+          failGroupOperation(operation, 'TOPOLOGY_NOT_CONFIRMED',
+              "The group mutation was sent, but no fresh report from configured coordinator ${operation.desiredCoordinatorId} confirmed the topology: ${summarizeGroupOperationTopology(topology)}")
+          return
+        }
+        operation.lastCommand = 'refreshGroupTopology'
+        operation.lastCommandAt = now()
+        operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+        saveActiveGroupOperation(operation)
+        refreshGroupOperationTopology([operationId: operation.operationId], false)
+      }
+      saveActiveGroupOperation(operation)
+      publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+        overwrite: true,
+        data: [operationId: operation.operationId]
+      ])
       return
     }
     operation.phase = 'ENSURE_GROUP'
@@ -4711,9 +4889,13 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     return
   }
 
+  if(operation.groupingMode == GROUPING_MODE_EXPLICIT) {
+    operation.topologyMutationSent = false
+  }
   updateGroupTopologyStability(operation, topology)
   if(((operation.stableObservations ?: 0) as Integer) < GROUP_OPERATION_STABILITY_OBSERVATIONS) {
     saveActiveGroupOperation(operation)
+    refreshGroupOperationTopology([operationId: operation.operationId], false)
     runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
       overwrite: true,
       data: [operationId: operation.operationId]

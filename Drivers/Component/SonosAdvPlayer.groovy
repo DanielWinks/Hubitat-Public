@@ -5140,6 +5140,16 @@ void publishPlayerStateUpdate(Map payload) {
   sendLocationEvent(name: 'dwinksSonosAdvancedPlayerState', value: device.getDeviceNetworkId(), data: eventData, isStateChange: true)
 }
 
+void publishGroupTopologyUpdate(String groupId, String coordinatorId, List<String> playerIds) {
+  publishPlayerStateUpdate([
+    kind: 'topology',
+    groupId: groupId,
+    coordinatorId: coordinatorId,
+    playerIds: playerIds ?: [],
+    observedAt: now()
+  ])
+}
+
 
 ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
   return favoritesMap
@@ -6530,13 +6540,14 @@ void processWebsocketMessage(String message) {
   }
 
   //Process groups
-  if(eventType?.type == 'groups' && eventType?.name == 'groups') {
+  if(eventType?.type == 'groups' && (eventType?.name == 'groups' || eventType?.response == 'getGroups')) {
     publishHouseholdPlayerPresence(eventData)
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
       if(group == null) {
         logTrace("Player ${getId()} not found in any group")
+        publishGroupTopologyUpdate(null, null, [])
         emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
         return
       }
@@ -6553,6 +6564,7 @@ void processWebsocketMessage(String message) {
       List<String> oldPlayerIds = getGroupPlayerIds()
       if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds) {
         logTrace('Groups websocket event received but group data unchanged, skipping processing')
+        publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         emitGroupFavoriteOperationEvent('groups', [
           groupId: groupId,
           coordinatorId: coordinatorId,
@@ -6595,6 +6607,7 @@ void processWebsocketMessage(String message) {
           }
         }
       }
+      publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
       emitGroupFavoriteOperationEvent('groups', [
         groupId: groupId,
         coordinatorId: coordinatorId,
@@ -6605,6 +6618,7 @@ void processWebsocketMessage(String message) {
       // leaving or joining a topology. Publish that negative observation so a
       // parent operation cannot continue using stale cached group data.
       logTrace('Groups websocket response contained no group for player ' + getId())
+      publishGroupTopologyUpdate(null, null, [])
       emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
     }
   }
