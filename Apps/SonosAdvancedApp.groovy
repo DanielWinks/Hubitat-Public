@@ -6947,81 +6947,39 @@ String getDriverVersionForUpdate(String driverName, String namespace) {
 }
 
 void fixVersionMismatches() {
+  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   if(!state.versionMismatches || state.versionMismatches.size() == 0) {
     logInfo('No version mismatches to fix')
     return
   }
-
-  logInfo("Fixing ${state.versionMismatches.size()} version mismatch(es)...")
-
-  // Process libraries FIRST, then drivers (since drivers depend on libraries)
-  // Single-pass partition instead of two findAll traversals
-  Map grouped = state.versionMismatches.groupBy { it.type }
-  List libraryMismatches = grouped['library'] ?: []
-  List driverMismatches = grouped['driver'] ?: []
-
-  // Step 1: Update libraries if any are out of date
-  if(libraryMismatches.size() > 0) {
-    logInfo("Updating ${libraryMismatches.size()} library/libraries first...")
-
-    libraryMismatches.each { mismatch ->
-      logInfo("Updating library ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
-
-      // Get current app version to download correct library files
-      String appVersion = getActualInstalledAppVersion()
-      String libraryUrl = "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/Libraries/${mismatch.fileName}"
-
-      String sourceCode = downloadFile(libraryUrl)
-
-      if(sourceCode) {
-        String libraryVersion = extractLibraryVersion(sourceCode)
-        Boolean success = publishLibraryToHub(mismatch.libraryId, sourceCode, libraryVersion)
-        if(success) {
-          logInfo("Successfully updated library ${mismatch.name}")
-        } else {
-          logWarn("Failed to update library ${mismatch.name}")
-        }
-      } else {
-        logWarn("Failed to download source code for library ${mismatch.name} from ${libraryUrl}")
-      }
+  List libraries = []
+  List drivers = []
+  state.versionMismatches.each { Map mismatch ->
+    if(mismatch.type == 'library') {
+      libraries << [id:mismatch.libraryId as Integer, name:mismatch.name, fileName:mismatch.fileName,
+        location:"https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${mismatch.expectedVersion}/Libraries/${mismatch.fileName}"]
+    } else if(mismatch.type == 'driver') {
+      drivers << [name:mismatch.name, namespace:mismatch.namespace ?: 'dwinks', location:mismatch.location]
     }
-
   }
-
-  // Store driver mismatches for deferred processing
-  if(driverMismatches.size() > 0) {
-    state.pendingDriverMismatches = driverMismatches
-  }
-
-  // Defer driver phase to allow hub to process library updates
-  if(libraryMismatches.size() > 0) {
-    runIn(3, 'fixDriverMismatches')
-  } else {
-    fixDriverMismatches()
-  }
+  Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', libraries:libraries,
+    drivers:drivers, errors:[], successCount:0]
+  state.maintenanceJob = job
+  job.pendingRequest = [stage:'nextLibrary']
+  maintenanceAuthenticate(job)
 }
 
 void fixDriverMismatches() {
+  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   List driverMismatches = state.pendingDriverMismatches ?: []
   state.remove('pendingDriverMismatches')
-
-  if(driverMismatches.size() > 0) {
-    logInfo("Updating ${driverMismatches.size()} driver(s)...")
-    driverMismatches.each { mismatch ->
-      logInfo("Updating driver ${mismatch.name} from ${mismatch.installedVersion} to ${mismatch.expectedVersion}...")
-      String sourceCode = downloadFile(mismatch.location)
-      if(sourceCode) {
-        Boolean success = updateDriver(mismatch.name, mismatch.namespace, sourceCode, mismatch.expectedVersion)
-        if(success) { logInfo("Successfully updated ${mismatch.name}") }
-        else { logWarn("Failed to update ${mismatch.name}") }
-      } else {
-        logWarn("Failed to download source code for ${mismatch.name}")
-      }
-    }
-    runIn(2, 'checkInstalledVersions')
-  } else {
-    checkInstalledVersions()
-  }
+  if(!driverMismatches) { checkInstalledVersions(); return }
+  Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', drivers:driverMismatches.collect { Map item ->
+    [name:item.name, namespace:item.namespace ?: 'dwinks', location:item.location]
+  }, libraries:[], errors:[], successCount:0]
+  state.maintenanceJob = job
+  job.pendingRequest = [stage:'nextDriver']
+  maintenanceAuthenticate(job)
 }
 
 void cleanupDuplicates() {
@@ -7049,26 +7007,14 @@ void cleanupDuplicates() {
  * Downloads the latest library files from GitHub and publishes them to the hub.
  */
 void publishLibraries() {
-  logInfo("Publishing libraries to hub...")
-
-  // Validate library IDs are configured
+  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   if(!settings.libraryIdSMAPI || !settings.libraryIdUtilities) {
     logWarn("Library IDs not configured. Please enter both library IDs in settings.")
     state.lastLibraryPublish = "Failed: Library IDs not configured"
     return
   }
 
-  // Get current app version to determine which files to publish
-  String appVersion = getActualInstalledAppVersion()
-  if(!appVersion) {
-    logWarn("Failed to determine app version")
-    state.lastLibraryPublish = "Failed: Could not determine app version"
-    return
-  }
-
-  logInfo("Publishing libraries for version ${appVersion}")
-
-  // Define libraries to publish
+  String appVersion = getCurrentVersion()
   List libraries = [
     [
       id: settings.libraryIdSMAPI as Integer,
@@ -7084,66 +7030,12 @@ void publishLibraries() {
     ]
   ]
 
-  Integer successCount = 0
-  Integer failCount = 0
-  List errors = []
-
-  libraries.each { library ->
-    logInfo("Publishing ${library.name}...")
-
-    try {
-      // Download library source code
-      String sourceCode = downloadFile(library.location)
-
-      if(!sourceCode) {
-        String error = "Failed to download ${library.name}"
-        logWarn(error)
-        errors << error
-        failCount++
-        return
-      }
-
-      // Extract version from library source
-      String libraryVersion = extractLibraryVersion(sourceCode)
-      logInfo("Library ${library.name} version: ${libraryVersion}")
-
-      // Publish library to hub
-      Boolean success = publishLibraryToHub(library.id, sourceCode, libraryVersion)
-
-      if(success) {
-        logInfo("Successfully published ${library.name} version ${libraryVersion}")
-        successCount++
-      } else {
-        String error = "Failed to publish ${library.name}"
-        logWarn(error)
-        errors << error
-        failCount++
-      }
-    } catch(Exception e) {
-      String error = "Error publishing ${library.name}: ${e.message}"
-      logError(error)
-      errors << error
-      failCount++
-    }
-  }
-
-  // Update status message
-  String timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
-  if(successCount == libraries.size()) {
-    state.lastLibraryPublish = "✓ ${timestamp}: Successfully published ${successCount} libraries"
-    logInfo("Library publish completed successfully: ${successCount} published")
-  } else if(successCount > 0) {
-    state.lastLibraryPublish = "⚠ ${timestamp}: Published ${successCount}, failed ${failCount} (${errors.join(', ')})"
-    logWarn("Library publish partially completed: ${successCount} published, ${failCount} failed")
-  } else {
-    state.lastLibraryPublish = "✗ ${timestamp}: Failed to publish any libraries (${errors.join(', ')})"
-    logWarn("Library publish failed: ${errors.join(', ')}")
-  }
-
-  // Re-check installed versions to reflect the published libraries
-  if(successCount > 0) {
-    runIn(1, 'checkInstalledVersions')
-  }
+  Map job = [id:UUID.randomUUID().toString(), op:'publishLibraries', libraries:libraries,
+    totalLibraries:libraries.size(), successCount:0, errors:[]]
+  state.maintenanceJob = job
+  state.lastLibraryPublish = 'Publishing libraries...'
+  job.pendingRequest = [stage:'nextLibrary']
+  maintenanceAuthenticate(job)
 }
 
 /**
@@ -7837,131 +7729,228 @@ Integer compareVersions(String version1, String version2) {
 }
 
 void installUpdate() {
+  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   if(!state.updateAvailable || !state.latestManifest) {
     logError('No update available to install')
     return
   }
-
-  try {
-    // First, check for and remove any duplicate apps/drivers that may have been created
-    logDebug("Checking for duplicate app/driver entries...")
-    Map duplicateResults = findAndRemoveDuplicates()
-    if(duplicateResults.appsRemoved > 0 || duplicateResults.driversRemoved > 0) {
-      logInfo("Cleaned up ${duplicateResults.appsRemoved} duplicate apps and ${duplicateResults.driversRemoved} duplicate drivers")
-    }
-    if(duplicateResults.errors.size() > 0) {
-      logWarn("Some errors occurred during duplicate cleanup: ${duplicateResults.errors}")
-    }
-
-    // Clear cached cookie to ensure fresh auth for updates
-    state.remove('hubCookie')
-
-    Map manifest = state.latestManifest
-    String version = state.latestVersion
-
-    logInfo("Starting update to version ${version}...")
-
-    // Track what needs updating
-    Map updateStatus = [
-      app: false,
-      drivers: [:],
-      errors: []
-    ]
-
-    // Update the main app
-    if(manifest.apps && manifest.apps.size() > 0) {
-      Map appInfo = manifest.apps[0]
-      String appLocation = appInfo.location
-
-      logDebug("Downloading app from: ${appLocation}")
-      String appCode = downloadFile(appLocation)
-
-      if(appCode) {
-        logDebug("Downloaded app code (${appCode.length()} bytes)")
-        Boolean success = updateThisApp(appCode, version)
-        updateStatus.app = success
-
-        if(success) {
-          logInfo("App updated successfully to version ${version}")
-          // Trigger page refresh after successful app update
-          runIn(2, 'refreshPage')
-        } else {
-          updateStatus.errors << "Failed to update app"
-          logError("Failed to update app - check logs for details")
-          // Don't stop - continue with driver updates even if app fails
-        }
-      } else {
-        updateStatus.errors << "Failed to download app code"
-        logError("Failed to download app code from ${appLocation}")
-      }
-    }
-
-    // Update drivers
-    if(manifest.drivers) {
-      manifest.drivers.each { driverInfo ->
-        String driverName = driverInfo.name
-        String driverLocation = driverInfo.location
-        String driverNamespace = driverInfo.namespace ?: 'dwinks'
-
-        logDebug("Downloading driver ${driverName} from: ${driverLocation}")
-        String driverCode = downloadFile(driverLocation)
-
-        if(driverCode) {
-          logDebug("Downloaded driver ${driverName} code (${driverCode.length()} bytes)")
-          Boolean success = updateDriver(driverName, driverNamespace, driverCode, version)
-          updateStatus.drivers[driverName] = success
-
-          if(success) {
-            logInfo("Driver ${driverName} updated successfully")
-          } else {
-            updateStatus.errors << "Failed to update driver: ${driverName}"
-            logError("Failed to update driver: ${driverName} - check logs for details")
-          }
-        } else {
-          updateStatus.errors << "Failed to download driver: ${driverName}"
-          logError("Failed to download driver: ${driverName} from ${driverLocation}")
-        }
-      }
-    }
-
-    // Clear update notification if successful
-    if(updateStatus.errors.size() == 0) {
-      state.updateAvailable = false
-      state.latestVersion = null
-      state.latestManifest = null
-      state.latestReleaseDate = null
-      state.latestReleaseUrl = null
-
-      // Clear stale version check data - the page will refresh and new code will run
-      // User can re-run version check after refresh to see current state
-      state.remove('versionMismatches')
-      state.remove('installedVersions')
-      state.remove('lastVersionCheck')
-
-      // Set flag to show success message after page refresh
-      state.updateJustCompleted = true
-
-      // Clear update label
-      app.updateLabel("Sonos Advanced Controller")
-
-      // Clear any scheduled auto-install
-      unschedule('performScheduledInstall')
-
-      logInfo("Update completed successfully! The app will refresh in 3 seconds...")
-      // Force page refresh to load new code
-      runIn(3, 'refreshPage')
-    } else {
-      logError("Update completed with errors: ${updateStatus.errors.join(', ')}")
-      // Even with errors, if drivers updated, recommend checking versions
-      if(updateStatus.drivers.any { it.value == true }) {
-        logInfo("Some drivers were updated successfully. The page will refresh in 3 seconds...")
-        runIn(3, 'refreshPage')
-      }
-    }
-
-  } catch(Exception e) {
-    logError("Error installing update: ${e.message}")
+  Map job = [id: UUID.randomUUID().toString(), op:'installUpdate', version: state.latestVersion,
+    manifest: state.latestManifest, drivers: [], errors: [], updated: false]
+  state.maintenanceJob = job
+  logInfo("Starting asynchronous update to version ${job.version}...")
+  Map apps = job.manifest.apps instanceof Collection ? (Map)job.manifest.apps.find { it instanceof Map } : null
+  if(apps?.location) {
+    job.pendingRequest = [stage:'downloadApp', params:[uri: apps.location, contentType: 'text/plain', textParser:true, timeout: 30], method:'GET']
+    maintenanceAuthenticate(job)
+  } else {
+    job.pendingRequest = [stage:'nextDriver']
+    maintenanceAuthenticate(job)
   }
+}
+
+/** Dispatch one maintenance HTTP operation. Each callback advances exactly one stage. */
+void maintenanceRequest(Map job, String stage, Map params, String method = 'GET') {
+  try {
+    job.stage = stage
+    String requestId = UUID.randomUUID().toString()
+    job.activeRequestId = requestId
+    Map requestData = [jobId: job.id, requestId: requestId, stage: stage]
+    if(method == 'POST') { asynchttpPost('maintenanceHttpCallback', params, requestData) }
+    else { asynchttpGet('maintenanceHttpCallback', params, requestData) }
+  } catch(Exception e) {
+    logError("Maintenance request ${stage} could not start: ${e.message}")
+    maintenanceAdvanceFailure(job, stage)
+  }
+}
+
+void maintenanceAuthenticate(Map job) {
+  Long cookieAge = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+  if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
+    job.cookie = state.hubCookie
+    Map pending = (Map)job.pendingRequest
+    if(pending.stage == 'nextLibrary') { maintenanceNextLibrary(job) }
+    else if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
+    else { maintenanceRequest(job, pending.stage as String, (Map)pending.params, pending.method as String) }
+    return
+  }
+  job.stage = 'login'
+  try {
+    String requestId = UUID.randomUUID().toString()
+    job.activeRequestId = requestId
+    asynchttpPost('maintenanceHttpCallback', [uri:'http://127.0.0.1:8080', path:'/login', requestContentType:'application/x-www-form-urlencoded',
+      body:[username:settings.hubSecurityUsername?.toString() ?: '', password:settings.hubSecurityPassword?.toString() ?: '', submit:'Login'],
+      followRedirects:false, textParser:true, timeout:15], [jobId:job.id, requestId:requestId, stage:'login'])
+  } catch(Exception e) { logError("Maintenance login failed to start: ${e.message}"); maintenanceAdvanceFailure(job, 'login') }
+}
+
+void maintenanceHttpCallback(AsyncResponse response, Map data) {
+  Map job = state.maintenanceJob instanceof Map ? (Map)state.maintenanceJob : null
+  if(!job || !data?.jobId || job.id != data.jobId || !data?.requestId ||
+      job.activeRequestId != data.requestId || job.stage != data.stage) {
+    logDebug("Ignoring stale maintenance callback request=${data?.requestId ?: 'unknown'} stage=${data?.stage ?: 'unknown'}")
+    return
+  }
+  job.remove('activeRequestId')
+  String stage = data.stage?.toString()
+  Boolean ok = response != null && !response.hasError() && response.status in [200, 302]
+  try {
+    if(stage == 'downloadApp' || stage == 'downloadDriver' || stage == 'downloadLibrary') {
+      String source = ok ? response.data?.toString() : null
+      if(!source) { maintenanceAdvanceFailure(job, stage); return }
+      job.source = source
+      if(stage == 'downloadApp') { maintenanceRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', timeout:15, ignoreSSLIssues:true]) }
+      else if(stage == 'downloadDriver') { maintenanceRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15]) }
+      else { maintenanceRequest(job, 'libraryCode', [uri:'http://127.0.0.1:8080', path:'/library/ajax/code', query:[id:job.artifact.id.toString()], headers:hubCookieHeaders(job.cookie as String), timeout:15]) }
+      return
+    }
+    if(stage == 'login') {
+      if(!ok) { maintenanceAdvanceFailure(job, 'login'); return }
+      Object header = getResponseHeaderIgnoreCase(response.headers, 'Set-Cookie')
+      if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
+      String cookieValue = null
+      if(header != null) {
+        try { cookieValue = header.value?.toString() } catch(Exception ignored) { cookieValue = null }
+        if(!cookieValue) { cookieValue = header.toString() }
+      }
+      job.cookie = cookieValue ? cookieValue.split(';')[0] : ''
+      state.hubCookie = job.cookie
+      state.hubCookieTime = now()
+      Map pending = (Map)job.pendingRequest
+      if(pending.stage == 'nextLibrary') { maintenanceNextLibrary(job) }
+      else if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
+      else { maintenanceRequest(job, pending.stage as String, (Map)pending.params, pending.method as String) }
+      return
+    }
+    if(stage == 'appList') {
+      Object payload = ok ? response.getJson() : null
+      Map target = payload instanceof Collection ? (Map)((Collection)payload).find { it instanceof Map && it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' } : null
+      if(!target?.id) { maintenanceAdvanceFailure(job, stage); return }
+      job.appId = target.id
+      maintenanceRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      return
+    }
+    if(stage == 'appCode') {
+      Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
+      if(payload.version == null) { maintenanceAdvanceFailure(job, stage); return }
+      maintenanceRequest(job, 'appUpdate', [uri:'http://127.0.0.1:8080', path:'/app/ajax/update', requestContentType:'application/x-www-form-urlencoded', headers:hubCookieHeaders(job.cookie as String), body:[id:job.appId, version:payload.version, source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
+      return
+    }
+    if(stage == 'appUpdate') {
+      Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
+      if(payload.status == 'success') { job.updated = true; runIn(2, 'refreshPage') }
+      else { job.errors << 'Failed to update app' }
+      job.remove('source')
+      maintenanceStartDrivers(job)
+      return
+    }
+    if(stage == 'driverList') {
+      Map artifact = (Map)job.artifact
+      Object payload = ok ? response.getJson() : null
+      Map target = payload instanceof Map && ((Map)payload).drivers instanceof Collection ? (Map)((Map)payload).drivers.find { it instanceof Map && it.type == 'usr' && it.name == artifact.name && it.namespace == artifact.namespace } : null
+      if(!target) {
+        maintenanceRequest(job, 'driverCreate', [uri:'http://127.0.0.1:8080', path:'/driver/save', requestContentType:'application/x-www-form-urlencoded', headers:hubCookieHeaders(job.cookie as String), body:[id:'', version:'', create:'', source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
+      } else {
+        job.driverId = target.id
+        maintenanceRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      }
+      return
+    }
+    if(stage == 'driverCode') {
+      Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
+      if(payload.version == null) { maintenanceAdvanceFailure(job, stage); return }
+      maintenanceRequest(job, 'driverUpdate', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/update', requestContentType:'application/x-www-form-urlencoded', headers:hubCookieHeaders(job.cookie as String), body:[id:job.driverId, version:payload.version, source:job.source], timeout:300, ignoreSSLIssues:true], 'POST')
+      return
+    }
+    if(stage == 'driverUpdate' || stage == 'driverCreate') {
+      Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
+      Boolean success = stage == 'driverCreate' ? response?.headers?.Location != null : payload.status == 'success'
+      if(!success) { job.errors << "Failed to update driver ${job.artifact.name}" } else { job.updated = true }
+      maintenanceNextDriver(job)
+      return
+    }
+    if(stage == 'downloadLibrary') {
+      job.librarySource = job.source
+      maintenanceRequest(job, 'libraryCode', [uri:'http://127.0.0.1:8080', path:'/library/ajax/code', query:[id:job.artifact.id.toString()], headers:hubCookieHeaders(job.cookie as String), timeout:15])
+      return
+    }
+    if(stage == 'libraryCode') {
+      Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
+      if(payload.id == null) { maintenanceAdvanceFailure(job, stage); return }
+      String body = "id=${job.artifact.id}&version=${payload.version ?: 0}&source=${java.net.URLEncoder.encode(job.librarySource ?: job.source, 'UTF-8')}"
+      maintenanceRequest(job, 'libraryUpdate', [uri:'http://127.0.0.1:8080', path:'/library/ajax/update', headers:hubCookieHeaders(job.cookie as String)+['Content-Type':'application/x-www-form-urlencoded'], body:body, timeout:30, ignoreSSLIssues:true], 'POST')
+      return
+    }
+    if(stage == 'libraryUpdate') {
+      if(!ok || response.getJson()?.status != 'success') { job.errors << "Failed to publish ${job.artifact.name}" }
+      else { job.successCount = (job.successCount ?: 0) + 1 }
+      maintenanceNextLibrary(job)
+    }
+  } catch(Exception e) {
+    logError("Maintenance callback ${stage} failed: ${e.message}")
+    maintenanceAdvanceFailure(job, stage)
+  }
+}
+
+void maintenanceAdvanceFailure(Map job, String stage) {
+  job.errors << "Maintenance stage failed: ${stage}"
+  if(stage.startsWith('driver') || stage == 'downloadDriver') { maintenanceNextDriver(job) }
+  else if(stage.startsWith('library') || stage == 'downloadLibrary') { maintenanceNextLibrary(job) }
+  else if(job.manifest?.drivers) { maintenanceStartDrivers(job) }
+  else { maintenanceFinish(job) }
+}
+
+void maintenanceStartDrivers(Map job) {
+  if(!(job.drivers instanceof Collection)) {
+    job.drivers = job.manifest?.drivers instanceof Collection ? new ArrayList(job.manifest.drivers) : []
+  }
+  maintenanceNextDriver(job)
+}
+
+void maintenanceNextDriver(Map job) {
+  if(job.drivers && !job.drivers.isEmpty()) {
+    Map artifact = (Map)job.drivers.remove(0)
+    artifact.namespace = artifact.namespace ?: 'dwinks'
+    job.artifact = artifact
+    job.source = null
+    maintenanceRequest(job, 'downloadDriver', [uri:artifact.location, contentType:'text/plain', textParser:true, timeout:30])
+  } else { maintenanceFinish(job) }
+}
+
+void maintenanceNextLibrary(Map job) {
+  if(job.libraries && !job.libraries.isEmpty()) {
+    Map artifact = (Map)job.libraries.remove(0)
+    job.artifact = artifact
+    job.source = null
+    maintenanceRequest(job, 'downloadLibrary', [uri:artifact.location, contentType:'text/plain', textParser:true, timeout:30])
+  } else if(job.op == 'repairVersions') { maintenanceStartDrivers(job) }
+  else { maintenanceFinish(job) }
+}
+
+void maintenanceFinish(Map job) {
+  if(job.op == 'publishLibraries') {
+    Integer successes = job.successCount ?: 0
+    String timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
+    state.lastLibraryPublish = successes == job.totalLibraries ? "✓ ${timestamp}: Successfully published ${successes} libraries" : (successes ? "⚠ ${timestamp}: Published ${successes}, failed ${job.errors.size()} (${job.errors.join(', ')})" : "✗ ${timestamp}: Failed to publish libraries (${job.errors.join(', ')})")
+    if(successes > 0) { runIn(1, 'checkInstalledVersions') }
+  } else if(job.op == 'repairVersions') {
+    if(job.errors.isEmpty()) { runIn(2, 'checkInstalledVersions') }
+    else { logWarn("Version repair completed with errors: ${job.errors.join(', ')}") }
+  } else if(job.errors.isEmpty()) {
+    state.updateAvailable = false
+    state.latestVersion = null
+    state.latestManifest = null
+    state.latestReleaseDate = null
+    state.latestReleaseUrl = null
+    state.remove('versionMismatches'); state.remove('installedVersions'); state.remove('lastVersionCheck')
+    state.updateJustCompleted = true
+    app.updateLabel('Sonos Advanced Controller')
+    unschedule('performScheduledInstall')
+    runIn(3, 'refreshPage')
+  } else {
+    logError("Maintenance completed with errors: ${job.errors.join(', ')}")
+    if(job.updated) { runIn(3, 'refreshPage') }
+  }
+  state.remove('maintenanceJob')
 }
 
 String downloadFile(String uri) {
@@ -8060,7 +8049,7 @@ Boolean updateThisApp(String sourceCode, String newVersionForLogging) {
         version: currentHubVersion,
         source: sourceCode
       ],
-      timeout: 420,
+      timeout: 300,
       ignoreSSLIssues: true
     ]
 
