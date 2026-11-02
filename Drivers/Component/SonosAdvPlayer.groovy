@@ -2619,7 +2619,7 @@ void componentRefresh(DeviceWrapper child) {
       getRepeatAllControlChild().sendEvent(name:'switch', value: getDeviceCurrentStateValue('currentRepeatAllMode') )
     break
     case 'Mute':
-      String muteValue = getDeviceCurrentStateValue('mute') != null ? getDeviceCurrentStateValue('mute') : 'unmuted'
+      String muteValue = getDeviceCurrentStateValue('mute') == 'muted' ? 'on' : 'off'
       getMuteControlChild().sendEvent(name:'switch', value: muteValue )
     break
     case 'NightMode':
@@ -2649,6 +2649,9 @@ void componentOn(DeviceWrapper child) {
     case 'RepeatAll':
       repeatAll()
     break
+    case 'Mute':
+      mute()
+    break
     case 'NightMode':
       setNightMode(true)
     break
@@ -2674,6 +2677,9 @@ void componentOff(DeviceWrapper child) {
     break
     case 'RepeatAll':
       repeatNone()
+    break
+    case 'Mute':
+      unmute()
     break
     case 'NightMode':
       setNightMode(false)

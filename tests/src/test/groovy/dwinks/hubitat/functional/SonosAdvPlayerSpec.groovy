@@ -17,6 +17,44 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
+  def "mute child commands send player mute requests"() {
+    given:
+    com.hubitat.app.DeviceWrapper child = new com.hubitat.app.DeviceWrapper(dataValues: [command: 'Mute'])
+
+    when:
+    driver.componentOn(child)
+    driver.componentOff(child)
+
+    then:
+    List messages = websocketMessages.collect { String message -> new JsonSlurper().parseText(message) }
+    messages.collect { it[0].command } == ['setMute', 'setMute']
+    messages.collect { it[1].muted } == [true, false]
+  }
+
+  def "mute child refresh reports valid switch states"() {
+    given:
+    dwinks.hubitat.stubs.MockDevice child = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getMuteControlChildDNI(), dataValues: [command: 'Mute'])
+    driver.children.clear()
+    driver.children.add(child)
+    driver.device.currentValues.mute = muteState
+
+    when:
+    driver.componentRefresh(child)
+
+    then:
+    child.currentValue('switch') == switchState
+
+    cleanup:
+    driver.children.clear()
+
+    where:
+    muteState | switchState
+    'muted'   | 'on'
+    'unmuted' | 'off'
+    null      | 'off'
+  }
+
   def setupSpec() {
     File file = new File('../Drivers/Component/SonosAdvPlayer.groovy')
     assert file.exists(), "Could not find ${file.absolutePath}"
