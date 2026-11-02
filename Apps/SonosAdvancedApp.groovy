@@ -2879,6 +2879,51 @@ ChildDeviceWrapper getDeviceFromRincon(String rincon) {
   return app.getChildDevices().find { it.getDataValue('id') == rincon }
 }
 
+/** Resolve and validate a Line-In source in the controller, where sibling lookup is serialized. */
+String resolveLineInSourceRincon(ChildDeviceWrapper coordinator, String sourceIdentifier) {
+  String identifier = sourceIdentifier?.trim()
+  if(!identifier) {
+    String capabilities = coordinator?.getDataValue('capabilities') as String
+    if(!capabilities?.contains('LINE_IN')) {
+      logWarn('Line-In is not supported on the selected player')
+      return null
+    }
+    return coordinator.getDataValue('id') as String
+  }
+
+  List<ChildDeviceWrapper> children = app.getChildDevices()
+  ChildDeviceWrapper source
+  if(identifier.startsWith('RINCON_')) {
+    source = children.find { ChildDeviceWrapper child -> child.getDataValue('id') == identifier }
+  } else if(identifier.matches('^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')) {
+    source = children.find { ChildDeviceWrapper child -> child.getDataValue('deviceIp') == identifier }
+  } else {
+    String lowerIdentifier = identifier.toLowerCase()
+    source = children.find { ChildDeviceWrapper child ->
+      child.getDataValue('name')?.toString()?.toLowerCase()?.contains(lowerIdentifier)
+    }
+    if(source == null) {
+      source = children.find { ChildDeviceWrapper child -> child.label?.toLowerCase()?.contains(lowerIdentifier) }
+    }
+  }
+
+  if(source == null) {
+    logWarn("Cannot resolve Line-In source '${identifier}'")
+    return null
+  }
+  String capabilities = source.getDataValue('capabilities') as String
+  if(!capabilities?.contains('LINE_IN')) {
+    logWarn("Source device '${source.getDataValue('name')}' does not have Line-In capability")
+    return null
+  }
+  String rincon = source.getDataValue('id') as String
+  if(!rincon?.startsWith('RINCON_')) {
+    logWarn("Source device '${source.getDataValue('name')}' has no valid RINCON ID")
+    return null
+  }
+  return rincon
+}
+
 /** Resolve the public add-player argument against managed primary-player devices. */
 ChildDeviceWrapper resolvePlayerIdentifier(String identifier) {
   String value = identifier?.trim()
@@ -5763,7 +5808,8 @@ void processPlayerCommandRequest(Map data) {
         coordinator.setTrack(args.size() > 0 ? args[0] as String : null)
         break
       case 'selectLineIn':
-        coordinator.selectLineIn(args.size() > 0 ? args[0] as String : null)
+        String sourceRincon = resolveLineInSourceRincon(coordinator, args.size() > 0 ? args[0] as String : null)
+        if(sourceRincon) { coordinator.selectLineInRincon(sourceRincon) }
         break
       case 'selectTV':
         coordinator.selectTV()

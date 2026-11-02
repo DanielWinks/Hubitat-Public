@@ -1498,112 +1498,18 @@ void setSpeechEnhancement(String mode) {
   asynchttpPost('localControlCallback', params)
 }
 
-@CompileStatic
-String resolveSourceRincon(String sourceIdentifier) {
-  if (sourceIdentifier == null || sourceIdentifier.trim() == '') {
-    if (!hasLineInCapability()) {
-      logWarn("Line-In is not supported on this Sonos device")
-      return null
-    }
-    return getId()
-  }
-
-  String trimmed = sourceIdentifier.trim()
-
-  if (trimmed.startsWith('RINCON_')) {
-    ChildDeviceWrapper sourceDevice = findSiblingByRincon(trimmed)
-    if (sourceDevice != null) {
-      String caps = sourceDevice.getDataValue('capabilities')
-      if (caps == null || !caps.contains('LINE_IN')) {
-        logWarn("Source device '${sourceDevice.getDataValue('name')}' does not have Line-In capability")
-        return null
-      }
-    } else {
-      logDebug("RINCON '${trimmed}' not found among sibling devices; passing through as-is")
-    }
-    return trimmed
-  }
-
-  if (trimmed.matches('^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')) {
-    return resolveRinconFromSibling(trimmed, 'deviceIp')
-  }
-
-  String result = resolveRinconFromSibling(trimmed, 'name')
-  if (result != null) { return result }
-  return resolveRinconFromSiblingByLabelSubstring(trimmed)
-}
-
-@CompileStatic
-private ChildDeviceWrapper findSiblingByRincon(String rincon) {
-  List<ChildDeviceWrapper> childDevices = getParentAppChildDevices()
-  if (childDevices == null) { return null }
-  return (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child -> child.getDataValue('id') == rincon }
-}
-
-@CompileStatic
-private String resolveRinconFromSibling(String value, String matchField) {
-  List<ChildDeviceWrapper> childDevices = getParentAppChildDevices()
-  if (childDevices == null || childDevices.isEmpty()) {
-    logWarn("Cannot resolve source player: no sibling devices found")
-    return null
-  }
-
-  ChildDeviceWrapper sourceDevice = (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child ->
-    if (matchField == 'name') {
-      return child.getDataValue('name')?.toLowerCase()?.contains(value.toLowerCase())
-    }
-    return child.getDataValue(matchField) == value
-  }
-
-  if (sourceDevice == null) { return null }
-
-  String caps = sourceDevice.getDataValue('capabilities')
-  if (caps == null || !caps.contains('LINE_IN')) {
-    logWarn("Source device '${sourceDevice.getDataValue('name')}' does not have Line-In capability")
-    return null
-  }
-
-  String rincon = sourceDevice.getDataValue('id')
-  if (rincon == null || rincon == '') {
-    logWarn("Source device '${sourceDevice.getDataValue('name')}' has no RINCON ID")
-    return null
-  }
-  return rincon
-}
-
-private String resolveRinconFromSiblingByLabelSubstring(String value) {
-  List<ChildDeviceWrapper> childDevices = getParentAppChildDevices()
-  if (childDevices == null || childDevices.isEmpty()) { return null }
-
-  String lowerValue = value.toLowerCase()
-  ChildDeviceWrapper sourceDevice = (ChildDeviceWrapper) childDevices.find { ChildDeviceWrapper child ->
-    return child.label?.toLowerCase()?.contains(lowerValue)
-  }
-
-  if (sourceDevice == null) {
-    logWarn("Cannot resolve source player: no device found matching '${value}'")
-    return null
-  }
-
-  String caps = sourceDevice.getDataValue('capabilities')
-  if (caps == null || !caps.contains('LINE_IN')) {
-    logWarn("Source device '${sourceDevice.getDataValue('name')}' does not have Line-In capability")
-    return null
-  }
-
-  String rincon = sourceDevice.getDataValue('id')
-  if (rincon == null || rincon == '') {
-    logWarn("Source device '${sourceDevice.getDataValue('name')}' has no RINCON ID")
-    return null
-  }
-  return rincon
-}
-
 void selectLineIn(String sourceIdentifier = null) {
   if(deferCommandToParentDuringGroupOperation('selectLineIn', [sourceIdentifier])) { return }
   if(routeGroupedPlaybackCommandToCoordinator('selectLineIn', [sourceIdentifier])) { return }
-  String rinconId = resolveSourceRincon(sourceIdentifier)
-  if (rinconId == null) { return }
+  requestParentCoordinatorCommand('selectLineIn', [sourceIdentifier])
+}
+
+/** Select a Line-In source after the controller has resolved and validated its RINCON. */
+void selectLineInRincon(String rinconId) {
+  if(rinconId == null || !rinconId.startsWith('RINCON_')) {
+    logWarn("Cannot select Line-In without a valid RINCON ID")
+    return
+  }
   String lineInURI = "x-rincon-stream:${rinconId}"
   logInfo("Switching to Line-In source: ${lineInURI}")
   String ip = getDeviceDataValue('localUpnpHost')
@@ -3638,11 +3544,6 @@ DeviceWrapper getThisDevice() {
 }
 InstalledAppWrapper getParentApp() {
   return getParent() as InstalledAppWrapper
-}
-List<ChildDeviceWrapper> getParentAppChildDevices() {
-  InstalledAppWrapper parentApp = getParentApp()
-  if (parentApp == null) { return null }
-  return parentApp.getChildDevices()
 }
 String getSid(String sid) {
   return device.getDataValue(sid)
