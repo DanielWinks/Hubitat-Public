@@ -718,6 +718,31 @@ class SonosAdvPlayerSpec extends Specification {
     ]
   }
 
+  def "short media load overloads enable crossfade in the outgoing command"() {
+    when:
+    driver."${method}"(*arguments)
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
+    payload[0].command == command
+    payload[1].playModes.crossfade == true
+
+    where:
+    method | arguments | command
+    'loadFavorite' | ['42'] | 'loadFavorite'
+    'loadFavoriteFull' | ['42'] | 'loadFavorite'
+    'loadFavoriteFull' | ['42', 'repeat all'] | 'loadFavorite'
+    'loadFavoriteFull' | ['42', 'repeat all', 'replace'] | 'loadFavorite'
+    'loadFavoriteFull' | ['42', 'repeat all', 'replace', 'off'] | 'loadFavorite'
+    'loadFavoriteFull' | ['42', 'repeat all', 'replace', 'off', 'true'] | 'loadFavorite'
+    'loadPlaylist' | ['42'] | 'loadPlaylist'
+    'loadPlaylistFull' | ['42'] | 'loadPlaylist'
+    'loadPlaylistFull' | ['42', 'repeat all'] | 'loadPlaylist'
+    'loadPlaylistFull' | ['42', 'repeat all', 'replace'] | 'loadPlaylist'
+    'loadPlaylistFull' | ['42', 'repeat all', 'replace', 'off'] | 'loadPlaylist'
+    'loadPlaylistFull' | ['42', 'repeat all', 'replace', 'off', 'true'] | 'loadPlaylist'
+  }
+
   def "append-and-play sends INSERT with the unchanged Sonos playlist ID"() {
     when:
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')

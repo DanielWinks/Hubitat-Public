@@ -96,3 +96,5 @@ java.util.regex.Pattern
 java.nio.charset.StandardCharsets
 java.io.ByteArrayInputStream
 java.io.ByteArrayOutputStream
+# Confirmed by Sonos Advanced Player compilation on Hubitat 2.5.3.111.
+java.io.InputStream

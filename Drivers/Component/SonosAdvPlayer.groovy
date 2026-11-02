@@ -1906,7 +1906,7 @@ void loadFavorite(String favoriteId) {
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -1916,7 +1916,7 @@ void loadFavoriteFull(String favoriteId) {
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -1925,7 +1925,7 @@ void loadFavoriteFull(String favoriteId, String repeatMode) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -1933,20 +1933,20 @@ void loadFavoriteFull(String favoriteId, String repeatMode) {
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode) {
   String autoPlay = 'true'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 @CompileStatic
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode) {
   String autoPlay = 'true'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 @CompileStatic
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadFavoriteFull(favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -2179,7 +2179,7 @@ void loadPlaylist(String playlistId) {
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -2189,7 +2189,7 @@ void loadPlaylistFull(String playlistId) {
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -2198,7 +2198,7 @@ void loadPlaylistFull(String playlistId, String repeatMode) {
   String queueMode = "REPLACE"
   String autoPlay = 'true'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
@@ -2206,20 +2206,20 @@ void loadPlaylistFull(String playlistId, String repeatMode) {
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode) {
   String autoPlay = 'true'
   String shuffleMode = 'false'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 @CompileStatic
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode) {
   String autoPlay = 'true'
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 
 @CompileStatic
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay) {
-  String crossfadeMode = 'true'
+  String crossfadeMode = 'on'
   loadPlaylistFull(playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode)
 }
 

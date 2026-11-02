@@ -24,6 +24,7 @@ class ImportRuleSpec extends Specification {
       import com.hubitat.app.DeviceWrapper
       import hubitat.scheduling.AsyncResponse
       import java.util.concurrent.ConcurrentHashMap
+      import java.io.InputStream
 
       library(name: 'X', namespace: 'dwinks', author: 'Daniel')
       void noop() { }
