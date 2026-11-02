@@ -4,6 +4,8 @@ import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import java.io.ByteArrayInputStream
+import java.time.Instant
 import spock.lang.Shared
 import spock.lang.Specification
 
@@ -11,12 +13,26 @@ class SonosAdvPlayerSpec extends Specification {
 
   @Shared HubitatScriptHarness driver
   @Shared List<String> websocketMessages = []
+  @Shared List<Map> rawConnections = []
+  @Shared List<String> rawRequests = []
 
   def setupSpec() {
     File file = new File('../Drivers/Component/SonosAdvPlayer.groovy')
     assert file.exists(), "Could not find ${file.absolutePath}"
     driver = ScriptLoader.load(file, new File('../Libraries'), true)
     driver.binding.setVariable('interfaces', [
+      rawSocket: new Expando(
+        connect: { Map options, String host, Integer port ->
+          Closure inputReader = options.inputReader as Closure
+          options.inputReader = { Object data ->
+            byte[] bytes = data == null ? new byte[0] : data.toString().getBytes('UTF-8')
+            inputReader.call(new ByteArrayInputStream(bytes), { String message -> driver.parse(message) })
+          }
+          rawConnections << [options: options, host: host, port: port]
+        },
+        sendMessage: { String message -> rawRequests << message },
+        close: { -> }
+      ),
       webSocket: new Expando(
         sendMessage: { String message -> websocketMessages << message },
         connect: { Object... ignored -> },
@@ -33,6 +49,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.scheduled.clear()
     driver.unschedules.clear()
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     driver.runtimeState.clear()
     driver.state.clear()
@@ -41,6 +59,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.clear()
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
+    driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
+    driver.location.metaClass.getHub = { -> new Expando(localIP: '192.168.1.4', localSrvPortTCP: 39501) }
+    driver.upnpRequestQueues.clear()
     driver.device.dataValues.groupId = 'GROUP_TEST'
     driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.isGroupCoordinator = 'true'
@@ -60,6 +81,203 @@ class SonosAdvPlayerSpec extends Specification {
 
   def cleanup() {
     GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
+  }
+
+  def "raw UPnP subscribe formats request and records SID expiry and renewal"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+
+    then:
+    rawConnections.size() == 1
+    rawConnections[0].host == '192.168.1.50'
+    rawRequests[0].contains('HOST: 192.168.1.50:1400')
+    rawConnections[0].port == 1400
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1\r\n')
+    rawRequests[0].contains('CALLBACK: <http://192.168.1.4:39501/avt>')
+    rawRequests[0].contains('NT: upnp:event')
+    rawRequests[0].contains('TIMEOUT: Second-3600')
+    rawRequests[0].contains('Connection: close')
+
+    when:
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:test-subscription\r\nTIMEOUT: Second-1800\r\n\r\n')
+
+    then:
+    driver.getSid('sid1') == 'uuid:test-subscription'
+    driver.device.dataValues['sid1-expires'] != null
+    driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
+  }
+
+  def "renewal uses captured SID and unsubscribe preserves a replacement SID"() {
+    given:
+    driver.setSid('sid1', 'uuid:old')
+    driver.eventTimestamps.put('SONOS-TEST-DNI-sid1-expires', Instant.now().getEpochSecond() + 7200L)
+
+    when:
+    driver.upnpResubscribeGeneric('renewAVTransportSubscription', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    rawRequests[0].contains('SID: uuid:old')
+    !rawRequests[0].contains('CALLBACK:')
+
+    when:
+    driver.upnpUnsubscribeGeneric('unsubscribeFromAVTransport', 'sid1', 'renewAVTransportSubscription', '/MediaRenderer/AVTransport/Event', 'callback')
+
+    then:
+    rawConnections.size() == 1
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').queue.size() == 1
+
+    when:
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:new\r\nTIMEOUT: Second-3600\r\n\r\n')
+
+    then:
+    rawRequests.size() == 2
+    rawRequests[1].startsWith('UNSUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    rawRequests[1].contains('SID: uuid:new')
+
+    when:
+    driver.setSid('sid1', 'uuid:replacement')
+    rawConnections[1].options.inputReader.call('HTTP/1.1 200 OK\r\n\r\n')
+
+    then:
+    driver.getSid('sid1') == 'uuid:replacement'
+  }
+
+  def "stale response and watchdog cannot complete the next request"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    Map firstQueue = driver.upnpRequestQueues.get('SONOS-TEST-DNI')
+    String firstGuid = firstQueue.active.guid
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid2', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
+    driver.upnpSubscriptionWatchdog([guid: firstGuid])
+
+    then:
+    rawConnections.size() == 2
+    firstQueue.active.sidKey == 'sid2'
+
+    when:
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:stale\r\n\r\n')
+    driver.socketStatus('receive error after request B started')
+    driver.upnpSubscriptionWatchdog([guid: firstGuid])
+
+    then:
+    firstQueue.active.sidKey == 'sid2'
+    driver.getSid('sid1') == null
+    driver.getSid('sid2') == null
+  }
+
+  def "missing SID and HTTP failures retry only within the configured bound"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nTIMEOUT: Second-3600\r\n\r\n')
+
+    then:
+    driver.getSid('sid1') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+
+    when:
+    Map retryOne = driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map
+    driver.retryUpnpSid1(retryOne)
+    rawConnections[1].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
+    Map retryTwo = driver.scheduled.findAll { List row -> row[1] == 'retryUpnpSid1' }.last()[2].data as Map
+    driver.retryUpnpSid1(retryTwo)
+    rawConnections[2].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
+
+    then:
+    rawRequests.size() == 3
+    driver.scheduled.count { List row -> row[1] == 'retryUpnpSid1' } == 2
+    driver.logs.any { String line -> line.contains('retry limit reached') }
+  }
+
+  def "scheduled retry callback accepts Hubitat LazyMap payloads"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
+    Map scheduledRetry = driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map
+    Map hubitatData = new JsonSlurper().parseText(JsonOutput.toJson(scheduledRetry)) as Map
+    driver.retryUpnpSid1(hubitatData)
+
+    then:
+    rawRequests.size() == 2
+    rawRequests[1].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active != null
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.attempts == 2
+  }
+
+  def "oversized and malformed headers fail without recording a SID"() {
+    given:
+    String oversizedGuid = null
+
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    oversizedGuid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
+    rawConnections[0].options.inputReader.call('X' * 17000)
+
+    then:
+    driver.getSid('sid1') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+
+    when:
+    driver.upnpSubscriptionWatchdog([guid: oversizedGuid])
+    driver.retryUpnpSid1(driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map)
+    rawConnections[1].options.inputReader.call('malformed status\r\n\r\n')
+
+    then:
+    driver.getSid('sid1') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+  }
+
+  def "EOF and connection errors are failures and never create a SID"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    rawConnections[0].options.inputReader.call(null)
+
+    then:
+    driver.getSid('sid1') == null
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' }
+
+    when:
+    driver.binding.getVariable('interfaces').rawSocket = new Expando(
+      connect: { Map options, String host, Integer port -> throw new IOException('refused') },
+      sendMessage: { String message -> rawRequests << message },
+      close: { -> }
+    )
+    driver.retryUpnpSid1(driver.scheduled.findAll { List row -> row[1] == 'retryUpnpSid1' }.last()[2].data as Map)
+
+    then:
+    driver.getSid('sid1') == null
+    rawRequests.size() == 0
+  }
+
+  def "reinitialization rejects callbacks from the previous queue generation"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    String priorGuid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
+    driver.invalidateUpnpRequestsForDevice()
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid2', '/mrc', 'callback', '/MediaRenderer/RenderingControl/Event')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:prior\r\n\r\n')
+    driver.upnpSubscriptionWatchdog([guid: priorGuid])
+
+    then:
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'sid2'
+    driver.getSid('sid1') == null
+    driver.getSid('sid2') == null
+  }
+
+  def "legacy callbacks and old fallback methods cannot alter current queue ownership"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    String guid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
+    driver.subscribeResubscribeGenericCallback('subscribeToAVTransport', 'resubscribeToAVTransport', 'sid1', 'AVTransport', null)
+    driver.upnpUnsubscribeCallbackGeneric('sid1', 'AVTransport', null)
+    driver.unlockSid1SubscribeMutexAfterTimeoutCallback()
+    driver.socketStatus('receive error')
+
+    then:
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid == guid
+    driver.getSid('sid1') == null
+    rawConnections.size() == 1
   }
 
   def "ZGT XML guards reject blank outer and nested payloads"() {
@@ -276,6 +494,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.scheduled.clear()
 
     when:
@@ -298,6 +518,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.scheduled.clear()
 
     when:
@@ -320,6 +542,8 @@ class SonosAdvPlayerSpec extends Specification {
     Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
     retryState.playbackObserved = true
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.scheduled.clear()
 
     when:
@@ -366,6 +590,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.loadPlaylistFull('playlist-7', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.scheduled.clear()
 
     when:
@@ -379,6 +605,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
 
     then:
@@ -410,6 +638,8 @@ class SonosAdvPlayerSpec extends Specification {
     Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
     driver.processWebsocketMessage('[{"namespace":"playlists","response":"loadPlaylist","success":true},{}]')
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.scheduled.clear()
 
     when:
@@ -427,6 +657,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
 
     then:
@@ -440,6 +672,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
     Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
 
     when:
     driver.processWebsocketMessage('[{"type":"playbackStatus","namespace":"playback"},{"playbackState":"PLAYBACK_STATE_BUFFERING"}]')
@@ -488,6 +722,8 @@ class SonosAdvPlayerSpec extends Specification {
     String staleOperationId = driver.favoriteRetryState['SONOS-TEST-DNI'].operationId
     driver.loadFavoriteFull('43', 'repeat all', 'replace', 'off', 'true', 'on')
     websocketMessages.clear()
+    rawConnections.clear()
+    rawRequests.clear()
     driver.scheduled.clear()
 
     when:

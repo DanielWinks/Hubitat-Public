@@ -32,6 +32,7 @@ import groovy.transform.CompileStatic
 import groovy.transform.Field
 import groovy.util.slurpersupport.GPathResult
 import hubitat.scheduling.AsyncResponse
+import java.io.InputStream
 import java.time.Instant
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
@@ -383,16 +384,12 @@ Boolean hasLineInCapability() {
 @Field static final List<Long> WS_BACKOFF_STAGE_SECONDS = [600L, 600L, 600L, 7200L, 14400L, 21600L]
 @Field static final List<Integer> WS_BACKOFF_INTERVALS_SECONDS = [30, 60, 120, 300, 900, 1800, 3600]
 @Field static final Integer WS_STALE_TIMEOUT_SECONDS = 900
-// Per-(DNI, sid) subscription mutexes. Previously these were shared static
-// singletons, which caused every driver instance on the hub to serialize
-// through a single permit per sid -- a large contributor to the ZGT retry
-// storm whenever multiple players' 1-hour resub windows aligned.
-@Field static ConcurrentHashMap<String, Semaphore> subscribeMutexes = new ConcurrentHashMap<String, Semaphore>()
-@Field static ConcurrentHashMap<String, Semaphore> unsubscribeMutexes = new ConcurrentHashMap<String, Semaphore>()
-@Field static final Integer SUBSCRIBE_MUTEX_MAX_PERMITS = 1
-@Field static final Integer UNSUBSCRIBE_MUTEX_MAX_PERMITS = 1
-@Field static final Integer SUBSCRIBE_MUTEX_WAIT_SECONDS = 2
-@Field static final Integer SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS = 5
+// UPnP subscriptions share one per-player socket, so all service requests
+// pass through a single in-memory queue for this device.
+@Field static ConcurrentHashMap<String, Map> upnpRequestQueues = new ConcurrentHashMap<String, Map>()
+@Field static final Integer UPNP_REQUEST_TIMEOUT_SECONDS = 5
+@Field static final Integer UPNP_REQUEST_MAX_ATTEMPTS = 3
+@Field static final Integer UPNP_MAX_HEADER_BYTES = 16384
 @Field static final Integer SUBSCRIBE_RETRY_MAX_ATTEMPTS = 3
 @Field static final Integer GROUP_DEVICE_UPDATE_MAX_RETRIES = 3
 @Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
@@ -504,7 +501,13 @@ Boolean hasLineInCapability() {
 // =============================================================================
 // Initialize and Configure
 // =============================================================================
+void uninstalled() {
+  clearStaticDriverStateForCurrentDevice()
+}
 void initialize() {
+  invalidateUpnpRequestsForDevice()
+  Map queueEntry = getUpnpRequestQueue()
+  if(queueEntry != null) { synchronized(queueEntry.lock) { queueEntry.retired = false } }
   migrateLegacyRuntimeState()
   cancelAudioClipWatchdog()
   resetSubscriptionMutexesForDevice()
@@ -517,6 +520,7 @@ void initialize() {
   scheduleWebsocketHealthCheck()
 }
 void configure() {
+  invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
   cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
@@ -925,8 +929,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(jsonSlurpers)
     clearedEntries += clearStaticMap(eventTimestamps)
     clearedEntries += clearStaticMap(favPlaylistDelegate)
-    clearedEntries += clearStaticMap(subscribeMutexes)
-    clearedEntries += clearStaticMap(unsubscribeMutexes)
+    clearedEntries += cleanupUpnpRequestQueues([] as Set<String>)
     clearedEntries += clearStaticMap(subscribeRetryAttempts)
     if(clearedEntries > 0) {
       logDebug("Cleared ${clearedEntries} orphaned static Sonos Advanced Player cache entries with no active players present")
@@ -966,8 +969,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
   removedEntries += pruneEventTimestampKeys(activePlayerDnis)
   removedEntries += pruneFavPlaylistDelegates(activePlayerDnis)
-  removedEntries += pruneDniPrefixedMap(subscribeMutexes, activePlayerDnis)
-  removedEntries += pruneDniPrefixedMap(unsubscribeMutexes, activePlayerDnis)
+  removedEntries += cleanupUpnpRequestQueues(activePlayerDnis)
   removedEntries += pruneDniPrefixedMap(subscribeRetryAttempts, activePlayerDnis)
 
   if(removedEntries > 0) {
@@ -1072,6 +1074,7 @@ String extractEventTimestampDni(String key) {
 }
 
 void clearStaticDriverStateForCurrentDevice() {
+  retireUpnpRequestsForDevice()
   Boolean cleanupMutexAcquired = false
   try {
     cleanupMutexAcquired = staticStateCleanupMutex.tryAcquire(100, TimeUnit.MILLISECONDS)
@@ -1113,8 +1116,12 @@ void clearStaticDriverStateForCurrentDevice() {
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
-      unsubscribeMutexes?.remove(dni)
-      subscribeMutexes?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+      Map upnpEntry = upnpRequestQueues?.get(dni)
+      if(upnpEntry != null) {
+        synchronized(upnpEntry.lock) {
+          if(upnpEntry.active == null && (upnpEntry.queue as List<Map>).isEmpty()) { upnpRequestQueues.remove(dni, upnpEntry) }
+        }
+      }
       subscribeRetryAttempts?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
     }
 
@@ -2925,6 +2932,10 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
 @CompileStatic
 void parse(String raw) {
   if(raw == null || raw == '') {return}
+  if(raw.startsWith('UPNP_RESPONSE|')) {
+    handleUpnpRawResponse(raw)
+    return
+  }
   try {
     if(!raw.startsWith('mac:')){
       setLastWebsocketEvent()
@@ -3574,8 +3585,8 @@ Boolean subValid(String sid) {
   }
 }
 @CompileStatic
-void updateSid(String sid, Map headers) {
-  long expiresEpochValue = Instant.now().getEpochSecond() + (2L * RESUB_INTERVAL.longValue())
+void updateSid(String sid, Map headers, Long grantedTimeout = null) {
+  long expiresEpochValue = Instant.now().getEpochSecond() + (grantedTimeout != null ? grantedTimeout.longValue() : (2L * RESUB_INTERVAL.longValue()))
   Long expiresEpoch = Long.valueOf(expiresEpochValue)
   // Store expiry in-memory for subValid() checks
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
@@ -3587,38 +3598,13 @@ void updateSid(String sid, Map headers) {
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
 }
 
-void scheduleResubscriptionToEvents(String eventsToResub) {
+void scheduleResubscriptionToEvents(String eventsToResub, Long grantedTimeout = null) {
   // Stagger the 1-hour resub window deterministically per device so that
   // multiple players don't all hit the hub at the same second.
   Integer jitterSeconds = getDeviceResubJitterSeconds()
-  runIn(RESUB_INTERVAL - 100 - jitterSeconds, eventsToResub, [overwrite: true])
+  Integer renewalDelay = grantedTimeout != null ? Math.max(30, Math.min(RESUB_INTERVAL, grantedTimeout.intValue()) - 100 - jitterSeconds) : RESUB_INTERVAL - 100 - jitterSeconds
+  runIn(renewalDelay, eventsToResub, [overwrite: true])
   clearSubscriptionRetryAttempts(eventsToResub)
-}
-
-void retrySubscription(String eventsToRetry, Integer retryTime = 60) {
-  // This is the "real retry" path (used by 412 callback and by the initial
-  // schedule on subscribe-failure), distinct from the mutex-contention
-  // retries gated by scheduleSubscriptionRetry. Reset the mutex-contention
-  // budget so a real server-driven retry doesn't get counted against the
-  // cap.
-  clearSubscriptionRetryAttempts(eventsToRetry)
-  runIn(retryTime, eventsToRetry, [overwrite: true])
-}
-
-// Queue a bounded retry for a subscribe/resubscribe whose mutex attempt
-// failed. Returns true iff a retry was actually scheduled (caller can gate
-// log output on the return value to avoid floods). The retry budget caps the
-// self-rescheduling loop that previously ran indefinitely.
-Boolean scheduleSubscriptionRetry(String eventsToRetry, String clearOnCancel = null) {
-  Integer attempts = incrementSubscriptionRetryAttempts(eventsToRetry)
-  if(attempts > SUBSCRIBE_RETRY_MAX_ATTEMPTS) {
-    logWarn("${eventsToRetry} retry budget exhausted (${attempts - 1} attempts); waiting for next scheduled window.")
-    clearSubscriptionRetryAttempts(eventsToRetry)
-    if(clearOnCancel != null) { clearSubscriptionRetryAttempts(clearOnCancel) }
-    return false
-  }
-  runIn(5, eventsToRetry, [overwrite: true])
-  return true
 }
 
 Integer getDeviceResubJitterSeconds() {
@@ -3633,260 +3619,499 @@ Integer getRandomLockRetry(Integer low = 8, Integer high = 30) {
 
 void removeResub(String resub) { unschedule(resub)}
 
-@CompileStatic
-Boolean tryAcquireMutexWithTimeout(Semaphore mutex, Integer timeoutSeconds, String lockName) {
-  if(mutex == null) {
-    logWarn("Cannot acquire ${lockName}; mutex was null")
-    return false
-  }
-
-  try {
-    return mutex.tryAcquire(timeoutSeconds.toLong(), TimeUnit.SECONDS)
-  } catch(InterruptedException e) {
-    logWarn("Interrupted while waiting for ${lockName}: ${e.message}")
-    return false
-  }
-}
-
-@CompileStatic
-void releaseMutexIfHeld(Semaphore mutex, Integer maxPermits, String lockName) {
-  if(mutex == null) { return }
-
-  synchronized(mutex) {
-    if(mutex.availablePermits() < maxPermits) {
-      mutex.release()
-    } else {
-      logTrace("Skipped extra release for ${lockName}")
-    }
-  }
-}
-
-Semaphore getMutexForSid(String sid) {
-  if(sid != 'sid1' && sid != 'sid2' && sid != 'sid3' && sid != 'sid4') {
-    logWarn("Unknown subscription sid '${sid}'")
-    return null
-  }
-  String key = "${getDNI()}-${sid}"
-  Semaphore existing = subscribeMutexes.get(key)
+// The registry value is never replaced while present: each player keeps one lock
+// guarding the queue, active GUID, socket and lifecycle generation.
+Map getUpnpRequestQueue(String dni = getDNI()) {
+  if(!dni) { return null }
+  Map existing = upnpRequestQueues.get(dni)
   if(existing != null) { return existing }
-  return subscribeMutexes.computeIfAbsent(key, { k -> new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS) })
-}
-
-Semaphore getUnsubscribeMutexForDevice() {
-  String key = getDNI()
-  if(key == null || key == '') { return null }
-  Semaphore existing = unsubscribeMutexes.get(key)
-  if(existing != null) { return existing }
-  return unsubscribeMutexes.computeIfAbsent(key, { k -> new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS) })
+  Map created = [lock: new Object(), queue: new ArrayList<Map>(), active: null, socket: null, generation: 0L, retired: false]
+  Map raced = upnpRequestQueues.putIfAbsent(dni, created)
+  return raced ?: created
 }
 
 void resetSubscriptionMutexesForDevice() {
-  String dni = getDNI()
-  if(dni == null || dni == '') { return }
-  ['sid1', 'sid2', 'sid3', 'sid4'].each { String sid ->
-    String key = "${dni}-${sid}"
-    // Do not replace a semaphore that may still be owned by an in-flight
-    // callback. Replacing it strands the old permit and allows overlapping
-    // subscriptions against the same SID.
-    subscribeMutexes.putIfAbsent(key, new Semaphore(SUBSCRIBE_MUTEX_MAX_PERMITS))
-  }
-  unsubscribeMutexes.putIfAbsent(dni, new Semaphore(UNSUBSCRIBE_MUTEX_MAX_PERMITS))
-}
-
-String retryAttemptKey(String eventsToRetry) {
-  return "${getDNI()}-${eventsToRetry}"
-}
-
-void clearSubscriptionRetryAttempts(String eventsToRetry) {
-  subscribeRetryAttempts.remove(retryAttemptKey(eventsToRetry))
+  invalidateUpnpRequestsForDevice()
 }
 
 Integer incrementSubscriptionRetryAttempts(String eventsToRetry) {
   String key = retryAttemptKey(eventsToRetry)
-  Integer current = subscribeRetryAttempts.get(key) ?: 0
-  Integer next = current + 1
+  Integer next = (subscribeRetryAttempts.get(key) ?: 0) + 1
   subscribeRetryAttempts.put(key, next)
   return next
 }
 
-// Each sid gets its own fallback callback so overwrite:true only replaces the
-// pending unlock for the SAME sid. With a single shared callback name, scheduling
-// one sid's fallback cancelled any other sid's pending unlock, leaving that mutex
-// held until tryAcquire timeouts degraded every later subscribe for it.
-void unlockSubscribeMutexAfterTimeout(String sid) {
-  logTrace("Scheduling unlock of subscribeMutex for ${sid} in ${SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS} seconds...")
-  switch(sid) {
-    case 'sid1': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid1SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
-    case 'sid2': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid2SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
-    case 'sid3': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid3SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
-    case 'sid4': runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockSid4SubscribeMutexAfterTimeoutCallback', [overwrite: true]); break
-    default: logWarn("Unknown subscription sid '${sid}'; not scheduling subscribe mutex fallback release")
-  }
-}
-void unlockSid1SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid1') }
-void unlockSid2SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid2') }
-void unlockSid3SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid3') }
-void unlockSid4SubscribeMutexAfterTimeoutCallback() { releaseSubscribeMutexForSid('sid4') }
+String retryAttemptKey(String eventsToRetry) { return "${getDNI()}-${eventsToRetry}" }
+void clearSubscriptionRetryAttempts(String eventsToRetry) { subscribeRetryAttempts.remove(retryAttemptKey(eventsToRetry)) }
 
-void releaseSubscribeMutexForSid(String sid) {
-  Semaphore mutex = getMutexForSid(sid)
-  releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${sid}")
-}
-
-// Retained so fallback jobs scheduled by prior driver code that are still
-// pending when this version is installed release their mutex instead of erroring.
-void unlockSubscribeMutexAfterTimeoutCallback(Map data) {
-  releaseSubscribeMutexForSid(data['sid'] as String)
-}
-
-void unlockUnsubscribeMutexAfterTimeout() {
-  runIn(SUBSCRIBE_MUTEX_FALLBACK_RELEASE_SECONDS, 'unlockUnsubscribeMutexAfterTimeoutCallback', [overwrite: true])
-}
-void unlockUnsubscribeMutexAfterTimeoutCallback() {
-  releaseMutexIfHeld(getUnsubscribeMutexForDevice(), UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
-}
-
-@CompileStatic
 void upnpSubscribeGeneric(String sub, String subId, String subPath, String callback, String evtSub) {
-  // Idempotency guard: if we already hold a valid SID for this service, skip
-  // entirely. External callers (e.g. the parent app's 499/GROUP_STATUS_MOVED
-  // handler) can hammer subscribeTo* freely without causing mutex contention
-  // or redundant UPnP SUBSCRIBE traffic.
-  if(subValid(subId)) { return }
-  Semaphore mutex = getMutexForSid(subId)
-  Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${sub} (${subId})")
-  if(acquired == true) {
-    logTrace('Acquired lock, proceeding to subscribe...')
-    unlockSubscribeMutexAfterTimeout(subId)
-    Boolean releaseMutex = true
-    try {
-      if(subValid(subId) != true) {
-        sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
-        releaseMutex = false
-      }
-    } catch(Exception e) {
-      logInfo("Subscription to ${evtSub} failed due to ${e}")
-      logInfo("Values used for attempt: sub:${sub} subId:${subId} subPath:${subPath} callback:${callback} evtSub:${evtSub}")
-    } finally {
-      if(releaseMutex == true) {
-        releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${subId}")
-      }
-    }
-  } else {
-    if(scheduleSubscriptionRetry(sub)) {
-      logTrace("${sub} attempt in progress, queued retry.")
-    }
-  }
+  enqueueUpnpRequest('subscribe', sub, null, subId, subPath, callback, evtSub)
 }
-
 void upnpResubscribeGeneric(String resub, String subId, String subPath, String callback, String evtSub) {
-  Semaphore mutex = getMutexForSid(subId)
-  Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${resub} (${subId})")
-  if(acquired == true) {
-    logTrace('Acquired lock, proceeding to resubscribe...')
-    unlockSubscribeMutexAfterTimeout(subId)
-    Boolean releaseMutex = true
-    try {
-      if(subValid(subId)) {
-        sonosEventRenew(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), getSid(subId), callback)
-      } else {
-        sonosEventSubscribe(evtSub, getlocalUpnpHost(), RESUB_INTERVAL, getDNI(), subPath, callback)
-      }
-      releaseMutex = false
-    } catch(Exception e) {
-      logInfo("Subscription to ${evtSub} failed due to ${e}")
-      logInfo("Values used for attempt: resub:${resub} subId:${subId} callback:${callback} evtSub:${evtSub}")
-    } finally {
-      if(releaseMutex == true) {
-        releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${subId}")
-      }
-    }
-  } else {
-    if(scheduleSubscriptionRetry(resub)) {
-      logTrace("${resub} attempt in progress, queued retry.")
-    }
-  }
+  enqueueUpnpRequest('renew', null, resub, subId, subPath, callback, evtSub)
 }
-
 void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evtSub, String callback) {
-  Semaphore mutex = getUnsubscribeMutexForDevice()
-  Boolean acquired = tryAcquireMutexWithTimeout(mutex, SUBSCRIBE_MUTEX_WAIT_SECONDS, "${unsub} (${subId})")
-  if(acquired == true) {
-    unlockUnsubscribeMutexAfterTimeout()
-    Boolean releaseMutex = true
-    try {
-      // Verify all required parameters are present before attempting unsubscribe
-      String localUpnpHost = getlocalUpnpHost()
-      String sid = getSid(subId)
-      String dni = getDNI()
+  enqueueUpnpRequest('unsubscribe', unsub, resub, subId, null, callback, evtSub)
+}
 
-      if(evtSub != null && subId != null && callback != null && resub != null &&
-         localUpnpHost != null && localUpnpHost != '' &&
-         sid != null && sid != '' &&
-         dni != null && dni != '') {
-        sonosEventUnsubscribe(evtSub, localUpnpHost, dni, sid, callback)
-        deleteSid(subId)
-        removeResub(resub)
-        releaseMutex = false
-      } else {
-        // Clean up anyway since we can't unsubscribe
-        if(subId != null) { deleteSid(subId) }
-        if(resub != null) { removeResub(resub) }
+void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
+  Map entry = getUpnpRequestQueue()
+  if(entry == null || !['sid1','sid2','sid3','sid4'].contains(sidKey)) { return }
+  String subscribeMethod = defaultSubscribeMethod(sidKey)
+  String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
+  Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
+    eventUrl: eventUrl, eventPath: eventPath, callbackPath: callbackPath, method: method, subscribeMethod: subscribeMethod, resub: resubscribeMethod,
+    sid: null, phase: 'queued', attempts: 0, dispatchedAt: null, deadlineAt: null, lifecycleGeneration: entry.generation]
+  Boolean added = false
+  Integer pendingDepth = 0
+  String activeGuid = null
+  Long queueGeneration = null
+  synchronized(entry.lock) {
+    if(entry.retired == true) {
+      logTrace("Ignoring UPnP ${operation} for ${sidKey}; request queue is retired generation=${entry.generation}")
+      return
+    }
+    request.lifecycleGeneration = entry.generation
+    Map active = entry.active as Map
+    // Coalesce identical outcomes only. Opposite operations retain their order.
+    List<Map> sameServicePending = (entry.queue as List<Map>).findAll { Map queued -> queued.sidKey == sidKey }
+    Map lastSameService = sameServicePending ? sameServicePending.last() : null
+    Boolean duplicate = lastSameService != null
+      ? lastSameService.operation == operation
+      : (active != null && active.operation == operation && active.sidKey == sidKey)
+    if(!duplicate) { (entry.queue as List<Map>).add(request); added = true }
+    pendingDepth = (entry.queue as List<Map>).size()
+    activeGuid = entry.active?.guid as String
+    queueGeneration = entry.generation as Long
+    if(operation == 'unsubscribe') {
+      if(resub) { removeResub(resub) }
+      removeResub(subscribeMethod)
+      switch(sidKey) {
+        case 'sid1': unschedule('retryUpnpSid1'); break
+        case 'sid2': unschedule('retryUpnpSid2'); break
+        case 'sid3': unschedule('retryUpnpSid3'); break
+        case 'sid4': unschedule('retryUpnpSid4'); break
       }
-    } catch(Exception e) {
-      logInfo("${unsub} failed due to ${e}")
-    } finally {
-      if(releaseMutex == true) {
-        releaseMutexIfHeld(mutex, UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
+    }
+  }
+  if(added) {
+    logTrace("Queued UPnP ${operation} ${eventUrl} guid=${request.guid} generation=${queueGeneration} depth=${pendingDepth} activeGuid=${activeGuid ?: 'none'}")
+    dispatchNextUpnpRequest(entry)
+  } else {
+    logTrace("Coalesced duplicate UPnP ${operation} ${eventUrl} sidKey=${sidKey} activeGuid=${activeGuid ?: 'none'} depth=${pendingDepth}")
+  }
+}
+
+String defaultSubscribeMethod(String sidKey) {
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', sid3: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents'][sidKey]
+}
+String defaultResubscribeMethod(String sidKey) {
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', sid3: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents'][sidKey]
+}
+
+void dispatchNextUpnpRequest(Map entry) {
+  Map request = null
+  Integer remaining = 0
+  synchronized(entry.lock) {
+    if(entry.active == null && !(entry.queue as List<Map>).isEmpty()) {
+      request = (entry.queue as List<Map>).remove(0)
+      entry.active = request
+      request.phase = 'dispatching'
+      request.dispatchedAt = now()
+      request.deadlineAt = now() + (UPNP_REQUEST_TIMEOUT_SECONDS * 1000L)
+    }
+    remaining = (entry.queue as List<Map>).size()
+  }
+  if(request != null) {
+    logTrace("Claimed UPnP queue request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} generation=${request.lifecycleGeneration} queuedRemaining=${remaining}")
+    dispatchUpnpRequest(entry, request)
+  }
+}
+
+Map getUpnpEndpoint() {
+  String configuredHost = getlocalUpnpHost()
+  String host = configuredHost ?: ''
+  String port = '1400'
+  if(configuredHost?.startsWith('[')) {
+    Integer closingBracket = configuredHost.indexOf(']')
+    if(closingBracket > 0) {
+      host = configuredHost.substring(1, closingBracket)
+      if(configuredHost.length() > closingBracket + 2 && configuredHost.charAt(closingBracket + 1) == ':') {
+        port = configuredHost.substring(closingBracket + 2)
       }
     }
   } else {
-    if(scheduleSubscriptionRetry(unsub, resub)) {
-      logTrace("${unsub} attempt in progress, queued retry.")
+    Integer separator = configuredHost != null ? configuredHost.lastIndexOf(':') : -1
+    if(separator > 0 && configuredHost.indexOf(':') == separator) {
+      String candidatePort = configuredHost.substring(separator + 1)
+      if(candidatePort.isNumber()) { host = configuredHost.substring(0, separator); port = candidatePort }
     }
   }
+  return [host: host, port: port]
 }
+
+void dispatchUpnpRequest(Map entry, Map request) {
+  Boolean redundant = false
+  Boolean missingUnsubscribeSid = false
+  synchronized(entry.lock) {
+    if(entry.active?.guid != request.guid || request.phase != 'dispatching') { return }
+    String sid = getSid(request.sidKey as String)
+    if(request.operation == 'subscribe' && subValid(request.sidKey as String)) { redundant = true }
+    if(request.operation == 'renew' && (!subValid(request.sidKey as String) || !sid)) {
+      request.operation = 'subscribe'
+      sid = null
+    }
+    request.sid = sid
+    if(request.operation == 'unsubscribe') {
+      if(request.resub) { removeResub(request.resub as String) }
+      missingUnsubscribeSid = !sid
+    }
+    if(!redundant && !missingUnsubscribeSid) { request.attempts = ((request.attempts ?: 0) as Integer) + 1 }
+  }
+  if(redundant) { completeUpnpWithoutResponse(entry, request, 'already-valid'); return }
+  if(missingUnsubscribeSid) { completeUpnpWithoutResponse(entry, request, 'no-sid'); return }
+  Map endpoint = getUpnpEndpoint()
+  String host = endpoint.host as String
+  String portValue = (device.getDataValue('localUpnpPort') ?: endpoint.port ?: '1400').toString()
+  String verb = request.operation == 'unsubscribe' ? 'UNSUBSCRIBE' : 'SUBSCRIBE'
+  String target = request.eventUrl as String
+  Boolean sidHeaderSent = request.operation == 'unsubscribe' || (request.operation == 'renew' && request.sid != null)
+  StringBuilder http = new StringBuilder()
+  String callbackUrl = null
+  String timeoutHeader = null
+  http.append(verb).append(' ').append(target).append(' HTTP/1.1\r\n')
+  http.append('HOST: ').append(host).append(':').append(portValue).append('\r\n')
+  if(sidHeaderSent) {
+    http.append('SID: ').append(request.sid).append('\r\n')
+  } else {
+    String callback = "${getLocation().getHub().localIP}:${getLocation().getHub().localSrvPortTCP}"
+    callbackUrl = "http://${callback}${request.eventPath}"
+    http.append("CALLBACK: <${callbackUrl}>\r\nNT: upnp:event\r\n")
+  }
+  if(request.operation != 'unsubscribe') {
+    timeoutHeader = "Second-${RESUB_INTERVAL}"
+    http.append("TIMEOUT: ${timeoutHeader}\r\n")
+  }
+  http.append('Connection: close\r\n\r\n')
+  String guid = request.guid as String
+  Integer port = Integer.parseInt(portValue)
+  Integer requestBytes = http.toString().getBytes('UTF-8').length
+  logTrace("UPnP outbound guid=${guid} operation=${request.operation} target=${target} endpoint=${host}:${portValue} callback=${callbackUrl ?: 'none'} sidHeader=${sidHeaderSent ? 'present' : 'none'} capturedSidPresent=${request.sid != null} timeout=${timeoutHeader ?: 'none'} bytes=${requestBytes}")
+  StringBuilder responseBuffer = new StringBuilder()
+  Boolean emitted = false
+  Boolean trailingCallbackLogged = false
+  try {
+    synchronized(entry.lock) {
+      if(entry.active?.guid != guid || request.phase != 'dispatching') { return }
+      entry.socket = interfaces.rawSocket
+      interfaces.rawSocket.connect([inputReader: { InputStream input, Closure parseCallback ->
+      synchronized(responseBuffer) {
+        if(emitted) {
+          if(!trailingCallbackLogged) {
+            trailingCallbackLogged = true
+            logTrace("Ignoring additional raw socket callbacks after response completion guid=${guid}")
+          }
+          return
+        }
+        byte[] inputBytes = new byte[UPNP_MAX_HEADER_BYTES + 1]
+        Integer bytesRead = input.read(inputBytes)
+        if(bytesRead < 0) {
+          logTrace("UPnP socket EOF guid=${guid} bufferedBytes=${responseBuffer.length()}")
+          if(!emitted) { emitted = true; parseCallback.call("UPNP_RESPONSE|${guid}|ERROR|eof") }
+          return
+        }
+        responseBuffer.append(new String(inputBytes, 0, bytesRead, 'UTF-8'))
+        Integer headerEnd = responseBuffer.indexOf('\r\n\r\n')
+        logTrace("UPnP socket read guid=${guid} bytesRead=${bytesRead} bufferedBytes=${responseBuffer.length()} headersComplete=${headerEnd >= 0}")
+        if(headerEnd >= 0) {
+          emitted = true
+          if((headerEnd + 4) > UPNP_MAX_HEADER_BYTES) {
+            parseCallback.call("UPNP_RESPONSE|${guid}|ERROR|headers-too-large")
+          } else {
+            parseCallback.call("UPNP_RESPONSE|${guid}|${responseBuffer.toString()}")
+          }
+        } else if(responseBuffer.length() > UPNP_MAX_HEADER_BYTES) {
+          emitted = true
+          parseCallback.call("UPNP_RESPONSE|${guid}|ERROR|headers-too-large")
+        }
+      }
+      }], host, port)
+      if(entry.active?.guid == guid && request.phase == 'dispatching') { request.phase = 'waiting' }
+      else { return }
+    }
+    interfaces.rawSocket.sendMessage(http.toString())
+    synchronized(entry.lock) {
+      if(entry.active?.guid == guid && request.phase == 'waiting') {
+        runIn(UPNP_REQUEST_TIMEOUT_SECONDS, 'upnpSubscriptionWatchdog', [data: [guid: guid], overwrite: true])
+        logTrace("Dispatched ${verb} ${target} guid=${guid} sidKey=${request.sidKey} attempt=${request.attempts} watchdogSeconds=${UPNP_REQUEST_TIMEOUT_SECONDS}")
+      }
+    }
+  } catch(Exception e) {
+    logWarn("UPnP socket dispatch failed guid=${guid}: ${e.message}")
+    completeUpnpFailure(entry, request, 'connection-error')
+  }
+}
+
+void handleUpnpRawResponse(String raw) {
+  String rest = raw.substring('UPNP_RESPONSE|'.length())
+  Integer separator = rest.indexOf('|')
+  if(separator < 1) { return }
+  String guid = rest.substring(0, separator)
+  String payload = rest.substring(separator + 1)
+  logTrace("UPnP response callback guid=${guid} payloadBytes=${payload.getBytes('UTF-8').length}")
+  Map entry = upnpRequestQueues.get(getDNI())
+  if(entry == null) { logTrace("Ignoring UPnP response guid=${guid}; no queue for dni=${getDNI()}"); return }
+  synchronized(entry.lock) {
+    Map request = entry.active as Map
+    if(request == null || request.guid != guid) {
+      logTrace("Ignoring stale UPnP response guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
+      return
+    }
+    if(request.phase == 'complete' || request.phase == 'expired') {
+      logTrace("Ignoring UPnP response guid=${guid} because owner phase=${request.phase}")
+      return
+    }
+    if(payload.startsWith('ERROR|')) { completeUpnpCurrentLocked(entry, request, null, payload); return }
+    Integer end = payload.indexOf('\r\n\r\n')
+    if(end < 0) { return }
+    String[] lines = payload.substring(0, end).split('\r\n')
+    String[] statusParts = lines[0].split(' ')
+    Integer status = null
+    if(statusParts.length > 1) { try { status = Integer.valueOf(statusParts[1]) } catch(NumberFormatException ignored) { status = null } }
+    Map<String, String> headers = [:]
+    for(Integer i = 1; i < lines.length; i++) {
+      Integer colon = lines[i].indexOf(':')
+      if(colon > 0) { headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim()) }
+    }
+    logTrace("Parsed UPnP response guid=${guid} statusLine=${lines[0]} headerNames=${headers.keySet().join(',')}")
+    completeUpnpCurrentLocked(entry, request, [status: status, headers: headers], null)
+  }
+}
+
+void completeUpnpCurrentLocked(Map entry, Map request, Map response, String error) {
+  if(entry.active?.guid != request.guid || request.phase == 'complete' || request.phase == 'expired') { return }
+  request.phase = 'complete'
+  Integer status = response?.status as Integer
+  logTrace("UPnP response guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
+  if(error) { logTrace("UPnP request failed guid=${request.guid} reason=${error}") }
+  Map<String,String> headers = response?.headers as Map<String,String> ?: [:]
+  String sidValue = headers['sid']
+  if(request.operation == 'unsubscribe') {
+    Boolean sidRemoved = false
+    if((status == 200 || status == 412) && getSid(request.sidKey as String) == request.sid) {
+      deleteSid(request.sidKey as String)
+      sidRemoved = true
+    }
+    logTrace("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
+  } else if(status == 200 && (sidValue || request.operation == 'renew')) {
+    if(getSid(request.sidKey as String) == request.sid) {
+      Long timeout = parseGrantedTimeout(headers['timeout'])
+      if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
+      else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
+      logTrace("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
+      removeResub(request.subscribeMethod as String)
+      if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
+      clearSubscriptionRetryAttempts(request.subscribeMethod as String)
+      clearSubscriptionRetryAttempts(request.resub as String)
+    } else {
+      logTrace("Ignoring UPnP SID update guid=${request.guid} sidKey=${request.sidKey}; current SID ownership changed before response")
+    }
+  } else if(status == 412 && request.operation != 'unsubscribe') {
+    if(request.sid && getSid(request.sidKey as String) == request.sid) { deleteSid(request.sidKey as String) }
+    logTrace("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
+    scheduleUpnpRetry(request, request.sid ? 5 : 60)
+  } else {
+    logTrace("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
+    scheduleUpnpRetry(request)
+  }
+  closeOwnedUpnpSocketLocked(entry, request)
+  entry.active = null
+  entry.socket = null
+  dispatchNextUpnpRequest(entry)
+}
+
+Long parseGrantedTimeout(String value) {
+  if(!value) { return 2L * RESUB_INTERVAL }
+  java.util.regex.Matcher matcher = java.util.regex.Pattern.compile('(?i)second-(\\d+)').matcher(value)
+  if(matcher.find()) { return Math.max(60L, Long.parseLong(matcher.group(1))) }
+  return 2L * RESUB_INTERVAL
+}
+
+void completeUpnpWithoutResponse(Map entry, Map request, String reason) {
+  synchronized(entry.lock) {
+    if(entry.active?.guid != request.guid) { return }
+    request.phase = 'complete'
+    logTrace("Completed UPnP request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} reason=${reason}")
+    entry.active = null
+    dispatchNextUpnpRequest(entry)
+  }
+}
+void completeUpnpFailure(Map entry, Map request, String reason) {
+  synchronized(entry.lock) {
+    if(entry.active?.guid != request.guid) { return }
+    completeUpnpCurrentLocked(entry, request, null, reason)
+  }
+}
+void scheduleUpnpRetry(Map request, Integer delayOverride = null) {
+  if((request.attempts as Integer) >= UPNP_REQUEST_MAX_ATTEMPTS) {
+    logWarn("UPnP request retry limit reached guid=${request.guid} operation=${request.operation}")
+    return
+  }
+  Map retryRequest = new LinkedHashMap(request)
+  retryRequest.remove('guid')
+  retryRequest.remove('phase')
+  retryRequest.remove('dispatchedAt')
+  retryRequest.remove('deadlineAt')
+  scheduleUpnpRetryCallback(request, retryRequest, delayOverride)
+}
+void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverride = null) {
+  Integer delay = delayOverride != null ? delayOverride : (5 * (request.attempts as Integer))
+  Map options = [data: [request: retryRequest], overwrite: true]
+  logTrace("Scheduling UPnP retry guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} delaySeconds=${delay} generation=${request.lifecycleGeneration}")
+  switch(request.sidKey) {
+    case 'sid1': runIn(delay, 'retryUpnpSid1', options); break
+    case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
+    case 'sid3': runIn(delay, 'retryUpnpSid3', options); break
+    case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
+  }
+}
+void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
+void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
+void retryUpnpSid3(Map data) { retryUpnpRequest(data) }
+void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
+
+void retryUpnpRequest(Map data) {
+  Map retry = data?.request as Map
+  if(retry == null) { logTrace('Ignoring UPnP retry callback without request data'); return }
+  Map entry = upnpRequestQueues.get(getDNI())
+  if(entry == null) { logTrace("Ignoring UPnP retry guid=${retry.guid ?: 'none'}; no queue for dni=${getDNI()}"); return }
+  synchronized(entry.lock) {
+    if(entry.retired == true) {
+      logTrace("Ignoring UPnP retry guid=${retry.guid ?: 'none'}; queue is retired generation=${entry.generation}")
+      return
+    }
+    if((retry.lifecycleGeneration as Long) != (entry.generation as Long)) {
+      logTrace("Ignoring stale UPnP retry after lifecycle change guid=${retry.guid}")
+      return
+    }
+    retry.guid = UUID.randomUUID().toString()
+    retry.phase = 'queued'
+    retry.dispatchedAt = null
+    retry.deadlineAt = null
+    (entry.queue as List<Map>).add(retry)
+    logTrace("Accepted UPnP retry guid=${retry.guid} operation=${retry.operation} sidKey=${retry.sidKey} attempt=${retry.attempts} generation=${entry.generation} depth=${(entry.queue as List<Map>).size()}")
+  }
+  dispatchNextUpnpRequest(entry)
+}
+
+void closeOwnedUpnpSocketLocked(Map entry, Map request) {
+  if(entry.active?.guid != request.guid) { return }
+  Object socket = entry.socket
+  entry.socket = null
+  if(socket != null) {
+    try { socket.close() } catch(Exception e) { logTrace("Socket close failed guid=${request.guid}: ${e.message}") }
+  }
+}
+void upnpSubscriptionWatchdog(Map data) {
+  String guid = data?.guid as String
+  Map entry = upnpRequestQueues.get(getDNI())
+  if(entry == null) { return }
+  synchronized(entry.lock) {
+    Map request = entry.active as Map
+    if(request == null || request.guid != guid) {
+      logTrace("Ignoring stale UPnP watchdog guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
+      return
+    }
+    request.phase = 'expired'
+    logTrace("UPnP watchdog expired guid=${guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} generation=${request.lifecycleGeneration}")
+    closeOwnedUpnpSocketLocked(entry, request)
+    if((request.attempts as Integer) < UPNP_REQUEST_MAX_ATTEMPTS) { scheduleUpnpRetry(request) }
+    entry.active = null
+    entry.socket = null
+    dispatchNextUpnpRequest(entry)
+  }
+}
+void socketStatus(String status) { logTrace("UPnP raw socket status (diagnostic only): ${status}") }
+
+void invalidateUpnpRequestsForDevice() {
+  String dni = getDNI()
+  Map entry = getUpnpRequestQueue(dni)
+  if(entry == null) { return }
+  synchronized(entry.lock) {
+    Integer queuedCount = (entry.queue as List<Map>).size()
+    String activeGuid = entry.active?.guid as String
+    entry.generation = ((entry.generation ?: 0L) as Long) + 1L
+    logTrace("Invalidated UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
+    unschedule('retryUpnpSid1')
+    unschedule('retryUpnpSid2')
+    unschedule('retryUpnpSid3')
+    unschedule('retryUpnpSid4')
+    Map active = entry.active as Map
+    if(active != null) {
+      active.phase = 'expired'
+      closeOwnedUpnpSocketLocked(entry, active)
+      unschedule('upnpSubscriptionWatchdog')
+    }
+    (entry.queue as List<Map>).clear()
+    entry.active = null
+    entry.socket = null
+  }
+}
+void retireUpnpRequestsForDevice() {
+  String dni = getDNI()
+  Map entry = getUpnpRequestQueue(dni)
+  if(entry == null) { return }
+  synchronized(entry.lock) {
+    Integer queuedCount = (entry.queue as List<Map>).size()
+    String activeGuid = entry.active?.guid as String
+    entry.retired = true
+    entry.generation = ((entry.generation ?: 0L) as Long) + 1L
+    logTrace("Retired UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
+    unschedule('upnpSubscriptionWatchdog')
+    unschedule('retryUpnpSid1')
+    unschedule('retryUpnpSid2')
+    unschedule('retryUpnpSid3')
+    unschedule('retryUpnpSid4')
+    Map active = entry.active as Map
+    if(active != null) { active.phase = 'expired'; closeOwnedUpnpSocketLocked(entry, active) }
+    (entry.queue as List<Map>).clear()
+    entry.active = null
+    entry.socket = null
+  }
+}
+
+Integer cleanupUpnpRequestQueues(Set<String> activeDnis) {
+  Integer removed = 0
+  upnpRequestQueues.each { String dni, Map entry ->
+    if(!activeDnis.contains(dni)) {
+      synchronized(entry.lock) {
+        if(entry.active == null && (entry.queue as List<Map>).isEmpty()) {
+          if(upnpRequestQueues.remove(dni, entry)) { removed++ }
+        }
+      }
+    }
+  }
+  return removed
+}
+
+// Retained legacy schedule/callback names. Old HubAction responses carry no GUID
+// and therefore cannot be allowed to mutate current subscription ownership.
+void unlockSubscribeMutexAfterTimeout(String sid) { logTrace("Ignoring legacy UPnP fallback for ${sid}") }
+void unlockSid1SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
+void unlockSid2SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
+void unlockSid3SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
+void unlockSid4SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
+void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logTrace('Ignoring legacy UPnP fallback callback') }
+void unlockUnsubscribeMutexAfterTimeout() { logTrace('Ignoring legacy UPnP fallback') }
+void unlockUnsubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
 
 @CompileStatic
 void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {
-  Semaphore mutex = getMutexForSid(subId)
-  try {
-    if(response?.status == 412){
-      if(hasSid(subId)) {
-        logTrace("Failed to resubscribe to ${domain}. Will try again in 5 seconds.")
-        deleteSid(subId)
-        retrySubscription(sub, 5)
-      } else {
-        logInfo("Failed to subscribe to ${domain}. Will try again in 60 seconds.")
-        logInfo("Values used for attempt: sub:${sub} subId:${subId} resub:${resub} domain:${domain}")
-        retrySubscription(sub, 60)
-      }
-    } else if(response?.status == 200) {
-      logTrace("Sucessfully subscribed to ${domain}")
-      updateSid(subId, response.headers)
-      // Cancel any retries queued by prior "attempt in progress" fallbacks so
-      // they don't keep firing now that we have a valid subscription.
-      removeResub(sub)
-      clearSubscriptionRetryAttempts(sub)
-      clearSubscriptionRetryAttempts(resub)
-      scheduleResubscriptionToEvents(resub)
-    }
-  } finally {
-    releaseMutexIfHeld(mutex, SUBSCRIBE_MUTEX_MAX_PERMITS, "subscribe mutex ${subId}")
-  }
+  logTrace("Ignoring legacy HubAction subscription callback for ${domain}; no request GUID is available")
 }
 
 void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse response) {
-  try {
-    if(response?.status == 412){
-      logTrace("Failed to unsubscribe to ${domain}. This is likely due to not currently being subscribed and is safely ignored.")
-    } else if(response?.status == 200) {
-      logTrace("Sucessfully unsubscribed to ${domain}")
-    }
-    deleteSid(subId)
-  } finally {
-    releaseMutexIfHeld(getUnsubscribeMutexForDevice(), UNSUBSCRIBE_MUTEX_MAX_PERMITS, 'unsubscribe mutex')
-  }
+  logTrace("Ignoring legacy HubAction unsubscribe callback for ${domain}; no request GUID is available")
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
