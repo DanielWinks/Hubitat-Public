@@ -253,6 +253,7 @@ preferences {
 @Field static final String GROUPING_MODE_CURRENT = 'CURRENT'
 @Field static final String GROUP_DEVICE_DNI_MARKER = '-SonosGroupDevice-'
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
+@Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
 @Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_STABILITY_OBSERVATIONS = 2
@@ -2959,6 +2960,7 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
     if(coordinatorMembers.size() == 1 && coordinatorMembers[0] == coordinatorId &&
         coordinator.currentValue('isGrouped', true) == 'off') {
       logInfo("Creating a group with ${coordinatorId} as coordinator and adding ${targetId}")
+      prepareExpectedTopologyForCreateGroup(coordinator, [coordinatorId, targetId])
       coordinator.playerCreateGroup([coordinatorId, targetId])
       return
     }
@@ -2975,6 +2977,7 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
   }
 
   logInfo("Adding ${targetId} to group ${groupId} through coordinator ${coordinatorId}")
+  prepareExpectedTopologyForMutation(coordinator, [targetId], [])
   coordinator.playerModifyGroupMembers([targetId], [])
 }
 
@@ -3314,6 +3317,7 @@ void processGroupCommandRequest(Map data) {
       case 'ungroupPlayers':
         cancelActiveGroupOperation(groupDni, "${command.toUpperCase()}_REQUESTED")
         if(coordinator && followerIds) {
+          prepareExpectedTopologyForMutation(coordinator, [], followerIds)
           coordinator.playerModifyGroupMembers([], followerIds)
         } else if(!coordinator) {
           logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
@@ -3818,6 +3822,39 @@ void setExpectedTopologyForPlayers(Map<String, Map> expectedByRincon, String ope
       }
     }
   }
+}
+
+void prepareExpectedTopologyForMutation(ChildDeviceWrapper coordinator, List<String> addIds,
+    List<String> removeIds, Map<String, Map> suppliedExpectation = null) {
+  if(coordinator == null) { return }
+  List<String> currentMembers = normalizeGroupPlayerIds(coordinator.getDataValue('groupPlayerIds'))
+  if(!currentMembers) {
+    String coordinatorId = coordinator.getDataValue('id') as String
+    if(coordinatorId) { currentMembers = [coordinatorId] }
+  }
+  List<String> resultingMembers = normalizeGroupPlayerIds((currentMembers - (removeIds ?: [])) + (addIds ?: []))
+  String coordinatorId = coordinator.getDataValue('groupCoordinatorId') as String ?: coordinator.getDataValue('id') as String
+  if(!resultingMembers.contains(coordinatorId)) { coordinatorId = resultingMembers ? resultingMembers[0] : coordinator.getDataValue('id') as String }
+  Map<String, Map> expected = suppliedExpectation != null ? suppliedExpectation : [:]
+  if(suppliedExpectation == null) {
+    resultingMembers.each { String playerId -> expected[playerId] = [coordinatorId: coordinatorId, memberIds: resultingMembers] }
+    (removeIds ?: []).each { String playerId -> if(!expected.containsKey(playerId)) { expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]] } }
+  }
+  setExpectedTopologyForPlayers(expected, UUID.randomUUID().toString(),
+      (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L)
+}
+
+void prepareExpectedTopologyForCreateGroup(ChildDeviceWrapper coordinator, List<String> playerIds) {
+  if(coordinator == null) { return }
+  List<String> requested = normalizeGroupPlayerIds(playerIds)
+  String coordinatorId = requested ? requested[0] : coordinator.getDataValue('id') as String
+  Map<String, Map> expected = [:]
+  requested.each { String playerId -> expected[playerId] = [coordinatorId: coordinatorId, memberIds: requested] }
+  normalizeGroupPlayerIds(coordinator.getDataValue('groupPlayerIds')).each { String playerId ->
+    if(!expected.containsKey(playerId)) { expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]] }
+  }
+  setExpectedTopologyForPlayers(expected, UUID.randomUUID().toString(),
+      (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L)
 }
 
 void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map args = [:]) {
@@ -4325,6 +4362,7 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
         operation.lastCommand = 'createAdditiveGroupAfterTransfer'
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching additive coordinator restoration ${operation.topologyRequestId} for group operation ${operation.operationId}")
+        prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
         coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
         operation.coordinatorTransferGroupCreated = true
         operation.topologyMutationSent = true
@@ -4359,7 +4397,8 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
     operation.topologyRequestId = UUID.randomUUID().toString()
     logInfo("Moving additive group coordination from ${topology.coordinatorId} to configured coordinator ${coordinatorId}")
     logDebug("Dispatching additive coordinator transfer ${operation.topologyRequestId} for group operation ${operation.operationId}")
-    previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
+    prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
+      previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
     operation.topologyMutationSent = true
   } else {
     List<String> coordinatorObservedPlayerIds = getAdditiveObservedPlayerIds(operation, topology)
@@ -4375,6 +4414,7 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Sending additive group mutation for ${operation.operationId}: configuredCoordinator=${coordinatorId}, add=${followersToAdd}")
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+      prepareExpectedTopologyForMutation(coordinator, followersToAdd, [])
       coordinator.playerModifyGroupMembers(followersToAdd, [])
       operation.topologyMutationSent = true
     } else {
@@ -4425,6 +4465,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         logInfo("Evicting unlisted players ${extras} from group ${topology.groupId} using configured coordinator ${configuredCoordinatorId}")
+        prepareExpectedTopologyForMutation(configuredCoordinator, [], extras)
         configuredCoordinator.playerModifyGroupMembers([], extras)
         topologyMutationSentNow = true
       } else {
@@ -4504,6 +4545,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
           memberIds: requiredPlayerIds
         ]
       }
+      prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
       previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
       operation.coordinatorTransferStarted = true
       operation.topologyMutationSent = true
@@ -4524,6 +4566,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       operation.lastCommand = 'removeExtraPlayers'
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+      prepareExpectedTopologyForMutation(coordinator, [], extras)
       coordinator.playerModifyGroupMembers([], extras)
       operation.topologyMutationSent = true
     } else {
@@ -4535,6 +4578,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       // the desired coordinator first in the command payload.
       List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
           requiredPlayerIds.findAll { String playerId -> playerId != coordinatorId }
+      prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
       coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
       operation.topologyMutationSent = true
     }
@@ -4594,6 +4638,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       operation.topologyMutationSent = true
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+      prepareExpectedTopologyForMutation(coordinator, followersToAdd, [])
       coordinator.playerModifyGroupMembers(followersToAdd, [])
     } else {
       // The topology may be mid-transition or the player cache may be stale.
@@ -5635,6 +5680,17 @@ void processPlayerCommandRequest(Map data) {
     return
   }
   List args = request.args instanceof List ? (List)request.args : []
+  if(command == 'ungroupPlayer') {
+    String playerId = source.getDataValue('id') as String
+    List<String> oldMembers = normalizeGroupPlayerIds(source.getDataValue('groupPlayerIds'))
+    Map<String, Map> expected = [:]
+    oldMembers.each { String memberId -> expected[memberId] = [coordinatorId: memberId, memberIds: [memberId]] }
+    if(playerId && !expected.containsKey(playerId)) { expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]] }
+    setExpectedTopologyForPlayers(expected, UUID.randomUUID().toString(),
+        (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L)
+    source.playerCreateNewGroup()
+    return
+  }
   Map activeOperation = getActiveGroupOperation()
   String sourcePlayerId = source.getDataValue('id') as String
   if(activeOperation && !activeOperation.favoriteId && activeOperation.phase != 'COMPLETE' &&

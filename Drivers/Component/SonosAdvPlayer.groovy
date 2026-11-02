@@ -574,10 +574,73 @@ void migrateLegacyRuntimeState() {
   }
   ConcurrentHashMap<String, Object> runtime = getRuntimeState()
   legacy.each { String key, Object value ->
-    if(value != null) { runtime.putIfAbsent(key, value) }
+    if(value != null) {
+      Object decodedValue = isHiddenJsonStateKey(key) ? fetchHiddenJsonStateValue(value) : value
+      if(decodedValue != null) { runtime.putIfAbsent(key, decodedValue) }
+    }
   }
   state.clear()
   atomicState.clear()
+  ['currentlyPlayingClip', 'activeAudioClipMessage', 'audioClipProgressByCorrelationId'].each { String key ->
+    Object value = runtime.get(key)
+    if(value != null) { storeHiddenJsonState(key, summarizeHiddenJsonState(key, value), value) }
+  }
+}
+
+Boolean isHiddenJsonStateKey(String name) {
+  return name in ['currentlyPlayingClip', 'activeAudioClipMessage', 'audioClipProgressByCorrelationId']
+}
+
+String summarizeHiddenJsonState(String name, Object value) {
+  if(name == 'audioClipProgressByCorrelationId') {
+    Integer count = value instanceof Map ? ((Map)value).size() : 0
+    return "${count} clip progress entr${count == 1 ? 'y' : 'ies'}"
+  }
+  Map clip = value instanceof Map ? (Map)value : [:]
+  String origin = clip.origin?.toString() ?: 'audio clip'
+  String correlationId = clip.correlationId?.toString() ?: 'pending'
+  return "${origin} (${correlationId})"
+}
+
+String escapeHiddenStateHtml(String value) {
+  return (value ?: '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&#39;')
+}
+
+void storeHiddenJsonState(String name, String visibleText, Object value) {
+  if(value == null) {
+    state.remove(name)
+    return
+  }
+  String encoded = JsonOutput.toJson(value).getBytes('UTF-8').encodeBase64().toString()
+  state[name] = "<root><span class=\"visible-data\">${escapeHiddenStateHtml(visibleText)}</span><span class=\"hidden-data\" style=\"display:none\">${encoded}</span></root>"
+}
+
+Object fetchHiddenJsonStateValue(Object storedValue) {
+  if(!(storedValue instanceof CharSequence) || !storedValue.toString().contains('class="hidden-data"')) { return storedValue }
+  try {
+    GPathResult xml = new XmlSlurper().parseText(storedValue.toString())
+    String encoded = xml.span.find { GPathResult span -> span.@class.toString() == 'hidden-data' }?.text()
+    if(!encoded) { return null }
+    return new JsonSlurper().parseText(new String(encoded.decodeBase64(), 'UTF-8'))
+  } catch(Exception e) {
+    logWarn("Could not decode hidden JSON state: ${e.message}")
+    return null
+  }
+}
+
+void setHiddenJsonRuntimeState(String name, Object value) {
+  if(value == null) {
+    runtimeState.remove(name)
+    state.remove(name)
+    return
+  }
+  runtimeState[name] = value
+  storeHiddenJsonState(name, summarizeHiddenJsonState(name, value), value)
+}
+
+void removeHiddenJsonRuntimeState(String name) {
+  runtimeState.remove(name)
+  state.remove(name)
 }
 
 void registerRinconId() {
@@ -1156,7 +1219,7 @@ void shuffleOn() { setShuffle('on') }
 void shuffleOff() { setShuffle('off') }
 
 @CompileStatic
-void ungroupPlayer() { playerCreateNewGroup() }
+void ungroupPlayer() { requestParentCoordinatorCommand('ungroupPlayer') }
 
 /** Add one resolved player to this player's current Sonos group. */
 void addPlayerToGroup(String playerIdentifier) {
@@ -3121,32 +3184,6 @@ void scheduleTopologyTimeoutFlush() {
     runIn(remaining, 'flushPendingTopologyUpdates', [overwrite: true])
   } catch(Exception e) {
     runIn(1, 'flushPendingTopologyUpdates', [overwrite: true])
-  }
-}
-
-void markGroupTopologyChangeInProcess(Map<String, Map> expectedByRincon) {
-  if(expectedByRincon == null || expectedByRincon.isEmpty()) { return }
-  String operationId = UUID.randomUUID().toString()
-  Long expiresAt = (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L
-  Map<String, Map> expected = [:]
-  expectedByRincon.each { String playerId, Map topology ->
-    if(playerId && topology != null) {
-      expected[playerId] = [
-        coordinatorId: topology.coordinatorId,
-        memberIds: ((Collection<String>)topology.memberIds).toList().sort()
-      ]
-    }
-  }
-  if(expected.containsKey(getId())) {
-    Map own = expected[getId()]
-    own.expiresAt = expiresAt
-    own.operationId = operationId
-    setDeviceDataValue('expectedGroupTopology', JsonOutput.toJson(own))
-  }
-  try {
-    parent?.setExpectedTopologyForPlayers(expected, operationId, expiresAt)
-  } catch(Exception e) {
-    logWarn("Could not mark related players for topology suppression: ${e.message}")
   }
 }
 
@@ -5224,7 +5261,7 @@ void interruptActiveAudioClipForHighPriority() {
     progress.phase = 'INTERRUPTED_BY_HIGH_PRIORITY'
     progress.interruptedAt = now()
     clipProgress[activeGuid] = progress
-    runtimeState.audioClipProgressByCorrelationId = clipProgress
+    setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
     publishAudioClipProgressEvent(progress, null)
   }
   logInfo("Suspending regular audio clip ${activeGuid} for high-priority playback")
@@ -6379,12 +6416,15 @@ void dequeueAudioClip() {
 
   if(!clipMessage) {
     logTrace('No more audio clips to dequeue.')
-    runtimeState.remove('currentlyPlayingClip')
+    removeHiddenJsonRuntimeState('currentlyPlayingClip')
     runtimeState.remove('activeAudioClipCorrelationId')
     runtimeState.remove('activeAudioClipSonosId')
-    runtimeState.remove('activeAudioClipMessage')
-    runtimeState.audioClipCommandSent = false
-    runtimeState.audioClipHadDisconnectAfterSend = false
+    removeHiddenJsonRuntimeState('activeAudioClipMessage')
+    runtimeState.remove('audioClipPlaying')
+    runtimeState.remove('audioClipCommandSent')
+    runtimeState.remove('audioClipHadDisconnectAfterSend')
+    runtimeState.remove('audioClipSentAt')
+    removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
     return
   }
 
@@ -6397,13 +6437,13 @@ void dequeueAudioClip() {
   // Save currently playing clip (only if it's NOT high priority)
   // High priority clips shouldn't be saved for replay
   if(clipMessage?.priority != 'HIGH') {
-    runtimeState.currentlyPlayingClip = clipMessage
+    setHiddenJsonRuntimeState('currentlyPlayingClip', clipMessage)
   } else {
-    runtimeState.remove('currentlyPlayingClip')
+    removeHiddenJsonRuntimeState('currentlyPlayingClip')
   }
 
   runtimeState.activeAudioClipCorrelationId = clipMessage.correlationId
-  runtimeState.activeAudioClipMessage = clipMessage
+  setHiddenJsonRuntimeState('activeAudioClipMessage', clipMessage)
   runtimeState.remove('activeAudioClipSonosId')
   runtimeState.audioClipCommandSent = false
   runtimeState.audioClipHadDisconnectAfterSend = false
@@ -6426,7 +6466,7 @@ void dequeueAudioClip() {
     if(!oldestGuid) { break }
     clipProgress.remove(oldestGuid)
   }
-  runtimeState.audioClipProgressByCorrelationId = clipProgress
+  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(clipProgress[clipMessage.correlationId as String], null)
   logInfo("Dispatching audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, dispatchedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
   runtimeState.audioClipPlaying = true
@@ -6463,30 +6503,12 @@ void playerGetGroupsFull() {
 @CompileStatic
 void playerCreateNewGroup() {
   List<String> playerIds = [getId()]
-  List<String> affectedPlayerIds = new ArrayList<String>(getGroupPlayerIds())
-  affectedPlayerIds.add(getId())
-  Map<String, Map> expected = [:]
-  affectedPlayerIds.unique().each { String playerId ->
-    expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]]
-  }
-  markGroupTopologyChangeInProcess(expected)
   sendCreateGroupRequest(playerIds)
 }
 
 @CompileStatic
 void playerCreateGroup(List<String> playerIds) {
   List<String> requestedPlayers = (playerIds ?: []).findAll { String id -> id }.unique()
-  String coordinatorId = requestedPlayers ? requestedPlayers[0] : getId()
-  Map<String, Map> expected = [:]
-  requestedPlayers.each { String playerId ->
-    expected[playerId] = [coordinatorId: coordinatorId, memberIds: requestedPlayers]
-  }
-  getGroupPlayerIds().each { String playerId ->
-    if(!expected.containsKey(playerId)) {
-      expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]]
-    }
-  }
-  markGroupTopologyChangeInProcess(expected)
   sendCreateGroupRequest(requestedPlayers)
 }
 
@@ -6511,28 +6533,6 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
     Map<String, Map> expectedTopology = null) {
   List<String> playersToAdd = playerIdsToAdd != null ? playerIdsToAdd : new ArrayList<String>()
   List<String> playersToRemove = playerIdsToRemove != null ? playerIdsToRemove : new ArrayList<String>()
-  List<String> resultingMembers = new ArrayList<String>(getGroupPlayerIds())
-  resultingMembers.removeAll(playersToRemove)
-  resultingMembers.addAll(playersToAdd)
-  resultingMembers = resultingMembers.unique()
-  String expectedCoordinator = getGroupCoordinatorId()
-  if(!resultingMembers.contains(expectedCoordinator)) {
-    expectedCoordinator = resultingMembers ? resultingMembers[0] : getId()
-  }
-  Map<String, Map> expected = expectedTopology != null
-      ? expectedTopology
-      : [:]
-  if(expectedTopology == null) {
-    resultingMembers.each { String playerId ->
-      expected[playerId] = [coordinatorId: expectedCoordinator, memberIds: resultingMembers]
-    }
-    playersToRemove.each { String playerId ->
-      if(!expected.containsKey(playerId)) {
-        expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]]
-      }
-    }
-  }
-  markGroupTopologyChangeInProcess(expected)
   Map command = [
     'namespace':'groups',
     'command':'modifyGroupMembers',
@@ -7329,7 +7329,7 @@ void processWebsocketMessage(String message) {
       if(!oldestGuid) { break }
       clipProgress.remove(oldestGuid)
     }
-    runtimeState.audioClipProgressByCorrelationId = clipProgress
+    setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
     if(matchedCurrentStatus == 'ACTIVE') {
       setAudioClipPlaying(true)
       runtimeState.audioClipHadDisconnectAfterSend = false
@@ -7541,8 +7541,17 @@ void setAudioClipPlaying(Boolean s) {
   if(s == false) {
     logDebug("Audio clip completion/reset for ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'} at ${now()}")
     pauseAudioClipWatchdog()
-    // Clear currently playing clip when playback finishes successfully
-    runtimeState.remove('currentlyPlayingClip')
+    // The regular queue and saved replay queue own any clip that still needs
+    // to be played. Drop the runtime payload and completed progress history so
+    // large Sonos command JSON does not remain in the hub's State Variables.
+    removeHiddenJsonRuntimeState('currentlyPlayingClip')
+    runtimeState.remove('activeAudioClipCorrelationId')
+    runtimeState.remove('activeAudioClipSonosId')
+    removeHiddenJsonRuntimeState('activeAudioClipMessage')
+    runtimeState.remove('audioClipSentAt')
+    removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
+    runtimeState.remove('audioClipCommandSent')
+    runtimeState.remove('audioClipHadDisconnectAfterSend')
     dequeueAudioClip()
   }
 }
@@ -7608,7 +7617,7 @@ void audioClipCommandSent(String correlationId) {
   progress.dispatchedAt = sentAt
   progress.sentAt = sentAt
   clipProgress[correlationId] = progress
-  runtimeState.audioClipProgressByCorrelationId = clipProgress
+  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(progress, null)
   logInfo("Sent audio clip ${correlationId} over WebSocket at ${sentAt}; waiting ${AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS}s for matching ACTIVE status")
   if(runtimeState.audioClipHadDisconnectAfterSend != true) {
@@ -7712,7 +7721,7 @@ void markAudioClipWatchdogFailure(String correlationId, String phase, String det
   progress.failureReason = detail
   progress.completedAt = now()
   clipProgress[correlationId] = progress
-  runtimeState.audioClipProgressByCorrelationId = clipProgress
+  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(progress, null)
   logWarn("Audio clip ${correlationId} ${phase}: ${detail}; advancing queue without replay")
   setAudioClipPlaying(false)
