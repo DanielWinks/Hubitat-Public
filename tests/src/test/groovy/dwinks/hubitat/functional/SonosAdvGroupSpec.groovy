@@ -41,6 +41,35 @@ class SonosAdvGroupSpec extends Specification {
     driver.device.dataValues.playerIds = 'RINCON_FOLLOW'
   }
 
+  def "retargeting a group fade to the reported volume cancels queued steps"() {
+    given:
+    driver.groupDeviceVolumeFadeState.clear()
+    driver.lastGroupDeviceVolumeFadeCallTime.clear()
+    driver.device.currentValues.volume = 5
+    driver.metaClass.now = { -> 10000L }
+    driver.setLevel(15G, 20G)
+    driver.groupDeviceVolumeFadeStep()
+    driver.device.currentValues.volume = 6
+    driver.metaClass.now = { -> 14000L }
+    driver.unschedules.clear()
+    driver.scheduled.clear()
+    driver.runtimeState.pendingGroupCommands.clear()
+
+    when:
+    driver.setLevel(6G, 10G)
+    driver.groupDeviceVolumeFadeStep()
+
+    then:
+    driver.groupDeviceVolumeFadeState.isEmpty()
+    driver.unschedules.contains('groupDeviceVolumeFadeStep')
+    driver.runtimeState.pendingGroupCommands.isEmpty()
+    driver.scheduled.isEmpty()
+
+    cleanup:
+    GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
+    driver.metaClass = null
+  }
+
   def "group commands publish an asynchronous request instead of looking up the parent"() {
     when:
     driver.on()
@@ -168,7 +197,7 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.runtimeState.groupCommandSequence == 7
     driver.runtimeState.pendingRegroup == true
-    driver.state.empty
+    driver.state.isEmpty()
   }
 
   def "refresh migrates legacy group variables before queuing its parent request"() {
@@ -180,8 +209,9 @@ class SonosAdvGroupSpec extends Specification {
     driver.refresh()
 
     then:
-    driver.state.empty
-    driver.runtimeState.groupCommandSequence == 8
+    driver.state.isEmpty()
+    driver.runtimeState.groupCommandSequence == 9
+    driver.runtimeState.pendingGroupCommands.last().requestId == 'SONOS-GROUP-TEST-DNI-9'
     driver.runtimeState.pendingRegroup == true
     driver.runtimeState.pendingGroupCommands.last().command == 'refresh'
   }

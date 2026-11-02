@@ -693,7 +693,10 @@ void setVolume(BigDecimal level, BigDecimal duration = null) {
 
   Integer currentVolume = (this.device.currentValue('volume', true) as Integer) ?: 0
   Integer delta = Math.abs(targetVolume - currentVolume)
-  if(delta == 0) { return }
+  if(delta == 0) {
+    cancelGroupDeviceVolumeFade()
+    return
+  }
   Integer durationSeconds = duration as Integer
 
   // If duration too short or delta too small, just send a single command

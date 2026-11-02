@@ -1405,7 +1405,10 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   }
   Integer currentVolume = getPlayerVolume()
   Integer delta = Math.abs(targetVolume - currentVolume)
-  if(delta == 0) { return }
+  if(delta == 0) {
+    cancelVolumeFade()
+    return
+  }
   Integer durationSeconds = duration as Integer
   // If the duration is too short for the delta, just send a single command
   if(durationSeconds < 2 || delta <= 1) {
@@ -1727,7 +1730,10 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   }
   Integer currentVolume = useGroupApi ? (this.device.currentValue('groupVolume', true) as Integer ?: 0) : getPlayerVolume()
   Integer delta = Math.abs(targetVolume - currentVolume)
-  if(delta == 0) { return }
+  if(delta == 0) {
+    cancelGroupVolumeFade()
+    return
+  }
   Integer durationSeconds = duration as Integer
   if(durationSeconds < 2 || delta <= 1) {
     cancelGroupVolumeFade()

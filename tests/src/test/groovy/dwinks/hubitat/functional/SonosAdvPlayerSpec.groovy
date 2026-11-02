@@ -15,6 +15,7 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> websocketMessages = []
   @Shared List<Map> rawConnections = []
   @Shared List<String> rawRequests = []
+  @Shared Object rawSocket
 
   def setupSpec() {
     File file = new File('../Drivers/Component/SonosAdvPlayer.groovy')
@@ -39,9 +40,11 @@ class SonosAdvPlayerSpec extends Specification {
         close: { -> }
       )
     ])
+    rawSocket = driver.binding.getVariable('interfaces').rawSocket
   }
 
   def setup() {
+    driver.binding.getVariable('interfaces').rawSocket = rawSocket
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
     driver.events.clear()
@@ -81,6 +84,39 @@ class SonosAdvPlayerSpec extends Specification {
 
   def cleanup() {
     GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
+    driver.metaClass = null
+  }
+
+  def "retargeting a fade to the reported volume cancels queued steps"() {
+    given:
+    driver.volumeFadeState.clear()
+    driver.groupVolumeFadeState.clear()
+    driver.lastVolumeFadeCallTime.clear()
+    driver.lastGroupVolumeFadeCallTime.clear()
+    driver.device.currentValues.volume = 5
+    driver.metaClass.now = { -> 10000L }
+    driver."${command}"(15G, 20G)
+    driver."${step}"()
+    driver.device.currentValues.volume = 6
+    driver.metaClass.now = { -> 14000L }
+    driver.unschedules.clear()
+    websocketMessages.clear()
+    driver.scheduled.clear()
+
+    when:
+    driver."${command}"(6G, 10G)
+    driver."${step}"()
+
+    then:
+    driver."${fadeMap}".isEmpty()
+    driver.unschedules.contains(step)
+    websocketMessages.isEmpty()
+    driver.scheduled.isEmpty()
+
+    where:
+    command          | step                  | fadeMap
+    'setLevel'       | 'volumeFadeStep'      | 'volumeFadeState'
+    'setGroupVolume' | 'groupVolumeFadeStep' | 'groupVolumeFadeState'
   }
 
   def "raw UPnP subscribe formats request and records SID expiry and renewal"() {
@@ -247,7 +283,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getSid('sid1') == null
-    rawRequests.size() == 0
+    rawRequests.size() == 1
+    driver.scheduled.count { List row -> row[1] == 'retryUpnpSid1' } == 2
   }
 
   def "reinitialization rejects callbacks from the previous queue generation"() {
@@ -298,9 +335,9 @@ class SonosAdvPlayerSpec extends Specification {
   def "topology change holds only affected player until its expected topology arrives"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.markGroupTopologyChangeInProcess([
-      'RINCON_TEST': [coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST']],
-      'RINCON_OTHER': [coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER']]
+    // The parent app stamps expectations before dispatching the mutation.
+    driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson([
+      coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: driver.now() + 30000L
     ])
     driver.metaClass.getZoneGroupTopologyForPlayer = { String xml, String playerId ->
       xml == '<topology>final</topology>'
@@ -314,6 +351,12 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>intermediate</topology>')
+
+    then:
+    driver.runtimeState.appliedTopologyXml == null
+    driver.pendingTopologyXmlByDni['SONOS-TEST-DNI'] == '<topology>intermediate</topology>'
+
+    when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>final</topology>')
 
     then:
@@ -322,7 +365,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.expectedGroupTopology == ''
   }
 
-  def "coordinator transfer retains the requested final topology expectation"() {
+  def "coordinator transfer retains the topology expectation stamped by the parent"() {
     given:
     driver.device.dataValues.id = 'RINCON_OLD_COORD'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_OLD_COORD'
@@ -331,6 +374,10 @@ class SonosAdvPlayerSpec extends Specification {
       'RINCON_OLD_COORD': [coordinatorId: 'RINCON_NEW_COORD', memberIds: ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']],
       'RINCON_NEW_COORD': [coordinatorId: 'RINCON_NEW_COORD', memberIds: ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']]
     ]
+
+    driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson(
+      finalTopology.RINCON_OLD_COORD + [expiresAt: driver.now() + 30000L]
+    )
 
     when:
     driver.playerModifyGroupMembers([], ['RINCON_NEW_COORD'], finalTopology)
@@ -506,8 +553,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.audioClipPlaying == true
     driver.runtimeState.parentCommandSequence == 4
     driver.runtimeState.wsRetryCount == 2
-    driver.state.empty
-    driver.binding.getVariable('atomicState').empty
+    driver.state.isEmpty()
+    driver.binding.getVariable('atomicState').isEmpty()
   }
 
   def "favorite lookup finds an item by Sonos favorite ID instead of map key"() {
@@ -608,16 +655,19 @@ class SonosAdvPlayerSpec extends Specification {
     ]
   }
 
-  def "stop does not send a request when playback is already stopped"() {
+  def "stop is queued even when the reported playback state is stopped"() {
     given:
     driver.device.currentValues.transportStatus = 'stopped'
 
     when:
     driver.stop()
+    driver.drainTransportCommandQueue()
 
     then:
-    websocketMessages.empty
-    driver.logs.any { String entry -> entry.contains('playback is already stopped') }
+    websocketMessages.size() == 1
+    websocketMessages[0].contains('"command":"stop"')
+    // Stop is intentionally sent even with stale reported state.
+    driver.runtimeState.activeTransportCommand.command == 'stop'
   }
 
   def "stop sends a playback stop request when playback is active"() {
@@ -626,6 +676,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.stop()
+    driver.drainTransportCommandQueue()
 
     then:
     websocketMessages.size() == 1
@@ -692,16 +743,17 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
+    driver.drainTransportCommandQueue()
 
     then:
     websocketMessages.count { String message -> message.contains('"command":"play"') } == 1
     websocketMessages.every { String message -> !message.contains('loadPlaylist') }
     retryState.playCommandAttempts == 1
-    driver.scheduled.last() == [
+    driver.scheduled.contains([
       2,
       'checkPlaylistPlaybackAndRetry',
       [overwrite: true, data: [operationId: retryState.operationId]]
-    ]
+    ])
 
     when:
     websocketMessages.clear()
@@ -994,7 +1046,7 @@ class SonosAdvPlayerSpec extends Specification {
     String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
     driver.sendWsMessage(command)
     List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
-    pending[0].deadlineAt = driver.now() - 1L
+    pending[0].deadlineAt = driver.now() - 1001L
 
     when:
     driver.watchExpectedSubscriptionEvents()
@@ -1042,7 +1094,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'metadataConfirmed'
     payload.data.favoriteId == '42'
     payload.data.confirmed == true
@@ -1058,7 +1110,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'favoriteLoadAck'
     payload.data.success == true
   }
@@ -1073,7 +1125,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'groups'
     payload.observedAt instanceof Number
     payload.data.groupId == null

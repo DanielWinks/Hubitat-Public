@@ -156,6 +156,25 @@ class SonosAdvancedAppSpec extends Specification {
     [groupDni: 'GROUP-DNI', requestId: "GROUP-DNI-${sequence}", command: command, args: args]
   }
 
+  def "parent stamps coordinator transfer expectations on each affected player"() {
+    given:
+    Long expiresAt = appScript.now() + 30000L
+    Map topology = [coordinatorId: 'RINCON_FOLLOW', memberIds: ['RINCON_FOLLOW', 'RINCON_COORD']]
+
+    when:
+    appScript.setExpectedTopologyForPlayers([
+      RINCON_COORD: topology, RINCON_FOLLOW: topology
+    ], 'transfer-1', expiresAt)
+
+    then:
+    [coordinator, follower].every { SonosAppPlayerDouble player ->
+      Map expected = new JsonSlurper().parseText(player.dataValues.expectedGroupTopology) as Map
+      expected == [operationId: 'transfer-1', expiresAt: expiresAt,
+        coordinatorId: 'RINCON_FOLLOW', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
+    }
+    !extra.dataValues.containsKey('expectedGroupTopology')
+  }
+
   def "update checks issue an asynchronous request and ignore stale responses"() {
     when:
     appScript.checkForUpdates(true)
@@ -543,13 +562,13 @@ class SonosAdvancedAppSpec extends Specification {
     follower.commands.find { it.name == 'playerModifyGroupMembers' } == [
       name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_COORD'],
       expectedTopology: [
-        RINCON_COORD: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
-        RINCON_FOLLOW: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
-        RINCON_EXTRA: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']]
+        RINCON_COORD: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']],
+        RINCON_FOLLOW: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']],
+        RINCON_EXTRA: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']]
       ]
     ]
     operation.coordinatorTransferStarted == true
-    operation.coordinatorTransferPlayerIds == ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    operation.coordinatorTransferPlayerIds == ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
     follower.commands.every { it.name != 'playerCreateGroup' }
     appScript.getActiveGroupOperation().groupingMode == 'ADDITIVE'
   }
@@ -572,7 +591,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
-        ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+        ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
     operation.coordinatorTransferGroupCreated == true
     operation.resolvedCoordinatorId == 'RINCON_COORD'
   }
@@ -1269,8 +1288,9 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "main page renders cached installed version without changing the async update result"() {
     given:
-    appScript.atomicState = [discoveryRunning: false, updateAvailable: true, latestVersion: '99.0.0',
-      installedAppVersion: '98.0.0', latestReleaseDate: '2026-11-01', latestReleaseUrl: 'https://example.com/release']
+    appScript.atomicState = [discoveryRunning: false]
+    appScript.state.putAll([updateAvailable: true, latestVersion: '99.0.0',
+      installedAppVersion: '98.0.0', latestReleaseDate: '2026-11-01', latestReleaseUrl: 'https://example.com/release'])
     appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false, useOldUi: false])
     appScript.binding.setVariable('autoCheckUpdates', false)
     appScript.binding.setVariable('autoInstallUpdates', false)
