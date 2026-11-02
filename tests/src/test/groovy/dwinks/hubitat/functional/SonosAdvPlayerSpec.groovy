@@ -430,6 +430,54 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.every { String entry -> entry.contains('visible') }
   }
 
+  def "second priority clip waits for active priority playback and preserves suspended regular clips"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.getDeviceAudioClipQueueSaved().clear()
+    driver.settings.ttsBoostAmount = 10
+    driver.playerLoadAudioClip('http://example.test/a.mp3', 15G, 30, 'A')
+    driver.playerLoadAudioClip('http://example.test/b.mp3', 15G, 10, 'B')
+    driver.playerLoadAudioClipHighPriority('http://example.test/h1.mp3', 15G, 'H1', 20)
+    List<Map> suspended = new ArrayList<Map>(driver.getDeviceAudioClipQueueSaved())
+    List<Map> watchdogs = new ArrayList<Map>(driver.scheduled)
+
+    when:
+    driver.playerLoadAudioClipHighPriority('http://example.test/h2.mp3', 15G, 'H2', 10)
+
+    then:
+    driver.runtimeState.activeAudioClipCorrelationId == 'H1'
+    driver.runtimeState.audioClipPlaying == true
+    driver.getDeviceAudioClipQueueHighPriority()*.correlationId == ['H2']
+    driver.getDeviceAudioClipQueueSaved().toList() == suspended
+    suspended*.correlationId == ['A', 'B']
+    driver.scheduled == watchdogs
+
+    when:
+    driver.setAudioClipPlaying(false)
+
+    then:
+    driver.runtimeState.activeAudioClipCorrelationId == 'H2'
+    driver.getDeviceAudioClipQueueSaved()*.correlationId == ['A', 'B']
+
+    when:
+    driver.setAudioClipPlaying(false)
+
+    then:
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/a.mp3'
+    driver.runtimeState.activeAudioClipMessage.dispatchCount == 2
+    driver.runtimeState.activeAudioClipCorrelationId != 'A'
+    driver.getDeviceAudioClipQueue()*.correlationId == ['B']
+    driver.getDeviceAudioClipQueueSaved().empty
+
+    when:
+    driver.setAudioClipPlaying(false)
+
+    then:
+    driver.runtimeState.activeAudioClipCorrelationId == 'B'
+  }
+
   def "stale audio clip watchdog does not reset active playback state"() {
     given:
     driver.runtimeState.audioClipPlaying = true

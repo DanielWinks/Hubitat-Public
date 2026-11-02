@@ -5419,7 +5419,15 @@ Boolean getAudioClipQueueIsEmpty() {
   return getDeviceAudioClipQueue().size() == 0
 }
 
+// Correlation IDs capture queue ownership without logging clip URLs or speech text.
+void traceAudioClipQueues(String stage) {
+  if(!loggingEnabled('trace')) { return }
+  Map active = runtimeState.activeAudioClipMessage as Map
+  logTrace("AudioClipQueue ${stage}: playing=${runtimeState.audioClipPlaying}, active=${runtimeState.activeAudioClipCorrelationId}, activePriority=${active?.priority ?: 'REGULAR'}, currentRegular=${(runtimeState.currentlyPlayingClip as Map)?.correlationId}, regular=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, high=${getDeviceAudioClipQueueHighPriority().collect { Map clip -> clip.correlationId }}, saved=${getDeviceAudioClipQueueSaved().collect { Map clip -> clip.correlationId }}")
+}
+
 void saveRegularAudioClipQueue() {
+  traceAudioClipQueues('save-before-clear')
   logTrace('saveRegularAudioClipQueue')
   ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
   ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
@@ -5440,10 +5448,12 @@ void saveRegularAudioClipQueue() {
     savedQueue.add(clip)
   }
 
+  traceAudioClipQueues('save-after-copy')
   logDebug("Saved ${savedQueue.size()} total clips (including currently playing)")
 }
 
 void restoreRegularAudioClipQueue() {
+  traceAudioClipQueues('restore-before')
   logTrace('restoreRegularAudioClipQueue')
   ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
   ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
@@ -5455,6 +5465,7 @@ void restoreRegularAudioClipQueue() {
   }
 
   savedQueue.clear()
+  traceAudioClipQueues('restore-after')
   logDebug("Restored ${savedList.size()} regular priority clips to queue")
 }
 
@@ -6840,10 +6851,16 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   audioClip.correlationId = clipCorrelationId
   addAudioClipCorrelation(audioClip)
 
-  // Check if this is the first high-priority clip
+  // A dispatched priority clip has already left the queue. Include the active
+  // payload so another priority request cannot overwrite the suspended queue
+  // or release the dispatcher while that clip is still playing.
   ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
-  Boolean isFirstHighPriority = highPriorityQueue.isEmpty()
+  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
+  Boolean audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
+  Boolean highPriorityActive = audioClipPlaying == true && activeClip?.priority == 'HIGH'
+  Boolean isFirstHighPriority = highPriorityQueue.isEmpty() && !highPriorityActive
 
+  traceAudioClipQueues("priority-admission incoming=${clipCorrelationId}, first=${isFirstHighPriority}, volume=${args.volume}")
   if(isFirstHighPriority) {
     // Save currently playing + all queued regular priority clips
     saveRegularAudioClipQueue()
@@ -6856,9 +6873,10 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 
   // Add to high-priority queue
   highPriorityQueue.add(audioClip)
+  traceAudioClipQueues('priority-enqueued')
 
   // If first high-priority or nothing playing, start immediately
-  Boolean audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
+  audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
   if(isFirstHighPriority || audioClipPlaying != true) {
     dequeueAudioClip()
   }
@@ -7001,6 +7019,7 @@ void enqueueAudioClip(Map clipMessage) {
 }
 
 void dequeueAudioClip() {
+  traceAudioClipQueues('dequeue-entry')
   logTrace('dequeueAudioClip')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
 
@@ -7074,6 +7093,7 @@ void dequeueAudioClip() {
   publishAudioClipProgressEvent(clipProgress[clipMessage.correlationId as String], null)
   logInfo("Dispatching audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, dispatchedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
   runtimeState.audioClipPlaying = true
+  traceAudioClipQueues('dispatch-selected')
   if(!isCurrentlySubcribedToAudioClipWS()) { subscribeToAudioClip() }
   sendWsMessage(clipMessage.leftChannel, [kind: 'audioClip', correlationId: clipMessage.correlationId as String])
   if(clipMessage.rightChannel && rightChannel) {
