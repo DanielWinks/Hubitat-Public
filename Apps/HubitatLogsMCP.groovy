@@ -27,7 +27,7 @@ import groovy.transform.Field
 @Field static int SEARCH_SNAPSHOT_SEQUENCE = 0
 
 definition(
-    name: APP_NAME,
+    name: "Hubitat Logs MCP Server",
     namespace: "dwinks",
     author: "Daniel Winks",
     description: "Read Hubitat's recent logs through a read-only MCP tool.",

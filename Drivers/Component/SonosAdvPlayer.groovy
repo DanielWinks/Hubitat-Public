@@ -6392,45 +6392,48 @@ void getHouseholdsWS() {
 }
 
 void enqueueTransportCommand(String command) {
-  if(!(command in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack'])) { return }
-  List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
-      ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
-      : []
-  if(command in ['play', 'pause', 'stop']) {
-    List<Map> retained = queued.findAll { Map item -> !(item.command in ['play', 'pause', 'stop']) }
-    Integer replaced = queued.size() - retained.size()
-    queued = retained
-    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-    if(active != null && active.queuedOnSocket == true && active.command in ['play', 'pause', 'stop']) {
-      cancelUnsentTransportCommand(active)
-      replaced++
+  synchronized(getRuntimeState()) {
+    if(!(command in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack'])) { return }
+    String intentGuid = recordStreamTransportIntent(command)
+    List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
+        ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
+        : []
+    if(command in ['play', 'pause', 'stop']) {
+      List<Map> retained = queued.findAll { Map item -> !(item.command in ['play', 'pause', 'stop']) }
+      Integer replaced = queued.size() - retained.size()
+      queued = retained
+      Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+          ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+      if(active != null && active.queuedOnSocket == true && active.command in ['play', 'pause', 'stop']) {
+        cancelUnsentTransportCommand(active)
+        replaced++
+      }
+      if(replaced > 0) {
+        logDebug("Transport command ${command} replaced ${replaced} queued play/pause/stop command(s)")
+      }
     }
-    if(replaced > 0) {
-      logDebug("Transport command ${command} replaced ${replaced} queued play/pause/stop command(s)")
+    if(queued.size() >= 32) {
+      logWarn("Dropping transport command ${command}: command queue is full")
+      return
     }
-  }
-  if(queued.size() >= 32) {
-    logWarn("Dropping transport command ${command}: command queue is full")
-    return
-  }
-  Map item = [id: UUID.randomUUID().toString(), command: command]
-  if(command in ['skipToNextTrack', 'skipToPreviousTrack']) {
-    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-    Map lastQueued = queued ? queued[queued.size() - 1] : null
-    String replayId = null
-    if(active != null && active.command in ['skipToNextTrack', 'skipToPreviousTrack']) {
-      replayId = active.replayId?.toString()
-    } else if(lastQueued != null && lastQueued.command in ['skipToNextTrack', 'skipToPreviousTrack']) {
-      replayId = lastQueued.replayId?.toString()
+    Map item = [id: intentGuid, command: command]
+    if(command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+      Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+          ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+      Map lastQueued = queued ? queued[queued.size() - 1] : null
+      String replayId = null
+      if(active != null && active.command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+        replayId = active.replayId?.toString()
+      } else if(lastQueued != null && lastQueued.command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+        replayId = lastQueued.replayId?.toString()
+      }
+      item.replayId = replayId ?: UUID.randomUUID().toString()
     }
-    item.replayId = replayId ?: UUID.randomUUID().toString()
+    queued.add(item)
+    runtimeState[TRANSPORT_QUEUE_KEY] = queued
+    logTrace("Queued transport command ${command} (${item.id}); pending=${queued.size()}")
+    runIn(1, 'drainTransportCommandQueue', [overwrite: true])
   }
-  queued.add(item)
-  runtimeState[TRANSPORT_QUEUE_KEY] = queued
-  logTrace("Queued transport command ${command} (${item.id}); pending=${queued.size()}")
-  runIn(1, 'drainTransportCommandQueue', [overwrite: true])
 }
 
 void drainTransportCommandQueue() {
@@ -7430,7 +7433,19 @@ void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
   postSonosSoapAsync(callbackMethod, params)
 }
 
+// Keep the latest intent separate from HTTP completion order. A GUID identifies
+// one intent; equality, rather than GUID sorting, determines callback ownership.
+String recordStreamTransportIntent(String command) {
+  synchronized(getRuntimeState()) {
+    String guid = UUID.randomUUID().toString()
+    runtimeState.streamTransportIntentGuid = guid
+    logDebug("Stream transport intent command=${command} guid=${guid}")
+    return guid
+  }
+}
+
 void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
+  String guid = recordStreamTransportIntent('setAVTransportURIAndPlay')
   String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURIAndPlay: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
@@ -7439,15 +7454,30 @@ void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = nul
   Map controlValues = [CurrentURI: currentURI]
   if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  postSonosSoapAsync('setAVTransportURIAndPlayCallback', params)
+  postSonosSoapAsync('setAVTransportURIAndPlayCallback', params, [streamTransportIntentGuid: guid])
 }
 
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
   localControlCallback(response, data)
-  if(response?.status == 200 && response.hasError() == false) { play() }
+  // Hubitat can run a command and an HTTP callback concurrently. Keep ownership
+  // validation and the resulting play enqueue atomic with transport commands.
+  synchronized(getRuntimeState()) {
+    String guid = data?.streamTransportIntentGuid?.toString()
+    String latestGuid = runtimeState.streamTransportIntentGuid?.toString()
+    Boolean current = guid != null && guid == latestGuid
+    logDebug("Stream load callback guid=${guid} latestGuid=${latestGuid} status=${response?.status} current=${current}")
+    if(!current) {
+      logDebug("Ignoring superseded stream load callback guid=${guid}")
+      return
+    }
+    // Consume the intent even on failure, so duplicate callbacks cannot replay it.
+    runtimeState.remove('streamTransportIntentGuid')
+    if(response?.status == 200 && response.hasError() == false) { play() }
+  }
 }
 
 void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
+  recordStreamTransportIntent('setAVTransportURI')
   String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURI: could not determine group coordinator UPnP host for ${device.displayName}; skipping")

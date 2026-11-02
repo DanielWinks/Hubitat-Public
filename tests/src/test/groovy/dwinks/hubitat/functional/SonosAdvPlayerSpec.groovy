@@ -17,6 +17,79 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
+  def "delayed stream callback cannot supersede a newer transport command"() {
+    given:
+    driver.asyncCalls.clear()
+    driver.setAVTransportURIAndPlay('http://example.test/first.mp3')
+    Map data = driver.asyncCalls.last().data
+    String originalGuid = data.streamTransportIntentGuid
+
+    when:
+    driver.enqueueTransportCommand(command)
+    driver.setAVTransportURIAndPlayCallback(new hubitat.scheduling.AsyncResponse(status: 200), data)
+
+    then:
+    originalGuid != driver.runtimeState.streamTransportIntentGuid
+    driver.runtimeState.transportCommandQueue*.command == [command]
+    driver.logs.any { it.toString().contains("Ignoring superseded stream load callback guid=${originalGuid}") }
+
+    where:
+    command << ['pause', 'stop', 'play', 'skipToNextTrack', 'skipToPreviousTrack']
+  }
+
+  def "only the latest stream callback plays and duplicate callbacks are ignored"() {
+    given:
+    driver.asyncCalls.clear()
+    driver.setAVTransportURIAndPlay('http://example.test/first.mp3')
+    Map first = driver.asyncCalls.last().data
+    driver.setAVTransportURIAndPlay('http://example.test/second.mp3')
+    Map second = driver.asyncCalls.last().data
+    hubitat.scheduling.AsyncResponse response = new hubitat.scheduling.AsyncResponse(status: 200)
+
+    when:
+    driver.setAVTransportURIAndPlayCallback(response, first)
+
+    then:
+    first.streamTransportIntentGuid != second.streamTransportIntentGuid
+    driver.runtimeState.transportCommandQueue == null
+
+    when:
+    driver.setAVTransportURIAndPlayCallback(response, second)
+    driver.setAVTransportURIAndPlayCallback(response, second)
+
+    then:
+    driver.runtimeState.transportCommandQueue*.command == ['play']
+  }
+
+  def "set-only media request supersedes pending stream autoplay"() {
+    given:
+    driver.asyncCalls.clear()
+    driver.setAVTransportURIAndPlay('http://example.test/first.mp3')
+    Map data = driver.asyncCalls.last().data
+
+    when:
+    driver.setAVTransportURI('http://example.test/second.mp3')
+    driver.setAVTransportURIAndPlayCallback(new hubitat.scheduling.AsyncResponse(status: 200), data)
+
+    then:
+    driver.runtimeState.transportCommandQueue == null
+  }
+
+  def "transport command arriving during HTTP diagnostics supersedes stream autoplay"() {
+    given:
+    driver.setAVTransportURIAndPlay('http://example.test/first.mp3')
+    Map data = driver.asyncCalls.last().data
+    driver.metaClass.localControlCallback = { hubitat.scheduling.AsyncResponse response, Map callbackData ->
+      driver.enqueueTransportCommand('pause')
+    }
+
+    when:
+    driver.setAVTransportURIAndPlayCallback(new hubitat.scheduling.AsyncResponse(status: 200), data)
+
+    then:
+    driver.runtimeState.transportCommandQueue*.command == ['pause']
+  }
+
   def "integer and decimal balance commands send identical stereo SOAP requests"() {
     given:
     driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
@@ -259,6 +332,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.binding.getVariable('interfaces').rawSocket = rawSocket
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
+    driver.asyncCalls.clear()
     driver.events.clear()
     driver.locationEvents.clear()
     driver.scheduled.clear()
