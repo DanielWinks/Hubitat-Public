@@ -561,9 +561,10 @@ void renderNewUiPageContent() {
 
 void startDiscoverySession() {
   if(atomicState.discoveryRunning != true) {
+    logTrace('Starting a new discovery session; clearing per-session probe reservations')
     subscribeToSsdpEvents(location)
-    ssdpDiscover()
     atomicState.discoveryRunning = true
+    ssdpDiscover()
     atomicState.discoveryEndTime = now() + 60000
     app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
     runIn(60, 'stopDiscovery')
@@ -2501,11 +2502,13 @@ void extendDiscovery(Integer seconds) {
   logInfo("Extending discovery by ${seconds} seconds")
   if(atomicState.discoveryRunning != true) {
     // Restart discovery without clearing already-discovered devices
+    logTrace('Starting a fresh discovery session while retaining devices already found')
+    atomicState.discoveryRunning = true
+    atomicState.discoveryProbeAttempts = [:]
     subscribeToSsdpEvents(location)
     sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
     sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
     startMdnsDiscovery()
-    atomicState.discoveryRunning = true
     runIn(1, 'updateDiscoveryTimer')
   }
   // Add seconds to current remaining time (or from now if already expired)
@@ -2531,6 +2534,7 @@ void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
+	atomicState.discoveryProbeAttempts = [:]
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
 
@@ -2540,12 +2544,6 @@ void ssdpDiscover() {
 
 void startMdnsDiscovery() {
   try {
-    // Check if mDNS methods exist (requires Hubitat 2.4.1+)
-    if(!this.respondsTo('registerMDNSListener')) {
-      logDebug("mDNS not available on this hub firmware version")
-      return
-    }
-
     // Register mDNS listener for Sonos devices
     // Sonos uses _sonos._tcp for its mDNS service
     registerMDNSListener('_sonos._tcp')
@@ -2558,7 +2556,7 @@ void startMdnsDiscovery() {
     // Schedule processing of mDNS entries after a delay to allow discovery
     runIn(5, 'processMdnsDiscovery')
   } catch(Exception e) {
-    logWarn("mDNS discovery not available or failed: ${e.message}")
+    logWarn("mDNS discovery registration failed: ${e.message}")
   }
 }
 
@@ -2570,34 +2568,29 @@ void processMdnsDiscovery() {
   try {
     logDebug("Processing mDNS discovered devices...")
 
-    // Get all mDNS entries
-    def mdnsEntries = getMDNSEntries()
-    if(!mdnsEntries) {
-      logDebug("No mDNS entries found")
-      return
-    }
+    Integer totalEntries = 0
+    ['_sonos._tcp', '_http._tcp'].each { String serviceType ->
+      List<Map> mdnsEntries = (getMDNSEntries(serviceType) ?: []) as List<Map>
+      totalEntries += mdnsEntries.size()
+      logTrace("Found ${mdnsEntries.size()} entries for mDNS service ${serviceType}")
+      mdnsEntries.each { Map entry ->
+        String serviceName = (entry.server ?: entry.name ?: '').toString()
+        String addresses = (entry.ip4Addresses ?: entry.ipAddress ?: '').toString()
+        String ipAddress = addresses.tokenize(',')?.first()?.trim()
+        Integer port = (entry.port ?: 0) as Integer
 
-    logDebug("Found ${mdnsEntries.size()} mDNS entries")
+        logTrace("mDNS entry: service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}, raw=${entry}")
 
-    mdnsEntries.each { entry ->
-      // Filter for Sonos devices - they typically have 'Sonos' in the name or specific service types
-      String serviceName = entry.name ?: ''
-      String serviceType = entry.type ?: ''
-      String ipAddress = entry.ipAddress ?: ''
-      Integer port = entry.port ?: 0
-
-      logTrace("mDNS entry: name=${serviceName}, type=${serviceType}, ip=${ipAddress}, port=${port}")
-
-      // Check if this looks like a Sonos device
-      if(serviceName.toLowerCase().contains('sonos') || serviceType == '_sonos._tcp') {
-        logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}")
-        processDiscoveredSonosDevice(ipAddress)
-      } else if(ipAddress && port == 1400) {
-        // Port 1400 is Sonos UPnP port - worth checking
-        logTrace("Found device on Sonos UPnP port 1400: ${ipAddress}")
-        processDiscoveredSonosDevice(ipAddress)
+        if(serviceType == '_sonos._tcp' || serviceName.toLowerCase().contains('sonos') || (ipAddress && port == 1400)) {
+          logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}:${port}")
+          processDiscoveredSonosDevice(ipAddress)
+        } else {
+          logTrace("Ignoring non-Sonos mDNS entry ${serviceName} (${serviceType}) at ${ipAddress}:${port}")
+        }
       }
     }
+
+    logDebug("Processed ${totalEntries} mDNS entries")
 
     runIn(2, 'sendFoundSonosEvents')
   } catch(Exception e) {
@@ -2611,6 +2604,106 @@ Boolean isIpAlreadyDiscovered(String ipAddress) {
   return alreadyDiscovered || alreadyDiscoveredSecondary
 }
 
+Boolean reserveDiscoveryProbe(String ipAddress) {
+  if(!ipAddress) {
+    logTrace('Skipping discovery probe because the candidate IP address is empty')
+    return false
+  }
+  if(atomicState.discoveryRunning != true) {
+    logTrace("Skipping discovery probe for ${ipAddress}; discovery session is stopped")
+    return false
+  }
+  synchronized(this) {
+    Map attempts = (atomicState.discoveryProbeAttempts ?: [:]) as Map
+    // Keep every IP reserved for the full discovery session, including failures and
+    // unsupported secondary speakers. A new session resets this map in ssdpDiscover().
+    if(attempts.containsKey(ipAddress)) {
+      logTrace("Skipping discovery probe for ${ipAddress}; already attempted this session at ${attempts[ipAddress]}")
+      return false
+    }
+    Map updated = new LinkedHashMap(attempts)
+    updated[ipAddress] = now()
+    atomicState.discoveryProbeAttempts = updated
+    logTrace("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
+    return true
+  }
+}
+
+void requestDiscoveryDeviceDescription(String ipAddress, LinkedHashMap playerInfo) {
+  if(atomicState.discoveryRunning != true) {
+    logTrace("Skipping device-description request for ${ipAddress}; discovery stopped before player-info callback")
+    return
+  }
+  Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3,
+    requestContentType: 'application/xml', contentType: 'application/xml']
+  try {
+    logTrace("Dispatching asynchronous device-description probe for ${ipAddress} (timeout=3s)")
+    asynchttpGet('discoveryDeviceDescriptionCallback', params, [ipAddress: ipAddress, playerInfo: playerInfo])
+  } catch(Exception e) {
+    logTrace("Could not dispatch device-description probe for ${ipAddress}: ${e.message}")
+  }
+}
+
+void discoveryPlayerInfoCallback(AsyncResponse response, Map data) {
+  String ipAddress = data?.ipAddress?.toString()
+  if(!ipAddress) { logTrace('Player-info callback received without an IP address'); return }
+  if(atomicState.discoveryRunning != true) {
+    logTrace("Ignoring player-info callback for ${ipAddress}; discovery session has stopped")
+    return
+  }
+  if(response == null || response.hasError()) {
+    logTrace("Player-info probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    Map playerInfo = response.getJson() as Map
+    if(!playerInfo) {
+      logTrace("Player-info probe for ${ipAddress} returned an empty or non-object JSON response (status=${response.status})")
+      return
+    }
+    logTrace("Player-info probe succeeded for ${ipAddress} (status=${response.status}, playerId=${playerInfo.playerId}, name=${playerInfo.device?.name})")
+    requestDiscoveryDeviceDescription(ipAddress, new LinkedHashMap(playerInfo))
+  } catch(Exception e) { logTrace("Could not parse player-info response for ${ipAddress} (status=${response.status}): ${e.message}") }
+}
+
+void discoveryDeviceDescriptionCallback(AsyncResponse response, Map data) {
+  String ipAddress = data?.ipAddress?.toString()
+  if(!ipAddress) { logTrace('Device-description callback received without an IP address'); return }
+  if(atomicState.discoveryRunning != true) {
+    logTrace("Ignoring device-description callback for ${ipAddress}; discovery session has stopped")
+    return
+  }
+  if(response == null || response.hasError()) {
+    logTrace("Device-description probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    String responseBody = response.getData() as String
+    if(!responseBody) {
+      logTrace("Device-description probe for ${ipAddress} returned an empty body (status=${response.status})")
+      return
+    }
+    GPathResult description = new XmlSlurper().parseText(responseBody)
+    logTrace("Device-description probe succeeded for ${ipAddress} (status=${response.status}, model=${description.device.modelName.text()})")
+    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
+  } catch(Exception e) { logTrace("Could not parse device-description response for ${ipAddress} (status=${response.status}): ${e.message}") }
+}
+
+void requestDiscoveryPlayerInfo(String ipAddress) {
+  if(atomicState.discoveryRunning != true) {
+    logTrace("Skipping player-info request for ${ipAddress}; discovery session has stopped")
+    return
+  }
+  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
+    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
+  Map callbackData = [ipAddress: ipAddress]
+  try {
+    logTrace("Dispatching asynchronous player-info probe for ${ipAddress}:1443 (timeout=3s)")
+    asynchttpGet('discoveryPlayerInfoCallback', params, callbackData)
+  } catch(Exception e) { logTrace("Could not dispatch player-info probe for ${ipAddress}: ${e.message}") }
+}
+
 void processDiscoveredSonosDevice(String ipAddress) {
   if(!ipAddress) { return }
   if(atomicState.discoveryRunning != true) {
@@ -2618,26 +2711,13 @@ void processDiscoveredSonosDevice(String ipAddress) {
     return
   }
 
+  logTrace("Considering mDNS discovery candidate at ${ipAddress}")
   if(isIpAlreadyDiscovered(ipAddress)) {
-    logTrace("Device at ${ipAddress} already discovered, skipping")
+    logTrace("Skipping mDNS candidate ${ipAddress}; device is already in discovered results")
     return
   }
-
-  // Try to get player info
-  LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
-  if(!playerInfo) {
-    logTrace("Could not get player info for ${ipAddress}")
-    return
-  }
-
-  GPathResult deviceDescription = getDeviceDescriptionLocalSync("${ipAddress}")
-  if(!deviceDescription) {
-    logTrace("Could not get device description for ${ipAddress}")
-    return
-  }
-
-  // Process using the same logic as SSDP
-  processSonosDeviceInfo(playerInfo, deviceDescription, ipAddress)
+  if(!reserveDiscoveryProbe(ipAddress)) { return }
+  requestDiscoveryPlayerInfo(ipAddress)
 }
 
 @CompileStatic
@@ -2661,31 +2741,18 @@ void ssdpEventHandler(Event event) {
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event?.networkAddress as String)
   String ipPort = convertHexToInt(event?.deviceAddress as String).toString()
+  logTrace("Considering SSDP discovery candidate at ${ipAddress}:${ipPort}")
 
-  // Devices send multiple SSDP responses (and we subscribe to two STs) -- skip the
-  // synchronous player info/description fetches for already-seen IPs.
+  // Devices send multiple SSDP responses; reserve each IP before issuing async probes.
   if(isIpAlreadyDiscovered(ipAddress)) {
-    logTrace("Device at ${ipAddress} already discovered, skipping")
+    logTrace("Skipping SSDP candidate ${ipAddress}; device is already in discovered results")
+    return
+  }
+  if(!reserveDiscoveryProbe(ipAddress)) {
     return
   }
 
-  LinkedHashMap playerInfo = getPlayerInfoLocalSync("${ipAddress}:1443")
-  if(playerInfo) {
-    logTrace("Discovered playerInfo for ${ipAddress}")
-  } else {
-    logTrace("Did not receive playerInfo for ${ipAddress}")
-    return
-  }
-
-  GPathResult deviceDescription = getDeviceDescriptionLocalSync("${ipAddress}")
-  if(deviceDescription) {
-    logTrace("Discovered device description for ${ipAddress}")
-  } else {
-    logTrace("Did not receive device description for ${ipAddress}")
-    return
-  }
-
-  processSonosDeviceInfo(playerInfo, deviceDescription, ipAddress)
+  requestDiscoveryPlayerInfo(ipAddress)
 }
 
 @CompileStatic
