@@ -17,6 +17,48 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
+  def "integer and decimal balance commands send identical stereo SOAP requests"() {
+    given:
+    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
+    driver.device.dataValues.secondaryIds = 'RINCON_RIGHT'
+    List<Map> requests = []
+    driver.metaClass.postSonosSoapAsync = { String callback, Map params -> requests.add(params) }
+
+    when:
+    driver.setBalance(level)
+
+    then:
+    requests.size() == 2
+    requests[0].body.contains('<Channel>' + firstChannel + '</Channel>')
+    ((requests[0].body =~ /<DesiredVolume>([^<]+)<\/DesiredVolume>/)[0][1] as BigDecimal) == firstVolume
+    requests[1].body.contains('<DesiredVolume>100</DesiredVolume>')
+    driver.events.findAll { Map event -> event.name == 'balance' }.empty
+
+    where:
+    level | firstChannel | firstVolume
+    10    | 'LF'         | 50
+    10.0G | 'LF'         | 50
+    -10   | 'RF'         | 50
+    -10.0G| 'RF'         | 50
+    0     | 'LF'         | 100
+    0.0G  | 'LF'         | 100
+  }
+
+  def "balance state updates deduplicate events without sending a speaker command"() {
+    given:
+    List<Map> requests = []
+    driver.metaClass.postSonosSoapAsync = { String callback, Map params -> requests.add(params) }
+
+    when:
+    driver.setBalanceState(10)
+    driver.device.currentValues.balance = 10
+    driver.setBalanceState(10)
+
+    then:
+    requests.empty
+    driver.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
+  }
+
   def "mute child commands send player mute requests"() {
     given:
     com.hubitat.app.DeviceWrapper child = new com.hubitat.app.DeviceWrapper(dataValues: [command: 'Mute'])

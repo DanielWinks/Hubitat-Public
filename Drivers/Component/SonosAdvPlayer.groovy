@@ -1537,6 +1537,7 @@ void setBass(BigDecimal level) { componentSetBassLocal(level)}
 void setLoudness(String mode) { componentSetLoudnessLocal(mode == 'on')}
 @CompileStatic
 void setBalance(BigDecimal level) { componentSetBalanceLocal(level)}
+void setBalance(Integer level) { setBalance(level as BigDecimal) }
 void setNightMode(String mode) {
   if(!hasHTPlaybackCapability()) {
     logWarn("Night Mode is only supported on Sonos soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)")
@@ -3582,7 +3583,7 @@ void processRenderingControlMessages(String xmlString) {
   } else if(rf < 100) {
     balance = -((100 - rf) / 5) as Integer
   }
-  setBalance(balance)
+  setBalanceState(balance)
 
   String mute = instanceId.children().findAll{((GPathResult)it).name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
@@ -5198,7 +5199,7 @@ void setPlayerVolume(Integer volume) {
   sendEvent(name:'volume', value: volume)
   if(volume > 0) { runtimeState.restoreLevelAfterUnmute = volume }
 }
-void setBalance(Integer balance) {
+void setBalanceState(Integer balance) {
   Integer oldBalance = this.device.currentValue('balance') as Integer
   if(balance == oldBalance) { return }
   sendEvent(name: 'balance', value: balance)
