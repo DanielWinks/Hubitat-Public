@@ -86,7 +86,7 @@ void webSocketStatus(String message) {
 
 void wsConnect() {
   try {
-    String websocketUrl = this.device.getDataValue('websocketUrl')
+    String websocketUrl = this.device.getDataValue('websocketUrl') ?: getLocalWsUrl()
     if(!websocketUrl) {
       logWarn('Websocket URL not configured, cannot connect')
       return

@@ -523,6 +523,9 @@ void uninstalled() {
   runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY)
   clearStaticDriverStateForCurrentDevice()
 }
+void installed() { initialize() }
+void updated() { initialize() }
+
 void initialize() {
   invalidateUpnpRequestsForDevice()
   Map queueEntry = getUpnpRequestQueue()
@@ -2919,24 +2922,37 @@ void createRemovePlaylistChildDevice(Boolean create) {
 void createRemoveRightChannelChildDevice(Boolean create) {
   String dni = getRightChannelChildDNI()
   ChildDeviceWrapper child = getRightChannelChild()
-  if(!child && create && getRightChannelRincon()) {
-    try {
-      logDebug("Creating Right Channel device")
-      child = addChildDevice('dwinks', 'Sonos Advanced Secondaries', dni,
-        [ name: 'Sonos Secondaries',
-          label: "Sonos Right Channel - ${this.getDataValue('name')}"]
-      )
-      child.updateDataValue('deviceIp', getRightChannelDeviceIp())
-      child.updateDataValue('id', getRightChannelRincon())
-    } catch (UnknownDeviceTypeException e) {
-      logException('createRemoveRightChannelChildDevice', e)
-    }
+  if(!create) {
+    if(child != null) { deleteChildDevice(dni) }
+    return
   }
-  else if(!create && child){ deleteChildDevice(dni) }
-  else if(!child && create && !getRightChannelRincon()) {
-    logWarn('Not creating right channel device. No right channel device detected.')
 
-    this.device.updateSetting('createRightChannelChildDevice', false)
+  // Older discovery stored RF even when this player was itself the RF member.
+  // Resolve that value to the companion before creating or repairing the child.
+  setRightChannelRincon(getRightChannelRincon())
+  String companionId = getRightChannelRincon()
+  String companionIp = getRightChannelDeviceIp()
+  if(!companionId || companionId == getId() || !companionIp) {
+    logWarn('Cannot configure stereo companion child until its ID and IP are discovered.')
+    return
+  }
+
+  try {
+    Boolean created = child == null
+    if(created) {
+      logDebug('Creating Right Channel device')
+      child = addChildDevice('dwinks', 'Sonos Advanced Secondaries', dni,
+        [name: 'Sonos Secondaries', label: "Sonos Right Channel - ${getDeviceDataValue('name')}"])
+    }
+    String websocketUrl = "wss://${companionIp}:1443/websocket/api"
+    Boolean changed = child.getDataValue('deviceIp') != companionIp ||
+      child.getDataValue('id') != companionId || child.getDataValue('websocketUrl') != websocketUrl
+    child.updateDataValue('deviceIp', companionIp)
+    child.updateDataValue('id', companionId)
+    child.updateDataValue('websocketUrl', websocketUrl)
+    if(created || changed) { child.initialize() }
+  } catch (UnknownDeviceTypeException e) {
+    logException('createRemoveRightChannelChildDevice', e)
   }
 }
 
@@ -4492,25 +4508,36 @@ String getRightChannelRincon() {
   return getDeviceDataValue('rightChannelId')
 }
 void setRightChannelRincon(String rincon) {
-  logTrace("Setting right channel RINCON to ${rincon}")
-  setDeviceDataValue('rightChannelId', rincon)
   List<String> secondaryIds = getSecondaryIds()
-  if(secondaryIds == null || secondaryIds.size() == 0) { return }
-
-  Integer secondaryIndex = secondaryIds.indexOf(rincon)
-  if(secondaryIndex == null || secondaryIndex < 0) {
-    logTrace("Right channel RINCON ${rincon} not found in secondaryIds: ${secondaryIds}")
-    return
+  String companionId = rincon
+  if(companionId == getId()) {
+    companionId = secondaryIds.size() == 1 ? secondaryIds[0] : null
   }
-
+  Integer secondaryIndex = secondaryIds.indexOf(companionId)
   List<String> secondaryIps = getSecondaryDeviceIps()
-  if(secondaryIps == null || secondaryIndex >= secondaryIps.size()) {
-    logTrace("Right channel index ${secondaryIndex} out of range for secondary IPs")
+  if(!companionId || secondaryIndex < 0 || secondaryIndex >= secondaryIps.size() || !secondaryIps[secondaryIndex]) {
+    // Do not retain a stale endpoint when pairing information is incomplete.
+    device.removeDataValue('rightChannelId')
+    device.removeDataValue('rightChannelDeviceIp')
     return
   }
+  setDeviceDataValue('rightChannelId', companionId)
+  setRightChannelDeviceIp(secondaryIps[secondaryIndex])
+}
 
-  String rightChannelIpAddress = secondaryIps[secondaryIndex]
-  setRightChannelDeviceIp(rightChannelIpAddress)
+/** Select the other front channel, regardless of which speaker owns the player. */
+@CompileStatic
+static String selectStereoCompanionId(List<Map> members, String playerId) {
+  if(members == null || !playerId) { return null }
+  Map ownMember = members.find { Map member -> member?.get('id') == playerId }
+  List ownChannels = ownMember?.get('channelMap') instanceof List ? (List)ownMember.get('channelMap') : []
+  String opposite = ownChannels.contains('LF') ? 'RF' : (ownChannels.contains('RF') ? 'LF' : null)
+  if(opposite == null) { return null }
+  Map companion = members.find { Map member ->
+    Object channels = member?.get('channelMap')
+    member?.get('id') != playerId && channels instanceof List && ((List)channels).contains(opposite)
+  }
+  return companion?.get('id')?.toString()
 }
 
 String getRightChannelDeviceIp() {
@@ -7693,8 +7720,9 @@ void processWebsocketMessage(String message) {
           if(zInfo != null && zInfo.size() > 0) {
             ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
             if(members != null && members.size() > 0) {
-              String rightChannelId = members.find{ ((ArrayList<String>)it?.channelMap)?.contains('RF') }?.id?.toString()
-              if(rightChannelId != null && rightChannelId != '') { setRightChannelRincon(rightChannelId) }
+              String companionId = selectStereoCompanionId(members, getId())
+              setRightChannelRincon(companionId)
+              if(getCreateRightChannelChildDevice()) { createRemoveRightChannelChildDevice(true) }
             }
           }
         }

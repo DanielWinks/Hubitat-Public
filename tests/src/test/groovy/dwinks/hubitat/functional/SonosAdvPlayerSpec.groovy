@@ -84,6 +84,109 @@ class SonosAdvPlayerSpec extends Specification {
     'unmuted' | 'unmuted' | 'off'
   }
 
+  def "stereo companion selection supports either front channel and excludes surrounds"() {
+    expect:
+    driver.selectStereoCompanionId(members, ownId) == companionId
+
+    where:
+    members | ownId | companionId
+    [[id: 'left', channelMap: ['LF']], [id: 'right', channelMap: ['RF']]] | 'left' | 'right'
+    [[id: 'right', channelMap: ['RF']], [id: 'left', channelMap: ['LF']]] | 'right' | 'left'
+    [[id: 'bar', channelMap: ['LF', 'RF']], [id: 'rear', channelMap: ['LR']]] | 'bar' | null
+    [[id: 'solo', channelMap: []]] | 'solo' | null
+    null | 'solo' | null
+  }
+
+  def "legacy self-referencing stereo ID resolves to companion IP"() {
+    given:
+    driver.device.dataValues.secondaryIds = 'OTHER'
+    driver.device.dataValues.secondaryDeviceIps = '192.168.1.51'
+
+    when:
+    driver.setRightChannelRincon('RINCON_TEST')
+
+    then:
+    driver.getRightChannelRincon() == 'OTHER'
+    driver.getRightChannelDeviceIp() == '192.168.1.51'
+
+    when: 'discovery no longer has a matching companion'
+    driver.setRightChannelRincon('MISSING')
+
+    then:
+    driver.getRightChannelRincon() == null
+    driver.getRightChannelDeviceIp() == null
+  }
+
+  def "saving preferences and installation invoke initialization"() {
+    given:
+    HubitatScriptHarness lifecycleDriver = ScriptLoader.load(
+      new File('../Drivers/Component/SonosAdvPlayer.groovy'), new File('../Libraries'), true)
+    Integer initialized = 0
+    lifecycleDriver.metaClass.initialize = { -> initialized++ }
+
+    when:
+    lifecycleDriver.installed()
+    lifecycleDriver.updated()
+
+    then:
+    initialized == 2
+  }
+
+  def "stereo child creation and repair populate connection data and initialize once"() {
+    given:
+    HubitatScriptHarness childDriver = ScriptLoader.load(
+      new File('../Drivers/Component/SonosAdvPlayer.groovy'), new File('../Libraries'), true)
+    childDriver.device.dataValues = [id: 'MAIN', rightChannelId: 'MAIN',
+      secondaryIds: 'OTHER', secondaryDeviceIps: '192.168.1.51']
+    dwinks.hubitat.stubs.MockDevice child = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: childDriver.getRightChannelChildDNI())
+    Integer initialized = 0
+    Integer created = 0
+    child.metaClass.initialize = { -> initialized++ }
+    childDriver.metaClass.addChildDevice = { String namespace, String type, String dni, Map props ->
+      created++
+      childDriver.children.add(child)
+      return child
+    }
+
+    when:
+    childDriver.createRemoveRightChannelChildDevice(true)
+    childDriver.createRemoveRightChannelChildDevice(true)
+
+    then:
+    created == 1
+    initialized == 1
+    child.dataValues == [deviceIp: '192.168.1.51', id: 'OTHER', websocketUrl: 'wss://192.168.1.51:1443/websocket/api']
+
+    when: 'an existing child needs its endpoint repaired'
+    childDriver.device.dataValues.secondaryDeviceIps = '192.168.1.52'
+    childDriver.createRemoveRightChannelChildDevice(true)
+
+    then:
+    initialized == 2
+    child.getDataValue('deviceIp') == '192.168.1.52'
+    child.getDataValue('websocketUrl') == 'wss://192.168.1.52:1443/websocket/api'
+
+    when:
+    childDriver.createRemoveRightChannelChildDevice(false)
+
+    then:
+    childDriver.children.empty
+  }
+
+  def "incomplete stereo discovery waits without creating a child or clearing preference"() {
+    given:
+    driver.settings.createRightChannelChildDevice = true
+    driver.children.clear()
+
+    when:
+    driver.createRemoveRightChannelChildDevice(true)
+
+    then:
+    driver.children.empty
+    !driver.device.updatedSettings.containsKey('createRightChannelChildDevice')
+  }
+
   def setupSpec() {
     File file = new File('../Drivers/Component/SonosAdvPlayer.groovy')
     assert file.exists(), "Could not find ${file.absolutePath}"
