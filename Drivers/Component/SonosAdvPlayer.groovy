@@ -3800,11 +3800,20 @@ void dispatchUpnpRequest(Map entry, Map request) {
   StringBuilder responseBuffer = new StringBuilder()
   Boolean emitted = false
   Boolean trailingCallbackLogged = false
+  Boolean dispatchOwned = false
   try {
     synchronized(entry.lock) {
       if(entry.active?.guid != guid || request.phase != 'dispatching') { return }
       entry.socket = interfaces.rawSocket
-      interfaces.rawSocket.connect([inputReader: { InputStream input, Closure parseCallback ->
+      dispatchOwned = true
+    }
+    if(!dispatchOwned) { return }
+    // Arm recovery before entering the platform socket API, which may block.
+    synchronized(entry.lock) {
+      if(entry.active?.guid != guid || request.phase != 'dispatching') { return }
+      runIn(UPNP_REQUEST_TIMEOUT_SECONDS, 'upnpSubscriptionWatchdog', [data: [guid: guid], overwrite: true])
+    }
+    interfaces.rawSocket.connect([timeout: UPNP_REQUEST_TIMEOUT_SECONDS * 1000, inputReader: { InputStream input, Closure parseCallback ->
       synchronized(responseBuffer) {
         if(emitted) {
           if(!trailingCallbackLogged) {
@@ -3836,13 +3845,13 @@ void dispatchUpnpRequest(Map entry, Map request) {
         }
       }
       }], host, port)
+    synchronized(entry.lock) {
       if(entry.active?.guid == guid && request.phase == 'dispatching') { request.phase = 'waiting' }
       else { return }
     }
     interfaces.rawSocket.sendMessage(http.toString())
     synchronized(entry.lock) {
       if(entry.active?.guid == guid && request.phase == 'waiting') {
-        runIn(UPNP_REQUEST_TIMEOUT_SECONDS, 'upnpSubscriptionWatchdog', [data: [guid: guid], overwrite: true])
         logTrace("Dispatched ${verb} ${target} guid=${guid} sidKey=${request.sidKey} attempt=${request.attempts} watchdogSeconds=${UPNP_REQUEST_TIMEOUT_SECONDS}")
       }
     }
@@ -3861,9 +3870,12 @@ void handleUpnpRawResponse(String raw) {
   logTrace("UPnP response callback guid=${guid} payloadBytes=${payload.getBytes('UTF-8').length}")
   Map entry = upnpRequestQueues.get(getDNI())
   if(entry == null) { logTrace("Ignoring UPnP response guid=${guid}; no queue for dni=${getDNI()}"); return }
+  Map request = null
+  Map response = null
+  String error = null
   synchronized(entry.lock) {
-    Map request = entry.active as Map
-    if(request == null || request.guid != guid) {
+    request = entry.active as Map
+    if(request == null || request.guid != guid || request.phase == 'complete' || request.phase == 'expired') {
       logTrace("Ignoring stale UPnP response guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
       return
     }
@@ -3871,63 +3883,79 @@ void handleUpnpRawResponse(String raw) {
       logTrace("Ignoring UPnP response guid=${guid} because owner phase=${request.phase}")
       return
     }
-    if(payload.startsWith('ERROR|')) { completeUpnpCurrentLocked(entry, request, null, payload); return }
-    Integer end = payload.indexOf('\r\n\r\n')
-    if(end < 0) { return }
-    String[] lines = payload.substring(0, end).split('\r\n')
-    String[] statusParts = lines[0].split(' ')
-    Integer status = null
-    if(statusParts.length > 1) { try { status = Integer.valueOf(statusParts[1]) } catch(NumberFormatException ignored) { status = null } }
-    Map<String, String> headers = [:]
-    for(Integer i = 1; i < lines.length; i++) {
-      Integer colon = lines[i].indexOf(':')
-      if(colon > 0) { headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim()) }
+    if(payload.startsWith('ERROR|')) { error = payload }
+    if(error == null) {
+      Integer end = payload.indexOf('\r\n\r\n')
+      if(end < 0) { return }
+      String[] lines = payload.substring(0, end).split('\r\n')
+      String[] statusParts = lines[0].split(' ')
+      Integer status = null
+      if(statusParts.length > 1) { try { status = Integer.valueOf(statusParts[1]) } catch(NumberFormatException ignored) { status = null } }
+      Map<String, String> headers = [:]
+      for(Integer i = 1; i < lines.length; i++) {
+        Integer colon = lines[i].indexOf(':')
+        if(colon > 0) { headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim()) }
+      }
+      response = [status: status, headers: headers]
+      logTrace("Parsed UPnP response guid=${guid} statusLine=${lines[0]} headerNames=${headers.keySet().join(',')}")
     }
-    logTrace("Parsed UPnP response guid=${guid} statusLine=${lines[0]} headerNames=${headers.keySet().join(',')}")
-    completeUpnpCurrentLocked(entry, request, [status: status, headers: headers], null)
   }
+  completeUpnpCurrent(entry, request, response, error)
 }
 
-void completeUpnpCurrentLocked(Map entry, Map request, Map response, String error) {
-  if(entry.active?.guid != request.guid || request.phase == 'complete' || request.phase == 'expired') { return }
-  request.phase = 'complete'
-  Integer status = response?.status as Integer
-  logTrace("UPnP response guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
-  if(error) { logTrace("UPnP request failed guid=${request.guid} reason=${error}") }
-  Map<String,String> headers = response?.headers as Map<String,String> ?: [:]
-  String sidValue = headers['sid']
-  if(request.operation == 'unsubscribe') {
-    Boolean sidRemoved = false
-    if((status == 200 || status == 412) && getSid(request.sidKey as String) == request.sid) {
-      deleteSid(request.sidKey as String)
-      sidRemoved = true
-    }
-    logTrace("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
-  } else if(status == 200 && (sidValue || request.operation == 'renew')) {
-    if(getSid(request.sidKey as String) == request.sid) {
-      Long timeout = parseGrantedTimeout(headers['timeout'])
-      if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
-      else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
-      logTrace("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
-      removeResub(request.subscribeMethod as String)
-      if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
-      clearSubscriptionRetryAttempts(request.subscribeMethod as String)
-      clearSubscriptionRetryAttempts(request.resub as String)
+void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
+  Object socket = null
+  Boolean completed = false
+  synchronized(entry.lock) {
+    if(entry.active?.guid != request.guid || request.phase == 'complete' || request.phase == 'expired') { return }
+    request.phase = 'complete'
+    completed = true
+    Integer status = response?.status as Integer
+    logTrace("UPnP response guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
+    if(error) { logTrace("UPnP request failed guid=${request.guid} reason=${error}") }
+    Map<String,String> headers = response?.headers as Map<String,String> ?: [:]
+    String sidValue = headers['sid']
+    if(request.operation == 'unsubscribe') {
+      Boolean sidRemoved = false
+      if((status == 200 || status == 412) && getSid(request.sidKey as String) == request.sid) {
+        deleteSid(request.sidKey as String)
+        sidRemoved = true
+      }
+      logTrace("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
+    } else if(status == 200 && (sidValue || request.operation == 'renew')) {
+      if(getSid(request.sidKey as String) == request.sid) {
+        Long timeout = parseGrantedTimeout(headers['timeout'])
+        if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
+        else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
+        logTrace("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
+        removeResub(request.subscribeMethod as String)
+        if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
+        clearSubscriptionRetryAttempts(request.subscribeMethod as String)
+        clearSubscriptionRetryAttempts(request.resub as String)
+      } else {
+        logTrace("Ignoring UPnP SID update guid=${request.guid} sidKey=${request.sidKey}; current SID ownership changed before response")
+      }
+    } else if(status == 412 && request.operation != 'unsubscribe') {
+      if(request.sid && getSid(request.sidKey as String) == request.sid) { deleteSid(request.sidKey as String) }
+      logTrace("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
+      scheduleUpnpRetry(request, request.sid ? 5 : 60)
     } else {
-      logTrace("Ignoring UPnP SID update guid=${request.guid} sidKey=${request.sidKey}; current SID ownership changed before response")
+      logTrace("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
+      scheduleUpnpRetry(request)
     }
-  } else if(status == 412 && request.operation != 'unsubscribe') {
-    if(request.sid && getSid(request.sidKey as String) == request.sid) { deleteSid(request.sidKey as String) }
-    logTrace("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
-    scheduleUpnpRetry(request, request.sid ? 5 : 60)
-  } else {
-    logTrace("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
-    scheduleUpnpRetry(request)
+    socket = detachOwnedUpnpSocketLocked(entry, request)
   }
-  closeOwnedUpnpSocketLocked(entry, request)
-  entry.active = null
-  entry.socket = null
-  dispatchNextUpnpRequest(entry)
+  if(completed) {
+    closeDetachedUpnpSocket(socket, request)
+    Boolean released = false
+    synchronized(entry.lock) {
+      if(entry.active?.guid == request.guid && request.phase == 'complete') {
+        entry.active = null
+        released = true
+      }
+    }
+    if(released) { dispatchNextUpnpRequest(entry) }
+  }
 }
 
 Long parseGrantedTimeout(String value) {
@@ -3938,19 +3966,18 @@ Long parseGrantedTimeout(String value) {
 }
 
 void completeUpnpWithoutResponse(Map entry, Map request, String reason) {
+  Boolean completed = false
   synchronized(entry.lock) {
     if(entry.active?.guid != request.guid) { return }
     request.phase = 'complete'
     logTrace("Completed UPnP request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} reason=${reason}")
     entry.active = null
-    dispatchNextUpnpRequest(entry)
+    completed = true
   }
+  if(completed) { dispatchNextUpnpRequest(entry) }
 }
 void completeUpnpFailure(Map entry, Map request, String reason) {
-  synchronized(entry.lock) {
-    if(entry.active?.guid != request.guid) { return }
-    completeUpnpCurrentLocked(entry, request, null, reason)
-  }
+  completeUpnpCurrent(entry, request, null, reason)
 }
 void scheduleUpnpRetry(Map request, Integer delayOverride = null) {
   if((request.attempts as Integer) >= UPNP_REQUEST_MAX_ATTEMPTS) {
@@ -4004,10 +4031,13 @@ void retryUpnpRequest(Map data) {
   dispatchNextUpnpRequest(entry)
 }
 
-void closeOwnedUpnpSocketLocked(Map entry, Map request) {
-  if(entry.active?.guid != request.guid) { return }
+Object detachOwnedUpnpSocketLocked(Map entry, Map request) {
+  if(entry.active?.guid != request.guid) { return null }
   Object socket = entry.socket
   entry.socket = null
+  return socket
+}
+void closeDetachedUpnpSocket(Object socket, Map request) {
   if(socket != null) {
     try { socket.close() } catch(Exception e) { logTrace("Socket close failed guid=${request.guid}: ${e.message}") }
   }
@@ -4016,20 +4046,25 @@ void upnpSubscriptionWatchdog(Map data) {
   String guid = data?.guid as String
   Map entry = upnpRequestQueues.get(getDNI())
   if(entry == null) { return }
+  Map request = null
+  Object socket = null
   synchronized(entry.lock) {
-    Map request = entry.active as Map
-    if(request == null || request.guid != guid) {
+    request = entry.active as Map
+    if(request == null || request.guid != guid || request.phase == 'complete' || request.phase == 'expired') {
       logTrace("Ignoring stale UPnP watchdog guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
       return
     }
     request.phase = 'expired'
     logTrace("UPnP watchdog expired guid=${guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} generation=${request.lifecycleGeneration}")
-    closeOwnedUpnpSocketLocked(entry, request)
+    socket = detachOwnedUpnpSocketLocked(entry, request)
     if((request.attempts as Integer) < UPNP_REQUEST_MAX_ATTEMPTS) { scheduleUpnpRetry(request) }
-    entry.active = null
-    entry.socket = null
-    dispatchNextUpnpRequest(entry)
   }
+  closeDetachedUpnpSocket(socket, request)
+  synchronized(entry.lock) {
+    if(entry.active?.guid == guid && request.phase == 'expired') { entry.active = null }
+    else { return }
+  }
+  dispatchNextUpnpRequest(entry)
 }
 void socketStatus(String status) { logTrace("UPnP raw socket status (diagnostic only): ${status}") }
 
@@ -4037,6 +4072,8 @@ void invalidateUpnpRequestsForDevice() {
   String dni = getDNI()
   Map entry = getUpnpRequestQueue(dni)
   if(entry == null) { return }
+  Object socket = null
+  Map active = null
   synchronized(entry.lock) {
     Integer queuedCount = (entry.queue as List<Map>).size()
     String activeGuid = entry.active?.guid as String
@@ -4046,21 +4083,25 @@ void invalidateUpnpRequestsForDevice() {
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpSid3')
     unschedule('retryUpnpSid4')
-    Map active = entry.active as Map
+    active = entry.active as Map
     if(active != null) {
       active.phase = 'expired'
-      closeOwnedUpnpSocketLocked(entry, active)
+      socket = detachOwnedUpnpSocketLocked(entry, active)
       unschedule('upnpSubscriptionWatchdog')
     }
     (entry.queue as List<Map>).clear()
-    entry.active = null
-    entry.socket = null
+  }
+  closeDetachedUpnpSocket(socket, active)
+  synchronized(entry.lock) {
+    if(active != null && entry.active?.guid == active.guid) { entry.active = null }
   }
 }
 void retireUpnpRequestsForDevice() {
   String dni = getDNI()
   Map entry = getUpnpRequestQueue(dni)
   if(entry == null) { return }
+  Object socket = null
+  Map active = null
   synchronized(entry.lock) {
     Integer queuedCount = (entry.queue as List<Map>).size()
     String activeGuid = entry.active?.guid as String
@@ -4072,11 +4113,13 @@ void retireUpnpRequestsForDevice() {
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpSid3')
     unschedule('retryUpnpSid4')
-    Map active = entry.active as Map
-    if(active != null) { active.phase = 'expired'; closeOwnedUpnpSocketLocked(entry, active) }
+    active = entry.active as Map
+    if(active != null) { active.phase = 'expired'; socket = detachOwnedUpnpSocketLocked(entry, active) }
     (entry.queue as List<Map>).clear()
-    entry.active = null
-    entry.socket = null
+  }
+  closeDetachedUpnpSocket(socket, active)
+  synchronized(entry.lock) {
+    if(active != null && entry.active?.guid == active.guid) { entry.active = null }
   }
 }
 
