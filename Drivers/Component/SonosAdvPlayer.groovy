@@ -863,6 +863,10 @@ void migrationCleanup() {
 }
 
 void maybeCleanupStaticDriverState() {
+  InstalledAppWrapper parentApp = getParentApp()
+  if(parentApp == null) { return }
+  List<Map<String, String>> activePlayerRoster = parentApp.getStaticDriverActivePlayerRoster()
+
   Long nowEpoch = Instant.now().getEpochSecond()
   Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
   if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
@@ -871,25 +875,19 @@ void maybeCleanupStaticDriverState() {
   try {
     lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
     if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
-    cleanupStaticDriverState()
+    cleanupStaticDriverState(activePlayerRoster)
     lastStaticStateCleanupEpoch = nowEpoch
   } finally {
     staticStateCleanupMutex.release()
   }
 }
 
-void cleanupStaticDriverState() {
-  InstalledAppWrapper parentApp = getParentApp()
-  if(parentApp == null) { return }
-
-  List<ChildDeviceWrapper> childDevices = parentApp.getChildDevices()
-  if(childDevices == null || childDevices.isEmpty()) { return }
-
+void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   Set<String> activePlayerIds = new HashSet<String>()
   Set<String> activePlayerDnis = new HashSet<String>()
-  childDevices.each { ChildDeviceWrapper child ->
-    String playerId = child.getDataValue('id')
-    String dni = child.getDeviceNetworkId()
+  (activePlayerRoster ?: []).each { Map<String, String> player ->
+    String playerId = player.playerId
+    String dni = player.dni
     if(playerId != null && playerId != '' && dni != null && dni != '') {
       activePlayerIds.add(playerId)
       activePlayerDnis.add(dni)

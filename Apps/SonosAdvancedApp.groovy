@@ -1948,6 +1948,22 @@ void cancelGroupEdit() {
 // Initialize() and Configure()
 // =============================================================================
 void initialize() { configure() }
+
+/** Snapshot the active player identifiers for driver-side cache maintenance. */
+List<Map<String, String>> getStaticDriverActivePlayerRoster() {
+  List<Map<String, String>> roster = []
+  List<ChildDeviceWrapper> children = app.getChildDevices()
+  if(children == null) { return roster }
+  children.each { ChildDeviceWrapper child ->
+    String playerId = child.getDataValue('id')
+    String dni = child.getDeviceNetworkId()
+    if(playerId != null && playerId != '' && dni != null && dni != '') {
+      roster.add([playerId: playerId, dni: dni])
+    }
+  }
+  return roster
+}
+
 void configure() {
   applyLogLevelChange()
   logInfo("${app.name} updated")
