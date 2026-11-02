@@ -55,6 +55,35 @@ class SonosAdvPlayerSpec extends Specification {
     null      | 'off'
   }
 
+  def "player mute reports synchronize the child even when parent state is unchanged"() {
+    given:
+    dwinks.hubitat.stubs.MockDevice child = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getMuteControlChildDNI())
+    driver.children.clear()
+    driver.children.add(child)
+    driver.settings.enableAirPlayUnmuteVolumeFix = false
+    driver.device.currentValues.mute = previousState
+    child.currentValues.switch = 'stale'
+
+    when:
+    driver.setMuteState(muteState)
+
+    then:
+    child.currentValue('switch') == switchState
+    driver.events.findAll { Map event -> event.name == 'mute' }*.value ==
+      (previousState == muteState ? [] : [muteState])
+
+    cleanup:
+    driver.children.clear()
+
+    where:
+    previousState | muteState | switchState
+    'unmuted' | 'muted'   | 'on'
+    'muted'   | 'unmuted' | 'off'
+    'muted'   | 'muted'   | 'on'
+    'unmuted' | 'unmuted' | 'off'
+  }
+
   def setupSpec() {
     File file = new File('../Drivers/Component/SonosAdvPlayer.groovy')
     assert file.exists(), "Could not find ${file.absolutePath}"

@@ -5183,6 +5183,7 @@ String getMuteState() {
   return this.device.currentValue('mute')
 }
 void setMuteState(String muted) {
+  sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
   String previousMutedState = getMuteState() != null ? getMuteState() : 'unmuted'
   if(muted == previousMutedState) { return }
   if(muted == 'unmuted' && previousMutedState == 'muted' && getEnableAirPlayUnmuteVolumeFix()) {
