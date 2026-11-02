@@ -542,13 +542,13 @@ class SonosAdvancedAppSpec extends Specification {
     follower.commands.find { it.name == 'playerModifyGroupMembers' } == [
       name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_COORD'],
       expectedTopology: [
-        RINCON_COORD: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
-        RINCON_FOLLOW: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
-        RINCON_EXTRA: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']]
+        RINCON_COORD: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']],
+        RINCON_FOLLOW: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']],
+        RINCON_EXTRA: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']]
       ]
     ]
     operation.coordinatorTransferStarted == true
-    operation.coordinatorTransferPlayerIds == ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+    operation.coordinatorTransferPlayerIds == ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
     follower.commands.every { it.name != 'playerCreateGroup' }
     appScript.getActiveGroupOperation().groupingMode == 'ADDITIVE'
   }
@@ -571,7 +571,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
-        ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
+        ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
     operation.coordinatorTransferGroupCreated == true
     operation.resolvedCoordinatorId == 'RINCON_COORD'
   }

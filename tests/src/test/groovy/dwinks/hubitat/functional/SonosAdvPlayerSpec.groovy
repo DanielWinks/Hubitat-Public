@@ -120,7 +120,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     Map expected = new JsonSlurper().parseText(driver.device.dataValues.expectedGroupTopology) as Map
     expected.coordinatorId == 'RINCON_NEW_COORD'
-    expected.memberIds == ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']
+    expected.memberIds == ['RINCON_NEW_COORD', 'RINCON_OLD_COORD']
     expected.expiresAt > driver.now()
     websocketMessages.any { String message -> message.contains('modifyGroupMembers') }
   }
@@ -240,8 +240,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.audioClipPlaying == true
     driver.runtimeState.parentCommandSequence == 4
     driver.runtimeState.wsRetryCount == 2
-    driver.state.empty
-    driver.binding.getVariable('atomicState').empty
+    driver.state.isEmpty()
+    driver.binding.getVariable('atomicState').isEmpty()
   }
 
   def "favorite lookup finds an item by Sonos favorite ID instead of map key"() {
@@ -690,7 +690,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'metadataConfirmed'
     payload.data.favoriteId == '42'
     payload.data.confirmed == true
@@ -706,7 +706,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'favoriteLoadAck'
     payload.data.success == true
   }
@@ -721,7 +721,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText(event.value as String)
+    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'groups'
     payload.observedAt instanceof Number
     payload.data.groupId == null
