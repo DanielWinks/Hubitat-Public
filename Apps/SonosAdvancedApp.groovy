@@ -6582,234 +6582,166 @@ void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAt
 // Version Checking for Installed Files
 // =============================================================================
 void checkInstalledVersions() {
+  if(state.versionCheckJob instanceof Map) { logInfo('Version check already in progress'); return }
   logInfo('Checking versions of all installed files...')
   state.lastVersionCheck = now()
   state.versionMismatches = []
   state.installedVersions = []
+  Map job = [id:UUID.randomUUID().toString(), stage:'login', appVersion:getCurrentVersion(), artifacts:[]]
+  state.versionCheckJob = job
+  Long cookieAge = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+  if(state.hubCookie && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
+    job.cookie = state.hubCookie
+    versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+  } else {
+    versionCheckRequest(job, 'login', [uri:'http://127.0.0.1:8080', path:'/login', requestContentType:'application/x-www-form-urlencoded',
+      body:[username:settings.hubSecurityUsername?.toString() ?: '', password:settings.hubSecurityPassword?.toString() ?: '', submit:'Login'],
+      followRedirects:false, textParser:true, timeout:15], 'POST')
+  }
+}
 
-  // Get the ACTUAL version from the hub's app code, not the running instance
-  // This is critical after updates when the instance may have the old version
-  String appVersion = getActualInstalledAppVersion()
-  logDebug("Current app version from hub: ${appVersion}")
-
-  // Get package manifest for the CURRENT installed version (not main branch)
-  // This ensures we're comparing against the correct expected versions
-  String manifestUrl = "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/PackageManifests/SonosAdvancedController/packageManifest.json"
-  Map manifest = null
-
+void versionCheckRequest(Map job, String stage, Map params, String method = 'GET') {
   try {
-    Map params = [
-      uri: manifestUrl,
-      contentType: 'application/json',
-      timeout: 15
-    ]
-
-    httpGet(params) { resp ->
-      if(resp?.status == 200 && resp.data) {
-        manifest = resp.data
-      }
-    }
+    job.stage = stage
+    String requestId = UUID.randomUUID().toString()
+    job.requestId = requestId
+    Map data = [jobId:job.id, requestId:requestId, stage:stage]
+    if(method == 'POST') { asynchttpPost('versionCheckCallback', params, data) }
+    else { asynchttpGet('versionCheckCallback', params, data) }
   } catch(Exception e) {
-    logWarn("Failed to retrieve package manifest for v${appVersion}: ${e.message}")
-    logDebug("Trying main branch manifest as fallback...")
-
-    // Fallback to main branch if version-specific manifest not found
-    try {
-      manifestUrl = 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json'
-      Map fallbackParams = [
-        uri: manifestUrl,
-        contentType: 'application/json',
-        timeout: 15
-      ]
-      httpGet(fallbackParams) { resp ->
-        if(resp?.status == 200 && resp.data) {
-          manifest = resp.data
-        }
-      }
-    } catch(Exception e2) {
-      logWarn("Failed to retrieve fallback manifest: ${e2.message}")
-    }
+    logWarn("Version check request ${stage} could not start: ${e.message}")
+    versionCheckFinish(job)
   }
+}
 
-  if(!manifest) {
-    logWarn('Failed to retrieve package manifest for version checking')
-    return
-  }
-
-  logDebug("Using manifest version: ${manifest.version}")
-
-  // Check each driver in the manifest
-  manifest.drivers?.each { driver ->
-    String driverName = driver.name
-    String namespace = driver.namespace ?: 'dwinks'
-    String expectedVersion = driver.version ?: appVersion
-
-    logDebug("Checking ${driverName} (${namespace})...")
-    String installedVersion = getInstalledDriverVersion(driverName, namespace)
-
-    if(installedVersion && installedVersion != expectedVersion) {
-      logWarn("Version mismatch: ${driverName} - installed: ${installedVersion}, expected: ${expectedVersion}")
-      state.versionMismatches << [
-        name: driverName,
-        namespace: namespace,
-        installedVersion: installedVersion,
-        expectedVersion: expectedVersion,
-        location: driver.location,
-        type: 'driver'
-      ]
-      state.installedVersions << [
-        name: driverName,
-        installedVersion: installedVersion,
-        expectedVersion: expectedVersion,
-        status: 'Mismatch'
-      ]
-    } else if(installedVersion) {
-      logDebug("${driverName} version OK: ${installedVersion}")
-      state.installedVersions << [
-        name: driverName,
-        installedVersion: installedVersion,
-        expectedVersion: expectedVersion,
-        status: 'OK'
-      ]
-    } else {
-      logDebug("${driverName} not found or could not determine version")
-      state.installedVersions << [
-        name: driverName,
-        installedVersion: 'Not Installed',
-        expectedVersion: expectedVersion,
-        status: 'Not Found'
-      ]
+void versionCheckCallback(AsyncResponse response, Map data) {
+  Map job = state.versionCheckJob instanceof Map ? (Map)state.versionCheckJob : null
+  if(!job || job.id != data?.jobId || job.requestId != data?.requestId || job.stage != data?.stage) { return }
+  String stage = data.stage.toString()
+  Boolean ok = response != null && !response.hasError() && (response.status == 200 || (stage == 'login' && response.status == 302))
+  try {
+    if(stage == 'login') {
+      Object header = getResponseHeaderIgnoreCase(response?.headers, 'Set-Cookie')
+      if(header instanceof Collection) { header = ((Collection)header).find { it != null } }
+      String cookie = null
+      try { cookie = header?.value?.toString() } catch(Exception ignored) { cookie = null }
+      if(!cookie && header != null) { cookie = header.toString() }
+      if(!ok || !cookie) { logWarn('Version check could not authenticate to the hub'); versionCheckFinish(job); return }
+      job.cookie = cookie.split(';')[0]
+      state.hubCookie = job.cookie
+      state.hubCookieTime = now()
+      versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      return
     }
-  }
-
-  // Check library files
-  // Libraries can be checked if library IDs are configured
-  logInfo("Library checking: libraryIdSMAPI=${libraryIdSMAPI}, libraryIdUtilities=${libraryIdUtilities}, manifest.files count=${manifest.files?.size() ?: 0}")
-  logInfo("Settings check: libraryIdSMAPI=${settings.libraryIdSMAPI}, libraryIdUtilities=${settings.libraryIdUtilities}")
-
-  if(settings.libraryIdSMAPI && settings.libraryIdUtilities) {
-    logInfo("Checking library versions using configured IDs (SMAPI: ${settings.libraryIdSMAPI}, Utilities: ${settings.libraryIdUtilities})...")
-
-    if(!manifest.files || manifest.files.size() == 0) {
-      logWarn("No library files found in manifest!")
-    } else {
-      logInfo("Found ${manifest.files.size()} file(s) in manifest to check")
+    if(stage == 'appList') {
+      Object payload = ok ? response.getJson() : null
+      Map target = payload instanceof Collection ? (Map)((Collection)payload).find { it instanceof Map && it.name == 'Sonos Advanced Controller' && it.namespace == 'dwinks' } : null
+      if(!target?.id) { logWarn('Could not find app code entry; using running app version'); versionCheckManifest(job); return }
+      versionCheckRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      return
     }
-
-    manifest.files?.each { file ->
-      String fileName = file.name
-      String expectedVersion = appVersion
-
-      logInfo("Processing file from manifest: ${fileName}")
-
-      // Determine which library ID to use based on filename
-      Integer libraryId = null
-      if(fileName.contains('SMAPILibrary')) {
-        libraryId = settings.libraryIdSMAPI as Integer
-      } else if(fileName.contains('UtilitiesAndLoggingLibrary')) {
-        libraryId = settings.libraryIdUtilities as Integer
+    if(stage == 'appCode') {
+      String source = ok ? response.getJson()?.source?.toString() : null
+      def matcher = source ? (source =~ /version:\s*['"]([^'"]+)['"]/) : null
+      if(matcher && matcher.find()) { job.appVersion = matcher.group(1) }
+      versionCheckManifest(job)
+      return
+    }
+    if(stage == 'manifest' || stage == 'manifestFallback') {
+      Map manifest = ok && response.getJson() instanceof Map ? (Map)response.getJson() : null
+      if(!manifest && stage == 'manifest') {
+        logDebug('Version-specific manifest unavailable; trying main branch')
+        versionCheckRequest(job, 'manifestFallback', [uri:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json', contentType:'application/json', timeout:15])
+        return
       }
-
-      if(libraryId) {
-        logInfo("Checking library ${fileName} (ID: ${libraryId})...")
-
-        // Determine expected library name and namespace
-        String expectedName = ''
-        String expectedNamespace = 'dwinks'
-        if(fileName.contains('SMAPILibrary')) {
-          expectedName = 'SMAPILibrary'
-        } else if(fileName.contains('UtilitiesAndLoggingLibrary')) {
-          expectedName = 'UtilitiesAndLoggingLibrary'
-        }
-
-        Map libraryResult = getInstalledLibraryVersionWithValidation(libraryId, expectedName, expectedNamespace)
-        String installedVersion = libraryResult.version
-        String error = libraryResult.error
-
-        logInfo("Library ${fileName} installed version: ${installedVersion ?: 'Not found'}, expected: ${expectedVersion}")
-
-        if(error) {
-          // Library ID is wrong or other error occurred
-          logWarn("Library check failed: ${error}")
-          state.installedVersions << [
-            name: fileName,
-            installedVersion: 'Error',
-            expectedVersion: expectedVersion,
-            status: error
-          ]
-        } else if(installedVersion && installedVersion != expectedVersion) {
-          logWarn("Version mismatch: ${fileName} - installed: ${installedVersion}, expected: ${expectedVersion}")
-          state.versionMismatches << [
-            name: expectedName,
-            fileName: fileName,
-            namespace: expectedNamespace,
-            installedVersion: installedVersion,
-            expectedVersion: expectedVersion,
-            libraryId: libraryId,
-            type: 'library'
-          ]
-          state.installedVersions << [
-            name: fileName,
-            installedVersion: installedVersion,
-            expectedVersion: expectedVersion,
-            status: 'Mismatch'
-          ]
-        } else if(installedVersion) {
-          logInfo("${fileName} version OK: ${installedVersion}")
-          state.installedVersions << [
-            name: fileName,
-            installedVersion: installedVersion,
-            expectedVersion: expectedVersion,
-            status: 'OK'
-          ]
-        } else {
-          logInfo("${fileName} not found or could not determine version")
-          state.installedVersions << [
-            name: fileName,
-            installedVersion: 'Not Installed',
-            expectedVersion: expectedVersion,
-            status: 'Not Found'
-          ]
-        }
-      } else {
-        // Determine which specific library ID is missing
-        String missingLibrary = ''
-        if(fileName.contains('SMAPILibrary')) {
-          missingLibrary = 'SMAPILibrary ID'
-        } else if(fileName.contains('UtilitiesAndLoggingLibrary')) {
-          missingLibrary = 'UtilitiesAndLoggingLibrary ID'
-        }
-        logDebug("Library file ${fileName} - no library ID configured for checking")
-        state.installedVersions << [
-          name: fileName,
-          installedVersion: 'N/A',
-          expectedVersion: expectedVersion,
-          status: "⚠ Configure ${missingLibrary} in settings"
-        ]
+      if(!manifest) { logWarn('Failed to retrieve package manifest for version checking'); versionCheckFinish(job); return }
+      job.manifest = manifest
+      job.artifacts = []
+      ((Collection)(manifest.drivers ?: [])).each { Object item -> if(item instanceof Map) { Map d = new LinkedHashMap((Map)item); d.type='driver'; d.namespace=d.namespace ?: 'dwinks'; d.expectedVersion=d.version ?: job.appVersion; job.artifacts << d } }
+      Boolean canCheckLibraries = settings.libraryIdSMAPI && settings.libraryIdUtilities
+      ((Collection)(manifest.files ?: [])).each { Object item ->
+        if(!(item instanceof Map)) { return }
+        Map f = (Map)item
+        String fileName = f.name?.toString() ?: ''
+        Integer libraryId = fileName.contains('SMAPILibrary') ? (settings.libraryIdSMAPI as Integer) : (fileName.contains('UtilitiesAndLoggingLibrary') ? (settings.libraryIdUtilities as Integer) : null)
+        String expectedName = fileName.contains('SMAPILibrary') ? 'SMAPILibrary' : (fileName.contains('UtilitiesAndLoggingLibrary') ? 'UtilitiesAndLoggingLibrary' : '')
+        if(canCheckLibraries && libraryId && expectedName) { job.artifacts << [type:'library', name:expectedName, fileName:fileName, namespace:'dwinks', id:libraryId, expectedVersion:job.appVersion] }
+        else { state.installedVersions << [name:fileName, installedVersion:'N/A', expectedVersion:job.appVersion, status:canCheckLibraries ? "⚠ Configure ${expectedName} ID in settings" : '⚠ Configure Library IDs in settings'] }
       }
+      versionCheckDriverList(job)
+      return
     }
+    if(stage == 'driverList') {
+      Object payload = ok ? response.getJson() : null
+      job.drivers = payload instanceof Map && ((Map)payload).drivers instanceof Collection ? ((Map)payload).drivers : []
+      versionCheckNextArtifact(job)
+      return
+    }
+    if(stage == 'driverCode' || stage == 'libraryCode') {
+      Map artifact = (Map)job.artifact
+      String source = null
+      if(ok) {
+        Object payload = response.getJson()
+        source = payload instanceof Map ? ((Map)payload).source?.toString() : null
+      }
+      String installedVersion = null
+      String error = null
+      if(stage == 'driverCode' && source) {
+        def matcher = source =~ /version:\s*['"]([^'"]+)['"]/; if(matcher.find()) { installedVersion = matcher.group(1) }
+      } else if(stage == 'libraryCode' && source) {
+        def nameMatch = source =~ /library\s*\([^)]*name\s*:\s*['"]([^'"]+)['"]/; def namespaceMatch = source =~ /library\s*\([^)]*namespace\s*:\s*['"]([^'"]+)['"]/; def versionMatch = source =~ /version:\s*['"]([^'"]+)['"]/
+        String actualName = nameMatch.find() ? nameMatch.group(1) : null
+        String actualNamespace = namespaceMatch.find() ? namespaceMatch.group(1) : null
+        if(actualName != artifact.name || actualNamespace != artifact.namespace) { error = "Library ID ${artifact.id} contains ${actualName ?: 'unknown'}/${actualNamespace ?: 'unknown'}, expected ${artifact.name}/${artifact.namespace}" }
+        else if(versionMatch.find()) { installedVersion = versionMatch.group(1) }
+      }
+      versionCheckRecordArtifact(artifact, installedVersion, error)
+      versionCheckNextArtifact(job)
+    }
+  } catch(Exception e) { logWarn("Version check stage ${stage} failed: ${e.message}"); if(stage == 'manifest') { versionCheckRequest(job, 'manifestFallback', [uri:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/PackageManifests/SonosAdvancedController/packageManifest.json', contentType:'application/json', timeout:15]) } else { versionCheckNextArtifact(job) } }
+}
+
+void versionCheckManifest(Map job) {
+  logDebug("Current app version from hub: ${job.appVersion}")
+  versionCheckRequest(job, 'manifest', [uri:"https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${job.appVersion}/PackageManifests/SonosAdvancedController/packageManifest.json", contentType:'application/json', timeout:15])
+}
+
+void versionCheckDriverList(Map job) {
+  versionCheckRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15])
+}
+
+void versionCheckNextArtifact(Map job) {
+  List artifacts = (List)(job.artifacts ?: [])
+  if(artifacts.isEmpty()) { versionCheckFinish(job); return }
+  Map artifact = (Map)artifacts.remove(0)
+  job.artifact = artifact
+  if(artifact.type == 'driver') {
+    Map driver = (Map)(((Collection)(job.drivers ?: [])).find { Object entry -> entry instanceof Map && ((Map)entry).type == 'usr' && ((Map)entry).name == artifact.name && ((Map)entry).namespace == artifact.namespace } ?: [:])
+    if(!driver.id) { versionCheckRecordArtifact(artifact, null, null); versionCheckNextArtifact(job); return }
+    versionCheckRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:driver.id], headers:hubCookieHeaders(job.cookie as String), timeout:15])
   } else {
-    // No library IDs configured, skip library version checking
-    logInfo("Library IDs not configured - skipping library version checks")
-    manifest.files?.each { file ->
-      String fileName = file.name
-      String expectedVersion = appVersion
-
-      logDebug("Library file ${fileName} - version checking not available (configure library IDs in settings)")
-      state.installedVersions << [
-        name: fileName,
-        installedVersion: 'N/A',
-        expectedVersion: expectedVersion,
-        status: '⚠ Configure Library IDs in settings'
-      ]
-    }
+    versionCheckRequest(job, 'libraryCode', [uri:'http://127.0.0.1:8080', path:'/library/ajax/code', query:[id:artifact.id.toString()], headers:hubCookieHeaders(job.cookie as String), timeout:15])
   }
+}
 
-  if(state.versionMismatches.size() > 0) {
-    logInfo("Found ${state.versionMismatches.size()} version mismatch(es)")
+void versionCheckRecordArtifact(Map artifact, String installedVersion, String error) {
+  String expected = artifact.expectedVersion?.toString() ?: getCurrentVersion()
+  if(error) {
+    state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:'Error', expectedVersion:expected, status:error]
+  } else if(installedVersion && installedVersion != expected) {
+    state.versionMismatches << [name:artifact.name, fileName:artifact.fileName, namespace:artifact.namespace, installedVersion:installedVersion, expectedVersion:expected, location:artifact.location, libraryId:artifact.id, type:artifact.type]
+    state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:installedVersion, expectedVersion:expected, status:'Mismatch']
+  } else if(installedVersion) {
+    state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:installedVersion, expectedVersion:expected, status:'OK']
   } else {
-    logInfo('All installed files are up to date')
+    state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:'Not Installed', expectedVersion:expected, status:'Not Found']
   }
+}
+
+void versionCheckFinish(Map job) {
+  if(state.versionCheckJob instanceof Map && state.versionCheckJob.id == job.id) { state.remove('versionCheckJob') }
+  if(state.versionMismatches?.size() > 0) { logInfo("Found ${state.versionMismatches.size()} version mismatch(es)") }
+  else { logInfo('All installed files are up to date') }
 }
 
 String getInstalledDriverVersion(String driverName, String namespace) {
