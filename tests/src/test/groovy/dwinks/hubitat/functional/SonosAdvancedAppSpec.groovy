@@ -1215,6 +1215,28 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
   }
 
+  def "ungrouped group refresh reflects only the coordinator when individual control is disabled"() {
+    given:
+    coordinator.currentValues.isGrouped = 'off'
+    coordinator.currentValues.isGroupCoordinator = 'on'
+    coordinator.currentValues.volume = 10
+    coordinator.currentValues.mute = 'muted'
+    follower.currentValues.volume = 30
+    follower.currentValues.mute = 'unmuted'
+
+    when:
+    appScript.refreshGroupDeviceState(group, coordinator, [coordinator, follower], [
+      useProportionalVolume: true, controlUngroupedIndividually: false
+    ])
+    Map attributes = (Map)new JsonSlurper().parseText(group.refreshedPlaybackUpdates.last())
+
+    then:
+    attributes.volume == 10
+    attributes.groupVolume == 10
+    attributes.mute == 'muted'
+    attributes.groupMute == 'muted'
+  }
+
   def "new UI speaker table merges discovery with created players and escapes display values"() {
     given:
     appScript.discoveredSonoses.clear()

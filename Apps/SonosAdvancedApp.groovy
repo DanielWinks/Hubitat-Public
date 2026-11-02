@@ -6163,10 +6163,13 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
     if(volume != null) { attributes.volume = volume; attributes.groupVolume = volume }
     if(mute != null) { attributes.mute = mute; attributes.groupMute = mute }
   } else {
+    Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
+    List<ChildDeviceWrapper> feedbackPlayers = !isSonosGrouped(coordinator) && !controlIndividually ?
+        [coordinator] : players
     Integer totalVolume = 0
     Integer volumeCount = 0
-    Boolean allMuted = !players.isEmpty()
-    players.each { ChildDeviceWrapper player ->
+    Boolean allMuted = !feedbackPlayers.isEmpty()
+    feedbackPlayers.each { ChildDeviceWrapper player ->
       Integer volume = player.currentValue('volume', true) as Integer
       if(volume != null) { totalVolume += volume; volumeCount++ }
       if(player.currentValue('mute', true) != 'muted') { allMuted = false }
