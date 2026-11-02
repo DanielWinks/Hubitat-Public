@@ -198,6 +198,7 @@ class SonosAdvancedAppSpec extends Specification {
     codeRequest.cb == 'updateCheckAppCodeCallback'
     appScript.state.updateAvailable == true
     appScript.state.latestVersion == '99.0.0'
+    appScript.state.installedAppVersion == '98.0.0'
     !appScript.state.containsKey('updateCheckRequestId')
   }
 
@@ -1264,6 +1265,24 @@ class SonosAdvancedAppSpec extends Specification {
     oldUiPage.title == 'Sonos Advanced Controller'
     appScript.pageHrefs.size() == 2
     appScript.pageHrefs*.first()*.page == ['localPlayerPage', 'groupPage']
+  }
+
+  def "main page renders cached installed version without changing the async update result"() {
+    given:
+    appScript.atomicState = [discoveryRunning: false, updateAvailable: true, latestVersion: '99.0.0',
+      installedAppVersion: '98.0.0', latestReleaseDate: '2026-11-01', latestReleaseUrl: 'https://example.com/release']
+    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false, useOldUi: false])
+    appScript.binding.setVariable('autoCheckUpdates', false)
+    appScript.binding.setVariable('autoInstallUpdates', false)
+
+    when:
+    Map page = appScript.mainPage()
+
+    then:
+    page.title == 'Sonos Advanced Controller'
+    appScript.state.updateAvailable == true
+    appScript.state.installedAppVersion == '98.0.0'
+    appScript.asyncCalls.empty
   }
 
   def "new UI speaker table restores discovered secondaries after the volatile map is cleared"() {

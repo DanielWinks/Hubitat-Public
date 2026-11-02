@@ -324,32 +324,23 @@ Map mainPage() {
   if(settings.useOldUi == true) {
     stopDiscovery()
   }
+  logTrace("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
   checkForUpdates()
+  logTrace('mainPage returned from asynchronous update-check dispatch')
   dynamicPage(title: 'Sonos Advanced Controller') {
     section {
       paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
 
       if(state.updateAvailable == true) {
-        // Validate that the "available" version is actually newer than what's installed
-        // This handles the case where the user updated via HPM or manual paste, bypassing installUpdate()
-        String currentVer = getActualInstalledAppVersion()
-        if(state.latestVersion && compareVersions(currentVer, state.latestVersion as String) < 0) {
-          section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
-            paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
-                      "Current version: ${currentVer}<br/>" +
-                      "Released: ${state.latestReleaseDate}<br/><br/>" +
-                      "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
-            input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
-            input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
-          }
-        } else {
-          // Stale update notification — installed version is already current or newer
-          state.updateAvailable = false
-          state.latestVersion = null
-          state.latestManifest = null
-          state.latestReleaseDate = null
-          state.latestReleaseUrl = null
-          app.updateLabel('Sonos Advanced Controller')
+        String currentVer = state.installedAppVersion?.toString() ?: getCurrentVersion()
+        logTrace("Rendering cached update notice: installed=${currentVer}, latest=${state.latestVersion}, cachePresent=${state.installedAppVersion != null}")
+        section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
+          paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
+                    "Current version: ${currentVer}<br/>" +
+                    "Released: ${state.latestReleaseDate}<br/><br/>" +
+                    "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
+          input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
+          input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
         }
       }
     }
@@ -7773,11 +7764,13 @@ void updateCheckAppCodeCallback(AsyncResponse response, Map data) {
 void completeUpdateCheck(Map data, String currentVersion) {
   if(!data?.requestId || state.updateCheckRequestId != data.requestId) { return }
   finishUpdateCheckRequest()
+  state.installedAppVersion = currentVersion
   Map manifest = data.manifest instanceof Map ? (Map)data.manifest : [:]
   if(!manifest.version) { return }
   String latestVersion = manifest.version.toString()
   Boolean manual = data.manual == true
   Integer comparison = compareVersions(currentVersion, latestVersion)
+  logTrace("Async update check cached installed=${currentVersion}, latest=${latestVersion}, comparison=${comparison}")
   state.lastUpdateCheck = now()
   state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
   if(comparison < 0) {
