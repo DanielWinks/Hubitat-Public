@@ -7029,23 +7029,15 @@ void fixDriverMismatches() {
 }
 
 void cleanupDuplicates() {
+  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
   logInfo("Checking for duplicate apps and drivers...")
-
-  // Clear cached cookie to ensure fresh auth
   state.remove('hubCookie')
-
-  Map results = findAndRemoveDuplicates()
-
-  if(results.appsRemoved > 0 || results.driversRemoved > 0) {
-    state.duplicateCleanupResult = "Removed ${results.appsRemoved} duplicate app(s) and ${results.driversRemoved} duplicate driver(s)"
-    logInfo(state.duplicateCleanupResult)
-  } else if(results.errors.size() > 0) {
-    state.duplicateCleanupResult = "Errors during cleanup: ${results.errors.join(', ')}"
-    logWarn(state.duplicateCleanupResult)
-  } else {
-    state.duplicateCleanupResult = "No duplicates found"
-    logInfo("No duplicate apps or drivers found")
-  }
+  Map job = [id:UUID.randomUUID().toString(), op:'cleanupDuplicates', errors:[], appsRemoved:0, driversRemoved:0,
+    appDeletes:[], driverDeletes:[]]
+  state.maintenanceJob = job
+  state.duplicateCleanupResult = 'Checking for duplicate apps and drivers...'
+  job.pendingRequest = [stage:'duplicateApps']
+  maintenanceAuthenticate(job)
 }
 
 /**
@@ -7816,6 +7808,7 @@ void maintenanceAuthenticate(Map job) {
     Map pending = (Map)job.pendingRequest
     if(pending.stage == 'nextLibrary') { maintenanceNextLibrary(job) }
     else if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
+    else if(pending.stage == 'duplicateDeletes') { maintenanceNextDuplicateDelete(job) }
     else { maintenanceRequest(job, pending.stage as String, (Map)pending.params, pending.method as String) }
     return
   }
@@ -7864,6 +7857,7 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       Map pending = (Map)job.pendingRequest
       if(pending.stage == 'nextLibrary') { maintenanceNextLibrary(job) }
       else if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
+      else if(pending.stage == 'duplicateDeletes') { maintenanceNextDuplicateDelete(job) }
       else { maintenanceRequest(job, pending.stage as String, (Map)pending.params, pending.method as String) }
       return
     }
@@ -7873,6 +7867,34 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       if(!target?.id) { maintenanceAdvanceFailure(job, stage); return }
       job.appId = target.id
       maintenanceRequest(job, 'appCode', [uri:'http://127.0.0.1:8080', path:'/app/ajax/code', query:[id:target.id], headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
+      return
+    }
+    if(stage == 'duplicateApps') {
+      if(!ok || !(response.getJson() instanceof Collection)) { maintenanceAdvanceFailure(job, stage); return }
+      List entries = new ArrayList((Collection)response.getJson())
+      job.appDeletes = duplicateCodeDeletes(entries, 'app')
+      maintenanceRequest(job, 'duplicateDrivers', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15])
+      return
+    }
+    if(stage == 'duplicateDrivers') {
+      Object payload = ok ? response.getJson() : null
+      if(!(payload instanceof Map) || !(((Map)payload).drivers instanceof Collection)) { maintenanceAdvanceFailure(job, stage); return }
+      List entries = new ArrayList((Collection)((Map)payload).drivers)
+      job.driverDeletes = duplicateCodeDeletes(entries, 'driver')
+      job.pendingDeletes = new ArrayList((Collection)job.appDeletes)
+      job.pendingDeletes.addAll((Collection)job.driverDeletes)
+      maintenanceNextDuplicateDelete(job)
+      return
+    }
+    if(stage == 'duplicateDeleteApp' || stage == 'duplicateDeleteDriver') {
+      Map item = (Map)job.activeDelete
+      Boolean deleted = ok && response.getJson() instanceof Map && response.getJson().status == true
+      if(deleted) {
+        if(stage == 'duplicateDeleteApp') { job.appsRemoved = (job.appsRemoved as Integer) + 1 }
+        else { job.driversRemoved = (job.driversRemoved as Integer) + 1 }
+      } else { job.errors << "Failed to remove ${item.kind} ${item.name} (id: ${item.id})" }
+      job.remove('activeDelete')
+      maintenanceNextDuplicateDelete(job)
       return
     }
     if(stage == 'appCode') {
@@ -7939,7 +7961,13 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
 
 void maintenanceAdvanceFailure(Map job, String stage) {
   job.errors << "Maintenance stage failed: ${stage}"
-  if(stage.startsWith('driver') || stage == 'downloadDriver') { maintenanceNextDriver(job) }
+  if(job.op == 'cleanupDuplicates') {
+    if(stage == 'duplicateApps') { maintenanceFinish(job) }
+    else if(stage == 'duplicateDrivers') { job.pendingDeletes = new ArrayList((Collection)(job.appDeletes ?: [])); maintenanceNextDuplicateDelete(job) }
+    else if(stage.startsWith('duplicateDelete')) { job.remove('activeDelete'); maintenanceNextDuplicateDelete(job) }
+    else { maintenanceFinish(job) }
+  }
+  else if(stage.startsWith('driver') || stage == 'downloadDriver') { maintenanceNextDriver(job) }
   else if(stage.startsWith('library') || stage == 'downloadLibrary') { maintenanceNextLibrary(job) }
   else if(job.manifest?.drivers) { maintenanceStartDrivers(job) }
   else { maintenanceFinish(job) }
@@ -7972,8 +8000,49 @@ void maintenanceNextLibrary(Map job) {
   else { maintenanceFinish(job) }
 }
 
+List duplicateCodeDeletes(List entries, String kind) {
+  Map grouped = [:].withDefault { [] }
+  entries.each { Object value ->
+    if(value instanceof Map && ((Map)value).name && ((Map)value).namespace && ((Map)value).id != null) {
+      Map entry = (Map)value
+      grouped["${entry.namespace}:${entry.name}"] << entry
+    }
+  }
+  List deletes = []
+  grouped.each { String key, List group ->
+    if(group.size() > 1) {
+      logWarn("Found ${group.size()} duplicate ${kind}s for ${key}")
+      group.sort { Object a, Object b -> (a.id as Integer) <=> (b.id as Integer) }
+      group.drop(1).each { Map duplicate -> deletes << [kind:kind, id:duplicate.id.toString(), name:duplicate.name] }
+    }
+  }
+  return deletes
+}
+
+void maintenanceNextDuplicateDelete(Map job) {
+  List pending = (List)(job.pendingDeletes ?: [])
+  if(pending.isEmpty()) { maintenanceFinish(job); return }
+  Map item = (Map)pending.remove(0)
+  job.activeDelete = item
+  logInfo("Removing duplicate ${item.kind}: ${item.name} (id: ${item.id})")
+  String stage = item.kind == 'app' ? 'duplicateDeleteApp' : 'duplicateDeleteDriver'
+  String path = item.kind == 'app' ? "/app/edit/deleteJsonSafe/${item.id}" : "/driver/editor/deleteJson/${item.id}"
+  maintenanceRequest(job, stage, [uri:'http://127.0.0.1:8080', path:path, headers:hubCookieHeaders(job.cookie as String), timeout:30, ignoreSSLIssues:true])
+}
+
 void maintenanceFinish(Map job) {
-  if(job.op == 'publishLibraries') {
+  if(job.op == 'cleanupDuplicates') {
+    if(job.appsRemoved > 0 || job.driversRemoved > 0) {
+      state.duplicateCleanupResult = "Removed ${job.appsRemoved} duplicate app(s) and ${job.driversRemoved} duplicate driver(s)"
+      logInfo(state.duplicateCleanupResult)
+    } else if(job.errors) {
+      state.duplicateCleanupResult = "Errors during cleanup: ${job.errors.join(', ')}"
+      logWarn(state.duplicateCleanupResult)
+    } else {
+      state.duplicateCleanupResult = 'No duplicates found'
+      logInfo('No duplicate apps or drivers found')
+    }
+  } else if(job.op == 'publishLibraries') {
     Integer successes = job.successCount ?: 0
     String timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
     state.lastLibraryPublish = successes == job.totalLibraries ? "✓ ${timestamp}: Successfully published ${successes} libraries" : (successes ? "⚠ ${timestamp}: Published ${successes}, failed ${job.errors.size()} (${job.errors.join(', ')})" : "✗ ${timestamp}: Failed to publish libraries (${job.errors.join(', ')})")
