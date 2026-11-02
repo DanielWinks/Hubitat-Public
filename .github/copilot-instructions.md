@@ -51,6 +51,18 @@ Typical runtime flow:
 - Use the repo's logging utilities and preference flags rather than adding ad-hoc printlns or `System.out`.
 - When adding web endpoints, follow the `getLocalUri()/getCloudUri()` pattern and `tryCreateAccessToken()` usage as in `SunriseSimulation.groovy`.
 
+## Using connected Hubitat MCP servers
+
+When both Hubitat MCP servers are available, use the general `hubitat` MCP for
+hub inventory, devices, state, events, rooms, modes, apps, scenes, and actions.
+Use the dedicated `hubitat_logs` MCP for historical log searches, summaries,
+and live log streaming. Prefer its `hubitat_get_logs`,
+`hubitat_get_log_summary`, and `hubitat_get_live_logs` tools over opening the
+logs page or fetching `/logs/past/json` through a browser. Use both servers when
+a task needs log evidence plus hub or device context. If the appropriate MCP is
+unavailable, choose a suitable fallback and never place MCP access tokens in
+source, committed configuration, or responses.
+
 ## Examples to copy/paste
 
 - Local/cloud endpoint pattern (copy from `Apps/SunriseSimulation.groovy`):

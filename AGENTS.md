@@ -259,6 +259,23 @@ Release process: version increment via workflow input (patch/minor) -> update ve
 - Follow the `tryCreateAccessToken()` pattern for OAuth
 - API keys should be stored in `settings` (user input), never in source
 
+## Using Connected Hubitat MCP Servers
+
+When both Hubitat MCP servers are available in the agent session, choose the
+server that matches the request:
+
+- Use the general `hubitat` MCP for hub inventory, devices, current state,
+  events, rooms, modes, apps, scenes, and device or app actions.
+- Use the dedicated `hubitat_logs` MCP for historical logs, log summaries, and
+  live logs. Prefer `hubitat_get_logs`, `hubitat_get_log_summary`, and
+  `hubitat_get_live_logs` over opening the Hubitat logs page or fetching
+  `/logs/past/json` in a browser. The logs MCP provides filtering, compact
+  results, pagination, and a live stream.
+- Use both servers when a task needs logs alongside device or app context.
+- If the relevant MCP server is unavailable, say so and use another route only
+  when it is appropriate for the task. Never copy MCP access tokens into source,
+  repository files, or responses.
+
 ## Reference Files
 
 - `Apps/SunriseSimulation.groovy` -- Standalone scheduling, state, settings, button events, and level-based logging
