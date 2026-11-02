@@ -913,6 +913,74 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.websocketOutboundQueue == null
   }
 
+  def "loading a Favorite expects playback and metadata subscription events"() {
+    given:
+    String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
+
+    when:
+    driver.sendWsMessage(command)
+
+    then:
+    List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
+    pending.size() == 1
+    pending[0].expected == [
+      [namespace: 'playbackMetadata', type: 'metadataStatus'],
+      [namespace: 'playback', type: 'playbackStatus']
+    ]
+
+    when:
+    driver.processWebsocketMessage('[{"namespace":"playbackMetadata","name":"playbackMetadataStatus","type":"metadataStatus"},{"currentItem":{"id":"24"}}]')
+
+    then:
+    (driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>)[0].received == ['playbackMetadata:metadataStatus']
+
+    when:
+    driver.observeExpectedSubscriptionEvent([namespace: 'playback', type: 'playbackStatus'])
+
+    then:
+    driver.runtimeState.websocketExpectedSubscriptionEvents == null
+  }
+
+  def "missing subscription events trigger one namespace resubscription"() {
+    given:
+    String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
+    driver.sendWsMessage(command)
+    List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
+    pending[0].deadlineAt = driver.now() - 1L
+
+    when:
+    driver.watchExpectedSubscriptionEvents()
+
+    then:
+    websocketMessages.any { String message -> message.contains('"namespace":"playbackMetadata"') && message.contains('"command":"subscribe"') }
+    websocketMessages.any { String message -> message.contains('"namespace":"playback"') && message.contains('"command":"subscribe"') }
+    (driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>)[0].attempts == 1
+  }
+
+  def "SOAP state changes expect a matching UPnP event and renew its subscription on timeout"() {
+    given:
+    Map params = [uri: 'http://192.168.1.50:1400/MediaRenderer/RenderingControl/Control',
+        headers: [SOAPAction: 'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume']]
+
+    when:
+    driver.postSonosSoapAsync('localControlCallback', params)
+    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
+    pending[0].deadlineAt = driver.now() - 1L
+    driver.watchExpectedUpnpSubscriptionEvents()
+
+    then:
+    driver.asyncCalls.size() == 1
+    pending[0].sidKey == 'sid2'
+    pending[0].attempts == 1
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/RenderingControl/Event HTTP/1.1')
+
+    when:
+    driver.observeExpectedUpnpSubscriptionEvent('sid2')
+
+    then:
+    driver.runtimeState.upnpExpectedSubscriptionEvents == null
+  }
+
   def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {
     given:
     driver.getFavoritesMap()['42serviceaccount'] = [id: '42', name: 'Favorite 42', imageUrl: 'https://example.test/cover']

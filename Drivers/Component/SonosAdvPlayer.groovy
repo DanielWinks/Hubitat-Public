@@ -381,6 +381,15 @@ Boolean hasLineInCapability() {
 @Field static final Integer WS_HEALTH_CHECK_SECONDS = 300
 @Field static final String WS_DISCONNECTED_SINCE_KEY = 'wsDisconnectedSince'
 @Field static final String WS_RETRY_SCHEDULED_KEY = 'wsRetryScheduled'
+@Field static final String TRANSPORT_QUEUE_KEY = 'transportCommandQueue'
+@Field static final String TRANSPORT_ACTIVE_KEY = 'activeTransportCommand'
+@Field static final String TRANSPORT_STATUS_SNAPSHOT_KEY = 'transportStatusSnapshot'
+@Field static final Integer TRANSPORT_WATCHDOG_SECONDS = 4
+@Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
+@Field static final String WS_EXPECTED_EVENTS_KEY = 'websocketExpectedSubscriptionEvents'
+@Field static final Integer WS_EXPECTED_EVENT_TIMEOUT_SECONDS = 20
+@Field static final String UPNP_EXPECTED_EVENTS_KEY = 'upnpExpectedSubscriptionEvents'
+@Field static final Integer UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS = 10
 @Field static final List<Long> WS_BACKOFF_STAGE_SECONDS = [600L, 600L, 600L, 7200L, 14400L, 21600L]
 @Field static final List<Integer> WS_BACKOFF_INTERVALS_SECONDS = [30, 60, 120, 300, 900, 1800, 3600]
 @Field static final Integer WS_STALE_TIMEOUT_SECONDS = 900
@@ -505,6 +514,13 @@ Boolean hasLineInCapability() {
 // Initialize and Configure
 // =============================================================================
 void uninstalled() {
+  unschedule('drainTransportCommandQueue')
+  unschedule('watchTransportCommand')
+  unschedule('retryUnconfirmedTransportCommand')
+  unschedule('watchExpectedSubscriptionEvents')
+  unschedule('watchExpectedUpnpSubscriptionEvents')
+  runtimeState.remove(WS_EXPECTED_EVENTS_KEY)
+  runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY)
   clearStaticDriverStateForCurrentDevice()
 }
 void initialize() {
@@ -1525,7 +1541,7 @@ void setNightMode(String mode) {
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [EQType: 'NightMode', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 void setSpeechEnhancement(String mode) {
   if(!hasHTPlaybackCapability()) {
@@ -1535,7 +1551,7 @@ void setSpeechEnhancement(String mode) {
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void selectLineIn(String sourceIdentifier = null) {
@@ -1555,7 +1571,7 @@ void selectLineInRincon(String rinconId) {
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [CurrentURI: lineInURI]
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
   play()
 }
 
@@ -1572,7 +1588,7 @@ void selectTV() {
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [CurrentURI: tvURI]
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
   play()
 }
 
@@ -1850,10 +1866,6 @@ void stop() {
   clearFavoriteRetryState()
   clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
-  if(getTransportStatus() == 'stopped') {
-    logDebug('Ignoring stop command because playback is already stopped')
-    return
-  }
   playerStop()
 }
 @CompileStatic
@@ -2990,17 +3002,20 @@ void parse(String raw) {
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
     if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
       try {
+        observeExpectedUpnpSubscriptionEvent('sid1')
         processAVTransportMessages(xmlBody, getLocalUpnpUrl())
       } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
     }
     else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
       try {
+        observeExpectedUpnpSubscriptionEvent('sid2')
         setLastInboundMrRcEvent()
         processRenderingControlMessages(xmlBody)
       } catch (Exception e) { logWarn("Ran into an issue parsing mrc: ${e}") }
     }
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
       try {
+        observeExpectedUpnpSubscriptionEvent('sid3')
         if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
         if(!isPlausibleXmlPayload(xmlBody)) {
           logDebug('Ignoring blank or non-XML ZGT event payload')
@@ -3015,6 +3030,7 @@ void parse(String raw) {
     }
     else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
       try {
+        observeExpectedUpnpSubscriptionEvent('sid4')
         setLastInboundMrGrcEvent()
         processGroupRenderingControlMessages(xmlBody)
       } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
@@ -5269,8 +5285,21 @@ void setCurrentTrackNumber(Integer currentTrackNumber) {
   queueLocalDeviceEvent('currentTrackNumber', value)
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackNumber: value])
+  observeTransportTrackNumber(value)
 }
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
+
+void observeTransportTrackNumber(Integer currentTrackNumber) {
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active == null || active.queuedOnSocket == true ||
+      !(active.command in ['skipToNextTrack', 'skipToPreviousTrack'])) { return }
+  Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
+  Integer previous = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
+  if(previous != null && currentTrackNumber != null && previous != currentTrackNumber) {
+    finishTransportCommand(active, true, "confirmed by track number ${previous} -> ${currentTrackNumber}")
+  }
+}
 
 @CompileStatic
 void setTrackDescription(String trackDescription) {
@@ -5827,6 +5856,9 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
   List<Map> queue = getWebsocketOutboundQueue()
   Map entry = [message: message, attempts: attempts ?: 0]
   if(metadata instanceof Map && !metadata.isEmpty()) { entry.putAll(metadata) }
+  if(!entry.expectedSubscriptionEvents) {
+    entry.expectedSubscriptionEvents = expectedSubscriptionEventsForWsCommand(message)
+  }
   queue.add(entry)
   runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
 }
@@ -5851,11 +5883,17 @@ void flushWebsocketOutboundQueue() {
       return
     }
     try {
+      armExpectedSubscriptionEvents(entry)
       interfaces.webSocket.sendMessage(message)
       if(entry?.kind == 'audioClip') {
         audioClipCommandSent(entry.correlationId as String)
+      } else if(entry?.kind == 'transportCommand') {
+        transportCommandSocketSent(entry.transportCommandId as String)
+      } else if(entry?.kind == 'transportStatusQuery') {
+        transportStatusQuerySocketSent(entry.transportCommandId as String)
       }
     } catch(Exception e) {
+      cancelExpectedSubscriptionEvents(entry)
       Integer nextAttempt = attempts + 1
       if(nextAttempt >= WS_OUTBOUND_MAX_ATTEMPTS) {
         if(entry?.kind in ['audioClip', 'audioClipSubscribe']) {
@@ -5899,16 +5937,185 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
     if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
     return false
   }
+  Map outbound = new LinkedHashMap(metadata ?: [:])
+  if(!outbound.expectedSubscriptionEvents) {
+    outbound.expectedSubscriptionEvents = expectedSubscriptionEventsForWsCommand(message)
+  }
   try {
+    armExpectedSubscriptionEvents(outbound)
     interfaces.webSocket.sendMessage(message)
     if(metadata?.kind == 'audioClip') { audioClipCommandSent(metadata.correlationId as String) }
+    if(metadata?.kind == 'transportCommand') { transportCommandSocketSent(metadata.transportCommandId as String) }
+    if(metadata?.kind == 'transportStatusQuery') { transportStatusQuerySocketSent(metadata.transportCommandId as String) }
     return true
   } catch(Exception e) {
+    cancelExpectedSubscriptionEvents(outbound)
     queueWebsocketMessage(message, 1, metadata)
     setWebSocketStatus('closed')
     logWarn("WebSocket send failed; queued message for retry: ${e.message}")
     scheduleWebSocketReconnect()
     return false
+  }
+}
+
+List<Map> expectedSubscriptionEventsForWsCommand(String message) {
+  if(!message) { return [] }
+  try {
+    List payload = (List)new JsonSlurper().parseText(message)
+    Map command = payload && payload[0] instanceof Map ? (Map)payload[0] : [:]
+    String namespace = command.namespace?.toString()
+    String name = command.command?.toString()
+    if(namespace in ['favorites', 'playlists'] && name in ['loadFavorite', 'loadPlaylist']) {
+      return [[namespace: 'playbackMetadata', type: 'metadataStatus'],
+          [namespace: 'playback', type: 'playbackStatus']]
+    }
+    if(namespace == 'playback' && name in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack', 'seek']) {
+      return [[namespace: 'playback', type: 'playbackStatus']]
+    }
+    if(namespace == 'groups' && name in ['createGroup', 'modifyGroupMembers']) {
+      return [[namespace: 'groups', type: 'groups']]
+    }
+  } catch(Exception e) {
+    logTrace("Could not inspect WebSocket command for expected subscription events: ${e.message}")
+  }
+  return []
+}
+
+String subscriptionEventKey(Map eventType) {
+  return "${eventType?.namespace ?: ''}:${eventType?.type ?: ''}".toString()
+}
+
+void armExpectedSubscriptionEvents(Map outbound) {
+  List<Map> expected = outbound?.expectedSubscriptionEvents instanceof List
+      ? (List<Map>)outbound.expectedSubscriptionEvents : []
+  if(expected.isEmpty()) { return }
+  String guid = UUID.randomUUID().toString()
+  Map expectation = [guid: guid, command: outbound.message?.toString(), expected: expected,
+      received: [], attempts: 0, deadlineAt: now() + WS_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L]
+  synchronized(runtimeState) {
+    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
+    pending.add(expectation)
+    runtimeState[WS_EXPECTED_EVENTS_KEY] = pending
+  }
+  outbound.expectedEventsGuid = guid
+  logTrace("Armed subscription event watchdog guid=${guid} expected=${expected}")
+  scheduleExpectedSubscriptionEventWatchdog()
+}
+
+void cancelExpectedSubscriptionEvents(Map outbound) {
+  String guid = outbound?.expectedEventsGuid?.toString()
+  if(!guid) { return }
+  synchronized(runtimeState) {
+    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
+    pending = pending.findAll { Map item -> item.guid?.toString() != guid }
+    if(pending.isEmpty()) { runtimeState.remove(WS_EXPECTED_EVENTS_KEY) }
+    else { runtimeState[WS_EXPECTED_EVENTS_KEY] = pending }
+  }
+  scheduleExpectedSubscriptionEventWatchdog()
+}
+
+void observeExpectedSubscriptionEvent(Map eventType) {
+  if(!(eventType instanceof Map) || eventType.response != null) { return }
+  String observed = subscriptionEventKey(eventType)
+  synchronized(runtimeState) {
+    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
+    if(pending.isEmpty()) { return }
+    List<String> completedGuids = []
+    pending.each { Map expectation ->
+      List<Map> expected = expectation.expected instanceof List ? (List<Map>)expectation.expected : []
+      List<String> received = expectation.received instanceof List ? (List<String>)expectation.received : []
+      if(expected.any { Map item -> subscriptionEventKey(item) == observed }) {
+        if(!received.contains(observed)) { received.add(observed) }
+        expectation.received = received
+        logTrace("Subscription event watchdog guid=${expectation.guid} observed=${observed} received=${received}")
+        List<Map> missing = expected.findAll { Map item -> !received.contains(subscriptionEventKey(item)) }
+        if(missing.isEmpty()) {
+          completedGuids.add(expectation.guid?.toString())
+          logDebug("Expected subscription events arrived for WebSocket command guid=${expectation.guid}")
+        }
+      }
+    }
+    if(!completedGuids.isEmpty()) {
+      pending = pending.findAll { Map item -> !completedGuids.contains(item.guid?.toString()) }
+      if(pending.isEmpty()) { runtimeState.remove(WS_EXPECTED_EVENTS_KEY) }
+      else { runtimeState[WS_EXPECTED_EVENTS_KEY] = pending }
+    } else {
+      // Reassign the top-level state entry so Hubitat persists nested receipt
+      // updates for the scheduled watchdog invocation.
+      runtimeState[WS_EXPECTED_EVENTS_KEY] = pending
+    }
+  }
+  scheduleExpectedSubscriptionEventWatchdog()
+}
+
+void scheduleExpectedSubscriptionEventWatchdog() {
+  List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
+      ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
+  if(pending.isEmpty()) {
+    unschedule('watchExpectedSubscriptionEvents')
+    return
+  }
+  Long earliest = pending.collect { Map item -> item.deadlineAt as Long }.min() as Long
+  Integer delay = Math.max(1, (int)Math.ceil((earliest - now()) / 1000.0d))
+  runIn(delay, 'watchExpectedSubscriptionEvents', [overwrite: true])
+}
+
+void watchExpectedSubscriptionEvents() {
+  Long currentTime = now()
+  List<Map> toResubscribe = []
+  synchronized(runtimeState) {
+    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
+    // Leave one second of slack for a subscription notification arriving on the
+    // same scheduler tick as its timeout callback.
+    List<Map> due = pending.findAll { Map item -> (item.deadlineAt as Long) <= currentTime - 1000L }
+    due.each { Map expectation ->
+      List<Map> expected = expectation.expected instanceof List ? (List<Map>)expectation.expected : []
+      List<String> received = expectation.received instanceof List ? (List<String>)expectation.received : []
+      List<Map> missing = expected.findAll { Map item -> !received.contains(subscriptionEventKey(item)) }
+      if(missing.isEmpty()) {
+        pending = pending.findAll { Map item -> item.guid?.toString() != expectation.guid?.toString() }
+        logDebug("Expected subscription events arrived before watchdog recovery for guid=${expectation.guid}")
+      } else if(((expectation.attempts ?: 0) as Integer) < 1) {
+        expectation.missingEvents = missing
+        expectation.attempts = 1
+        expectation.deadlineAt = currentTime + WS_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L
+        toResubscribe.add(expectation)
+      } else {
+        logWarn("Expected subscription events still missing after resubscription for guid=${expectation.guid}; received=${expectation.received}: ${missing}")
+        pending = pending.findAll { Map item -> item.guid?.toString() != expectation.guid?.toString() }
+      }
+    }
+    if(pending.isEmpty()) { runtimeState.remove(WS_EXPECTED_EVENTS_KEY) }
+    else { runtimeState[WS_EXPECTED_EVENTS_KEY] = pending }
+  }
+  toResubscribe.each { Map expectation ->
+    List<Map> missing = expectation.missingEvents instanceof List ? (List<Map>)expectation.missingEvents : []
+    Set<String> namespaces = missing.collect { Map item -> item.namespace.toString() } as Set<String>
+    logWarn("No expected subscription event arrived for WebSocket command guid=${expectation.guid}; resubscribing namespaces=${namespaces}, missing=${missing}")
+    namespaces.each { String namespace -> resubscribeWebsocketNamespace(namespace) }
+  }
+  scheduleExpectedSubscriptionEventWatchdog()
+}
+
+void resubscribeWebsocketNamespace(String namespace) {
+  String groupId = getGroupId()
+  if(namespace in ['playback', 'playbackMetadata', 'groupVolume'] && !groupId) {
+    logWarn("Cannot resubscribe to ${namespace}: no current group ID")
+    return
+  }
+  switch(namespace) {
+    case 'playback': subscribeToPlayback(groupId); break
+    case 'playbackMetadata': subscribeToPlaybackMetadata(groupId); break
+    case 'groups': subscribeToGroups(); break
+    case 'playerVolume': subscribeToPlayerVolume(); break
+    case 'groupVolume': subscribeToGroupVolume(groupId); break
+    case 'favorites': subscribeToFavorites(); break
+    case 'playlists': subscribeToPlaylists(); break
+    default: logWarn("No resubscribe handler for WebSocket namespace ${namespace}")
   }
 }
 
@@ -6093,7 +6300,13 @@ void getPlaybackStatus() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  sendWsMessage(json)
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active != null && active.statusQueryPending == true) {
+    sendWsMessage(json, [kind: 'transportStatusQuery', transportCommandId: active.id])
+  } else {
+    sendWsMessage(json)
+  }
 }
 
 @CompileStatic
@@ -6128,69 +6341,260 @@ void getHouseholdsWS() {
   sendWsMessage(json)
 }
 
+void enqueueTransportCommand(String command) {
+  if(!(command in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack'])) { return }
+  List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
+      ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
+      : []
+  if(command in ['play', 'pause', 'stop']) {
+    List<Map> retained = queued.findAll { Map item -> !(item.command in ['play', 'pause', 'stop']) }
+    Integer replaced = queued.size() - retained.size()
+    queued = retained
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(active != null && active.queuedOnSocket == true && active.command in ['play', 'pause', 'stop']) {
+      cancelUnsentTransportCommand(active)
+      replaced++
+    }
+    if(replaced > 0) {
+      logDebug("Transport command ${command} replaced ${replaced} queued play/pause/stop command(s)")
+    }
+  }
+  if(queued.size() >= 32) {
+    logWarn("Dropping transport command ${command}: command queue is full")
+    return
+  }
+  Map item = [id: UUID.randomUUID().toString(), command: command]
+  if(command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    Map lastQueued = queued ? queued[queued.size() - 1] : null
+    String replayId = null
+    if(active != null && active.command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+      replayId = active.replayId?.toString()
+    } else if(lastQueued != null && lastQueued.command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+      replayId = lastQueued.replayId?.toString()
+    }
+    item.replayId = replayId ?: UUID.randomUUID().toString()
+  }
+  queued.add(item)
+  runtimeState[TRANSPORT_QUEUE_KEY] = queued
+  logTrace("Queued transport command ${command} (${item.id}); pending=${queued.size()}")
+  runIn(1, 'drainTransportCommandQueue', [overwrite: true])
+}
+
+void drainTransportCommandQueue() {
+  if(runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map) { return }
+  List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
+      ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
+      : []
+  if(queued.isEmpty()) { return }
+  Map item = queued.remove(0)
+  runtimeState[TRANSPORT_QUEUE_KEY] = queued
+  Map baseline = runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] instanceof Map
+      ? new LinkedHashMap((Map)runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY])
+      : [:]
+  baseline.trackNumber = getCurrentTrackNumber()
+  Map active = [id: item.id, command: item.command, replayId: item.replayId,
+      attempts: 0, baseline: baseline,
+      queuedOnSocket: false, statusQueryPending: false]
+  runtimeState[TRANSPORT_ACTIVE_KEY] = active
+  sendTransportCommandAttempt(active)
+}
+
+void sendTransportCommandAttempt(Map active) {
+  if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
+  String commandName = active.command as String
+  String wireCommand = commandName == 'skipToNextTrack' ? 'skipToNextTrack' :
+      commandName == 'skipToPreviousTrack' ? 'skipToPreviousTrack' : commandName
+  Map command = [namespace: 'playback', command: wireCommand, groupId: getGroupId()]
+  String message = JsonOutput.toJson([command, [:]])
+  active.attempts = ((active.attempts ?: 0) as Integer) + 1
+  active.queuedOnSocket = true
+  active.statusQueryPending = false
+  logTrace("Sending transport command ${commandName}, attempt ${active.attempts} (${active.id})")
+  sendWsMessage(message, [kind: 'transportCommand', transportCommandId: active.id])
+}
+
+void transportCommandSocketSent(String commandId) {
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active == null || active.id?.toString() != commandId) { return }
+  active.queuedOnSocket = false
+  active.sentAt = now()
+  logTrace("Transport command ${active.command} (${commandId}) sent to Sonos WebSocket")
+  runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand', [overwrite: true, data: [commandId: commandId]])
+}
+
+void cancelUnsentTransportCommand(Map active) {
+  if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
+  List<Map> socketQueue = getWebsocketOutboundQueue()
+  socketQueue.removeAll { Map entry ->
+    entry?.kind == 'transportCommand' && entry.transportCommandId?.toString() == active.id?.toString()
+  }
+  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = socketQueue
+  runtimeState.remove(TRANSPORT_ACTIVE_KEY)
+  unschedule('watchTransportCommand')
+  unschedule('retryUnconfirmedTransportCommand')
+  logDebug("Cancelled unsent transport command ${active.command} (${active.id}) because a newer state command arrived")
+}
+
+void watchTransportCommand(Map data = [:]) {
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  String commandId = data?.commandId?.toString()
+  if(active == null || active.id?.toString() != commandId) { return }
+  if(active.queuedOnSocket == true) {
+    logTrace("Transport command ${active.command} (${commandId}) is still waiting in the WebSocket send queue")
+    runIn(30, 'watchTransportCommand', [overwrite: true, data: [commandId: commandId]])
+    return
+  }
+  active.statusQueryPending = true
+  logTrace("Watchdog querying playback status for ${active.command} (${commandId})")
+  getPlaybackStatus()
+}
+
+void transportStatusQuerySocketSent(String commandId) {
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active == null || active.id?.toString() != commandId || active.statusQueryPending != true) { return }
+  active.statusQuerySentAt = now()
+  logTrace("Watchdog status query sent for ${active.command} (${commandId})")
+  runIn(2, 'retryUnconfirmedTransportCommand', [overwrite: true, data: [commandId: commandId]])
+}
+
+void retryUnconfirmedTransportCommand(Map data = [:]) {
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  String commandId = data?.commandId?.toString()
+  if(active == null || active.id?.toString() != commandId) { return }
+  if(active.queuedOnSocket == true) { return }
+  Integer attempts = (active.attempts ?: 0) as Integer
+  String reason = active.lastFailureReason?.toString() ?:
+      "no confirming playback status after ${TRANSPORT_WATCHDOG_SECONDS} seconds"
+  if(attempts >= TRANSPORT_MAX_ATTEMPTS) {
+    logWarn("Transport command ${active.command} (${commandId}) was not confirmed after ${attempts} attempts; last reason: ${reason}")
+    finishTransportCommand(active, false, reason)
+    return
+  }
+  unschedule('watchTransportCommand')
+  unschedule('retryUnconfirmedTransportCommand')
+  logDebug("Retrying transport command ${active.command} (${commandId}), attempt ${attempts + 1}; reason: ${reason}")
+  sendTransportCommandAttempt(active)
+}
+
+void observeTransportPlaybackStatus(Map eventData) {
+  if(!(eventData instanceof Map)) { return }
+  Map snapshot = [playbackState: eventData.playbackState?.toString(),
+      itemId: eventData.itemId?.toString(), positionMillis: eventData.positionMillis,
+      observedAt: now()]
+  runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] = snapshot
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active == null || active.queuedOnSocket == true) { return }
+  String command = active.command as String
+  String playbackState = snapshot.playbackState as String
+  if(command == 'play' && playbackState == 'PLAYBACK_STATE_BUFFERING') {
+    active.statusQueryPending = false
+    logTrace("Transport command play (${active.id}) is buffering; extending the confirmation window")
+    runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand',
+        [overwrite: true, data: [commandId: active.id]])
+    return
+  }
+  Boolean confirmed = false
+  if(command == 'play') { confirmed = playbackState == 'PLAYBACK_STATE_PLAYING' }
+  else if(command == 'pause') { confirmed = playbackState in ['PLAYBACK_STATE_PAUSED', 'PLAYBACK_STATE_IDLE'] }
+  else if(command == 'stop') { confirmed = playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_STOPPED'] }
+  else if(command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+    Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
+    String priorItem = baseline.itemId?.toString()
+    String currentItem = snapshot.itemId?.toString()
+    Long priorPosition = toLongValue(baseline.positionMillis)
+    Long currentPosition = toLongValue(snapshot.positionMillis)
+    Integer priorTrackNumber = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
+    Integer currentTrackNumber = getCurrentTrackNumber()
+    confirmed = (priorItem && currentItem && priorItem != currentItem) ||
+        (priorTrackNumber != null && currentTrackNumber != null && priorTrackNumber != currentTrackNumber) ||
+        (priorPosition != null && currentPosition != null && priorPosition - currentPosition >= 3000L)
+  }
+  if(confirmed) {
+    finishTransportCommand(active, true, "confirmed by playback status ${playbackState}")
+  } else if(active.statusQueryPending == true) {
+    active.statusQueryPending = false
+    active.lastFailureReason = "status query returned ${playbackState ?: 'no playback state'} without confirming ${command}"
+    logTrace("Watchdog did not confirm ${command} (${active.id}); state=${playbackState}, itemId=${snapshot.itemId}, position=${snapshot.positionMillis}")
+  }
+}
+
+Long toLongValue(Object value) {
+  if(value == null) { return null }
+  try { return value.toString().toLong() }
+  catch(Exception ignored) { return null }
+}
+
+void finishTransportCommand(Map active, Boolean succeeded, String detail) {
+  if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
+  if(!succeeded && active.command in ['skipToNextTrack', 'skipToPreviousTrack'] && active.replayId) {
+    List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
+        ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
+        : []
+    Integer discarded = queued.count { Map item -> item.replayId?.toString() == active.replayId?.toString() }
+    if(discarded > 0) {
+      queued = queued.findAll { Map item -> item.replayId?.toString() != active.replayId?.toString() }
+      runtimeState[TRANSPORT_QUEUE_KEY] = queued
+      logWarn("Discarded ${discarded} queued skip command(s) from replay ${active.replayId} because ${active.command} was not confirmed")
+    }
+  }
+  unschedule('watchTransportCommand')
+  unschedule('retryUnconfirmedTransportCommand')
+  runtimeState.remove(TRANSPORT_ACTIVE_KEY)
+  if(succeeded) { logDebug("Transport command ${active.command} (${active.id}) confirmed: ${detail}") }
+  else { logWarn("Transport command ${active.command} (${active.id}) failed: ${detail}") }
+  runIn(1, 'drainTransportCommandQueue', [overwrite: true])
+}
+
+void failTransportCommand(String response, String reason) {
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active == null) { return }
+  String command = active.command as String
+  if(response == command || (response == 'stop' && command == 'stop') ||
+      (response == 'pause' && command == 'pause')) {
+    active.lastFailureReason = reason ?: 'Sonos returned a command error'
+    if(reason?.contains('ERROR_UNSUPPORTED_COMMAND') && command == 'stop') {
+      finishTransportCommand(active, false, active.lastFailureReason as String)
+      enqueueTransportCommand('pause')
+    } else if(reason?.contains('ERROR_PLAYBACK_FAILED') && command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+      finishTransportCommand(active, false, active.lastFailureReason as String)
+    } else {
+      retryUnconfirmedTransportCommand([commandId: active.id])
+    }
+  }
+}
+
 @CompileStatic
 void playerPlay() {
-  Map command = [
-    'namespace':'playback',
-    'command':'play',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logTrace(json)
-  sendWsMessage(json)
+  enqueueTransportCommand('play')
 }
 
 @CompileStatic
 void playerPause() {
-  Map command = [
-    'namespace':'playback',
-    'command':'pause',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logTrace(json)
-  sendWsMessage(json)
+  enqueueTransportCommand('pause')
 }
 
 @CompileStatic
 void playerStop() {
-  Map command = [
-    'namespace':'playback',
-    'command':'stop',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logTrace(json)
-  sendWsMessage(json)
+  enqueueTransportCommand('stop')
 }
 
 @CompileStatic
 void playerSkipToNextTrack() {
-  Map command = [
-    'namespace':'playback',
-    'command':'skipToNextTrack',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logTrace(json)
-  sendWsMessage(json)
+  enqueueTransportCommand('skipToNextTrack')
 }
 
 @CompileStatic
 void playerSkipToPreviousTrack() {
-  Map command = [
-    'namespace':'playback',
-    'command':'skipToPreviousTrack',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logTrace(json)
-  sendWsMessage(json)
+  enqueueTransportCommand('skipToPreviousTrack')
 }
 
 @CompileStatic
@@ -6799,8 +7203,120 @@ void localControlCallback(AsyncResponse response, Map data) {
   }
 }
 
+String expectedUpnpSidForSoapAction(Map params) {
+  String soapAction = params?.headers?.SOAPAction?.toString() ?: ''
+  Integer separator = soapAction.lastIndexOf('#')
+  if(separator < 0) { return null }
+  String service = soapAction.substring(0, separator)
+  String action = soapAction.substring(separator + 1)
+  if(service.contains('AVTransport') && action in ['Play', 'Pause', 'Stop', 'Next', 'Previous', 'Seek',
+      'SetAVTransportURI', 'RemoveAllTracksFromQueue', 'AddURIToQueue']) { return 'sid1' }
+  if(service.contains('GroupRenderingControl') && action in ['SetGroupVolume', 'SetRelativeGroupVolume', 'SetGroupMute']) { return 'sid4' }
+  if(service.contains('RenderingControl') && action in ['SetVolume', 'SetMute', 'SetBass', 'SetTreble', 'SetLoudness', 'SetEQ']) { return 'sid2' }
+  return null
+}
+
+void postSonosSoapAsync(String callback, Map params) {
+  String sidKey = expectedUpnpSidForSoapAction(params)
+  String guid = sidKey ? armExpectedUpnpSubscriptionEvent(sidKey, params?.headers?.SOAPAction?.toString()) : null
+  try {
+    asynchttpPost(callback, params)
+  } catch(Exception e) {
+    if(guid) { cancelExpectedUpnpSubscriptionEvent(guid) }
+    throw e
+  }
+}
+
+void postSonosSoapAsync(String callback, Map params, Map data) {
+  String sidKey = expectedUpnpSidForSoapAction(params)
+  String guid = sidKey ? armExpectedUpnpSubscriptionEvent(sidKey, params?.headers?.SOAPAction?.toString()) : null
+  try {
+    asynchttpPost(callback, params, data)
+  } catch(Exception e) {
+    if(guid) { cancelExpectedUpnpSubscriptionEvent(guid) }
+    throw e
+  }
+}
+
+String armExpectedUpnpSubscriptionEvent(String sidKey, String action) {
+  String guid = UUID.randomUUID().toString()
+  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
+      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
+  pending.add([guid: guid, sidKey: sidKey, action: action, attempts: 0,
+      deadlineAt: now() + UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L])
+  runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending
+  logTrace("Armed UPnP subscription event watchdog guid=${guid} action=${action} expected=${sidKey}")
+  scheduleExpectedUpnpEventWatchdog()
+  return guid
+}
+
+void cancelExpectedUpnpSubscriptionEvent(String guid) {
+  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
+      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
+  pending.removeAll { Map item -> item.guid?.toString() == guid }
+  if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
+  else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
+  scheduleExpectedUpnpEventWatchdog()
+}
+
+void observeExpectedUpnpSubscriptionEvent(String sidKey) {
+  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
+      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
+  List<Map> observed = pending.findAll { Map item -> item.sidKey?.toString() == sidKey }
+  if(observed.isEmpty()) { return }
+  pending.removeAll(observed)
+  logDebug("Received ${sidKey} UPnP event; satisfied ${observed.size()} command expectation(s)")
+  if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
+  else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
+  scheduleExpectedUpnpEventWatchdog()
+}
+
+void scheduleExpectedUpnpEventWatchdog() {
+  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
+      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
+  if(pending.isEmpty()) {
+    unschedule('watchExpectedUpnpSubscriptionEvents')
+    return
+  }
+  Long earliest = pending.collect { Map item -> item.deadlineAt as Long }.min() as Long
+  Integer delay = Math.max(1, (int)Math.ceil((earliest - now()) / 1000.0d))
+  runIn(delay, 'watchExpectedUpnpSubscriptionEvents', [overwrite: true])
+}
+
+void watchExpectedUpnpSubscriptionEvents() {
+  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
+      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
+  Long currentTime = now()
+  List<Map> due = pending.findAll { Map item -> (item.deadlineAt as Long) <= currentTime }
+  due.each { Map expectation ->
+    if(((expectation.attempts ?: 0) as Integer) < 1) {
+      String sidKey = expectation.sidKey?.toString()
+      logWarn("No UPnP ${sidKey} subscription event arrived after ${expectation.action}; resubscribing (guid=${expectation.guid})")
+      resubscribeUpnpSid(sidKey)
+      expectation.attempts = 1
+      expectation.deadlineAt = currentTime + UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L
+    } else {
+      logWarn("No UPnP ${expectation.sidKey} event arrived after resubscription for ${expectation.action} (guid=${expectation.guid})")
+      pending.remove(expectation)
+    }
+  }
+  if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
+  else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
+  scheduleExpectedUpnpEventWatchdog()
+}
+
+void resubscribeUpnpSid(String sidKey) {
+  switch(sidKey) {
+    case 'sid1': resubscribeToAVTransport(); break
+    case 'sid2': resubscribeToMrRcEvents(); break
+    case 'sid3': resubscribeToZgtEvents(); break
+    case 'sid4': resubscribeToMrGrcEvents(); break
+    default: logWarn("No UPnP resubscribe handler for ${sidKey}")
+  }
+}
+
 void httpPostAsync(Map params, String callback = 'localControlCallback') {
-  asynchttpPost(callback, params)
+  postSonosSoapAsync(callback, params)
 }
 // =============================================================================
 // End SOAP Commands
@@ -6838,7 +7354,7 @@ void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
     return
   }
   Map params = getSoapActionParams(ip, AVTransport, 'RemoveAllTracksFromQueue')
-  asynchttpPost(callbackMethod, params)
+  postSonosSoapAsync(callbackMethod, params)
 }
 
 void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
@@ -6850,7 +7366,7 @@ void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = nul
   Map controlValues = [CurrentURI: currentURI]
   if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  asynchttpPost('setAVTransportURIAndPlayCallback', params)
+  postSonosSoapAsync('setAVTransportURIAndPlayCallback', params)
 }
 
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
@@ -6867,7 +7383,7 @@ void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
   Map controlValues = [CurrentURI: currentURI]
   if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
@@ -6879,7 +7395,7 @@ void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
   Map controlValues = [EnqueuedURI: enqueuedURI]
   if(enqueuedURIMetaData) {controlValues.EnqueuedURIMetaData = enqueuedURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'AddURIToQueue', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
@@ -6897,28 +7413,28 @@ void componentSetStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
 void getDeviceStateAsync(String callbackMethod = 'localControlCallback', Map service, String action, Map data = null, Map controlValues = null) {
   String ip = device.getDataValue('localUpnpHost')
   Map params = getSoapActionParams(ip, service, action, controlValues)
-  asynchttpPost(callbackMethod, params, data)
+  postSonosSoapAsync(callbackMethod, params, data)
 }
 
 void componentSetPlayerLevelLocal(BigDecimal level) {
   String ip = device.getDataValue('localUpnpHost')
   Map controlValues = [DesiredVolume: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetTrebleLocal(BigDecimal level) {
   String ip = device.getDataValue('localUpnpHost')
   Map controlValues = [DesiredTreble: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetTreble', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetBassLocal(BigDecimal level) {
   String ip = device.getDataValue('localUpnpHost')
   Map controlValues = [DesiredBass: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetBalanceLocal(BigDecimal level) {
@@ -6932,25 +7448,25 @@ void componentSetBalanceLocal(BigDecimal level) {
     level = level < -100 ? -100 : level
     Map controlValues = [DesiredVolume: 100 + level, Channel: "RF"]
     Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-    asynchttpPost('localControlCallback', params)
+    postSonosSoapAsync('localControlCallback', params)
     controlValues = [DesiredVolume: 100, Channel: "LF"]
     params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-    asynchttpPost('localControlCallback', params)
+    postSonosSoapAsync('localControlCallback', params)
   } else if(level > 0) {
     level = level > 100 ? 100 : level
     Map controlValues = [DesiredVolume: 100 - level, Channel: "LF"]
     Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-    asynchttpPost('localControlCallback', params)
+    postSonosSoapAsync('localControlCallback', params)
     controlValues = [DesiredVolume: 100, Channel: "RF"]
     params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-    asynchttpPost('localControlCallback', params)
+    postSonosSoapAsync('localControlCallback', params)
   } else {
     Map controlValues = [DesiredVolume: 100, Channel: "LF"]
     Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-    asynchttpPost('localControlCallback', params)
+    postSonosSoapAsync('localControlCallback', params)
     controlValues = [DesiredVolume: 100, Channel: "RF"]
     params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
-    asynchttpPost('localControlCallback', params)
+    postSonosSoapAsync('localControlCallback', params)
   }
 }
 
@@ -6958,7 +7474,7 @@ void componentSetLoudnessLocal(Boolean desiredLoudness) {
   String ip = device.getDataValue('localUpnpHost')
   Map controlValues = [DesiredLoudness: desiredLoudness]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetLoudness', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentMuteGroupLocal(Boolean desiredMute) {
@@ -6969,7 +7485,7 @@ void componentMuteGroupLocal(Boolean desiredMute) {
   }
   Map controlValues = [DesiredMute: desiredMute]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupMute', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetGroupRelativeLevelLocal(Integer adjustment) {
@@ -6980,7 +7496,7 @@ void componentSetGroupRelativeLevelLocal(Integer adjustment) {
   }
   Map controlValues = [Adjustment: adjustment]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetRelativeGroupVolume', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetGroupLevelLocal(BigDecimal level) {
@@ -6991,7 +7507,7 @@ void componentSetGroupLevelLocal(BigDecimal level) {
   }
   Map controlValues = [DesiredVolume: level]
   Map params = getSoapActionParams(ip, GroupRenderingControl, 'SetGroupVolume', controlValues)
-  asynchttpPost('localControlCallback', params)
+  postSonosSoapAsync('localControlCallback', params)
 }
 // =============================================================================
 // Local Control Component Methods
@@ -7015,6 +7531,7 @@ void processWebsocketMessage(String message) {
   Map eventType = (json as List)[0]
   Map eventData = (json as List)[1]
   if(eventType == null || eventData == null) {return}
+  observeExpectedSubscriptionEvent(eventType)
 
   if(loggingEnabled('trace')) {
     // Suppress consecutive duplicate WS event log messages to reduce logging load
@@ -7552,10 +8069,11 @@ void processWebsocketMessage(String message) {
     if(eventType?.namespace == 'audioClip') {
       logWarn("Audio clip command '${eventType?.response}' failed for active clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
     }
-    if(eventType?.namespace == 'playback' && eventType?.response == 'stop') {
-      if(eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
-        logTrace("Stop command unavailable for current stream, issuing pause command...")
-        playerPause()
+    if(eventType?.namespace == 'playback') {
+      String errorReason = "${eventData?.errorCode ?: 'UNKNOWN'}: ${eventData?.reason ?: eventData}"
+      failTransportCommand(eventType?.response?.toString(), errorReason)
+      if(eventType?.response == 'stop' && eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
+        logTrace('Stop command unavailable for current stream; queued pause as the fallback')
       }
     }
     if(eventType?.namespace == 'groups' && (eventType?.response == 'createGroup' || eventType?.response == 'modifyGroupMembers')) {
@@ -7604,6 +8122,7 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     String currentState = eventData?.playbackState?.toString()
+    observeTransportPlaybackStatus(eventData)
     String previousState = lastPlaybackState.put(dni, currentState)
     Map favoriteState = favoriteRetryState.get(dni)
     Map playlistState = playlistRetryState.get(dni)

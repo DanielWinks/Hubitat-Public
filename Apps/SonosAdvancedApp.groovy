@@ -3765,6 +3765,19 @@ void deferGroupCommandRequest(Map request) {
   List<Map> deferred = state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List
       ? (List<Map>)state[DEFERRED_GROUP_COMMANDS_STATE_KEY]
       : []
+  String command = request.command as String
+  String groupDni = request.groupDni as String
+  if(isCoalescibleTransportStateCommand(command)) {
+    Integer replaced = deferred.count { Map pending ->
+      pending.groupDni?.toString() == groupDni && isCoalescibleTransportStateCommand(pending.command as String)
+    }
+    deferred = deferred.findAll { Map pending ->
+      pending.groupDni?.toString() != groupDni || !isCoalescibleTransportStateCommand(pending.command as String)
+    }
+    if(replaced > 0) {
+      logDebug("Deferred group transport command ${command} replaced ${replaced} queued state command(s) for ${groupDni}")
+    }
+  }
   deferred.add(request)
   state[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferred
   logInfo("Deferring group command ${request.command} for ${request.groupDni} until the current group operation completes")
@@ -5678,9 +5691,26 @@ void deferGroupPlayerCommand(Map request) {
   List<Map> deferred = state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] instanceof List
       ? (List<Map>)state[DEFERRED_PLAYER_COMMANDS_STATE_KEY]
       : []
+  String command = request.command as String
+  String playerDni = request.playerDni as String
+  if(isCoalescibleTransportStateCommand(command)) {
+    Integer replaced = deferred.count { Map pending ->
+      pending.playerDni?.toString() == playerDni && isCoalescibleTransportStateCommand(pending.command as String)
+    }
+    deferred = deferred.findAll { Map pending ->
+      pending.playerDni?.toString() != playerDni || !isCoalescibleTransportStateCommand(pending.command as String)
+    }
+    if(replaced > 0) {
+      logDebug("Deferred player transport command ${command} replaced ${replaced} queued state command(s) for ${playerDni}")
+    }
+  }
   deferred.add(request)
   state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] = deferred
   logInfo("Deferring player command ${request.command} from ${request.playerDni} until the active group operation completes")
+}
+
+Boolean isCoalescibleTransportStateCommand(String command) {
+  return command in ['play', 'pause', 'stop']
 }
 
 void drainDeferredGroupPlayerCommands() {
