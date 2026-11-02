@@ -1080,4 +1080,131 @@ class SonosAdvPlayerSpec extends Specification {
     payload.data.coordinatorId == null
     payload.data.playerIds == []
   }
+  def "announcement volume preserves explicit zero across paths and boosts"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.device.currentValues.volume = 5
+    driver.device.currentValues.mute = 'unmuted'
+    driver.settings.ttsBoostAmount = boost
+    driver.settings.chimeBeforeTTS = false
+    driver.settings.createRightChannelChildDevice = true
+    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.getDeviceAudioClipQueueSaved().clear()
+    driver.runtimeState.audioClipPlaying = true
+
+    when:
+    if (path == 'regular') {
+      driver.playerLoadAudioClip('http://example.test/volume.mp3', volume, 2, 'V')
+    } else if (path == 'priority') {
+      driver.playerLoadAudioClipHighPriority('http://example.test/volume.mp3', volume, 'V', 2)
+    } else {
+      driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/volume.mp3', volume, 'V', 2)
+    }
+    Map clip = path == 'priority' ? driver.runtimeState.activeAudioClipMessage : driver.getDeviceAudioClipQueue().peek()
+    List payload = (List)new JsonSlurper().parseText(clip.leftChannel as String)
+
+    then:
+    payload[1].volume == (volume == 0 ? 0 : Math.max(0, Math.min((volume == null ? 5 : volume) + boost, 100)))
+    ((List)new JsonSlurper().parseText(clip.rightChannel as String))[1].volume == payload[1].volume
+
+    where:
+    [path, volume, boost] << [['regular', 'priority', 'synchronized'], [null, 0G, 1G, 95G], [0, 10, -5]].combinations()
+  }
+  def "chimes preserve explicit zero and omit unspecified volume"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.device.currentValues.mute = 'unmuted'
+    driver.settings.chimeBeforeTTS = true
+    driver.settings.createRightChannelChildDevice = true
+    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.getDeviceAudioClipQueueSaved().clear()
+    driver.runtimeState.audioClipPlaying = true
+
+    when:
+    if (synchronizedClip) {
+      driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/test.mp3', volume, 'C', 2)
+    } else {
+      driver.playerLoadAudioClipChime(volume)
+    }
+    Map clip = driver.getDeviceAudioClipQueue().peek()
+    List payload = (List)new JsonSlurper().parseText(clip.leftChannel as String)
+
+    then:
+    payload[1].clipType == 'CHIME'
+    payload[1].containsKey('volume') == (volume != null)
+    ((List)new JsonSlurper().parseText(clip.rightChannel as String))[1] == payload[1]
+    if (volume != null) { assert payload[1].volume == volume }
+
+    where:
+    [synchronizedClip, volume] << [[false, true], [null, 0G, 1G]].combinations()
+  }
+
+  def "public volume coercion preserves zero"() {
+    expect:
+    driver.coerceVolume(input) == 0G
+
+    where:
+    input << [0, 0L, 0G, '0', ' 0 ']
+  }
+  def "public restore resume and speak commands preserve zero in clip payloads"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3', duration: 1] as LinkedHashMap }
+    driver.device.dataValues.capabilities = 'AUDIO_CLIP'
+    driver.device.currentValues.volume = 5
+    driver.settings.ttsBoostAmount = 10
+    driver.getDeviceAudioClipQueue().clear()
+    driver.runtimeState.audioClipPlaying = true
+
+    when:
+    driver.invokeMethod(command, ['zero', input] as Object[])
+    Map clip = driver.getDeviceAudioClipQueue().peek()
+
+    then:
+    ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].volume == 0
+
+    where:
+    [command, input] << [['playTextAndRestore', 'playTextAndResume', 'speak'], [0, 0L, 0G, '0', ' 0 ']].combinations()
+  }
+
+  def "fallback announcements preserve zero with boost"() {
+    given:
+    List<BigDecimal> volumes = []
+    driver.metaClass.getParent = { -> null }
+    driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3'] as LinkedHashMap }
+    driver.metaClass.componentPlayTextNoRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
+    driver.device.currentValues.volume = 5
+    driver.settings.ttsBoostAmount = 10
+
+    when:
+    driver.invokeMethod(command, ['zero', 0G, null] as Object[])
+
+    then:
+    volumes == [0G]
+
+    where:
+    command << ['devicePlayText', 'devicePlayTextNoRestore']
+  }
+
+  def "local stream playback applies explicit zero volume"() {
+    given:
+    List<BigDecimal> volumes = []
+    driver.metaClass.componentSetGroupLevelLocal = { BigDecimal level -> volumes.add(level) }
+    driver.metaClass.setAVTransportURIAndPlay = { String uri -> }
+    driver.metaClass.setAVTransportURI = { String uri -> }
+    driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3'] as LinkedHashMap }
+
+    when:
+    driver.invokeMethod(command, ['http://example.test/zero.mp3', 0G] as Object[])
+
+    then:
+    volumes == [0G]
+
+    where:
+    command << ['componentPlayTextNoRestoreLocal', 'componentLoadStreamUrlLocal', 'componentSetStreamUrlLocal']
+  }
 }

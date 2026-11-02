@@ -1341,8 +1341,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
     playerLoadAudioClip(tts.uri as String, volume, ttsDuration, UUID.randomUUID().toString())
   } else {
-    if(volume) { volume += getTTSBoostAmount() }
-    else { volume = getPlayerVolume() + getTTSBoostAmount() }
+    volume = getAnnouncementVolume(volume)
     componentPlayTextNoRestoreLocal(text, volume, voice)
   }
 }
@@ -1369,8 +1368,7 @@ void playHighPriorityTrack(String uri, BigDecimal volume = null) {
 
 void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
   if(deferCommandToParentDuringGroupOperation('speakNoRestore', [text, volume, voice])) { return }
-  if(volume) { volume += getTTSBoostAmount() }
-  else { volume = getPlayerVolume() + getTTSBoostAmount() }
+  volume = getAnnouncementVolume(volume)
   componentPlayTextNoRestoreLocal(text, volume, voice)
 }
 
@@ -6823,6 +6821,23 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
   }
 }
 
+/** Explicit zero is a silent announcement, even when a TTS boost is configured. */
+@CompileStatic
+static Integer calculateAnnouncementVolume(BigDecimal requestedVolume, Integer currentVolume, Integer boost) {
+  if(requestedVolume != null && requestedVolume.compareTo(BigDecimal.ZERO) == 0) { return 0 }
+  BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
+  return Math.max(0, Math.min((baseVolume + boost) as Integer, 100))
+}
+
+@CompileStatic
+Integer getAnnouncementVolume(BigDecimal requestedVolume) {
+  Integer currentVolume = getPlayerVolume()
+  Integer boost = getTTSBoostAmount()
+  Integer resolvedVolume = calculateAnnouncementVolume(requestedVolume, currentVolume, boost)
+  logTrace("Announcement volume: requested=${requestedVolume}, current=${currentVolume}, boost=${boost}, resolved=${resolvedVolume}")
+  return resolvedVolume
+}
+
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null, String correlationId = null,
     Integer duration = 0) {
@@ -6837,8 +6852,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   ]
   Map args = ['name': clipCorrelationId, 'appId': 'com.hubitat.sonos', 'priority': 'HIGH']
   if(uri) {args.streamUrl = uri}
-  if(volume) {args.volume = Math.min((volume + getTTSBoostAmount()) as Integer, 100)}
-  else {args.volume = Math.min(getPlayerVolume() + getTTSBoostAmount(), 100)}
+  args.volume = getAnnouncementVolume(volume)
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json, priority: 'HIGH' ]
   if(duration != null && duration > 0) { audioClip.duration = duration }
@@ -6898,8 +6912,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
   ]
   Map args = ['name': clipCorrelationId, 'appId': 'com.hubitat.sonos']
   if(uri) {args.streamUrl = uri}
-  if(volume) {args.volume = Math.min((volume + getTTSBoostAmount()) as Integer, 100)}
-  else {args.volume = Math.min(getPlayerVolume() + getTTSBoostAmount(), 100)}
+  args.volume = getAnnouncementVolume(volume)
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
   if(loadAudioClipOnRightChannel()) {
@@ -6935,7 +6948,7 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
       'playerId':"${getId()}".toString()
     ]
     Map chimeArgs = ['name': chimeCorrelationId, 'appId': 'com.hubitat.sonos', 'clipType': 'CHIME']
-    if(volume) { chimeArgs.volume = volume }
+    if(volume != null) { chimeArgs.volume = volume }
     Map chimeClip = [leftChannel: JsonOutput.toJson([chimeCommand,chimeArgs]), duration: 8]
     chimeClip.origin = 'synchronized-player-chime'
     chimeClip.correlationId = chimeCorrelationId
@@ -6953,8 +6966,7 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
   ]
   Map args = ['name': clipCorrelationId, 'appId': 'com.hubitat.sonos']
   if(uri) { args.streamUrl = uri }
-  if(volume) { args.volume = Math.min((volume + getTTSBoostAmount()) as Integer, 100) }
-  else { args.volume = Math.min(getPlayerVolume() + getTTSBoostAmount(), 100) }
+  args.volume = getAnnouncementVolume(volume)
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [leftChannel: json, uri: uri]
   if(duration != null && duration > 0) { audioClip.duration = duration }
@@ -6990,7 +7002,7 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
   ]
   String correlationId = UUID.randomUUID().toString()
   Map args = ['name': correlationId, 'appId': 'com.hubitat.sonos', "clipType": "CHIME"]
-  if(volume) {args.volume = volume}
+  if(volume != null) {args.volume = volume}
   String json = JsonOutput.toJson([command,args])
   Map audioClip = [ leftChannel: json ]
   if(loadAudioClipOnRightChannel()) {
@@ -7360,10 +7372,10 @@ String getLocalUpnpHostForGroupOperation() {
 }
 
 void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
-  logDebug("${device} play text ${text} (volume ${volume ?: 'not set'})")
+  logDebug("${device} play text ${text} (volume ${volume != null ? volume : 'not set'})")
   Map tts = textToSpeech(text, voice)
   String streamUrl = tts.uri
-  if(volume) {componentSetGroupLevelLocal(volume)}
+  if(volume != null) {componentSetGroupLevelLocal(volume)}
   setAVTransportURIAndPlay(streamUrl)
 }
 
@@ -7419,14 +7431,14 @@ void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
 }
 
 void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
-  logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
-  if(volume) {componentSetGroupLevelLocal(volume)}
+  logDebug("${device} play track ${streamUrl} (volume ${volume != null ? volume : 'not set'})")
+  if(volume != null) {componentSetGroupLevelLocal(volume)}
   setAVTransportURIAndPlay(streamUrl)
 }
 
 void componentSetStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
-  logDebug("${device} play track ${streamUrl} (volume ${volume ?: 'not set'})")
-  if(volume) {componentSetGroupLevelLocal(volume)}
+  logDebug("${device} play track ${streamUrl} (volume ${volume != null ? volume : 'not set'})")
+  if(volume != null) {componentSetGroupLevelLocal(volume)}
   setAVTransportURI(streamUrl)
 }
 
