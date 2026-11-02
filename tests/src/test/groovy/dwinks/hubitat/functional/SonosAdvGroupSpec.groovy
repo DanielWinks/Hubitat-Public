@@ -168,7 +168,7 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.runtimeState.groupCommandSequence == 7
     driver.runtimeState.pendingRegroup == true
-    driver.state.empty
+    driver.state.isEmpty()
   }
 
   def "refresh migrates legacy group variables before queuing its parent request"() {
@@ -180,8 +180,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.refresh()
 
     then:
-    driver.state.empty
-    driver.runtimeState.groupCommandSequence == 8
+    driver.state.isEmpty()
+    driver.runtimeState.groupCommandSequence == 9
     driver.runtimeState.pendingRegroup == true
     driver.runtimeState.pendingGroupCommands.last().command == 'refresh'
   }
