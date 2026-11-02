@@ -1533,6 +1533,7 @@ void createNewUiPlayer(String playerKey) {
 }
 
 void finalizeNewUiPlayerCreation() {
+  refreshStaticDriverActivePlayerRoster()
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   runIn(1, 'subscribeToGroupCommandRequests')
   app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
@@ -1848,6 +1849,7 @@ void confirmNewUiPlayerDeletion() {
 }
 
 void finalizeNewUiPlayerDeletion() {
+  refreshStaticDriverActivePlayerRoster()
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
 }
@@ -1950,19 +1952,41 @@ void cancelGroupEdit() {
 // =============================================================================
 void initialize() { configure() }
 
-/** Snapshot the active player identifiers for driver-side cache maintenance. */
-List<Map<String, String>> getStaticDriverActivePlayerRoster() {
-  List<Map<String, String>> roster = []
-  List<ChildDeviceWrapper> children = app.getChildDevices()
-  if(children == null) { return roster }
-  children.each { ChildDeviceWrapper child ->
-    String playerId = child.getDataValue('id')
-    String dni = child.getDeviceNetworkId()
-    if(playerId != null && playerId != '' && dni != null && dni != '') {
-      roster.add([playerId: playerId, dni: dni])
+@Field static final String STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY = 'staticDriverActivePlayerRoster'
+@Field static final Integer STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION = 1
+
+/** Return the player roster published during app lifecycle/device changes. */
+Map<String, Object> getStaticDriverActivePlayerRoster() {
+  Object cachedRoster = state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY]
+  if(!(cachedRoster instanceof Map)) { return null }
+  return new LinkedHashMap<String, Object>((Map<String, Object>)cachedRoster)
+}
+
+/** Refresh the driver cleanup snapshot after child-device changes. */
+void refreshStaticDriverActivePlayerRoster() {
+  try {
+    List<Map<String, String>> roster = []
+    List<ChildDeviceWrapper> children = app.getChildDevices()
+    if(children == null) {
+      logWarn('Could not refresh active player roster cache: child device list was unavailable')
+      return
     }
+    children.each { ChildDeviceWrapper child ->
+      String playerId = child.getDataValue('id')
+      String dni = child.getDeviceNetworkId()
+      if(playerId != null && playerId != '' && dni != null && dni != '') {
+        roster.add([playerId: playerId, dni: dni])
+      }
+    }
+    Long refreshedAt = (now() / 1000L) as Long
+    state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY] = [
+      version: STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION,
+      refreshedAt: refreshedAt,
+      players: roster
+    ]
+  } catch(Exception e) {
+    logWarn("Could not refresh active player roster cache: ${e.message}")
   }
-  return roster
 }
 
 void configure() {
@@ -1980,6 +2004,9 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  refreshStaticDriverActivePlayerRoster()
+  unschedule('refreshStaticDriverActivePlayerRoster')
+  schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
   subscribeToGroupCommandRequests()
   Map activeGroupOperation = getActiveGroupOperation()
   if(activeGroupOperation != null) {
@@ -2151,6 +2178,7 @@ void createPlayerDevicesWithFeedback() {
 }
 
 void finalizePlayerCreation(Map data) {
+  refreshStaticDriverActivePlayerRoster()
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   runIn(1, 'subscribeToGroupCommandRequests')
   Integer createdCount = data.createdCount as Integer
@@ -2188,6 +2216,7 @@ void removePlayerDevicesWithFeedback() {
 }
 
 void finalizePlayerRemoval(Map data) {
+  refreshStaticDriverActivePlayerRoster()
   app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   Integer removedCount = data.removedCount as Integer
   state.playerRemovalFeedback = "Successfully removed ${removedCount} player(s)"
@@ -2318,6 +2347,7 @@ Integer createPlayerDevices(List<String> requestedPlayerDevices) {
     }
   }
   // Note: removeOrphans() is now handled by the explicit Remove Players button
+  refreshStaticDriverActivePlayerRoster()
   return createdCount
 }
 
@@ -2404,6 +2434,7 @@ void removeOrphans() {
       }
     }
   }
+  refreshStaticDriverActivePlayerRoster()
 }
 // =============================================================================
 // End Create Child Devices

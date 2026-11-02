@@ -421,7 +421,10 @@ Boolean hasLineInCapability() {
 ]
 @Field final Integer RESUB_INTERVAL = 3600
 @Field private final Integer STATIC_STATE_CLEANUP_INTERVAL_SECONDS = 900
+@Field private final Integer STATIC_STATE_ROSTER_MAX_AGE_SECONDS = 1200
+@Field private final Integer STATIC_STATE_ROSTER_VERSION = 1
 @Field static volatile Long lastStaticStateCleanupEpoch = 0L
+@Field static volatile Long lastStaticStateCleanupAttemptEpoch = 0L
 @Field static Semaphore staticStateCleanupMutex = new Semaphore(1)
 
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
@@ -867,13 +870,19 @@ void migrationCleanup() {
 }
 
 void maybeCleanupStaticDriverState() {
-  InstalledAppWrapper parentApp = getParentApp()
-  if(parentApp == null) { return }
-  List<Map<String, String>> activePlayerRoster = parentApp.getStaticDriverActivePlayerRoster()
-
   Long nowEpoch = Instant.now().getEpochSecond()
   Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
-  if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
+  Long lastAttempt = lastStaticStateCleanupAttemptEpoch != null ? lastStaticStateCleanupAttemptEpoch : 0L
+  Long lastCheck = Math.max(lastCleanup, lastAttempt)
+  if((nowEpoch - lastCheck) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
+  lastStaticStateCleanupAttemptEpoch = nowEpoch
+
+  InstalledAppWrapper parentApp = getParentApp()
+  if(parentApp == null) { return }
+  Map rosterSnapshot = parentApp.getStaticDriverActivePlayerRoster()
+  List<Map<String, String>> activePlayerRoster = validateStaticDriverActivePlayerRoster(rosterSnapshot, nowEpoch)
+  if(activePlayerRoster == null) { return }
+
   if(!staticStateCleanupMutex.tryAcquire()) { return }
 
   try {
@@ -884,6 +893,30 @@ void maybeCleanupStaticDriverState() {
   } finally {
     staticStateCleanupMutex.release()
   }
+}
+
+List<Map<String, String>> validateStaticDriverActivePlayerRoster(Map rosterSnapshot, Long nowEpoch) {
+  if(rosterSnapshot == null || !(rosterSnapshot.version instanceof Number)) { return null }
+  if(((Number)rosterSnapshot.version).intValue() != STATIC_STATE_ROSTER_VERSION) { return null }
+  if(!(rosterSnapshot.refreshedAt instanceof Number)) { return null }
+  Long refreshedAt = ((Number)rosterSnapshot.refreshedAt).longValue()
+  if(refreshedAt == null || refreshedAt <= 0L || refreshedAt > (nowEpoch + 60L)) { return null }
+  if((nowEpoch - refreshedAt) > STATIC_STATE_ROSTER_MAX_AGE_SECONDS) { return null }
+
+  Object rawPlayers = rosterSnapshot.players
+  if(!(rawPlayers instanceof List)) { return null }
+  List<Map<String, String>> activePlayerRoster = []
+  Set<String> seenPlayerIds = new HashSet<String>()
+  Set<String> seenDnis = new HashSet<String>()
+  for(Object rawPlayer : (List)rawPlayers) {
+    if(!(rawPlayer instanceof Map)) { return null }
+    Map player = (Map)rawPlayer
+    String playerId = player.playerId?.toString()?.trim()
+    String dni = player.dni?.toString()?.trim()
+    if(!playerId || !dni || !seenPlayerIds.add(playerId) || !seenDnis.add(dni)) { return null }
+    activePlayerRoster.add([playerId: playerId, dni: dni])
+  }
+  return activePlayerRoster
 }
 
 void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
