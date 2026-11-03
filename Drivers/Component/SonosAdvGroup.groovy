@@ -91,6 +91,7 @@ metadata {
     ]
   ) {
     capability 'MusicPlayer'
+    capability 'AudioNotification'
     capability 'AudioVolume'
     capability 'SpeechSynthesis'
     capability 'Actuator'
@@ -470,7 +471,43 @@ void setState(String stateName, String stateValue) {
   else { runtimeState[stateName] = stateValue }
 }
 void clearState() { runtimeState.clear() }
-void speak(String text, BigDecimal volume = null, String voice = null) { devicePlayText(text, volume, voice) }
+void playText(String text, Object volume = null) {
+  devicePlayText(text, coerceVolume(volume))
+}
+
+void playTextAndRestore(String text, Object volume = null) {
+  devicePlayText(text, coerceVolume(volume))
+}
+
+void playTextAndResume(String text, Object volume = null) {
+  devicePlayText(text, coerceVolume(volume))
+}
+
+void speak(String text, Object volume = null, String voice = null) {
+  devicePlayText(text, coerceVolume(volume), voice)
+}
+
+void speakNoRestore(String text, Object volume = null, String voice = null) {
+  devicePlayTextNoRestore(text, coerceVolume(volume), voice)
+}
+
+@CompileStatic
+BigDecimal coerceVolume(Object volume) {
+  if(volume == null) { return null }
+  if(volume instanceof BigDecimal) { return (BigDecimal) volume }
+  if(volume instanceof Number) { return new BigDecimal(((Number) volume).toString()) }
+  if(volume instanceof CharSequence) {
+    String asString = volume.toString().trim()
+    if(asString == '') { return null }
+    try { return new BigDecimal(asString) }
+    catch(NumberFormatException e) {
+      logWarn("Could not parse volume '${asString}'; ignoring.")
+      return null
+    }
+  }
+  logWarn("Unsupported volume value '${volume}'; ignoring.")
+  return null
+}
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   if(!text) {
@@ -491,7 +528,13 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
   }
 }
 
-void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
+// Group announcements use the same synchronized clip path regardless of the
+// AudioNotification command variant, so every member starts together.
+void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
+  devicePlayText(text, volume, voice)
+}
+
+void playHighPriorityTTS(String text, Object volume = null, String voice = null) {
   if(!text) {
     logWarn('No text provided to play')
     return
@@ -503,7 +546,8 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
       return
     }
     String correlationId = UUID.randomUUID().toString()
-    requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: volume?.toString(),
+    BigDecimal normalizedVolume = coerceVolume(volume)
+    requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: normalizedVolume?.toString(),
       correlationId: correlationId, duration: ttsMap.duration])
   } catch (Exception e) {
     logError("Error playing high priority TTS: ${e.message}")
