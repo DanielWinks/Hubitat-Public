@@ -22,6 +22,7 @@
  */
 
 import groovy.transform.Field
+import groovy.transform.CompileStatic
 import groovy.json.JsonOutput
 import java.util.concurrent.ConcurrentHashMap
 
