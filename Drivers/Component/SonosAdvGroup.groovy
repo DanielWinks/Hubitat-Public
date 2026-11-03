@@ -562,6 +562,23 @@ void playHighPriorityTrack(String uri, BigDecimal volume = null) {
   requestGroupCommand('playHighPriorityTrack', [uri: uri, volume: volume?.toString()])
 }
 
+void playTrackAndRestore(String uri, Object volume = null) {
+  playTrackWithSynchronizedClip(uri, volume)
+}
+
+void playTrackAndResume(String uri, Object volume = null) {
+  playTrackWithSynchronizedClip(uri, volume)
+}
+
+private void playTrackWithSynchronizedClip(String uri, Object volume) {
+  if(!uri) {
+    logWarn('No URI provided to play')
+    return
+  }
+  requestGroupCommand('playAudioClip', [uri: uri, volume: coerceVolume(volume)?.toString(),
+    correlationId: UUID.randomUUID().toString()])
+}
+
 void enqueueLowPriorityTrack(String uri, BigDecimal volume = null) {
   if(!uri) {
     logWarn('No URI provided to enqueue')
