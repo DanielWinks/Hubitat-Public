@@ -151,9 +151,9 @@ metadata {
     command 'loadPlaylist', [[ name: 'playlistId', type: 'STRING']]
     command 'loadPlaylistFull', [
       [ name: 'playlistId', type: 'STRING'],
-      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
       [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
-      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on', 'unchanged']],
       [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
       [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
     ]

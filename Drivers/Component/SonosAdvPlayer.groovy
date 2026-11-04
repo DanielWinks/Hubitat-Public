@@ -127,9 +127,9 @@ metadata {
   command 'getFavorites'
   command 'loadFavoriteFull', [
     [ name: 'favoriteId', type: 'STRING'],
-    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
     [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
-    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on', 'unchanged']],
     [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
     [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
   ]
@@ -138,9 +138,9 @@ metadata {
   command 'getPlaylists'
   command 'loadPlaylistFull', [
     [ name: 'playlistId', type: 'STRING'],
-    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+    [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
     [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
-    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+    [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on', 'unchanged']],
     [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
     [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
   ]
@@ -2013,9 +2013,9 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
       [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])) { return }
   String action = queueMode?.toUpperCase() ?: 'REPLACE'
   Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
+  Boolean repeat = repeatMode == 'unchanged' ? null : repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'unchanged' ? null : repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'unchanged' ? null : shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
     // A new media request supersedes all pending confirmation/retry work.
@@ -2095,9 +2095,9 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
 
   String action = queueMode.toUpperCase()
   Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
+  Boolean repeat = repeatMode == 'unchanged' ? null : repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'unchanged' ? null : repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'unchanged' ? null : shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   emitGroupFavoriteOperationEvent('loadStarted', [favoriteId: favoriteId, groupId: expectedGroupId,
     requestId: runtimeState.groupFavoriteOperationRequestId])
@@ -2294,9 +2294,9 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
     return
   }
   Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'on'
+  Boolean repeat = repeatMode == 'unchanged' ? null : repeatMode == 'repeat all'
+  Boolean repeatOne = repeatMode == 'unchanged' ? null : repeatMode == 'repeat one'
+  Boolean shuffle = shuffleMode == 'unchanged' ? null : shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
     // A new media request supersedes all pending confirmation/retry work.
@@ -6858,6 +6858,18 @@ void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolea
   playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, getGroupId(), true)
 }
 
+/** Build only the play-mode fields requested by the caller; null means preserve. */
+@CompileStatic
+private Map<String, Boolean> buildRequestedPlayModes(Boolean repeat, Boolean repeatOne,
+    Boolean shuffle, Boolean crossfade) {
+  Map<String, Boolean> playModes = new LinkedHashMap<String, Boolean>()
+  if(repeat != null) { playModes.put('repeat', repeat) }
+  if(repeatOne != null) { playModes.put('repeatOne', repeatOne) }
+  if(shuffle != null) { playModes.put('shuffle', shuffle) }
+  if(crossfade != null) { playModes.put('crossfade', crossfade) }
+  return playModes
+}
+
 @CompileStatic
 void playerLoadFavoriteForGroupOperation(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
     Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId) {
@@ -6874,15 +6886,11 @@ private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean
     'command':'loadFavorite',
     'groupId':"${groupId}"
   ]
+  Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
   Map args = [
     'favoriteId': favoriteId,
     'action': action,
-    'playModes': [
-      'repeat': repeat,
-      'repeatOne': repeatOne,
-      'shuffle': shuffle,
-      'crossfade': crossfade
-    ],
+    'playModes': playModes,
     'playOnCompletion': playOnCompletion
   ]
   String json = JsonOutput.toJson([command,args])
@@ -6915,15 +6923,11 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
     'command':'loadPlaylist',
     'groupId':"${getGroupId()}"
   ]
+  Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
   Map args = [
     'playlistId': playlistId,
     'action': action,
-    'playModes': [
-      'repeat': repeat,
-      'repeatOne': repeatOne,
-      'shuffle': shuffle,
-      'crossfade': crossfade
-    ],
+    'playModes': playModes,
     'playOnCompletion': playOnCompletion
   ]
   String json = JsonOutput.toJson([command,args])

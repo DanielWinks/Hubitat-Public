@@ -34,9 +34,9 @@ metadata {
     command 'getFavorites'
     command 'loadFavoriteFull', [
       [ name: 'favoriteId', type: 'STRING'],
-      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
       [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
-      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on', 'unchanged']],
       [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
       [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
     ]
@@ -118,7 +118,7 @@ void loadFavoriteNoShuffle(String favoriteId) {
 }
 
 void loadFavoriteNoCrossfade(String favoriteId) {
-  parent?.loadFavoriteFull(favoriteId, 'off', 'replace', 'off', 'true', 'off')
+  parent?.loadFavoriteFull(favoriteId, 'unchanged', 'replace', 'unchanged', 'true', 'off')
 }
 
 void loadFavoriteAppendAndPlay(String favoriteId) {

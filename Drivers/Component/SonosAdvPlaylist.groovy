@@ -34,9 +34,9 @@ metadata {
     command 'getPlaylists'
     command 'loadPlaylistFull', [
       [ name: 'playlistId', type: 'STRING'],
-      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off' ]],
+      [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
       [ name: 'queueMode', type: 'ENUM', constraints: [ 'replace', 'append', 'insert', 'insert_next' ]],
-      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on']],
+      [ name: 'shuffleMode', type: 'ENUM', constraints: ['off', 'on', 'unchanged']],
       [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
       [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
     ]
@@ -118,7 +118,7 @@ void loadPlaylistNoShuffle(String playlistId) {
 }
 
 void loadPlaylistNoCrossfade(String playlistId) {
-  parent?.loadPlaylistFull(playlistId, 'off', 'replace', 'off', 'true', 'off')
+  parent?.loadPlaylistFull(playlistId, 'unchanged', 'replace', 'unchanged', 'true', 'off')
 }
 
 void loadPlaylistAppendAndPlay(String playlistId) {
