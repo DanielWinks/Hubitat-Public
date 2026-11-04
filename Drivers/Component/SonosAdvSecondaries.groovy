@@ -173,6 +173,40 @@ void setId(String id) {
 void playerLoadAudioClip(String json) {
   sendWsMessage(json)
 }
+
+/** Queue the paired-channel send result without logging during a synchronized group release pass. */
+void playerLoadAudioClipForSynchronizedRelease(String json, String correlationId) {
+  if(!json || !correlationId) { return }
+  Map pending = state.synchronizedAudioClipReleases instanceof Map
+      ? (Map)state.synchronizedAudioClipReleases : [:]
+  Map release = [json: json, result: 'deferred']
+  if(this.device.getDataValue('websocketStatus') == 'open') {
+    try {
+      interfaces.webSocket.sendMessage(json)
+      release.result = 'sent'
+    } catch(Exception e) {
+      release.result = 'failed'
+      release.error = e.message?.toString()
+    }
+  }
+  pending[correlationId] = release
+  state.synchronizedAudioClipReleases = pending
+}
+
+/** Complete deferred connection/error handling after the synchronized send pass. */
+void completeSynchronizedAudioClipRelease(String correlationId) {
+  if(!correlationId) { return }
+  Map pending = state.synchronizedAudioClipReleases instanceof Map
+      ? (Map)state.synchronizedAudioClipReleases : [:]
+  Map release = pending.remove(correlationId) as Map
+  state.synchronizedAudioClipReleases = pending
+  if(release == null) { return }
+  if(release.result == 'deferred') {
+    sendWsMessage(release.json?.toString())
+  } else if(release.result == 'failed') {
+    logWarn("Paired-speaker audioClip send failed for ${correlationId}: ${release.error ?: 'unknown error'}")
+  }
+}
 // =============================================================================
 // End Websocket Commands
 // =============================================================================

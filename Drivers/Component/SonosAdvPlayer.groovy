@@ -214,7 +214,6 @@ metadata {
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
   attribute 'groupMemberNames', 'JSON_OBJECT'
-  attribute 'lastError', 'string'
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
   }
@@ -252,7 +251,6 @@ metadata {
       }
       if(hasAudioClipCapability() == true) {
         input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
-        input 'alwaysUseLoadAudioClip', 'bool', title: 'Always Use Non-Interrupting Methods', required: false, defaultValue: true
       }
       input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
       input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
@@ -305,7 +303,8 @@ Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelC
 Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
 Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
 Boolean getChimeBeforeTTS() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
-Boolean getAlwaysUseLoadAudioClip() { return settings.alwaysUseLoadAudioClip != null ? settings.alwaysUseLoadAudioClip : true }
+// Retain the legacy setting for existing direct-player commands. Group
+// announcements use the parent app's single group policy instead.
 Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
 Boolean getEnableRawWebsocketLogging() { return settings.enableRawWebsocketLogging != null ? settings.enableRawWebsocketLogging : false }
 
@@ -553,6 +552,11 @@ void configure() {
   // Remove the retired audio clip progress state from devices upgraded from
   // versions that exposed it as a current state.
   clearAudioClipPlaybackProgressCurrentState()
+  // These diagnostics are stored in State Variables and are not exposed as
+  // device Current States. Remove values created by earlier development builds.
+  ['playbackState', 'playbackStateObservedAt', 'audioSourceSignalStatus', 'audioSourceSignalObservedAt', 'lastError'].each { String name ->
+    device.deleteCurrentState(name)
+  }
   // Apply child device preferences synchronously (no-ops when devices already exist)
   createRemoveCrossfadeChildDevice(getCreateCrossfadeChildDevice())
   createRemoveShuffleChildDevice(getCreateShuffleChildDevice())
@@ -873,7 +877,6 @@ void migrationCleanup() {
   if(settings.createNightModeChildDevice == null) { settings.createNightModeChildDevice = false }
   if(settings.createSpeechEnhancementChildDevice == null) { settings.createSpeechEnhancementChildDevice = false }
   if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
-  if(settings.alwaysUseLoadAudioClip == null) { settings.alwaysUseLoadAudioClip = true }
   if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
   if(settings.enableRawWebsocketLogging == null) { settings.enableRawWebsocketLogging = false }
   if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
@@ -1288,17 +1291,19 @@ void addPlayerToGroup(String playerIdentifier) {
   requestParentCoordinatorCommand('addPlayerToGroup', [identifier])
 }
 
-@CompileStatic
 void playText(String text, BigDecimal volume = null) {
-  if(getAlwaysUseLoadAudioClip()) { devicePlayText(text, volume) }
-  else{ devicePlayTextNoRestore(text, volume) }
+  devicePlayText(text, volume)
 }
 // Public speech entry points. Volume is typed as Object to tolerate callers
 // that pass Integer/Long/String (Rule Machine, webCoRE, user apps). Without
 // this the @CompileStatic signature throws ClassCastException on any caller
 // that doesn't hand us a literal BigDecimal.
-void playTextAndRestore(String text, Object volume = null) { devicePlayText(text, coerceVolume(volume)) }
-void playTextAndResume(String text, Object volume = null) { devicePlayText(text, coerceVolume(volume)) }
+void playTextAndRestore(String text, Object volume = null) {
+  devicePlayTextWithAudioClip(text, coerceVolume(volume), null, 'playTextAndRestore')
+}
+void playTextAndResume(String text, Object volume = null) {
+  devicePlayTextWithAudioClip(text, coerceVolume(volume), null, 'playTextAndResume')
+}
 void speak(String text, Object volume = null, String voice = null) { devicePlayText(text, coerceVolume(volume), voice) }
 
 @CompileStatic
@@ -1325,11 +1330,10 @@ void setTrack(String uri) {
   if(routeGroupedPlaybackCommandToCoordinator('setTrack', [uri])) { return }
   componentSetStreamUrlLocal(uri)
 }
-@CompileStatic
 void playTrack(String uri, BigDecimal volume = null) {
   if(deferCommandToParentDuringGroupOperation('playTrack', [uri, volume])) { return }
   if(routeGroupedPlaybackCommandToCoordinator('playTrack', [uri, volume])) { return }
-  if(getAlwaysUseLoadAudioClip()) { playerLoadAudioClip(uri, volume) }
+  if(shouldUseAnnouncementAudioClip(false)) { playerLoadAudioClip(uri, volume) }
   else{ componentLoadStreamUrlLocal(uri, volume) }
 }
 @CompileStatic
@@ -1339,8 +1343,8 @@ void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioC
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) { return }
-  LinkedHashMap tts = textToSpeech(text, voice)
-  if(hasAudioClipCapability() == true) {
+  if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(false)) {
+    LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
     playerLoadAudioClip(tts.uri as String, volume, ttsDuration, UUID.randomUUID().toString())
   } else {
@@ -1349,20 +1353,56 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
   }
 }
 
+/** Explicit Play Text And Restore/Resume commands always prefer Sonos audioClip,
+ * independent of the app's automatic announcement policy. */
+void devicePlayTextWithAudioClip(String text, BigDecimal volume = null, String voice = null,
+    String deferredCommand = 'playTextAndRestore') {
+  if(!text) {
+    logWarn('No text provided to play')
+    return
+  }
+  if(deferCommandToParentDuringGroupOperation(deferredCommand, [text, volume, voice])) { return }
+  if(hasAudioClipCapability() == true) {
+    LinkedHashMap tts = textToSpeech(text, voice)
+    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
+    playerLoadAudioClip(tts.uri as String, volume, ttsDuration, UUID.randomUUID().toString())
+  } else {
+    logDebug("${device} does not support audioClip; using the streaming TTS fallback")
+    volume = getAnnouncementVolume(volume)
+    componentPlayTextNoRestoreLocal(text, volume, voice)
+  }
+}
+
+/** Ask the controller app for the shared group/player announcement policy. */
+Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
+  InstalledAppWrapper parentApp = getParentApp()
+  if(parentApp == null) {
+    logWarn('Cannot read the app announcement policy; using the standard stream method')
+    return false
+  }
+  try {
+    return parentApp.shouldUseAudioClipForPlayer(device.getDeviceNetworkId(), highPriority) == true
+  } catch(Exception e) {
+    logWarn("Could not read the app announcement policy; using the standard stream method: ${e.message}")
+    return false
+  }
+}
+
 void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
   if(deferCommandToParentDuringGroupOperation('playHighPriorityTTS', [text, volume, voice])) { return }
-  if(hasAudioClipCapability() == true) {
+  if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
     LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
     playerLoadAudioClipHighPriority(tts.uri as String, volume, UUID.randomUUID().toString(), ttsDuration)
   } else {
+    volume = getAnnouncementVolume(volume)
     componentPlayTextNoRestoreLocal(text, volume, voice)
   }
 }
 
 @CompileStatic
 void playHighPriorityTrack(String uri, BigDecimal volume = null) {
-  if(hasAudioClipCapability() == true) {
+  if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
     playerLoadAudioClipHighPriority(uri, volume)
   } else {
     componentLoadStreamUrlLocal(uri, volume)
@@ -1373,6 +1413,19 @@ void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice
   if(deferCommandToParentDuringGroupOperation('speakNoRestore', [text, volume, voice])) { return }
   volume = getAnnouncementVolume(volume)
   componentPlayTextNoRestoreLocal(text, volume, voice)
+}
+
+/** Start an announcement as a coordinator-owned stream when no source is active. */
+void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String correlationId) {
+  if(!uri || !correlationId) {
+    logWarn('Cannot start group announcement stream without a URI and correlation ID')
+    return
+  }
+  Integer targetVolume = getAnnouncementVolume(volume)
+  runtimeState.groupAnnouncementStream = [correlationId: correlationId, phase: 'LOADING', activeObserved: false]
+  logInfo("Starting group announcement stream ${correlationId} on coordinator ${getId()} at volume=${targetVolume}")
+  componentSetGroupLevelLocal(new BigDecimal(targetVolume))
+  setAVTransportURIAndPlay(uri, null, [groupAnnouncementCorrelationId: correlationId])
 }
 
 @CompileStatic
@@ -2578,7 +2631,13 @@ void reportPlaylistLoadError(String playlistId, String errorCode, String reason)
   String safeReason = reason ?: 'Sonos rejected the playlist load request.'
   String message = "Playlist '${safePlaylistId}' failed to load: ${safeErrorCode}"
   logError("${message}. ${safeReason}")
-  sendEvent(name: 'lastError', value: message, descriptionText: safeReason)
+  recordLastError(message, safeReason)
+}
+
+void recordLastError(String message, String reason = null) {
+  state.lastError = message
+  state.lastErrorReason = reason
+  state.lastErrorObservedAt = now()
 }
 
 // =============================================================================
@@ -6794,6 +6853,7 @@ void playerLoadFavoriteForGroupOperation(String favoriteId, String action, Boole
 private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
     Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId,
     Boolean scheduleAmazonWorkaround) {
+  if(playOnCompletion == true) { invalidateGroupAnnouncementStream('FAVORITE_LOAD_REQUESTED') }
   Map command = [
     'namespace':'favorites',
     'command':'loadFavorite',
@@ -6834,6 +6894,7 @@ void cancelPendingAmazonMusicAutoPlay() {
 }
 
 void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
+  if(playOnCompletion == true) { invalidateGroupAnnouncementStream('PLAYLIST_LOAD_REQUESTED') }
   Map command = [
     'namespace':'playlists',
     'command':'loadPlaylist',
@@ -6884,7 +6945,7 @@ Integer getAnnouncementVolume(BigDecimal requestedVolume) {
 
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null, String correlationId = null,
-    Integer duration = 0) {
+    Integer duration = 0, Boolean deferStart = false) {
   if(deferCommandToParentDuringGroupOperation('loadHighPriorityAudioClip', [uri, volume, correlationId, duration])) { return }
   logTrace('playerLoadAudioClipHighPriority')
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
@@ -6907,6 +6968,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
   audioClip.uri = uri
   audioClip.origin = 'high-priority-player-tts'
   audioClip.correlationId = clipCorrelationId
+  audioClip.groupAnnouncementCorrelationId = correlationId
   addAudioClipCorrelation(audioClip)
 
   // A dispatched priority clip has already left the queue. Include the active
@@ -6935,7 +6997,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 
   // If first high-priority or nothing playing, start immediately
   audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
-  if(isFirstHighPriority || audioClipPlaying != true) {
+  if(!deferStart && (isFirstHighPriority || audioClipPlaying != true)) {
     dequeueAudioClip()
   }
 }
@@ -6977,7 +7039,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
  * ungrouped players on the same Hubitat scheduler tick.
  */
 void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal volume = null, String correlationId = null,
-    Integer duration = 0) {
+    Integer duration = 0, Boolean deferStart = false) {
   if(getIsMuted()) {
     logTrace('Skipping synchronized audio clip because player is muted.')
     return
@@ -7016,19 +7078,102 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
   if(duration != null && duration > 0) { audioClip.duration = duration }
   audioClip.origin = 'synchronized-player-tts'
   audioClip.correlationId = clipCorrelationId
+  audioClip.groupAnnouncementCorrelationId = correlationId
   addAudioClipCorrelation(audioClip)
   if(loadAudioClipOnRightChannel()) {
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
   queue.add(audioClip)
-  if(runtimeState.audioClipPlaying != true) {
-    runInMillis(100, 'startPreparedAudioClip', [overwrite: true])
+  logTrace("Prepared loadAudioClip for Sonos player ${getId()}, correlation=${clipCorrelationId}, resolvedVolume=${args.volume}, queued=${queue.size()}, deferStart=${deferStart}")
+  if(!deferStart && runtimeState.audioClipPlaying != true) {
+    runInMillis(100, 'prepareAndStartAudioClip', [overwrite: true])
   }
 }
 
+/** Select and fully track the next queued clip before a synchronized release pass. */
+void prepareAudioClipForDispatch() {
+  if(runtimeState.audioClipPlaying != true) { prepareNextAudioClipForDispatch() }
+}
+
+void prepareAndStartAudioClip() {
+  prepareAudioClipForDispatch()
+  startPreparedAudioClip()
+  completePreparedAudioClipDispatch()
+}
+
+/** Called in the tight group release loop. Keep this method free of logging and bookkeeping. */
 void startPreparedAudioClip() {
-  if(runtimeState.audioClipPlaying != true) { dequeueAudioClip() }
+  if(runtimeState.audioClipPlaying != true) { return }
+  Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
+  String message = clipMessage?.leftChannel?.toString()
+  String correlationId = clipMessage?.correlationId?.toString()
+  if(!message || !correlationId) { runtimeState.preparedAudioClipDispatchResult = 'missing'; return }
+
+  Map metadata = [kind: 'audioClip', correlationId: correlationId]
+  if(!isWebsocketConnected() || !getWebsocketOutboundQueue().isEmpty() || !isCurrentlySubcribedToAudioClipWS()) {
+    queueWebsocketMessage(message, 0, metadata)
+    runtimeState.preparedAudioClipDispatchResult = 'queued'
+    runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
+  } else {
+    try {
+      interfaces.webSocket.sendMessage(message)
+      runtimeState.preparedAudioClipDispatchResult = 'sent'
+      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
+    } catch(Exception e) {
+      queueWebsocketMessage(message, 1, metadata)
+      runtimeState.preparedAudioClipDispatchResult = 'failed'
+      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
+      runtimeState.preparedAudioClipDispatchError = e.message?.toString()
+    }
+  }
+
+  if(clipMessage.rightChannel) {
+    ChildDeviceWrapper rightChannel = getRightChannelChild()
+    if(rightChannel) {
+      rightChannel.playerLoadAudioClipForSynchronizedRelease(
+        clipMessage.rightChannel.toString(), correlationId)
+    }
+    else { runtimeState.preparedAudioClipRightChannelMissing = true }
+  }
+}
+
+/** Run acknowledgements, reconnect handling, and diagnostic logs after the group send pass. */
+void completePreparedAudioClipDispatch() {
+  String result = runtimeState.preparedAudioClipDispatchResult?.toString()
+  String correlationId = runtimeState.preparedAudioClipDispatchCorrelationId?.toString()
+  String error = runtimeState.preparedAudioClipDispatchError?.toString()
+  Boolean rightChannelMissing = runtimeState.preparedAudioClipRightChannelMissing == true
+  runtimeState.remove('preparedAudioClipDispatchResult')
+  runtimeState.remove('preparedAudioClipDispatchCorrelationId')
+  runtimeState.remove('preparedAudioClipDispatchError')
+  runtimeState.remove('preparedAudioClipRightChannelMissing')
+
+  if(result == 'sent') {
+    logTrace("Sent prepared audioClip to Sonos player ${getId()}, correlation=${correlationId}")
+    audioClipCommandSent(correlationId)
+  } else if(result == 'queued') {
+    logTrace("Queued prepared audioClip for Sonos player ${getId()}, correlation=${correlationId}")
+    if(!isWebsocketConnected()) { wsConnect() }
+    else if(!isCurrentlySubcribedToAudioClipWS()) {
+      if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
+    } else if(getWebsocketOutboundQueue().size() > 0) { flushWebsocketOutboundQueue() }
+  } else if(result == 'failed') {
+    logWarn("Prepared audioClip send failed for Sonos player ${getId()}, correlation=${correlationId}: ${error ?: 'unknown error'}; queued for retry")
+    setWebSocketStatus('closed')
+    scheduleWebSocketReconnect()
+  } else if(result == 'missing') {
+    logWarn("No prepared audioClip was available to release for Sonos player ${getId()}")
+  }
+
+  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
+  ChildDeviceWrapper rightChannel = getRightChannelChild()
+  if(activeClip?.rightChannel && rightChannel) {
+    rightChannel.completeSynchronizedAudioClipRelease(
+      activeClip.correlationId?.toString())
+  } else if(rightChannelMissing || activeClip?.rightChannel) {
+    logWarn('Right channel audio clip requested but no right channel child device is available. Playing clip on left channel only.')
+  }
 }
 
 
@@ -7075,9 +7220,13 @@ void enqueueAudioClip(Map clipMessage) {
 }
 
 void dequeueAudioClip() {
+  prepareNextAudioClipForDispatch()
+  dispatchPreparedAudioClip()
+}
+
+void prepareNextAudioClipForDispatch() {
   traceAudioClipQueues('dequeue-entry')
   logTrace('dequeueAudioClip')
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
 
   // Check high-priority queue first
   ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
@@ -7131,6 +7280,7 @@ void dequeueAudioClip() {
       : new LinkedHashMap<String, Map>()
   clipProgress[clipMessage.correlationId as String] = [
     correlationId: clipMessage.correlationId,
+    groupAnnouncementCorrelationId: clipMessage.groupAnnouncementCorrelationId,
     origin: clipMessage.origin ?: 'audio-clip',
     phase: 'QUEUED_FOR_WEBSOCKET',
     duration: coerceClipDuration(clipMessage.duration),
@@ -7147,11 +7297,23 @@ void dequeueAudioClip() {
   }
   setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(clipProgress[clipMessage.correlationId as String], null)
-  logInfo("Dispatching audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, dispatchedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
+  logInfo("Prepared audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, preparedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
   runtimeState.audioClipPlaying = true
-  traceAudioClipQueues('dispatch-selected')
+  traceAudioClipQueues('dispatch-prepared')
   if(!isCurrentlySubcribedToAudioClipWS()) { subscribeToAudioClip() }
-  sendWsMessage(clipMessage.leftChannel, [kind: 'audioClip', correlationId: clipMessage.correlationId as String])
+}
+
+void dispatchPreparedAudioClip() {
+  Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
+  if(!clipMessage || runtimeState.audioClipPlaying != true) { return }
+  ChildDeviceWrapper rightChannel = getRightChannelChild()
+  Boolean sentToSocket = sendWsMessage(clipMessage.leftChannel,
+    [kind: 'audioClip', correlationId: clipMessage.correlationId as String])
+  if(sentToSocket) {
+    logTrace("Sent audioClip.loadAudioClip over WebSocket to Sonos player ${getId()}, correlation=${clipMessage.correlationId}, channel=left")
+  } else {
+    logTrace("Queued audioClip.loadAudioClip for WebSocket delivery to Sonos player ${getId()}, correlation=${clipMessage.correlationId}, channel=left")
+  }
   if(clipMessage.rightChannel && rightChannel) {
     rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
   } else if(clipMessage.rightChannel) {
@@ -7444,17 +7606,29 @@ String recordStreamTransportIntent(String command) {
   }
 }
 
-void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null) {
+void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null, Map callbackData = null) {
+  logTrace("setAVTransportURIAndPlay request player=${getId()}, uri=${currentURI}, announcementCorrelation=${callbackData?.groupAnnouncementCorrelationId ?: 'none'}, replacingGroupAnnouncement=${runtimeState.groupAnnouncementStream?.correlationId ?: 'none'}")
   String guid = recordStreamTransportIntent('setAVTransportURIAndPlay')
+  if(!(callbackData?.groupAnnouncementCorrelationId) && runtimeState.groupAnnouncementStream instanceof Map) {
+    Map announcement = (Map)runtimeState.groupAnnouncementStream
+    runtimeState.pendingGroupAnnouncementTakeover = [transportGuid: guid,
+      correlationId: announcement.correlationId?.toString(), replacementUri: currentURI]
+    logTrace("Staged group announcement takeover player=${getId()}, correlation=${announcement.correlationId}, transportGuid=${guid}, replacementUri=${currentURI}; waiting for Sonos SetAVTransportURI acceptance")
+  }
   String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
     logWarn("setAVTransportURIAndPlay: could not determine group coordinator UPnP host for ${device.displayName}; skipping")
+    clearPendingGroupAnnouncementTakeover(guid, 'COORDINATOR_HOST_UNAVAILABLE')
+    String announcementGuid = callbackData?.groupAnnouncementCorrelationId?.toString()
+    if(announcementGuid) { invalidateGroupAnnouncementStream('COORDINATOR_HOST_UNAVAILABLE') }
     return
   }
   Map controlValues = [CurrentURI: currentURI]
   if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
-  postSonosSoapAsync('setAVTransportURIAndPlayCallback', params, [streamTransportIntentGuid: guid])
+  Map data = [streamTransportIntentGuid: guid]
+  if(callbackData instanceof Map) { data.putAll(callbackData) }
+  postSonosSoapAsync('setAVTransportURIAndPlayCallback', params, data)
 }
 
 void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
@@ -7472,11 +7646,60 @@ void setAVTransportURIAndPlayCallback(AsyncResponse response, Map data = null) {
     }
     // Consume the intent even on failure, so duplicate callbacks cannot replay it.
     runtimeState.remove('streamTransportIntentGuid')
-    if(response?.status == 200 && response.hasError() == false) { play() }
+    String announcementGuid = data?.groupAnnouncementCorrelationId?.toString()
+    Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+        ? (Map)runtimeState.groupAnnouncementStream : null
+    if(announcementGuid && announcement?.correlationId?.toString() != announcementGuid) {
+      logDebug("Ignoring stale group announcement stream callback ${announcementGuid}")
+      return
+    }
+    if(response?.status == 200 && response.hasError() == false) {
+      commitPendingGroupAnnouncementTakeover(guid)
+      if(announcementGuid) { announcement.phase = 'STARTING' }
+      play()
+    } else if(announcementGuid) {
+      announcement.phase = 'FAILED'
+      publishGroupAnnouncementProgress(announcementGuid, 'FAILED')
+      runtimeState.remove('groupAnnouncementStream')
+    } else {
+      clearPendingGroupAnnouncementTakeover(guid, "SET_AV_TRANSPORT_URI_REJECTED status=${response?.status}")
+    }
+  }
+}
+
+void commitPendingGroupAnnouncementTakeover(String transportGuid) {
+  Map pending = runtimeState.pendingGroupAnnouncementTakeover instanceof Map
+      ? (Map)runtimeState.pendingGroupAnnouncementTakeover : null
+  if(pending == null || pending.transportGuid?.toString() != transportGuid) { return }
+  runtimeState.remove('pendingGroupAnnouncementTakeover')
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  if(announcement?.correlationId?.toString() != pending.correlationId?.toString()) {
+    logTrace("Ignoring transport takeover ${transportGuid}; announcement ownership changed before Sonos accepted the URI")
+    return
+  }
+  String correlationId = pending.correlationId?.toString()
+  logTrace("Sonos accepted replacement stream for group announcement ${correlationId}; notifying parent app")
+  publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
+    externalPlayback: true,
+    replacementUri: pending.replacementUri?.toString(),
+    playbackState: state.playbackState?.toString(),
+    sourceUri: device.currentValue('audioSource')?.toString()
+  ])
+  runtimeState.remove('groupAnnouncementStream')
+}
+
+void clearPendingGroupAnnouncementTakeover(String transportGuid, String reason) {
+  Map pending = runtimeState.pendingGroupAnnouncementTakeover instanceof Map
+      ? (Map)runtimeState.pendingGroupAnnouncementTakeover : null
+  if(pending?.transportGuid?.toString() == transportGuid) {
+    logTrace("Clearing unaccepted group announcement takeover ${transportGuid}: ${reason}")
+    runtimeState.remove('pendingGroupAnnouncementTakeover')
   }
 }
 
 void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
+  invalidateGroupAnnouncementStream('SUPERSEDED_BY_TRANSPORT_REQUEST')
   recordStreamTransportIntent('setAVTransportURI')
   String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
@@ -7487,6 +7710,26 @@ void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
   if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
   postSonosSoapAsync('localControlCallback', params)
+}
+
+void invalidateGroupAnnouncementStream(String reason, String replacementUri = null) {
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  if(announcement == null) { return }
+  String correlationId = announcement.correlationId?.toString()
+  logTrace("Group announcement interruption candidate player=${getId()}, correlation=${correlationId}, phase=${announcement.phase}, activeObserved=${announcement.activeObserved}, reason=${reason}, replacementUri=${replacementUri}, playbackState=${state.playbackState}, audioSource=${device.currentValue('audioSource')}")
+  logInfo("Interrupting group announcement stream ${correlationId} (${reason}); replacement=${replacementUri ?: 'unknown'}")
+  if(correlationId && announcement.activeObserved == true) {
+    publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
+      externalPlayback: true,
+      replacementUri: replacementUri,
+      playbackState: state.playbackState?.toString(),
+      sourceUri: device.currentValue('audioSource')?.toString()
+    ])
+  } else if(correlationId) {
+    publishGroupAnnouncementProgress(correlationId, 'FAILED')
+  }
+  runtimeState.remove('groupAnnouncementStream')
 }
 
 void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
@@ -8132,6 +8375,11 @@ void processWebsocketMessage(String message) {
       }
       clipProgress[clipGuid] = progress
       publishAudioClipProgressEvent(progress, callbackId)
+      String groupAnnouncementId = progress.groupAnnouncementCorrelationId?.toString() ?: clipGuid
+      if(progress.groupAnnouncementCorrelationId || clipGuid == callbackActiveClipId) {
+        publishGroupAnnouncementProgress(groupAnnouncementId, clipStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']
+            ? (clipStatus == 'ERROR' ? 'FAILED' : clipStatus) : clipStatus)
+      }
       logDebug("Audio clip GUID ${clipGuid} received Sonos status ${clipStatus ?: 'unknown'} callback=${callbackId} sonosId=${clip?.id ?: 'unknown'} observedAt=${observedAt}")
 
       // Only the currently playing GUID may advance or finish the queue. A late
@@ -8184,10 +8432,10 @@ void processWebsocketMessage(String message) {
       String reason = eventData?.reason as String
       if(eventData?.errorCode == 'ERROR_PLAYBACK_FAILED' && reason != null && reason.contains('musicContextGroupId')) {
         logWarn("Cannot group/join while playing from this music service (likely Amazon Music). Use 'Join Players to Coordinator' or stop playback first. Reason: ${reason}")
-        getDevice().sendEvent(name: 'lastError', value: 'Cannot group: incompatible music service', descriptionText: reason)
+        recordLastError('Cannot group: incompatible music service', reason)
       } else {
         logError("Group operation failed - Error: ${eventData?.errorCode}, Reason: ${reason}")
-        getDevice().sendEvent(name: 'lastError', value: "Group operation failed: ${eventData?.errorCode}", descriptionText: reason)
+        recordLastError("Group operation failed: ${eventData?.errorCode}", reason)
       }
     }
     if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
@@ -8226,7 +8474,30 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     String currentState = eventData?.playbackState?.toString()
+    Long playbackStateObservedAt = now()
+    state.playbackState = currentState
+    state.playbackStateObservedAt = playbackStateObservedAt
+    publishPlaybackObservation()
     observeTransportPlaybackStatus(eventData)
+    Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+        ? (Map)runtimeState.groupAnnouncementStream : null
+    if(announcement != null) {
+      String announcementGuid = announcement.correlationId?.toString()
+      logTrace("Group announcement playback observation player=${getId()}, correlation=${announcementGuid}, playbackState=${currentState}, itemId=${eventData?.itemId}, source=${device.currentValue('audioSource')}, activeObserved=${announcement.activeObserved}")
+      if(currentState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+        announcement.activeObserved = true
+        announcement.phase = 'ACTIVE'
+        publishGroupAnnouncementProgress(announcementGuid, 'ACTIVE')
+      } else if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED'] && announcement.activeObserved == true) {
+        // A user stop/pause does not necessarily transition a Sonos stream to
+        // IDLE. Treat either terminal transport state as completion so the app
+        // can restore temporary topology without waiting for its watchdog.
+        announcement.phase = 'DONE'
+        publishGroupAnnouncementProgress(announcementGuid, 'DONE', [playbackState: currentState,
+          termination: currentState == 'PLAYBACK_STATE_PAUSED' ? 'paused' : 'idle'])
+        runtimeState.remove('groupAnnouncementStream')
+      }
+    }
     String previousState = lastPlaybackState.put(dni, currentState)
     Map favoriteState = favoriteRetryState.get(dni)
     Map playlistState = playlistRetryState.get(dni)
@@ -8253,6 +8524,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
+    observeAudioSourceSignalStatus(eventData)
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
     Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
@@ -8292,6 +8564,38 @@ void processWebsocketMessage(String message) {
       queueGroupDeviceUpdate([_groupMute: groupMuteState])
     }
   }
+}
+
+void observeAudioSourceSignalStatus(Map eventData) {
+  Map container = eventData?.container instanceof Map ? (Map)eventData.container : [:]
+  String containerType = container.type?.toString()
+  if(!containerType) {
+    logTrace("Ignoring metadata status without a container for ${getId()}; retaining last source signal observation")
+    return
+  }
+  Map inputFormat = container.htInputFormat instanceof Map ? (Map)container.htInputFormat : [:]
+  String streamDescription = inputFormat.streamDescription?.toString()?.trim()
+  String signalStatus = 'unknown'
+  if(containerType?.startsWith('linein.homeTheater')) {
+    signalStatus = streamDescription?.equalsIgnoreCase('No Signal') ? 'no-signal' :
+        (streamDescription ? 'signal' : 'unknown')
+  } else {
+    signalStatus = 'not-hdmi'
+  }
+  Long observedAt = now()
+  state.audioSourceSignalStatus = signalStatus
+  state.audioSourceSignalObservedAt = observedAt
+  publishPlaybackObservation()
+  logTrace("Home theater input observation player=${getId()}, containerType=${containerType}, streamDescription=${streamDescription}, signalStatus=${signalStatus}")
+}
+
+void publishPlaybackObservation() {
+  publishPlayerStateUpdate([kind: 'playbackObservation',
+    playbackState: state.playbackState?.toString(),
+    playbackObservedAt: state.playbackStateObservedAt,
+    audioSource: device.currentValue('audioSource')?.toString(),
+    signalStatus: state.audioSourceSignalStatus?.toString(),
+    signalObservedAt: state.audioSourceSignalObservedAt])
 }
 
 @CompileStatic
@@ -8392,6 +8696,14 @@ void publishAudioClipProgressEvent(Map progress, String callbackId) {
   logTrace("Audio clip ${progress.correlationId} progress: phase=${progress.phase}, status=${progress.lastStatus}, callback=${callbackId ?: progress.lastCallbackId ?: 'n/a'}")
 }
 
+void publishGroupAnnouncementProgress(String correlationId, String phase, Map details = null) {
+  if(!correlationId || !phase) { return }
+  Map payload = [kind: 'groupAnnouncementProgress', correlationId: correlationId,
+    phase: phase, playerId: getId()]
+  if(details instanceof Map) { payload.putAll(details) }
+  publishPlayerStateUpdate(payload)
+}
+
 void clearAudioClipPlaybackProgressCurrentState() {
   try {
     device.deleteCurrentState('audioClipPlaybackProgress')
@@ -8442,7 +8754,7 @@ void audioClipCommandSent(String correlationId) {
   clipProgress[correlationId] = progress
   setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(progress, null)
-  logInfo("Sent audio clip ${correlationId} over WebSocket at ${sentAt}; waiting ${AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS}s for matching ACTIVE status")
+  logInfo("Sent audioClip.loadAudioClip to Sonos player ${getId()} over WebSocket, correlation=${correlationId}, at ${sentAt}; waiting ${AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS}s for matching ACTIVE status")
   if(runtimeState.audioClipHadDisconnectAfterSend != true) {
     scheduleAudioClipWatchdog(correlationId, 'WAITING_FOR_ACTIVE', sentAt + (AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS * 1000L))
   }

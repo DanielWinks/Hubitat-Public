@@ -37,6 +37,112 @@ class SonosAdvPlayerSpec extends Specification {
     command << ['pause', 'stop', 'play', 'skipToNextTrack', 'skipToPreviousTrack']
   }
 
+  def "external transport replacement reports correlated interruption of active group announcement"() {
+    given:
+    driver.device.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    driver.device.currentValues.audioSource = 'http://example.test/announcement.mp3'
+    driver.runtimeState.groupAnnouncementStream = [correlationId: 'announcement-guid',
+      phase: 'ACTIVE', activeObserved: true]
+
+    when:
+    driver.setAVTransportURIAndPlay('https://music.example.test/track.mp3')
+    Map request = driver.asyncCalls.last().data
+    driver.setAVTransportURIAndPlayCallback(new hubitat.scheduling.AsyncResponse(status: 200), request)
+
+    then:
+    driver.locationEvents.any { Map event ->
+      event.data?.kind == 'groupAnnouncementProgress' &&
+        event.data?.correlationId == 'announcement-guid' && event.data?.phase == 'INTERRUPTED' &&
+        event.data?.externalPlayback == true &&
+        event.data?.replacementUri == 'https://music.example.test/track.mp3'
+    }
+    driver.runtimeState.groupAnnouncementStream == null
+  }
+
+  def "paused coordinator stream completes correlated group announcement immediately"() {
+    given:
+    driver.locationEvents.clear()
+    driver.device.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    driver.device.currentValues.audioSource = 'http://example.test/announcement.mp3'
+    driver.runtimeState.groupAnnouncementStream = [correlationId: 'announcement-paused',
+      phase: 'ACTIVE', activeObserved: true]
+
+    when:
+    driver.processWebsocketMessage(JsonOutput.toJson([
+      [namespace: 'playback', type: 'playbackStatus'],
+      [playbackState: 'PLAYBACK_STATE_PAUSED', itemId: 'announcement-item']
+    ]))
+
+    then:
+    driver.locationEvents.any { Map event ->
+      event.data?.kind == 'groupAnnouncementProgress' &&
+        event.data?.correlationId == 'announcement-paused' && event.data?.phase == 'DONE' &&
+        event.data?.playbackState == 'PLAYBACK_STATE_PAUSED' && event.data?.termination == 'paused'
+    }
+    driver.runtimeState.groupAnnouncementStream == null
+  }
+
+  def "playback status websocket events publish internal freshness state even when repeated"() {
+    given:
+    String dni = driver.device.getDeviceNetworkId()
+    driver.pendingLocalDeviceEvents.remove(dni)
+    driver.state.playbackState = 'PLAYBACK_STATE_IDLE'
+
+    when:
+    driver.processWebsocketMessage(JsonOutput.toJson([
+      [namespace: 'playback', type: 'playbackStatus'],
+      [playbackState: 'PLAYBACK_STATE_IDLE', itemId: 'hdmi-input']
+    ]))
+
+    then:
+    driver.state.playbackState == 'PLAYBACK_STATE_IDLE'
+    (driver.state.playbackStateObservedAt as Long) > 0L
+    !driver.pendingLocalDeviceEvents[dni].containsKey('playbackState')
+    !driver.pendingLocalDeviceEvents[dni].containsKey('playbackStateObservedAt')
+    driver.locationEvents.any { Map event ->
+      event.data?.kind == 'playbackObservation' && event.data?.playbackState == 'PLAYBACK_STATE_IDLE' &&
+        event.data?.playbackObservedAt == driver.state.playbackStateObservedAt
+    }
+  }
+
+  def "HDMI metadata reports no signal separately from the playback state"() {
+    given:
+    String dni = driver.device.getDeviceNetworkId()
+    driver.pendingLocalDeviceEvents.remove(dni)
+
+    when:
+    driver.processWebsocketMessage(JsonOutput.toJson([
+      [namespace: 'playbackMetadata', type: 'metadataStatus'],
+      [container: [type: 'linein.homeTheater.hdmi', htInputFormat: [streamDescription: 'No Signal']]]
+    ]))
+
+    then:
+    driver.state.audioSourceSignalStatus == 'no-signal'
+    (driver.state.audioSourceSignalObservedAt as Long) > 0L
+    !driver.pendingLocalDeviceEvents[dni].containsKey('audioSourceSignalStatus')
+    !driver.pendingLocalDeviceEvents[dni].containsKey('audioSourceSignalObservedAt')
+    driver.locationEvents.any { Map event ->
+      event.data?.kind == 'playbackObservation' && event.data?.signalStatus == 'no-signal'
+    }
+  }
+
+  def "empty metadata status preserves the last valid HDMI signal observation"() {
+    given:
+    driver.state.audioSourceSignalStatus = 'no-signal'
+    Long observedAt = driver.now() - 1000L
+    driver.state.audioSourceSignalObservedAt = observedAt
+
+    when:
+    driver.processWebsocketMessage(JsonOutput.toJson([
+      [namespace: 'playbackMetadata', type: 'metadataStatus'],
+      [container: [:]]
+    ]))
+
+    then:
+    driver.state.audioSourceSignalStatus == 'no-signal'
+    driver.state.audioSourceSignalObservedAt == observedAt
+  }
+
   def "only the latest stream callback plays and duplicate callbacks are ignored"() {
     given:
     driver.asyncCalls.clear()
@@ -1075,7 +1181,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     websocketMessages.empty
     driver.playlistRetryState.isEmpty()
-    driver.events.find { Map event -> event.name == 'lastError' }?.value?.contains('PLAYBACK_NOT_STARTED')
+    driver.state.lastError?.contains('PLAYBACK_NOT_STARTED')
+    !driver.events.any { Map event -> event.name == 'lastError' }
   }
 
   def "buffering counts as playlist playback progress and does not reload the playlist"() {
@@ -1104,8 +1211,9 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.playlistRetryState.isEmpty()
-    driver.events.find { Map event -> event.name == 'lastError' }?.value == "Playlist 'playlist-963' failed to load: ERROR_INVALID_OBJECT_ID"
-    driver.events.find { Map event -> event.name == 'lastError' }?.descriptionText == 'Playlist not found'
+    driver.state.lastError == "Playlist 'playlist-963' failed to load: ERROR_INVALID_OBJECT_ID"
+    driver.state.lastErrorReason == 'Playlist not found'
+    !driver.events.any { Map event -> event.name == 'lastError' }
   }
 
   def "playlist metadata matches the exact ID before using a unique name fallback"() {

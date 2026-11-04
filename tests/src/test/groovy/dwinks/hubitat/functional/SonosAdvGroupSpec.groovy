@@ -81,6 +81,23 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.pendingGroupCommands[0].command == 'on'
     driver.runtimeState.pendingGroupCommands[0].groupDni == 'SONOS-GROUP-TEST-DNI'
     driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
+    UUID.fromString(driver.runtimeState.pendingGroupCommands[0].requestId as String)
+    driver.runtimeState.pendingGroupCommands[0].sequence == 1
+  }
+
+  def "group command request IDs stay unique when the in-memory sequence resets"() {
+    when:
+    driver.requestGroupCommand('refresh')
+    String firstRequestId = driver.runtimeState.pendingGroupCommands[0].requestId as String
+    driver.runtimeState.remove('groupCommandSequence')
+    driver.requestGroupCommand('refresh')
+    String secondRequestId = driver.runtimeState.pendingGroupCommands[1].requestId as String
+
+    then:
+    UUID.fromString(firstRequestId).toString() == firstRequestId
+    UUID.fromString(secondRequestId).toString() == secondRequestId
+    firstRequestId != secondRequestId
+    driver.runtimeState.pendingGroupCommands*.sequence == [1, 1]
   }
 
   def "joinPlayersToCoordinator publishes an additive grouping request"() {

@@ -286,7 +286,8 @@ void requestGroupCommand(String command, Map args = [:]) {
   runtimeState.groupCommandSequence = sequence
   Map payload = [
     groupDni: device.getDeviceNetworkId(),
-    requestId: "${device.getDeviceNetworkId()}-${sequence}",
+    requestId: UUID.randomUUID().toString(),
+    sequence: sequence,
     command: command,
     args: args ?: [:]
   ]
@@ -473,15 +474,15 @@ void setState(String stateName, String stateValue) {
 }
 void clearState() { runtimeState.clear() }
 void playText(String text, Object volume = null) {
-  devicePlayText(text, coerceVolume(volume))
+  devicePlayText(text, coerceVolume(volume), null, false)
 }
 
 void playTextAndRestore(String text, Object volume = null) {
-  devicePlayText(text, coerceVolume(volume))
+  devicePlayText(text, coerceVolume(volume), null, true)
 }
 
 void playTextAndResume(String text, Object volume = null) {
-  devicePlayText(text, coerceVolume(volume))
+  devicePlayText(text, coerceVolume(volume), null, true)
 }
 
 void speak(String text, Object volume = null, String voice = null) {
@@ -510,7 +511,7 @@ BigDecimal coerceVolume(Object volume) {
   return null
 }
 
-void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
+void devicePlayText(String text, BigDecimal volume = null, String voice = null, Boolean forceAudioClip = false) {
   if(!text) {
     logWarn('No text provided to play')
     return
@@ -523,7 +524,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     }
     String correlationId = UUID.randomUUID().toString()
     requestGroupCommand('playAudioClip', [uri: ttsMap.uri as String, volume: volume?.toString(),
-      correlationId: correlationId, duration: ttsMap.duration])
+      correlationId: correlationId, duration: ttsMap.duration, forceAudioClip: forceAudioClip == true])
   } catch (Exception e) {
     logError("Error playing text: ${e.message}")
   }
