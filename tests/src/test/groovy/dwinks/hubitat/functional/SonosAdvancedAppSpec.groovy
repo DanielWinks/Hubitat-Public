@@ -1006,6 +1006,8 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.currentValues.isGrouped = 'on'
     coordinator.currentValues.isGroupCoordinator = 'on'
     coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    appScript.state.sonosPlayerPlaybackObservations = [RINCON_COORD: [
+      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()]]
     String correlationId = 'test-tts-correlation'
 
     when:
@@ -1035,6 +1037,8 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.currentValues.isGrouped = 'on'
     coordinator.currentValues.isGroupCoordinator = 'on'
     coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    appScript.state.sonosPlayerPlaybackObservations = [RINCON_COORD: [
+      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()]]
     Map groupRequest = request('playAudioClip', [uri: 'http://example.test/tts.mp3', volume: '15', duration: 2])
 
     when:

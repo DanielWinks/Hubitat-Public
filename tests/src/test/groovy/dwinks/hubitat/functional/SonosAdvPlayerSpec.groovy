@@ -1624,6 +1624,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "public restore resume and speak commands preserve zero in clip payloads"() {
     given:
     driver.metaClass.getParent = { -> null }
+    driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
     driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3', duration: 1] as LinkedHashMap }
     driver.device.dataValues.capabilities = 'AUDIO_CLIP'
     driver.device.currentValues.volume = 5
