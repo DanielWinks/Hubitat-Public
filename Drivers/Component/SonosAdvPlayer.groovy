@@ -1422,7 +1422,8 @@ void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String cor
     return
   }
   Integer targetVolume = getAnnouncementVolume(volume)
-  runtimeState.groupAnnouncementStream = [correlationId: correlationId, phase: 'LOADING', activeObserved: false]
+  runtimeState.groupAnnouncementStream = [correlationId: correlationId, uri: uri,
+      phase: 'LOADING', activeObserved: false]
   logInfo("Starting group announcement stream ${correlationId} on coordinator ${getId()} at volume=${targetVolume}")
   componentSetGroupLevelLocal(new BigDecimal(targetVolume))
   setAVTransportURIAndPlay(uri, null, [groupAnnouncementCorrelationId: correlationId])
@@ -5184,6 +5185,20 @@ void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
     audioSourceUrl = 'Not Available'
   }
 
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  if(announcement?.activeObserved == true && audioSourceUrl && audioSourceUrl != 'Not Available' &&
+      audioSourceUrl != announcement.uri?.toString()) {
+    String correlationId = announcement.correlationId?.toString()
+    logTrace("Observed external source replacing group announcement ${correlationId} on ${getId()}; expected=${announcement.uri}, observed=${audioSourceUrl}")
+    publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
+      externalPlayback: true,
+      replacementUri: audioSourceUrl,
+      playbackState: runtimeState.playbackState?.toString(),
+      sourceUri: device.currentValue('audioSource')?.toString()
+    ])
+    runtimeState.remove('groupAnnouncementStream')
+  }
   if(audioSourceUrl == this.device.currentValue('audioSource')) { return }
   queueLocalDeviceEvent('audioSource', audioSourceUrl)
   // Queue for batched group device update
@@ -7169,6 +7184,7 @@ void completePreparedAudioClipDispatch() {
   Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   if(activeClip?.rightChannel && rightChannel) {
+    logTrace("Finalizing paired-speaker audioClip release for Sonos player ${getId()}, child=${rightChannel.displayName} (${getRightChannelChildDNI()}), correlation=${activeClip.correlationId}")
     rightChannel.completeSynchronizedAudioClipRelease(
       activeClip.correlationId?.toString())
   } else if(rightChannelMissing || activeClip?.rightChannel) {

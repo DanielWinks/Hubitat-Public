@@ -36,6 +36,12 @@ void logWarn(String message) {
     if(app) log.warn "${app.label ?: app.name }: ${message}"
   }
 }
+void logTrace(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.trace "${device.label ?: device.name }: ${message}"
+    if(app) log.trace "${app.label ?: app.name }: ${message}"
+  }
+}
 
 metadata {
   definition(
@@ -82,6 +88,7 @@ void webSocketStatus(String message) {
     this.device.updateDataValue('websocketStatus', 'unknown')
     logWarn("Websocket status: ${message}")
   }
+  logTrace("WebSocket status callback: ${message}; storedStatus=${this.device.getDataValue('websocketStatus')}")
 }
 
 void wsConnect() {
@@ -179,8 +186,9 @@ void playerLoadAudioClipForSynchronizedRelease(String json, String correlationId
   if(!json || !correlationId) { return }
   Map pending = state.synchronizedAudioClipReleases instanceof Map
       ? (Map)state.synchronizedAudioClipReleases : [:]
-  Map release = [json: json, result: 'deferred']
-  if(this.device.getDataValue('websocketStatus') == 'open') {
+  String websocketStatus = this.device.getDataValue('websocketStatus')?.toString()
+  Map release = [json: json, result: 'deferred', websocketStatusAtRelease: websocketStatus]
+  if(websocketStatus == 'open') {
     try {
       interfaces.webSocket.sendMessage(json)
       release.result = 'sent'
@@ -200,11 +208,22 @@ void completeSynchronizedAudioClipRelease(String correlationId) {
       ? (Map)state.synchronizedAudioClipReleases : [:]
   Map release = pending.remove(correlationId) as Map
   state.synchronizedAudioClipReleases = pending
-  if(release == null) { return }
+  if(release == null) {
+    logTrace("No paired-speaker audioClip release record found during completion for ${correlationId}")
+    return
+  }
+  logTrace("Completing paired-speaker audioClip release for ${correlationId}: result=${release.result}, websocketStatusAtRelease=${release.websocketStatusAtRelease}, websocketStatusNow=${this.device.getDataValue('websocketStatus')}")
   if(release.result == 'deferred') {
-    sendWsMessage(release.json?.toString())
+    try {
+      sendWsMessage(release.json?.toString())
+      logTrace("Deferred paired-speaker audioClip dispatch returned successfully for ${correlationId}; websocketStatusNow=${this.device.getDataValue('websocketStatus')}")
+    } catch(Exception e) {
+      logWarn("Deferred paired-speaker audioClip dispatch failed for ${correlationId}: ${e.message}")
+    }
   } else if(release.result == 'failed') {
     logWarn("Paired-speaker audioClip send failed for ${correlationId}: ${release.error ?: 'unknown error'}")
+  } else if(release.result == 'sent') {
+    logTrace("Paired-speaker audioClip sent during synchronized release pass for ${correlationId}")
   }
 }
 // =============================================================================

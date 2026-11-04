@@ -3461,10 +3461,14 @@ void startNextGroupAnnouncement(String groupDni) {
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
   Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
   if(queue == null || queue.active instanceof Map) { return }
-  if(getActiveGroupOperation() != null || hasActiveAnnouncementTopologyTransaction()) {
+  Boolean takeoverCanContinue = queue.externalTakeover == true && canContinueAnnouncementQueueDuringTakeover(groupDni)
+  if(getActiveGroupOperation() != null || (hasActiveAnnouncementTopologyTransaction() && !takeoverCanContinue)) {
     logTrace("Deferring queued announcement for ${groupDni} while a Sonos topology transaction is active")
     runIn(2, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true])
     return
+  }
+  if(takeoverCanContinue) {
+    logTrace("Continuing queued announcements for ${groupDni} in the temporary topology while external playback remains active")
   }
   List<Map> pending = queue.pending instanceof List ? (List<Map>)queue.pending : []
   if(pending.isEmpty()) { queues.remove(groupDni); state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues; return }
@@ -3507,6 +3511,15 @@ void startNextGroupAnnouncement(String groupDni) {
     return
   }
   dispatchGroupAnnouncementByPolicy(groupDni, queue, item, players, coordinator, null)
+}
+
+Boolean canContinueAnnouncementQueueDuringTakeover(String groupDni) {
+  Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
+  return transactions.values().any { Map transaction ->
+    transaction.groupDni?.toString() == groupDni && transaction.phase?.toString() == 'RESTORING' &&
+        transaction.restorationReason?.toString() == 'INTERRUPTED_BY_EXTERNAL_PLAYBACK'
+  }
 }
 
 void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
@@ -4399,6 +4412,13 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
     state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = topologyTransactions
     logInfo("Beginning topology restoration for ${correlationId} after ${reason}")
     startNextAnnouncementRestorationStep(topologyTransaction)
+    if(reason == 'INTERRUPTED_BY_EXTERNAL_PLAYBACK' && queue.externalTakeover == true) {
+      queue.active = null
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      logInfo("Releasing announcement queue for ${groupDni} after external playback takeover; the next automatic message can use audioClip while topology restoration waits")
+      runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+    }
     return
   }
   queue.active = null
