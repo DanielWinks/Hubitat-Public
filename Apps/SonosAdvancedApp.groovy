@@ -366,6 +366,14 @@ Map mainPage() {
     }
 
     section('Announcement Settings') {
+      input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention',
+        options: [
+          '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
+          '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
+          '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
+          '1440': '24 hours', unlimited: 'Unlimited'
+        ], required: true, defaultValue: '60', submitOnChange: true
+      paragraph 'Maximum time between when a TTS message is submitted on Hubitat and when it is dequeued and sent to the speaker.'
       input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method',
         options: [
           automatic: 'Automatic',
@@ -1971,6 +1979,8 @@ void cancelGroupEdit() {
 // =============================================================================
 // Initialize() and Configure()
 // =============================================================================
+void installed() { initialize() }
+void updated() { configure() }
 void initialize() { configure() }
 
 @Field static final String STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY = 'staticDriverActivePlayerRoster'
@@ -2020,6 +2030,8 @@ void configure() {
   // Initialize settings with defaults
   if(settings.skipOrphanRemoval == null) { settings.skipOrphanRemoval = false }
   if(settings.descriptionTextEnable == null) { settings.descriptionTextEnable = true }
+  // Hubitat does not persist a newly introduced preference's default on existing apps.
+  if(settings.maximumTtsRetention == null) { settings.maximumTtsRetention = '60' }
 
   try { createPlayerDevices() }
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
@@ -3236,6 +3248,7 @@ void playerStateUpdateHandler(Event event) {
         ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
     offlinePlayers.remove(playerDni)
     state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+    resumeAnnouncementsForPlayer(playerDni)
     return
   }
   if(payload.kind == 'householdPresence') {
@@ -3380,6 +3393,7 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
   String groupDni = groupDevice.deviceNetworkId
   String correlationId = args.correlationId?.toString() ?: requestId ?: UUID.randomUUID().toString()
   Map item = [correlationId: correlationId, requestId: requestId, command: command,
+    submittedAt: now(),
     uri: args.uri?.toString(), volume: args.volume?.toString(),
     duration: (toBigDecimal(args.duration)?.intValue() ?: 0),
     forceAudioClip: args.forceAudioClip == true,
@@ -3471,6 +3485,23 @@ void startNextGroupAnnouncement(String groupDni) {
     logTrace("Continuing queued announcements for ${groupDni} in the temporary topology while external playback remains active")
   }
   List<Map> pending = queue.pending instanceof List ? (List<Map>)queue.pending : []
+  Long maxRetentionMs = getMaximumTtsRetentionMs()
+  if(maxRetentionMs != null) {
+    Long currentTime = now()
+    List<Map> expired = pending.findAll { Map queuedItem ->
+      Long submittedAt = queuedItem.submittedAt instanceof Number ? ((Number)queuedItem.submittedAt).longValue() : currentTime
+      return currentTime - submittedAt > maxRetentionMs
+    }
+    if(expired) {
+      pending.removeAll(expired)
+      expired.each { Map queuedItem ->
+        logInfo("Discarding expired queued announcement ${queuedItem.correlationId}; it exceeded the configured TTS retention")
+      }
+      queue.pending = pending
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    }
+  }
   if(pending.isEmpty()) { queues.remove(groupDni); state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues; return }
   Map item = pending.remove(0)
   queue.active = item
@@ -3484,6 +3515,21 @@ void startNextGroupAnnouncement(String groupDni) {
   if(coordinator == null || players.isEmpty()) {
     logWarn("Cannot start group announcement ${item.correlationId}: target devices are unavailable")
     finishGroupAnnouncement(groupDni, item.correlationId?.toString(), 'FAILED')
+    return
+  }
+  Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
+  Boolean targetOffline = players.any { ChildDeviceWrapper player ->
+    offlinePlayers.containsKey(player.getDeviceNetworkId())
+  }
+  if(targetOffline) {
+    queue.active = null
+    pending.add(0, item)
+    queue.pending = pending
+    queues[groupDni] = queue
+    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    logDebug("Deferring announcement ${item.correlationId} while a target speaker is offline")
+    runIn(30, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true])
     return
   }
   if(item.forceAudioClip == true) {
@@ -3511,6 +3557,30 @@ void startNextGroupAnnouncement(String groupDni) {
     return
   }
   dispatchGroupAnnouncementByPolicy(groupDni, queue, item, players, coordinator, null)
+}
+
+/** Resume any group queues that include a speaker whose WebSocket has reconnected. */
+void resumeAnnouncementsForPlayer(String playerDni) {
+  Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
+  queues.each { String groupDni, Map queue ->
+    List<Map> pending = queue.pending instanceof List ? (List<Map>)queue.pending : []
+    Boolean targetsPlayer = pending.any { Map item ->
+      normalizeGroupPlayerIds(item.playerIds).contains(getChildDevice(playerDni)?.getDataValue('id')?.toString())
+    }
+    if(targetsPlayer && !(queue.active instanceof Map)) { runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true]) }
+  }
+}
+
+/** Return the configured queued-TTS age limit, or null when retention is unlimited. */
+Long getMaximumTtsRetentionMs() {
+  String configuredValue = settings.maximumTtsRetention?.toString() ?: '60'
+  if(configuredValue == 'unlimited') { return null }
+  try {
+    return Long.parseLong(configuredValue) * 60L * 1000L
+  } catch(NumberFormatException ignored) {
+    return 60L * 60L * 1000L
+  }
 }
 
 Boolean canContinueAnnouncementQueueDuringTakeover(String groupDni) {

@@ -1356,6 +1356,55 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { it.contains('treating the group as otherwise idle') }
   }
 
+  def "expired queued announcements are discarded before dispatch"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.settings.maximumTtsRetention = '60'
+    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [pending: [[
+      correlationId: 'stale-announcement', command: 'playAudioClip',
+      uri: 'http://example.test/stale.mp3', volume: '15', duration: 5,
+      submittedAt: appScript.now() - (2L * 60L * 60L * 1000L),
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
+    ]]]]
+
+    when:
+    appScript.startNextGroupAnnouncement('GROUP-DNI')
+
+    then:
+    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' || it.name == 'playerPrepareAudioClipForSynchronizedStart' }
+    !appScript.state.groupAnnouncementQueues.containsKey('GROUP-DNI')
+    appScript.logs.any { it.contains('Discarding expired queued announcement stale-announcement') }
+  }
+
+  def "announcement stays queued while a target speaker is offline"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.state.offlineSonosPlayers = ['DNI-RINCON_FOLLOW': [id: 'RINCON_FOLLOW', retryDelay: 30]]
+    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [pending: [[
+      correlationId: 'offline-announcement', command: 'playAudioClip',
+      uri: 'http://example.test/offline.mp3', volume: '15', duration: 5,
+      submittedAt: appScript.now(), coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
+    ]]]]
+
+    when:
+    appScript.startNextGroupAnnouncement('GROUP-DNI')
+
+    then:
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active == null
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].pending*.correlationId == ['offline-announcement']
+    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' || it.name == 'playerPrepareAudioClipForSynchronizedStart' }
+    appScript.scheduled.any { it[1] == 'startNextGroupAnnouncementCallback' }
+  }
+
+  def "unlimited TTS retention disables expiration"() {
+    expect:
+    appScript.settings.maximumTtsRetention = 'unlimited'
+    appScript.getMaximumTtsRetentionMs() == null
+    appScript.settings.maximumTtsRetention = '60'
+    appScript.getMaximumTtsRetentionMs() == 3600000L
+  }
+
   def "queued announcement uses audioClip when an external source replaces prior TTS"() {
     given:
     makeAnnouncementRosterExact()
