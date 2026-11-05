@@ -379,13 +379,13 @@ Map mainPage() {
           automatic: 'Automatic',
           alwaysNonInterrupting: 'Always non-interrupting',
           alwaysCoordinatorStream: 'Always standard stream'
-        ], required: true, defaultValue: 'automatic', submitOnChange: true
+        ], required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
       input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method',
         options: [
           automatic: 'Automatic',
           alwaysNonInterrupting: 'Always non-interrupting',
           alwaysCoordinatorStream: 'Always standard stream'
-        ], required: true, defaultValue: 'automatic', submitOnChange: true
+        ], required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
       input 'automaticTtsTopologyChanges', 'bool', title: 'Automatic TTS topology changes',
         required: true, defaultValue: true, submitOnChange: true
       paragraph 'Choose the routing policy independently for normal and high priority announcements. <b>Automatic:</b> use synchronized audio clips while a player or group is playing another source; otherwise use a standard stream when the target topology can be prepared safely. <b>Always non-interrupting:</b> use synchronized audio clips even when players are idle, preserving current playback. <b>Always standard stream:</b> use a standard stream on the group coordinator; this can replace current playback and may force temporary topology changes.'
@@ -2032,6 +2032,10 @@ void configure() {
   if(settings.descriptionTextEnable == null) { settings.descriptionTextEnable = true }
   // Hubitat does not persist a newly introduced preference's default on existing apps.
   if(settings.maximumTtsRetention == null) { settings.maximumTtsRetention = '60' }
+  // These app-level announcement policies were added after installs already existed.
+  // Persist the safe default only when the setting is missing; keep user selections.
+  if(settings.groupAnnouncementMode == null) { settings.groupAnnouncementMode = 'alwaysNonInterrupting' }
+  if(settings.highPriorityAnnouncementMode == null) { settings.highPriorityAnnouncementMode = 'alwaysNonInterrupting' }
 
   try { createPlayerDevices() }
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
