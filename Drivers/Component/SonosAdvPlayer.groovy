@@ -536,9 +536,16 @@ void initialize() {
   configure()
   // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
   Integer staggerDelay = getRandomLockRetry(3, 20)
-  logDebug("Scheduling full subscription renewal in ${staggerDelay} seconds")
-  runIn(staggerDelay, 'fullRenewSubscriptions', [overwrite: true])
+  requestFullSubscriptionRenewal(staggerDelay, 'Initialize')
   scheduleWebsocketHealthCheck()
+}
+
+/** Queue a full subscription recovery. Both lifecycle entry points schedule the
+ * same method with overwrite enabled, coalescing close-together requests.
+ */
+void requestFullSubscriptionRenewal(Integer delaySeconds, String reason) {
+  logInfo("Scheduling full subscription recovery after ${reason} in ${delaySeconds} seconds")
+  runIn(delaySeconds, 'fullRenewSubscriptions', [overwrite: true])
 }
 void configure() {
   invalidateUpnpRequestsForDevice()
@@ -696,16 +703,13 @@ void fullRenewSubscriptions() {
     return
   }
 
-  // A stored "open" status does not guarantee that the Hubitat WebSocket
-  // object is still usable. Force a new transport during a full renewal so
-  // queued commands such as volume and audio clips cannot be sent to a stale
-  // connection.
-  if(isWebsocketConnected()) {
-    logDebug('Closing existing WebSocket before full subscription renewal')
-    try { wsClose() }
-    catch(Exception e) { logTrace("Could not close existing WebSocket during renewal: ${e.message}") }
-    setWebSocketStatus('closed')
-  }
+  // Driver updates and hub restarts can invalidate the actual WebSocket while
+  // leaving the persisted status as "open". Always retire the old transport and
+  // clear its subscription markers before reconnecting, regardless of that status.
+  logDebug('Closing existing WebSocket before full subscription renewal')
+  try { wsClose() }
+  catch(Exception e) { logTrace("Could not close existing WebSocket during renewal: ${e.message}") }
+  setWebSocketStatus('closed')
 
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
   runIn(7, 'subscribeToEvents', [overwrite: true])
@@ -837,18 +841,14 @@ void secondaryConfigurationPhase4() {
   groupsRegistryInitialization()
   favoritesMapInitialization()
 
-  // After device data is configured, establish subscriptions if not already done
-  // This handles the fresh install case where fullRenewSubscriptions() exited early
+  // After device data is configured, force a complete recovery. The persisted
+  // WebSocket status and in-memory namespace markers may survive a driver update
+  // even though the underlying connection and subscriptions do not.
   String localUpnpHost = device.getDataValue('localUpnpHost')
   String websocketUrl = device.getDataValue('websocketUrl')
 
   if(localUpnpHost && websocketUrl) {
-    String wsPlaybackStatus = getWsSubscriptionValue('playback')
-    if(wsPlaybackStatus == 'Unsubscribed') {
-      logInfo('Device data now configured, establishing subscriptions...')
-      runIn(2, 'initializeWebsocketConnection', [overwrite: true])
-      runIn(7, 'subscribeToEvents', [overwrite: true])
-    }
+    requestFullSubscriptionRenewal(1, 'secondary configuration')
   } else {
     logWarn('Device data still incomplete after validation - subscriptions not established')
   }
