@@ -457,6 +457,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
     driver.location.metaClass.getHub = { -> new Expando(localIP: '192.168.1.4', localSrvPortTCP: 39501) }
     driver.upnpRequestQueues.clear()
+    driver.eventTimestamps.clear()
     driver.device.dataValues.groupId = 'GROUP_TEST'
     driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.isGroupCoordinator = 'true'
@@ -1498,6 +1499,83 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.runtimeState.upnpExpectedSubscriptionEvents == null
+  }
+
+  def "UPnP event expectations cover state-changing SOAP actions only"() {
+    expect:
+    driver.expectedUpnpSidForSoapAction([headers: [SOAPAction: soapAction]]) == expectedSid
+
+    where:
+    soapAction                                                                                         || expectedSid
+    'urn:schemas-upnp-org:service:AVTransport:1#Play'                                                  || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#Pause'                                                 || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#Stop'                                                  || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#Next'                                                  || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#Previous'                                              || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#Seek'                                                  || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI'                                     || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#RemoveAllTracksFromQueue'                              || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#AddURIToQueue'                                         || 'sid1'
+    'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume'                                        || 'sid2'
+    'urn:schemas-upnp-org:service:RenderingControl:1#SetMute'                                           || 'sid2'
+    'urn:schemas-upnp-org:service:RenderingControl:1#SetBass'                                           || 'sid2'
+    'urn:schemas-upnp-org:service:RenderingControl:1#SetTreble'                                         || 'sid2'
+    'urn:schemas-upnp-org:service:RenderingControl:1#SetLoudness'                                       || 'sid2'
+    'urn:schemas-upnp-org:service:RenderingControl:1#SetEQ'                                            || 'sid2'
+    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupVolume'                              || 'sid4'
+    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetRelativeGroupVolume'                      || 'sid4'
+    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupMute'                                || 'sid4'
+    'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'                                      || null
+    'urn:schemas-upnp-org:service:RenderingControl:1#GetVolume'                                         || null
+  }
+
+  def "UPnP expectation retries once and then stops when no event arrives"() {
+    given:
+    driver.armExpectedUpnpSubscriptionEvent('sid1', 'Play')
+    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
+    pending[0].deadlineAt = driver.now() - 1L
+
+    when:
+    driver.watchExpectedUpnpSubscriptionEvents()
+
+    then:
+    pending[0].attempts == 1
+    rawRequests.size() == 1
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+
+    when:
+    pending[0].deadlineAt = driver.now() - 1L
+    driver.watchExpectedUpnpSubscriptionEvents()
+
+    then:
+    driver.runtimeState.upnpExpectedSubscriptionEvents == null
+    rawRequests.size() == 1
+    driver.logs.any { it.toString().contains('No UPnP sid1 event arrived after resubscription for Play') }
+  }
+
+  def "GroupRenderingControl expectation does not resubscribe after player becomes ungrouped"() {
+    given:
+    driver.device.currentValues.isGrouped = 'off'
+    driver.armExpectedUpnpSubscriptionEvent('sid4', 'SetGroupVolume')
+    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
+    pending[0].deadlineAt = driver.now() - 1L
+
+    when:
+    driver.watchExpectedUpnpSubscriptionEvents()
+
+    then:
+    driver.runtimeState.upnpExpectedSubscriptionEvents == null
+    rawRequests.empty
+    driver.logs.any { it.toString().contains('Skipping GroupRenderingControl resubscribe') }
+  }
+
+  def "AVTransport event receipt records a per-player diagnostic timestamp"() {
+    when:
+    driver.setLastInboundAVTransportEvent()
+
+    then:
+    driver.getLastInboundAVTransportEventEpoch() > 0L
+    driver.EVENT_TIMESTAMP_KEYS.contains('lastAVTransportEvent')
   }
 
   def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {

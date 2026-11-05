@@ -3089,6 +3089,7 @@ void parse(String raw) {
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
     if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
       try {
+        setLastInboundAVTransportEvent()
         observeExpectedUpnpSubscriptionEvent('sid1')
         processAVTransportMessages(xmlBody, getLocalUpnpUrl())
       } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
@@ -4633,6 +4634,16 @@ void removeEventTimestampDeviceDataKeys() {
 }
 
 @CompileStatic
+Long getLastInboundAVTransportEventEpoch() {
+  Long ts = eventTimestamps.get("${getDeviceDNI()}-lastAVTransportEvent" as String)
+  return ts != null ? ts : 0L
+}
+@CompileStatic
+void setLastInboundAVTransportEvent() {
+  eventTimestamps.put("${getDeviceDNI()}-lastAVTransportEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastAVTransportEvent')
+}
+@CompileStatic
 Long getLastInboundMrRcEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastMrRcEvent" as String)
   return ts != null ? ts : 0L
@@ -4789,7 +4800,7 @@ Boolean isDebugLoggingEnabled() {
 }
 
 @Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastWebsocketEvent']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
@@ -7545,22 +7556,43 @@ void watchExpectedUpnpSubscriptionEvents() {
   List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
       ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
   Long currentTime = now()
+  Long currentTimeEpoch = currentTime.longValue().intdiv(1000L)
   List<Map> due = pending.findAll { Map item -> (item.deadlineAt as Long) <= currentTime }
   due.each { Map expectation ->
+    String sidKey = expectation.sidKey?.toString()
+    Long lastEventEpoch = getLastInboundUpnpEventEpoch(sidKey)
+    String lastEventAge = lastEventEpoch > 0L
+        ? "${Math.max(0L, currentTimeEpoch - lastEventEpoch)}s ago"
+        : 'not observed in this runtime'
     if(((expectation.attempts ?: 0) as Integer) < 1) {
-      String sidKey = expectation.sidKey?.toString()
-      logWarn("No UPnP ${sidKey} subscription event arrived after ${expectation.action}; resubscribing (guid=${expectation.guid})")
+      if(sidKey == 'sid4' && !getIsGrouped()) {
+        logDebug("Skipping GroupRenderingControl resubscribe after ${expectation.action}; player is no longer grouped (guid=${expectation.guid})")
+        pending.remove(expectation)
+        return
+      }
+      logWarn("No UPnP ${sidKey} subscription event arrived after ${expectation.action}; last event ${lastEventAge}; resubscribing (guid=${expectation.guid})")
       resubscribeUpnpSid(sidKey)
       expectation.attempts = 1
       expectation.deadlineAt = currentTime + UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L
     } else {
-      logWarn("No UPnP ${expectation.sidKey} event arrived after resubscription for ${expectation.action} (guid=${expectation.guid})")
+      logWarn("No UPnP ${sidKey} event arrived after resubscription for ${expectation.action}; last event ${lastEventAge} (guid=${expectation.guid})")
       pending.remove(expectation)
     }
   }
   if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
   else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
   scheduleExpectedUpnpEventWatchdog()
+}
+
+@CompileStatic
+Long getLastInboundUpnpEventEpoch(String sidKey) {
+  switch(sidKey) {
+    case 'sid1': return getLastInboundAVTransportEventEpoch()
+    case 'sid2': return getLastInboundMrRcEventEpoch()
+    case 'sid3': return getLastInboundZgtEventEpoch()
+    case 'sid4': return getLastInboundMrGrcEventEpoch()
+    default: return 0L
+  }
 }
 
 void resubscribeUpnpSid(String sidKey) {
