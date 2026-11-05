@@ -97,8 +97,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.state.playbackState == 'PLAYBACK_STATE_IDLE'
     (driver.state.playbackStateObservedAt as Long) > 0L
-    !driver.pendingLocalDeviceEvents[dni].containsKey('playbackState')
-    !driver.pendingLocalDeviceEvents[dni].containsKey('playbackStateObservedAt')
+    driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackState') != true
+    driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackStateObservedAt') != true
     driver.locationEvents.any { Map event ->
       event.data?.kind == 'playbackObservation' && event.data?.playbackState == 'PLAYBACK_STATE_IDLE' &&
         event.data?.playbackObservedAt == driver.state.playbackStateObservedAt
@@ -119,8 +119,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.state.audioSourceSignalStatus == 'no-signal'
     (driver.state.audioSourceSignalObservedAt as Long) > 0L
-    !driver.pendingLocalDeviceEvents[dni].containsKey('audioSourceSignalStatus')
-    !driver.pendingLocalDeviceEvents[dni].containsKey('audioSourceSignalObservedAt')
+    driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalStatus') != true
+    driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalObservedAt') != true
     driver.locationEvents.any { Map event ->
       event.data?.kind == 'playbackObservation' && event.data?.signalStatus == 'no-signal'
     }
@@ -1702,6 +1702,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "public restore resume and speak commands preserve zero in clip payloads"() {
     given:
     driver.metaClass.getParent = { -> null }
+    driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
     driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3', duration: 1] as LinkedHashMap }
     driver.device.dataValues.capabilities = 'AUDIO_CLIP'
     driver.device.currentValues.volume = 5
