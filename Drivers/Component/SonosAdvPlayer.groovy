@@ -8534,11 +8534,11 @@ void processWebsocketMessage(String message) {
                 if(tok.size() >= 2) { objectId = tok[1] }
               }
               String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-              getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
+              getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name, details:new LinkedHashMap(item)]
             }
           } else if(item?.imageUrl != null) {
             String universalMusicObjectId = ("${item?.imageUrl}".toString()).split('&v=')[0]
-            getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name]
+            getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name, details:new LinkedHashMap(item)]
           }
         }
       }
@@ -8680,7 +8680,7 @@ void processWebsocketMessage(String message) {
           String playlistId = (String)item?.id
           String playlistName = (String)item?.name
           if(playlistId != null) {
-            getPlaylistsMap()[playlistId] = [id: playlistId, name: playlistName, service: 'Sonos']
+            getPlaylistsMap()[playlistId] = [id: playlistId, name: playlistName, service: 'Sonos', details:new LinkedHashMap(item)]
           }
         }
       }

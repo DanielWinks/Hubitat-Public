@@ -29,6 +29,7 @@ import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.hub.domain.Event
 import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import groovy.util.slurpersupport.GPathResult
 import hubitat.scheduling.AsyncResponse
 
@@ -255,6 +256,10 @@ preferences {
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
 @Field static final String GROUPING_MODE_CURRENT = 'CURRENT'
 @Field static final String GROUP_DEVICE_DNI_MARKER = '-SonosGroupDevice-'
+@Field static final String ALARM_SWITCH_DNI_MARKER = '-SonosAlarm-'
+@Field static final String ALARM_MANAGER_DNI_MARKER = '-SonosAlarmManager-'
+@Field static final String SONOS_ALARM_SERVICE_TYPE = 'urn:schemas-upnp-org:service:AlarmClock:1'
+@Field static final String SONOS_ALARM_CONTROL_URL = '/AlarmClock/Control'
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
@@ -324,6 +329,7 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // =============================================================================
 Map mainPage() {
   applyLogLevelChange()
+  applyAlarmManagementPreferenceChanges()
   if(settings.useOldUi == true) {
     stopDiscovery()
   }
@@ -401,6 +407,20 @@ Map mainPage() {
           (getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream')) {
         paragraph '<span style="color:#ff6b6b"><b>Warning:</b> Always standard stream with automatic topology changes can force temporary regrouping, including changes to active outside groups. Playback in those groups may be interrupted. The app attempts to restore their original topology after the announcement.</span>'
       }
+    }
+
+    section('Alarm Management') {
+      input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?',
+        required: false, defaultValue: false, submitOnChange: true
+      if(settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true') {
+        paragraph 'Creates one household-level Sonos Alarm Manager child device.'
+      }
+      input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?',
+        required: false, defaultValue: false, submitOnChange: true
+      if(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true') {
+        paragraph 'Creates one switch child device for each alarm found on the Sonos household. Alarm changes are sent over the local Sonos UPnP interface.'
+      }
+      paragraph 'Each option takes effect as soon as it is toggled.'
     }
 
     section('Update Settings:', hideable: true, hidden: true) {
@@ -2044,6 +2064,8 @@ void configure() {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  try { configureAlarmManagement() }
+  catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
   refreshStaticDriverActivePlayerRoster()
   unschedule('refreshStaticDriverActivePlayerRoster')
   schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
@@ -2075,6 +2097,385 @@ void configure() {
   unschedule('refreshFavoritesAndPlaylists')
   schedule('0 5 3 * * ?', 'refreshFavoritesAndPlaylists')
 }
+
+// =============================================================================
+// Alarm management (local Sonos AlarmClock UPnP service)
+// =============================================================================
+void configureAlarmManagement() {
+  Boolean managerEnabled = settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true'
+  Boolean switchesEnabled = settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true'
+  state.alarmManagementPreferencesApplied = [manager: managerEnabled, switches: switchesEnabled]
+
+  if(!managerEnabled) { removeAlarmManagerDevices() }
+  if(!switchesEnabled) {
+    unschedule('refreshAllSonosAlarms')
+    removeAlarmSwitchDevices()
+  } else {
+    unschedule('refreshAllSonosAlarms')
+    schedule('0 */15 * * * ?', 'refreshAllSonosAlarms')
+  }
+  if(!managerEnabled && !switchesEnabled) { return }
+
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  Map<String, ChildDeviceWrapper> householdPlayers = [:]
+  players.each { ChildDeviceWrapper player ->
+    String householdId = player.getDataValue('householdId')?.toString()
+    if(householdId && !householdPlayers.containsKey(householdId)) { householdPlayers[householdId] = player }
+  }
+  householdPlayers.each { String householdId, ChildDeviceWrapper player ->
+    if(managerEnabled) { ensureAlarmManagerDevice(householdId) }
+    if(switchesEnabled) { refreshSonosAlarms(householdId, player) }
+  }
+}
+
+void applyAlarmManagementPreferenceChanges() {
+  Boolean managerEnabled = settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true'
+  Boolean switchesEnabled = settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true'
+  Map applied = state.alarmManagementPreferencesApplied instanceof Map ? (Map)state.alarmManagementPreferencesApplied : null
+  if(applied == null || applied.manager != managerEnabled || applied.switches != switchesEnabled) {
+    configureAlarmManagement()
+  }
+}
+
+void refreshAllSonosAlarms() {
+  if(!(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true')) { return }
+  Map<String, ChildDeviceWrapper> householdPlayers = [:]
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String householdId = player.getDataValue('householdId')?.toString()
+    if(householdId && !householdPlayers.containsKey(householdId)) { householdPlayers[householdId] = player }
+  }
+  householdPlayers.each { String householdId, ChildDeviceWrapper player -> refreshSonosAlarms(householdId, player) }
+}
+
+void ensureAlarmManagerDevice(String householdId) {
+  String dni = "${app.id}${ALARM_MANAGER_DNI_MARKER}${householdId}"
+  ChildDeviceWrapper manager = getChildDevice(dni)
+  if(manager == null) {
+    try {
+      manager = addChildDevice('dwinks', 'Sonos Advanced Alarm Manager', dni,
+        [name: 'Sonos Alarm Manager', label: 'Sonos Alarm Manager', isComponent: true])
+      logInfo('Created Sonos Alarm Manager for household ' + householdId)
+    } catch(Exception e) {
+      logWarn('Could not create alarm manager for ' + householdId + ': ' + e.message)
+      return
+    }
+  }
+  manager.updateDataValue('householdId', householdId)
+  manager.setLabel('Sonos Alarm Manager')
+}
+
+void removeAlarmManagerDevices() {
+  getChildDevices().findAll { ChildDeviceWrapper child ->
+    child.getDeviceNetworkId()?.contains(ALARM_MANAGER_DNI_MARKER)
+  }.each { ChildDeviceWrapper child ->
+    try { deleteChildDevice(child.getDeviceNetworkId()) }
+    catch(Exception e) { logWarn("Could not remove alarm manager ${child.label}: ${e.message}") }
+  }
+}
+
+void removeAlarmSwitchDevices() {
+  getChildDevices().findAll { ChildDeviceWrapper child ->
+    child.getDeviceNetworkId()?.contains(ALARM_SWITCH_DNI_MARKER)
+  }.each { ChildDeviceWrapper child ->
+    try { deleteChildDevice(child.getDeviceNetworkId()) }
+    catch(Exception e) { logWarn("Could not remove alarm child ${child.label}: ${e.message}") }
+  }
+}
+
+void removeAlarmDevices() {
+  removeAlarmSwitchDevices()
+  removeAlarmManagerDevices()
+}
+
+void refreshSonosAlarms(String householdId, ChildDeviceWrapper player) {
+  if(!(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true')) { return }
+  String host = player?.getDataValue('localUpnpHost')?.toString()
+  if(!householdId || !host) { logWarn("Cannot refresh alarms for household ${householdId}: no local Sonos player endpoint"); return }
+  String requestId = UUID.randomUUID().toString()
+  state.sonosAlarmRefreshRequestIds = (state.sonosAlarmRefreshRequestIds instanceof Map ? state.sonosAlarmRefreshRequestIds : [:]) + [(householdId): requestId]
+  String body = sonosAlarmSoapBody('ListAlarms', [:])
+  Map params = [uri: "http://${host}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
+    headers: [SOAPAction: "${SONOS_ALARM_SERVICE_TYPE}#ListAlarms"], body: body, timeout: 10]
+  asynchttpPost('sonosAlarmListCallback', params, [householdId: householdId, playerDni: player.deviceNetworkId, requestId: requestId])
+}
+
+void refreshSonosAlarmsForHousehold(String householdId) {
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDataValue('householdId')?.toString() == householdId
+  }
+  if(player) { refreshSonosAlarms(householdId, player) }
+  else { logWarn("Cannot refresh alarms for ${householdId}: no Sonos player child is available") }
+}
+
+void sonosAlarmListCallback(AsyncResponse response, Map data) {
+  String householdId = data?.householdId?.toString()
+  Map requests = state.sonosAlarmRefreshRequestIds instanceof Map ? (Map)state.sonosAlarmRefreshRequestIds : [:]
+  if(!householdId || requests[householdId] != data?.requestId) { return }
+  requests.remove(householdId)
+  state.sonosAlarmRefreshRequestIds = requests
+  if(!(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true')) {
+    removeAlarmSwitchDevices()
+    return
+  }
+  if(response == null || response.hasError() || response.status != 200) {
+    logWarn("Sonos alarm refresh failed for ${householdId}: HTTP ${response?.status} ${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    List<Map> alarms = parseSonosAlarmList(response.getData()?.toString())
+    reconcileSonosAlarmChildren(householdId, alarms)
+    logInfo("Found ${alarms.size()} Sonos alarm(s) in household ${householdId}")
+  } catch(Exception e) {
+    logWarn("Could not parse Sonos alarms for household ${householdId}: ${e.message}")
+  }
+}
+
+@CompileStatic
+String sonosAlarmSoapBody(String action, Map values) {
+  StringBuilder args = new StringBuilder()
+  values.each { Object key, Object value -> args.append('<').append(key).append('>').append(escapeSonosXml(value?.toString() ?: '')).append('</').append(key).append('>') }
+  return '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:' + action + ' xmlns:u="' + SONOS_ALARM_SERVICE_TYPE + '">' + args.toString() + '</u:' + action + '></s:Body></s:Envelope>'
+}
+
+@CompileStatic
+String escapeSonosXml(String value) {
+  return value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
+}
+
+List<Map> parseSonosAlarmList(String responseXml) {
+  if(!responseXml) { return [] }
+  GPathResult outer = new XmlSlurper(false, false).parseText(responseXml)
+  String alarmXml = outer.depthFirst().find { node -> node.name()?.toString()?.endsWith('CurrentAlarmList') }?.text()
+  if(!alarmXml) { return [] }
+  GPathResult alarmRoot = new XmlSlurper(false, false).parseText(alarmXml)
+  List<Map> result = []
+  alarmRoot.depthFirst().findAll { node -> node.name()?.toString()?.endsWith('Alarm') }.each { node ->
+    Map attrs = [:]
+    node.attributes().each { Object key, Object value -> attrs[key.toString()] = value.toString() }
+    if(attrs.StartTime && !attrs.StartLocalTime) { attrs.StartLocalTime = attrs.StartTime }
+    if(attrs.ID) { result.add(attrs) }
+  }
+  return result
+}
+
+void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
+  Set<String> keep = [] as Set<String>
+  Map<String, ChildDeviceWrapper> playersById = [:]
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    if(player.getDataValue('householdId')?.toString() == householdId) {
+      playersById[player.getDataValue('id')?.toString()] = player
+    }
+  }
+  alarms.each { Map alarm ->
+    String alarmId = alarm.ID?.toString()
+    String roomUuid = alarm.RoomUUID?.toString()
+    if(!alarmId || !roomUuid) { return }
+    String dni = "${app.id}${ALARM_SWITCH_DNI_MARKER}${householdId}-${alarmId}"
+    keep.add(dni)
+    ChildDeviceWrapper child = getChildDevice(dni)
+    if(child == null) {
+      try { child = addChildDevice('dwinks', 'Sonos Advanced Alarm Switch', dni,
+        [name: 'Sonos Alarm', label: "Sonos Alarm: ${roomUuid} ${alarm.StartLocalTime ?: ''}", isComponent: true]) }
+      catch(Exception e) { logWarn("Could not create Sonos alarm child ${alarmId}: ${e.message}"); return }
+    }
+    ChildDeviceWrapper roomPlayer = playersById[roomUuid]
+    child.updateDataValue('householdId', householdId)
+    child.updateDataValue('alarmId', alarmId)
+    child.updateDataValue('roomUuid', roomUuid)
+    child.updateDataValue('playerDni', roomPlayer?.deviceNetworkId ?: '')
+    child.updateDataValue('localUpnpHost', roomPlayer?.getDataValue('localUpnpHost')?.toString() ?: '')
+    child.updateDataValue('alarmData', JsonOutput.toJson(alarm))
+    child.updateDataValue('parentAppId', app.id.toString())
+    child.sendEvent(name: 'switch', value: alarm.Enabled?.toString() == '1' ? 'on' : 'off')
+    child.sendEvent(name: 'alarmTime', value: alarm.StartLocalTime?.toString() ?: '')
+    child.sendEvent(name: 'alarmVolume', value: alarm.Volume?.toString()?.toInteger() ?: 0)
+    child.sendEvent(name: 'recurrence', value: alarm.Recurrence?.toString() ?: '')
+    child.sendEvent(name: 'room', value: roomPlayer?.label ?: roomUuid)
+    child.sendEvent(name: 'duration', value: alarm.Duration?.toString() ?: '')
+    child.sendEvent(name: 'alarmSource', value: alarm.ProgramURI?.toString() ?: '')
+    child.sendEvent(name: 'playMode', value: alarm.PlayMode?.toString() ?: '')
+    if(alarm.containsKey('IncludeLinkedZones')) {
+      String linkedZones = alarm.IncludeLinkedZones?.toString()?.toLowerCase()
+      child.sendEvent(name: 'includeGroupedRooms', value: linkedZones in ['1', 'true'] ? 'true' : 'false')
+    }
+    child.setLabel("Sonos Alarm: ${roomPlayer?.label ?: roomUuid} ${alarm.StartLocalTime ?: ''}")
+  }
+  getChildDevices().findAll { ChildDeviceWrapper child -> child.getDeviceNetworkId()?.contains(ALARM_SWITCH_DNI_MARKER) && child.getDeviceNetworkId()?.contains("${ALARM_SWITCH_DNI_MARKER}${householdId}-") && !keep.contains(child.getDeviceNetworkId()) }
+    .each { ChildDeviceWrapper child -> deleteChildDevice(child.getDeviceNetworkId()) }
+}
+
+void createSonosAlarm(String householdId, Map alarm) {
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDataValue('householdId')?.toString() == householdId
+  }
+  String host = player?.getDataValue('localUpnpHost')?.toString()
+  if(!host) { logWarn("Cannot create Sonos alarm in ${householdId}: no local player endpoint"); return }
+  List<String> required = ['StartLocalTime','Duration','Recurrence','Enabled','RoomUUID','ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones']
+  if(required.any { String key -> alarm[key] == null }) { logWarn('Cannot create Sonos alarm: one or more required settings are missing'); return }
+  if(!(alarm.Recurrence in ['ONCE','DAILY','WEEKDAYS','WEEKENDS']) || !(alarm.PlayMode in ['NORMAL','REPEAT_ALL','SHUFFLE_NOREPEAT','SHUFFLE'])) {
+    logWarn('Cannot create Sonos alarm: recurrence or play mode is invalid'); return
+  }
+  Integer volume = alarm.Volume.toString().toInteger()
+  if(volume < 0 || volume > 100 || !(alarm.StartLocalTime ==~ /\d{2}:\d{2}:\d{2}/) || !(alarm.Duration ==~ /\d{2}:\d{2}:\d{2}/)) {
+    logWarn('Cannot create Sonos alarm: time, duration, or volume is invalid'); return
+  }
+  Map params = [uri: "http://${host}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
+    headers: [SOAPAction: "${SONOS_ALARM_SERVICE_TYPE}#CreateAlarm"], body: sonosAlarmSoapBody('CreateAlarm', alarm), timeout: 10]
+  asynchttpPost('sonosAlarmCreateCallback', params, [householdId: householdId, playerDni: player.deviceNetworkId])
+}
+
+void createSonosAlarmFromCatalogSource(String householdId, String sourceType, String sourceId, Map alarm) {
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDataValue('householdId')?.toString() == householdId
+  }
+  if(player == null) { logWarn("Cannot create alarm from ${sourceType}: no player is available for household ${householdId}"); return }
+  Map<String, LinkedHashMap> catalog = sourceType == 'favorite' ? player.getFavoritesMap() : player.getPlaylistsMap()
+  Map entry = catalog?.values()?.find { Map candidate -> candidate?.get('id')?.toString() == sourceId }
+  Map details = entry?.details instanceof Map ? (Map)entry.details : [:]
+  Map resource = details?.resource instanceof Map ? (Map)details.resource : [:]
+  Map resourceId = resource?.id instanceof Map ? (Map)resource.id : [:]
+  String programUri = (resource?.uri ?: resource?.resourceUri ?: details?.programURI ?: details?.ProgramURI ?: details?.uri ?: details?.resourceUri)?.toString()
+  String metadataValue = (resource?.metadata instanceof String ? resource.metadata : null) ?: (resource?.metaData instanceof String ? resource.metaData : null) ?: (details?.programMetadata ?: details?.ProgramMetaData ?: details?.metadata ?: details?.metaData)?.toString()
+  String sourceTitle = (entry?.name ?: details?.name ?: sourceId).toString()
+  if(!programUri && sourceType == 'favorite' && resourceId?.objectId && resourceId?.serviceId) {
+    String serviceId = resourceId.serviceId.toString()
+    String accountId = resourceId.accountId?.toString() ?: 'sn_0'
+    String serialNumber = accountId.replaceFirst('^sn_', '')
+    String objectId = resourceId.objectId.toString()
+    programUri = "x-rincon-cpcontainer:${objectId}?sid=${serviceId}&flags=8300&sn=${serialNumber}"
+    String contentId = sonosAlarmXmlEscape(objectId)
+    String serviceMetadataId = "SA_RINCON${sonosAlarmXmlEscape(serviceId)}_X_#Svc${sonosAlarmXmlEscape(serviceId)}-0-Token"
+    metadataValue = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"${contentId}\" restricted=\"true\"><dc:title>${sonosAlarmXmlEscape(sourceTitle)}</dc:title><upnp:class>object.container.playlistContainer</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">${serviceMetadataId}</desc></item></DIDL-Lite>"
+  } else if(!programUri && sourceType == 'playlist') {
+    String contentId = "0006206c${sourceId}"
+    programUri = "x-rincon-cpcontainer:${contentId}?sid=0&flags=0&sn=0"
+    metadataValue = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"><item id=\"${contentId}\" restricted=\"true\"><dc:title>${sonosAlarmXmlEscape(sourceTitle)}</dc:title><upnp:class>object.container.playlistContainer</upnp:class><desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">RINCON_AssociatedZPUDN</desc></item></DIDL-Lite>"
+  }
+  String programMetadata = metadataValue ?: ''
+  if(!programUri) {
+    logWarn("Cannot create alarm from ${sourceType} '${sourceTitle}': Sonos catalog data has no playable resource URI; refresh favorites/playlists and try again")
+    return
+  }
+  Map alarmData = new LinkedHashMap(alarm ?: [:])
+  alarmData.ProgramURI = programUri
+  alarmData.ProgramMetaData = programMetadata
+  logInfo("Creating Sonos alarm from ${sourceType} '${sourceTitle}'")
+  createSonosAlarm(householdId, alarmData)
+}
+
+String sonosAlarmXmlEscape(String value) {
+  return value?.replace('&', '&amp;')?.replace('<', '&lt;')?.replace('>', '&gt;')?.replace('"', '&quot;')?.replace("'", '&apos;') ?: ''
+}
+
+void sonosAlarmCreateCallback(AsyncResponse response, Map data) {
+  if(response == null || response.hasError() || response.status != 200) {
+    logWarn("Sonos alarm creation failed for ${data?.householdId}: HTTP ${response?.status} ${response?.getErrorMessage()}")
+    return
+  }
+  refreshSonosAlarmsDeferred([householdId: data?.householdId, playerDni: data?.playerDni])
+}
+
+void destroySonosAlarm(String householdId, String alarmId, String roomUuid) {
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDataValue('householdId')?.toString() == householdId && candidate.getDataValue('id')?.toString() == roomUuid
+  }
+  if(player == null) { logWarn("Cannot delete Sonos alarm ${alarmId}: room player ${roomUuid} was not found"); return }
+  Map params = [uri: "http://${player.getDataValue('localUpnpHost')}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
+    headers: [SOAPAction: "${SONOS_ALARM_SERVICE_TYPE}#DestroyAlarm"], body: sonosAlarmSoapBody('DestroyAlarm', [ID: alarmId]), timeout: 10]
+  asynchttpPost('sonosAlarmDestroyCallback', params, [householdId: householdId, playerDni: player.deviceNetworkId])
+}
+
+void sonosAlarmDestroyCallback(AsyncResponse response, Map data) {
+  if(response == null || response.hasError() || response.status != 200) {
+    logWarn("Sonos alarm deletion failed for ${data?.householdId}: HTTP ${response?.status} ${response?.getErrorMessage()}")
+    return
+  }
+  refreshSonosAlarmsDeferred([householdId: data?.householdId, playerDni: data?.playerDni])
+}
+
+void updateSonosAlarm(String dni, Map changes) {
+  ChildDeviceWrapper child = getChildDevice(dni)
+  Map alarm = [:]
+  try { alarm = (Map)new JsonSlurper().parseText(child?.getDataValue('alarmData')?.toString() ?: '{}') }
+  catch(Exception e) { logWarn("Cannot update Sonos alarm ${dni}: cached alarm data is invalid"); return }
+  String host = child?.getDataValue('localUpnpHost')?.toString()
+  if(!host) { logWarn("Cannot update Sonos alarm ${dni}: its room player is unavailable"); return }
+  alarm.putAll(changes)
+  alarm.ID = child.getDataValue('alarmId')?.toString()
+  ChildDeviceWrapper targetPlayer = null
+  if(changes.RoomUUID) {
+    targetPlayer = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+      candidate.getDataValue('id')?.toString() == changes.RoomUUID.toString() &&
+        candidate.getDataValue('householdId')?.toString() == child.getDataValue('householdId')?.toString()
+    }
+    if(targetPlayer == null) { logWarn("Cannot move alarm ${alarm.ID} to unknown household player ${changes.RoomUUID}"); return }
+  }
+  Map bodyValues = [:]
+  ['ID','StartLocalTime','Duration','Recurrence','RoomUUID','ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones','Enabled'].each { String key ->
+    if(alarm.containsKey(key)) { bodyValues[key] = alarm[key] }
+  }
+  List<String> updateFields = ['ID','StartLocalTime','Duration','Recurrence','RoomUUID','ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones','Enabled']
+  if(updateFields.any { String key -> bodyValues[key] == null }) {
+    logWarn("Cannot update Sonos alarm ${alarm.ID}: required alarm settings are missing from the cached record")
+    return
+  }
+  String requestHost = targetPlayer?.getDataValue('localUpnpHost')?.toString() ?: host
+  Map params = [uri: "http://${requestHost}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
+    headers: [SOAPAction: "${SONOS_ALARM_SERVICE_TYPE}#UpdateAlarm"], body: sonosAlarmSoapBody('UpdateAlarm', bodyValues), timeout: 10]
+  asynchttpPost('sonosAlarmUpdateCallback', params, [householdId: child.getDataValue('householdId')?.toString(), playerDni: targetPlayer?.deviceNetworkId ?: child.getDataValue('playerDni')?.toString(), alarmDni: dni])
+}
+
+void sonosAlarmUpdateCallback(AsyncResponse response, Map data) {
+  if(response == null || response.hasError() || response.status != 200) {
+    logWarn("Sonos alarm update failed for ${data?.alarmDni}: HTTP ${response?.status} ${response?.getErrorMessage()}")
+    return
+  }
+  String householdId = data?.householdId?.toString()
+  ChildDeviceWrapper player = data?.playerDni ? getChildDevice(data.playerDni.toString()) : null
+  if(householdId && player) { runIn(1, 'refreshSonosAlarmsDeferred', [data: [householdId: householdId, playerDni: player.deviceNetworkId]]) }
+}
+
+void refreshSonosAlarmsDeferred(Map data) {
+  ChildDeviceWrapper player = data?.playerDni ? getChildDevice(data.playerDni.toString()) : null
+  if(player) { refreshSonosAlarms(data.householdId.toString(), player) }
+}
+
+void setSonosAlarmEnabled(String dni, Boolean enabled) { updateSonosAlarm(dni, [Enabled: enabled ? '1' : '0']) }
+void setSonosAlarmTime(String dni, String time) {
+  if(!(time ==~ /\d{2}:\d{2}:\d{2}/)) { logWarn("Ignoring invalid alarm time ${time}"); return }
+  updateSonosAlarm(dni, [StartLocalTime: time])
+}
+void setSonosAlarmVolume(String dni, Integer volume) {
+  if(volume == null || volume < 0 || volume > 100) { logWarn("Ignoring invalid alarm volume ${volume}"); return }
+  updateSonosAlarm(dni, [Volume: volume.toString()])
+}
+void setSonosAlarmRecurrence(String dni, String recurrence) {
+  if(!(recurrence in ['ONCE','DAILY','WEEKDAYS','WEEKENDS'])) { logWarn("Ignoring invalid alarm recurrence ${recurrence}"); return }
+  updateSonosAlarm(dni, [Recurrence: recurrence])
+}
+void setSonosAlarmDuration(String dni, String duration) {
+  if(!(duration ==~ /\d{2}:\d{2}:\d{2}/)) { logWarn("Ignoring invalid alarm duration ${duration}"); return }
+  updateSonosAlarm(dni, [Duration: duration])
+}
+void setSonosAlarmRoom(String dni, String playerId) {
+  if(!playerId) { return }
+  updateSonosAlarm(dni, [RoomUUID: playerId])
+}
+void setSonosAlarmSource(String dni, String programUri, String programMetadata) {
+  if(!programUri) { logWarn('Ignoring alarm source update without a program URI'); return }
+  updateSonosAlarm(dni, [ProgramURI: programUri, ProgramMetaData: programMetadata ?: ''])
+}
+void setSonosAlarmPlayMode(String dni, String playMode) {
+  if(!(playMode in ['NORMAL', 'REPEAT_ALL', 'SHUFFLE_NOREPEAT', 'SHUFFLE'])) { logWarn("Ignoring invalid alarm play mode ${playMode}"); return }
+  updateSonosAlarm(dni, [PlayMode: playMode])
+}
+void setSonosAlarmIncludeGroupedRooms(String dni, Boolean include) {
+  updateSonosAlarm(dni, [IncludeLinkedZones: include ? '1' : '0'])
+}
+
+// =============================================================================
+// End Alarm management
+// =============================================================================
 
 void refreshTTSVoiceCache() {
   logDebug('Refreshing TTS voice cache for all devices...')
@@ -2319,7 +2720,7 @@ Integer createPlayerDevices(List<String> requestedPlayerDevices) {
           }
         }
       } else {
-        logWarn("Attempted to create child device for ${dni} but did not find playerInfo")
+        logInfo("Skipping selected device ${dni}: it was not found in the current Sonos discovery results, so no Sonos player configuration is available. It may be offline or may not be a Sonos player.")
       }
     }
 
@@ -2383,7 +2784,7 @@ Integer createPlayerDevices(List<String> requestedPlayerDevices) {
     } else if(!cd) {
       logWarn("Skipping device configuration for ${dni} - device not created")
     } else if(!playerInfo) {
-      logWarn("Skipping device configuration for ${dni} - no player info available")
+      logInfo("Skipping configuration for selected device ${dni}: it was not found in the current Sonos discovery results, so no Sonos player configuration is available. It may be offline or may not be a Sonos player.")
     }
   }
   // Note: removeOrphans() is now handled by the explicit Remove Players button
@@ -2406,7 +2807,7 @@ void retryDeviceConfiguration(Map data) {
 
   Map playerInfo = discoveredSonoses[dni]
   if(!playerInfo) {
-    logWarn("Cannot retry configuration for ${dni} - no player info available")
+    logInfo("Skipping configuration retry for ${dni}: the device is no longer present in the current Sonos discovery results, so no Sonos player configuration is available.")
     return
   }
 
@@ -2460,6 +2861,9 @@ void removeOrphans() {
   allChildren.each { child ->
     String id = child.getDataValue('id')
     String dni = child.getDeviceNetworkId()
+    if(dni?.contains(ALARM_SWITCH_DNI_MARKER) || dni?.contains(ALARM_MANAGER_DNI_MARKER)) {
+      return
+    }
     if(id == null) {
       // Group device
       if(!(dni in configuredGroupDevices)) {

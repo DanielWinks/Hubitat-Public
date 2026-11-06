@@ -78,6 +78,22 @@
       "name": "Sonos Advanced Playlist",
       "namespace": "dwinks",
       "required": true
+    },
+    {
+      "id": "1fa70eea-a57a-4d01-9e68-c94654d8508f",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.14.1/SonosAdvAlarmSwitch.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvAlarmSwitch.groovy",
+      "name": "Sonos Advanced Alarm Switch",
+      "namespace": "dwinks",
+      "required": true
+    },
+    {
+      "id": "2332bd97-3428-4a9c-9605-b8032f59df99",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.14.1/SonosAdvAlarmManager.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvAlarmManager.groovy",
+      "name": "Sonos Advanced Alarm Manager",
+      "namespace": "dwinks",
+      "required": true
     }
   ],
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
