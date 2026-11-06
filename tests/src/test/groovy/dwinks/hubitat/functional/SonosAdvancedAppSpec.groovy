@@ -15,6 +15,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<Map> commands = []
   List<String> acknowledgedParentRequests = []
 
+  void mute() { commands << [name: 'mute'] }
+  void unmute() { commands << [name: 'unmute'] }
+
   void acknowledgeParentCommand(String requestId) { acknowledgedParentRequests << requestId }
 
   void playerCreateGroup(List<String> playerIds) {
@@ -55,6 +58,10 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String correlationId) {
     commands << [name: 'playerPlayGroupAnnouncementStream', uri: uri, volume: volume,
       correlationId: correlationId]
+  }
+
+  void restoreGroupAnnouncementPlayback(String correlationId) {
+    commands << [name: 'restoreGroupAnnouncementPlayback', correlationId: correlationId]
   }
 
   void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
@@ -1117,6 +1124,31 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
   }
 
+  def "disabling temporary stream holders preserves an active Sonos stream with audioClip"() {
+    given:
+    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
+    appScript.settings.automaticTtsTopologyChanges = true
+    appScript.settings.useTemporaryStreamHolder = false
+    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    coordinator.currentValues.transportStatus = 'playing'
+    coordinator.currentValues.audioSource = 'x-sonos-http:song%3a12345.mp4?sid=204&flags=8232&sn=9'
+    Map item = [correlationId: 'holder-disabled-fallback', command: 'playAudioClip',
+      uri: 'http://example.test/tts.mp3', volume: '14', duration: 20,
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]
+    Map queue = [active: item, pending: []]
+
+    when:
+    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item,
+      [coordinator], coordinator, null)
+
+    then:
+    item.mode == 'AUDIO_CLIP'
+    coordinator.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
+    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
+    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
+    appScript.logs.any { it.contains('Temporary stream holder handoff is unavailable or disabled') }
+  }
+
   def "Automatic mode permits pulling an active follower when its coordinator remains outside the target"() {
     given:
     appScript.settings.groupAnnouncementMode = 'automatic'
@@ -1244,6 +1276,78 @@ class SonosAdvancedAppSpec extends Specification {
     }
   }
 
+  def "stream handoff carries the captured audio source into its restoration transaction"() {
+    given:
+    String originalAudioSource = 'x-sonos-http:song%3a12345.mp4?sid=204&flags=8232&sn=9'
+    coordinator.dataValues.groupId = 'SOURCE-GROUP'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    extra.dataValues.groupId = 'HOLDER-GROUP'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
+    Map item = [correlationId: 'stream-source-captured', command: 'playAudioClip',
+      uri: 'http://example.test/tts.mp3', volume: '14', duration: 20,
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD'],
+      coordinatorAudioSource: originalAudioSource]
+    Map queue = [active: item, pending: []]
+    Map snapshot = [observations: [
+      RINCON_COORD: [groupId: 'SOURCE-GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
+      RINCON_EXTRA: [groupId: 'HOLDER-GROUP', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
+    ]]
+
+    when:
+    appScript.beginGroupAnnouncementTopologyTransaction('GROUP-DNI', queue, item,
+      [coordinator], snapshot, false, [playerId: 'RINCON_EXTRA'])
+
+    then:
+    appScript.state.groupAnnouncementTopologyTransactions['stream-source-captured'].coordinatorAudioSource == originalAudioSource
+  }
+
+  def "stream handoff mutes an unmuted holder and restores its prior unmuted state"() {
+    given:
+    coordinator.dataValues.groupId = 'SOURCE-GROUP'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    extra.dataValues.groupId = 'HOLDER-GROUP'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
+    extra.currentValues.mute = 'unmuted'
+    Map item = [correlationId: 'stream-holder-unmuted', command: 'playAudioClip',
+      uri: 'http://example.test/tts.mp3', volume: '14', duration: 20,
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]
+    Map queue = [active: item, pending: []]
+    Map snapshot = [observations: [
+      RINCON_COORD: [groupId: 'SOURCE-GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
+      RINCON_EXTRA: [groupId: 'HOLDER-GROUP', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
+    ]]
+
+    when:
+    appScript.beginGroupAnnouncementTopologyTransaction('GROUP-DNI', queue, item,
+      [coordinator], snapshot, false, [playerId: 'RINCON_EXTRA', previousMuteState: 'unmuted'])
+
+    then:
+    extra.commands*.name == ['mute']
+    appScript.state.groupAnnouncementTopologyTransactions['stream-holder-unmuted'].holderPreviousMuteState == 'unmuted'
+
+    when:
+    appScript.restoreStreamHolderMuteState(appScript.state.groupAnnouncementTopologyTransactions['stream-holder-unmuted'])
+
+    then:
+    extra.commands*.name == ['mute', 'unmute']
+  }
+
+  def "stream handoff leaves a holder muted when it was muted before use"() {
+    given:
+    extra.currentValues.mute = 'muted'
+    Map transaction = [holderId: 'RINCON_EXTRA', holderPreviousMuteState: 'muted']
+
+    when:
+    appScript.restoreStreamHolderMuteState(transaction)
+
+    then:
+    extra.commands*.name == ['mute']
+  }
+
   def "failed automatic source subgroup split falls back to clips for all target players"() {
     given:
     Map item = [correlationId: 'split-fallback', command: 'playAudioClip',
@@ -1348,6 +1452,8 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.handleGroupAnnouncementProgress(coordinator, [groupDni: 'GROUP-DNI',
       correlationId: 'first-announcement', phase: 'DONE'])
+    appScript.handleGroupAnnouncementProgress(coordinator, [groupDni: 'GROUP-DNI',
+      correlationId: 'first-announcement', phase: 'PLAYBACK_RESTORED', restored: true])
     appScript.startNextGroupAnnouncement('GROUP-DNI')
 
     then:
@@ -1358,6 +1464,7 @@ class SonosAdvancedAppSpec extends Specification {
     }
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'COORDINATOR_STREAM'
     appScript.logs.any { it.contains('treating the group as otherwise idle') }
+    coordinator.commands.any { it.name == 'restoreGroupAnnouncementPlayback' && it.correlationId == 'first-announcement' }
   }
 
   def "expired queued announcements are discarded before dispatch"() {
@@ -1402,10 +1509,16 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   def "unlimited TTS retention disables expiration"() {
-    expect:
+    when:
     appScript.settings.maximumTtsRetention = 'unlimited'
+
+    then:
     appScript.getMaximumTtsRetentionMs() == null
+
+    when:
     appScript.settings.maximumTtsRetention = '60'
+
+    then:
     appScript.getMaximumTtsRetentionMs() == 3600000L
   }
 

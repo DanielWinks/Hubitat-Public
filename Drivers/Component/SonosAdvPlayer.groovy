@@ -383,6 +383,7 @@ Boolean hasLineInCapability() {
 @Field static final String TRANSPORT_QUEUE_KEY = 'transportCommandQueue'
 @Field static final String TRANSPORT_ACTIVE_KEY = 'activeTransportCommand'
 @Field static final String TRANSPORT_STATUS_SNAPSHOT_KEY = 'transportStatusSnapshot'
+@Field static final String ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY = 'announcementPlaybackSnapshot'
 @Field static final Integer TRANSPORT_WATCHDOG_SECONDS = 4
 @Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
 @Field static final String WS_EXPECTED_EVENTS_KEY = 'websocketExpectedSubscriptionEvents'
@@ -1343,14 +1344,60 @@ void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioC
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) { return }
-  if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(false)) {
-    LinkedHashMap tts = textToSpeech(text, voice)
-    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
-    playerLoadAudioClip(tts.uri as String, volume, ttsDuration, UUID.randomUUID().toString())
-  } else {
-    volume = getAnnouncementVolume(volume)
-    componentPlayTextNoRestoreLocal(text, volume, voice)
+  Boolean airPlaySource = isCurrentAirPlayAudioSource()
+  Boolean useAudioClip = hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(false)
+  if(airPlaySource && hasAudioClipCapability() == true) {
+    try {
+      useAudioClip = getParentApp()?.shouldUseAudioClipForAirPlay() == true
+    } catch(Exception e) {
+      logWarn("Could not read AirPlay announcement policy; using the standard stream method: ${e.message}")
+    }
   }
+  // AirPlay cannot be transferred to a temporary holder. Keep the existing
+  // audioClip route when policy requests it; only non-AirPlay streams may use
+  // Sonos Advanced's coordinator handoff path.
+  if(airPlaySource && useAudioClip) {
+    LinkedHashMap tts = textToSpeech(text, voice)
+    String streamUrl = tts?.uri?.toString()
+    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
+    playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
+  } else {
+    LinkedHashMap tts = textToSpeech(text, voice)
+    String streamUrl = tts?.uri?.toString()
+    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
+    Boolean routedToParent = false
+    if(!airPlaySource && streamUrl && getParentApp() != null) {
+      try {
+        routedToParent = getParentApp().handlePlayerActiveStreamTts(device.getDeviceNetworkId(),
+            streamUrl, volume, ttsDuration, UUID.randomUUID().toString()) == true
+      } catch(Exception e) {
+        logWarn("Could not route active Sonos stream TTS through Sonos Advanced: ${e.message}")
+      }
+    }
+    if(!routedToParent) {
+      volume = getAnnouncementVolume(volume)
+      if(streamUrl) {
+        componentPlayStreamWithRestoreLocal(streamUrl, ttsDuration, volume)
+      } else {
+        componentPlayTextWithRestoreLocal(text, volume, voice)
+      }
+    }
+  }
+}
+
+Boolean isAirPlayAudioSource(String audioSource) {
+  String normalized = audioSource?.toLowerCase()
+  return normalized?.contains('airplay:') == true || normalized?.contains('linein.airplay') == true
+}
+
+Boolean isCurrentAirPlayAudioSource() {
+  if(isAirPlayAudioSource(device.currentValue('audioSource')?.toString())) { return true }
+  String observedType = state.audioSourceMetadataType?.toString()
+  Long observedAt = null
+  try { observedAt = state.audioSourceMetadataObservedAt?.toString()?.toLong() }
+  catch(Exception ignored) { observedAt = null }
+  return observedType?.equalsIgnoreCase('linein.airplay') == true && observedAt != null &&
+      now() >= observedAt && now() - observedAt <= 180000L
 }
 
 /** Explicit Play Text And Restore/Resume commands always prefer Sonos audioClip,
@@ -1369,7 +1416,7 @@ void devicePlayTextWithAudioClip(String text, BigDecimal volume = null, String v
   } else {
     logDebug("${device} does not support audioClip; using the streaming TTS fallback")
     volume = getAnnouncementVolume(volume)
-    componentPlayTextNoRestoreLocal(text, volume, voice)
+    componentPlayTextWithRestoreLocal(text, volume, voice)
   }
 }
 
@@ -1396,7 +1443,7 @@ void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = n
     playerLoadAudioClipHighPriority(tts.uri as String, volume, UUID.randomUUID().toString(), ttsDuration)
   } else {
     volume = getAnnouncementVolume(volume)
-    componentPlayTextNoRestoreLocal(text, volume, voice)
+    componentPlayTextWithRestoreLocal(text, volume, voice)
   }
 }
 
@@ -1422,11 +1469,198 @@ void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String cor
     return
   }
   Integer targetVolume = getAnnouncementVolume(volume)
+  Map existingSnapshot = runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] instanceof Map
+      ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
+  Map previousAnnouncement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  Map savedPlayback = existingSnapshot != null && previousAnnouncement != null
+      ? new LinkedHashMap(existingSnapshot)
+      : (runtimeState.lastTransportPlaybackSnapshot instanceof Map
+          ? new LinkedHashMap((Map)runtimeState.lastTransportPlaybackSnapshot) : null)
+  if(savedPlayback != null) {
+    savedPlayback.correlationId = correlationId
+    savedPlayback.captureAt = now()
+    savedPlayback.announcementUri = uri
+    runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] = savedPlayback
+    logDebug("Captured pre-announcement transport for ${correlationId}: uri=${savedPlayback.currentUri}, track=${savedPlayback.track}")
+  } else {
+    logWarn("No AVTransport snapshot is available to restore after announcement ${correlationId}")
+  }
   runtimeState.groupAnnouncementStream = [correlationId: correlationId, uri: uri,
       phase: 'LOADING', activeObserved: false]
   logInfo("Starting group announcement stream ${correlationId} on coordinator ${getId()} at volume=${targetVolume}")
   componentSetGroupLevelLocal(new BigDecimal(targetVolume))
   setAVTransportURIAndPlay(uri, null, [groupAnnouncementCorrelationId: correlationId])
+}
+
+/** Restore the coordinator's captured transport after its group announcement. */
+void restoreGroupAnnouncementPlayback(String correlationId) {
+  Map snapshot = runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] instanceof Map
+      ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
+  if(snapshot == null || snapshot.correlationId?.toString() != correlationId) {
+    logDebug("No matching playback snapshot to restore for ${correlationId}")
+    publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
+    return
+  }
+  String uri = snapshot.currentUri?.toString()
+  if(!uri) {
+    logWarn("Captured transport for ${correlationId} has no URI; skipping playback restore")
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+    publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
+    return
+  }
+  String currentSource = device.currentValue('audioSource')?.toString()
+  if(currentSource && snapshot.announcementUri?.toString() && currentSource != snapshot.announcementUri.toString() &&
+      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+    logInfo("Skipping playback restore for ${correlationId}; another source is active")
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+    runtimeState.remove('groupAnnouncementStream')
+    publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false, skipped: 'external-playback'])
+    return
+  }
+  runtimeState.announcementPlaybackRestore = [correlationId: correlationId, snapshot: snapshot]
+  logInfo("Restoring pre-announcement transport for ${correlationId}: ${uri}")
+  setAVTransportURIForAnnouncementRestore(uri, snapshot.currentUriMetaData?.toString(), correlationId)
+}
+
+void setAVTransportURIForAnnouncementRestore(String uri, String metadata, String correlationId) {
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
+  Map values = [CurrentURI: uri]
+  if(metadata) { values.CurrentURIMetaData = metadata }
+  Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', values)
+  postSonosSoapAsync('announcementPlaybackUriRestored', params, [correlationId: correlationId])
+}
+
+void announcementPlaybackUriRestored(AsyncResponse response, Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  if(response?.status != 200 || response.hasError()) {
+    finishAnnouncementPlaybackRestore(correlationId, false, "set-uri-failed-${response?.status}")
+    return
+  }
+  Map snapshot = active.snapshot instanceof Map ? (Map)active.snapshot : [:]
+  Integer track = null
+  try { track = snapshot.track?.toString()?.toInteger() } catch(Exception ignored) { track = null }
+  Long positionMillis = null
+  try { positionMillis = snapshot.positionMillis?.toString()?.toLong() } catch(Exception ignored) { positionMillis = null }
+  if(track != null && track > 0) {
+    sendAnnouncementRestoreSeek(correlationId, 'TRACK_NR', track.toString(), 'track')
+  } else if(positionMillis != null && positionMillis > 0L) {
+    sendAnnouncementRestoreSeek(correlationId, 'REL_TIME', formatSonosTime(positionMillis), 'position')
+  } else {
+    restoreAnnouncementPlayMode(correlationId)
+  }
+}
+
+void sendAnnouncementRestoreSeek(String correlationId, String unit, String target, String stage) {
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
+  Map params = getSoapActionParams(ip, AVTransport, 'Seek', [Unit: unit, Target: target])
+  postSonosSoapAsync('announcementPlaybackSeekRestored', params,
+      [correlationId: correlationId, stage: stage])
+}
+
+void announcementPlaybackSeekRestored(AsyncResponse response, Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("Could not restore ${data?.stage} for announcement ${correlationId}: status=${response?.status}")
+    restoreAnnouncementPlayMode(correlationId)
+    return
+  }
+  Map snapshot = active.snapshot instanceof Map ? (Map)active.snapshot : [:]
+  if(data?.stage == 'track') {
+    Long positionMillis = null
+    try { positionMillis = snapshot.positionMillis?.toString()?.toLong() } catch(Exception ignored) { positionMillis = null }
+    if(positionMillis != null && positionMillis > 0L) {
+      sendAnnouncementRestoreSeek(correlationId, 'REL_TIME', formatSonosTime(positionMillis), 'position')
+      return
+    }
+  }
+  restoreAnnouncementPlayMode(correlationId)
+}
+
+void restoreAnnouncementPlayMode(String correlationId) {
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  Map snapshot = active?.snapshot instanceof Map ? (Map)active.snapshot : [:]
+  String playMode = snapshot.playMode?.toString()
+  if(!playMode) { finishAnnouncementPlaybackRestore(correlationId, true, null); return }
+  String ip = getLocalUpnpHostForGroupOperation()
+  if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
+  Map params = getSoapActionParams(ip, AVTransport, 'SetPlayMode', [NewPlayMode: playMode])
+  postSonosSoapAsync('announcementPlaybackPlayModeRestored', params, [correlationId: correlationId])
+}
+
+void announcementPlaybackPlayModeRestored(AsyncResponse response, Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  Boolean success = response?.status == 200 && response.hasError() == false
+  if(!success) { logWarn("Could not restore play mode for announcement ${correlationId}: status=${response?.status}") }
+  finishAnnouncementPlaybackRestore(correlationId, true, null)
+}
+
+String formatSonosTime(Long positionMillis) {
+  Long seconds = Math.max(0L, positionMillis.intdiv(1000L))
+  return String.format('%02d:%02d:%02d', seconds.intdiv(3600L), seconds.intdiv(60L) % 60L, seconds % 60L)
+}
+
+void finishAnnouncementPlaybackRestore(String correlationId, Boolean success, String reason) {
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(active?.correlationId?.toString() != correlationId) { return }
+  Map snapshot = active.snapshot instanceof Map ? (Map)active.snapshot : [:]
+  if(success && snapshot.transportState?.toString() in ['PLAYING', 'TRANSITIONING', 'PAUSED_PLAYBACK']) {
+    String ip = getLocalUpnpHostForGroupOperation()
+    if(ip) {
+      String action = snapshot.transportState?.toString() == 'PAUSED_PLAYBACK' ? 'Pause' : 'Play'
+      Map params = getSoapActionParams(ip, AVTransport, action)
+      postSonosSoapAsync('announcementPlaybackTransportRestored', params, [correlationId: correlationId])
+      return
+    }
+    success = false
+    reason = 'coordinator-unavailable'
+  }
+  completeAnnouncementPlaybackRestore(correlationId, success, reason)
+}
+
+void announcementPlaybackTransportRestored(AsyncResponse response, Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  Boolean success = response?.status == 200 && response.hasError() == false
+  completeAnnouncementPlaybackRestore(correlationId, success,
+      success ? null : "transport-resume-failed-${response?.status}")
+}
+
+void completeAnnouncementPlaybackRestore(String correlationId, Boolean success, String reason) {
+  Map active = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(active?.correlationId?.toString() != correlationId) { return }
+  runtimeState.remove('announcementPlaybackRestore')
+  runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+  runtimeState.remove('groupAnnouncementStream')
+  if(!success) { logWarn("Playback restore for ${correlationId} was incomplete: ${reason}") }
+  publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: success, reason: reason])
+}
+
+void completeGroupAnnouncementPlaybackHandoff(String correlationId, Boolean restored = true) {
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  if(announcement?.correlationId?.toString() != correlationId) { return }
+  runtimeState.remove('announcementPlaybackRestore')
+  runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+  runtimeState.remove('groupAnnouncementStream')
+  if(restored != true) { logWarn("Stream handoff for ${correlationId} completed without verifying the original audio source") }
+  publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: restored == true, handoff: true])
 }
 
 @CompileStatic
@@ -3299,6 +3533,19 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
   String enqueuedTransportURIMetaDataString = instanceId['EnqueuedTransportURIMetaData']['@val']
   String avTransportURI = instanceId['AVTransportURI']['@val']
+  Map<String, Object> playbackSnapshot = new LinkedHashMap<String, Object>()
+  playbackSnapshot.put('currentUri', avTransportURI?.replace('&amp;', '&'))
+  playbackSnapshot.put('currentUriMetaData', instanceId['AVTransportURIMetaData']['@val']?.toString())
+  playbackSnapshot.put('trackUri', trackUri)
+  playbackSnapshot.put('trackMetaData', instanceId['CurrentTrackMetaData']['@val']?.toString())
+  playbackSnapshot.put('track', instanceId['CurrentTrack']['@val']?.toString())
+  playbackSnapshot.put('playMode', instanceId['CurrentPlayMode']['@val']?.toString())
+  playbackSnapshot.put('transportState', instanceId['TransportState']['@val']?.toString())
+  playbackSnapshot.put('observedAt', new Date().getTime())
+  Map<String, Object> positionSnapshot = runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] instanceof Map
+      ? (Map<String, Object>)runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] : [:]
+  if(positionSnapshot.get('positionMillis') != null) { playbackSnapshot.put('positionMillis', positionSnapshot.get('positionMillis')) }
+  runtimeState.lastTransportPlaybackSnapshot = playbackSnapshot
 
   Boolean isPlayingLocalTrack = false
   if(trackUri.startsWith('http') && trackUri == enqueuedUri && trackUri == avTransportURI) {
@@ -7380,20 +7627,20 @@ void playerCreateNewGroup() {
 }
 
 @CompileStatic
-void playerCreateGroup(List<String> playerIds) {
+void playerCreateGroup(List<String> playerIds, String musicContextGroupId = null) {
   List<String> requestedPlayers = (playerIds ?: []).findAll { String id -> id }.unique()
-  sendCreateGroupRequest(requestedPlayers)
+  sendCreateGroupRequest(requestedPlayers, musicContextGroupId)
 }
 
 @CompileStatic
-void sendCreateGroupRequest(List<String> playerIds) {
+void sendCreateGroupRequest(List<String> playerIds, String musicContextGroupId = null) {
   Map command = [
     'namespace':'groups',
     'command':'createGroup',
     'householdId':"${getHouseholdId()}"
   ]
   Map args = [
-    'musicContextGroupId': null,
+    'musicContextGroupId': musicContextGroupId,
     'playerIds': playerIds
   ]
   String json = JsonOutput.toJson([command,args])
@@ -7637,6 +7884,59 @@ void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, Stri
   setAVTransportURIAndPlay(streamUrl)
 }
 
+/** Stream TTS, then restore the previous transport if this stream still owns playback. */
+void componentPlayTextWithRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
+  if(!text) { logWarn('No text provided to play'); return }
+  Map tts = textToSpeech(text, voice)
+  String streamUrl = tts?.uri?.toString()
+  if(!streamUrl) { logWarn('TTS did not return a stream URI'); return }
+  Integer duration = coerceClipDuration(tts?.duration) ?: 30
+  componentPlayStreamWithRestoreLocal(streamUrl, duration, volume)
+}
+
+void componentPlayStreamWithRestoreLocal(String streamUrl, Integer duration, BigDecimal volume = null) {
+  if(!streamUrl) { logWarn('TTS did not return a stream URI'); return }
+  Map snapshot = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+      ? new LinkedHashMap((Map)runtimeState.lastTransportPlaybackSnapshot) : null
+  String correlationId = UUID.randomUUID().toString()
+  if(snapshot != null) {
+    snapshot.correlationId = correlationId
+    snapshot.announcementUri = streamUrl
+    runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] = snapshot
+    runtimeState.directStreamTtsRestore = [correlationId: correlationId, streamUri: streamUrl,
+      duration: duration]
+  } else {
+    logWarn("No AVTransport snapshot is available to restore after direct stream TTS ${correlationId}")
+  }
+  if(volume != null) { componentSetGroupLevelLocal(volume) }
+  setAVTransportURIAndPlay(streamUrl)
+  if(snapshot != null) {
+    runIn(Math.max(duration + 2, 5), 'restoreDirectStreamTts', [overwrite: true,
+      data: [correlationId: correlationId]])
+  }
+}
+
+void restoreDirectStreamTts(Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.directStreamTtsRestore instanceof Map
+      ? (Map)runtimeState.directStreamTtsRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  String currentSource = device.currentValue('audioSource')?.toString()
+  if(currentSource && currentSource != active.streamUri?.toString()) {
+    if(!(state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING'])) {
+      runtimeState.remove('directStreamTtsRestore')
+      restoreGroupAnnouncementPlayback(correlationId)
+      return
+    }
+    logInfo("Skipping direct TTS playback restore ${correlationId}; another source took over")
+    runtimeState.remove('directStreamTtsRestore')
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+    return
+  }
+  runtimeState.remove('directStreamTtsRestore')
+  restoreGroupAnnouncementPlayback(correlationId)
+}
+
 void removeAllTracksFromQueue(String callbackMethod = 'localControlCallback') {
   String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
@@ -7739,6 +8039,7 @@ void commitPendingGroupAnnouncementTakeover(String transportGuid) {
     sourceUri: device.currentValue('audioSource')?.toString()
   ])
   runtimeState.remove('groupAnnouncementStream')
+  runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
 }
 
 void clearPendingGroupAnnouncementTakeover(String transportGuid, String reason) {
@@ -7781,6 +8082,7 @@ void invalidateGroupAnnouncementStream(String reason, String replacementUri = nu
   } else if(correlationId) {
     publishGroupAnnouncementProgress(correlationId, 'FAILED')
   }
+  runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
   runtimeState.remove('groupAnnouncementStream')
 }
 
@@ -8625,6 +8927,8 @@ void observeAudioSourceSignalStatus(Map eventData) {
     logTrace("Ignoring metadata status without a container for ${getId()}; retaining last source signal observation")
     return
   }
+  state.audioSourceMetadataType = containerType
+  state.audioSourceMetadataObservedAt = now()
   Map inputFormat = container.htInputFormat instanceof Map ? (Map)container.htInputFormat : [:]
   String streamDescription = inputFormat.streamDescription?.toString()?.trim()
   String signalStatus = 'unknown'

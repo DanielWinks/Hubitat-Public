@@ -82,6 +82,78 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.groupAnnouncementStream == null
   }
 
+  def "group announcement restores the captured queue track and playback position"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [
+      correlationId: 'restore-guid', currentUri: 'x-rincon-queue:RINCON_TEST#0',
+      currentUriMetaData: '<DIDL-Lite></DIDL-Lite>', track: '3', positionMillis: 65000L,
+      playMode: 'REPEAT_ALL', transportState: 'PLAYING'
+    ]
+
+    when:
+    driver.restoreGroupAnnouncementPlayback('restore-guid')
+    Map uriRequest = driver.asyncCalls.last()
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 200), uriRequest.data)
+    Map trackRequest = driver.asyncCalls.last()
+    driver.announcementPlaybackSeekRestored(new hubitat.scheduling.AsyncResponse(status: 200), trackRequest.data)
+    Map positionRequest = driver.asyncCalls.last()
+    driver.announcementPlaybackSeekRestored(new hubitat.scheduling.AsyncResponse(status: 200), positionRequest.data)
+    Map modeRequest = driver.asyncCalls.last()
+    driver.announcementPlaybackPlayModeRestored(new hubitat.scheduling.AsyncResponse(status: 200), modeRequest.data)
+    Map playRequest = driver.asyncCalls.last()
+    driver.announcementPlaybackTransportRestored(new hubitat.scheduling.AsyncResponse(status: 200), playRequest.data)
+
+    then:
+    uriRequest.params.body.contains('<CurrentURI>x-rincon-queue:RINCON_TEST#0</CurrentURI>')
+    trackRequest.params.body.contains('<Unit>TRACK_NR</Unit>')
+    trackRequest.params.body.contains('<Target>3</Target>')
+    positionRequest.params.body.contains('<Unit>REL_TIME</Unit>')
+    positionRequest.params.body.contains('<Target>00:01:05</Target>')
+    modeRequest.params.body.contains('<NewPlayMode>REPEAT_ALL</NewPlayMode>')
+    playRequest.params.headers.SOAPAction.endsWith('#Play')
+    driver.runtimeState.announcementPlaybackSnapshot == null
+    driver.locationEvents.any { Map event ->
+      event.data?.phase == 'PLAYBACK_RESTORED' && event.data?.correlationId == 'restore-guid'
+    }
+  }
+
+  def "group stream captures the pre-TTS transport and keeps it across stream replacement"() {
+    given:
+    driver.runtimeState.lastTransportPlaybackSnapshot = [
+      currentUri: 'x-rincon-queue:RINCON_TEST#0', track: '2', positionMillis: 41000L,
+      transportState: 'PLAYING'
+    ]
+
+    when:
+    driver.playerPlayGroupAnnouncementStream('http://example.test/first.mp3', 20G, 'first-guid')
+    driver.playerPlayGroupAnnouncementStream('http://example.test/second.mp3', 20G, 'second-guid')
+
+    then:
+    driver.runtimeState.announcementPlaybackSnapshot.correlationId == 'second-guid'
+    driver.runtimeState.announcementPlaybackSnapshot.currentUri == 'x-rincon-queue:RINCON_TEST#0'
+    driver.runtimeState.announcementPlaybackSnapshot.positionMillis == 41000L
+  }
+
+  def "group announcement restore leaves an external playback takeover alone"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [
+      correlationId: 'external-guid', currentUri: 'x-rincon-queue:RINCON_TEST#0',
+      announcementUri: 'http://example.test/tts.mp3', transportState: 'PLAYING'
+    ]
+    driver.device.currentValues.audioSource = 'https://music.example.test/new-track.mp3'
+    driver.state.playbackState = 'PLAYBACK_STATE_PLAYING'
+
+    when:
+    driver.restoreGroupAnnouncementPlayback('external-guid')
+
+    then:
+    driver.asyncCalls.empty
+    driver.runtimeState.announcementPlaybackSnapshot == null
+    driver.locationEvents.any { Map event ->
+      event.data?.phase == 'PLAYBACK_RESTORED' && event.data?.skipped == 'external-playback'
+    }
+  }
+
   def "playback status websocket events publish internal freshness state even when repeated"() {
     given:
     String dni = driver.device.getDeviceNetworkId()
@@ -1721,12 +1793,54 @@ class SonosAdvPlayerSpec extends Specification {
     [command, input] << [['playTextAndRestore', 'playTextAndResume', 'speak'], [0, 0L, 0G, '0', ' 0 ']].combinations()
   }
 
+  def "paused AirPlay metadata never routes speak through the stream holder"() {
+    given:
+    Boolean routedToHolder = false
+    com.hubitat.app.InstalledAppWrapper parent = new com.hubitat.app.InstalledAppWrapper()
+    parent.metaClass.shouldUseAudioClipForAirPlay = { -> true }
+    parent.metaClass.handlePlayerActiveStreamTts = { String dni, String uri, BigDecimal volume,
+        Integer duration, String correlationId ->
+      routedToHolder = dni == 'SONOS-TEST-DNI' && uri == 'http://example.test/airplay.mp3'
+      return routedToHolder
+    }
+    driver.metaClass.getParentApp = { -> parent }
+    driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
+    driver.metaClass.textToSpeech = { String text, String voice ->
+      [uri: 'http://example.test/airplay.mp3', duration: 2] as LinkedHashMap
+    }
+    driver.device.currentValues.audioSource = 'Not Available'
+    driver.state.audioSourceMetadataType = 'linein.airplay'
+    driver.state.audioSourceMetadataObservedAt = driver.now()
+    driver.device.dataValues.capabilities = 'AUDIO_CLIP'
+    driver.runtimeState.audioClipPlaying = true
+
+    when:
+    driver.devicePlayText('AirPlay clip test', 1G, null)
+    Map clip = driver.getDeviceAudioClipQueue().peek()
+
+    then:
+    !routedToHolder
+    driver.asyncCalls.empty
+    clip != null
+    ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].streamUrl == 'http://example.test/airplay.mp3'
+  }
+
+  def "stale AirPlay metadata does not trigger holder routing"() {
+    given:
+    driver.state.audioSourceMetadataType = 'linein.airplay'
+    driver.state.audioSourceMetadataObservedAt = driver.now() - 180001L
+
+    expect:
+    !driver.isCurrentAirPlayAudioSource()
+  }
+
   def "fallback announcements preserve zero with boost"() {
     given:
     List<BigDecimal> volumes = []
     driver.metaClass.getParent = { -> null }
     driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3'] as LinkedHashMap }
     driver.metaClass.componentPlayTextNoRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
+    driver.metaClass.componentPlayTextWithRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
     driver.device.currentValues.volume = 5
     driver.settings.ttsBoostAmount = 10
 

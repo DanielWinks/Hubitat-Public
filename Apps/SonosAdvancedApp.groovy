@@ -388,6 +388,9 @@ Map mainPage() {
         ], required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
       input 'automaticTtsTopologyChanges', 'bool', title: 'Automatic TTS topology changes',
         required: true, defaultValue: true, submitOnChange: true
+      input 'useTemporaryStreamHolder', 'bool', title: 'Use a temporary stream holder',
+        required: true, defaultValue: true, submitOnChange: true
+      paragraph 'When enabled, an idle speaker can temporarily hold an active Sonos-managed stream while standard-stream TTS plays on its target. When disabled, announcements use synchronized audioClip playback to preserve the active stream. AirPlay streams are never handed to a holder.'
       paragraph 'Choose the routing policy independently for normal and high priority announcements. <b>Automatic:</b> use synchronized audio clips while a player or group is playing another source; otherwise use a standard stream when the target topology can be prepared safely. <b>Always non-interrupting:</b> use synchronized audio clips even when players are idle, preserving current playback. <b>Always standard stream:</b> use a standard stream on the group coordinator; this can replace current playback and may force temporary topology changes.'
       if(settings.automaticTtsTopologyChanges == false || settings.automaticTtsTopologyChanges?.toString() == 'false') {
         if(getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream') {
@@ -3621,6 +3624,19 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
   }
   String transportStatus = coordinator.currentValue('transportStatus', true)?.toString()?.toLowerCase()
   String currentAudioSource = coordinator.currentValue('audioSource', true)?.toString()
+  String coordinatorId = coordinator?.getDataValue('id')?.toString()
+  Map<String, Map> playbackObservations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] : [:]
+  String observedAudioSource = playbackObservations[coordinatorId]?.audioSource?.toString()
+  String snapshotAudioSource = snapshot?.coordinatorAudioSource?.toString()
+  String handoffAudioSource = isUsableAnnouncementAudioSource(currentAudioSource) ? currentAudioSource :
+      (isUsableAnnouncementAudioSource(snapshotAudioSource) ? snapshotAudioSource : observedAudioSource)
+  if(handoffAudioSource && !item.coordinatorAudioSource) {
+    // Preserve the source observed during routing. A later topology snapshot
+    // can read an unavailable event value even though the player state was
+    // already known to be a Sonos-managed stream.
+    item.coordinatorAudioSource = handoffAudioSource
+  }
   Map playbackActivity = getPlayerPlaybackActivity(coordinator, currentAudioSource)
   String playbackState = playbackActivity.playbackState?.toString()
   Boolean playing = playbackActivity.active == true
@@ -3639,7 +3655,51 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
   }
   Boolean useAudioClip = announcementMode == 'alwaysNonInterrupting' ||
       (announcementMode == 'automatic' && playing && (!playingPreviousAnnouncement || externalTakeover))
-  if(announcementMode == 'automatic' && !exactTopology && !playing) {
+  if(announcementMode == 'automatic' && isAirPlayAudioSource(handoffAudioSource)) {
+    useAudioClip = true
+  }
+  Boolean activeSonosStreamHandoff = normalizeGroupPlayerIds(item.playerIds).size() == 1 &&
+      !useAudioClip && playing &&
+      !isAirPlayAudioSource(handoffAudioSource)
+  if(activeSonosStreamHandoff && !(snapshot instanceof Map)) {
+    if(isTemporaryStreamHolderEnabled() && isAutomaticTtsTopologyChangesEnabled()) {
+      beginGroupAnnouncementTopologySnapshot(groupDni, queue, item, players)
+      return
+    }
+    players = [coordinator]
+    useAudioClip = true
+    logInfo("Temporary stream holder handoff is unavailable or disabled; preserving active stream ${item.correlationId} with audioClip")
+  }
+  if(activeSonosStreamHandoff && snapshot instanceof Map) {
+    // Sonos-managed streams can follow the coordinator when membership is
+    // handed to an idle holder. AirPlay is deliberately excluded: its source
+    // cannot be copied or safely moved by this Control API flow.
+    String targetCoordinatorId = coordinator?.getDataValue('id')?.toString()
+    ChildDeviceWrapper handoffTarget = targetCoordinatorId ? buildRinconMap()[targetCoordinatorId] : null
+    List<ChildDeviceWrapper> handoffTargets = handoffTarget != null ? [handoffTarget] : []
+    if(!isTemporaryStreamHolderEnabled() || !isAutomaticTtsTopologyChangesEnabled()) {
+      players = handoffTargets
+      useAudioClip = true
+      logInfo("Temporary stream holder handoff is unavailable or disabled; preserving active stream ${item.correlationId} with audioClip")
+    } else {
+      Map holder = findIdleStreamHolder(handoffTargets, snapshot)
+      if(holder != null) {
+        Map handoffItem = new LinkedHashMap(item)
+        handoffItem.playerIds = [targetCoordinatorId]
+        handoffItem.coordinatorId = targetCoordinatorId
+        beginGroupAnnouncementTopologyTransaction(groupDni, queue, handoffItem, handoffTargets, snapshot, false, holder)
+        return
+      }
+      players = handoffTargets
+      useAudioClip = true
+      String fallbackReason = announcementMode == 'automatic'
+          ? 'routing the announcement as audioClip'
+          : 'preserving playback with audioClip'
+      logWarn("No fresh ungrouped idle holder was found for active stream ${item.correlationId}; ${fallbackReason}")
+    }
+  }
+  if(announcementMode == 'automatic' && !useAudioClip && !exactTopology && !playing &&
+      !isAirPlayAudioSource(handoffAudioSource)) {
     if(!isAutomaticTtsTopologyChangesEnabled()) {
       useAudioClip = true
       logInfo("Automatic topology changes are disabled; routing announcement ${item.correlationId} to every player with audioClip")
@@ -3651,7 +3711,8 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
       return
     }
   }
-  if(announcementMode == 'alwaysCoordinatorStream' && !exactTopology && isAutomaticTtsTopologyChangesEnabled()) {
+  if(announcementMode == 'alwaysCoordinatorStream' && !exactTopology &&
+      isAutomaticTtsTopologyChangesEnabled() && !isAirPlayAudioSource(handoffAudioSource)) {
     beginGroupAnnouncementTopologyTransaction(groupDni, queue, item, players, snapshot, true)
     return
   }
@@ -3689,6 +3750,11 @@ String getAnnouncementMode(Boolean highPriority = false) {
 Boolean isAutomaticTtsTopologyChangesEnabled() {
   return settings.automaticTtsTopologyChanges == null ||
       !(settings.automaticTtsTopologyChanges == false || settings.automaticTtsTopologyChanges.toString() == 'false')
+}
+
+Boolean isTemporaryStreamHolderEnabled() {
+  return settings.useTemporaryStreamHolder == null ||
+      !(settings.useTemporaryStreamHolder == false || settings.useTemporaryStreamHolder.toString() == 'false')
 }
 
 Boolean hasActiveAnnouncementTopologyTransaction() {
@@ -3768,6 +3834,128 @@ Boolean isPlayerActivelyPlaying(ChildDeviceWrapper player) {
   return getPlayerPlaybackActivity(player, audioSource).active == true
 }
 
+Boolean isAirPlayAudioSource(String audioSource) {
+  String normalized = audioSource?.toLowerCase()
+  return normalized?.contains('airplay:') == true || normalized?.contains('linein.airplay') == true
+}
+
+Boolean isUsableAnnouncementAudioSource(String audioSource) {
+  String normalized = audioSource?.trim()?.toLowerCase()
+  return normalized && !(normalized in ['not available', 'no source', 'n/a', 'unknown', 'unavailable', 'none'])
+}
+
+/** Queue direct player TTS so an active Sonos stream can be handed to a holder and restored. */
+Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal volume,
+    Integer duration, String correlationId) {
+  ChildDeviceWrapper target = playerDni ? getChildDevice(playerDni) : null
+  if(target == null || !uri) {
+    return false
+  }
+  String targetId = target.getDataValue('id')?.toString()
+  if(!targetId) { return false }
+  String audioSource = target.currentValue('audioSource', true)?.toString()
+  String groupCoordinatorId = target.getDataValue('groupCoordinatorId')?.toString()
+  if(isAirPlayAudioSource(audioSource) || (groupCoordinatorId && groupCoordinatorId != targetId) ||
+      !isPlayerActivelyPlaying(target)) {
+    return false
+  }
+  List<ChildDeviceWrapper> groupDevices = getCurrentGroupDevices()
+  ChildDeviceWrapper operationGroup = groupDevices.find { ChildDeviceWrapper candidate ->
+    normalizeGroupPlayerIds(getAllPlayersForGroupDevice(candidate)).contains(targetId)
+  }
+  if(operationGroup == null) {
+    logWarn("Cannot manage active stream TTS for ${target.displayName}: no Sonos group device is available for topology operations")
+    return false
+  }
+  Map args = [uri: uri, volume: volume?.toString(), duration: duration ?: 0,
+    correlationId: correlationId, forceAudioClip: !isAutomaticTtsTopologyChangesEnabled()]
+  enqueueGroupAnnouncement(operationGroup, target, [target], 'playAudioClip', args, correlationId)
+  logInfo("Queued direct-player active-stream TTS for ${target.displayName}; Sonos Advanced will select and release a temporary holder")
+  return true
+}
+
+Map findIdleStreamHolder(List<ChildDeviceWrapper> targetPlayers, Map snapshot) {
+  List<String> targetIds = targetPlayers.collect { ChildDeviceWrapper player ->
+    player?.getDataValue('id')?.toString()
+  }.findAll { String playerId -> playerId }.unique()
+  Map<String, Map> observations = snapshot?.observations instanceof Map
+      ? (Map<String, Map>)snapshot.observations : [:]
+  if(targetIds.size() != 1 || observations.isEmpty()) { return null }
+
+  String sourcePlayerId = targetIds[0]
+  Map sourceObservation = observations[sourcePlayerId]
+  List<String> sourceMembers = normalizeGroupPlayerIds(sourceObservation?.playerIds)
+  String sourceGroupId = sourceObservation?.groupId?.toString()
+  if(!sourceGroupId || sourceObservation?.coordinatorId?.toString() != sourcePlayerId ||
+      sourceMembers != [sourcePlayerId]) { return null }
+
+  ChildDeviceWrapper sourcePlayer = buildRinconMap()[sourcePlayerId]
+  String householdId = sourcePlayer?.getDataValue('householdId')?.toString()
+  if(!householdId) {
+    logTrace("Stream holder search skipped: target ${sourcePlayerId} has no household id")
+    return null
+  }
+
+  Map<String, Map> playbackObservations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] : [:]
+  for(ChildDeviceWrapper candidate : getCurrentPlayerDevices()) {
+    String candidateId = candidate?.getDataValue('id')?.toString()
+    if(!candidateId || targetIds.contains(candidateId) ||
+        candidate.getDataValue('householdId')?.toString() != householdId) {
+      logTrace("Stream holder candidate ${candidateId ?: 'unknown'} skipped: outside target household or targeted")
+      continue
+    }
+    Map candidateTopology = observations[candidateId]
+    List<String> candidateMembers = normalizeGroupPlayerIds(candidateTopology?.playerIds)
+    if(!candidateTopology?.groupId || candidateTopology?.coordinatorId?.toString() != candidateId ||
+        candidateMembers != [candidateId]) {
+      logTrace("Stream holder candidate ${candidateId} skipped: topology group=${candidateTopology?.groupId}, coordinator=${candidateTopology?.coordinatorId}, players=${candidateMembers}")
+      continue
+    }
+    Map playback = playbackObservations[candidateId]
+    if(playback?.playbackState?.toString() != 'PLAYBACK_STATE_IDLE') {
+      logTrace("Stream holder candidate ${candidateId} skipped: playback state=${playback?.playbackState}")
+      continue
+    }
+    Long playbackObservedAt = null
+    try { playbackObservedAt = playback.playbackObservedAt?.toString()?.toLong() }
+    catch(Exception ignored) { playbackObservedAt = null }
+    Long snapshotAt = snapshot.refreshAt as Long
+    if(playbackObservedAt == null || snapshotAt == null || playbackObservedAt < snapshotAt) {
+      logTrace("Stream holder candidate ${candidateId} skipped: playback observation ${playbackObservedAt} is older than snapshot ${snapshotAt}")
+      continue
+    }
+    Map activity = getPlayerPlaybackActivity(candidate)
+    if(activity.active == true || activity.ageMs == null || (activity.ageMs as Long) > 15000L) {
+      logTrace("Stream holder candidate ${candidateId} skipped: activity=${activity}")
+      continue
+    }
+    String audioSource = playback.audioSource?.toString() ?: candidate.currentValue('audioSource', true)?.toString()
+    if(audioSource?.startsWith('x-sonos-htastream:') == true) {
+      logTrace("Stream holder candidate ${candidateId} skipped: HDMI source ${audioSource}")
+      continue
+    }
+    String playlist = candidate.currentValue('currentPlaylist', true)?.toString()
+    String favorite = candidate.currentValue('currentFavorite', true)?.toString()
+    if(playlist && !(playlist in ['No playlist playing', 'Not Available', 'n/a'])) {
+      logTrace("Stream holder candidate ${candidateId} skipped: retained playlist ${playlist}")
+      continue
+    }
+    if(favorite && !(favorite in ['No favorite playing', 'Not Available', 'n/a'])) {
+      logTrace("Stream holder candidate ${candidateId} skipped: retained favorite ${favorite}")
+      continue
+    }
+    String priorMuteState = candidate.currentValue('mute', true)?.toString()
+    if(!(priorMuteState in ['muted', 'unmuted'])) {
+      logTrace("Stream holder candidate ${candidateId} skipped: mute state is unavailable")
+      continue
+    }
+    logDebug("Selected temporary stream holder ${candidateId} with idle playback, singleton group ${candidateTopology.groupId}, and mute state ${priorMuteState}")
+    return [playerId: candidateId, previousMuteState: priorMuteState]
+  }
+  return null
+}
+
 Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = null) {
   if(player == null) { return [active: false, signal: 'no-player'] }
   String playerId = player.getDataValue('id')?.toString()
@@ -3836,6 +4024,23 @@ void beginGroupAnnouncementTopologySnapshot(String groupDni, Map queue, Map item
   requiredIds.toList().each { String playerId ->
     ChildDeviceWrapper player = rinconMap[playerId]
     normalizeGroupPlayerIds(player?.getDataValue('groupPlayerIds')).each { String memberId -> requiredIds.add(memberId) }
+  }
+  ChildDeviceWrapper announcementCoordinator = buildRinconMap()[item.coordinatorId?.toString()]
+  String announcementAudioSource = announcementCoordinator?.currentValue('audioSource', true)?.toString()
+  if(!isUsableAnnouncementAudioSource(announcementAudioSource)) {
+    announcementAudioSource = item.coordinatorAudioSource?.toString()
+  }
+  if(!isUsableAnnouncementAudioSource(announcementAudioSource)) {
+    Map<String, Map> playbackObservations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] : [:]
+    announcementAudioSource = playbackObservations[item.coordinatorId?.toString()]?.audioSource?.toString()
+  }
+  transaction.coordinatorAudioSource = announcementAudioSource
+  if(isAutomaticTtsTopologyChangesEnabled()) {
+    getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+      String playerId = player.getDataValue('id')?.toString()
+      if(playerId) { requiredIds.add(playerId) }
+    }
   }
   requestAnnouncementTopologyObservations(transaction, requiredIds)
   Integer timeoutSeconds = 12
@@ -3968,7 +4173,8 @@ void completeGroupAnnouncementTopologySnapshot(Map transaction, Boolean timedOut
     scheduleGroupAnnouncementWatchdog(groupDni, item)
     return
   }
-  Map snapshot = [observations: transaction.observations ?: [:],
+  Map snapshot = [observations: transaction.observations ?: [:], refreshAt: transaction.refreshAt,
+    coordinatorAudioSource: transaction.coordinatorAudioSource,
     requestedPlayerIds: transaction.requestedPlayerIds ?: [], timedOut: timedOut]
   transaction.phase = 'ROUTING'
   Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
@@ -3993,11 +4199,13 @@ void completeGroupAnnouncementTopologySnapshot(Map transaction, Boolean timedOut
 }
 
 void beginGroupAnnouncementTopologyTransaction(String groupDni, Map queue, Map item,
-    List<ChildDeviceWrapper> players, Map snapshot, Boolean forced) {
+    List<ChildDeviceWrapper> players, Map snapshot, Boolean forced, Map streamHolder = null) {
   String correlationId = item.correlationId?.toString()
   Map<String, Map> observations = snapshot?.observations instanceof Map
       ? (Map<String, Map>)snapshot.observations : [:]
   List<String> targetIds = normalizeGroupPlayerIds(item.playerIds)
+  Boolean streamHandoff = streamHolder instanceof Map && targetIds.size() == 1
+  String holderId = streamHandoff ? streamHolder.playerId?.toString() : null
   if(observations.isEmpty() || !targetIds.every { String id -> observations[id] != null }) {
     if(forced) {
       logWarn("Forced coordinator-stream topology for ${correlationId} lacks a complete snapshot; sending the standard stream to the configured coordinator")
@@ -4015,7 +4223,7 @@ void beginGroupAnnouncementTopologyTransaction(String groupDni, Map queue, Map i
   }
   List<Map> originalGroups = []
   Set<String> affectedIds = new LinkedHashSet<String>()
-  targetIds.each { String playerId ->
+  (targetIds + (holderId ? [holderId] : [])).unique().each { String playerId ->
     Map observed = observations[playerId]
     List<String> members = normalizeGroupPlayerIds(observed.playerIds)
     affectedIds.addAll(members)
@@ -4028,8 +4236,47 @@ void beginGroupAnnouncementTopologyTransaction(String groupDni, Map queue, Map i
   Map transaction = [correlationId: correlationId, groupDni: groupDni, phase: 'PREPARING',
     forced: forced, originalGroups: originalGroups, affectedPlayerIds: affectedIds.toList().sort(),
     targetPlayerIds: targetIds, coordinatorId: item.coordinatorId?.toString(),
+    coordinatorAudioSource: item.coordinatorAudioSource?.toString() ?: snapshot?.coordinatorAudioSource?.toString(),
     expectedTopology: [:], userTopologyChanged: false, currentStep: 0, item: item]
   List<Map> steps = []
+
+  if(streamHandoff) {
+    transaction.streamHandoff = true
+    transaction.holderId = holderId
+    transaction.holderPreviousMuteState = streamHolder.previousMuteState?.toString()
+    ChildDeviceWrapper holder = buildRinconMap()[holderId]
+    if(holder == null || !(transaction.holderPreviousMuteState in ['muted', 'unmuted'])) {
+      logWarn("Cannot safely use stream holder ${holderId} for ${correlationId}; mute state is unavailable, falling back to audioClip")
+      transaction.streamHandoff = false
+      transaction.holderId = null
+      transaction.streamHandoffAborted = true
+      fallbackAnnouncementTopologyToAudioClip(transaction, 'stream holder mute state unavailable')
+      return
+    }
+    logInfo("Muting temporary stream holder ${holderId} before it takes over the active stream")
+    holder.mute()
+    transaction.restorationSteps = [
+      [playerIds: [holderId, targetIds[0]], coordinatorId: holderId,
+        groupingMode: GROUPING_MODE_ADDITIVE],
+      [playerIds: [targetIds[0]], coordinatorId: targetIds[0], removeCurrentCoordinator: true]
+    ]
+    steps.add([phase: 'STREAM_HOLD', playerIds: [targetIds[0], holderId],
+      coordinatorId: targetIds[0], groupingMode: GROUPING_MODE_ADDITIVE])
+    steps.add([phase: 'STREAM_DETACH_TARGET', playerIds: [holderId],
+      coordinatorId: holderId, removeCurrentCoordinator: true])
+  }
+
+  if(streamHandoff) {
+    transaction.steps = steps
+    Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
+    transactions[correlationId] = transaction
+    state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = transactions
+    queue.active.mode = 'STREAM_HANDOFF_PREPARING'
+    logInfo("Handing active Sonos stream from ${targetIds[0]} to idle holder ${holderId} for standard-stream announcement ${correlationId}")
+    startNextAnnouncementTopologyStep(transaction)
+    return
+  }
 
   // When Always standard stream is forced and the target contains an active
   // outside group's coordinator, first transfer coordination to the outside
@@ -4145,13 +4392,18 @@ void startNextAnnouncementTopologyStep(Map transaction) {
   Map target = [requiredPlayerIds: [coordinatorId] + ids.findAll { String id -> id != coordinatorId }.sort(),
     configuredCoordinatorId: coordinatorId, desiredCoordinatorId: coordinatorId,
     resolvedCoordinatorId: coordinatorId, missingPlayerIds: []]
-  Map operation = buildNewGroupOperation(groupDevice, GROUPING_MODE_EXPLICIT, target)
+  String groupingMode = step.groupingMode?.toString() ?: GROUPING_MODE_EXPLICIT
+  Map operation = buildNewGroupOperation(groupDevice, groupingMode, target)
+  if(step.removeCurrentCoordinator == true) { operation.handoffRemoveCurrentCoordinator = true }
   operation.announcementTransactionId = transaction.correlationId
   operation.announcementTopologyPhase = step.phase
   operation.announcementTopologyStepIndex = index
+  if(step.musicContextGroupId) { operation.musicContextGroupId = step.musicContextGroupId }
   transaction.operationId = operation.operationId
   transaction.phase = step.phase == 'GROUP_TARGET' ? 'GROUPING_TARGET' :
-      (step.phase == 'PREPARE_SOURCE_GROUP' ? 'PREPARING_SOURCE_GROUP' : 'PREPARING_OUTSIDE')
+      (step.phase == 'PREPARE_SOURCE_GROUP' ? 'PREPARING_SOURCE_GROUP' :
+      (step.phase == 'STREAM_HOLD' ? 'STREAM_HOLDING' :
+      (step.phase == 'STREAM_DETACH_TARGET' ? 'STREAM_DETACHING' : 'PREPARING_OUTSIDE')))
   Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
   transactions[transaction.correlationId.toString()] = transaction
@@ -4171,9 +4423,30 @@ void handleAnnouncementTopologyOperationFinished(Map operation, String status) {
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
   Map transaction = transactions[correlationId]
   if(transaction == null || transaction.operationId?.toString() != operation.operationId?.toString()) { return }
+  if(status != 'SUCCEEDED' && transaction.streamHandoff == true &&
+      transaction.phase in ['STREAM_HOLDING', 'STREAM_DETACHING']) {
+    logWarn("Active-stream handoff preparation failed during ${transaction.phase} for ${correlationId}; sending audioClip and restoring the captured topology")
+    transaction.streamHandoff = false
+    transaction.streamHandoffAborted = true
+    transactions[correlationId] = transaction
+    state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = transactions
+    fallbackAnnouncementTopologyToAudioClip(transaction,
+        "Could not verify active-stream handoff preparation (${status})")
+    return
+  }
   if(transaction.phase == 'RESTORING') {
-    if(status != 'SUCCEEDED') { logWarn("Topology restoration step ${operation.announcementTopologyStepIndex} failed for ${correlationId}; continuing recovery") }
-    transaction.currentStep = ((transaction.currentStep ?: 0) as Integer) + 1
+    if(transaction.streamHandoff == true) {
+      if(status != 'SUCCEEDED') {
+        transaction.restorationFailed = true
+        logWarn("Sonos stream handoff restoration step ${operation.announcementTopologyStepIndex} failed for ${correlationId}; leaving the stream on its current coordinator")
+        transaction.restorationStepIndex = ((transaction.restorationSteps as List).size()) as Integer
+      } else {
+        transaction.restorationStepIndex = ((transaction.restorationStepIndex ?: 0) as Integer) + 1
+      }
+    } else {
+      if(status != 'SUCCEEDED') { logWarn("Topology restoration step ${operation.announcementTopologyStepIndex} failed for ${correlationId}; continuing recovery") }
+      transaction.currentStep = ((transaction.currentStep ?: 0) as Integer) + 1
+    }
     transaction.operationId = null
     transactions[correlationId] = transaction
     state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = transactions
@@ -4276,6 +4549,45 @@ void startNextAnnouncementRestorationStep(Map transaction) {
       return
     }
   }
+  if(transaction.streamHandoff == true) {
+    List<Map> handoffSteps = transaction.restorationSteps instanceof List
+        ? (List<Map>)transaction.restorationSteps : []
+    Integer handoffIndex = (transaction.restorationStepIndex ?: 0) as Integer
+    if(transaction.restorationFailed == true || handoffIndex >= handoffSteps.size()) {
+      completeAnnouncementTopologyTransaction(transaction)
+      return
+    }
+    Map step = handoffSteps[handoffIndex]
+    List<String> ids = normalizeGroupPlayerIds(step.playerIds)
+    String coordinatorId = step.coordinatorId?.toString()
+    ChildDeviceWrapper groupDevice = getChildDevice(transaction.groupDni?.toString())
+    if(!ids || !coordinatorId || groupDevice == null) {
+      transaction.restorationFailed = true
+      completeAnnouncementTopologyTransaction(transaction)
+      return
+    }
+    Map target = [requiredPlayerIds: [coordinatorId] + ids.findAll { String id -> id != coordinatorId }.sort(),
+      configuredCoordinatorId: coordinatorId, desiredCoordinatorId: coordinatorId,
+      resolvedCoordinatorId: coordinatorId, missingPlayerIds: []]
+    String groupingMode = step.groupingMode?.toString() ?: GROUPING_MODE_EXPLICIT
+    Map operation = buildNewGroupOperation(groupDevice, groupingMode, target)
+    if(step.removeCurrentCoordinator == true) { operation.handoffRemoveCurrentCoordinator = true }
+    operation.announcementTransactionId = transaction.correlationId
+    operation.announcementTopologyPhase = 'RESTORING'
+    operation.announcementTopologyStepIndex = handoffIndex
+    transaction.operationId = operation.operationId
+    Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
+    transactions[transaction.correlationId.toString()] = transaction
+    state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = transactions
+    saveActiveGroupOperation(operation)
+    registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
+    publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+    refreshGroupOperationTopology([operationId: operation.operationId])
+    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [overwrite: true,
+      data: [operationId: operation.operationId]])
+    return
+  }
   List<Map> originalGroups = transaction.originalGroups instanceof List ? (List<Map>)transaction.originalGroups : []
   Integer index = (transaction.currentStep ?: 0) as Integer
   if(index >= originalGroups.size()) {
@@ -4325,17 +4637,71 @@ void completeAnnouncementTopologyTransaction(Map transaction) {
   String groupDni = transaction.groupDni?.toString()
   Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
+  restoreStreamHolderMuteState(transaction)
   transactions.remove(correlationId)
   state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = transactions
   Map queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
       ? (Map)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
   Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
   if(queue?.active?.correlationId?.toString() == correlationId) {
+    Map active = queue.active instanceof Map ? (Map)queue.active : null
+    ChildDeviceWrapper coordinator = buildRinconMap()[active?.coordinatorId?.toString()]
+    if(transaction.streamHandoff == true) {
+      String expectedAudioSource = transaction.coordinatorAudioSource?.toString()
+      String restoredAudioSource = coordinator?.currentValue('audioSource', true)?.toString()
+      Boolean sourceVerified = expectedAudioSource && restoredAudioSource &&
+          expectedAudioSource == restoredAudioSource
+      if(sourceVerified != true) {
+        transaction.restorationFailed = true
+        logWarn("Sonos stream handoff ${correlationId} topology is restored, but the original audio source could not be verified (expected=${expectedAudioSource ?: 'unknown'}, observed=${restoredAudioSource ?: 'unknown'})")
+      }
+      if(active?.restorationReason?.toString() != 'INTERRUPTED_BY_EXTERNAL_PLAYBACK') {
+        coordinator?.completeGroupAnnouncementPlaybackHandoff(correlationId, sourceVerified)
+      }
+      queue.active = null
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      logInfo("Sonos stream handoff ${correlationId} ${transaction.restorationFailed == true ? 'completed with restoration unverified' : 'restored and verified'}; announcement queue may advance")
+      runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+      return
+    }
+    if(active?.mode?.toString() != 'AUDIO_CLIP' &&
+        active?.restorationReason?.toString() != 'INTERRUPTED_BY_EXTERNAL_PLAYBACK' && coordinator != null) {
+      active.playbackRestorePending = true
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      logInfo("Original topology restored for ${correlationId}; restoring coordinator playback")
+      coordinator.restoreGroupAnnouncementPlayback(correlationId)
+      return
+    }
     queue.active = null
     queues[groupDni] = queue
     state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
     logInfo("Topology transaction ${correlationId} complete; original topology restored or preserved and announcement queue may advance")
     runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+  }
+}
+
+/** Restore a temporary holder's mute state after it has been removed from the transferred stream. */
+void restoreStreamHolderMuteState(Map transaction) {
+  String holderId = transaction?.holderId?.toString()
+  String previousMuteState = transaction?.holderPreviousMuteState?.toString()
+  if(!holderId || !(previousMuteState in ['muted', 'unmuted'])) { return }
+  if(transaction.restorationFailed == true) {
+    logWarn("Leaving stream holder ${holderId} muted because stream handback did not complete successfully")
+    return
+  }
+  ChildDeviceWrapper holder = buildRinconMap()[holderId]
+  if(holder == null) {
+    logWarn("Could not restore mute state for temporary stream holder ${holderId}; player is unavailable")
+    return
+  }
+  if(previousMuteState == 'unmuted') {
+    logInfo("Restoring temporary stream holder ${holderId} to its prior unmuted state")
+    holder.unmute()
+  } else {
+    logInfo("Restoring temporary stream holder ${holderId} to its prior muted state")
+    holder.mute()
   }
 }
 
@@ -4347,6 +4713,10 @@ void scheduleGroupAnnouncementWatchdog(String groupDni, Map item) {
 }
 
 /** Resolve the shared announcement policy for an individual player. */
+Boolean shouldUseAudioClipForAirPlay() {
+  return getAnnouncementMode(false) != 'alwaysCoordinatorStream'
+}
+
 Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = false) {
   String mode = getAnnouncementMode(highPriority)
   if(mode == 'alwaysNonInterrupting') { return true }
@@ -4359,6 +4729,10 @@ Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = fal
       ?: player.getDataValue('id')?.toString()
   ChildDeviceWrapper coordinator = coordinatorId ? rinconMap[coordinatorId] : player
   if(coordinator == null) { coordinator = player }
+  if(isAirPlayAudioSource(coordinator.currentValue('audioSource', true)?.toString())) {
+    logDebug("Player announcement route check player=${playerDni}, coordinator=${coordinatorId}, mode=${mode}, audioSource=AirPlay, useAudioClip=true")
+    return true
+  }
   String transportStatus = coordinator.currentValue('transportStatus', true)?.toString()?.toLowerCase()
   Map playbackActivity = getPlayerPlaybackActivity(coordinator)
   String playbackState = playbackActivity.playbackState?.toString()
@@ -4420,6 +4794,10 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
     finishGroupAnnouncement(groupDni, correlationId, 'INTERRUPTED_BY_EXTERNAL_PLAYBACK')
     return
   }
+  if(phase == 'PLAYBACK_RESTORED') {
+    completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, payload)
+    return
+  }
   Map<String, String> statuses = active.playerStatuses instanceof Map ? (Map<String, String>)active.playerStatuses : [:]
   String playerId = player.getDataValue('id')?.toString()
   if(playerId) { statuses[playerId] = phase; active.playerStatuses = statuses }
@@ -4474,6 +4852,7 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
   Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
   if(queue?.active?.correlationId?.toString() != correlationId) { return }
+  Map active = queue.active instanceof Map ? (Map)queue.active : null
   logInfo("Group announcement ${correlationId} finished (${reason}) for ${groupDni}")
   Map<String, Map> topologyTransactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
@@ -4495,6 +4874,28 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
     }
     return
   }
+  if(active.mode?.toString() != 'AUDIO_CLIP' && reason != 'INTERRUPTED_BY_EXTERNAL_PLAYBACK' &&
+      reason != 'SUPERSEDED_BY_HIGH_PRIORITY_ANNOUNCEMENT') {
+    ChildDeviceWrapper coordinator = buildRinconMap()[active.coordinatorId?.toString()]
+    if(coordinator != null) {
+      active.playbackRestorePending = true
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      logInfo("Restoring coordinator playback for ${correlationId} after ${reason}")
+      coordinator.restoreGroupAnnouncementPlayback(correlationId)
+      return
+    }
+    logWarn("Cannot restore playback for ${correlationId}: coordinator is unavailable")
+  }
+  completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, [restored: false, skipped: reason])
+}
+
+void completeGroupAnnouncementPlaybackRestore(String groupDni, String correlationId, Map payload = [:]) {
+  Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
+  if(queue?.active?.correlationId?.toString() != correlationId) { return }
+  logInfo("Coordinator playback restore completed for ${correlationId}: restored=${payload?.restored}")
   queue.active = null
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
@@ -5719,7 +6120,7 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching additive coordinator restoration ${operation.topologyRequestId} for group operation ${operation.operationId}")
         prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
-        coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
+        coordinator.playerCreateGroup(playerIdsInCoordinatorOrder, operation.musicContextGroupId as String)
         operation.coordinatorTransferGroupCreated = true
         operation.topologyMutationSent = true
       } else {
@@ -5808,7 +6209,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
     if(!topologyCanBeChanged) {
       // Eviction is deliberately removal-only. Never create/rebuild a group
       // from an incomplete snapshot because that can transfer coordination
-      // away from the configured AirPlay/source player.
+      // away from the configured active source player.
       operation.lastCommand = 'refreshGroupTopology'
       logDebug("Waiting for a fresh topology with configured coordinator ${configuredCoordinatorId} before evicting unlisted players")
       configuredCoordinator.playerGetGroupsFull()
@@ -5952,8 +6353,17 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
           memberIds: requiredPlayerIds
         ]
       }
-      prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
-      previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
+      if(operation.handoffRemoveCurrentCoordinator == true) {
+        // In a stream handoff, the current coordinator leaves the shared
+        // group so the holder already following its stream becomes coordinator.
+        prepareExpectedTopologyForMutation(previousCoordinator, [], [topology.coordinatorId as String],
+            finalTopologyExpectation)
+        previousCoordinator.playerModifyGroupMembers([], [topology.coordinatorId as String],
+            finalTopologyExpectation)
+      } else {
+        prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
+        previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
+      }
       operation.coordinatorTransferStarted = true
       operation.topologyMutationSent = true
       operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
@@ -5987,7 +6397,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
           requiredPlayerIds.findAll { String playerId -> playerId != coordinatorId }
       prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
-      coordinator.playerCreateGroup(playerIdsInCoordinatorOrder)
+      coordinator.playerCreateGroup(playerIdsInCoordinatorOrder, operation.musicContextGroupId as String)
       operation.topologyMutationSent = true
     }
   } else if(operation.groupingMode == GROUPING_MODE_ADDITIVE) {
