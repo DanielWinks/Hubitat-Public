@@ -343,10 +343,12 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   void emitPlayback(String playerId, String playbackState, Long observedAt = null, String groupId = 'GROUP-1') {
+    Map operation = appScript.getActiveGroupOperation()
     appScript.groupFavoriteOperationEventHandler([
       value: JsonOutput.toJson([
-        operationId: appScript.getActiveGroupOperation().operationId,
+        operationId: operation.operationId,
         playerId: playerId,
+        attemptId: operation.favoriteAttemptId,
         observedAt: observedAt ?: appScript.now(),
         event: 'playbackStatus',
         data: [playbackState: playbackState, groupId: groupId]
@@ -1670,6 +1672,8 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' }.groupId == 'GROUP-1'
     coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' }.attemptId == operation.favoriteAttemptId
     appScript.getActiveGroupOperation().phase == 'WAIT_FOR_FAVORITE'
+    operation.topologyDeadlineAt < operation.deadlineAt
+    operation.favoriteDeadlineAt > 0L
   }
 
   def "Favorite inherits the additive context and accepts the extra player"() {
@@ -1757,7 +1761,7 @@ class SonosAdvancedAppSpec extends Specification {
     group.statuses.last().status.status != 'SUCCEEDED'
   }
 
-  def "Favorite completes only after coordinator acknowledgement, playback, and exact metadata"() {
+  def "Favorite completes with correlated group playback and exact metadata"() {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
     Map operation = appScript.getActiveGroupOperation()
@@ -1794,6 +1798,78 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation() == null
     group.statuses.last().status.status == 'SUCCEEDED'
     coordinator.commands.find { it.name == 'clearGroupFavoriteOperation' } != null
+  }
+
+  def "exact post-load metadata and group playback cover a lost acknowledgement at the deadline"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    stabilizePostFavoriteTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    assert operation.favoriteTopologyVerified == true
+    emitPlayback('RINCON_COORD', 'PLAYBACK_STATE_PLAYING')
+    emitPlayback('RINCON_FOLLOW', 'PLAYBACK_STATE_PLAYING')
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: operation.operationId, playerId: 'RINCON_COORD',
+        attemptId: operation.favoriteAttemptId, observedAt: appScript.now(),
+        event: 'metadataConfirmed',
+        data: [favoriteId: '42', confirmed: true, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+    operation.favoriteDeadlineAt = appScript.now() - 1L
+    operation.deadlineAt = appScript.now() - 1L
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    appScript.getActiveGroupOperation() == null
+    group.statuses.last().status.status == 'SUCCEEDED'
+    appScript.logs.any { it.contains('load acknowledgment was not observed') }
+  }
+
+  def "Favorite timeout identifies missing playback observations and phase"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    stabilizePostFavoriteTopology()
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: operation.operationId, playerId: 'RINCON_COORD',
+        attemptId: operation.favoriteAttemptId, event: 'favoriteLoadAck',
+        data: [success: true, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+    emitPlayback('RINCON_COORD', 'PLAYBACK_STATE_PLAYING')
+    emitPlayback('RINCON_FOLLOW', 'PLAYBACK_STATE_PAUSED')
+    appScript.groupFavoriteOperationEventHandler([
+      value: JsonOutput.toJson([
+        operationId: operation.operationId, playerId: 'RINCON_COORD',
+        attemptId: operation.favoriteAttemptId, event: 'metadataConfirmed',
+        data: [favoriteId: '42', confirmed: true, groupId: 'GROUP-1']
+      ])
+    ] as Event)
+    operation.favoriteDeadlineAt = appScript.now() - 1L
+    operation.deadlineAt = appScript.now() + 60000L
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    appScript.getActiveGroupOperation() == null
+    group.statuses.last().status.errorCode == 'GROUP_OPERATION_TIMEOUT'
+    group.statuses.last().status.detail.contains('favorite confirmation')
+    group.statuses.last().status.detail.contains('RINCON_FOLLOW=PLAYBACK_STATE_PAUSED')
+    group.statuses.last().status.detail.contains('observedFavorite=42 (expected=42)')
   }
 
   def "a failed Favorite acknowledgement retries the media load without regrouping"() {

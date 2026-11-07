@@ -264,6 +264,7 @@ preferences {
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
+@Field static final Integer GROUP_OPERATION_HARD_DEADLINE_SECONDS = 180
 @Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_STABILITY_OBSERVATIONS = 2
 @Field static final Integer GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS = 4
@@ -6495,7 +6496,9 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     phase: 'ENSURE_GROUP',
     status: 'ENSURING_TOPOLOGY',
     createdAt: startTime,
-    deadlineAt: startTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L,
+    deadlineAt: startTime + (favoriteSpec ? GROUP_OPERATION_HARD_DEADLINE_SECONDS : GROUP_OPERATION_DEADLINE_SECONDS) * 1000L,
+    topologyDeadlineAt: startTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L,
+    favoriteDeadlineAt: 0L,
     topologyAttempt: 0,
     favoriteAttempt: 0,
     playAttempt: 0,
@@ -6518,7 +6521,9 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     observedCoordinatorId: null,
     lastTopologyObservations: [],
     loadAcknowledged: false,
+    loadAcknowledgedAt: 0L,
     favoriteCommandDelivered: false,
+    favoriteCommandDeliveredAt: 0L,
     loadErrorCode: null,
     loadErrorReason: null,
     playbackState: null,
@@ -6537,6 +6542,7 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     favoriteTopologyVerified: false,
     playerPlaybackStates: [:],
     metadataConfirmed: false,
+    metadataObservedAt: 0L,
     exactFavoriteId: null,
     evictUnlistedOnly: false
   ]
@@ -6726,7 +6732,9 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   operation.favoriteAttempt = 0
   operation.playAttempt = 0
   operation.loadAcknowledged = false
+  operation.loadAcknowledgedAt = 0L
   operation.favoriteCommandDelivered = false
+  operation.favoriteCommandDeliveredAt = 0L
   operation.playCommandDelivered = false
   operation.loadErrorCode = null
   operation.loadErrorReason = null
@@ -6746,8 +6754,12 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   operation.favoriteTopologyVerified = false
   operation.playerPlaybackStates = [:]
   operation.metadataConfirmed = false
+  operation.metadataObservedAt = 0L
   operation.exactFavoriteId = null
-  operation.deadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
+  Long attachmentTime = now()
+  operation.deadlineAt = attachmentTime + GROUP_OPERATION_HARD_DEADLINE_SECONDS * 1000L
+  operation.topologyDeadlineAt = attachmentTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
+  operation.favoriteDeadlineAt = 0L
   clearRegisteredGroupOperations(operation)
   operation.registeredPlayerIds = []
   operation.registrationRequestIds = [:]
@@ -7616,8 +7628,11 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
   operation.phase = 'WAIT_FOR_FAVORITE'
   operation.status = 'LOADING_FAVORITE'
   operation.favoriteAttempt = ((operation.favoriteAttempt ?: 0) as Integer) + 1
+  operation.favoriteDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
   operation.loadAcknowledged = false
+  operation.loadAcknowledgedAt = 0L
   operation.favoriteCommandDelivered = false
+  operation.favoriteCommandDeliveredAt = 0L
   operation.playCommandDelivered = false
   operation.loadErrorCode = null
   operation.loadErrorReason = null
@@ -7641,6 +7656,7 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
   operation.favoriteExpectedCoordinatorId = coordinatorId
   operation.playerPlaybackStates = [:]
   operation.metadataConfirmed = false
+  operation.metadataObservedAt = 0L
   operation.exactFavoriteId = null
   operation.lastCommandAt = operation.favoriteCommandAt
   saveActiveGroupOperation(operation)
@@ -7754,6 +7770,81 @@ String summarizeGroupFavoritePlayback(Map operation) {
   }.join('; ')
 }
 
+/** Describe the correlated Favorite and playback evidence required to finish an operation. */
+String summarizeGroupFavoriteCompletion(Map operation) {
+  if(operation == null || !operation.favoriteId) { return 'No Favorite completion evidence is required.' }
+  Long currentTime = now()
+  Long commandAt = operation.favoriteCommandAt as Long ?: 0L
+  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
+      ? (Map<String, Map>)operation.playerPlaybackStates
+      : [:]
+  List<String> playerSummaries = normalizeGroupPlayerIds(operation.requiredPlayerIds).collect { String playerId ->
+    Map playerState = playbackStates[playerId]
+    Long observedAt = playerState?.observedAt as Long ?: 0L
+    Long ageSeconds = observedAt > 0L ? Math.max(0L, Math.floorDiv(currentTime - observedAt, 1000L)) : 0L
+    String freshness = observedAt <= 0L ? 'not observed' :
+        (observedAt < commandAt ? 'stale' : "${ageSeconds}s old")
+    "${playerId}=${playerState?.playbackState ?: 'unknown'} (${freshness})"
+  }
+  Long coordinatorObservedAt = playbackStates[operation.resolvedCoordinatorId as String]?.observedAt as Long ?: 0L
+  Long coordinatorAgeSeconds = coordinatorObservedAt > 0L
+      ? Math.max(0L, Math.floorDiv(currentTime - coordinatorObservedAt, 1000L))
+      : 0L
+  String coordinatorFreshness = coordinatorObservedAt <= 0L ? 'not observed' :
+      (coordinatorObservedAt < commandAt ? 'stale' : "${coordinatorAgeSeconds}s old")
+  Long acknowledgmentObservedAt = operation.loadAcknowledgedAt as Long ?: 0L
+  Long metadataObservedAt = operation.metadataObservedAt as Long ?: 0L
+  String acknowledgmentFreshness = acknowledgmentObservedAt <= 0L ? 'not observed' :
+      "${Math.max(0L, Math.floorDiv(currentTime - acknowledgmentObservedAt, 1000L))}s old"
+  String metadataFreshness = metadataObservedAt <= 0L ? 'not observed' :
+      "${Math.max(0L, Math.floorDiv(currentTime - metadataObservedAt, 1000L))}s old"
+  return "phase=${operation.phase ?: 'unknown'}, favorite=${operation.favoriteId}, " +
+      "acknowledged=${operation.loadAcknowledged == true} (${acknowledgmentFreshness}), " +
+      "commandDelivered=${operation.favoriteCommandDelivered == true} at=${operation.favoriteCommandDeliveredAt ?: 0L}, " +
+      "coordinatorPlayback=${operation.playbackState ?: 'unknown'} (${coordinatorFreshness}), " +
+      "loadError=${operation.loadErrorCode ?: 'none'}, metadataConfirmed=${operation.metadataConfirmed == true} (${metadataFreshness}), " +
+      "observedFavorite=${operation.exactFavoriteId ?: 'unknown'} (expected=${operation.favoriteId}), " +
+      "players=[${playerSummaries.join('; ')}], postLoadTopologyVerified=${operation.favoriteTopologyVerified == true}, " +
+      "favoriteGroup=${operation.favoriteExpectedGroupId ?: 'unknown'}, favoriteCoordinator=${operation.favoriteExpectedCoordinatorId ?: 'unknown'}"
+}
+
+/** Permit strong, current playback evidence to cover a lost load-ack event. */
+Boolean isGroupFavoriteCompletionConfirmed(Map operation) {
+  if(operation == null || !operation.favoriteId) { return false }
+  if(operation.favoriteTopologyVerified != true) { return false }
+  if(operation.loadAcknowledged == true && operation.autoPlay?.toString() != 'true') { return true }
+  if(operation.autoPlay?.toString() != 'true') { return false }
+  Boolean exactFavoritePlaying = operation.playbackState == 'PLAYBACK_STATE_PLAYING' &&
+      areRequiredPlayersPlaying(operation) && operation.metadataConfirmed == true &&
+      operation.exactFavoriteId?.toString() == operation.favoriteId?.toString()
+  if(!exactFavoritePlaying) { return false }
+  if(operation.loadAcknowledged != true) {
+    String acknowledgmentState = operation.loadErrorCode
+        ? "load acknowledgment reported ${operation.loadErrorCode}"
+        : 'load acknowledgment was not observed'
+    logWarn("Completing Favorite ${operation.favoriteId} for operation ${operation.operationId} from matching post-load metadata and playback; ${acknowledgmentState}")
+  }
+  return true
+}
+
+/** Return the expired deadline phase, if any. */
+String getExpiredGroupOperationDeadlinePhase(Map operation) {
+  if(operation == null) { return null }
+  Long currentTime = now()
+  Long hardDeadlineAt = operation.deadlineAt as Long ?: 0L
+  Boolean favoritePlaybackPhase = operation.favoriteId &&
+      ((operation.favoriteAttempt ?: 0) as Integer) > 0 && operation.phase != 'ENSURE_GROUP'
+  Long phaseDeadlineAt = favoritePlaybackPhase
+      ? (operation.favoriteDeadlineAt as Long ?: 0L)
+      : (operation.topologyDeadlineAt as Long ?: 0L)
+  if(phaseDeadlineAt <= 0L) { phaseDeadlineAt = hardDeadlineAt }
+  if(phaseDeadlineAt > 0L && currentTime >= phaseDeadlineAt) {
+    return favoritePlaybackPhase ? 'favorite confirmation' : 'group topology'
+  }
+  if(hardDeadlineAt > 0L && currentTime >= hardDeadlineAt) { return 'overall operation' }
+  return null
+}
+
 void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   String detail = "The group topology changed after the Favorite load: ${summarizeGroupOperationTopology(topology)}"
   if(operation.groupingMode == GROUPING_MODE_CURRENT) {
@@ -7768,7 +7859,9 @@ void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   operation.phase = 'ENSURE_GROUP'
   operation.status = 'ENSURING_TOPOLOGY'
   operation.loadAcknowledged = false
+  operation.loadAcknowledgedAt = 0L
   operation.favoriteCommandDelivered = false
+  operation.favoriteCommandDeliveredAt = 0L
   operation.playCommandDelivered = false
   operation.loadErrorCode = null
   operation.loadErrorReason = null
@@ -7786,6 +7879,7 @@ void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   operation.favoriteTopologyVerified = false
   operation.playerPlaybackStates = [:]
   operation.metadataConfirmed = false
+  operation.metadataObservedAt = 0L
   operation.exactFavoriteId = null
   operation.topologyAttempt = 0
   operation.stableObservations = 0
@@ -7796,6 +7890,7 @@ void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   operation.observedCoordinatorId = null
   operation.observedPlayerIds = []
   operation.lastTopologyObservations = topology?.observations ?: []
+  operation.topologyDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
   operation.lastCommand = 'refreshGroupTopology'
   operation.lastCommandAt = now()
   operation.errorCode = null
@@ -7820,8 +7915,19 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId)) {
     return
   }
-  if((operation.deadlineAt as Long ?: 0L) <= now()) {
-    failGroupOperation(operation, 'GROUP_OPERATION_TIMEOUT', "The live Sonos topology or playback confirmation did not stabilize before the deadline. Last topology: ${summarizeGroupOperationTopology([observations: operation.lastTopologyObservations])}")
+  updateGroupFavoriteSignalsFromState(operation)
+  if(isGroupFavoriteCompletionConfirmed(operation)) {
+    completeGroupOperation(operation)
+    return
+  }
+  String expiredDeadlinePhase = getExpiredGroupOperationDeadlinePhase(operation)
+  if(expiredDeadlinePhase) {
+    String detail = "Timed out during ${expiredDeadlinePhase}. "
+    if(operation.favoriteId) {
+      detail += "Favorite evidence: ${summarizeGroupFavoriteCompletion(operation)}. "
+    }
+    detail += "Last topology: ${summarizeGroupOperationTopology([observations: operation.lastTopologyObservations])}"
+    failGroupOperation(operation, 'GROUP_OPERATION_TIMEOUT', detail)
     return
   }
   registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
@@ -8044,6 +8150,10 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   }
 
   updateGroupFavoriteSignalsFromState(operation)
+  if(isGroupFavoriteCompletionConfirmed(operation)) {
+    completeGroupOperation(operation)
+    return
+  }
   if(operation.loadErrorCode && !isRetryableGroupFavoriteError(operation.loadErrorCode as String)) {
     failGroupOperation(operation, operation.loadErrorCode as String, operation.loadErrorReason as String)
     return
@@ -8073,17 +8183,6 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
 
   Boolean autoPlay = operation.autoPlay?.toString() == 'true'
   Boolean playbackInProgress = operation.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']
-  if(operation.loadAcknowledged == true && !autoPlay) {
-    completeGroupOperation(operation)
-    return
-  }
-  if(operation.loadAcknowledged == true && operation.playbackState == 'PLAYBACK_STATE_PLAYING' &&
-      areRequiredPlayersPlaying(operation) &&
-      operation.metadataConfirmed == true && operation.exactFavoriteId?.toString() == operation.favoriteId?.toString()) {
-    completeGroupOperation(operation)
-    return
-  }
-
   Long lastCommandAt = operation.lastCommandAt as Long ?: 0L
   Boolean allPlaybackObserved = haveRequiredPlaybackObservations(operation)
   Boolean partialPlaybackObserved = allPlaybackObserved &&
@@ -8144,6 +8243,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
       operation.phase = 'ENSURE_GROUP'
       operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
       operation.lastCommandAt = 0L
+      operation.topologyDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
       saveActiveGroupOperation(operation)
       sendGroupFavoriteLoad(operation, topology)
       return
@@ -8207,6 +8307,7 @@ void groupFavoriteOperationEventHandler(Event event) {
       if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand &&
           payload.requestId?.toString() == operation.favoriteRequestId?.toString()) {
         operation.favoriteCommandDelivered = true
+        operation.favoriteCommandDeliveredAt = eventObservedAt
         logDebug("Favorite load request ${operation.favoriteRequestId} for operation ${operation.operationId} was handed to player ${eventPlayerId}")
       }
       break
@@ -8219,6 +8320,7 @@ void groupFavoriteOperationEventHandler(Event event) {
     case 'favoriteLoadAck':
       if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         operation.loadAcknowledged = eventData.success == true
+        operation.loadAcknowledgedAt = eventObservedAt
         operation.loadErrorCode = eventData.errorCode as String
         operation.loadErrorReason = eventData.reason as String
       }
@@ -8226,6 +8328,7 @@ void groupFavoriteOperationEventHandler(Event event) {
     case 'loadRejected':
       if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         operation.loadAcknowledged = false
+        operation.loadAcknowledgedAt = eventObservedAt
         operation.loadErrorCode = eventData.reason as String ?: 'PLAYER_REJECTED_LOAD'
         operation.loadErrorReason = eventData.reason as String
       }
@@ -8249,9 +8352,11 @@ void groupFavoriteOperationEventHandler(Event event) {
       if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
         if(eventData.confirmed == true && eventData.favoriteId?.toString() == operation.favoriteId?.toString()) {
           operation.metadataConfirmed = true
+          operation.metadataObservedAt = eventObservedAt
           operation.exactFavoriteId = eventData.favoriteId as String
         } else {
           operation.metadataConfirmed = false
+          operation.metadataObservedAt = eventObservedAt
           operation.exactFavoriteId = eventData.favoriteId as String
         }
       }
@@ -8332,7 +8437,15 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
     observations: operation.lastTopologyObservations ?: [],
     playbackStates: operation.playerPlaybackStates ?: [:],
     favoriteAcknowledged: operation.loadAcknowledged == true,
+    favoriteAcknowledgedAt: operation.loadAcknowledgedAt ?: 0L,
     metadataConfirmed: operation.metadataConfirmed == true,
+    metadataObservedAt: operation.metadataObservedAt ?: 0L,
+    exactFavoriteId: operation.exactFavoriteId,
+    favoriteCommandDeliveredAt: operation.favoriteCommandDeliveredAt ?: 0L,
+    favoriteCommandAt: operation.favoriteCommandAt ?: 0L,
+    deadlineAt: operation.deadlineAt ?: 0L,
+    topologyDeadlineAt: operation.topologyDeadlineAt ?: 0L,
+    favoriteDeadlineAt: operation.favoriteDeadlineAt ?: 0L,
     topologyAttempt: operation.topologyAttempt ?: 0,
     favoriteAttempt: operation.favoriteAttempt ?: 0,
     favoriteAttemptId: operation.favoriteAttemptId,
