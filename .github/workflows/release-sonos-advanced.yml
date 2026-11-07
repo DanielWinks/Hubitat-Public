@@ -60,22 +60,50 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          VERSION_INCREMENT: ${{ inputs.version_increment }}
         run: |
           npm install --global @github/copilot
 
           python3 - <<'PY'
           import os
+          import json
+          import re
           import subprocess
           from pathlib import Path
 
           current_version = os.environ["CURRENT_VERSION"]
-          tag = f"v{current_version}"
-          tag_exists = subprocess.run(
-              ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+          new_version = os.environ["NEW_VERSION"]
+          increment = os.environ["VERSION_INCREMENT"]
+          major, minor, _ = (int(part) for part in new_version.split("."))
+
+          # A minor release starts its summary at the immediately preceding release.
+          # A patch release rebuilds the complete current-minor summary from code history
+          # and receives the previously published notes as context to preserve details.
+          tags = subprocess.check_output(
+              ["git", "tag", "--list", "v*", "--sort=-version:refname"], text=True
+          ).splitlines()
+          parsed_tags = []
+          for candidate in tags:
+              match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", candidate)
+              if match:
+                  version = tuple(int(part) for part in match.groups())
+                  parsed_tags.append((version, candidate))
+
+          if increment == "minor":
+              base_tag = f"v{current_version}"
+          else:
+              previous_minor = [
+                  (version, tag) for version, tag in parsed_tags
+                  if version[0] == major and version[1] < minor
+              ]
+              base_tag = max(previous_minor)[1] if previous_minor else None
+
+          base_exists = bool(base_tag) and subprocess.run(
+              ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{base_tag}"],
               check=False,
           ).returncode == 0
-          if tag_exists:
-              commit_range = f"{tag}..HEAD"
+          if base_exists:
+              commit_range = f"{base_tag}..HEAD"
               commits = subprocess.check_output(
                   ["git", "log", commit_range, "--no-merges", "--pretty=format:- %s"], text=True
               )
@@ -83,24 +111,45 @@ jobs:
                   ["git", "diff", "--no-ext-diff", "--unified=2", commit_range, "--",
                    "Apps/SonosAdvancedApp.groovy", "Drivers/Component/SonosAdv*.groovy",
                    "Libraries/SMAPILibrary.groovy", "Libraries/UtilitiesAndLoggingLibrary.groovy",
-                   "COMMUNITY_ISSUES_CHECKLIST.md"], text=True
+                   "Readme/", "README.md", "COMMUNITY_ISSUES_CHECKLIST.md"], text=True
               )
           else:
               commits = subprocess.check_output(
-                  ["git", "log", "--since=30 days ago", "--no-merges", "--pretty=format:- %s"], text=True
+                  ["git", "log", "--no-merges", "--pretty=format:- %s"], text=True
               )
-              diff = "No previous release tag was found; use the commit list as the source of truth."
+              diff = "No appropriate previous release tag was found; use available commit history as the source of truth."
+
+          manifest = json.loads(Path("PackageManifests/SonosAdvancedController/packageManifest.json").read_text())
+          existing_minor_notes = []
+          if increment == "patch":
+              note_text = manifest.get("releaseNotes", "")
+              entries = re.split(r"(?:\\r\\n|\r\n|\n)(?=\d+\.\d+\.\d+)", note_text)
+              prefix = f"{major}.{minor}."
+              existing_minor_notes = [
+                  entry.strip() for entry in entries if re.match(r"\s*" + re.escape(prefix) + r"\d+\b", entry)
+              ]
 
           if not commits.strip():
-              commits = "No Sonos Advanced commits found since the previous release."
+              commits = "No Sonos Advanced commits found in the selected release range."
           diff = diff[:60000]
-          prompt = f"""Write concise, user-facing release notes for Sonos Advanced Controller version {os.environ['NEW_VERSION']}.
-          Summarize only user-visible changes supported by the commit list and code diff below. Group related changes into bullets. Omit internal version bumps, generated files, and speculative claims. Output Markdown bullets only, with no heading or preamble. If there are no meaningful changes, say so plainly.
+          existing_notes = "\n\n".join(existing_minor_notes) or "No previous summary exists for this minor-version line."
+          release_scope = (
+              f"This is a patch release. Produce the complete cumulative summary for {major}.{minor}.x. "
+              "Carry forward every user-visible change in the existing notes and add all additional changes evidenced by the full code history. Consolidate duplicates without dropping distinct functionality."
+              if increment == "patch" else
+              f"This is the first release in minor version {major}.{minor}. Summarize all user-visible changes since the previous release tag."
+          )
+          prompt = f"""Write concise, user-facing, cumulative release notes for Sonos Advanced Controller version {new_version}.
+          {release_scope}
+          Treat the existing summary as information to preserve, not as a replacement for reviewing the code history. Summarize only user-visible changes supported by these sources. Group related changes into clear bullets. Omit internal version bumps, generated-only changes, and speculative claims. Output Markdown bullets only, with no heading or preamble. If there are no meaningful user-visible changes, say so plainly.
 
-          Commits since the previous release:
+          Existing summary for this minor-version line:
+          {existing_notes}
+
+          Commits in the cumulative release range beginning at {base_tag or 'available repository history'}:
           {commits}
 
-          Sonos Advanced source diff (may be truncated):
+          Sonos Advanced source and documentation diff for the cumulative release range (may be truncated):
           {diff}
           """
           Path("copilot-prompt.md").write_text(prompt)
@@ -146,9 +195,11 @@ jobs:
           import json
           import sys
           import os
+          import re
 
           manifest_path = 'PackageManifests/SonosAdvancedController/packageManifest.json'
           new_version = sys.argv[1]
+          increment = sys.argv[2]
           with open('release-notes.md', 'r') as f:
               release_notes = f.read().strip()
           date_released = sys.argv[3]
@@ -189,12 +240,17 @@ jobs:
                   filename = file['location'].split('/')[-1]
                   file['location'] = f'{base_release_url}/{filename}'
 
-          # Prepend new release notes
-          new_notes = f"{new_version} {release_notes}"
-          if 'releaseNotes' in data and data['releaseNotes']:
-              data['releaseNotes'] = new_notes + "\\r\\n" + data['releaseNotes']
-          else:
-              data['releaseNotes'] = new_notes
+          # A patch note is the full summary for its minor line, so replace older
+          # entries from that same line instead of leaving a partial patch note on top.
+          # Minor releases start a new line and preserve all earlier minor history.
+          existing_notes = data.get('releaseNotes', '')
+          existing_entries = re.split(r"(?:\\r\\n|\r\n|\n)(?=\d+\.\d+\.\d+)", existing_notes)
+          major, minor, _ = (int(part) for part in new_version.split('.'))
+          if increment == 'patch':
+              same_minor = re.compile(r'^\s*' + re.escape(f'{major}.{minor}.') + r'\d+\b')
+              existing_entries = [entry for entry in existing_entries if not same_minor.match(entry)]
+          new_notes = f"{new_version} - {release_notes}"
+          data['releaseNotes'] = "\r\n".join([new_notes] + [entry.strip() for entry in existing_entries if entry.strip()])
 
           with open(manifest_path, 'w') as f:
               json.dump(data, f, indent=2)
@@ -203,7 +259,7 @@ jobs:
           print(f"Updated all URLs to point to release v{new_version}")
           EOF
 
-          python3 update_manifest.py "$NEW_VERSION" "" "$DATE"
+          python3 update_manifest.py "$NEW_VERSION" "${{ inputs.version_increment }}" "$DATE"
 
       - name: Assemble release changelog
         id: changelog
