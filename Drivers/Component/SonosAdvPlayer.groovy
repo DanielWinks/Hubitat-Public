@@ -8465,7 +8465,8 @@ String renderQueueHtml(List<Map> entries) {
   entries.each { Map entry ->
     position++
     html.append("<div class='queue-row' style='background:white;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);padding:15px;text-align:center;'>")
-    if(entry.artist) { html.append("<div class='queue-artist' style='font-size:14px;color:#666;margin-bottom:5px;font-weight:500;'>${escapeQueueHtml(entry.artist.toString())}</div>") }
+    String artistLabel = entry.artist ? "# ${position} — ${entry.artist}" : "# ${position}"
+    html.append("<div class='queue-artist' style='font-size:14px;color:#666;margin-bottom:5px;font-weight:500;'>${escapeQueueHtml(artistLabel)}</div>")
     if(entry.albumArtURI) {
       html.append("<img class='queue-image' src='${escapeQueueHtml(entry.albumArtURI.toString())}' alt='Album art' style='width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;'/>")
     }
