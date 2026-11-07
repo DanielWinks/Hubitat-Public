@@ -115,7 +115,6 @@ metadata {
   command 'shuffleOff'
   command 'ungroupPlayer'
   command 'addPlayerToGroup', [[name: 'Player', type: 'STRING', description: 'RINCON ID, player name, IP address, MAC address, or Device Network ID']]
-
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
   command 'setVolumeZero'
@@ -242,6 +241,8 @@ metadata {
       }
       input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
       input 'createPlaylistChildDevice', 'bool', title: 'Create child device for playlists?', required: false, defaultValue: false
+      input 'createQueueChildDevice', 'bool', title: 'Create child device for queue management?', required: false, defaultValue: false
+      input 'createSleepTimerChildDevice', 'bool', title: 'Add sleep timer child device', required: false, defaultValue: false
       if(getRightChannelRincon() != null && getRightChannelRincon() != '') {
         input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
       }
@@ -299,6 +300,8 @@ Boolean getCreateMuteChildDevice() { return settings.createMuteChildDevice != nu
 Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
 Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
 Boolean getCreatePlaylistChildDevice() { return settings.createPlaylistChildDevice != null ? settings.createPlaylistChildDevice : false }
+Boolean getCreateQueueChildDevice() { return settings.createQueueChildDevice != null ? settings.createQueueChildDevice : false }
+Boolean getCreateSleepTimerChildDevice() { return settings.createSleepTimerChildDevice != null ? settings.createSleepTimerChildDevice : false }
 Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
 Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
 Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
@@ -574,6 +577,8 @@ void configure() {
   createRemoveBatteryStatusChildDevice(getCreateBatteryStatusChildDevice())
   createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
   createRemovePlaylistChildDevice(getCreatePlaylistChildDevice())
+  createRemoveQueueChildDevice(getCreateQueueChildDevice())
+  createRemoveSleepTimerChildDevice(getCreateSleepTimerChildDevice())
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
@@ -588,6 +593,7 @@ void configure() {
     audioClipQueueInitialization()
     groupsRegistryInitialization()
     favoritesMapInitialization()
+    if(getCreateSleepTimerChildDevice()) { getSleepTimer() }
   }
 }
 
@@ -827,6 +833,9 @@ void secondaryConfigurationPhase3() {
   // Phase 3: Third batch of child devices
   createRemoveFavoritesChildDevice(getCreateFavoritesChildDevice())
   createRemovePlaylistChildDevice(getCreatePlaylistChildDevice())
+  createRemoveQueueChildDevice(getCreateQueueChildDevice())
+  createRemoveSleepTimerChildDevice(getCreateSleepTimerChildDevice())
+  if(getCreateSleepTimerChildDevice()) { getSleepTimer() }
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   runIn(1, 'secondaryConfigurationPhase4')
 }
@@ -874,6 +883,7 @@ void migrationCleanup() {
   if(settings.createBatteryStatusChildDevice == null) { settings.createBatteryStatusChildDevice = false }
   if(settings.createFavoritesChildDevice == null) { settings.createFavoritesChildDevice = false }
   if(settings.createPlaylistChildDevice == null) { settings.createPlaylistChildDevice = false }
+  if(settings.createQueueChildDevice == null) { settings.createQueueChildDevice = false }
   if(settings.createRightChannelChildDevice == null) { settings.createRightChannelChildDevice = false }
   if(settings.createNightModeChildDevice == null) { settings.createNightModeChildDevice = false }
   if(settings.createSpeechEnhancementChildDevice == null) { settings.createSpeechEnhancementChildDevice = false }
@@ -3023,6 +3033,8 @@ String getMuteControlChildDNI() { return "${device.getDeviceNetworkId()}-MuteCon
 String getBatteryStatusChildDNI() { return "${device.getDeviceNetworkId()}-BatteryStatus" }
 String getFavoritesChildDNI() { return "${device.getDeviceNetworkId()}-Favorites" }
 String getPlaylistChildDNI() { return "${device.getDeviceNetworkId()}-Playlist" }
+String getQueueChildDNI() { return "${device.getDeviceNetworkId()}-Queue" }
+String getSleepTimerChildDNI() { return "${device.getDeviceNetworkId()}-SleepTimer" }
 String getRightChannelChildDNI() { return "${device.getDeviceNetworkId()}-RightChannel" }
 String getNightModeChildDNI() { return "${device.getDeviceNetworkId()}-NightMode" }
 String getSpeechEnhancementChildDNI() { return "${device.getDeviceNetworkId()}-SpeechEnhancement" }
@@ -3034,6 +3046,8 @@ ChildDeviceWrapper getMuteControlChild() { return getChildDevice(getMuteControlC
 ChildDeviceWrapper getBatteryStatusChild() { return getChildDevice(getBatteryStatusChildDNI()) }
 ChildDeviceWrapper getFavoritesChild() { return getChildDevice(getFavoritesChildDNI()) }
 ChildDeviceWrapper getPlaylistChild() { return getChildDevice(getPlaylistChildDNI()) }
+ChildDeviceWrapper getQueueChild() { return getChildDevice(getQueueChildDNI()) }
+ChildDeviceWrapper getSleepTimerChild() { return getChildDevice(getSleepTimerChildDNI()) }
 ChildDeviceWrapper getRightChannelChild() { return getChildDevice(getRightChannelChildDNI()) }
 ChildDeviceWrapper getNightModeChild() { return getChildDevice(getNightModeChildDNI()) }
 ChildDeviceWrapper getSpeechEnhancementChild() { return getChildDevice(getSpeechEnhancementChildDNI()) }
@@ -3212,6 +3226,126 @@ void createRemovePlaylistChildDevice(Boolean create) {
       logException('createRemovePlaylistChildDevice', e)
     }
   } else if(!create && child){ deleteChildDevice(dni) }
+}
+
+void createRemoveQueueChildDevice(Boolean create) {
+  String dni = getQueueChildDNI()
+  ChildDeviceWrapper child = getQueueChild()
+  if(!child && create) {
+    try {
+      logDebug("Creating Queue device")
+      child = addChildDevice('dwinks', 'Sonos Advanced Queue', dni,
+        [name: 'Sonos Queue', label: "Sonos Queue - ${this.getDataValue('name')}"])
+    } catch (UnknownDeviceTypeException e) {
+      logException("createRemoveQueueChildDevice: ${e.message}")
+    } catch (Exception e) {
+      logException("createRemoveQueueChildDevice: ${e.message}")
+    }
+  } else if(!create && child) {
+    deleteChildDevice(dni)
+  }
+}
+
+void createRemoveSleepTimerChildDevice(Boolean create) {
+  String dni = getSleepTimerChildDNI()
+  ChildDeviceWrapper child = getSleepTimerChild()
+  if(!child && create) {
+    try {
+      child = addChildDevice('dwinks', 'Sonos Advanced Sleep Timer', dni,
+        [name: 'Sonos Sleep Timer', label: "Sonos Sleep Timer - ${this.getDataValue('name')}"])
+      child.updateDataValue('playerDni', device.getDeviceNetworkId())
+      child.sendEvent(name: 'remainingDuration', value: '00:00:00')
+      child.sendEvent(name: 'sleepTimerState', value: 'unknown')
+    } catch(Exception e) {
+      logException("createRemoveSleepTimerChildDevice: ${e.message}")
+    }
+  } else if(!create) {
+    unschedule('getSleepTimer')
+    if(child) { deleteChildDevice(dni) }
+  }
+}
+
+void setSleepTimer(String duration) {
+  if(!requireSleepTimerCoordinator()) { return }
+  if(!(duration ==~ /\d{2,}:\d{2}:\d{2}/)) {
+    logWarn("setSleepTimer: invalid duration '${duration}'; expected hh:mm:ss")
+    return
+  }
+  List<String> parts = duration.split(':') as List<String>
+  if(parts[1].toInteger() > 59 || parts[2].toInteger() > 59) {
+    logWarn("setSleepTimer: invalid duration '${duration}'; minutes and seconds must be 00-59")
+    return
+  }
+  String host = getDeviceDataValue('localUpnpHost')
+  Map params = getSoapActionParams(host, AVTransport, 'ConfigureSleepTimer',
+    [NewSleepTimerDuration: duration])
+  postSonosSoapAsync('sleepTimerSetCallback', params,
+    [sleepTimerChildDni: getSleepTimerChildDNI()])
+}
+
+void cancelSleepTimer() {
+  if(!requireSleepTimerCoordinator()) { return }
+  String host = getDeviceDataValue('localUpnpHost')
+  Map params = getSoapActionParams(host, AVTransport, 'ConfigureSleepTimer',
+    [NewSleepTimerDuration: ''])
+  postSonosSoapAsync('sleepTimerSetCallback', params,
+    [sleepTimerChildDni: getSleepTimerChildDNI()])
+}
+
+void getSleepTimer() {
+  if(!requireSleepTimerCoordinator()) { return }
+  String host = getDeviceDataValue('localUpnpHost')
+  Map params = getSoapActionParams(host, AVTransport, 'GetRemainingSleepTimerDuration')
+  asynchttpPost('sleepTimerGetCallback', params,
+    [sleepTimerChildDni: getSleepTimerChildDNI()])
+}
+
+Boolean requireSleepTimerCoordinator() {
+  if(getIsGroupCoordinator()) { return true }
+  unschedule('getSleepTimer')
+  ChildDeviceWrapper child = getSleepTimerChild()
+  if(child) { child.sendEvent(name: 'sleepTimerState', value: 'unknown') }
+  logWarn('Sleep timer actions are available only on the current Sonos group coordinator')
+  return false
+}
+
+void sleepTimerSetCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("Sleep timer command failed: ${response?.getErrorMessage() ?: response?.status}")
+    return
+  }
+  getSleepTimer()
+}
+
+void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    ChildDeviceWrapper child = getSleepTimerChild()
+    if(child) { child.sendEvent(name: 'sleepTimerState', value: 'unknown') }
+    logWarn("Sleep timer query failed: ${response?.getErrorMessage() ?: response?.status}")
+    return
+  }
+  try {
+    String body = response.getData()?.toString() ?: ''
+    GPathResult xml = new XmlSlurper().parseText(body)
+    String remaining = xml.depthFirst().find { it.name() == 'RemainingSleepTimerDuration' }?.text()?.toString() ?: ''
+    String generation = xml.depthFirst().find { it.name() == 'CurrentSleepTimerGeneration' }?.text()?.toString() ?: ''
+    ChildDeviceWrapper child = getSleepTimerChild()
+    if(child) {
+      child.sendEvent(name: 'remainingDuration', value: remaining ?: '00:00:00')
+      Boolean active = remaining && remaining != '00:00:00'
+      child.sendEvent(name: 'sleepTimerState', value: active ? 'active' : 'inactive')
+      child.sendEvent(name: 'generation', value: generation)
+      if(active && getCreateSleepTimerChildDevice()) {
+        runIn(60, 'getSleepTimer', [overwrite: true])
+      } else {
+        unschedule('getSleepTimer')
+      }
+    }
+  } catch(Exception e) {
+    ChildDeviceWrapper child = getSleepTimerChild()
+    if(child) { child.sendEvent(name: 'sleepTimerState', value: 'unknown') }
+    logWarn("Could not parse sleep timer response: ${e.message}")
+  }
 }
 
 void createRemoveRightChannelChildDevice(Boolean create) {
@@ -3528,6 +3662,15 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   if(!lastChange) {return}
   GPathResult event = xmlParser.parseText(lastChange)
   GPathResult instanceId = (GPathResult)event['InstanceID']
+
+  String sleepTimerGeneration = instanceId['SleepTimerGeneration']['@val']?.toString()
+  ChildDeviceWrapper sleepTimerChild = getSleepTimerChild()
+  if(sleepTimerChild) {
+    if(sleepTimerGeneration) {
+      sleepTimerChild.sendEvent(name: 'generation', value: sleepTimerGeneration)
+      getSleepTimer()
+    }
+  }
 
   String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
   String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
@@ -7726,7 +7869,7 @@ String expectedUpnpSidForSoapAction(Map params) {
   String service = soapAction.substring(0, separator)
   String action = soapAction.substring(separator + 1)
   if(service.contains('AVTransport') && action in ['Play', 'Pause', 'Stop', 'Next', 'Previous', 'Seek',
-      'SetAVTransportURI', 'RemoveAllTracksFromQueue', 'AddURIToQueue']) { return 'sid1' }
+      'SetAVTransportURI', 'RemoveAllTracksFromQueue', 'AddURIToQueue', 'ConfigureSleepTimer']) { return 'sid1' }
   if(service.contains('GroupRenderingControl') && action in ['SetGroupVolume', 'SetRelativeGroupVolume', 'SetGroupMute']) { return 'sid4' }
   if(service.contains('RenderingControl') && action in ['SetVolume', 'SetMute', 'SetBass', 'SetTreble', 'SetLoudness', 'SetEQ']) { return 'sid2' }
   return null
@@ -8063,6 +8206,294 @@ void setAVTransportURI(String currentURI, String currentURIMetaData = null) {
   if(currentURIMetaData) {controlValues.CurrentURIMetaData = currentURIMetaData}
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
   postSonosSoapAsync('localControlCallback', params)
+}
+
+// =============================================================================
+// Queue management
+// =============================================================================
+/** Append the current track to an existing Sonos saved playlist. */
+void addCurrentlyPlayingToPlaylist(String playlistIdOrName) {
+  String requested = playlistIdOrName?.trim()
+  if(!requested) { logInfo('Cannot add the currently playing track to a Sonos Playlist: provide a playlist name or ID'); return }
+  Map playlist = getPlaylistsMap()?.get(requested)
+  if(!playlist) {
+    List<Map> matches = (getPlaylistsMap()?.values() ?: []).findAll { Map item -> item.name?.toString()?.equalsIgnoreCase(requested) }
+    if(matches.size() == 1) { playlist = matches[0] }
+  }
+  String objectId = playlist?.id?.toString() ?: requested
+  if(objectId && objectId != 'null' && objectId.isNumber() && !objectId.startsWith('SQ:')) {
+    objectId = "SQ:${objectId}"
+  }
+  if(!objectId || !objectId.startsWith('SQ:')) {
+    logInfo("Cannot add the currently playing track to '${requested}': only an existing Sonos Playlist (saved queue) is editable; refresh Playlists and pass its name or SQ: ID")
+    return
+  }
+  Map snapshot = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+      ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
+  Map track = getReusableCurrentTrack(snapshot)
+  if(!track) { return }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn("addCurrentlyPlayingToPlaylist: coordinator UPnP host unavailable for ${device.displayName}"); return }
+  String requestId = UUID.randomUUID().toString()
+  state.playlistAddRequestId = requestId
+  Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: objectId,
+    BrowseFlag: 'BrowseMetadata', Filter: '*', StartingIndex: 0, RequestedCount: 0, SortCriteria: ''])
+  postSonosSoapAsync('playlistAddBrowseCallback', params, [requestId: requestId, host: host,
+    objectId: objectId, playlistName: playlist?.name?.toString() ?: requested, track: track])
+}
+
+void playlistAddBrowseCallback(AsyncResponse response, Map data = null) {
+  if(data?.requestId?.toString() != state.playlistAddRequestId?.toString()) { return }
+  if(response?.status != 200 || response.hasError()) {
+    state.remove('playlistAddRequestId')
+    logWarn("Could not read Sonos Playlist '${data?.playlistName}' before adding the track (HTTP ${response?.status})")
+    return
+  }
+  try {
+    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    String updateId = findQueueXmlText(envelope, 'UpdateID') ?: '0'
+    Map track = (Map)data.track
+    Map params = getSoapActionParams(data.host.toString(), AVTransport, 'AddURIToSavedQueue', [
+      ObjectID: data.objectId.toString(), UpdateID: updateId, EnqueuedURI: escapeSoapXmlText(track.uri.toString()),
+      EnqueuedURIMetaData: escapeSoapXmlText(track.metadata.toString()), AddAtIndex: '4294967295'])
+    postSonosSoapAsync('playlistAddTrackCallback', params, [requestId: data.requestId,
+      playlistName: data.playlistName])
+  } catch(Exception e) {
+    state.remove('playlistAddRequestId')
+    logWarn("Could not prepare the track for Sonos Playlist '${data?.playlistName}': ${e.message}")
+  }
+}
+
+void playlistAddTrackCallback(AsyncResponse response, Map data = null) {
+  if(data?.requestId?.toString() != state.playlistAddRequestId?.toString()) { return }
+  state.remove('playlistAddRequestId')
+  if(response?.status == 200 && !response.hasError()) {
+    logInfo("Added currently playing track to Sonos Playlist '${data?.playlistName}'")
+    return
+  }
+  String xml = response?.getData()?.toString() ?: ''
+  if(xml.contains('errorCode>800<') || xml.contains('errorCode>701<')) {
+    logInfo("Could not add the currently playing track to '${data?.playlistName}': this playlist or audio source does not support adding tracks through Sonos")
+  } else {
+    logWarn("Adding currently playing track to Sonos Playlist '${data?.playlistName}' failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+  }
+}
+
+Map getReusableCurrentTrack(Map snapshot) {
+  String currentUri = normalizeQueueTrackUri(snapshot?.trackUri?.toString())
+  String metadata = snapshot?.trackMetaData?.toString()
+  if(!currentUri || !metadata || currentUri.startsWith('x-rincon-stream:') || currentUri.startsWith('x-sonos-htastream:')) {
+    logInfo("Cannot save the currently playing item for ${device.displayName}: the source is a radio station or live input, not a reusable track Sonos exposes to Favorites and Playlists")
+    return null
+  }
+  try {
+    GPathResult item = new XmlSlurper().parseText(unEscapeMetaData(metadata))
+    String title = item.'**'.find { node -> node.name()?.toString()?.endsWith('title') }?.text()
+    String resource = item.'**'.find { node -> node.name()?.toString()?.endsWith('res') }?.text()
+    String protocolInfo = item.'**'.find { node -> node.name()?.toString()?.endsWith('res') }?.attributes()?.get('protocolInfo')?.toString()
+    String uri = normalizeQueueTrackUri(resource)
+    if(!title || !uri || uri.startsWith('x-sonosapi-stream:') || uri.startsWith('x-rincon-mp3radio:') || uri.startsWith('x-sonosapi-radio:')) {
+      logInfo("Cannot save the currently playing item for ${device.displayName}: the music service did not provide track metadata that Sonos can add to a Favorite or Playlist")
+      return null
+    }
+    return [uri: uri, metadata: unEscapeMetaData(metadata), title: title, creator: item.'**'.find { node -> node.name()?.toString()?.endsWith('creator') }?.text() ?: '',
+      album: item.'**'.find { node -> node.name()?.toString()?.endsWith('album') }?.text() ?: '',
+      art: item.'**'.find { node -> node.name()?.toString()?.endsWith('albumArtURI') }?.text() ?: '', protocolInfo: protocolInfo ?: '*:*:*:*']
+  } catch(Exception e) {
+    logInfo("Cannot save the currently playing item for ${device.displayName}: Sonos did not provide reusable track metadata (${e.message})")
+    return null
+  }
+}
+
+String escapeSoapXmlText(String value) { return value?.replace('&', '&amp;')?.replace('<', '&lt;')?.replace('>', '&gt;')?.replace('"', '&quot;')?.replace("'", '&apos;') ?: '' }
+String escapeSoapXmlAttribute(String value) { return escapeSoapXmlText(value) }
+
+void getQueue() {
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) {
+    state.remove('queueBrowseRequestId')
+    logWarn("getQueue: could not determine coordinator UPnP host for ${device.displayName}")
+    setChildQueue('<p>Queue unavailable: player network address is missing.</p>')
+    return
+  }
+  String requestId = UUID.randomUUID().toString()
+  state.queueBrowseRequestId = requestId
+  requestQueuePage(host, 0, [], requestId)
+}
+
+void removeCurrentlyPlayingItemFromQueue() {
+  Map snapshot = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+      ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
+  String currentTrackUri = normalizeQueueTrackUri(snapshot.trackUri?.toString())
+  String transportState = snapshot.transportState?.toString()?.toUpperCase()
+  if(!currentTrackUri || (transportState && !(transportState in ['PLAYING', 'PAUSED_PLAYBACK']))) {
+    logInfo("Currently playing item is not in the Sonos queue for ${device.displayName}: no active track URI is available")
+    return
+  }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) {
+    logWarn("removeCurrentlyPlayingItemFromQueue: coordinator UPnP host unavailable for ${device.displayName}")
+    return
+  }
+  String requestId = UUID.randomUUID().toString()
+  state.queueBrowseRequestId = requestId
+  requestQueuePage(host, 0, [], requestId, 'remove-current', currentTrackUri)
+}
+
+void requestQueuePage(String host, Integer startingIndex, List<Map> entries, String requestId, String action = 'display', String currentTrackUri = null) {
+  Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [
+    ObjectID: 'Q:0', BrowseFlag: 'BrowseDirectChildren', Filter: '*',
+    StartingIndex: startingIndex, RequestedCount: 100, SortCriteria: ''
+  ])
+  postSonosSoapAsync('queueBrowseCallback', params, [host: host, startingIndex: startingIndex,
+    entries: entries, requestId: requestId, action: action, currentTrackUri: currentTrackUri])
+}
+
+void queueBrowseCallback(AsyncResponse response, Map data) {
+  if(data?.requestId?.toString() != state.queueBrowseRequestId?.toString()) { return }
+  if(response?.status != 200 || response.hasError()) {
+    state.remove('queueBrowseRequestId')
+    logWarn("Queue Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    setChildQueue('<p>Could not retrieve the Sonos queue. Tap Refresh to try again.</p>')
+    return
+  }
+  try {
+    String soap = response.getData()?.toString()
+    if(!soap) { throw new IllegalArgumentException('Browse response was empty') }
+    GPathResult envelope = new XmlSlurper().parseText(soap)
+    String resultXml = findQueueXmlText(envelope, 'Result')
+    Integer returned = findQueueXmlText(envelope, 'NumberReturned')?.toInteger() ?: 0
+    Integer total = findQueueXmlText(envelope, 'TotalMatches')?.toInteger() ?: 0
+    String updateId = findQueueXmlText(envelope, 'UpdateID') ?: '0'
+    List<Map> entries = (List<Map>)(data.entries ?: [])
+    if(resultXml) {
+      GPathResult didl = new XmlSlurper().parseText(resultXml)
+      didl.children().each { item ->
+        String objectId = item.getAt('@id')?.text()
+        String title = findQueueXmlText(item, 'title')
+        String artist = findQueueXmlText(item, 'creator')
+        String album = findQueueXmlText(item, 'album')
+        String albumArtURI = findQueueXmlText(item, 'albumArtURI')
+        String trackUri = findQueueXmlText(item, 'res')
+        if(albumArtURI?.startsWith('/')) { albumArtURI = "${getDeviceDataValue('localUpnpUrl')}${albumArtURI}" }
+        entries.add([objectId: objectId, updateId: updateId, title: title ?: 'Unknown track', artist: artist ?: '', album: album ?: '', albumArtURI: albumArtURI ?: '', trackUri: normalizeQueueTrackUri(trackUri)])
+      }
+    }
+    Integer nextIndex = (data.startingIndex as Integer) + returned
+    if(returned > 0 && nextIndex < total && entries.size() < 2000) {
+      requestQueuePage(data.host.toString(), nextIndex, entries, data.requestId.toString(), data.action?.toString() ?: 'display', data.currentTrackUri?.toString())
+    } else {
+      state.remove('queueBrowseRequestId')
+      if(data.action == 'remove-current') {
+        Map currentEntry = entries.find { Map entry -> entry.trackUri && entry.trackUri == data.currentTrackUri }
+        if(currentEntry) {
+          logInfo("Removing currently playing queue item '${currentEntry.title}' (${currentEntry.objectId}) from ${device.displayName}")
+          removeQueueItem(currentEntry.objectId?.toString(), currentEntry.updateId?.toString())
+        } else {
+          logInfo("Currently playing item is not in the Sonos queue for ${device.displayName}: ${snapshotTrackDescription(data.currentTrackUri?.toString())}")
+          setChildQueue(renderQueueHtml(entries))
+        }
+      } else {
+        setChildQueue(renderQueueHtml(entries))
+      }
+    }
+  } catch(Exception e) {
+    state.remove('queueBrowseRequestId')
+    logWarn("Could not parse Sonos queue response: ${e.message}")
+    setChildQueue('<p>Could not read the Sonos queue response. Tap Refresh to try again.</p>')
+  }
+}
+
+String normalizeQueueTrackUri(String uri) {
+  String normalized = uri?.trim()
+  while(normalized?.contains('&amp;')) { normalized = normalized.replace('&amp;', '&') }
+  return normalized
+}
+
+String snapshotTrackDescription(String trackUri) {
+  String title = device.currentValue('currentTrackName')?.toString()
+  return title ? "'${title}' (${trackUri ?: 'track URI unavailable'})" : (trackUri ?: 'track URI unavailable')
+}
+
+String queueXmlLocalName(Object nodeName) {
+  String name = nodeName?.toString() ?: ''
+  Integer separator = Math.max(name.lastIndexOf('}'), name.lastIndexOf(':'))
+  return separator >= 0 ? name.substring(separator + 1) : name
+}
+
+String findQueueXmlText(GPathResult node, String targetName) {
+  if(node == null) { return null }
+  if(queueXmlLocalName(node.name()) == targetName) { return node.text() }
+  for(GPathResult child : node.children()) {
+    String value = findQueueXmlText(child, targetName)
+    if(value != null) { return value }
+  }
+  return null
+}
+
+String escapeQueueHtml(String value) {
+  return (value ?: '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&#39;')
+}
+
+String renderQueueHtml(List<Map> entries) {
+  Long queueDeviceId = getQueueChild()?.getIdAsLong() ?: device.getIdAsLong()
+  StringBuilder html = new StringBuilder("<div class=\"sonos-queue\" style='max-width:400px;margin:0 auto;display:flex;flex-direction:column;gap:20px;'><div style='display:flex;gap:8px;'><button style='flex:1;' onclick=\"${buildHubitatRunMethodOnclick(queueDeviceId, 'getQueue', [])}\">Refresh</button><button style='flex:1;' onclick=\"${buildHubitatRunMethodOnclick(queueDeviceId, 'removeCurrentlyPlayingItemFromQueue', [])}\">Remove Currently Playing</button></div>")
+  if(!entries) { return html.append('<p>The Sonos queue is empty.</p></div>').toString() }
+  Integer position = 0
+  entries.each { Map entry ->
+    position++
+    html.append("<div class='queue-row' style='background:white;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.1);padding:15px;text-align:center;'>")
+    if(entry.artist) { html.append("<div class='queue-artist' style='font-size:14px;color:#666;margin-bottom:5px;font-weight:500;'>${escapeQueueHtml(entry.artist.toString())}</div>") }
+    if(entry.albumArtURI) {
+      html.append("<img class='queue-image' src='${escapeQueueHtml(entry.albumArtURI.toString())}' alt='Album art' style='width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;'/>")
+    }
+    html.append("<div class='queue-title' style='font-size:18px;color:#333;margin-top:10px;font-weight:600;line-height:1.3;'>${escapeQueueHtml(entry.title?.toString())}</div>")
+    if(entry.album) { html.append("<div class='queue-album' style='font-size:13px;color:#666;margin-top:4px;'>${escapeQueueHtml(entry.album.toString())}</div>") }
+    html.append("<div class='queue-actions' style='display:flex;justify-content:center;gap:8px;margin-top:12px;'><button style='flex:1;' onclick=\"${buildHubitatRunMethodOnclick(queueDeviceId, 'playQueuePosition', [position.toString()])}\">Play</button>")
+    html.append("<button style='flex:1;' onclick=\"${buildHubitatRunMethodOnclick(queueDeviceId, 'removeQueueItem', [entry.objectId?.toString() ?: '', entry.updateId?.toString() ?: '0'])}\">Remove</button></div></div>")
+  }
+  html.append('</div>')
+  return html.toString()
+}
+
+String buildHubitatRunMethodOnclick(Long deviceId, String method, List<String> values) {
+  List<Map> args = (values ?: []).collect { String value -> [type: 'STRING', value: value ?: ''] }
+  String payload = JsonOutput.toJson([id: deviceId, method: method, args: args])
+  String handler = "(function(){fetch('http://${device.hub.localIP}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/json'},body:${JsonOutput.toJson(payload)}})})()"
+  return handler.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+}
+
+void setChildQueue(String html) {
+  if(getCreateQueueChildDevice()) {
+    ChildDeviceWrapper child = getQueueChild()
+    if(child) { child.setQueue(html) }
+  }
+}
+
+void playQueuePosition(String position) {
+  Integer trackNumber = null
+  try { trackNumber = position?.toInteger() } catch(Exception ignored) { }
+  if(trackNumber == null || trackNumber < 1) { logWarn("Invalid queue position: ${position}"); return }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('playQueuePosition: coordinator UPnP host unavailable'); return }
+  Map params = getSoapActionParams(host, AVTransport, 'Seek', [Unit: 'TRACK_NR', Target: trackNumber.toString()])
+  postSonosSoapAsync('queueMutationCallback', params, [refresh: true])
+}
+
+void removeQueueItem(String objectId, String updateId) {
+  if(!objectId || !objectId.startsWith('Q:0/')) { logWarn("Invalid queue item id: ${objectId}"); return }
+  Integer queueUpdateId = null
+  try { queueUpdateId = updateId?.toInteger() } catch(Exception ignored) { }
+  if(queueUpdateId == null || queueUpdateId < 0) { logWarn("Invalid queue update ID: ${updateId}"); return }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('removeQueueItem: coordinator UPnP host unavailable'); return }
+  Map params = getSoapActionParams(host, AVTransport, 'RemoveTrackFromQueue', [ObjectID: objectId, UpdateID: queueUpdateId])
+  postSonosSoapAsync('queueMutationCallback', params, [refresh: true])
+}
+
+void queueMutationCallback(AsyncResponse response, Map data) {
+  if(response?.status == 200 && !response.hasError()) { getQueue() }
+  else { logWarn("Queue command failed (HTTP ${response?.status}): ${response?.getErrorMessage()}"); getQueue() }
 }
 
 void invalidateGroupAnnouncementStream(String reason, String replacementUri = null) {
@@ -8484,21 +8915,21 @@ void processWebsocketMessage(String message) {
         String favName = fav?.value?.name
 
         if(albumArtURI == null) {
-          html += """    <div class="favorite-card" onclick="(function(){var fd='id=${deviceId}&method=loadFavorite&argType.1=STRING&arg[1]=${favId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+          html += """    <div class="favorite-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadFavorite', [favId])}">
       <div class="favorite-number">Favorite #${favId}</div>
       <div class="no-image">
         <span>♪ ${favName}</span>
       </div>
 """
         } else if(albumArtURI.startsWith('/')) {
-          html += """    <div class="favorite-card" onclick="(function(){var fd='id=${deviceId}&method=loadFavorite&argType.1=STRING&arg[1]=${favId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+          html += """    <div class="favorite-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadFavorite', [favId])}">
       <div class="favorite-number">Favorite #${favId}</div>
       <img class="favorite-image"
            src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
            alt="${favName}" />
 """
         } else {
-          html += """    <div class="favorite-card" onclick="(function(){var fd='id=${deviceId}&method=loadFavorite&argType.1=STRING&arg[1]=${favId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+          html += """    <div class="favorite-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadFavorite', [favId])}">
       <div class="favorite-number">Favorite #${favId}</div>
       <img class="favorite-image"
            src="${albumArtURI}"
@@ -8639,21 +9070,21 @@ void processWebsocketMessage(String message) {
         String playlistName = playlist?.value?.name
 
         if(albumArtURI == null) {
-          html += """    <div class="playlist-card" onclick="(function(){var fd='id=${deviceId}&method=loadPlaylist&argType.1=STRING&arg[1]=${playlistId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+          html += """    <div class="playlist-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadPlaylist', [playlistId])}">
       <div class="playlist-number">Playlist #${playlistId}</div>
       <div class="no-image">
         <span>♪ ${playlistName}</span>
       </div>
 """
         } else if(albumArtURI.startsWith('/')) {
-          html += """    <div class="playlist-card" onclick="(function(){var fd='id=${deviceId}&method=loadPlaylist&argType.1=STRING&arg[1]=${playlistId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+          html += """    <div class="playlist-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadPlaylist', [playlistId])}">
       <div class="playlist-number">Playlist #${playlistId}</div>
       <img class="playlist-image"
            src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
            alt="${playlistName}" />
 """
         } else {
-          html += """    <div class="playlist-card" onclick="(function(){var fd='id=${deviceId}&method=loadPlaylist&argType.1=STRING&arg[1]=${playlistId}';fetch('http://${hubIp}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:fd})})()">
+          html += """    <div class="playlist-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadPlaylist', [playlistId])}">
       <div class="playlist-number">Playlist #${playlistId}</div>
       <img class="playlist-image"
            src="${albumArtURI}"

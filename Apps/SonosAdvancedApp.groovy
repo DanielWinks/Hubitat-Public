@@ -6290,6 +6290,26 @@ Map readGroupOperationTopology(Map operation) {
       : null
   if(coordinatorObservation == null || !coordinatorObservation.groupId ||
       !coordinatorObservation.coordinatorId || !coordinatorObservation.playerIds) {
+    // The `groups` response is a household-wide roster, so another configured
+    // player can confirm the exact requested topology if the coordinator's
+    // WebSocket response is delayed or lost.
+    Map memberConfirmation = topology.observations instanceof List
+        ? ((List<Map>)topology.observations).find { Map item ->
+            item.fresh == true && item.groupId && item.coordinatorId && item.playerIds &&
+                item.coordinatorId.toString() == coordinatorId &&
+                normalizeGroupPlayerIds(item.playerIds) == normalizeGroupPlayerIds(operation.requiredPlayerIds)
+          }
+        : null
+    if(memberConfirmation != null) {
+      topology.fresh = true
+      topology.consistent = true
+      topology.groupId = memberConfirmation.groupId as String
+      topology.coordinatorId = memberConfirmation.coordinatorId as String
+      topology.playerIds = normalizeGroupPlayerIds(memberConfirmation.playerIds)
+      topology.authorityPlayerId = memberConfirmation.playerId as String
+      topology.fingerprint = "${memberConfirmation.playerId}:${memberConfirmation.groupId}:${memberConfirmation.coordinatorId}:${topology.playerIds.join(',')}"
+      return topology
+    }
     return topology
   }
 
@@ -6307,6 +6327,22 @@ Map readGroupOperationTopology(Map operation) {
   topology.authorityPlayerId = coordinatorId
   topology.fingerprint = "${coordinatorId}:${groupId}:${observedCoordinatorId}:${playerIds.join(',')}"
   return topology
+}
+
+Boolean explicitFollowersConfirmGroupWasNotApplied(Map operation, Map topology) {
+  if(operation?.groupingMode != GROUPING_MODE_EXPLICIT || !(topology?.observations instanceof List)) {
+    return false
+  }
+  String coordinatorId = operation.desiredCoordinatorId as String
+  List<String> followers = normalizeGroupPlayerIds(operation.requiredPlayerIds)
+      .findAll { String playerId -> playerId != coordinatorId }
+  if(!followers) { return false }
+  List<Map> observations = (List<Map>)topology.observations
+  return followers.every { String playerId ->
+    Map observation = observations.find { Map item -> item.playerId?.toString() == playerId }
+    observation?.fresh == true && observation.groupId && observation.coordinatorId == playerId &&
+        normalizeGroupPlayerIds(observation.playerIds) == [playerId]
+  }
 }
 
 Map readFavoriteGroupTopology(Map operation) {
@@ -7291,6 +7327,27 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
         if(((operation.topologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS) {
           failGroupOperation(operation, 'TOPOLOGY_NOT_CONFIRMED',
               "The group mutation was sent, but no fresh report from configured coordinator ${operation.desiredCoordinatorId} confirmed the topology: ${summarizeGroupOperationTopology(topology)}")
+          return
+        }
+        if(operation.topologyMutationSent == true && operation.lastCommand == 'createExactGroup' &&
+            explicitFollowersConfirmGroupWasNotApplied(operation, topology)) {
+          // The followers have independently reported that they remain
+          // standalone. Retry the explicit topology mutation instead of
+          // polling indefinitely when the coordinator's report is missing.
+          // The retry remains bounded by GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS.
+          operation.topologyMutationSent = false
+          saveActiveGroupOperation(operation)
+          try {
+            sendGroupTopologyCommand(operation, topology)
+          } catch(Exception e) {
+            failGroupOperation(operation, 'GROUP_COMMAND_FAILED', e.message as String)
+            return
+          }
+          publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+          runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+            overwrite: true,
+            data: [operationId: operation.operationId]
+          ])
           return
         }
         operation.lastCommand = 'refreshGroupTopology'

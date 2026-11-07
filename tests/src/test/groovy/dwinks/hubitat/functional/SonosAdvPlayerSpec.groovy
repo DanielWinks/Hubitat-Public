@@ -467,6 +467,88 @@ class SonosAdvPlayerSpec extends Specification {
     childDriver.children.empty
   }
 
+  def "sleep timer preference creates a stable player child and removes it when disabled"() {
+    given:
+    driver.children.clear()
+
+    when:
+    driver.createRemoveSleepTimerChildDevice(true)
+    driver.createRemoveSleepTimerChildDevice(true)
+
+    then:
+    driver.children.size() == 1
+    driver.children[0].deviceNetworkId == 'SONOS-TEST-DNI-SleepTimer'
+    driver.children[0].dataValues.playerDni == 'SONOS-TEST-DNI'
+
+    when:
+    driver.createRemoveSleepTimerChildDevice(false)
+
+    then:
+    driver.children.isEmpty()
+  }
+
+  def "sleep timer commands use AVTransport and query response updates child state"() {
+    given:
+    driver.children.clear()
+    driver.createRemoveSleepTimerChildDevice(true)
+    driver.asyncCalls.clear()
+
+    when:
+    driver.setSleepTimer('01:25:30')
+    Map setRequest = driver.asyncCalls.last()
+
+    then:
+    setRequest.cb == 'sleepTimerSetCallback'
+    setRequest.params.headers.SOAPAction.endsWith('#ConfigureSleepTimer')
+    setRequest.params.body.contains('<NewSleepTimerDuration>01:25:30</NewSleepTimerDuration>')
+
+    when:
+    driver.setSleepTimer('01:99:00')
+    driver.cancelSleepTimer()
+    Map cancelRequest = driver.asyncCalls.last()
+
+    then:
+    driver.asyncCalls.size() == 2
+    cancelRequest.params.headers.SOAPAction.endsWith('#ConfigureSleepTimer')
+    cancelRequest.params.body.contains('<NewSleepTimerDuration></NewSleepTimerDuration>')
+
+    when:
+    driver.asyncCalls.clear()
+    driver.getSleepTimer()
+    Map queryRequest = driver.asyncCalls.last()
+    driver.sleepTimerGetCallback(new hubitat.scheduling.AsyncResponse(status: 200,
+      data: '<GetRemainingSleepTimerDurationResponse><RemainingSleepTimerDuration>00:12:34</RemainingSleepTimerDuration><CurrentSleepTimerGeneration>7</CurrentSleepTimerGeneration></GetRemainingSleepTimerDurationResponse>'), queryRequest.data)
+
+    then:
+    queryRequest.params.headers.SOAPAction.endsWith('#GetRemainingSleepTimerDuration')
+    driver.children[0].currentValues.remainingDuration == '00:12:34'
+    driver.children[0].currentValues.sleepTimerState == 'active'
+    driver.children[0].currentValues.generation == '7'
+
+    when:
+    driver.sleepTimerGetCallback(new hubitat.scheduling.AsyncResponse(status: 200,
+      data: '<GetRemainingSleepTimerDurationResponse><RemainingSleepTimerDuration></RemainingSleepTimerDuration><CurrentSleepTimerGeneration>0</CurrentSleepTimerGeneration></GetRemainingSleepTimerDurationResponse>'), null)
+
+    then:
+    driver.children[0].currentValues.remainingDuration == '00:00:00'
+    driver.children[0].currentValues.sleepTimerState == 'inactive'
+    driver.children[0].currentValues.generation == '0'
+  }
+
+  def "sleep timer AVTransport events normalize running state and generation"() {
+    given:
+    driver.children.clear()
+    driver.createRemoveSleepTimerChildDevice(true)
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;SleepTimerState val="SLEEP_TIMER_RUNNING"/&gt;&lt;SleepTimerGeneration val="9"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
+
+    then:
+    driver.children[0].currentValues.sleepTimerState == 'active'
+    driver.children[0].currentValues.generation == '9'
+  }
+
   def "incomplete stereo discovery waits without creating a child or clearing preference"() {
     given:
     driver.settings.createRightChannelChildDevice = true
@@ -1588,6 +1670,7 @@ class SonosAdvPlayerSpec extends Specification {
     'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI'                                     || 'sid1'
     'urn:schemas-upnp-org:service:AVTransport:1#RemoveAllTracksFromQueue'                              || 'sid1'
     'urn:schemas-upnp-org:service:AVTransport:1#AddURIToQueue'                                         || 'sid1'
+    'urn:schemas-upnp-org:service:AVTransport:1#ConfigureSleepTimer'                                 || 'sid1'
     'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume'                                        || 'sid2'
     'urn:schemas-upnp-org:service:RenderingControl:1#SetMute'                                           || 'sid2'
     'urn:schemas-upnp-org:service:RenderingControl:1#SetBass'                                           || 'sid2'
@@ -1871,4 +1954,5 @@ class SonosAdvPlayerSpec extends Specification {
     where:
     command << ['componentPlayTextNoRestoreLocal', 'componentLoadStreamUrlLocal', 'componentSetStreamUrlLocal']
   }
+
 }

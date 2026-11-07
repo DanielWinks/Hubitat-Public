@@ -80,6 +80,22 @@
       "required": true
     },
     {
+      "id": "ee78bb27-b47c-4e2e-99bc-8ed510887ed7",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.14.2/SonosAdvQueue.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvQueue.groovy",
+      "name": "Sonos Advanced Queue",
+      "namespace": "dwinks",
+      "required": true
+    },
+    {
+      "id": "495d188a-74cc-468e-89fb-c4f3f00d37c0",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.14.2/SonosAdvSleepTimer.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvSleepTimer.groovy",
+      "name": "Sonos Advanced Sleep Timer",
+      "namespace": "dwinks",
+      "required": true
+    },
+    {
       "id": "1fa70eea-a57a-4d01-9e68-c94654d8508f",
       "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.14.1/SonosAdvAlarmSwitch.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvAlarmSwitch.groovy",

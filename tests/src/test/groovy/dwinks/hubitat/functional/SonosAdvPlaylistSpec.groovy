@@ -20,6 +20,7 @@ class SonosAdvPlaylistSpec extends Specification {
     parentCalls = []
     Expando parentDevice = new Expando()
     parentDevice.loadPlaylistFull = { Object[] args -> parentCalls << args.toList() }
+    parentDevice.addCurrentlyPlayingToPlaylist = { String value -> parentCalls << [value] }
     playlistDriver.binding.setVariable('parent', parentDevice)
   }
 
@@ -33,5 +34,13 @@ class SonosAdvPlaylistSpec extends Specification {
       ['playlist-963', 'repeat all', 'append', 'off', 'false', 'on'],
       ['playlist-963', 'repeat all', 'insert', 'off', 'true', 'on']
     ]
+  }
+
+  def "currently playing track add forwards the selected playlist string to the parent player"() {
+    when:
+    playlistDriver.addCurrentlyPlayingToPlaylist('Morning Mix')
+
+    then:
+    parentCalls == [['Morning Mix']]
   }
 }

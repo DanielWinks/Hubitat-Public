@@ -875,6 +875,47 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.find { it.name == 'playerCreateGroup' } == null
   }
 
+  def "explicit group retries createGroup when every fresh follower still reports standalone"() {
+    given:
+    appScript.startGroupTopologyOperation(group, 'EXPLICIT')
+    Map operation = appScript.getActiveGroupOperation()
+    operation.topologyMutationSent = true
+    operation.lastCommand = 'createExactGroup'
+    operation.lastCommandAt = appScript.now() - 11000L
+    operation.topologyAttempt = 1
+    appScript.saveActiveGroupOperation(operation)
+    coordinator.commands.clear()
+    follower.commands.clear()
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-FOLLOW', 'RINCON_FOLLOW', 'RINCON_FOLLOW')
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    appScript.getActiveGroupOperation().lastCommand == 'createExactGroup'
+    appScript.getActiveGroupOperation().topologyMutationSent == true
+    appScript.getActiveGroupOperation().topologyAttempt == 2
+    coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
+        ['RINCON_COORD', 'RINCON_FOLLOW']
+  }
+
+  def "explicit group accepts an exact fresh follower roster when coordinator report is missing"() {
+    given:
+    appScript.startGroupTopologyOperation(group, 'EXPLICIT')
+    Map operation = appScript.getActiveGroupOperation()
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+
+    when:
+    Map topology = appScript.readGroupOperationTopology(operation)
+
+    then:
+    topology.fresh == true
+    topology.consistent == true
+    topology.authorityPlayerId == 'RINCON_FOLLOW'
+    topology.coordinatorId == 'RINCON_COORD'
+    topology.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW']
+  }
+
   def "cached topology is not accepted before a fresh group observation"() {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])

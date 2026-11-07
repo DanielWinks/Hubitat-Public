@@ -32,6 +32,7 @@ metadata {
   ) {
     capability 'Actuator'
     command 'getPlaylists'
+    command 'addCurrentlyPlayingToPlaylist', [[ name: 'playlistIdOrName', type: 'STRING']]
     command 'loadPlaylistFull', [
       [ name: 'playlistId', type: 'STRING'],
       [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
@@ -57,6 +58,7 @@ metadata {
 void initialize() {configure()}
 void configure() {getPlaylists()}
 void getPlaylists() {parent?.getPlaylists()}
+void addCurrentlyPlayingToPlaylist(String playlistIdOrName) { parent?.addCurrentlyPlayingToPlaylist(playlistIdOrName) }
 void setPlaylists(String playlists) {state.playlists = playlists}
 
 // Load Playlist Commands - Full Control
