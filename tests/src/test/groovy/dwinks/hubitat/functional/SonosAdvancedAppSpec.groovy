@@ -95,6 +95,7 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   void getPlaybackStatus() { commands << [name: 'getPlaybackStatus'] }
   void getPlaybackMetadataStatus() { commands << [name: 'getPlaybackMetadataStatus'] }
   void playerPlay() { commands << [name: 'playerPlay'] }
+  void play() { commands << [name: 'play'] }
   void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {
     commands << [name: 'playerPlayForGroupOperation', operationId: operationId,
       attemptId: attemptId, requestId: requestId]
@@ -580,6 +581,70 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.every { it.name != 'playerCreateGroup' }
     operation.lastCommand == 'splitConflictingTargetGroup'
     operation.topologyMutationSent == true
+  }
+
+  def "explicit grouping expands a target subgroup already led by the configured coordinator"() {
+    given:
+    SonosAppPlayerDouble bedroom = createPlayer('RINCON_BEDROOM', 'GROUP-BEDROOM',
+        'RINCON_BEDROOM', 'RINCON_BEDROOM', true)
+    appScript.children = [group, coordinator, follower, extra, bedroom]
+    appScript.app.children = appScript.children
+    coordinator.dataValues.id = 'RINCON_COORD'
+    Map operation = [
+      operationId: 'explicit-preserve-coordinator', groupingMode: 'EXPLICIT',
+      desiredCoordinatorId: 'RINCON_COORD', resolvedCoordinatorId: 'RINCON_COORD',
+      requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA', 'RINCON_BEDROOM'],
+      topologyAttempt: 0
+    ]
+    Map topology = [
+      fresh: true, consistent: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'], observations: [
+        [playerId: 'RINCON_COORD', fresh: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+          playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
+        [playerId: 'RINCON_FOLLOW', fresh: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+          playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
+        [playerId: 'RINCON_EXTRA', fresh: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+          playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']],
+        [playerId: 'RINCON_BEDROOM', fresh: true, groupId: 'GROUP-BEDROOM', coordinatorId: 'RINCON_BEDROOM',
+          playerIds: ['RINCON_BEDROOM']]
+      ]
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
+      name: 'playerModifyGroupMembers', add: ['RINCON_BEDROOM'], remove: []
+    ]
+    coordinator.commands.every { it.name != 'playerCreateGroup' }
+    coordinator.commands.every { it.name != 'playerModifyGroupMembers' || it.add == ['RINCON_BEDROOM'] }
+    follower.commands.every { it.name != 'playerModifyGroupMembers' }
+    extra.commands.every { it.name != 'playerModifyGroupMembers' }
+    operation.lastCommand == 'addMissingPlayers'
+  }
+
+  def "play queued during explicit grouping runs once after the operation completes"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('on')])
+    Map operation = appScript.getActiveGroupOperation()
+    coordinator.commands.clear()
+
+    when:
+    appScript.processGroupCommandRequest([request: request('play', [:], 2)])
+
+    then:
+    appScript.getActiveGroupOperation()?.operationId == operation.operationId
+    coordinator.commands.every { it.name != 'play' }
+    appScript.state.deferredGroupOperationCommands.size() == 1
+
+    when:
+    appScript.completeGroupOperation(operation)
+    appScript.drainDeferredGroupOperationCommands()
+
+    then:
+    coordinator.commands.findAll { it.name == 'play' }.size() == 1
+    appScript.state.deferredGroupOperationCommands == null
   }
 
   def "explicit group creation puts the desired coordinator first after transfer"() {
@@ -1868,6 +1933,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation() == null
     group.statuses.last().status.errorCode == 'GROUP_OPERATION_TIMEOUT'
     group.statuses.last().status.detail.contains('favorite confirmation')
+    group.statuses.last().status.detail.contains("operation=${operation.operationId}")
+    group.statuses.last().status.detail.contains('elapsedMs=')
     group.statuses.last().status.detail.contains('RINCON_FOLLOW=PLAYBACK_STATE_PAUSED')
     group.statuses.last().status.detail.contains('observedFavorite=42 (expected=42)')
   }

@@ -6390,7 +6390,8 @@ void deferGroupCommandRequest(Map request) {
   }
   deferred.add(request)
   state[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferred
-  logInfo("Deferring group command ${request.command} for ${request.groupDni} until the current group operation completes")
+  Map activeOperation = getActiveGroupOperation()
+  logInfo("Deferring group command ${request.command} for ${request.groupDni} until group operation ${activeOperation?.operationId ?: '(unknown)'} completes; phase=${activeOperation?.phase ?: 'unknown'}, queueDepth=${deferred.size()}")
 }
 
 void drainDeferredGroupOperationCommands() {
@@ -6407,6 +6408,7 @@ void drainDeferredGroupOperationCommands() {
   if(!deferred.isEmpty()) {
     state[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferred
   }
+  logDebug("Draining deferred group command ${nextRequest.command} for ${nextRequest.groupDni}; remaining=${deferred.size()}")
   processGroupCommandRequest([request: nextRequest])
   if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List && !getActiveGroupOperation()) {
     runIn(1, 'drainDeferredGroupOperationCommands', [overwrite: true])
@@ -7376,6 +7378,48 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         }
       }
     }
+    // When the requested coordinator already leads a valid subset of the
+    // exact target roster, preserve that group and attach only players that
+    // are not already bound into another multi-player group. Rebuilding here
+    // would interrupt active playback even though Sonos already has the
+    // desired coordinator in place.
+    Map coordinatorLedTargetSubset = observedTargetGroups.values().find { Map item ->
+      item.coordinatorId == coordinatorId &&
+          item.memberIds.contains(coordinatorId) &&
+          item.memberIds.size() < requiredPlayerSet.size() &&
+          item.groupId == topology?.groupId &&
+          item.memberIds == normalizeGroupPlayerIds(topology?.playerIds)
+    }
+    if(topology?.fresh == true && topology?.consistent == true &&
+        topology.coordinatorId == coordinatorId && coordinatorLedTargetSubset != null) {
+      List<String> missingPlayers = requiredPlayerSet.findAll { String playerId ->
+        !coordinatorLedTargetSubset.memberIds.contains(playerId)
+      }
+      Boolean missingPlayersAreUnattached = missingPlayers.every { String playerId ->
+        !topologyObservations.any { Map item ->
+          List<String> members = normalizeGroupPlayerIds(item.playerIds)
+          item.fresh == true && item.groupId && item.groupId.toString() != coordinatorLedTargetSubset.groupId &&
+              members.size() > 1 && members.contains(playerId)
+        }
+      }
+      if(missingPlayers && missingPlayersAreUnattached) {
+        operation.lastCommand = 'addMissingPlayers'
+        operation.topologyRequestId = UUID.randomUUID().toString()
+        logInfo("Expanding target subgroup ${coordinatorLedTargetSubset.memberIds} under its configured coordinator ${coordinatorId}; adding ${missingPlayers} for group operation ${operation.operationId}")
+        logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+        prepareExpectedTopologyForMutation(coordinator, missingPlayers, [])
+        coordinator.playerModifyGroupMembers(missingPlayers, [])
+        operation.topologyMutationSent = true
+        operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+        operation.lastCommandAt = now()
+        saveActiveGroupOperation(operation)
+        runIn(1, 'refreshGroupOperationTopology', [
+          overwrite: true,
+          data: [operationId: operation.operationId]
+        ])
+        return
+      }
+    }
     Map conflictingTargetGroup = observedTargetGroups.values().find { Map item ->
       item.memberIds != requiredPlayerSet || item.coordinatorId != coordinatorId
     }
@@ -7808,6 +7852,21 @@ String summarizeGroupFavoriteCompletion(Map operation) {
       "favoriteGroup=${operation.favoriteExpectedGroupId ?: 'unknown'}, favoriteCoordinator=${operation.favoriteExpectedCoordinatorId ?: 'unknown'}"
 }
 
+/** Summarize the operation timeline that explains a topology or Favorite timeout. */
+String summarizeGroupOperationProgress(Map operation) {
+  if(operation == null) { return 'Operation state was unavailable.' }
+  Long createdAt = operation.createdAt as Long ?: now()
+  Long deadlineAt = operation.deadlineAt as Long ?: 0L
+  List<Map> deferred = state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_GROUP_COMMANDS_STATE_KEY]
+      : []
+  List<String> deferredCommands = deferred.findAll { Map item ->
+    item.groupDni?.toString() == operation.groupDni?.toString()
+  }.collect { Map item -> item.command?.toString() ?: 'unknown' }
+  Long deadlineRemainingMs = deadlineAt > 0L ? deadlineAt - now() : 0L
+  return "operation=${operation.operationId}, elapsedMs=${Math.max(0L, now() - createdAt)}, phase=${operation.phase ?: 'unknown'}, lastCommand=${operation.lastCommand ?: 'none'}, topologyAttempt=${operation.topologyAttempt ?: 0}, stableObservations=${operation.stableObservations ?: 0}, favoriteAttempt=${operation.favoriteAttempt ?: 0}, playAttempt=${operation.playAttempt ?: 0}, deadlineRemainingMs=${deadlineRemainingMs}, deferredCommands=${deferredCommands}"
+}
+
 /** Permit strong, current playback evidence to cover a lost load-ack event. */
 Boolean isGroupFavoriteCompletionConfirmed(Map operation) {
   if(operation == null || !operation.favoriteId) { return false }
@@ -7922,7 +7981,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   }
   String expiredDeadlinePhase = getExpiredGroupOperationDeadlinePhase(operation)
   if(expiredDeadlinePhase) {
-    String detail = "Timed out during ${expiredDeadlinePhase}. "
+    String detail = "Timed out during ${expiredDeadlinePhase}. ${summarizeGroupOperationProgress(operation)}. "
     if(operation.favoriteId) {
       detail += "Favorite evidence: ${summarizeGroupFavoriteCompletion(operation)}. "
     }
@@ -8443,10 +8502,14 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
     exactFavoriteId: operation.exactFavoriteId,
     favoriteCommandDeliveredAt: operation.favoriteCommandDeliveredAt ?: 0L,
     favoriteCommandAt: operation.favoriteCommandAt ?: 0L,
+    createdAt: operation.createdAt ?: 0L,
+    elapsedMs: Math.max(0L, now() - ((operation.createdAt as Long) ?: now())),
     deadlineAt: operation.deadlineAt ?: 0L,
     topologyDeadlineAt: operation.topologyDeadlineAt ?: 0L,
     favoriteDeadlineAt: operation.favoriteDeadlineAt ?: 0L,
     topologyAttempt: operation.topologyAttempt ?: 0,
+    stableObservations: operation.stableObservations ?: 0,
+    topologyLastObservedAt: operation.topologyLastObservedAt ?: 0L,
     favoriteAttempt: operation.favoriteAttempt ?: 0,
     favoriteAttemptId: operation.favoriteAttemptId,
     favoriteRequestId: operation.favoriteRequestId,
@@ -8461,6 +8524,8 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
     favoriteTopologyAttempt: operation.favoriteTopologyAttempt ?: 0,
     favoriteTopologyVerified: operation.favoriteTopologyVerified == true,
     playAttempt: operation.playAttempt ?: 0,
+    loadErrorCode: operation.loadErrorCode,
+    loadErrorReason: operation.loadErrorReason,
     lastCommand: operation.lastCommand,
     errorCode: operation.errorCode,
     detail: operation.detail,
