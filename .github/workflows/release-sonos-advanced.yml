@@ -11,10 +11,6 @@ on:
         options:
           - patch
           - minor
-      release_notes:
-        description: "Release notes for this version (summarize changes)"
-        required: true
-        type: string
 
 jobs:
   release:
@@ -23,6 +19,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      copilot-requests: write
 
     steps:
       - name: Checkout repository
@@ -58,6 +55,62 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "Incrementing from $CURRENT_VERSION to $NEW_VERSION"
 
+      - name: Generate release notes with GitHub Copilot
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          npm install --global @github/copilot
+
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          current_version = os.environ["CURRENT_VERSION"]
+          tag = f"v{current_version}"
+          tag_exists = subprocess.run(
+              ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}"],
+              check=False,
+          ).returncode == 0
+          if tag_exists:
+              commit_range = f"{tag}..HEAD"
+              commits = subprocess.check_output(
+                  ["git", "log", commit_range, "--no-merges", "--pretty=format:- %s"], text=True
+              )
+              diff = subprocess.check_output(
+                  ["git", "diff", "--no-ext-diff", "--unified=2", commit_range, "--",
+                   "Apps/SonosAdvancedApp.groovy", "Drivers/Component/SonosAdv*.groovy",
+                   "Libraries/SMAPILibrary.groovy", "Libraries/UtilitiesAndLoggingLibrary.groovy",
+                   "COMMUNITY_ISSUES_CHECKLIST.md"], text=True
+              )
+          else:
+              commits = subprocess.check_output(
+                  ["git", "log", "--since=30 days ago", "--no-merges", "--pretty=format:- %s"], text=True
+              )
+              diff = "No previous release tag was found; use the commit list as the source of truth."
+
+          if not commits.strip():
+              commits = "No Sonos Advanced commits found since the previous release."
+          diff = diff[:60000]
+          prompt = f"""Write concise, user-facing release notes for Sonos Advanced Controller version {os.environ['NEW_VERSION']}.
+          Summarize only user-visible changes supported by the commit list and code diff below. Group related changes into bullets. Omit internal version bumps, generated files, and speculative claims. Output Markdown bullets only, with no heading or preamble. If there are no meaningful changes, say so plainly.
+
+          Commits since the previous release:
+          {commits}
+
+          Sonos Advanced source diff (may be truncated):
+          {diff}
+          """
+          Path("copilot-prompt.md").write_text(prompt)
+          PY
+
+          copilot -s < copilot-prompt.md > release-notes.md
+          test -s release-notes.md
+          cat release-notes.md
+
+
       - name: Update version in all Sonos Advanced files
         run: |
           OLD_VERSION="${{ steps.version.outputs.current_version }}"
@@ -84,8 +137,6 @@ jobs:
           echo "Version update complete"
 
       - name: Update packageManifest.json
-        env:
-          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
         run: |
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
           DATE=$(date +%Y-%m-%d)
@@ -98,7 +149,8 @@ jobs:
 
           manifest_path = 'PackageManifests/SonosAdvancedController/packageManifest.json'
           new_version = sys.argv[1]
-          release_notes = sys.argv[2]
+          with open('release-notes.md', 'r') as f:
+              release_notes = f.read().strip()
           date_released = sys.argv[3]
 
           with open(manifest_path, 'r') as f:
@@ -151,43 +203,21 @@ jobs:
           print(f"Updated all URLs to point to release v{new_version}")
           EOF
 
-          python3 update_manifest.py "$NEW_VERSION" "$RELEASE_NOTES" "$DATE"
+          python3 update_manifest.py "$NEW_VERSION" "" "$DATE"
 
-      - name: Generate changelog from git commits
+      - name: Assemble release changelog
         id: changelog
         run: |
-          OLD_VERSION="${{ steps.version.outputs.current_version }}"
           NEW_VERSION="${{ steps.version.outputs.new_version }}"
 
-          # Try to find the last version tag
-          LAST_TAG=$(git tag -l "v${OLD_VERSION}" | head -n 1)
-
-          if [ -z "$LAST_TAG" ]; then
-            # If no tag exists, get commits from last 30 days
-            COMMIT_RANGE="--since='30 days ago'"
-            echo "No previous tag found, using commits from last 30 days"
-          else
-            COMMIT_RANGE="${LAST_TAG}..HEAD"
-            echo "Using commits since ${LAST_TAG}"
-          fi
-
-          # Generate changelog from commits
-          CHANGELOG=$(git log $COMMIT_RANGE --pretty=format:"- %s" --no-merges -- \
-            Apps/SonosAdvancedApp.groovy \
-            Drivers/Component/SonosAdv*.groovy \
-            Libraries/SMAPILibrary.groovy \
-            Libraries/UtilitiesAndLoggingLibrary.groovy \
-            COMMUNITY_ISSUES_CHECKLIST.md || echo "- Initial release")
+          RELEASE_NOTES=$(cat release-notes.md)
 
           # Save to file for use in release
           cat > changelog.md << EOF
           ## Sonos Advanced Controller ${NEW_VERSION}
 
           ### Release Notes
-          ${{ github.event.inputs.release_notes }}
-
-          ### Changes in this release
-          ${CHANGELOG}
+          ${RELEASE_NOTES}
 
           ### Files Updated
           - SonosAdvancedApp.groovy
