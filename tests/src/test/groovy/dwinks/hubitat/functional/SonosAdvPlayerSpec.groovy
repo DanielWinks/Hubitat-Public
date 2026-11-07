@@ -1854,7 +1854,7 @@ class SonosAdvPlayerSpec extends Specification {
     where:
     input << [0, 0L, 0G, '0', ' 0 ']
   }
-  def "public restore resume and speak commands preserve zero in clip payloads"() {
+  def "public restore resume and speak commands preserve zero volume"() {
     given:
     driver.metaClass.getParent = { -> null }
     driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
@@ -1864,13 +1864,21 @@ class SonosAdvPlayerSpec extends Specification {
     driver.settings.ttsBoostAmount = 10
     driver.getDeviceAudioClipQueue().clear()
     driver.runtimeState.audioClipPlaying = true
+    List<BigDecimal> streamVolumes = []
+    driver.metaClass.componentPlayStreamWithRestoreLocal = { String uri, Integer duration, BigDecimal volume ->
+      streamVolumes << volume
+    }
 
     when:
     driver.invokeMethod(command, ['zero', input] as Object[])
     Map clip = driver.getDeviceAudioClipQueue().peek()
 
     then:
-    ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].volume == 0
+    if(command == 'speak') {
+      streamVolumes == [0G]
+    } else {
+      ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].volume == 0
+    }
 
     where:
     [command, input] << [['playTextAndRestore', 'playTextAndResume', 'speak'], [0, 0L, 0G, '0', ' 0 ']].combinations()
@@ -1878,6 +1886,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "paused AirPlay metadata never routes speak through the stream holder"() {
     given:
+    driver.getDeviceAudioClipQueue().clear()
     Boolean routedToHolder = false
     com.hubitat.app.InstalledAppWrapper parent = new com.hubitat.app.InstalledAppWrapper()
     parent.metaClass.shouldUseAudioClipForAirPlay = { -> true }
@@ -1923,7 +1932,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.getParent = { -> null }
     driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3'] as LinkedHashMap }
     driver.metaClass.componentPlayTextNoRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
-    driver.metaClass.componentPlayTextWithRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
+    driver.metaClass.componentPlayStreamWithRestoreLocal = { String uri, Integer duration, BigDecimal level -> volumes.add(level) }
     driver.device.currentValues.volume = 5
     driver.settings.ttsBoostAmount = 10
 

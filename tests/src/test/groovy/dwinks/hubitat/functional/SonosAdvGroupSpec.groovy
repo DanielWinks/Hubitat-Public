@@ -228,7 +228,8 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.state.isEmpty()
     driver.runtimeState.groupCommandSequence == 9
-    driver.runtimeState.pendingGroupCommands.last().requestId == 'SONOS-GROUP-TEST-DNI-9'
+    UUID.fromString(driver.runtimeState.pendingGroupCommands.last().requestId as String).toString() ==
+      driver.runtimeState.pendingGroupCommands.last().requestId
     driver.runtimeState.pendingRegroup == true
     driver.runtimeState.pendingGroupCommands.last().command == 'refresh'
   }

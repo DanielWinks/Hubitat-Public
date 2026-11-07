@@ -1385,10 +1385,15 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
       }
     }
     if(!routedToParent) {
-      volume = getAnnouncementVolume(volume)
       if(streamUrl) {
-        componentPlayStreamWithRestoreLocal(streamUrl, ttsDuration, volume)
+        if(useAudioClip) {
+          playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
+        } else {
+          volume = getAnnouncementVolume(volume)
+          componentPlayStreamWithRestoreLocal(streamUrl, ttsDuration, volume)
+        }
       } else {
+        volume = getAnnouncementVolume(volume)
         componentPlayTextWithRestoreLocal(text, volume, voice)
       }
     }
@@ -3252,7 +3257,7 @@ void createRemoveSleepTimerChildDevice(Boolean create) {
   if(!child && create) {
     try {
       child = addChildDevice('dwinks', 'Sonos Advanced Sleep Timer', dni,
-        [name: 'Sonos Sleep Timer', label: "Sonos Sleep Timer - ${this.getDataValue('name')}"])
+        [name: 'Sonos Sleep Timer', label: "Sonos Sleep Timer - ${device.getDataValue('name') ?: device.displayName}"])
       child.updateDataValue('playerDni', device.getDeviceNetworkId())
       child.sendEvent(name: 'remainingDuration', value: '00:00:00')
       child.sendEvent(name: 'sleepTimerState', value: 'unknown')
@@ -3327,8 +3332,8 @@ void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
   try {
     String body = response.getData()?.toString() ?: ''
     GPathResult xml = new XmlSlurper().parseText(body)
-    String remaining = xml.depthFirst().find { it.name() == 'RemainingSleepTimerDuration' }?.text()?.toString() ?: ''
-    String generation = xml.depthFirst().find { it.name() == 'CurrentSleepTimerGeneration' }?.text()?.toString() ?: ''
+    String remaining = findSleepTimerXmlText(xml, 'RemainingSleepTimerDuration')
+    String generation = findSleepTimerXmlText(xml, 'CurrentSleepTimerGeneration')
     ChildDeviceWrapper child = getSleepTimerChild()
     if(child) {
       child.sendEvent(name: 'remainingDuration', value: remaining ?: '00:00:00')
@@ -3346,6 +3351,17 @@ void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
     if(child) { child.sendEvent(name: 'sleepTimerState', value: 'unknown') }
     logWarn("Could not parse sleep timer response: ${e.message}")
   }
+}
+
+String findSleepTimerXmlText(GPathResult node, String elementName) {
+  if(node?.name()?.toString() == elementName) { return node.text()?.toString() ?: '' }
+  for(Object child : node?.children() ?: []) {
+    if(child instanceof GPathResult) {
+      String value = findSleepTimerXmlText((GPathResult)child, elementName)
+      if(value != null) { return value }
+    }
+  }
+  return null
 }
 
 void createRemoveRightChannelChildDevice(Boolean create) {
@@ -3664,8 +3680,14 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   GPathResult instanceId = (GPathResult)event['InstanceID']
 
   String sleepTimerGeneration = instanceId['SleepTimerGeneration']['@val']?.toString()
+  String sleepTimerState = instanceId['SleepTimerState']['@val']?.toString()
   ChildDeviceWrapper sleepTimerChild = getSleepTimerChild()
   if(sleepTimerChild) {
+    if(sleepTimerState) {
+      String normalizedSleepTimerState = sleepTimerState.toUpperCase()
+      Boolean sleepTimerActive = normalizedSleepTimerState in ['ACTIVE', 'RUNNING', 'SLEEP_TIMER_RUNNING']
+      sleepTimerChild.sendEvent(name: 'sleepTimerState', value: sleepTimerActive ? 'active' : 'inactive')
+    }
     if(sleepTimerGeneration) {
       sleepTimerChild.sendEvent(name: 'generation', value: sleepTimerGeneration)
       getSleepTimer()
@@ -9205,6 +9227,11 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'globalError' && eventType?.success == false) {
     if(eventType?.namespace == 'audioClip') {
       logWarn("Audio clip command '${eventType?.response}' failed for active clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
+      String failedCorrelationId = runtimeState.activeAudioClipCorrelationId as String
+      if(failedCorrelationId) {
+        retryAudioClipAfterCommandFailure(failedCorrelationId,
+          "Sonos rejected audioClip command: ${eventData?.errorCode ?: eventData?.reason ?: 'unknown error'}")
+      }
     }
     if(eventType?.namespace == 'playback') {
       String errorReason = "${eventData?.errorCode ?: 'UNKNOWN'}: ${eventData?.reason ?: eventData}"
@@ -9645,8 +9672,49 @@ void markAudioClipWatchdogFailure(String correlationId, String phase, String det
   clipProgress[correlationId] = progress
   setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(progress, null)
-  logWarn("Audio clip ${correlationId} ${phase}: ${detail}; advancing queue without replay")
-  setAudioClipPlaying(false)
+  logWarn("Audio clip ${correlationId} ${phase}: ${detail}; pausing queue to prevent queued clips from playing back-to-back")
+  pauseAudioClipWatchdog()
+  runtimeState.audioClipPlaying = false
+  runtimeState.audioClipCommandSent = false
+  runtimeState.remove('audioClipHadDisconnectAfterSend')
+  runtimeState.remove('activeAudioClipCorrelationId')
+  runtimeState.remove('activeAudioClipSonosId')
+  removeHiddenJsonRuntimeState('activeAudioClipMessage')
+  removeHiddenJsonRuntimeState('currentlyPlayingClip')
+}
+
+void retryAudioClipAfterCommandFailure(String correlationId, String detail) {
+  if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
+  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+      : new LinkedHashMap<String, Map>()
+  Map progress = clipProgress[correlationId] ?: [correlationId: correlationId]
+  Integer retryCount = (progress.commandRetryCount ?: 0) as Integer
+  if(retryCount >= 1) {
+    markAudioClipWatchdogFailure(correlationId, 'FAILED_COMMAND',
+      "${detail}; one reconnect retry already failed")
+    return
+  }
+  Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
+  String message = clipMessage?.leftChannel?.toString()
+  if(!message) {
+    markAudioClipWatchdogFailure(correlationId, 'FAILED_COMMAND', "${detail}; active command payload is unavailable")
+    return
+  }
+  progress.commandRetryCount = retryCount + 1
+  progress.phase = 'RETRY_PENDING'
+  progress.failureReason = detail
+  progress.retryQueuedAt = now()
+  clipProgress[correlationId] = progress
+  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
+  publishAudioClipProgressEvent(progress, null)
+  runtimeState.audioClipHadDisconnectAfterSend = false
+  runtimeState.audioClipCommandSent = false
+  pauseAudioClipWatchdog()
+  queueWebsocketMessage(message, 1, [kind: 'audioClip', correlationId: correlationId])
+  setWebSocketStatus('closed')
+  logWarn("Audio clip ${correlationId} failed; queued one retry after WebSocket reconnect: ${detail}")
+  scheduleWebSocketReconnect()
 }
 
 void isFavoritePlaying(Map json) {

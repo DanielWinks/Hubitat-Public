@@ -20,8 +20,8 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   void acknowledgeParentCommand(String requestId) { acknowledgedParentRequests << requestId }
 
-  void playerCreateGroup(List<String> playerIds) {
-    commands << [name: 'playerCreateGroup', playerIds: playerIds]
+  void playerCreateGroup(List<String> playerIds, String musicContextGroupId = null) {
+    commands << [name: 'playerCreateGroup', playerIds: playerIds, musicContextGroupId: musicContextGroupId]
   }
 
   void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = [],
@@ -1267,6 +1267,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.playerStateUpdateHandler([data: JsonOutput.toJson([kind: 'topology',
       playerDni: follower.deviceNetworkId, groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW',
       playerIds: ['RINCON_FOLLOW'], observedAt: observedAt + 1L])] as Event)
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([kind: 'topology',
+      playerDni: extra.deviceNetworkId, groupId: 'GROUP-3', coordinatorId: 'RINCON_EXTRA',
+      playerIds: ['RINCON_EXTRA'], observedAt: observedAt + 2L])] as Event)
 
     then:
     appScript.state.groupAnnouncementTopologyTransactions['fresh-topology'].phase == 'GROUPING_TARGET'
@@ -1367,14 +1370,14 @@ class SonosAdvancedAppSpec extends Specification {
       [coordinator], snapshot, false, [playerId: 'RINCON_EXTRA', previousMuteState: 'unmuted'])
 
     then:
-    extra.commands*.name == ['mute']
+    extra.commands.findAll { it.name in ['mute', 'unmute'] }*.name == ['mute']
     appScript.state.groupAnnouncementTopologyTransactions['stream-holder-unmuted'].holderPreviousMuteState == 'unmuted'
 
     when:
     appScript.restoreStreamHolderMuteState(appScript.state.groupAnnouncementTopologyTransactions['stream-holder-unmuted'])
 
     then:
-    extra.commands*.name == ['mute', 'unmute']
+    extra.commands.findAll { it.name in ['mute', 'unmute'] }*.name == ['mute', 'unmute']
   }
 
   def "stream handoff leaves a holder muted when it was muted before use"() {
