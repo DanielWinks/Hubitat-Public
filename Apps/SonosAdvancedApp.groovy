@@ -215,6 +215,7 @@ definition(
 
 preferences {
   page(name: 'mainPage', install: true, uninstall: true)
+  page(name: 'legacyBooleanSettingsPage')
   page(name: 'newUiPage')
   page(name: 'localPlayerPage')
   page(name: 'localPlayerSelectionPage')
@@ -282,6 +283,7 @@ preferences {
 @Field static final String NEW_UI_GROUP_ERROR_KEY = 'newUiGroupError'
 @Field static final String NEW_UI_GROUP_DELETE_KEY = 'pendingNewUiDeleteGroup'
 @Field static final String NEW_UI_GROUP_TABLE_EVENT = 'newUiGroupsTable'
+@Field static final String NEW_UI_GROUP_EDITOR_EVENT = 'newUiGroupEditor'
 @Field static final String NEW_UI_GROUP_MODE_CREATE = 'create'
 @Field static final String NEW_UI_GROUP_MODE_EDIT = 'edit'
 @Field static Map SOURCES = [
@@ -330,31 +332,33 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 Map mainPage() {
   applyLogLevelChange()
   applyAlarmManagementPreferenceChanges()
-  if(settings.useOldUi == true) {
+  Boolean useOldUi = settings.useOldUi == true
+  if(useOldUi) {
     stopDiscovery()
   }
   logTrace("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
   checkForUpdates()
   logTrace('mainPage returned from asynchronous update-check dispatch')
-  dynamicPage(title: 'Sonos Advanced Controller') {
+  dynamicPage(title: useOldUi ? 'Sonos Advanced Controller' : '<p hidden>Sonos Advanced Controller</p>') {
     section {
-      paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
-
+      if(useOldUi) {
+        paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
+      }
       if(state.updateAvailable == true) {
-        String currentVer = state.installedAppVersion?.toString() ?: getCurrentVersion()
-        logTrace("Rendering cached update notice: installed=${currentVer}, latest=${state.latestVersion}, cachePresent=${state.installedAppVersion != null}")
-        section('<b style="color: #ff6b6b;">⚠️ Update Available</b>', hideable: false) {
-          paragraph "<b>Version ${state.latestVersion} is available!</b><br/>" +
-                    "Current version: ${currentVer}<br/>" +
-                    "Released: ${state.latestReleaseDate}<br/><br/>" +
-                    "<a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
-          input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
-          input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
+        if(useOldUi) {
+          String currentVersion = state.installedAppVersion?.toString() ?: getCurrentVersion()
+          section('<b style="color:#ff6b6b">⚠️ Update Available</b>', hideable: false) {
+            paragraph "<b>Version ${state.latestVersion} is available!</b><br/>Current version: ${currentVersion}<br/>Released: ${state.latestReleaseDate}<br/><br/><a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
+            input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
+            input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
+          }
+        } else {
+          paragraph displayNewUiUpdateNotice()
         }
       }
     }
 
-    if(settings.useOldUi == true) {
+    if(useOldUi) {
       section() {
         href (
           page: 'localPlayerPage',
@@ -367,60 +371,59 @@ Map mainPage() {
           description: 'Select to create/delete Sonos group devices'
         )
       }
-    } else {
-      renderNewUiPageContent()
-    }
 
-    section('Announcement Settings') {
-      input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention',
-        options: [
-          '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
-          '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
-          '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
-          '1440': '24 hours', unlimited: 'Unlimited'
-        ], required: true, defaultValue: '60', submitOnChange: true
-      paragraph 'Maximum time between when a TTS message is submitted on Hubitat and when it is dequeued and sent to the speaker.'
-      input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method',
-        options: [
-          automatic: 'Automatic',
-          alwaysNonInterrupting: 'Always non-interrupting',
-          alwaysCoordinatorStream: 'Always standard stream'
-        ], required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
-      input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method',
-        options: [
-          automatic: 'Automatic',
-          alwaysNonInterrupting: 'Always non-interrupting',
-          alwaysCoordinatorStream: 'Always standard stream'
-        ], required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
-      input 'automaticTtsTopologyChanges', 'bool', title: 'Automatic TTS topology changes',
-        required: true, defaultValue: true, submitOnChange: true
-      input 'useTemporaryStreamHolder', 'bool', title: 'Use a temporary stream holder',
-        required: true, defaultValue: true, submitOnChange: true
-      paragraph 'When enabled, an idle speaker can temporarily hold an active Sonos-managed stream while standard-stream TTS plays on its target. When disabled, announcements use synchronized audioClip playback to preserve the active stream. AirPlay streams are never handed to a holder.'
-      paragraph 'Choose the routing policy independently for normal and high priority announcements. <b>Automatic:</b> use synchronized audio clips while a player or group is playing another source; otherwise use a standard stream when the target topology can be prepared safely. <b>Always non-interrupting:</b> use synchronized audio clips even when players are idle, preserving current playback. <b>Always standard stream:</b> use a standard stream on the group coordinator; this can replace current playback and may force temporary topology changes.'
-      if(settings.automaticTtsTopologyChanges == false || settings.automaticTtsTopologyChanges?.toString() == 'false') {
-        if(getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream') {
-          paragraph '<span style="color:#ff6b6b"><b>Warning:</b> With automatic topology changes off, a standard-stream announcement to a group that is not currently grouped together may play only on the coordinator and any players already grouped with it.</span>'
+      section('Announcement Settings') {
+        input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention',
+          options: [
+            '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
+            '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
+            '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
+            '1440': '24 hours', unlimited: 'Unlimited'
+          ], required: true, defaultValue: '60', submitOnChange: true
+        paragraph 'Maximum time between when a TTS message is submitted on Hubitat and when it is dequeued and sent to the speaker.'
+        input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method',
+          options: [automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting', alwaysCoordinatorStream: 'Always standard stream'],
+          required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
+        input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method',
+          options: [automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting', alwaysCoordinatorStream: 'Always standard stream'],
+          required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
+        input 'automaticTtsTopologyChanges', 'bool', title: 'Automatic TTS topology changes', required: true, defaultValue: true, submitOnChange: true
+        input 'useTemporaryStreamHolder', 'bool', title: 'Use a temporary stream holder', required: true, defaultValue: true, submitOnChange: true
+        paragraph 'When enabled, an idle speaker can temporarily hold an active Sonos-managed stream while standard-stream TTS plays on its target. When disabled, announcements use synchronized audioClip playback to preserve the active stream. AirPlay streams are never handed to a holder.'
+        paragraph 'Choose the routing policy independently for normal and high priority announcements. <b>Automatic:</b> use synchronized audio clips while a player or group is playing another source; otherwise use a standard stream when the target topology can be prepared safely. <b>Always non-interrupting:</b> use synchronized audio clips even when players are idle, preserving current playback. <b>Always standard stream:</b> use a standard stream on the group coordinator; this can replace current playback and may force temporary topology changes.'
+        if(settings.automaticTtsTopologyChanges == false || settings.automaticTtsTopologyChanges?.toString() == 'false') {
+          if(getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream') {
+            paragraph '<span style="color:#ff6b6b"><b>Warning:</b> With automatic topology changes off, a standard-stream announcement to a group that is not currently grouped together may play only on the coordinator and any players already grouped with it.</span>'
+          }
+        }
+        if(isAutomaticTtsTopologyChangesEnabled() &&
+            (getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream')) {
+          paragraph '<span style="color:#ff6b6b"><b>Warning:</b> Always standard stream with automatic topology changes can force temporary regrouping, including changes to active outside groups. Playback in those groups may be interrupted. The app attempts to restore their original topology after the announcement.</span>'
         }
       }
-      if(isAutomaticTtsTopologyChangesEnabled() &&
-          (getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream')) {
-        paragraph '<span style="color:#ff6b6b"><b>Warning:</b> Always standard stream with automatic topology changes can force temporary regrouping, including changes to active outside groups. Playback in those groups may be interrupted. The app attempts to restore their original topology after the announcement.</span>'
-      }
-    }
 
-    section('Alarm Management') {
-      input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?',
-        required: false, defaultValue: false, submitOnChange: true
-      if(settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true') {
-        paragraph 'Creates one household-level Sonos Alarm Manager child device.'
+      section('Alarm Management') {
+        input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?', required: false, defaultValue: false, submitOnChange: true
+        if(settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true') {
+          paragraph 'Creates one household-level Sonos Alarm Manager child device.'
+        }
+        input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?', required: false, defaultValue: false, submitOnChange: true
+        if(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true') {
+          paragraph 'Creates one switch child device for each alarm found on the Sonos household. Alarm changes are sent over the local Sonos UPnP interface.'
+        }
+        paragraph 'Each option takes effect as soon as it is toggled.'
       }
-      input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?',
-        required: false, defaultValue: false, submitOnChange: true
-      if(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true') {
-        paragraph 'Creates one switch child device for each alarm found on the Sonos household. Alarm changes are sent over the local Sonos UPnP interface.'
+
+      section('Logging Settings:', hideable: true) {
+        input 'logLevel', 'enum', title: 'Logging level',
+          options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
+          required: false, defaultValue: getConfiguredLogLevel(), submitOnChange: true
       }
-      paragraph 'Each option takes effect as soon as it is toggled.'
+    } else {
+      renderNewUiPageContent()
+      section() {
+        paragraph displayCustomSettings()
+      }
     }
 
     section('Update Settings:', hideable: true, hidden: true) {
@@ -428,12 +431,14 @@ Map mainPage() {
       paragraph 'If Hub Login Security is enabled, enter the local hub credentials used by this app.'
       input 'hubSecurityUsername', 'text', title: 'Hub Login Security username', required: false
       input 'hubSecurityPassword', 'password', title: 'Hub Login Security password', required: false
-      input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
+      if(useOldUi) {
+        input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
+        input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false, submitOnChange: true
+      }
       if(autoCheckUpdates) {
         input 'updateCheckFrequency', 'enum', title: 'Check frequency', required: false, defaultValue: 'Daily',
               options: ['Daily', 'Weekly', 'Manual']
       }
-      input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false, submitOnChange: true
       if(autoInstallUpdates) {
         input 'autoInstallTime', 'time', title: 'Install updates at this time', required: true, defaultValue: '02:00'
         input 'autoInstallNextOccurrence', 'bool', title: 'Install at next occurrence of selected time (regardless of day)', required: false, defaultValue: false, submitOnChange: true
@@ -505,14 +510,43 @@ Map mainPage() {
       }
     }
 
-    section('Logging Settings:', hideable: true) {
+    section('Interface Settings:', hideable: true) {
+      if(!useOldUi) {
+        paragraph updateSettingsDisclosureInstaller() + updateSettingsDisclosureControlsStyle()
+      }
+      // This option changes the page structure, so retain its native submit-and-refresh control.
+      input 'useOldUi', 'bool', title: 'Use old UI', required: false, defaultValue: false, submitOnChange: true
+    }
+  }
+}
+
+/** Keep the legacy preference inputs registered on an unlinked page for compatibility. */
+Map legacyBooleanSettingsPage() {
+  dynamicPage(name: 'legacyBooleanSettingsPage', title: 'Legacy Settings', install: false, uninstall: false) {
+    section('') {
+      input 'automaticTtsTopologyChanges', 'bool', title: 'Automatic TTS topology changes', required: true, defaultValue: true
+      input 'useTemporaryStreamHolder', 'bool', title: 'Use a temporary stream holder', required: true, defaultValue: true
+      input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?', required: false, defaultValue: false
+      input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?', required: false, defaultValue: false
+      input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true
+      input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false
+      input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention', options: [
+        '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
+        '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
+        '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
+        '1440': '24 hours', unlimited: 'Unlimited'
+      ], required: true, defaultValue: '60'
+      input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method', options: [
+        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
+        alwaysCoordinatorStream: 'Always standard stream'
+      ], required: true, defaultValue: 'alwaysNonInterrupting'
+      input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method', options: [
+        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
+        alwaysCoordinatorStream: 'Always standard stream'
+      ], required: true, defaultValue: 'alwaysNonInterrupting'
       input 'logLevel', 'enum', title: 'Logging level',
         options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
-        required: false, defaultValue: getConfiguredLogLevel(), submitOnChange: true
-    }
-
-    section('Interface Settings:', hideable: true) {
-      input 'useOldUi', 'bool', title: 'Use old UI', required: false, defaultValue: false, submitOnChange: true
+        required: false, defaultValue: getConfiguredLogLevel()
     }
   }
 }
@@ -532,8 +566,6 @@ Map newUiPage() {
 
 void renderNewUiPageContent() {
   section() {
-    paragraph "<span class='ssr-app-state-${app.id}-discoveryTimer'>${renderNewUiDiscoveryTimerMarkup()}</span>"
-    input 'btnNewUiDiscoverSpeakers', 'button', title: 'Discover Speakers (60 seconds)', submitOnChange: true
     paragraph displayNewUiSpeakerTable()
   }
 
@@ -565,49 +597,30 @@ void renderNewUiPageContent() {
   }
 
   section() {
-    paragraph "<div class='new-ui-group-section-title'>Sonos Groups</div>"
     if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
       Map groupDraft = getNewUiGroupDraft()
-      List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
-      Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
+      List<ChildDeviceWrapper> groupPlayers = getCurrentPlayerDevices()
+      Map<String, String> groupPlayerOptions = groupPlayers.collectEntries { ChildDeviceWrapper player ->
         String id = player.getDataValue('id')?.toString()
         id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
       }
-      String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
-      List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
-      Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
+      String groupCoordinator = getNewUiGroupCoordinator(groupDraft)
+      List<String> groupFollowers = getNewUiGroupFollowers(groupDraft)
+      Map<String, String> groupSwGen = groupPlayers.collectEntries { ChildDeviceWrapper player ->
         String id = player.getDataValue('id')?.toString()
         id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
       }
-      String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
-      Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
-        id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
+      String selectedCoordinatorSwGen = groupSwGen[groupCoordinator]
+      Map<String, String> compatibleFollowerOptions = groupPlayerOptions.findAll { String id, String ignored ->
+        id != groupCoordinator && (!selectedCoordinatorSwGen || !groupSwGen[id] || groupSwGen[id] == selectedCoordinatorSwGen || groupFollowers.contains(id))
       }
-      String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
-      String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
-      String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
-
-      paragraph "<h3>${editorTitle}</h3>"
-      if(state[NEW_UI_GROUP_ERROR_KEY]) {
-        paragraph "<b style='color:#F44336'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</b>"
-      }
-      if(selectedCoordinator) {
-        paragraph 'Followers cannot include the selected coordinator. Only compatible speakers are listed.'
-      } else {
-        paragraph 'Select one coordinator, then select one or more follower speakers.'
-      }
-      input name: 'newUiGroupName', type: 'text', title: 'Group Name:', required: false,
-          defaultValue: editorName, submitOnChange: true
-      input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator:', multiple: false,
-          options: playerOptions, required: false, defaultValue: selectedCoordinator, submitOnChange: true, offerAll: false
-      input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers:', multiple: true,
-          options: followerOptions, required: false, defaultValue: selectedFollowers, submitOnChange: true, offerAll: false
-      input name: 'btnNewUiSaveGroup', type: 'button', title: 'Save Group', submitOnChange: true
-      input name: 'btnNewUiCancelGroup', type: 'button', title: 'Cancel', submitOnChange: true
+      input name: 'newUiGroupName', type: 'text', title: 'Group name', defaultValue: settings.newUiGroupName?.toString() ?: '', submitOnChange: true
+      input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator', options: groupPlayerOptions, defaultValue: groupCoordinator, submitOnChange: true, offerAll: false
+      input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers', options: compatibleFollowerOptions, multiple: true, defaultValue: groupFollowers, submitOnChange: true, offerAll: false
+      paragraph displayNewUiGroupEditor()
     }
 
     paragraph displayNewUiGroupTable()
-    input 'btnNewUiCreateGroup', 'button', title: 'Create Group', submitOnChange: true
   }
 }
 
@@ -621,64 +634,154 @@ void startDiscoverySession() {
     app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
     runIn(60, 'stopDiscovery')
     runIn(1, 'updateDiscoveryTimer')
+    app.sendEvent(name: 'discoveryTimer', value: 'Discovery started')
   }
 }
 
 String displayNewUiSpeakerTable() {
   String css = """
     <style>
+      .mdl-grid:has(.sonos-update-card) { padding-bottom: 0 !important; }
+      .mdl-cell:has(.sonos-update-card) { margin-bottom: 0 !important; }
+      .sonos-update-card { margin-bottom: 0 !important; }
+      .mdl-grid:has(.new-ui-device-card) { padding-top: 0 !important; }
+      .mdl-cell:has(.new-ui-device-card) { margin-top: 0 !important; }
+      .new-ui-device-card {
+        background: var(--surface-card, var(--surface-a, #fff));
+        border: 1px solid var(--surface-border, #dedede);
+        border-radius: 12px;
+        box-shadow: 0 2px 10px rgba(25, 35, 55, .07);
+        color: var(--text-color, #30343b);
+        margin: 0 0 18px;
+        overflow: hidden;
+      }
+      .new-ui-device-toolbar {
+        align-items: center;
+        background: var(--surface-b, #f7f8fa);
+        border-bottom: 1px solid var(--surface-border, #e5e7eb);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        justify-content: space-between;
+        padding: 15px 18px;
+        position: relative;
+      }
+      .new-ui-device-toolbar-container { border-bottom: 1px solid var(--surface-border, #e5e7eb); }
+      .new-ui-device-toolbar > span[class*='discoveryTimer'] {
+        align-items: center;
+        display: flex;
+        flex: 1 1 auto;
+        flex-wrap: wrap;
+        gap: 16px;
+        justify-content: space-between;
+        min-width: 0;
+      }
+      .new-ui-discovery-status {
+        align-items: center;
+        display: flex;
+        gap: 11px;
+        min-width: 220px;
+      }
+      .new-ui-discovery-indicator {
+        background: #9aa2ad;
+        border-radius: 50%;
+        flex: 0 0 10px;
+        height: 10px;
+        width: 10px;
+      }
+      .new-ui-discovery-indicator-running {
+        animation: new-ui-discovery-pulse 1.6s ease-in-out infinite;
+        background: #16a36a;
+        box-shadow: 0 0 0 4px rgba(22, 163, 106, .12);
+      }
+      @keyframes new-ui-discovery-pulse {
+        50% { box-shadow: 0 0 0 7px rgba(22, 163, 106, .04); }
+      }
+      .new-ui-discovery-copy { line-height: 1.35; }
+      .new-ui-discovery-title { font-size: 15px; font-weight: 650; }
+      .new-ui-device-section-title {
+        color: var(--text-color, #30343b);
+        flex: 1 1 auto;
+        font-size: 17px;
+        font-weight: 650;
+        text-align: center;
+      }
+      .new-ui-discovery-detail {
+        color: var(--text-color-secondary, #6b7280);
+        font-size: 12px;
+        margin-top: 2px;
+      }
+      .new-ui-device-toolbar .form-group:has(input[name='btnNewUiDiscoverSpeakers']) { display: none !important; }
+      .new-ui-discovery-button {
+        align-items: center;
+        background: #4054b2;
+        border: 1px solid #4054b2;
+        border-radius: 8px;
+        color: #fff;
+        cursor: pointer;
+        display: inline-flex;
+        font-size: 14px;
+        font-weight: 600;
+        gap: 9px;
+        line-height: 1.2;
+        padding: 10px 14px;
+        transition: background .15s ease, box-shadow .15s ease, transform .15s ease;
+      }
+      .new-ui-discovery-button:hover { background: #34479e; box-shadow: 0 2px 6px rgba(52, 71, 158, .2); }
+      .new-ui-discovery-button:active { transform: translateY(1px); }
+      .new-ui-discovery-button:focus-visible { outline: 2px solid #1a77c9; outline-offset: 2px; }
+      .new-ui-discovery-button svg { height: 16px; width: 16px; }
       #new-ui-speaker-table-wrapper {
         display: block;
         overflow-x: auto;
-        margin: -64px 0 0 0 !important;
         padding: 0 !important;
         width: 100%;
       }
 
       /* Keep only the group editor's action buttons on one row. */
-      .form-group:has(input[name='btnNewUiSaveGroup']),
-      .form-group:has(input[name='btnNewUiCancelGroup']) {
+      .form-group:has(input[name='settings[btnNewUiSaveGroup]']),
+      .form-group:has(input[name='settings[btnNewUiCancelGroup]']) {
         display: inline-block !important;
         width: auto !important;
         margin: 8px 8px 0 0 !important;
         vertical-align: top;
       }
 
-      .mdl-cell:has(input[name='btnNewUiSaveGroup']),
-      .mdl-cell:has(input[name='btnNewUiCancelGroup']),
-      .mdl-cell:has(button[name='btnNewUiSaveGroup']),
-      .mdl-cell:has(button[name='btnNewUiCancelGroup']) {
+      .mdl-cell:has(input[name='settings[btnNewUiSaveGroup]']),
+      .mdl-cell:has(input[name='settings[btnNewUiCancelGroup]']),
+      .mdl-cell:has(button[name='settings[btnNewUiSaveGroup]']),
+      .mdl-cell:has(button[name='settings[btnNewUiCancelGroup]']) {
         display: inline-block !important;
         width: auto !important;
         margin: 8px 8px 0 0 !important;
         vertical-align: top;
       }
 
-      input[name='btnNewUiSaveGroup'],
-      input[name='btnNewUiCancelGroup'],
-      button[name='btnNewUiSaveGroup'],
-      button[name='btnNewUiCancelGroup'] {
+      input[name='settings[btnNewUiSaveGroup]'],
+      input[name='settings[btnNewUiCancelGroup]'],
+      button[name='settings[btnNewUiSaveGroup]'],
+      button[name='settings[btnNewUiCancelGroup]'] {
         display: inline-block !important;
         width: auto !important;
       }
       #new-ui-speaker-table {
         background-color: var(--surface-card, var(--surface-a, #ffffff));
-        border: 1px solid var(--surface-border, #E0E0E0);
-        border-collapse: collapse;
-        border-radius: 4px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        border: 0;
+        border-collapse: separate;
+        border-spacing: 0;
+        border-radius: 0;
         color: var(--text-color, #424242);
-        min-width: 720px;
+        min-width: 760px;
         width: 100%;
       }
       #new-ui-speaker-table th,
       #new-ui-speaker-table td {
         background-color: var(--surface-card, var(--surface-a, #ffffff));
         border-bottom: 1px solid var(--surface-border, #EEEEEE);
-        border-right: 1px solid var(--surface-border, #EEEEEE);
+        border-right: 0;
         color: var(--text-color, #424242);
         font-size: 14px !important;
-        padding: 6px 4px !important;
+        padding: 12px 14px !important;
         text-align: center;
       }
       #new-ui-speaker-table thead {
@@ -686,16 +789,24 @@ String displayNewUiSpeakerTable() {
       }
       #new-ui-speaker-table th {
         background-color: var(--surface-b, #F5F5F5);
-        border-bottom: 2px solid var(--surface-border, #E0E0E0);
+        border-bottom: 1px solid var(--surface-border, #E0E0E0);
         color: var(--text-color, #424242);
         font-size: 14px !important;
         font-weight: 500;
-        padding: 8px !important;
+        padding: 11px 14px !important;
         text-align: center;
         white-space: nowrap;
       }
+      #new-ui-speaker-table .new-ui-table-toolbar-cell {
+        background: var(--surface-b, #f7f8fa);
+        padding: 0 18px !important;
+        text-align: left;
+      }
       #new-ui-speaker-table tbody tr:hover {
-        background-color: inherit !important;
+        background-color: var(--surface-hover, #f8f9fc) !important;
+      }
+      #new-ui-speaker-table tbody tr:last-child td {
+        border-bottom: 0;
       }
       #new-ui-speaker-table td:first-child .form-group {
         display: none;
@@ -763,25 +874,73 @@ String displayNewUiSpeakerTable() {
         color: var(--text-color-secondary, #757575);
       }
       #new-ui-speaker-table .new-ui-action-cell {
-        padding-left: 4px !important;
-        padding-right: 4px !important;
-        width: 56px;
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+        width: 64px;
       }
       #new-ui-speaker-table .new-ui-group-action-cell {
-        padding-left: 4px !important;
-        padding-right: 4px !important;
-        width: 92px;
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+        width: 110px;
+      }
+      .new-ui-mobile-list { display: none; }
+      .new-ui-mobile-record { border-bottom: 1px solid var(--surface-border, #e5e7eb); padding: 14px 16px; }
+      .new-ui-mobile-record:last-child { border-bottom: 0; }
+      .new-ui-mobile-field { align-items: flex-start; display: flex; gap: 12px; padding: 5px 0; }
+      .new-ui-mobile-label { color: var(--text-color-secondary, #6b7280); flex: 0 0 34%; font-size: 12px; font-weight: 600; }
+      .new-ui-mobile-value { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; text-align: left; }
+      .new-ui-mobile-value .new-ui-speaker-detail { overflow-wrap: anywhere; }
+      .new-ui-mobile-actions { align-items: center; display: flex; gap: 14px; }
+      .new-ui-mobile-record .form-group { display: none !important; }
+      .new-ui-mobile-action-button { align-items: center; border: 1px solid transparent; border-radius: 7px; box-sizing: border-box; display: inline-flex !important; font-size: 13px !important; font-weight: 600; justify-content: center; line-height: 1.2; min-height: 38px; padding: 9px 15px; text-decoration: none; }
+      .new-ui-mobile-remove-button { background: var(--surface-b, #fff); border-color: #d84a45; color: #c83d38 !important; }
+      .new-ui-mobile-create-group-button { background: #4054b2; border-color: #4054b2; color: #fff !important; }
+      .new-ui-mobile-speaker-primary { font-size: 16px; line-height: 1.45; text-align: center; }
+      .new-ui-mobile-speaker-primary .new-ui-speaker-detail { color: var(--text-color-secondary, #6b7280); font-size: 13px; overflow-wrap: anywhere; }
+      .new-ui-mobile-secondary-box { border: 1px solid var(--surface-border, #cfd3da); border-radius: 9px; margin: 12px auto; max-width: 100%; padding: 10px 12px; text-align: center; }
+      .new-ui-mobile-secondary-title { color: var(--text-color-secondary, #6b7280); font-size: 12px; font-weight: 650; margin: 0 auto 7px; }
+      .new-ui-mobile-secondary-box .new-ui-secondary-count,
+      .new-ui-mobile-secondary-box .new-ui-secondary-entry,
+      .new-ui-mobile-secondary-box .new-ui-secondary-detail { text-align: center; }
+      .new-ui-mobile-secondary-box .new-ui-secondary-detail { color: var(--text-color-secondary, #6b7280); font-size: 11px !important; overflow-wrap: anywhere; }
+      .new-ui-mobile-ip { color: var(--text-color, #30343b); font-size: 14px; text-align: center; }
+      .new-ui-mobile-ip-label { color: var(--text-color-secondary, #6b7280); font-size: 12px; font-weight: 650; }
+      .new-ui-mobile-create-group { display: flex; justify-content: center; margin-top: 10px; }
+      .new-ui-mobile-empty { color: var(--text-color-secondary, #6b7280); padding: 16px; }
+      @media (max-width: 640px) {
+        .new-ui-speaker-mobile-list .new-ui-mobile-record { padding: 16px 14px; text-align: center; }
+        .new-ui-mobile-field { align-items: center; flex-direction: column; gap: 3px; padding: 7px 0; text-align: center; }
+        .new-ui-mobile-label { flex: 0 0 auto; }
+        .new-ui-mobile-value { flex: 1 1 auto; text-align: center; width: 100%; }
+        #new-ui-speaker-table-wrapper,
+        #new-ui-speaker-table-wrapper > div { overflow: visible !important; }
+        #new-ui-speaker-table-wrapper { display: none !important; }
+        .new-ui-speaker-mobile-list { display: block !important; }
+        .new-ui-device-toolbar {
+          align-items: stretch;
+          box-sizing: border-box;
+          flex-direction: column;
+          gap: 10px;
+          padding: 12px 14px !important;
+        }
+        .new-ui-device-toolbar > div[style='display:inline-block'] { display: block !important; width: 100%; }
+        .new-ui-device-toolbar > span[class*='discoveryTimer'] { align-items: stretch; flex-direction: column; gap: 10px; width: 100%; }
+        .new-ui-device-section-title { order: 1; }
+        .new-ui-device-toolbar > span[class*='discoveryTimer'] > .new-ui-discovery-status { order: 2; }
+        .new-ui-device-toolbar > span[class*='discoveryTimer'] > .new-ui-discovery-button { order: 3; }
+        .new-ui-device-toolbar > span[class*='discoveryTimer'] > div[style='display:inline-block'] { display: block !important; width: 100%; }
+        .new-ui-discovery-button { justify-content: center; width: 100%; }
       }
     </style>
   """
   String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-  return "${css}${iconifyScript}<span class='ssr-app-state-${app.id}-newUiSpeakerTable'><div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div></span>"
+  return "${css.trim()}${iconifyScript}<div class='new-ui-device-card'><div class='new-ui-device-toolbar-container'><div class='new-ui-device-toolbar'><span class='ssr-app-state-${app.id}-discoveryTimer'>${renderNewUiDiscoveryTimerMarkup()}</span></div></div><span class='ssr-app-state-${app.id}-newUiSpeakerTable'><div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>${renderNewUiSpeakerMobileListMarkup()}</span></div>"
 }
 
 String renderNewUiSpeakerTableMarkup() {
   List<Map> rows = buildNewUiSpeakerRows()
   StringBuilder html = new StringBuilder()
-  html.append("<div style='overflow-x:auto'><table id='new-ui-speaker-table' class='mdl-data-table'>")
+  html.append("<div><table id='new-ui-speaker-table' class='mdl-data-table'>")
   html.append('<thead><tr>')
   html.append('<th>Action</th>')
   html.append('<th>Speaker</th>')
@@ -807,20 +966,59 @@ String renderNewUiSpeakerTableMarkup() {
           .join(' &middot; ')
 
       html.append('<tr>')
-      html.append("<td class='new-ui-action-cell'>${renderNewUiCreatedStatus(row)}</td>")
-      html.append("<td class='new-ui-speaker-name'><strong>${safeName}</strong>")
+      html.append("<td class='new-ui-action-cell' data-label='Action'>${renderNewUiCreatedStatus(row)}</td>")
+      html.append("<td class='new-ui-speaker-name' data-label='Speaker'><strong>${safeName}</strong>")
       if(detail) {
         html.append("<div class='new-ui-speaker-detail'>${detail}</div>")
       }
       html.append('</td>')
-      html.append("<td class='new-ui-secondary-speakers'>${renderNewUiSecondaryDevices(row)}</td>")
-      html.append("<td>${safeIp}</td>")
-      html.append("<td class='new-ui-group-action-cell'>${renderNewUiCreateGroupStatus(row)}</td>")
+      html.append("<td class='new-ui-secondary-speakers' data-label='Secondary speakers'>${renderNewUiSecondaryDevices(row)}</td>")
+      html.append("<td data-label='Network'>${safeIp}</td>")
+      html.append("<td class='new-ui-group-action-cell' data-label='Create group from'>${renderNewUiCreateGroupStatus(row)}</td>")
       html.append('</tr>')
     }
   }
 
   html.append('</tbody></table></div>')
+  return html.toString()
+}
+
+String renderNewUiSpeakerMobileListMarkup() {
+  List<Map> rows = buildNewUiSpeakerRows()
+  StringBuilder html = new StringBuilder("<div id='new-ui-speaker-mobile-list' class='new-ui-mobile-list new-ui-speaker-mobile-list'>")
+  if(rows.isEmpty()) {
+    html.append("<div class='new-ui-mobile-empty'>No primary Sonos speakers have been discovered yet.</div>")
+  } else {
+    rows.each { Map row ->
+      String safeName = escapeNewUiHtml(row.name)
+      String safeModel = escapeNewUiHtml(row.model)
+      String safeId = escapeNewUiHtml(row.id)
+      String safeIp = escapeNewUiHtml(row.ip ?: 'Unknown')
+      String childDeviceId = row.player?.id?.toString()
+      if(row.created == true && childDeviceId) {
+        safeName = "<a href='/device/edit/${escapeNewUiHtml(childDeviceId)}' target='_blank'>${safeName}</a>"
+      }
+      String detail = [safeModel, safeId].findAll { String value -> value }.join(' &middot; ')
+      String speakerMarkup = "<strong>${safeName}</strong>" + (detail ? "<div class='new-ui-speaker-detail'>${detail}</div>" : '')
+      String actionKey = row.discoveryKey?.toString() ?: row.id?.toString()
+      String playerAction
+      if(row.created == true) {
+        playerAction = newUiButtonLink("newUiMobileDeletePlayer|${actionKey}", 'Remove', '#c83d38', '13px', 'Remove speaker', 'new-ui-mobile-action-button new-ui-mobile-remove-button')
+      } else {
+        playerAction = newUiButtonLink("newUiMobileCreatePlayer|${actionKey}", 'Add speaker', '#4054b2', '13px', 'Create speaker', 'new-ui-mobile-action-button new-ui-mobile-create-group-button')
+      }
+      String groupAction = '<span class="new-ui-status new-ui-status-na">—</span>'
+      if(row.created == true && row.id) {
+        groupAction = newUiButtonLink("newUiMobileCreateGroup|${row.id}", 'Create Group From', '#fff', '13px', 'Create group from speaker', 'new-ui-mobile-action-button new-ui-mobile-create-group-button')
+      }
+      html.append("<article class='new-ui-mobile-record'><div class='new-ui-mobile-speaker-primary'>${speakerMarkup}</div>")
+      html.append("<div class='new-ui-mobile-create-group'>${playerAction}</div>")
+      html.append("<section class='new-ui-mobile-secondary-box'><div class='new-ui-mobile-secondary-title'>Secondary Speakers</div>${renderNewUiSecondaryDevices(row)}</section>")
+      html.append("<div class='new-ui-mobile-ip'><span class='new-ui-mobile-ip-label'>IP:</span> ${safeIp}</div>")
+      html.append("<div class='new-ui-mobile-create-group'>${groupAction}</div></article>")
+    }
+  }
+  html.append('</div>')
   return html.toString()
 }
 
@@ -990,9 +1188,11 @@ String renderNewUiCreateGroupStatus(Map row) {
   return newUiButtonLink("newUiCreateGroup|${row.id}", groupIcon, '#4CAF50', '20px')
 }
 
-String newUiButtonLink(String buttonName, String linkText, String color = '#1A77C9', String font = '15px') {
+String newUiButtonLink(String buttonName, String linkText, String color = '#1A77C9', String font = '15px', String ariaLabel = null, String cssClass = '') {
+  String safeAriaLabel = ariaLabel ? " aria-label='${escapeNewUiHtml(ariaLabel)}'" : ''
+  String safeCssClass = cssClass ? " ${escapeNewUiHtml(cssClass)}" : ''
   return "<div class='form-group'><input type='hidden' name='${buttonName}.type' value='button'></div>" +
-      "<div style='display:inline-block'><div class='submitOnChange' onclick='buttonClick(this)' style='color:${color};cursor:pointer;font-size:${font}'>${linkText}</div></div>" +
+      "<div style='display:inline-block'><div class='submitOnChange${safeCssClass}' role='button' tabindex='0'${safeAriaLabel} onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\" style='color:${color};cursor:pointer;font-size:${font}'>${linkText}</div></div>" +
       "<input type='hidden' name='settings[${buttonName}]' value=''>"
 }
 
@@ -1011,35 +1211,150 @@ String escapeNewUiHtml(Object value) {
       .replace("'", '&#39;')
 }
 
+String displayNewUiGroupEditor() {
+  return "<span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_EDITOR_EVENT}'>${renderNewUiGroupEditorMarkup()}</span>"
+}
+
+String renderNewUiGroupEditorMarkup() {
+  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return '' }
+  Map groupDraft = getNewUiGroupDraft()
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
+    String id = player.getDataValue('id')?.toString()
+    id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
+  }
+  String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
+  List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
+  Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
+    String id = player.getDataValue('id')?.toString()
+    id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
+  }
+  String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
+  Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
+    id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
+  }
+  String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
+  String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
+  String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
+  String editorErrorMarkup = state[NEW_UI_GROUP_ERROR_KEY]
+      ? "<div class='new-ui-group-editor-error'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</div>"
+      : ''
+  String editorInstructions = selectedCoordinator
+      ? 'Choose one coordinator and one or more compatible follower speakers.'
+      : 'Select one coordinator, then select one or more follower speakers.'
+  StringBuilder coordinatorOptions = new StringBuilder("<option value=''>Choose a coordinator</option>")
+  playerOptions.each { String id, String label ->
+    String selected = id == selectedCoordinator ? ' selected' : ''
+    coordinatorOptions.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
+  }
+  String nameChange = "updateNewUiGroupField('name',this.value)"
+  String coordinatorChange = "updateNewUiGroupField('coordinator',this.value)"
+  String followerChange = "updateNewUiGroupField('followers',Array.prototype.map.call(document.querySelectorAll('.new-ui-group-follower-checkbox:checked'),function(e){return e.value}).join(','))"
+  StringBuilder followerMarkup = new StringBuilder()
+  followerOptions.each { String id, String label ->
+    String checked = selectedFollowers.contains(id) ? ' checked' : ''
+    followerMarkup.append("<label class='new-ui-group-follower-option'><input class='new-ui-group-follower-checkbox' type='checkbox' value='${escapeNewUiHtml(id)}'${checked} onchange=\"${followerChange}\"><span>${escapeNewUiHtml(label)}</span></label>")
+  }
+  String followerOptionsMarkup = followerMarkup.toString()
+  String saveAction = newUiButtonLink('btnNewUiSaveGroup', 'Save group', '#4054b2', '14px', 'Save group', 'new-ui-group-save')
+  String cancelAction = newUiButtonLink('btnNewUiCancelGroup', 'Cancel', '#4b5563', '14px', 'Cancel group edit', 'new-ui-group-cancel')
+  String changeAction = newUiButtonLink('btnNewUiGroupFieldChanged', 'Update group draft', '#4054b2', '13px', 'Update group draft', 'new-ui-group-field-change-action')
+  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option input{width:18px;height:18px;flex:0 0 18px;accent-color:#4054b2}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
+  StringBuilder html = new StringBuilder(css)
+  html.append("<div class='new-ui-group-editor-card'><div class='new-ui-group-editor-heading'>${editorTitle}</div><div class='new-ui-group-editor-description'>${editorInstructions}</div>${editorErrorMarkup}")
+  html.append("<div class='new-ui-group-editor-grid'>")
+  html.append("<div class='new-ui-group-editor-field new-ui-group-editor-field-wide'><label for='new-ui-group-name'>Group name</label><input id='new-ui-group-name' type='text' name='newUiGroupNameUi' value='${escapeNewUiHtml(editorName)}' autocomplete='off' onchange=\"${nameChange}\"></div>")
+  html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
+  html.append("<div class='new-ui-group-editor-field'><span class='new-ui-group-editor-label'>Followers</span><div id='new-ui-group-followers' class='new-ui-group-follower-list' aria-describedby='new-ui-group-followers-help'>${followerOptionsMarkup}</div><div id='new-ui-group-followers-help' class='new-ui-group-editor-help'>Select one or more compatible speakers.</div></div>")
+  html.append("</div><div class='new-ui-group-editor-actions'>").append(saveAction).append(cancelAction).append('</div>')
+  html.append(changeAction)
+  html.append("<script>function updateNewUiGroupField(field,value){var encoded=btoa(unescape(encodeURIComponent(String(value||'')))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+\$/,'');var action='newUiGroupField|'+field+'|'+encoded;var marker=document.querySelector(\"input[name='btnNewUiGroupFieldChanged.type']\");var setting=document.querySelector(\"input[name='settings[btnNewUiGroupFieldChanged]']\");var button=document.querySelector('.new-ui-group-field-change-action');if(marker&&setting&&button){marker.name=action+'.type';setting.name='settings['+action+']';buttonClick(button)}}}</script>")
+  html.append('</div>')
+  return html.toString()
+}
+
 String displayNewUiGroupTable() {
   String css = """
     <style>
+      .mdl-grid:has(.new-ui-device-card) { padding-bottom: 0 !important; }
+      .mdl-cell:has(.new-ui-device-card) { margin-bottom: 0 !important; }
+      .new-ui-device-card { margin-bottom: 0 !important; }
+      .mdl-grid:has(.new-ui-groups-card) { padding-bottom: 0 !important; padding-top: 0 !important; }
+      .mdl-cell:has(.new-ui-groups-card) { margin-bottom: 0 !important; margin-top: 0 !important; }
+      .new-ui-groups-card { margin-bottom: 0 !important; margin-top: 0 !important; }
+      .mdl-grid:has(.sonos-settings) { padding-top: 0 !important; }
+      .mdl-cell:has(.sonos-settings) { margin-top: 0 !important; }
+      .new-ui-groups-card {
+        background: var(--surface-card, var(--surface-a, #fff));
+        border: 1px solid var(--surface-border, #dedede);
+        border-radius: 12px;
+        box-shadow: 0 2px 10px rgba(25, 35, 55, .07);
+        color: var(--text-color, #30343b);
+        margin: 10px 0 18px;
+        overflow: hidden;
+      }
       #new-ui-group-table-wrapper {
         display: block;
         overflow-x: auto;
-        margin: 0 !important;
         padding: 0 !important;
         width: 100%;
       }
       .new-ui-group-table-content {
         display: block;
-        margin: -56px 0 0 0 !important;
+        margin: 0 !important;
         padding: 0 !important;
       }
-      .new-ui-group-section-title {
-        color: var(--text-color, #424242);
-        font-size: 18px !important;
-        font-weight: 400;
+      .new-ui-group-toolbar {
+        align-items: center;
+        background: var(--surface-b, #f7f8fa);
+        border-bottom: 1px solid var(--surface-border, #e5e7eb);
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        min-height: 60px;
+        padding: 10px 18px;
+        position: relative;
+      }
+      .new-ui-group-toolbar-title {
+        color: var(--text-color, #30343b);
+        font-size: 17px;
+        font-weight: 650;
+        left: 50%;
+        position: absolute;
+        text-align: center;
+        transform: translateX(-50%);
+      }
+      .new-ui-group-toolbar .form-group:has(input[name='btnNewUiCreateGroup']) { display: none !important; }
+      .new-ui-group-toolbar-container { border-bottom: 1px solid var(--surface-border, #e5e7eb); }
+      .new-ui-group-create-button {
+        align-items: center;
+        background: #4054b2;
+        border: 1px solid #4054b2;
+        border-radius: 8px;
+        color: #fff;
+        cursor: pointer;
+        display: inline-flex;
+        font-weight: 600;
+        gap: 8px;
         line-height: 1.2;
-        margin: 0 0 12px !important;
+        padding: 9px 13px;
+        transition: background .15s ease, box-shadow .15s ease;
+      }
+      .new-ui-group-create-button:hover { background: #34479e; box-shadow: 0 2px 6px rgba(52, 71, 158, .2); }
+      .new-ui-group-create-button:focus-visible { outline: 2px solid #1a77c9; outline-offset: 2px; }
+      .new-ui-group-create-button svg { height: 16px; width: 16px; }
+      .new-ui-group-toolbar > div[style='display:inline-block'] { display: inline-block !important; margin-left: auto; position: relative; z-index: 1; }
+      .new-ui-group-table-toolbar-cell {
+        background: var(--surface-b, #f7f8fa) !important;
         padding: 0 !important;
+        text-align: left !important;
       }
       #new-ui-group-table {
         background-color: var(--surface-card, var(--surface-a, #ffffff));
-        border: 1px solid var(--surface-border, #E0E0E0);
-        border-collapse: collapse;
-        border-radius: 4px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        border: 0;
+        border-collapse: separate;
+        border-spacing: 0;
+        border-radius: 0;
         color: var(--text-color, #424242);
         min-width: 760px;
         width: 100%;
@@ -1048,10 +1363,10 @@ String displayNewUiGroupTable() {
       #new-ui-group-table td {
         background-color: var(--surface-card, var(--surface-a, #ffffff));
         border-bottom: 1px solid var(--surface-border, #EEEEEE);
-        border-right: 1px solid var(--surface-border, #EEEEEE);
+        border-right: 0;
         color: var(--text-color, #424242);
         font-size: 14px !important;
-        padding: 8px 6px !important;
+        padding: 12px 14px !important;
         text-align: center;
         vertical-align: middle;
       }
@@ -1060,14 +1375,22 @@ String displayNewUiGroupTable() {
       }
       #new-ui-group-table th {
         background-color: var(--surface-b, #F5F5F5);
-        border-bottom: 2px solid var(--surface-border, #E0E0E0);
+        border-bottom: 1px solid var(--surface-border, #E0E0E0);
         color: var(--text-color, #424242);
         font-size: 14px !important;
         font-weight: 500;
         white-space: nowrap;
       }
+      #new-ui-group-table .new-ui-group-table-toolbar-cell {
+        background: var(--surface-b, #f7f8fa);
+        padding: 0 !important;
+        text-align: left;
+      }
       #new-ui-group-table tbody tr:hover {
-        background-color: inherit !important;
+        background-color: var(--surface-hover, #f8f9fc) !important;
+      }
+      #new-ui-group-table tbody tr:last-child td {
+        border-bottom: 0;
       }
       #new-ui-group-table td:first-child .form-group {
         display: none;
@@ -1077,17 +1400,17 @@ String displayNewUiGroupTable() {
         vertical-align: middle;
       }
       #new-ui-group-table .new-ui-group-action-cell {
-        padding-left: 4px !important;
-        padding-right: 4px !important;
+        padding-left: 10px !important;
+        padding-right: 10px !important;
         white-space: nowrap;
-        width: 92px;
+        width: 100px;
       }
       #new-ui-group-table .new-ui-group-name,
       #new-ui-group-table .new-ui-group-followers {
         text-align: left;
       }
       #new-ui-group-table .new-ui-group-name {
-        min-width: 180px;
+        min-width: 200px;
       }
       #new-ui-group-table .new-ui-group-name a {
         color: #2196F3;
@@ -1099,16 +1422,39 @@ String displayNewUiGroupTable() {
       #new-ui-group-table .new-ui-group-followers br {
         line-height: 1.7;
       }
+      .new-ui-group-mobile-list { display: none; }
+      .new-ui-group-mobile-actions { align-items: center; display: flex; gap: 14px; }
+      .new-ui-group-mobile-record { text-align: center; }
+      .new-ui-group-mobile-title { font-size: 17px; line-height: 1.4; overflow-wrap: anywhere; }
+      .new-ui-group-mobile-title a { color: #2196F3; text-decoration: none; }
+      .new-ui-group-mobile-buttons { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin: 10px 0 12px; }
+      .new-ui-group-mobile-buttons .form-group { display: none !important; }
+      .new-ui-group-mobile-buttons .submitOnChange { align-items: center; border: 1px solid transparent; border-radius: 7px; box-sizing: border-box; display: inline-flex !important; font-size: 13px !important; font-weight: 600; justify-content: center; line-height: 1.2; min-height: 38px; padding: 9px 15px; text-decoration: none; }
+      .new-ui-group-mobile-edit { background: #4054b2; border-color: #4054b2 !important; color: #fff !important; }
+      .new-ui-group-mobile-delete { background: var(--surface-b, #fff); border-color: #d84a45 !important; color: #c83d38 !important; }
+      .new-ui-group-mobile-record .new-ui-mobile-field { margin-top: 5px; }
+      @media (max-width: 640px) {
+        #new-ui-group-table-wrapper,
+        #new-ui-group-table-wrapper > div { overflow: visible !important; }
+        #new-ui-group-table-wrapper { display: none !important; }
+        .new-ui-group-mobile-list { display: block !important; }
+        .new-ui-group-toolbar { align-items: stretch; box-sizing: border-box; flex-direction: column; gap: 10px; padding: 12px 14px !important; width: 100%; }
+        .new-ui-group-toolbar > div[style='display:inline-block'] { display: block !important; margin: 0; width: 100%; }
+        .new-ui-group-toolbar-title { align-self: center; left: auto; position: static; transform: none; }
+        .new-ui-group-create-button { box-sizing: border-box; justify-content: center; margin: 0 auto; white-space: nowrap; width: 100%; }
+      }
     </style>
   """
   String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-  return "${css}${iconifyScript}<div class='new-ui-group-table-content'><span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_TABLE_EVENT}'><div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div></span></div>"
+  String createIcon = "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round'><path d='M12 5v14M5 12h14'></path></svg>"
+  String createButton = newUiButtonLink('btnNewUiCreateGroup', "${createIcon}<span>Create group</span>", '#fff', '14px', 'Create a Sonos group', 'new-ui-group-create-button')
+  return "${css.trim()}${iconifyScript}<div class='new-ui-groups-card'><div class='new-ui-group-toolbar-container'><div class='new-ui-group-toolbar'><div class='new-ui-group-toolbar-title'>Sonos groups</div>${createButton}</div></div><span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_TABLE_EVENT}'><div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div>${renderNewUiGroupTableMobileListMarkup()}</span></div>"
 }
 
 String renderNewUiGroupTableMarkup() {
   List<Map> rows = buildNewUiGroupRows()
   StringBuilder html = new StringBuilder()
-  html.append("<div style='overflow-x:auto'><table id='new-ui-group-table' class='mdl-data-table'>")
+  html.append("<div><table id='new-ui-group-table' class='mdl-data-table'>")
   html.append('<thead><tr>')
   html.append('<th>Action</th>')
   html.append('<th>Group Name</th>')
@@ -1136,15 +1482,43 @@ String renderNewUiGroupTableMarkup() {
       String followerMarkup = renderNewUiGroupFollowers(row.followerIds)
 
       html.append('<tr>')
-      html.append("<td class='new-ui-group-action-cell'>${actionMarkup}</td>")
-      html.append("<td class='new-ui-group-name'><strong>${safeName}</strong></td>")
-      html.append("<td>${safeCoordinator}</td>")
-      html.append("<td class='new-ui-group-followers'>${followerMarkup}</td>")
+      html.append("<td class='new-ui-group-action-cell' data-label='Action'>${actionMarkup}</td>")
+      html.append("<td class='new-ui-group-name' data-label='Group name'><strong>${safeName}</strong></td>")
+      html.append("<td data-label='Coordinator'>${safeCoordinator}</td>")
+      html.append("<td class='new-ui-group-followers' data-label='Followers'>${followerMarkup}</td>")
       html.append('</tr>')
     }
   }
 
   html.append('</tbody></table></div>')
+  return html.toString()
+}
+
+String renderNewUiGroupTableMobileListMarkup() {
+  List<Map> rows = buildNewUiGroupRows()
+  StringBuilder html = new StringBuilder("<div id='new-ui-group-mobile-list' class='new-ui-mobile-list new-ui-group-mobile-list'>")
+  if(rows.isEmpty()) {
+    html.append("<div class='new-ui-mobile-empty'>No Sonos groups have been created yet.</div>")
+  } else {
+    rows.each { Map row ->
+      String groupName = row.name?.toString() ?: 'Unnamed group'
+      String token = newUiGroupToken(groupName)
+      String actions = newUiButtonLink("newUiMobileEditGroup|${token}", 'Edit', '#fff', '13px', 'Edit group', 'new-ui-group-mobile-edit') +
+          newUiButtonLink("newUiMobileDeleteGroup|${token}", 'Delete', '#c83d38', '13px', 'Delete group', 'new-ui-group-mobile-delete')
+      String safeName = escapeNewUiHtml(groupName)
+      String groupDeviceId = row.device?.id?.toString()
+      if(groupDeviceId) {
+        safeName = "<a href='/device/edit/${escapeNewUiHtml(groupDeviceId)}' target='_blank'>${safeName}</a>"
+      }
+      String coordinator = escapeNewUiHtml(row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown')
+      String followers = renderNewUiGroupFollowers(row.followerIds)
+      html.append("<article class='new-ui-mobile-record new-ui-group-mobile-record'><div class='new-ui-group-mobile-title'><strong>${safeName}</strong></div>")
+      html.append("<div class='new-ui-group-mobile-buttons'>${actions}</div>")
+      html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Coordinator</span><span class='new-ui-mobile-value'>${coordinator}</span></div>")
+      html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Followers</span><span class='new-ui-mobile-value'>${followers}</span></div></article>")
+    }
+  }
+  html.append('</div>')
   return html.toString()
 }
 
@@ -1464,6 +1838,13 @@ Map groupPage() {
 // Button Handlers
 // =============================================================================
 void appButtonHandler(String buttonName) {
+  if(buttonName?.startsWith('newUiMobile')) {
+    buttonName = buttonName.replaceFirst('newUiMobile', 'newUi')
+  }
+  if(buttonName?.startsWith('newUiSetting|')) {
+    handleNewUiSettingChange(buttonName)
+    return
+  }
   if(buttonName == 'applySettingsButton') { applySettingsButton() }
   if(buttonName == 'saveGroup') { saveGroup() }
   if(buttonName == 'deleteGroup') { deleteGroup() }
@@ -1483,6 +1864,7 @@ void appButtonHandler(String buttonName) {
     state.latestVersion = null
     state.latestReleaseDate = null
     state.latestReleaseUrl = null
+    app.sendEvent(name: 'newUiUpdateNotice', value: 'dismissed')
   }
   if(buttonName == 'btnExtend60') { extendDiscovery(60) }
   if(buttonName == 'btnExtend300') { extendDiscovery(300) }
@@ -1505,6 +1887,10 @@ void appButtonHandler(String buttonName) {
   }
   if(buttonName == 'btnNewUiCreateGroup') {
     beginNewUiGroupEditor(null)
+    return
+  }
+  if(buttonName?.startsWith('newUiGroupField|')) {
+    handleNewUiGroupFieldChange(buttonName)
     return
   }
   if(buttonName == 'btnNewUiSaveGroup') {
@@ -1646,6 +2032,51 @@ void beginNewUiGroupEdit(String token) {
   }
   app.updateSetting('newUiGroupFollowers', [type: 'enum', value: normalizeNewUiGroupPlayerIds(group.followerIds)])
   logInfo("New UI group edit started for '${group.name}'")
+}
+
+void handleNewUiGroupFieldChange(String action) {
+  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
+  List<String> parts = action.tokenize('|')
+  if(parts.size() != 3) { return }
+  String field = parts[1]
+  String encodedValue = parts[2].replace('-', '+').replace('_', '/')
+  while(encodedValue.length() % 4 != 0) { encodedValue += '=' }
+  String value = new String(encodedValue.decodeBase64(), 'UTF-8')
+  Map draft = getNewUiGroupDraft()
+  String coordinatorId = getNewUiGroupCoordinator(draft)
+  List<String> followerIds = getNewUiGroupFollowers(draft)
+  if(field == 'name') {
+    String previousName = draft.name?.toString()?.trim() ?: ''
+    String updatedName = value.trim()
+    if(updatedName != previousName) { state[NEW_UI_GROUP_AUTO_NAME_KEY] = false }
+    app.updateSetting('newUiGroupName', [type: 'text', value: updatedName])
+    draft.name = updatedName
+  } else if(field == 'coordinator') {
+    Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+    if(value && !playerNames.containsKey(value)) { return }
+    coordinatorId = value
+    if(coordinatorId) {
+      app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: coordinatorId])
+    } else {
+      app.removeSetting('newUiGroupCoordinator')
+    }
+    followerIds = followerIds.findAll { String id -> id != coordinatorId }
+    app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
+    draft.coordinatorId = coordinatorId
+    draft.followerIds = followerIds
+  } else if(field == 'followers') {
+    List<String> requestedFollowers = value ? value.split(',').collect { String id -> id }.findAll { String id -> id } : []
+    Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+    if(requestedFollowers.any { String id -> !playerNames.containsKey(id) || id == coordinatorId }) { return }
+    followerIds = requestedFollowers.unique()
+    app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
+    draft.followerIds = followerIds
+  } else {
+    return
+  }
+  state[NEW_UI_GROUP_DRAFT_KEY] = draft
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
 }
 
 void saveNewUiGroup() {
@@ -1916,9 +2347,11 @@ void cancelNewUiPlayerDeletion() {
 
 void startNewUiDiscoverySession() {
   if(atomicState.discoveryRunning == true) {
+    logInfo('Cancelling New UI Sonos speaker discovery')
     stopDiscovery()
+    return
   }
-  logInfo('Starting New UI Sonos speaker discovery for 60 seconds')
+  logInfo('Starting New UI Sonos speaker discovery')
   startDiscoverySession()
 }
 
@@ -2997,12 +3430,21 @@ void extendDiscovery(Integer seconds) {
 }
 
 String renderNewUiDiscoveryTimerMarkup() {
+  String discoveryIcon = atomicState.discoveryRunning == true ?
+    "<svg viewBox='0 0 24 24' aria-hidden='true' fill='currentColor'><rect x='6' y='6' width='12' height='12' rx='1'></rect></svg>" :
+    "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 12a8 8 0 0 1 13.7-5.7L20 8.5'></path><path d='M20 4v4.5h-4.5'></path><path d='M20 12a8 8 0 0 1-13.7 5.7L4 15.5'></path><path d='M4 20v-4.5h4.5'></path></svg>"
+  String actionLabel = atomicState.discoveryRunning == true ? 'Cancel discovery' : 'Discover speakers'
+  String buttonTitle = atomicState.discoveryRunning == true ? 'Cancel speaker discovery' : 'Discover speakers for 60 seconds'
+  String discoveryButton = newUiButtonLink('btnNewUiDiscoverSpeakers', "${discoveryIcon}<span>${actionLabel}</span>", '#fff', '14px', buttonTitle, 'new-ui-discovery-button')
+  String statusMarkup
   if(atomicState.discoveryRunning == true && atomicState.discoveryEndTime) {
     Long endTime = atomicState.discoveryEndTime as Long
     Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
-    return "<b>Discovery is running: ${remainingSecs} seconds remaining.</b>"
+    statusMarkup = "<div class='new-ui-discovery-status'><span class='new-ui-discovery-indicator new-ui-discovery-indicator-running' aria-hidden='true'></span><div class='new-ui-discovery-copy'><div class='new-ui-discovery-title'>Searching for Sonos speakers</div><div class='new-ui-discovery-detail'>About ${remainingSecs} seconds remaining</div></div></div>"
+  } else {
+    statusMarkup = "<div class='new-ui-discovery-status'><span class='new-ui-discovery-indicator' aria-hidden='true'></span><div class='new-ui-discovery-copy'><div class='new-ui-discovery-title'>Discovery is stopped</div><div class='new-ui-discovery-detail'>Start a scan to refresh available speakers</div></div></div>"
   }
-  return '<b>Discovery has stopped.</b>'
+  return "${statusMarkup}<div class='new-ui-device-section-title'>Sonos Players</div>${discoveryButton}"
 }
 
 void ssdpDiscover() {
@@ -3375,16 +3817,194 @@ void sendFoundSonosEvents() {
 // =============================================================================
 
 String processServerSideRender(Map event) {
+  if(event?.name == 'newUiUpdateNotice') {
+    return renderNewUiUpdateNoticeMarkup()
+  }
+  if(event?.name == 'newUiSettings') {
+    return renderCustomSettingsMarkup()
+  }
   if(event?.name == 'discoveryTimer') {
     return renderNewUiDiscoveryTimerMarkup()
   }
   if(event?.name == 'newUiSpeakerTable') {
-    return "<div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>"
+    return "<div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>${renderNewUiSpeakerMobileListMarkup()}"
+  }
+  if(event?.name == NEW_UI_GROUP_EDITOR_EVENT) {
+    return renderNewUiGroupEditorMarkup()
   }
   if(event?.name == NEW_UI_GROUP_TABLE_EVENT) {
-    return "<div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div>"
+    return "<div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div>${renderNewUiGroupTableMobileListMarkup()}"
   }
   return ''
+}
+
+String displayCustomSettings() {
+  return "<span class='ssr-app-state-${app.id}-newUiSettings'>${renderCustomSettingsMarkup()}</span>"
+}
+
+String updateSettingsDisclosureInstaller() {
+  return "<style>.sonos-update-settings-disclosure{box-sizing:border-box;border:1px solid var(--surface-border,#d8dde5);border-radius:12px;background:var(--surface-card,#fff);box-shadow:0 2px 8px rgba(25,35,55,.06);margin:10px 0 16px;overflow:hidden}.sonos-update-settings-disclosure>summary{align-items:center;background:var(--surface-b,#f7f8fa);color:var(--text-color,#30343b);cursor:pointer;display:flex;font-size:16px;font-weight:650;justify-content:space-between;list-style:none;padding:14px 18px}.sonos-update-settings-disclosure>summary::-webkit-details-marker{display:none}.sonos-update-settings-disclosure>summary:after{content:'+';font-size:20px;line-height:1}.sonos-update-settings-disclosure[open]>summary:after{content:'−'}.sonos-update-settings-disclosure>.mdl-grid{box-shadow:none!important;margin:0!important;padding:12px 18px!important;width:100%!important}.sonos-update-settings-disclosure input.mdl-textfield__input,.sonos-update-settings-disclosure input:not([type='hidden']):not([type='checkbox']):not([type='radio']),.sonos-update-settings-disclosure select{background:var(--surface-a,#fff)!important;border:1px solid var(--surface-border,#c8cdd5)!important;border-radius:8px!important;box-sizing:border-box!important;color:var(--text-color,#30343b)!important;font:inherit!important;min-height:42px;padding:9px 12px!important;width:100%!important;box-shadow:none!important}.sonos-update-settings-disclosure input:focus,.sonos-update-settings-disclosure select:focus{border-color:#4054b2!important;box-shadow:0 0 0 3px rgba(64,84,178,.16)!important;outline:none!important}.sonos-update-settings-disclosure .mdl-button:not(.mdl-button--icon),.sonos-update-settings-disclosure button:not(.mdl-button--icon){background:#4054b2!important;border:1px solid #4054b2!important;border-radius:8px!important;box-shadow:none!important;color:#fff!important;cursor:pointer;font:inherit!important;font-weight:600!important;letter-spacing:normal!important;min-height:40px;padding:9px 16px!important;text-transform:none!important}.sonos-update-settings-disclosure .mdl-button:not(.mdl-button--icon):hover,.sonos-update-settings-disclosure button:not(.mdl-button--icon):hover{background:#34479e!important;border-color:#34479e!important}.sonos-update-settings-disclosure .mdl-button:focus-visible,.sonos-update-settings-disclosure button:focus-visible{outline:2px solid #1a77c9!important;outline-offset:2px}@media(max-width:640px){.sonos-update-settings-disclosure>summary{padding:12px 14px}.sonos-update-settings-disclosure>.mdl-grid{padding:10px 12px!important}}</style><script>(function(){function wrapUpdateSettings(){var input=document.querySelector(\"[name='settings[hubSecurityUsername]']\");var content=input&&input.closest('.mdl-shadow--2dp.mdl-grid');if(!content||content.dataset.nativeDisclosureWrapped==='true'){return}var host=content.parentElement;if(!host){return}var details=document.createElement('details');details.className='sonos-update-settings-disclosure';var summary=document.createElement('summary');summary.textContent='Update settings and maintenance';details.appendChild(summary);host.insertBefore(details,content);details.appendChild(content);content.dataset.nativeDisclosureWrapped='true';content.style.display='none';details.addEventListener('toggle',function(){content.style.display=details.open?'grid':'none'});var oldHeader=host.querySelector('.app-ui-navigation-control');if(oldHeader){oldHeader.remove()}}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',wrapUpdateSettings,{once:true})}setTimeout(wrapUpdateSettings,0)})();</script>"
+}
+
+String updateSettingsDisclosureControlsStyle() {
+  return "<style>.sonos-update-settings-disclosure button.app-password-toggle:not(.mdl-button--icon){align-items:center!important;background:transparent!important;border:0!important;box-shadow:none!important;color:#68707c!important;display:inline-flex!important;height:40px!important;justify-content:center!important;min-height:40px!important;padding:0!important;width:40px!important}.sonos-update-settings-disclosure button.app-password-toggle:not(.mdl-button--icon):hover{background:#eef2ff!important;border-radius:8px!important}</style>"
+}
+
+String displayNewUiUpdateNotice() {
+  return "<span class='ssr-app-state-${app.id}-newUiUpdateNotice'>${renderNewUiUpdateNoticeMarkup()}</span>"
+}
+
+String renderNewUiUpdateNoticeMarkup() {
+  if(state.updateAvailable != true) { return '' }
+  String currentVersion = state.installedAppVersion?.toString() ?: getCurrentVersion()
+  String latestVersion = escapeNewUiHtml(state.latestVersion?.toString() ?: 'Unknown')
+  String safeCurrentVersion = escapeNewUiHtml(currentVersion)
+  String releaseDateValue = state.latestReleaseDate?.toString()
+  if(!releaseDateValue || releaseDateValue == 'Unknown') {
+    releaseDateValue = state.latestManifest?.dateReleased?.toString() ?: state.latestManifest?.releaseDate?.toString() ?: 'Unknown'
+  }
+  String releaseDate = escapeNewUiHtml(releaseDateValue)
+  String releaseUrl = escapeNewUiHtml(state.latestReleaseUrl?.toString() ?: '#')
+  String installAction = 'btnInstallUpdate'
+  String dismissAction = 'btnDismissUpdate'
+  return "<style>.sonos-update-card{border:1px solid #e3b341;border-radius:10px;padding:16px 18px;margin:10px 0 18px;background:var(--surface-card,#fffdf6);color:var(--text-color,#30343b);box-shadow:0 2px 8px rgba(50,45,20,.06)}.sonos-update-header{display:flex;align-items:center;gap:9px;color:#8a5b00;font-weight:650;font-size:1.12em;margin-bottom:10px}.sonos-update-icon{display:inline-flex;align-items:center;justify-content:center;width:25px;height:25px;border-radius:50%;background:#fff1c2}.sonos-update-version{font-weight:650;font-size:1.05em;margin-bottom:4px}.sonos-update-meta{color:var(--text-color-secondary,#666)}.sonos-update-link{display:inline-block;margin-top:10px}.sonos-update-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.sonos-update-button{display:inline-block;padding:8px 14px;border:1px solid var(--surface-border,#c8c8c8);border-radius:7px;background:var(--surface-b,#f7f7f7);color:var(--text-color,#30343b);cursor:pointer;font-weight:600}.sonos-update-button-primary{background:#4054b2;border-color:#4054b2;color:#fff}.sonos-update-button:hover{filter:brightness(.97)}.sonos-update-button:focus-visible{outline:2px solid #1a77c9;outline-offset:2px}</style>" +
+    "<div class='sonos-update-card'><div class='sonos-update-header'><span class='sonos-update-icon' aria-hidden='true'>⚠</span>Update available</div>" +
+    "<div class='sonos-update-version'>Version ${latestVersion} is available</div>" +
+    "<div class='sonos-update-meta'>Current version: ${safeCurrentVersion}<br/>Released: ${releaseDate}</div>" +
+    "<a class='sonos-update-link' href='${releaseUrl}' target='_blank' rel='noopener noreferrer'>View release notes</a>" +
+    "<div class='sonos-update-actions'><div class='form-group'><input type='hidden' name='${installAction}.type' value='button'></div>" +
+    "<div class='submitOnChange sonos-update-button sonos-update-button-primary' role='button' tabindex='0' onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\">Install update</div><input type='hidden' name='settings[${installAction}]' value=''>" +
+    "<div class='form-group'><input type='hidden' name='${dismissAction}.type' value='button'></div>" +
+    "<div class='submitOnChange sonos-update-button' role='button' tabindex='0' onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\">Dismiss</div><input type='hidden' name='settings[${dismissAction}]' value=''></div></div>"
+}
+
+String renderCustomSettingsMarkup() {
+  StringBuilder html = new StringBuilder()
+  html.append("<style>\
+    .new-ui-device-card,.new-ui-groups-card,.new-ui-group-editor-card,.sonos-setting-card,.sonos-update-card,.sonos-update-settings-disclosure{border:1px solid var(--surface-border,#d8d8d8)!important;border-radius:7px!important;box-shadow:none!important}\
+    .new-ui-device-card,.new-ui-groups-card,.new-ui-group-editor-card,.sonos-setting-card{background:var(--surface-card,#fff)!important}\
+    .new-ui-device-toolbar,.new-ui-group-toolbar,#new-ui-speaker-table thead,#new-ui-speaker-table th,#new-ui-group-table thead,#new-ui-group-table th,#new-ui-speaker-table .new-ui-table-toolbar-cell,#new-ui-group-table .new-ui-group-table-toolbar-cell{background:var(--surface-card,#fff)!important}\
+    #new-ui-speaker-table .new-ui-table-toolbar-cell{padding:0!important}\
+    .new-ui-device-toolbar,.new-ui-group-toolbar{padding:12px 14px!important}\
+    .new-ui-group-toolbar-title{font-size:16px!important;font-weight:700!important}\
+    .sonos-setting-card{border-radius:7px!important;padding:12px 14px!important}\
+    .sonos-setting-title{font-size:15px!important;font-weight:700!important}\
+    .sonos-setting-description{font-size:13px!important;line-height:1.45}\
+    .sonos-update-card{background:var(--surface-card,#fffdf6)!important;color:var(--text-color,#30343b)!important;padding:14px 16px!important}\
+    .sonos-update-settings-disclosure>summary{background:var(--surface-card,#fff)!important}\
+    .new-ui-group-editor-heading{font-size:16px!important;font-weight:700!important}\
+    @media(max-width:640px){.sonos-setting-card{padding:11px 12px!important}.new-ui-device-toolbar,.new-ui-group-toolbar{padding:10px 12px!important}}\
+  </style>")
+  html.append("<style>.sonos-settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin:0 0 18px}.sonos-setting-card{border:1px solid var(--surface-border,#ddd);border-radius:10px;padding:14px 16px;background:var(--surface-card,#fff);color:var(--text-color,#30343b)}.sonos-setting-row{display:flex;align-items:center;justify-content:space-between;gap:16px}.sonos-setting-title{font-weight:600}.sonos-setting-description{color:var(--text-color-secondary,#666);font-size:.92em;margin-top:6px}.sonos-switch{position:relative;display:inline-block;flex:0 0 39px;width:39px;height:14px;border-radius:7px;transition:background-color .2s}.sonos-switch-knob{position:absolute;top:-3.5px;width:21px;height:21px;border-radius:50%;transition:left .2s,background-color .2s;box-shadow:0 3px 1px -2px rgba(0,0,0,.2),0 2px 2px rgba(0,0,0,.14),0 1px 5px rgba(0,0,0,.12)}.sonos-switch:focus-visible{outline:2px solid #1a77c9;outline-offset:4px}.sonos-custom-select{position:relative;margin-top:10px}.sonos-custom-select summary{list-style:none;cursor:pointer;padding:9px 34px 9px 10px;border:1px solid var(--surface-border,#bbb);border-radius:6px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);position:relative}.sonos-custom-select summary::-webkit-details-marker{display:none}.sonos-custom-select summary:after{content:'⌄';position:absolute;right:12px;top:7px;font-size:18px}.sonos-custom-select[open] summary{border-radius:6px 6px 0 0}.sonos-select-options{width:100%;border-collapse:collapse;border:1px solid var(--surface-border,#bbb);border-top:0;background:var(--surface-card,#fff);color:var(--text-color,#30343b);display:block;max-height:260px;overflow:auto}.sonos-select-options tbody{display:block}.sonos-select-options tr{display:table;width:100%;table-layout:fixed}.sonos-select-options td{padding:0}.sonos-select-option{padding:9px 10px;cursor:pointer}.sonos-select-option:hover,.sonos-select-option:focus{background:var(--surface-b,#eef2ff);outline:none}.sonos-select-option-selected{font-weight:600;color:var(--primary-color,#3347a9)}.sonos-setting-warning{grid-column:1/-1;border-left:4px solid #e0a000;background:#fff8e1;padding:10px 12px;color:#5b4500}</style>")
+  html.append("<div class='sonos-settings'>")
+  html.append(renderCustomSettingCard('automaticTtsTopologyChanges', 'Automatic TTS topology changes', 'Allow announcements to prepare or restore speaker group topology automatically.'))
+  html.append(renderCustomSettingCard('useTemporaryStreamHolder', 'Use a temporary stream holder', 'An idle speaker can hold an active Sonos stream while a standard stream announcement plays.'))
+  html.append(renderCustomSettingCard('enableAlarmManagement', 'Sonos Alarm Manager', 'Create one household-level alarm manager device.'))
+  html.append(renderCustomSettingCard('enableAlarmSwitches', 'Sonos alarm switches', 'Create a switch device for each alarm found on the Sonos household.'))
+  html.append(renderCustomSettingCard('autoCheckUpdates', 'Check for updates automatically', 'Schedule checks for new app releases.'))
+  html.append(renderCustomSettingCard('autoInstallUpdates', 'Install updates automatically', 'Install available updates using the schedule below.'))
+  Map<String, String> logLevelOptions = [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off']
+  html.append(renderCustomSelectCard('logLevel', 'Logging level', 'Choose the amount of detail written to Hubitat logs.', logLevelOptions, getConfiguredLogLevel()))
+  Map<String, String> retentionOptions = [
+    '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
+    '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
+    '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
+    '1440': '24 hours', 'unlimited': 'Unlimited'
+  ]
+  Map<String, String> announcementOptions = [
+    'automatic': 'Automatic',
+    'alwaysNonInterrupting': 'Always non-interrupting',
+    'alwaysCoordinatorStream': 'Always standard stream'
+  ]
+  html.append(renderCustomSelectCard('maximumTtsRetention', 'Maximum TTS retention', 'Maximum time a queued TTS message can wait before it is sent.', retentionOptions, '60'))
+  html.append(renderCustomSelectCard('groupAnnouncementMode', 'Normal priority announcement method', 'Choose how standard announcements are routed.', announcementOptions, 'alwaysNonInterrupting'))
+  html.append(renderCustomSelectCard('highPriorityAnnouncementMode', 'High priority announcement method', 'Choose how high priority announcements are routed.', announcementOptions, 'alwaysNonInterrupting'))
+  if(getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream') {
+    if(!isAutomaticTtsTopologyChangesEnabled()) {
+      html.append("<div class='sonos-setting-warning'><b>Warning:</b> With automatic topology changes off, a standard-stream announcement to a group that is not currently grouped together may play only on the coordinator and any players already grouped with it.</div>")
+    } else {
+      html.append("<div class='sonos-setting-warning'><b>Warning:</b> Always standard stream with automatic topology changes can force temporary regrouping, including changes to active outside groups. Playback in those groups may be interrupted. The app attempts to restore their original topology after the announcement.</div>")
+    }
+  }
+  html.append('</div>')
+  return html.toString()
+}
+
+String renderCustomSettingCard(String settingName, String title, String description) {
+  Boolean enabled = settings[settingName] == true || settings[settingName]?.toString() == 'true'
+  String value = enabled ? 'false' : 'true'
+  String checked = enabled ? 'true' : 'false'
+  String action = "newUiSetting|${settingName}|${value}"
+  String safeTitle = escapeNewUiHtml(title)
+  String safeDescription = escapeNewUiHtml(description)
+  String switchColor = enabled ? 'rgba(63, 81, 181, .5)' : 'rgba(0, 0, 0, .38)'
+  String knobColor = enabled ? '#3f51b5' : '#b0b0b0'
+  String knobPosition = enabled ? '20px' : '-1px'
+  return "<div class='sonos-setting-card'><div class='sonos-setting-row'><div><div class='sonos-setting-title'>${safeTitle}</div><div class='sonos-setting-description'>${safeDescription}</div></div><div class='form-group'><input type='hidden' name='${action}.type' value='button'></div><div style='display:inline-block'><div class='submitOnChange sonos-switch' role='switch' aria-checked='${checked}' aria-label='${safeTitle}' title='${enabled ? 'On' : 'Off'}' onclick='buttonClick(this)' style='background:${switchColor};cursor:pointer'><span class='sonos-switch-knob' style='left:${knobPosition};background:${knobColor}'></span></div></div><input type='hidden' name='settings[${action}]' value=''></div></div>"
+}
+
+String renderCustomSelectCard(String settingName, String title, String description, Map<String, String> options, String defaultValue) {
+  String selectedValue = settings[settingName]?.toString() ?: defaultValue
+  if(!options.containsKey(selectedValue)) { selectedValue = defaultValue }
+  StringBuilder html = new StringBuilder()
+  html.append("<div class='sonos-setting-card'><div class='sonos-setting-title'>${escapeNewUiHtml(title)}</div><div class='sonos-setting-description'>${escapeNewUiHtml(description)}</div>")
+  html.append("<details class='sonos-custom-select'><summary aria-label='${escapeNewUiHtml(title)}'>${escapeNewUiHtml(options[selectedValue])}</summary><table class='sonos-select-options' role='listbox' aria-label='${escapeNewUiHtml(title)}'><tbody>")
+  options.each { String optionValue, String optionLabel ->
+    String action = "newUiSetting|${settingName}|${optionValue}"
+    String selectedClass = optionValue == selectedValue ? ' sonos-select-option-selected' : ''
+    String selectedMark = optionValue == selectedValue ? ' ✓' : ''
+    html.append("<tr><td><div class='form-group'><input type='hidden' name='${action}.type' value='button'></div><div style='display:inline-block;width:100%'><div class='submitOnChange sonos-select-option${selectedClass}' role='button' tabindex='0' onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\">${escapeNewUiHtml(optionLabel)}${selectedMark}</div></div><input type='hidden' name='settings[${action}]' value=''></td></tr>")
+  }
+  html.append('</tbody></table></details></div>')
+  return html.toString()
+}
+
+void handleNewUiSettingChange(String buttonName) {
+  List<String> parts = buttonName.tokenize('|')
+  if(parts.size() != 3) {
+    logWarn("Ignored malformed custom setting action '${buttonName}'")
+    return
+  }
+  List<String> allowedSettings = ['automaticTtsTopologyChanges', 'useTemporaryStreamHolder', 'enableAlarmManagement', 'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates']
+  String settingName = parts[1]
+  String value = parts[2]
+  List<String> enumSettings = ['maximumTtsRetention', 'groupAnnouncementMode', 'highPriorityAnnouncementMode', 'logLevel']
+  if(settingName in enumSettings) {
+    String requestedEnumValue = value
+    Map<String, List<String>> allowedValues = [
+      maximumTtsRetention: ['1', '3', '5', '10', '15', '30', '60', '120', '180', '240', '360', '720', '1440', 'unlimited'],
+      groupAnnouncementMode: ['automatic', 'alwaysNonInterrupting', 'alwaysCoordinatorStream'],
+      highPriorityAnnouncementMode: ['automatic', 'alwaysNonInterrupting', 'alwaysCoordinatorStream'],
+      logLevel: ['trace', 'debug', 'info', 'warn', 'error', 'off']
+    ]
+    if(!(requestedEnumValue in allowedValues[settingName])) {
+      logWarn("Ignored unsupported value '${requestedEnumValue}' for custom setting '${settingName}'")
+      return
+    }
+    logInfo("Applying custom setting '${settingName}'=${requestedEnumValue}")
+    app.updateSetting(settingName, [type: 'enum', value: requestedEnumValue])
+    if(settingName == 'logLevel') { applyLogLevelChange() }
+    app.sendEvent(name: 'newUiSettings', value: 'updated')
+    return
+  }
+  if(!(settingName in allowedSettings)) {
+    logWarn("Ignored unsupported custom setting '${settingName}'")
+    return
+  }
+  if(!(value in ['true', 'false'])) {
+    logWarn("Ignored unsupported boolean value '${value}' for custom setting '${settingName}'")
+    return
+  }
+  Boolean booleanValue = value == 'true'
+  logInfo("Applying custom setting '${settingName}'=${booleanValue}")
+  app.updateSetting(settingName, [type: 'bool', value: booleanValue])
+  if(settingName == 'enableAlarmManagement' || settingName == 'enableAlarmSwitches') {
+    configureAlarmManagement()
+  }
+  if(settingName == 'autoCheckUpdates' || settingName == 'autoInstallUpdates') {
+    scheduleUpdateCheck()
+  }
+  app.sendEvent(name: 'newUiSettings', value: 'updated')
 }
 
 /**
@@ -9908,7 +10528,7 @@ void completeUpdateCheck(Map data, String currentVersion) {
     state.updateAvailable = true
     state.latestVersion = latestVersion
     state.latestManifest = manifest
-    state.latestReleaseDate = manifest.releaseDate ?: 'Unknown'
+    state.latestReleaseDate = manifest.dateReleased ?: manifest.releaseDate ?: 'Unknown'
     state.latestReleaseUrl = "https://github.com/DanielWinks/Hubitat-Public/releases/tag/v${latestVersion}"
     app.updateLabel('Sonos Advanced Controller [Update Available]')
     logInfo("Update available: ${latestVersion} (current: ${currentVersion})")
