@@ -1984,7 +1984,7 @@ class SonosAdvancedAppSpec extends Specification {
     Map newUiPage = appScript.mainPage()
 
     then:
-    newUiPage.title == 'Sonos Advanced Controller'
+    newUiPage.title == '<p hidden>Sonos Advanced Controller</p>'
     appScript.pageHrefs.empty
 
     when:
@@ -2011,7 +2011,7 @@ class SonosAdvancedAppSpec extends Specification {
     Map page = appScript.mainPage()
 
     then:
-    page.title == 'Sonos Advanced Controller'
+    page.title == '<p hidden>Sonos Advanced Controller</p>'
     appScript.state.updateAvailable == true
     appScript.state.installedAppVersion == '98.0.0'
     appScript.asyncCalls.empty
@@ -2233,6 +2233,7 @@ class SonosAdvancedAppSpec extends Specification {
     String timerMarkup = appScript.processServerSideRender([name: 'discoveryTimer'])
 
     then:
-    timerMarkup ==~ /<b>Discovery is running: [0-9]+ seconds remaining\.<\/b>/
+    timerMarkup.contains("<div class='new-ui-discovery-title'>Searching for Sonos speakers</div>")
+    timerMarkup ==~ /(?s).*<div class='new-ui-discovery-detail'>About [0-9]+ seconds remaining<\/div>.*/
   }
 }
