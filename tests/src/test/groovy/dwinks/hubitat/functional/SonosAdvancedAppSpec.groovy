@@ -1865,7 +1865,7 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.find { it.name == 'clearGroupFavoriteOperation' } != null
   }
 
-  def "exact post-load metadata and group playback cover a lost acknowledgement at the deadline"() {
+  def "verified group topology and coordinator playback cover a lost acknowledgement and missing follower callback"() {
     given:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
     Map operation = appScript.getActiveGroupOperation()
@@ -1877,7 +1877,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
     assert operation.favoriteTopologyVerified == true
     emitPlayback('RINCON_COORD', 'PLAYBACK_STATE_PLAYING')
-    emitPlayback('RINCON_FOLLOW', 'PLAYBACK_STATE_PLAYING')
     appScript.groupFavoriteOperationEventHandler([
       value: JsonOutput.toJson([
         operationId: operation.operationId, playerId: 'RINCON_COORD',

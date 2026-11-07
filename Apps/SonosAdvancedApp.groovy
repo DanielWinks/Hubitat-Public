@@ -7873,8 +7873,24 @@ Boolean isGroupFavoriteCompletionConfirmed(Map operation) {
   if(operation.favoriteTopologyVerified != true) { return false }
   if(operation.loadAcknowledged == true && operation.autoPlay?.toString() != 'true') { return true }
   if(operation.autoPlay?.toString() != 'true') { return false }
-  Boolean exactFavoritePlaying = operation.playbackState == 'PLAYBACK_STATE_PLAYING' &&
-      areRequiredPlayersPlaying(operation) && operation.metadataConfirmed == true &&
+  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
+  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
+      ? (Map<String, Map>)operation.playerPlaybackStates
+      : [:]
+  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
+  String coordinatorId = operation.resolvedCoordinatorId as String
+  Map coordinatorState = coordinatorId ? playbackStates[coordinatorId] : null
+  Long coordinatorObservedAt = coordinatorState?.observedAt as Long ?: 0L
+  Boolean coordinatorPlaying = !coordinatorId || requiredPlayerIds.contains(coordinatorId)
+      ? coordinatorObservedAt >= favoriteCommandAt && coordinatorState?.playbackState == 'PLAYBACK_STATE_PLAYING'
+      : false
+  Boolean noFreshPlayerReportsStopped = !requiredPlayerIds.isEmpty() && requiredPlayerIds.every { String playerId ->
+    Map playerState = playbackStates[playerId]
+    Long observedAt = playerState?.observedAt as Long ?: 0L
+    observedAt < favoriteCommandAt || playerState?.playbackState == 'PLAYBACK_STATE_PLAYING'
+  }
+  Boolean exactFavoritePlaying = coordinatorPlaying && noFreshPlayerReportsStopped &&
+      operation.metadataConfirmed == true &&
       operation.exactFavoriteId?.toString() == operation.favoriteId?.toString()
   if(!exactFavoritePlaying) { return false }
   if(operation.loadAcknowledged != true) {
