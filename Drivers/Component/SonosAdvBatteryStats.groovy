@@ -52,7 +52,7 @@ void logDebug(String message) {
 metadata {
   definition(
     name: 'Sonos Advanced Battery Status',
-    version: '0.15.3',
+    version: '0.15.4',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
