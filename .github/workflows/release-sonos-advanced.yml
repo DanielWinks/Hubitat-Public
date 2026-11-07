@@ -381,6 +381,10 @@ jobs:
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
             Drivers/Component/SonosAdvPlaylist.groovy
+            Drivers/Component/SonosAdvQueue.groovy
+            Drivers/Component/SonosAdvSleepTimer.groovy
+            Drivers/Component/SonosAdvAlarmSwitch.groovy
+            Drivers/Component/SonosAdvAlarmManager.groovy
             Libraries/SMAPILibrary.groovy
             Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
