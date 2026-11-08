@@ -2,7 +2,7 @@
   "apps": [
     {
       "id": "a5e66956-f81b-40e8-ac79-28f7a5530a9a",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvancedApp.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvancedApp.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Apps/SonosAdvancedApp.groovy",
       "name": "Sonos Advanced Controller",
       "namespace": "dwinks",
@@ -14,7 +14,7 @@
   "bundles": [
     {
       "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvancedController.zip",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvancedController.zip",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Bundles/SonosAdvancedController.zip",
       "name": "Sonos Advanced Controller",
       "namespace": "dwinks",
@@ -25,7 +25,7 @@
   "drivers": [
     {
       "id": "60791fce-4431-40fe-823f-daba182cdd12",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvGroup.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvGroup.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvGroup.groovy",
       "name": "Sonos Advanced Group",
       "namespace": "dwinks",
@@ -33,7 +33,7 @@
     },
     {
       "id": "35457105-655a-40f0-953a-5c32cb7b9d0e",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvPlayer.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvPlayer.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvPlayer.groovy",
       "name": "Sonos Advanced Player",
       "namespace": "dwinks",
@@ -41,7 +41,7 @@
     },
     {
       "id": "1e419d13-89bd-4709-8660-ba34e295236e",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvSnapshot.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvSnapshot.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvSnapshot.groovy",
       "name": "Sonos Advanced Snapshot",
       "namespace": "dwinks",
@@ -49,7 +49,7 @@
     },
     {
       "id": "fb684879-f318-4fcd-859f-6a9266522214",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvBatteryStats.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvBatteryStats.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvBatteryStats.groovy",
       "name": "Sonos Advanced Battery Status",
       "namespace": "dwinks",
@@ -57,7 +57,7 @@
     },
     {
       "id": "0eee0121-1903-4f44-833e-c0243dee0c7e",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvFavorites.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvFavorites.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvFavorites.groovy",
       "name": "Sonos Advanced Favorites",
       "namespace": "dwinks",
@@ -65,7 +65,7 @@
     },
     {
       "id": "d8741cd4-2adf-4cc5-b429-cceba8a46a7a",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvSecondaries.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvSecondaries.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvSecondaries.groovy",
       "name": "Sonos Advanced Secondaries",
       "namespace": "dwinks",
@@ -73,7 +73,7 @@
     },
     {
       "id": "d79681d8-aea1-4f42-a9c5-8e4afa81cb6c",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvPlaylist.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvPlaylist.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvPlaylist.groovy",
       "name": "Sonos Advanced Playlist",
       "namespace": "dwinks",
@@ -81,7 +81,7 @@
     },
     {
       "id": "ee78bb27-b47c-4e2e-99bc-8ed510887ed7",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvQueue.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvQueue.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvQueue.groovy",
       "name": "Sonos Advanced Queue",
       "namespace": "dwinks",
@@ -89,7 +89,7 @@
     },
     {
       "id": "495d188a-74cc-468e-89fb-c4f3f00d37c0",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvSleepTimer.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvSleepTimer.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvSleepTimer.groovy",
       "name": "Sonos Advanced Sleep Timer",
       "namespace": "dwinks",
@@ -97,7 +97,7 @@
     },
     {
       "id": "1fa70eea-a57a-4d01-9e68-c94654d8508f",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvAlarmSwitch.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvAlarmSwitch.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvAlarmSwitch.groovy",
       "name": "Sonos Advanced Alarm Switch",
       "namespace": "dwinks",
@@ -105,7 +105,7 @@
     },
     {
       "id": "2332bd97-3428-4a9c-9605-b8032f59df99",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.5/SonosAdvAlarmManager.groovy",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.15.6/SonosAdvAlarmManager.groovy",
       "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Drivers/Component/SonosAdvAlarmManager.groovy",
       "name": "Sonos Advanced Alarm Manager",
       "namespace": "dwinks",
@@ -129,7 +129,7 @@
   "packageName": "Sonos Advanced Controller",
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",
   "betaReleaseNotes": "0.11.8 beta: current Sonos Advanced development build from the sonos-beta branch. Use only for testing.",
-  "releaseNotes": "0.15.5 - - **Alarm management (opt-in):** Two new options in the Alarm Management section.\n  - A household-level Sonos Alarm Manager device.\n  - One switch device per Sonos alarm. Each switch shows the alarm's time, volume, recurrence, room, duration, source, play mode and grouped-rooms setting.\n  - You can enable, disable, change, create and delete alarms over the local Sonos interface.\n  - You can set an alarm's source from your favorites or playlists.\n  - Alarm switches refresh every 15 minutes.\n  - Each option takes effect as soon as it is toggled.\n- **Queue and sleep timer controls:** New Sonos queue and sleep timer controls, with updated documentation. The queue display now shows each entry's position (for example, \"# 3 \u2014 Artist\") above the album art. Entries with no artist show only the position number.\n- **TTS no longer interrupts playback:**\n  - New \"Use a temporary stream holder\" option, on by default. While standard-stream TTS plays, an idle speaker can briefly hold the active Sonos stream. The stream is then handed back to the original speaker, and the player's previous mute state is restored.\n  - If no suitable idle speaker is available, or the option is off, announcements use synchronized audio clips so playback continues.\n  - AirPlay streams are never handed to a holder and always use audio clips.\n- **Audio clip recovery:** The original topology and playback are restored and verified more reliably after announcements.\n- **Refreshed new UI:**\n  - Speakers and groups appear in card layouts with toolbars.\n  - Discovery has a status indicator and a button.\n  - Mobile layouts are available for speakers and groups.\n  - The group editor has a redesigned form with a follower checklist.\n  - Logging and announcement settings are consolidated.\n  - The old-UI toggle remains under Interface Settings.\n- **Update notices:**\n  - New-UI update notices use the card style with native buttons and restored styling.\n  - Dismissing a Sonos update notice now works correctly.\n- **More reliable group and favorite operations:** Group operations are handled more robustly. Sonos Favorite playback confirmation is hardened, and its operation timeouts are improved.\n- **Packaging:** The Sonos Advanced package now includes the Sonos alarm, queue and component drivers.\n- **Quieter logs:** A selected speaker that is missing from Sonos discovery (offline, or not a Sonos player) is now logged at info level instead of as a warning.\n- **Release notes:** Release notes are now generated with Copilot, and cumulative notes are improved.\r\n0.14.1 Set TTS modes to \"always non-interrupting\"\r\n0.14.0 Adds configurable, resilient Sonos group announcements with safer topology handling, offline TTS queue retention, and improved WebSocket and UPnP subscription recovery.\r\n0.13.3 Add missing import\r\n0.13.2 Add playTrackAndRestore(uri, volume) and playTrackAndResume(uri, volume)\r\n0.13.1 Updated the Group driver to support the player\u2019s speech and text entry points. It now declares AudioNotification and implements playText, playTextAndRestore, playTextAndResume, speak, and speakNoRestore. Volume inputs accept common numeric and string types.\r\n0.13.0 Added async maintenance and discovery, serialized Sonos transport and UPnP handling, Line-In selection, and active-player cleanup; fixed topology, mute, balance, crossfade, announcement volume, priority playback, and update-state issues.\r\n0.12.1 Added queued group command handling, improved coordinator and membership checks, and refined volume, mute, playback state, and topology updates.\r\n0.12.0 ### Sonos Advanced Controller 0.11.12  - Improved reliability when several Sonos commands happen close together. - Playback commands now wait for speakers to finish grouping, helping prevent playback from interrupting group changes. - Improved recovery when Sonos responds slowly or misses a command. - Made playback status and audio notifications more reliable.\r\n0.11.11 Use Hubitat theme CSS variables for Sonos speaker and group tables, including backgrounds, borders, text colors, secondary details, and action icons. This improves readability and dark-mode compatibility while retaining fallback colors.\r\n0.11.10 Adds addPlayerToGroup commands for Sonos group and player drivers. Resolves identifiers by RINCON ID, name, MAC, IP, or device network ID, validates household and group state, and mutates only the requested membership. Includes coverage for forwarding, resolution, ambiguity, inactive groups, and standalone coordinators.\r\n0.11.9 Redesigned the Sonos management UI, made the new interface the default, and improved player discovery and the group editor. Group operations now validate targets and handle eviction without unintended regrouping. Improved favorite loading, playlist playback, WebSocket subscription recovery, and grouped volume updates. Also includes player state, null-safety, and compilation fixes.\r\n0.11.8 Redesigned the Sonos management UI, made the new interface the default, and improved player discovery and the group editor. Group operations now validate targets and handle eviction without unintended regrouping. Improved favorite loading, playlist playback, WebSocket subscription recovery, and grouped volume updates. Also includes player state, null-safety, and compilation fixes.",
-  "version": "0.15.5",
+  "releaseNotes": "0.15.6 - - **Alarm management (opt-in):** Two new options in the Alarm Management section.\n  - A household-level Sonos Alarm Manager device.\n  - One switch device per Sonos alarm. Each switch shows the alarm's time, volume, recurrence, room, duration, source, play mode and grouped-rooms setting.\n  - You can enable, disable, change, create and delete alarms over the local Sonos interface.\n  - You can set an alarm's source from your favorites or playlists.\n  - Alarm switches refresh every 15 minutes.\n  - Each option takes effect as soon as it is toggled.\n- **Queue and sleep timer controls:** New Sonos queue and sleep timer controls, with updated documentation. The queue display now shows each entry's position (for example, \"# 3 \u2014 Artist\") above the album art. Entries with no artist show only the position number.\n- **TTS no longer interrupts playback:**\n  - New \"Use a temporary stream holder\" option, on by default. While standard-stream TTS plays, an idle speaker can briefly hold the active Sonos stream. The stream is then handed back to the original speaker, and the player's previous mute state is restored.\n  - If no suitable idle speaker is available, or the option is off, announcements use synchronized audio clips so playback continues.\n  - AirPlay streams are never handed to a holder and always use audio clips.\n- **Audio clip recovery:** The original topology and playback are restored and verified more reliably after announcements.\n- **Refreshed new UI:**\n  - Speakers and groups appear in card layouts with toolbars.\n  - Discovery has a status indicator and a button.\n  - Mobile layouts are available for speakers and groups.\n  - The group editor has a redesigned form with a follower checklist.\n  - Logging and announcement settings are consolidated.\n  - The old-UI toggle remains under Interface Settings.\n- **Update notices:**\n  - New-UI update notices use the card style with native buttons and restored styling.\n  - Dismissing a Sonos update notice now works correctly.\n- **More reliable group and favorite operations:** Group operations are handled more robustly. Sonos Favorite playback confirmation is hardened, and its operation timeouts are improved.\n- **Subscription reliability:** Stale UPnP subscription ID replacement is now handled correctly.\n- **Packaging:** The Sonos Advanced package now includes the Sonos alarm, queue and component drivers.\n- **Quieter logs:** A selected speaker that is missing from Sonos discovery (offline, or not a Sonos player) is now logged at info level instead of as a warning.\n- **Release notes:** Release notes are now generated with Copilot, and cumulative notes are improved.\r\n0.14.1 Set TTS modes to \"always non-interrupting\"\r\n0.14.0 Adds configurable, resilient Sonos group announcements with safer topology handling, offline TTS queue retention, and improved WebSocket and UPnP subscription recovery.\r\n0.13.3 Add missing import\r\n0.13.2 Add playTrackAndRestore(uri, volume) and playTrackAndResume(uri, volume)\r\n0.13.1 Updated the Group driver to support the player\u2019s speech and text entry points. It now declares AudioNotification and implements playText, playTextAndRestore, playTextAndResume, speak, and speakNoRestore. Volume inputs accept common numeric and string types.\r\n0.13.0 Added async maintenance and discovery, serialized Sonos transport and UPnP handling, Line-In selection, and active-player cleanup; fixed topology, mute, balance, crossfade, announcement volume, priority playback, and update-state issues.\r\n0.12.1 Added queued group command handling, improved coordinator and membership checks, and refined volume, mute, playback state, and topology updates.\r\n0.12.0 ### Sonos Advanced Controller 0.11.12  - Improved reliability when several Sonos commands happen close together. - Playback commands now wait for speakers to finish grouping, helping prevent playback from interrupting group changes. - Improved recovery when Sonos responds slowly or misses a command. - Made playback status and audio notifications more reliable.\r\n0.11.11 Use Hubitat theme CSS variables for Sonos speaker and group tables, including backgrounds, borders, text colors, secondary details, and action icons. This improves readability and dark-mode compatibility while retaining fallback colors.\r\n0.11.10 Adds addPlayerToGroup commands for Sonos group and player drivers. Resolves identifiers by RINCON ID, name, MAC, IP, or device network ID, validates household and group state, and mutates only the requested membership. Includes coverage for forwarding, resolution, ambiguity, inactive groups, and standalone coordinators.\r\n0.11.9 Redesigned the Sonos management UI, made the new interface the default, and improved player discovery and the group editor. Group operations now validate targets and handle eviction without unintended regrouping. Improved favorite loading, playlist playback, WebSocket subscription recovery, and grouped volume updates. Also includes player state, null-safety, and compilation fixes.\r\n0.11.8 Redesigned the Sonos management UI, made the new interface the default, and improved player discovery and the group editor. Group operations now validate targets and handle eviction without unintended regrouping. Improved favorite loading, playlist playback, WebSocket subscription recovery, and grouped volume updates. Also includes player state, null-safety, and compilation fixes.",
+  "version": "0.15.6",
   "betaVersion": "0.11.8"
 }
