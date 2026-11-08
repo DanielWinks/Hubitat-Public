@@ -355,6 +355,8 @@ Map mainPage() {
           }
         } else {
           paragraph displayNewUiUpdateNotice()
+          input 'btnInstallUpdate', 'button', title: 'Install update', submitOnChange: false
+          input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
         }
       }
     }
@@ -3874,17 +3876,11 @@ String renderNewUiUpdateNoticeMarkup() {
   }
   String releaseDate = escapeNewUiHtml(releaseDateValue)
   String releaseUrl = escapeNewUiHtml(state.latestReleaseUrl?.toString() ?: '#')
-  String installAction = 'btnInstallUpdate'
-  String dismissAction = 'btnDismissUpdate'
-  return "<style>.sonos-update-card{border:1px solid #e3b341;border-radius:10px;padding:16px 18px;margin:10px 0 18px;background:var(--surface-card,#fffdf6);color:var(--text-color,#30343b);box-shadow:0 2px 8px rgba(50,45,20,.06)}.sonos-update-header{display:flex;align-items:center;gap:9px;color:#8a5b00;font-weight:650;font-size:1.12em;margin-bottom:10px}.sonos-update-icon{display:inline-flex;align-items:center;justify-content:center;width:25px;height:25px;border-radius:50%;background:#fff1c2}.sonos-update-version{font-weight:650;font-size:1.05em;margin-bottom:4px}.sonos-update-meta{color:var(--text-color-secondary,#666)}.sonos-update-link{display:inline-block;margin-top:10px}.sonos-update-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.sonos-update-button{display:inline-block;padding:8px 14px;border:1px solid var(--surface-border,#c8c8c8);border-radius:7px;background:var(--surface-b,#f7f7f7);color:var(--text-color,#30343b);cursor:pointer;font-weight:600}.sonos-update-button-primary{background:#4054b2;border-color:#4054b2;color:#fff}.sonos-update-button:hover{filter:brightness(.97)}.sonos-update-button:focus-visible{outline:2px solid #1a77c9;outline-offset:2px}</style>" +
+  return "<style>.sonos-update-card{border:1px solid #e3b341;border-radius:10px;padding:16px 18px;margin:10px 0 18px;background:var(--surface-card,#fffdf6);color:var(--text-color,#30343b);box-shadow:0 2px 8px rgba(50,45,20,.06)}.sonos-update-header{display:flex;align-items:center;gap:9px;color:#8a5b00;font-weight:650;font-size:1.12em;margin-bottom:10px}.sonos-update-icon{display:inline-flex;align-items:center;justify-content:center;width:25px;height:25px;border-radius:50%;background:#fff1c2}.sonos-update-version{font-weight:650;font-size:1.05em;margin-bottom:4px}.sonos-update-meta{color:var(--text-color-secondary,#666)}.sonos-update-link{display:inline-block;margin-top:10px}</style>" +
     "<div class='sonos-update-card'><div class='sonos-update-header'><span class='sonos-update-icon' aria-hidden='true'>⚠</span>Update available</div>" +
     "<div class='sonos-update-version'>Version ${latestVersion} is available</div>" +
     "<div class='sonos-update-meta'>Current version: ${safeCurrentVersion}<br/>Released: ${releaseDate}</div>" +
-    "<a class='sonos-update-link' href='${releaseUrl}' target='_blank' rel='noopener noreferrer'>View release notes</a>" +
-    "<div class='sonos-update-actions'><div class='form-group'><input type='hidden' name='${installAction}.type' value='button'></div>" +
-    "<div class='submitOnChange sonos-update-button sonos-update-button-primary' role='button' tabindex='0' onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\">Install update</div><input type='hidden' name='settings[${installAction}]' value=''>" +
-    "<div class='form-group'><input type='hidden' name='${dismissAction}.type' value='button'></div>" +
-    "<div class='submitOnChange sonos-update-button' role='button' tabindex='0' onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\">Dismiss</div><input type='hidden' name='settings[${dismissAction}]' value=''></div></div>"
+    "<a class='sonos-update-link' href='${releaseUrl}' target='_blank' rel='noopener noreferrer'>View release notes</a></div>"
 }
 
 String renderCustomSettingsMarkup() {
