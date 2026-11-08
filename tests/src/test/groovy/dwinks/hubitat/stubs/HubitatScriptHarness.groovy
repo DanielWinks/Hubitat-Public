@@ -142,6 +142,16 @@ class HubitatScriptHarness extends Script {
   // ----- Setting updaters -----
   void updateSetting(String name, Map opts) { updatedSettings[name] = opts.value }
   void updateSetting(String name, Object value) { updatedSettings[name] = value }
+
+  /** Hubitat app preference helper used to render appButtonHandler actions. */
+  String buttonLink(String buttonName, String linkText, String color = '#1A77C9',
+      String stateAttribute = '', String ariaLabel = '', String font = '1em', String tooltip = '') {
+    String safeAriaLabel = ariaLabel ? " aria-label='${ariaLabel}'" : ''
+    String safeTooltip = tooltip ? " title='${tooltip}'" : ''
+    return "<div class='form-group'><input type='hidden' name='${buttonName}.type' value='button'></div>" +
+        "<div style='display:inline-block'><div class='submitOnChange' role='button' tabindex='0'${safeAriaLabel}${safeTooltip} onclick='buttonClick(this)' style='color:${color};cursor:pointer;font-size:${font}'>${linkText}</div></div>" +
+        "<input type='hidden' name='settings[${buttonName}]' value=''>"
+  }
 }
 
 /** Tiny mock for the {@code log.*} object used pervasively in Hubitat code. */

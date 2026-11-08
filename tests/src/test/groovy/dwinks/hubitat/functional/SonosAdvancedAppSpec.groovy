@@ -2151,12 +2151,15 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     Map page = appScript.mainPage()
+    String noticeMarkup = appScript.renderNewUiUpdateNoticeMarkup()
 
     then:
     page.title == '<p hidden>Sonos Advanced Controller</p>'
     appScript.state.updateAvailable == true
     appScript.state.installedAppVersion == '98.0.0'
     appScript.asyncCalls.empty
+    noticeMarkup.contains('settings[btnInstallUpdate]')
+    noticeMarkup.contains('settings[btnDismissUpdate]')
   }
 
   def "new UI speaker table restores discovered secondaries after the volatile map is cleared"() {
