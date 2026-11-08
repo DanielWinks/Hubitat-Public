@@ -337,7 +337,7 @@ Map mainPage() {
   if(useOldUi) {
     stopDiscovery()
   }
-  logTrace("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
+  logTrace("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, latestVersion=${state.latestVersion}, dismissedVersion=${state.dismissedUpdateVersion}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
   checkForUpdates()
   logTrace('mainPage returned from asynchronous update-check dispatch')
   dynamicPage(title: useOldUi ? 'Sonos Advanced Controller' : '<p hidden>Sonos Advanced Controller</p>') {
@@ -1839,6 +1839,7 @@ Map groupPage() {
 // Button Handlers
 // =============================================================================
 void appButtonHandler(String buttonName) {
+  logTrace("Received app button action '${buttonName}'")
   if(buttonName?.startsWith('newUiMobile')) {
     buttonName = buttonName.replaceFirst('newUiMobile', 'newUi')
   }
@@ -1861,11 +1862,18 @@ void appButtonHandler(String buttonName) {
   if(buttonName == 'btnCleanupDuplicates') { cleanupDuplicates() }
   if(buttonName == 'btnPublishLibraries') { publishLibraries() }
   if(buttonName == 'btnDismissUpdate') {
+    String dismissedVersion = state.latestVersion?.toString() ?: state.latestManifest?.version?.toString()
+    if(dismissedVersion) { state.dismissedUpdateVersion = dismissedVersion }
+    logInfo("Dismissing update notice for version ${dismissedVersion ?: 'unknown'}")
     state.updateAvailable = false
     state.latestVersion = null
+    state.latestManifest = null
     state.latestReleaseDate = null
     state.latestReleaseUrl = null
+    app.updateLabel('Sonos Advanced Controller')
     app.sendEvent(name: 'newUiUpdateNotice', value: 'dismissed')
+    logTrace("Update notice dismissed; updateAvailable=${state.updateAvailable}, dismissedVersion=${state.dismissedUpdateVersion}")
+    return
   }
   if(buttonName == 'btnExtend60') { extendDiscovery(60) }
   if(buttonName == 'btnExtend300') { extendDiscovery(300) }
@@ -10718,7 +10726,9 @@ void completeUpdateCheck(Map data, String currentVersion) {
   logTrace("Async update check cached installed=${currentVersion}, latest=${latestVersion}, comparison=${comparison}")
   state.lastUpdateCheck = now()
   state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
-  if(comparison < 0) {
+  Boolean updateDismissed = state.dismissedUpdateVersion?.toString() == latestVersion
+  logTrace("Completing update check; currentVersion=${currentVersion}, latestVersion=${latestVersion}, comparison=${comparison}, dismissedVersion=${state.dismissedUpdateVersion}, updateDismissed=${updateDismissed}")
+  if(comparison < 0 && !updateDismissed) {
     state.updateAvailable = true
     state.latestVersion = latestVersion
     state.latestManifest = manifest
