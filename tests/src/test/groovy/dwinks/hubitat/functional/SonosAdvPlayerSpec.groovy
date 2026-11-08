@@ -691,6 +691,63 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
   }
 
+  def "expired renewal accepts the replacement SID returned by a fresh subscribe"() {
+    given:
+    driver.setSid('sid1', 'uuid:expired')
+    driver.eventTimestamps.put('SONOS-TEST-DNI-sid1-expires', Instant.now().getEpochSecond() - 60L)
+
+    when:
+    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'sid1', '/avt', 'callback',
+      '/MediaRenderer/AVTransport/Event')
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    rawRequests[0].contains('CALLBACK: <http://192.168.1.4:39501/avt>')
+    !rawRequests[0].contains('SID: uuid:expired')
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.expectedCurrentSid == 'uuid:expired'
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sid == null
+
+    when:
+    rawConnections[0].options.inputReader.call(
+      'HTTP/1.1 200 OK\r\nSID: uuid:replacement\r\nTIMEOUT: Second-1800\r\n\r\n')
+
+    then:
+    driver.getSid('sid1') == 'uuid:replacement'
+    driver.device.dataValues['sid1-expires'] != null
+    driver.eventTimestamps.get('SONOS-TEST-DNI-sid1-expires') > Instant.now().getEpochSecond()
+    driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
+    !driver.logs.any { String line -> line.contains('Ignoring UPnP SID update') }
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
+  }
+
+  def "late fresh subscribe retry cannot replace a newer SID owner"() {
+    given:
+    driver.setSid('sid1', 'uuid:expired')
+    driver.eventTimestamps.put('SONOS-TEST-DNI-sid1-expires', Instant.now().getEpochSecond() - 60L)
+
+    when:
+    driver.upnpResubscribeGeneric('resubscribeToAVTransport', 'sid1', '/avt', 'callback',
+      '/MediaRenderer/AVTransport/Event')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
+    driver.setSid('sid1', 'uuid:newer-owner')
+    Map retryData = driver.scheduled.find { List row -> row[1] == 'retryUpnpSid1' }[2].data as Map
+    driver.retryUpnpSid1(retryData)
+
+    then:
+    rawRequests.size() == 2
+    rawRequests[1].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.expectedCurrentSid == 'uuid:expired'
+
+    when:
+    rawConnections[1].options.inputReader.call(
+      'HTTP/1.1 200 OK\r\nSID: uuid:stale-response\r\nTIMEOUT: Second-1800\r\n\r\n')
+
+    then:
+    driver.getSid('sid1') == 'uuid:newer-owner'
+    driver.logs.any { String line -> line.contains('Ignoring UPnP SID update') }
+    !driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
+  }
+
   def "renewal uses captured SID and unsubscribe preserves a replacement SID"() {
     given:
     driver.setSid('sid1', 'uuid:old')

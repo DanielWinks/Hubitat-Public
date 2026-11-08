@@ -4305,6 +4305,7 @@ void dispatchUpnpRequest(Map entry, Map request) {
   synchronized(entry.lock) {
     if(entry.active?.guid != request.guid || request.phase != 'dispatching') { return }
     String sid = getSid(request.sidKey as String)
+    if(!request.containsKey('expectedCurrentSid')) { request.expectedCurrentSid = sid }
     if(request.operation == 'subscribe' && subValid(request.sidKey as String)) { redundant = true }
     if(request.operation == 'renew' && (!subValid(request.sidKey as String) || !sid)) {
       request.operation = 'subscribe'
@@ -4472,7 +4473,7 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
       }
       logTrace("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
     } else if(status == 200 && (sidValue || request.operation == 'renew')) {
-      if(getSid(request.sidKey as String) == request.sid) {
+      if(getSid(request.sidKey as String) == request.expectedCurrentSid) {
         Long timeout = parseGrantedTimeout(headers['timeout'])
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
@@ -4485,9 +4486,11 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         logTrace("Ignoring UPnP SID update guid=${request.guid} sidKey=${request.sidKey}; current SID ownership changed before response")
       }
     } else if(status == 412 && request.operation != 'unsubscribe') {
-      if(request.sid && getSid(request.sidKey as String) == request.sid) { deleteSid(request.sidKey as String) }
+      if(request.expectedCurrentSid && getSid(request.sidKey as String) == request.expectedCurrentSid) {
+        deleteSid(request.sidKey as String)
+      }
       logTrace("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
-      scheduleUpnpRetry(request, request.sid ? 5 : 60)
+      scheduleUpnpRetry(request, request.expectedCurrentSid ? 5 : 60)
     } else {
       logTrace("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
