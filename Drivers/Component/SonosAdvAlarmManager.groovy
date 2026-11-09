@@ -112,3 +112,21 @@ void destroyAlarm(String alarmId, String roomUuid) {
   if(!alarmId || !roomUuid) { return }
   parent?.destroySonosAlarm(device.getDataValue('householdId')?.toString(), alarmId, roomUuid)
 }
+
+String getCurrentTTSVoice() {
+  return cachedTTSDefaultVoice != null ? cachedTTSDefaultVoice : 'Matthew'
+}
+
+List<String> getCachedTTSVoiceNames() {
+  if(cachedTTSVoiceNames != null && cachedTTSVoiceNames.size() > 0) { return cachedTTSVoiceNames }
+  return ['Matthew']
+}
+
+void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
+  cachedTTSVoiceNames = voiceNames
+  cachedTTSDefaultVoice = defaultVoice
+  logTrace("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
+}
+
+@Field static volatile List<String> cachedTTSVoiceNames = null
+@Field static volatile String cachedTTSDefaultVoice = null
