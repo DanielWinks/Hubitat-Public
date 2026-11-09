@@ -223,8 +223,20 @@ class MockApp {
 class MockZWave {
   MockAssociationV2 associationV2 = new MockAssociationV2()
   MockAssociationGrpInfoV1 associationGrpInfoV1 = new MockAssociationGrpInfoV1()
+  MockConfigurationV1 configurationV1 = new MockConfigurationV1()
 
   Object parse(String description, Map versions = [:]) { null }
+}
+
+/** Minimal Configuration V1 command factory used by parameter-control tests. */
+class MockConfigurationV1 {
+  hubitat.zwave.Command configurationSet(Map arguments) {
+    new hubitat.zwave.Command(formatted: "configurationSet:${arguments.parameterNumber}:${arguments['size']}:${arguments.scaledConfigurationValue}")
+  }
+
+  hubitat.zwave.Command configurationGet(Map arguments) {
+    new hubitat.zwave.Command(formatted: "configurationGet:${arguments.parameterNumber}")
+  }
 }
 
 /** Minimal Association V2 command factory used by driver behavior tests. */
