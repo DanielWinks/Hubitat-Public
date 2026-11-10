@@ -109,5 +109,7 @@ package wildcards (`hubitat.*`, `java.util.concurrent.*`).
 `.github/workflows/lint-and-test.yml` runs the linter on every push and pull
 request. Spock selects specs based on changed Apps, Drivers, Libraries, or test
 files; changes to shared test harness/build files run the full suite. A manual
-workflow dispatch also runs the full suite. Lint findings show up as inline
+workflow dispatch also runs the full suite. Selected Spock feature methods are
+distributed across 10 parallel GitHub Actions shards, including when many
+selected features belong to one large spec. Lint findings show up as inline
 GitHub annotations on the Files Changed view.

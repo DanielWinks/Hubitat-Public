@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_tests: ${{ steps.select.outputs.has_tests }}
-      patterns: ${{ steps.select.outputs.patterns }}
+      shards: ${{ steps.select.outputs.shards }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -94,6 +94,7 @@ jobs:
           import fnmatch
           import json
           import os
+          import re
           from pathlib import Path
 
           suites = {
@@ -207,16 +208,47 @@ jobs:
                   selected.update(all_patterns)
 
           patterns = [pattern for pattern in all_patterns if pattern in selected]
+          selected_classes = {
+              pattern for pattern in patterns if pattern != lint_pattern
+          }
+          test_root = Path('tests/src/test/groovy')
+          spec_files = []
+          for spec_file in sorted(test_root.rglob('*Spec.groovy')):
+              relative = spec_file.relative_to(test_root).with_suffix('')
+              class_name = '.'.join(relative.parts)
+              if class_name in selected_classes or (lint_pattern in patterns and class_name.startswith('dwinks.hubitat.lint.')):
+                  spec_files.append((class_name, spec_file))
+
+          # Split at Spock feature granularity so a single large spec cannot
+          # hold up one runner while the other shards sit idle.
+          feature_pattern = re.compile(r'^\s*def\s+"([^"]+)"\s*\(', re.MULTILINE)
+          features = []
+          for class_name, spec_file in spec_files:
+              source = spec_file.read_text(encoding='utf-8')
+              for match in feature_pattern.finditer(source):
+                  feature_name = match.group(1)
+                  features.append(f'{class_name}.{feature_name}')
+
+          shard_count = 10
+          shards = [[] for _ in range(shard_count)]
+          for index, feature in enumerate(features):
+              shards[index % shard_count].append(feature)
+          if patterns and not features:
+              raise SystemExit(f"Selected Spock filters did not match any feature methods: {patterns}")
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f"has_tests={'true' if patterns else 'false'}\n")
-              output.write(f"patterns={json.dumps(patterns, separators=(',', ':'))}\n")
-          print(f"Selected {len(patterns)} Spock filter(s): {', '.join(patterns) if patterns else 'none'}")
+              output.write(f"shards={json.dumps(shards, separators=(',', ':'))}\n")
+          print(f"Selected {len(features)} Spock feature(s) across {shard_count} shards ({', '.join(patterns) if patterns else 'none'})")
           PY
 
   test:
-    name: Spock Tests
+    name: Spock Tests (${{ matrix.shard }}/10)
     needs: select-tests
     if: needs.select-tests.outputs.has_tests == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -234,14 +266,19 @@ jobs:
       - name: Run selected tests
         working-directory: tests
         env:
-          TEST_PATTERNS: ${{ needs.select-tests.outputs.patterns }}
+          TEST_SHARDS: ${{ needs.select-tests.outputs.shards }}
+          TEST_SHARD: ${{ matrix.shard }}
         run: |
           python3 - <<'PY'
           import json
           import os
           import subprocess
 
-          patterns = json.loads(os.environ['TEST_PATTERNS'])
+          shards = json.loads(os.environ['TEST_SHARDS'])
+          patterns = shards[int(os.environ['TEST_SHARD']) - 1]
+          if not patterns:
+              print(f"Shard {os.environ['TEST_SHARD']} has no selected Spock features.")
+              raise SystemExit(0)
           command = ['gradle', 'test', '--no-daemon']
           for pattern in patterns:
               command.extend(['--tests', pattern])
@@ -252,6 +289,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: spock-test-report
+          name: spock-test-report-${{ matrix.shard }}
           path: tests/build/reports/tests/test/
           if-no-files-found: ignore
