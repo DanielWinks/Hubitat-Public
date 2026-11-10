@@ -2144,6 +2144,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "paused AirPlay metadata never routes speak through the stream holder"() {
     given:
+    driver.metaClass.getParent = { -> null }
     driver.getDeviceAudioClipQueue().clear()
     Boolean routedToHolder = false
     com.hubitat.app.InstalledAppWrapper parent = new com.hubitat.app.InstalledAppWrapper()
