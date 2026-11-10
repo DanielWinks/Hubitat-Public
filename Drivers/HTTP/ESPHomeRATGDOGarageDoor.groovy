@@ -133,11 +133,11 @@ void off() {
 }
 
 void lock() {
-    sendEntityCommandAsync('remote-control lock', remoteLockEntityId(), 'lock')
+    sendEntityCommandAsync('lock', remoteLockEntityId(), 'lock')
 }
 
 void unlock() {
-    sendEntityCommandAsync('remote-control lock', remoteLockEntityId(), 'unlock')
+    sendEntityCommandAsync('lock', remoteLockEntityId(), 'unlock')
 }
 
 void commandCallback(AsyncResponse response, Map data = null) {
@@ -237,7 +237,7 @@ private void processInboundMessage(final Map jsonData) {
     switch (eventId) {
         case 'cover-door':
         case 'cover/door':
-            processCoverEvent(jsonData.value)
+            processCoverEvent(jsonData.value, jsonData.current_operation)
             break
         case 'light-light':
         case 'light/light':
@@ -293,10 +293,33 @@ private String presenceChildDni(final String trackerName) {
     return "${device.deviceNetworkId}-presence-${safeTrackerName}"
 }
 
-private void processCoverEvent(final Object value) {
+private void processCoverEvent(final Object value, final Object currentOperation) {
     final String direction = value?.toString()?.trim()?.toLowerCase()
     if (direction == STATE_OPENING || direction == STATE_CLOSING) {
         emitIfChanged('door', direction)
+        return
+    }
+
+    final BigDecimal position = parseCoverPosition(value)
+    if (position != null) {
+        emitIfChanged('position', position)
+    }
+
+    final String operation = currentOperation?.toString()?.trim()?.toLowerCase()
+    if (operation == STATE_OPENING || operation == STATE_CLOSING) {
+        emitIfChanged('door', operation)
+        return
+    }
+
+    if (position != null) {
+        final String doorState = position == BigDecimal.ZERO ? STATE_CLOSED :
+            (position == BigDecimal.ONE ? STATE_OPEN : STATE_PARTIALLY_OPEN)
+        emitIfChanged('door', doorState)
+        return
+    }
+
+    if (value instanceof Number) {
+        logWarn("RATGDO cover-door event has an out-of-range position: ${value}")
         return
     }
 
@@ -307,6 +330,19 @@ private void processCoverEvent(final Object value) {
     }
     emitIfChanged('position', endpointValue ? BigDecimal.ONE : BigDecimal.ZERO)
     emitIfChanged('door', endpointValue ? STATE_OPEN : STATE_CLOSED)
+}
+
+@CompileStatic
+private static BigDecimal parseCoverPosition(final Object value) {
+    if (!(value instanceof Number)) {
+        return null
+    }
+    try {
+        final BigDecimal position = new BigDecimal(value.toString())
+        return position >= BigDecimal.ZERO && position <= BigDecimal.ONE ? position : null
+    } catch (NumberFormatException ignored) {
+        return null
+    }
 }
 
 private void processBooleanEvent(final String attribute, final Object value, final String trueValue,

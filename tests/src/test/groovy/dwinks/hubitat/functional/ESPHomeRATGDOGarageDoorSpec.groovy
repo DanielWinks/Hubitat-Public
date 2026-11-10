@@ -36,12 +36,16 @@ class ESPHomeRATGDOGarageDoorSpec extends Specification {
     driver.open()
     driver.close()
     driver.stop()
+    driver.lock()
+    driver.unlock()
 
     then:
     driver.asyncCalls == [
       [verb: 'POST', cb: 'commandCallback', params: [uri: 'http://192.168.1.214:80/cover/door/open'], data: [action: 'open']],
       [verb: 'POST', cb: 'commandCallback', params: [uri: 'http://192.168.1.214:80/cover/door/close'], data: [action: 'close']],
-      [verb: 'POST', cb: 'commandCallback', params: [uri: 'http://192.168.1.214:80/cover/door/stop'], data: [action: 'stop']]
+      [verb: 'POST', cb: 'commandCallback', params: [uri: 'http://192.168.1.214:80/cover/door/stop'], data: [action: 'stop']],
+      [verb: 'POST', cb: 'commandCallback', params: [uri: 'http://192.168.1.214:80/lock/remotes/lock'], data: [action: 'lock']],
+      [verb: 'POST', cb: 'commandCallback', params: [uri: 'http://192.168.1.214:80/lock/remotes/unlock'], data: [action: 'unlock']]
     ]
     driver.scheduled.empty
   }
@@ -82,6 +86,43 @@ class ESPHomeRATGDOGarageDoorSpec extends Specification {
     driver.events.find { Map event -> event.name == 'lock' }?.value == 'locked'
     driver.events.find { Map event -> event.name == 'motion' }?.value == 'active'
     driver.events.find { Map event -> event.name == 'obstruction' }?.value == 'clear'
+  }
+
+  def "cover refresh payloads preserve position and movement state"() {
+    when: 'the door is partially open and idle'
+    driver.parse('{"id":"cover/door","state":"OPEN","value":0.4,"current_operation":"IDLE"}')
+
+    then:
+    driver.device.currentValue('position') == 0.4G
+    driver.device.currentValue('door') == 'partially open'
+
+    when: 'the door is moving while partially open'
+    driver.parse('{"id":"cover/door","state":"OPEN","value":0.55,"current_operation":"OPENING"}')
+
+    then:
+    driver.device.currentValue('position') == 0.55G
+    driver.device.currentValue('door') == 'opening'
+
+    when: 'the door is moving closed while partially open'
+    driver.parse('{"id":"cover/door","state":"OPEN","value":0.3,"current_operation":"CLOSING"}')
+
+    then:
+    driver.device.currentValue('position') == 0.3G
+    driver.device.currentValue('door') == 'closing'
+
+    when: 'the door is fully open'
+    driver.parse('{"id":"cover/door","state":"OPEN","value":1.0,"current_operation":"IDLE"}')
+
+    then:
+    driver.device.currentValue('position') == 1.0G
+    driver.device.currentValue('door') == 'open'
+
+    when: 'the door is fully closed'
+    driver.parse('{"id":"cover/door","state":"CLOSED","value":0.0,"current_operation":"IDLE"}')
+
+    then:
+    driver.device.currentValue('position') == 0.0G
+    driver.device.currentValue('door') == 'closed'
   }
 
   def "BLE device-tracker POSTs create and update presence children"() {
