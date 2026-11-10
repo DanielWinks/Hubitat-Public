@@ -7010,7 +7010,52 @@ Map readFavoriteGroupTopology(Map operation) {
       ? (Map)operation.favoriteTopologyObservations
       : [:]
   Long refreshAt = (operation?.favoriteTopologyRefreshAt ?: 0L) as Long
-  return readGroupTopologyFromObservations(operation, observations, refreshAt)
+  Map topology = readGroupTopologyFromObservations(operation, observations, refreshAt)
+  List<Map> playerObservations = topology.observations instanceof List
+      ? (List<Map>)topology.observations
+      : []
+  String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
+  if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.resolvedCoordinatorId as String }
+  if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.desiredCoordinatorId as String }
+  Map coordinatorObservation = expectedCoordinatorId
+      ? playerObservations.find { Map item ->
+          item.playerId?.toString() == expectedCoordinatorId && item.fresh == true
+        }
+      : null
+
+  if(coordinatorObservation == null || !coordinatorObservation.groupId ||
+      !coordinatorObservation.coordinatorId || !coordinatorObservation.playerIds ||
+      !normalizeGroupPlayerIds(coordinatorObservation.playerIds).contains(expectedCoordinatorId)) {
+    List<String> freshnessSummary = playerObservations.collect { Map item ->
+      return "${item.playerId}:${item.fresh == true}"
+    }
+    logTrace("Post-Favorite topology has no complete fresh report from expected coordinator ${expectedCoordinatorId ?: '(unknown)'}; per-player observations=${freshnessSummary}")
+    return topology
+  }
+
+  List<String> authoritativePlayerIds = normalizeGroupPlayerIds(coordinatorObservation.playerIds)
+  Boolean hasConflictingFreshObservation = playerObservations.any { Map item ->
+    item.fresh == true && (item.groupId?.toString() != coordinatorObservation.groupId?.toString() ||
+        item.coordinatorId?.toString() != coordinatorObservation.coordinatorId?.toString() ||
+        normalizeGroupPlayerIds(item.playerIds) != authoritativePlayerIds)
+  }
+  if(hasConflictingFreshObservation) {
+    logTrace("Post-Favorite topology coordinator ${expectedCoordinatorId} conflicts with another fresh player report; requiring another observation")
+    return topology
+  }
+
+  Map confirmedTopology = [
+    fresh: true,
+    consistent: true,
+    groupId: coordinatorObservation.groupId as String,
+    coordinatorId: coordinatorObservation.coordinatorId as String,
+    playerIds: authoritativePlayerIds,
+    observations: [coordinatorObservation],
+    authorityPlayerId: expectedCoordinatorId,
+    fingerprint: "${expectedCoordinatorId}:${coordinatorObservation.groupId}:${coordinatorObservation.coordinatorId}:${authoritativePlayerIds.join(',')}"
+  ]
+  logTrace("Post-Favorite topology uses fresh coordinator roster ${expectedCoordinatorId}: group=${confirmedTopology.groupId}, coordinator=${confirmedTopology.coordinatorId}, members=${authoritativePlayerIds}, freshPlayers=${playerObservations.findAll { Map item -> item.fresh == true }.collect { Map item -> item.playerId }}")
+  return confirmedTopology
 }
 
 String summarizeGroupOperationTopology(Map topology) {
@@ -8078,6 +8123,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
 
   if(verifyingFavoriteTopology) {
     Boolean finalTopologySatisfied = isFavoriteGroupTopologySatisfied(operation, topology)
+    logTrace("Post-Favorite topology check for ${operation.operationId}: fresh=${topology.fresh == true}, consistent=${topology.consistent == true}, satisfied=${finalTopologySatisfied}, authority=${topology.authorityPlayerId ?: 'all configured players'}, observations=${summarizeGroupOperationTopology(topology)}")
     if(topology.fresh != true) {
       Long refreshAt = operation.favoriteTopologyRefreshAt as Long ?: 0L
       Boolean waitingForFreshTopology = refreshAt > 0L &&

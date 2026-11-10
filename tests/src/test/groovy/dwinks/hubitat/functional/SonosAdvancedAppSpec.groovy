@@ -1741,6 +1741,36 @@ class SonosAdvancedAppSpec extends Specification {
     operation.favoriteDeadlineAt > 0L
   }
 
+  def "post-Favorite topology accepts the fresh coordinator roster when a follower misses its report"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('on', [:], 1)])
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 2)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    assert operation.phase == 'WAIT_FOR_FAVORITE'
+
+    when:
+    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    operation.favoriteTopologyStableObservations == 1
+    operation.favoriteTopologyVerified == false
+    appScript.logs.any { it.contains('Post-Favorite topology uses fresh coordinator roster RINCON_COORD') }
+
+    when:
+    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    operation.favoriteTopologyVerified == true
+    operation.favoriteTopologyStableObservations == 2
+    operation.favoriteExpectedGroupId == 'GROUP-1'
+  }
+
   def "Favorite inherits the additive context and accepts the extra player"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
