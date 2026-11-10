@@ -21,6 +21,8 @@
  *  SOFTWARE.
  */
 
+import groovy.transform.Field
+
 metadata {
   definition(
     name: 'Sonos Advanced Alarm Manager',
