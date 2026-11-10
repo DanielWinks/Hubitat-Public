@@ -1189,11 +1189,12 @@ String renderNewUiCreateGroupStatus(Map row) {
   return newUiButtonLink("newUiCreateGroup|${row.id}", groupIcon, '#4CAF50', '20px')
 }
 
-String newUiButtonLink(String buttonName, String linkText, String color = '#1A77C9', String font = '15px', String ariaLabel = null, String cssClass = '') {
+String newUiButtonLink(String buttonName, String linkText, String color = '#1A77C9', String font = '15px', String ariaLabel = null, String cssClass = '', String clickHandler = null) {
   String safeAriaLabel = ariaLabel ? " aria-label='${escapeNewUiHtml(ariaLabel)}'" : ''
   String safeCssClass = cssClass ? " ${escapeNewUiHtml(cssClass)}" : ''
+  String action = clickHandler ?: 'buttonClick(this)'
   return "<div class='form-group'><input type='hidden' name='${buttonName}.type' value='button'></div>" +
-      "<div style='display:inline-block'><div class='submitOnChange${safeCssClass}' role='button' tabindex='0'${safeAriaLabel} onclick='buttonClick(this)' onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();buttonClick(this)}\" style='color:${color};cursor:pointer;font-size:${font}'>${linkText}</div></div>" +
+      "<div style='display:inline-block'><div class='submitOnChange${safeCssClass}' role='button' tabindex='0'${safeAriaLabel} onclick=\"${action}\" onkeydown=\"if(event.key==='Enter'||event.key===' '){event.preventDefault();${action}}\" style='color:${color};cursor:pointer;font-size:${font}'>${linkText}</div></div>" +
       "<input type='hidden' name='settings[${buttonName}]' value=''>"
 }
 
@@ -1248,28 +1249,34 @@ String renderNewUiGroupEditorMarkup() {
     String selected = id == selectedCoordinator ? ' selected' : ''
     coordinatorOptions.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
   }
-  String nameChange = "updateNewUiGroupField('name',this.value)"
-  String coordinatorChange = "updateNewUiGroupField('coordinator',this.value)"
-  String followerChange = "updateNewUiGroupField('followers',Array.prototype.map.call(document.querySelectorAll('.new-ui-group-follower-checkbox:checked'),function(e){return e.value}).join(','))"
+  String nameChange = "updateNewUiGroupField('name')"
+  String coordinatorChange = "updateNewUiGroupField('coordinator')"
   StringBuilder followerMarkup = new StringBuilder()
   followerOptions.each { String id, String label ->
-    String checked = selectedFollowers.contains(id) ? ' checked' : ''
-    followerMarkup.append("<label class='new-ui-group-follower-option'><input class='new-ui-group-follower-checkbox' type='checkbox' value='${escapeNewUiHtml(id)}'${checked} onchange=\"${followerChange}\"><span>${escapeNewUiHtml(label)}</span></label>")
+    Boolean selected = selectedFollowers.contains(id)
+    String actionLabel = selected ? "Remove ${label} from followers" : "Add ${label} to followers"
+    String checkboxClass = selected ? 'new-ui-group-checkbox new-ui-group-checkbox-checked' : 'new-ui-group-checkbox'
+    String followerControl = "<span class='new-ui-group-follower-control'><span class='${checkboxClass}' aria-hidden='true'></span><span>${escapeNewUiHtml(label)}</span></span>"
+    String toggleAction = newUiButtonLink("newUiToggleGroupFollower|${id}", followerControl,
+        '#30343b', '14px', actionLabel, 'new-ui-group-follower-toggle')
+    followerMarkup.append("<div class='new-ui-group-follower-item'>${toggleAction}</div>")
   }
   String followerOptionsMarkup = followerMarkup.toString()
-  String saveAction = newUiButtonLink('btnNewUiSaveGroup', 'Save group', '#4054b2', '14px', 'Save group', 'new-ui-group-save')
+  String saveAction = newUiButtonLink('btnNewUiSaveGroup', 'Save group', '#4054b2', '14px', 'Save group', 'new-ui-group-save', 'syncNewUiGroupFields();buttonClick(this)')
   String cancelAction = newUiButtonLink('btnNewUiCancelGroup', 'Cancel', '#4b5563', '14px', 'Cancel group edit', 'new-ui-group-cancel')
-  String changeAction = newUiButtonLink('btnNewUiGroupFieldChanged', 'Update group draft', '#4054b2', '13px', 'Update group draft', 'new-ui-group-field-change-action')
-  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option input{width:18px;height:18px;flex:0 0 18px;accent-color:#4054b2}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
+  String nameChangeAction = newUiButtonLink('btnNewUiGroupNameChanged', 'Update group name', '#4054b2', '13px', 'Update group name', 'new-ui-group-field-change-action new-ui-group-name-change-action')
+  String coordinatorChangeAction = newUiButtonLink('btnNewUiGroupCoordinatorChanged', 'Update group coordinator', '#4054b2', '13px', 'Update group coordinator', 'new-ui-group-field-change-action new-ui-group-coordinator-change-action')
+  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
   StringBuilder html = new StringBuilder(css)
+  html.append("<style>.new-ui-group-follower-item .form-group{display:none!important}.new-ui-group-follower-item>div{display:block!important;width:100%}.new-ui-group-follower-toggle{box-sizing:border-box;display:flex!important;align-items:center;width:100%;min-height:40px;padding:7px;border:1px solid transparent;border-radius:6px;color:var(--text-color,#30343b)!important;text-align:left}.new-ui-group-follower-toggle:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-control{display:flex;align-items:center;gap:9px}.new-ui-group-checkbox{box-sizing:border-box;position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;border:1.5px solid #747b86;border-radius:4px;background:var(--surface-card,#fff)}.new-ui-group-checkbox-checked{border-color:#4054b2;background:#4054b2}.new-ui-group-checkbox-checked:after{box-sizing:border-box;content:'';width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}.new-ui-group-follower-toggle:focus-visible{outline:2px solid #4054b2;outline-offset:2px}</style>")
   html.append("<div class='new-ui-group-editor-card'><div class='new-ui-group-editor-heading'>${editorTitle}</div><div class='new-ui-group-editor-description'>${editorInstructions}</div>${editorErrorMarkup}")
   html.append("<div class='new-ui-group-editor-grid'>")
   html.append("<div class='new-ui-group-editor-field new-ui-group-editor-field-wide'><label for='new-ui-group-name'>Group name</label><input id='new-ui-group-name' type='text' name='newUiGroupNameUi' value='${escapeNewUiHtml(editorName)}' autocomplete='off' onchange=\"${nameChange}\"></div>")
   html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
   html.append("<div class='new-ui-group-editor-field'><span class='new-ui-group-editor-label'>Followers</span><div id='new-ui-group-followers' class='new-ui-group-follower-list' aria-describedby='new-ui-group-followers-help'>${followerOptionsMarkup}</div><div id='new-ui-group-followers-help' class='new-ui-group-editor-help'>Select one or more compatible speakers.</div></div>")
   html.append("</div><div class='new-ui-group-editor-actions'>").append(saveAction).append(cancelAction).append('</div>')
-  html.append(changeAction)
-  html.append("<script>function updateNewUiGroupField(field,value){var encoded=btoa(unescape(encodeURIComponent(String(value||'')))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+\$/,'');var action='newUiGroupField|'+field+'|'+encoded;var marker=document.querySelector(\"input[name='btnNewUiGroupFieldChanged.type']\");var setting=document.querySelector(\"input[name='settings[btnNewUiGroupFieldChanged]']\");var button=document.querySelector('.new-ui-group-field-change-action');if(marker&&setting&&button){marker.name=action+'.type';setting.name='settings['+action+']';buttonClick(button)}}}</script>")
+  html.append(nameChangeAction).append(coordinatorChangeAction)
+  html.append("<script>function syncNewUiGroupFields(){var name=document.querySelector(\"#new-ui-group-name\");var coordinator=document.querySelector(\"#new-ui-group-coordinator\");var nameSetting=document.querySelector(\"[name='settings[newUiGroupName]']\");var coordinatorSetting=document.querySelector(\"[name='settings[newUiGroupCoordinator]']\");if(name&&nameSetting){nameSetting.value=name.value}if(coordinator&&coordinatorSetting){coordinatorSetting.value=coordinator.value}}function updateNewUiGroupField(field){syncNewUiGroupFields();var buttonClass={name:'.new-ui-group-name-change-action',coordinator:'.new-ui-group-coordinator-change-action'}[field];var button=buttonClass?document.querySelector(buttonClass):null;if(button){buttonClick(button)}}</script>")
   html.append('</div>')
   return html.toString()
 }
@@ -1898,8 +1905,16 @@ void appButtonHandler(String buttonName) {
     beginNewUiGroupEditor(null)
     return
   }
-  if(buttonName?.startsWith('newUiGroupField|')) {
-    handleNewUiGroupFieldChange(buttonName)
+  if(buttonName?.startsWith('newUiToggleGroupFollower|')) {
+    toggleNewUiGroupFollower(buttonName.minus('newUiToggleGroupFollower|'))
+    return
+  }
+  if(buttonName == 'btnNewUiGroupNameChanged') {
+    handleNewUiGroupFieldChange('name')
+    return
+  }
+  if(buttonName == 'btnNewUiGroupCoordinatorChanged') {
+    handleNewUiGroupFieldChange('coordinator')
     return
   }
   if(buttonName == 'btnNewUiSaveGroup') {
@@ -2043,42 +2058,46 @@ void beginNewUiGroupEdit(String token) {
   logInfo("New UI group edit started for '${group.name}'")
 }
 
-void handleNewUiGroupFieldChange(String action) {
+void toggleNewUiGroupFollower(String playerId) {
   if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
-  List<String> parts = action.tokenize('|')
-  if(parts.size() != 3) { return }
-  String field = parts[1]
-  String encodedValue = parts[2].replace('-', '+').replace('_', '/')
-  while(encodedValue.length() % 4 != 0) { encodedValue += '=' }
-  String value = new String(encodedValue.decodeBase64(), 'UTF-8')
+  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+  if(!playerId || !playerNames.containsKey(playerId)) { return }
+
+  Map draft = getNewUiGroupDraft()
+  String coordinatorId = getNewUiGroupCoordinator(draft)
+  if(playerId == coordinatorId) { return }
+
+  List<String> followerIds = getNewUiGroupFollowers(draft)
+  if(followerIds.contains(playerId)) {
+    followerIds.remove(playerId)
+  } else {
+    followerIds << playerId
+  }
+  followerIds = followerIds.unique()
+  draft.followerIds = followerIds
+  state[NEW_UI_GROUP_DRAFT_KEY] = draft
+  app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
+}
+
+void handleNewUiGroupFieldChange(String field) {
+  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
   Map draft = getNewUiGroupDraft()
   String coordinatorId = getNewUiGroupCoordinator(draft)
   List<String> followerIds = getNewUiGroupFollowers(draft)
   if(field == 'name') {
     String previousName = draft.name?.toString()?.trim() ?: ''
-    String updatedName = value.trim()
+    String updatedName = settings.newUiGroupName?.toString()?.trim() ?: ''
     if(updatedName != previousName) { state[NEW_UI_GROUP_AUTO_NAME_KEY] = false }
-    app.updateSetting('newUiGroupName', [type: 'text', value: updatedName])
     draft.name = updatedName
   } else if(field == 'coordinator') {
+    coordinatorId = settings.newUiGroupCoordinator?.toString() ?: ''
     Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-    if(value && !playerNames.containsKey(value)) { return }
-    coordinatorId = value
-    if(coordinatorId) {
-      app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: coordinatorId])
-    } else {
-      app.removeSetting('newUiGroupCoordinator')
-    }
+    if(coordinatorId && !playerNames.containsKey(coordinatorId)) { return }
     followerIds = followerIds.findAll { String id -> id != coordinatorId }
     app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
     draft.coordinatorId = coordinatorId
-    draft.followerIds = followerIds
-  } else if(field == 'followers') {
-    List<String> requestedFollowers = value ? value.split(',').collect { String id -> id }.findAll { String id -> id } : []
-    Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-    if(requestedFollowers.any { String id -> !playerNames.containsKey(id) || id == coordinatorId }) { return }
-    followerIds = requestedFollowers.unique()
-    app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
     draft.followerIds = followerIds
   } else {
     return
@@ -2181,6 +2200,7 @@ void clearNewUiGroupSettings() {
   app.removeSetting('newUiGroupName')
   app.removeSetting('newUiGroupCoordinator')
   app.removeSetting('newUiGroupFollowers')
+  app.removeSetting('newUiGroupFollowerSelection')
 }
 
 String synchronizeNewUiGroupName(Map draft, String coordinatorId, List<String> followerIds,

@@ -28,4 +28,6 @@ Treat syntax, callback, capability, sandbox, and static-typing errors as
 blockers. Separate changed-file failures from pre-existing repository failures.
 Lint does not prove live Hubitat behavior; note when a real-hub smoke test is
 needed for dynamic pages, device commands, subscriptions, or lifecycle work.
+For browser-based smoke tests, always use the Codex built-in browser (IAB)
+through CUA; do not use Firefox, Chrome, or another native/external browser.
 Finish with `git diff --check`.

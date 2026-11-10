@@ -259,6 +259,11 @@ Release process: version increment via workflow input (patch/minor) -> update ve
 - Follow the `tryCreateAccessToken()` pattern for OAuth
 - API keys should be stored in `settings` (user input), never in source
 
+## Browser UI Automation
+
+- For any browser-based task, always use the Codex built-in browser (IAB) through CUA. Do not launch or use Firefox, Chrome, or another native/external browser session.
+- Prefer purpose-built MCP/API tools when they fully support the task; when browser interaction is needed, use the built-in browser exclusively.
+
 ## Using Connected Hubitat MCP Servers
 
 When both Hubitat MCP servers are available in the agent session, choose the

@@ -2212,6 +2212,27 @@ class SonosAdvancedAppSpec extends Specification {
     groupTable.contains("<div id='new-ui-group-table-wrapper'>")
   }
 
+  def "new UI group editor uses registered settings and fixed field actions"() {
+    given:
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
+
+    when:
+    String markup = appScript.renderNewUiGroupEditorMarkup()
+
+    then:
+    markup.contains("[name='settings[newUiGroupName]']")
+    markup.contains("[name='settings[newUiGroupCoordinator]']")
+    markup.contains('syncNewUiGroupFields();buttonClick(this)')
+    markup.contains("btnNewUiGroupNameChanged.type")
+    markup.contains("btnNewUiGroupCoordinatorChanged.type")
+    markup.contains("newUiToggleGroupFollower|RINCON_FOLLOW")
+    markup.contains("new-ui-group-checkbox")
+    markup.contains("new-ui-group-checkbox-checked:after")
+    !markup.contains("<iconify-icon icon='material-symbols:check_box")
+    !markup.contains("new-ui-group-follower-checkbox")
+    !markup.contains("marker.name=action+'.type'")
+  }
+
   def "new UI group creation persists a name, coordinator, followers, and child device"() {
     given:
     appScript.state.userGroups = [:]
@@ -2222,8 +2243,10 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
     appScript.settings.newUiGroupName = 'Family'
+    appScript.appButtonHandler('btnNewUiGroupNameChanged')
     appScript.settings.newUiGroupCoordinator = 'RINCON_COORD'
-    appScript.settings.newUiGroupFollowers = ['RINCON_FOLLOW']
+    appScript.appButtonHandler('btnNewUiGroupCoordinatorChanged')
+    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
     appScript.appButtonHandler('btnNewUiSaveGroup')
 
     then:
@@ -2232,6 +2255,52 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.newUiGroupEditorMode == null
     appScript.app.updatedSettings.groupDevices == ["${appScript.app.id}-SonosGroupDevice-Family"]
     appScript.logs.any { String entry -> entry.contains("New UI created Sonos group 'Family'") }
+  }
+
+  def "new UI follower selection sentinel preserves the empty selection for validation"() {
+    given:
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
+
+    when:
+    appScript.appButtonHandler('btnNewUiSaveGroup')
+
+    then:
+    appScript.state.newUiGroupError == 'Select at least one follower before saving the group.'
+    appScript.state.newUiGroupEditorMode == 'create'
+  }
+
+  def "new UI follower action updates and removes the configured follower"() {
+    given:
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
+
+    when:
+    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
+    List<String> added = appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft())
+    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
+    List<String> removed = appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft())
+
+    then:
+    added == ['RINCON_FOLLOW']
+    removed.empty
+    (appScript.state.newUiGroupDraft.followerIds as List<String>).empty
+  }
+
+  def "muted member completion advances an audio clip group announcement"() {
+    given:
+    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [pending: [], active: [
+      correlationId: 'muted-member-announcement', mode: 'AUDIO_CLIP',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      playerStatuses: [RINCON_COORD: 'DONE']
+    ]]]
+
+    when:
+    appScript.handleGroupAnnouncementProgress(follower, [groupDni: 'GROUP-DNI',
+      correlationId: 'muted-member-announcement', phase: 'DISMISSED', reason: 'muted'])
+
+    then:
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active == null
+    appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
+    !appScript.logs.any { String entry -> entry.contains('timed out') }
   }
 
   def "new UI automatic group names use the follower name for one follower"() {

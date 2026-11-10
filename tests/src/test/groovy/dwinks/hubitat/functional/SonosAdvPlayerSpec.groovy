@@ -2083,6 +2083,28 @@ class SonosAdvPlayerSpec extends Specification {
     [synchronizedClip, volume] << [[false, true], [null, 0G, 1G]].combinations()
   }
 
+  def "muted synchronized group member reports terminal progress"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.locationEvents.clear()
+    driver.device.currentValues.mute = 'muted'
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.getDeviceAudioClipQueueSaved().clear()
+
+    when:
+    driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/muted.mp3', 10G,
+      'muted-group-announcement', 2)
+
+    then:
+    driver.getDeviceAudioClipQueue().empty
+    driver.locationEvents.any { Map event ->
+      event.data?.kind == 'groupAnnouncementProgress' &&
+        event.data?.correlationId == 'muted-group-announcement' &&
+        event.data?.phase == 'DISMISSED' && event.data?.reason == 'muted'
+    }
+  }
+
   def "public volume coercion preserves zero"() {
     expect:
     driver.coerceVolume(input) == 0G

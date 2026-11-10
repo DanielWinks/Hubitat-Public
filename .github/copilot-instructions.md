@@ -63,6 +63,13 @@ a task needs log evidence plus hub or device context. If the appropriate MCP is
 unavailable, choose a suitable fallback and never place MCP access tokens in
 source, committed configuration, or responses.
 
+## Browser UI automation
+
+For browser-based tasks, always use the Codex built-in browser (IAB) through
+CUA. Do not launch or use Firefox, Chrome, or another native/external browser
+session. Prefer purpose-built MCP/API tools when they fully support the task;
+when browser interaction is needed, use the built-in browser exclusively.
+
 ## Examples to copy/paste
 
 - Local/cloud endpoint pattern (copy from `Apps/SunriseSimulation.groovy`):

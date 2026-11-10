@@ -7622,6 +7622,7 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
     Integer duration = 0, Boolean deferStart = false) {
   if(getIsMuted()) {
     logTrace('Skipping synchronized audio clip because player is muted.')
+    if(correlationId) { publishGroupAnnouncementProgress(correlationId, 'DISMISSED', [reason: 'muted']) }
     return
   }
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
