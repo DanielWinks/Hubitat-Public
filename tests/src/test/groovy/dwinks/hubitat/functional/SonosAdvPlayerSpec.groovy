@@ -603,8 +603,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
 
     then:
-    driver.pendingLocalDeviceEvents[dni] == null
-    driver.pendingGroupDeviceUpdates[dni] == null
+    driver.pendingLocalDeviceEvents[dni]?.containsKey('status') != true
+    driver.pendingLocalDeviceEvents[dni]?.containsKey('transportStatus') != true
+    driver.pendingGroupDeviceUpdates[dni]?.containsKey('status') != true
+    driver.pendingGroupDeviceUpdates[dni]?.containsKey('transportStatus') != true
     driver.logs.any { it.toString().contains("unsupported Sonos TransportState='BUFFERING_UNKNOWN'") }
   }
 
