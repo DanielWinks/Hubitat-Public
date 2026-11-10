@@ -202,6 +202,63 @@ class SonosAdvQueueManagementSpec extends Specification {
     player.logs.any { it.contains('Removing currently playing queue item') }
   }
 
+  def "remove currently playing item uses the one-based CurrentTrack position for duplicate URIs"() {
+    given:
+    player.runtimeState.lastTransportPlaybackSnapshot = [trackUri: 'x-sonos-http:track-7.mp3', track: '2', transportState: 'PLAYING']
+    String firstPage = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/"><item id="Q:0/3"><dc:title>First occurrence</dc:title><res>x-sonos-http:track-7.mp3</res></item></DIDL-Lite>'
+    String secondPage = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/"><item id="Q:0/9"><dc:title>Second occurrence</dc:title><res>x-sonos-http:track-7.mp3</res></item></DIDL-Lite>'
+
+    when:
+    player.removeCurrentlyPlayingItemFromQueue()
+    Map browse = player.asyncCalls.last()
+    player.queueBrowseCallback(new AsyncResponse(data: browseResponse(firstPage, 1, 2, 29)), browse.data as Map)
+    Map nextPage = player.asyncCalls.last()
+    player.queueBrowseCallback(new AsyncResponse(data: browseResponse(secondPage, 1, 2, 29)), nextPage.data as Map)
+
+    then:
+    nextPage.data.startingIndex == 1
+    nextPage.data.currentTrackPosition == '2'
+    player.asyncCalls.size() == 3
+    player.asyncCalls.last().params.headers.SOAPAction.endsWith('#RemoveTrackFromQueue')
+    player.asyncCalls.last().params.body.contains('<ObjectID>Q:0/9</ObjectID>')
+    player.asyncCalls.last().params.body.contains('<UpdateID>29</UpdateID>')
+  }
+
+  def "remove currently playing item uses a unique URI match when CurrentTrack position is unavailable"() {
+    given:
+    player.runtimeState.lastTransportPlaybackSnapshot = [trackUri: 'x-sonos-http:track&amp;7.mp3', transportState: 'PLAYING']
+    String didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1.0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/"><item id="Q:0/11"><dc:title>Unique occurrence</dc:title><res>x-sonos-http:track&amp;7.mp3</res></item></DIDL-Lite>'
+
+    when:
+    player.removeCurrentlyPlayingItemFromQueue()
+    Map browse = player.asyncCalls.last()
+    player.queueBrowseCallback(new AsyncResponse(data: browseResponse(didl, 1, 1, 31)), browse.data as Map)
+
+    then:
+    player.asyncCalls.size() == 2
+    player.asyncCalls.last().params.body.contains('<ObjectID>Q:0/11</ObjectID>')
+    player.asyncCalls.last().params.body.contains('<UpdateID>31</UpdateID>')
+  }
+
+  def "remove currently playing item leaves ambiguous duplicate URIs unchanged without a position"() {
+    given:
+    player.runtimeState.lastTransportPlaybackSnapshot = [trackUri: 'x-sonos-http:track-7.mp3', transportState: 'PLAYING']
+    String firstPage = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/"><item id="Q:0/3"><dc:title>First occurrence</dc:title><res>x-sonos-http:track-7.mp3</res></item></DIDL-Lite>'
+    String secondPage = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/"><item id="Q:0/9"><dc:title>Second occurrence</dc:title><res>x-sonos-http:track-7.mp3</res></item></DIDL-Lite>'
+
+    when:
+    player.removeCurrentlyPlayingItemFromQueue()
+    Map browse = player.asyncCalls.last()
+    player.queueBrowseCallback(new AsyncResponse(data: browseResponse(firstPage, 1, 2, 29)), browse.data as Map)
+    Map nextPage = player.asyncCalls.last()
+    player.queueBrowseCallback(new AsyncResponse(data: browseResponse(secondPage, 1, 2, 29)), nextPage.data as Map)
+
+    then:
+    player.asyncCalls.size() == 2
+    player.asyncCalls.every { it.params.headers.SOAPAction.endsWith('#Browse') }
+    player.logs.any { it.contains('URI matches 2 queue entries') && it.contains('CurrentTrack position is unavailable') }
+  }
+
   def "remove currently playing item logs Info when its resource is not in the queue"() {
     given:
     player.runtimeState.lastTransportPlaybackSnapshot = [trackUri: 'x-sonos-http:playing-track.mp3', transportState: 'PLAYING']

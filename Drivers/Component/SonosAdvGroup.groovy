@@ -889,9 +889,8 @@ void updateBatchPlaybackState(String jsonAttributes) {
 }
 
 /**
- * Apply an explicit refresh from the parent app. Refresh historically copied
- * the coordinator's complete playback state even while the configured group
- * was inactive, so it must not be blocked by onlyUpdateWhenActive.
+ * Apply an explicit refresh from the parent app. Refresh playback is subject
+ * to the same inactive-group guard as other playback updates.
  */
 void applyRefreshedPlaybackState(String jsonAttributes) {
   processBatchPlaybackState(jsonAttributes, true)
@@ -924,6 +923,13 @@ private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlayb
       : wasActive
 
   if(forcePlaybackUpdate) {
+    if(getOnlyUpdateWhenActiveSetting() && !isActive) {
+      if(getResetAttributesWhenInactiveSetting()) {
+        resetPlaybackAttributes()
+      }
+      logDebug('Ignoring refreshed playback state because the group is inactive')
+      return
+    }
     applyPlaybackAttributes(playbackAttrs)
     clearHeldState()
     return

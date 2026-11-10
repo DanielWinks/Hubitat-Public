@@ -549,6 +549,65 @@ class SonosAdvPlayerSpec extends Specification {
     driver.children[0].currentValues.generation == '9'
   }
 
+  def "AVTransport states publish only supported normalized local and group values"() {
+    given:
+    String dni = driver.device.getDeviceNetworkId()
+    driver.pendingLocalDeviceEvents.remove(dni)
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="' +
+      sonosState + '"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
+
+    then:
+    driver.pendingLocalDeviceEvents[dni].status == expectedStatus
+    driver.pendingLocalDeviceEvents[dni].transportStatus == expectedStatus
+    driver.pendingGroupDeviceUpdates[dni].status == expectedStatus
+    driver.pendingGroupDeviceUpdates[dni].transportStatus == expectedStatus
+
+    where:
+    sonosState       | expectedStatus
+    'PLAYING'        | 'playing'
+    'PAUSED_PLAYBACK'| 'paused'
+    'STOPPED'        | 'stopped'
+    'NO_MEDIA_PRESENT' | 'stopped'
+  }
+
+  def "TRANSITIONING preserves the last valid local and group transport state"() {
+    given:
+    String dni = driver.device.getDeviceNetworkId()
+    driver.device.currentValues.status = 'paused'
+    driver.device.currentValues.transportStatus = 'paused'
+    driver.pendingLocalDeviceEvents.remove(dni)
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="TRANSITIONING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
+
+    then:
+    driver.device.currentValue('status') == 'paused'
+    driver.device.currentValue('transportStatus') == 'paused'
+    driver.pendingLocalDeviceEvents[dni] == null
+    driver.pendingGroupDeviceUpdates[dni] == null
+  }
+
+  def "unknown AVTransport state is logged and not sent to local or group devices"() {
+    given:
+    String dni = driver.device.getDeviceNetworkId()
+    driver.device.currentValues.status = 'playing'
+    driver.device.currentValues.transportStatus = 'playing'
+    driver.pendingLocalDeviceEvents.remove(dni)
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="BUFFERING_UNKNOWN"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
+
+    then:
+    driver.pendingLocalDeviceEvents[dni] == null
+    driver.pendingGroupDeviceUpdates[dni] == null
+    driver.logs.any { it.toString().contains("unsupported Sonos TransportState='BUFFERING_UNKNOWN'") }
+  }
+
   def "incomplete stereo discovery waits without creating a child or clearing preference"() {
     given:
     driver.settings.createRightChannelChildDevice = true
@@ -1288,6 +1347,33 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages[0].contains('"command":"stop"')
   }
 
+  def "unsupported stop fails and queues a separately tracked pause fallback"() {
+    given:
+    driver.device.currentValues.transportStatus = 'playing'
+    driver.stop()
+    driver.drainTransportCommandQueue()
+    Map stopCommand = driver.runtimeState.activeTransportCommand
+
+    when:
+    driver.failTransportCommand('stop', 'ERROR_UNSUPPORTED_COMMAND: stop command is not supported')
+
+    then:
+    driver.runtimeState.activeTransportCommand == null
+    driver.runtimeState.transportCommandQueue*.command == ['pause']
+    driver.logs.any { String entry -> entry.contains("Transport command stop (${stopCommand.id}) failed: ERROR_UNSUPPORTED_COMMAND") }
+    !driver.logs.any { String entry -> entry.contains("Transport command stop (${stopCommand.id}) confirmed:") }
+
+    when:
+    driver.drainTransportCommandQueue()
+
+    then:
+    websocketMessages.size() == 2
+    websocketMessages[0].contains('"command":"stop"')
+    websocketMessages[1].contains('"command":"pause"')
+    driver.runtimeState.activeTransportCommand.command == 'pause'
+    driver.logs.any { String entry -> entry.contains('sending pause as the supported fallback') }
+  }
+
   def "playlist confirmation also polls before performing a bounded reload"() {
     given:
     driver.loadPlaylistFull('playlist-7', 'repeat all', 'replace', 'off', 'true', 'on')
@@ -1616,6 +1702,99 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     !driver.device.currentValues.containsKey('groupFavoriteOperation')
+  }
+
+  def "paired audio clip waits for both sockets and never replays secondary after primary dispatch"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.setWsSubscriptionValue('audioClip', 'Subscribed')
+    driver.children.clear()
+    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getRightChannelChildDNI())
+    rightChannel.dataValues.websocketStatus = 'closed'
+    Integer childConnects = 0
+    Boolean failRightSendOnce = true
+    rightChannel.metaClass.initializeWebsocketConnection = { -> childConnects++ }
+    rightChannel.metaClass.playerLoadAudioClipForSynchronizedRelease = { String message, String correlationId ->
+      if(failRightSendOnce) {
+        failRightSendOnce = false
+        rightChannel.updateDataValue('websocketStatus', 'error')
+        return false
+      }
+      websocketMessages << "right:${message}"
+      true
+    }
+    rightChannel.metaClass.completeSynchronizedAudioClipRelease = { String correlationId -> }
+    driver.children << rightChannel
+    driver.queueWebsocketMessage('left', 0, [kind: 'audioClip', correlationId: 'pair-1',
+      pairedRightChannelMessage: 'right'])
+
+    when:
+    driver.flushWebsocketOutboundQueue()
+
+    then:
+    websocketMessages.empty
+    driver.runtimeState.websocketOutboundQueue.size() == 1
+    driver.runtimeState.websocketOutboundQueue[0].message == 'left'
+    driver.runtimeState.websocketOutboundQueue[0].pairedRightChannelMessage == 'right'
+    childConnects == 1
+
+    when:
+    rightChannel.updateDataValue('websocketStatus', 'open')
+    driver.flushWebsocketOutboundQueue()
+
+    then:
+    websocketMessages == ['left']
+    driver.runtimeState.websocketOutboundQueue == null
+    driver.logs.any { it.toString().contains('Holding paired audioClip before either channel send') }
+    driver.logs.any { it.toString().contains('AudioClip channel dispatch completed') }
+
+    when:
+    rightChannel.updateDataValue('websocketStatus', 'open')
+    driver.flushWebsocketOutboundQueue()
+
+    then:
+    websocketMessages == ['left']
+    driver.runtimeState.websocketOutboundQueue == null
+
+    cleanup:
+    driver.children.clear()
+    driver.subscriptions.clear()
+  }
+
+  def "paired clip falls back to primary only after secondary open timeout"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.setWsSubscriptionValue('audioClip', 'Subscribed')
+    driver.children.clear()
+    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getRightChannelChildDNI())
+    rightChannel.dataValues.websocketStatus = 'closed'
+    rightChannel.metaClass.initializeWebsocketConnection = { -> }
+    rightChannel.metaClass.playerLoadAudioClipForSynchronizedRelease = { String message, String correlationId ->
+      websocketMessages << "right:${message}"
+      true
+    }
+    rightChannel.metaClass.completeSynchronizedAudioClipRelease = { String correlationId -> }
+    driver.children << rightChannel
+    Map pair = [kind: 'audioClip', correlationId: 'timeout-pair', pairedRightChannelMessage: 'right',
+      pairedSecondaryDeadline: driver.now() + 30000L]
+    driver.queueWebsocketMessage('left', 0, pair)
+    driver.schedulePairedAudioClipSecondaryTimeout(driver.getWebsocketOutboundQueue()[0])
+
+    when:
+    driver.expirePairedAudioClipSecondary([correlationId: 'timeout-pair'])
+
+    then:
+    websocketMessages == ['left']
+    driver.runtimeState.websocketOutboundQueue == null
+    driver.logs.any { it.toString().contains('did not report open within 30 seconds') }
+    driver.logs.any { it.toString().contains('Secondary-open timeout expired') }
+    driver.scheduled.any { List job -> job[1] == 'expirePairedAudioClipSecondary' && job[0] == 30 }
+
+    cleanup:
+    driver.children.clear()
+    driver.subscriptions.clear()
   }
 
   def "websocket commands queue until the socket is open and flush in order"() {

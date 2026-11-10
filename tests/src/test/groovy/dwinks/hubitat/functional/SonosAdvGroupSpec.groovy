@@ -39,6 +39,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.device.currentValues.clear()
     driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
     driver.device.dataValues.playerIds = 'RINCON_FOLLOW'
+    driver.heldPlaybackState.remove('SONOS-GROUP-TEST-DNI')
   }
 
   def "retargeting a group fade to the reported volume cancels queued steps"() {
@@ -234,25 +235,85 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.pendingGroupCommands.last().command == 'refresh'
   }
 
-  def "explicit refresh hydrates legacy playback states while group is inactive"() {
+  def "refreshing an inactive shared-coordinator group does not copy playback and resets configured attributes"() {
     given:
     driver.settings.onlyUpdateWhenActive = true
+    driver.settings.resetAttributesWhenInactive = true
     driver.device.currentValues.switch = 'off'
 
     when:
     driver.applyRefreshedPlaybackState(JsonOutput.toJson([
-      status: 'playing', currentTrackName: 'Only the Good Die Young',
-      currentArtistName: 'Billy Joel', volume: 26, mute: 'unmuted'
+      status: 'playing', transportStatus: 'playing', currentTrackName: 'Only the Good Die Young',
+      currentArtistName: 'Billy Joel', volume: 26, mute: 'unmuted', currentlyJoinedPlayers: 'Living Room, Kitchen, Dining Room'
+    ]))
+
+    then:
+    driver.device.currentValue('switch') == 'off'
+    driver.events.find { Map event -> event.name == 'status' }?.value == 'inactive'
+    driver.events.find { Map event -> event.name == 'transportStatus' }?.value == 'stopped'
+    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'n/a'
+    !driver.events.any { Map event -> event.name == 'status' && event.value == 'playing' }
+    !driver.events.any { Map event -> event.name == 'transportStatus' && event.value == 'playing' }
+    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Kitchen, Dining Room'
+  }
+
+  def "inactive refresh leaves playback attributes unchanged when inactive resets are disabled"() {
+    given:
+    driver.settings.onlyUpdateWhenActive = true
+    driver.settings.resetAttributesWhenInactive = false
+    driver.device.currentValues.switch = 'off'
+    driver.device.currentValues.status = 'paused'
+    driver.device.currentValues.transportStatus = 'paused'
+    driver.device.currentValues.currentTrackName = 'Existing track'
+
+    when:
+    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
+      status: 'playing', transportStatus: 'playing', currentTrackName: 'Coordinator track'
+    ]))
+
+    then:
+    driver.events.find { Map event -> event.name == 'status' } == null
+    driver.events.find { Map event -> event.name == 'transportStatus' } == null
+    driver.events.find { Map event -> event.name == 'currentTrackName' } == null
+    driver.device.currentValue('status') == 'paused'
+    driver.device.currentValue('transportStatus') == 'paused'
+    driver.device.currentValue('currentTrackName') == 'Existing track'
+  }
+
+  def "explicit refresh still hydrates an inactive group when active-only updates are disabled"() {
+    given:
+    driver.settings.onlyUpdateWhenActive = false
+    driver.settings.resetAttributesWhenInactive = true
+    driver.device.currentValues.switch = 'off'
+
+    when:
+    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
+      status: 'playing', transportStatus: 'playing', currentTrackName: 'Coordinator track', volume: 26, mute: 'unmuted'
     ]))
 
     then:
     driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
-    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Only the Good Die Young'
-    driver.events.find { Map event -> event.name == 'currentArtistName' }?.value == 'Billy Joel'
+    driver.events.find { Map event -> event.name == 'transportStatus' }?.value == 'playing'
+    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Coordinator track'
     driver.events.find { Map event -> event.name == 'volume' }?.value == 26
-    driver.events.find { Map event -> event.name == 'groupVolume' }?.value == 26
     driver.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
-    driver.events.find { Map event -> event.name == 'groupMute' }?.value == 'unmuted'
+  }
+
+  def "explicit refresh hydrates playback while the group is active"() {
+    given:
+    driver.settings.onlyUpdateWhenActive = true
+    driver.settings.resetAttributesWhenInactive = true
+    driver.device.currentValues.switch = 'on'
+
+    when:
+    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
+      status: 'playing', transportStatus: 'playing', currentTrackName: 'Active group track'
+    ]))
+
+    then:
+    driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
+    driver.events.find { Map event -> event.name == 'transportStatus' }?.value == 'playing'
+    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Active group track'
   }
 
   def "deprecated diagnostic states are removed during initialization"() {

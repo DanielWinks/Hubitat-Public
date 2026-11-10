@@ -379,6 +379,7 @@ Boolean hasLineInCapability() {
 @Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
+@Field static final Integer PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS = 30
 @Field static final Integer WS_CONNECT_TIMEOUT_SECONDS = 20
 @Field static final Integer WS_HEALTH_CHECK_SECONDS = 300
 @Field static final String WS_DISCONNECTED_SINCE_KEY = 'wsDisconnectedSince'
@@ -3670,7 +3671,6 @@ String unEscapeLastChangeXML(String text) {
 @CompileStatic
 void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   if(xmlString.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
-  if(xmlString.contains('&lt;TransportState val=&quot;TRANSITIONING&quot;/&gt;')) { return } //Bail out if this AVTransport message is TRANSITIONING"
 
   XmlSlurper xmlParser = new XmlSlurper()
   GPathResult propertyset = xmlParser.parseText(xmlString)
@@ -3678,6 +3678,12 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   if(!lastChange) {return}
   GPathResult event = xmlParser.parseText(lastChange)
   GPathResult instanceId = (GPathResult)event['InstanceID']
+  String transportState = instanceId['TransportState']['@val']?.toString()
+  String status = normalizeTransportStatus(transportState)
+  if(transportState?.trim()?.equalsIgnoreCase('TRANSITIONING')) {
+    logTrace("Ignoring transient Sonos TransportState=TRANSITIONING from AVTransport event at ${localUpnpUrl}")
+    return
+  }
 
   String sleepTimerGeneration = instanceId['SleepTimerGeneration']['@val']?.toString()
   String sleepTimerState = instanceId['SleepTimerState']['@val']?.toString()
@@ -3718,8 +3724,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
     logTrace("Playing Local Track")
   }
 
-  String status = (instanceId['TransportState']['@val'].toString()).toLowerCase().replace('_playback','')
-  setStatusTransportStatus(status)
+  setStatusTransportStatus(transportState, "AVTransport event from ${localUpnpUrl}")
 
   String currentPlayMode = instanceId['CurrentPlayMode']['@val']
   setPlayMode(currentPlayMode)
@@ -5678,7 +5683,31 @@ String getCurrentPlaylist() {
 }
 
 @CompileStatic
-void setStatusTransportStatus(String status) {
+String normalizeTransportStatus(String transportState) {
+  if(transportState == null) { return null }
+  String normalizedState = transportState.trim().toUpperCase(Locale.US)
+  if(normalizedState == 'PLAYING') { return 'playing' }
+  if(normalizedState == 'PAUSED_PLAYBACK') { return 'paused' }
+  if(normalizedState == 'STOPPED' || normalizedState == 'NO_MEDIA_PRESENT') { return 'stopped' }
+  return null
+}
+
+@CompileStatic
+void setStatusTransportStatus(String transportState, String source = 'transport status update') {
+  if(transportState == null || transportState.trim() == '') {
+    logWarn("Ignoring empty Sonos TransportState from ${source}")
+    return
+  }
+  String normalizedState = transportState.trim().toUpperCase(Locale.US)
+  if(normalizedState == 'TRANSITIONING') {
+    logTrace("Ignoring transient Sonos TransportState=TRANSITIONING from ${source}; preserving ${getTransportStatus() ?: 'unknown'}")
+    return
+  }
+  String status = normalizeTransportStatus(transportState)
+  if(status == null) {
+    logWarn("Ignoring unsupported Sonos TransportState='${transportState}' from ${source}")
+    return
+  }
   if(status == getTransportStatus()) { return }
   queueLocalDeviceEvent('status', status)
   queueLocalDeviceEvent('transportStatus', status)
@@ -6066,6 +6095,7 @@ Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
 void setWebSocketStatus(String status) {
+  logTrace("Primary WebSocket status transition: previous=${getWebSocketStatus()}, next=${status}, outboundQueue=${getWebsocketOutboundQueue().size()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
@@ -6295,6 +6325,7 @@ List<Map> getCurrentPlayingStatesForGroup() {
 // Websocket Connection and Initialization
 // =============================================================================
 void webSocketStatus(String message) {
+  logTrace("Primary WebSocket status callback received: message=${message}, currentStatus=${getWebSocketStatus()}, outboundQueue=${getWebsocketOutboundQueue().size()}")
   if(message == 'failure: null') {
     setWebSocketStatus('closed')
     scheduleWebSocketReconnect()
@@ -6415,11 +6446,13 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
 
 void flushWebsocketOutboundQueue() {
   if(!isWebsocketConnected()) {
+    logTrace("Outbound WebSocket queue drain deferred; primary websocketStatus=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
     return
   }
 
   List<Map> queue = getWebsocketOutboundQueue()
+  logTrace("Starting outbound WebSocket queue drain: queued=${queue.size()}, primaryStatus=${getWebSocketStatus()}")
   runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
   while(!queue.isEmpty()) {
     Map entry = (Map)queue.remove(0)
@@ -6427,14 +6460,44 @@ void flushWebsocketOutboundQueue() {
     Integer attempts = (entry?.attempts ?: 0) as Integer
     if(!message) { continue }
     if(entry?.kind == 'audioClip' && !isCurrentlySubcribedToAudioClipWS()) {
+      logTrace("Holding audioClip queue entry until primary audioClip subscription is active: correlation=${entry?.correlationId}, queueRemaining=${queue.size() + 1}")
       queue.add(0, entry)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
       if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
       return
     }
+    String pairedRightMessage = entry?.pairedRightChannelMessage?.toString()
+    ChildDeviceWrapper pairedRightChannel = pairedRightMessage ? getRightChannelChild() : null
+    Boolean secondaryExpired = entry.pairedSecondaryExpired == true
+    if(pairedRightMessage && !secondaryExpired && (!pairedRightChannel || pairedRightChannel.getDataValue('websocketStatus') != 'open')) {
+      logTrace("Holding paired audioClip before either channel send: correlation=${entry.correlationId}, primary=open, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}, timeoutExpired=${secondaryExpired}")
+      queue.add(0, entry)
+      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      if(pairedRightChannel) {
+        watchRightChannelWebsocket(pairedRightChannel)
+        pairedRightChannel.initializeWebsocketConnection()
+      } else {
+        logInfo('Paired audio clip is waiting for the right-channel socket before dispatch.')
+      }
+      schedulePairedAudioClipSecondaryTimeout(entry)
+      return
+    }
+    Boolean primarySendReturned = false
     try {
+      logTrace("Dispatching audioClip primary channel: correlation=${entry?.correlationId}, paired=${pairedRightMessage != null}, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, secondaryExpired=${secondaryExpired}, attempts=${attempts}")
       armExpectedSubscriptionEvents(entry)
       interfaces.webSocket.sendMessage(message)
+      primarySendReturned = true
+      Boolean rightSent = false
+      if(pairedRightMessage && !secondaryExpired) {
+        rightSent = pairedRightChannel.playerLoadAudioClipForSynchronizedRelease(
+          pairedRightMessage, entry.correlationId?.toString()) == true
+        pairedRightChannel.completeSynchronizedAudioClipRelease(entry.correlationId?.toString())
+        if(!rightSent) {
+          logInfo("Secondary audio clip send failed after primary dispatch for ${entry.correlationId}; not replaying the secondary clip")
+        }
+      }
+      logTrace("AudioClip channel dispatch completed: correlation=${entry?.correlationId}, primary=sent, secondary=${!pairedRightMessage ? 'not paired' : (secondaryExpired ? 'timed out; skipped' : (rightSent ? 'sent' : 'failed'))}")
       if(entry?.kind == 'audioClip') {
         audioClipCommandSent(entry.correlationId as String)
       } else if(entry?.kind == 'transportCommand') {
@@ -6443,6 +6506,17 @@ void flushWebsocketOutboundQueue() {
         transportStatusQuerySocketSent(entry.transportCommandId as String)
       }
     } catch(Exception e) {
+      logTrace("Outbound WebSocket send threw for correlation=${entry?.correlationId ?: 'n/a'}, kind=${entry?.kind ?: 'unknown'}, attempt=${attempts + 1}: ${e.message}")
+      if(primarySendReturned && pairedRightMessage) {
+        logInfo("Secondary audio clip dispatch threw after primary dispatch for ${entry.correlationId}; not replaying either channel")
+        try {
+          pairedRightChannel?.completeSynchronizedAudioClipRelease(entry.correlationId?.toString())
+        } catch(Exception completionError) {
+          logTrace("Could not complete secondary release logging for ${entry.correlationId}: ${completionError.message}")
+        }
+        audioClipCommandSent(entry.correlationId as String)
+        continue
+      }
       cancelExpectedSubscriptionEvents(entry)
       Integer nextAttempt = attempts + 1
       if(nextAttempt >= WS_OUTBOUND_MAX_ATTEMPTS) {
@@ -6466,6 +6540,66 @@ void flushWebsocketOutboundQueue() {
       return
     }
   }
+  logTrace("Outbound WebSocket queue drain completed: remaining=${getWebsocketOutboundQueue().size()}, primaryStatus=${getWebSocketStatus()}")
+}
+
+void watchRightChannelWebsocket(ChildDeviceWrapper rightChannel) {
+  logTrace("Tracking right-channel WebSocket status through child-to-parent callbacks: child=${rightChannel?.displayName}, dni=${rightChannel?.getDeviceNetworkId()}, status=${rightChannel?.getDataValue('websocketStatus')}")
+}
+
+void rightChannelWebsocketStatusChanged(String status, String childDeviceNetworkId) {
+  ChildDeviceWrapper rightChannel = getRightChannelChild()
+  if(rightChannel?.getDeviceNetworkId()?.toString() != childDeviceNetworkId) {
+    logTrace("Ignoring right-channel WebSocket status from unexpected child: dni=${childDeviceNetworkId}, expected=${rightChannel?.getDeviceNetworkId()}")
+    return
+  }
+  logTrace("Right-channel WebSocket status callback: value=${status}, child=${childDeviceNetworkId}, primaryStatus=${getWebSocketStatus()}, queued=${getWebsocketOutboundQueue().size()}")
+  if(status == 'open') {
+    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
+    else { logTrace('Right-channel socket opened first; paired entry remains queued until the primary socket opens') }
+  }
+}
+
+void schedulePairedAudioClipSecondaryTimeout(Map entry) {
+  if(!entry?.pairedRightChannelMessage || entry.pairedSecondaryExpired == true || !entry.correlationId) { return }
+  if(entry.pairedSecondaryDeadline == null) {
+    entry.pairedSecondaryDeadline = now() + (PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS * 1000L)
+  }
+  if(entry.pairedSecondaryTimeoutScheduled == true) { return }
+  Long remainingMillis = Math.max(0L, (entry.pairedSecondaryDeadline as Long) - now())
+  Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
+  entry.pairedSecondaryTimeoutScheduled = true
+  logTrace("Scheduled secondary-open timeout: correlation=${entry.correlationId}, delay=${delaySeconds}s, deadline=${entry.pairedSecondaryDeadline}, secondaryStatus=${getRightChannelChild()?.getDataValue('websocketStatus') ?: 'child unavailable'}")
+  runIn(delaySeconds, 'expirePairedAudioClipSecondary',
+      [data: [correlationId: entry.correlationId.toString()], overwrite: false])
+}
+
+void expirePairedAudioClipSecondary(Map data) {
+  String correlationId = data?.correlationId?.toString()
+  if(!correlationId) {
+    logTrace('Ignored secondary-open timeout without a correlation ID')
+    return
+  }
+  List<Map> queue = getWebsocketOutboundQueue()
+  Map entry = queue.find { Map queued -> queued?.correlationId?.toString() == correlationId }
+  if(entry == null || entry.pairedSecondaryExpired == true) {
+    logTrace("Secondary-open timeout is stale; no pending paired queue entry remains for ${correlationId}")
+    return
+  }
+  ChildDeviceWrapper rightChannel = getRightChannelChild()
+  if(rightChannel?.getDataValue('websocketStatus') == 'open') {
+    logTrace("Secondary socket reported open before timeout handling for ${correlationId}; preserving paired dispatch")
+    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
+    else { logTrace("Secondary opened before timeout for ${correlationId}, but primary remains ${getWebSocketStatus()}; preserving paired entry") }
+    return
+  }
+  entry.pairedSecondaryExpired = true
+  entry.remove('pairedSecondaryTimeoutScheduled')
+  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+  logTrace("Secondary-open timeout expired: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, queued=${queue.size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}")
+  logInfo("Secondary socket did not report open within ${PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS} seconds for ${correlationId}; continuing with primary only")
+  if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
+  else { logTrace("Primary-only fallback remains queued until primary socket opens: correlation=${correlationId}") }
 }
 
 Boolean sendWsMessage(String message, Map metadata = [:]) {
@@ -7116,6 +7250,7 @@ void failTransportCommand(String response, String reason) {
     active.lastFailureReason = reason ?: 'Sonos returned a command error'
     if(reason?.contains('ERROR_UNSUPPORTED_COMMAND') && command == 'stop') {
       finishTransportCommand(active, false, active.lastFailureReason as String)
+      logInfo('Sonos does not support playback stop for this target; sending pause as the supported fallback')
       enqueueTransportCommand('pause')
     } else if(reason?.contains('ERROR_PLAYBACK_FAILED') && command in ['skipToNextTrack', 'skipToPreviousTrack']) {
       finishTransportCommand(active, false, active.lastFailureReason as String)
@@ -7547,39 +7682,95 @@ void prepareAndStartAudioClip() {
   completePreparedAudioClipDispatch()
 }
 
-/** Called in the tight group release loop. Keep this method free of logging and bookkeeping. */
+/** Called in the tight group release loop; keep the two socket writes adjacent. */
 void startPreparedAudioClip() {
-  if(runtimeState.audioClipPlaying != true) { return }
+  if(runtimeState.audioClipPlaying != true) {
+    logTrace("No active prepared audioClip to release for Sonos player ${getId()}")
+    return
+  }
   Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
   String message = clipMessage?.leftChannel?.toString()
   String correlationId = clipMessage?.correlationId?.toString()
-  if(!message || !correlationId) { runtimeState.preparedAudioClipDispatchResult = 'missing'; return }
-
-  Map metadata = [kind: 'audioClip', correlationId: correlationId]
-  if(!isWebsocketConnected() || !getWebsocketOutboundQueue().isEmpty() || !isCurrentlySubcribedToAudioClipWS()) {
-    queueWebsocketMessage(message, 0, metadata)
-    runtimeState.preparedAudioClipDispatchResult = 'queued'
-    runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
-  } else {
-    try {
-      interfaces.webSocket.sendMessage(message)
-      runtimeState.preparedAudioClipDispatchResult = 'sent'
-      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
-    } catch(Exception e) {
-      queueWebsocketMessage(message, 1, metadata)
-      runtimeState.preparedAudioClipDispatchResult = 'failed'
-      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
-      runtimeState.preparedAudioClipDispatchError = e.message?.toString()
-    }
+  if(!message || !correlationId) {
+    logTrace("Prepared audioClip is missing its primary message or correlation ID: player=${getId()}, hasMessage=${message != null}, correlation=${correlationId}")
+    runtimeState.preparedAudioClipDispatchResult = 'missing'
+    return
   }
 
-  if(clipMessage.rightChannel) {
-    ChildDeviceWrapper rightChannel = getRightChannelChild()
-    if(rightChannel) {
-      rightChannel.playerLoadAudioClipForSynchronizedRelease(
-        clipMessage.rightChannel.toString(), correlationId)
+  ChildDeviceWrapper rightChannel = clipMessage.rightChannel ? getRightChannelChild() : null
+  String pairedRightMessage = clipMessage.rightChannel?.toString()
+  if(pairedRightMessage && rightChannel) {
+    watchRightChannelWebsocket(rightChannel)
+    if(rightChannel.getDataValue('websocketStatus') != 'open') {
+      rightChannel.initializeWebsocketConnection()
     }
-    else { runtimeState.preparedAudioClipRightChannelMissing = true }
+  } else if(pairedRightMessage) {
+    runtimeState.preparedAudioClipRightChannelMissing = true
+    logTrace("Paired audioClip has no right-channel child: correlation=${correlationId}; proceeding with primary only")
+    pairedRightMessage = null
+  }
+
+  Map metadata = [kind: 'audioClip', correlationId: correlationId]
+  if(pairedRightMessage) { metadata.pairedRightChannelMessage = pairedRightMessage }
+  Boolean primaryReady = isWebsocketConnected() && getWebsocketOutboundQueue().isEmpty() && isCurrentlySubcribedToAudioClipWS()
+  Boolean rightReady = !pairedRightMessage || rightChannel?.getDataValue('websocketStatus') == 'open'
+  logTrace("AudioClip paired-send readiness: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, primaryQueue=${getWebsocketOutboundQueue().size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: (pairedRightMessage ? 'child unavailable' : 'not paired')}, primaryReady=${primaryReady}, secondaryReady=${rightReady}")
+  if(!primaryReady || !rightReady) {
+    if(pairedRightMessage && !rightReady) {
+      metadata.pairedSecondaryDeadline = now() + (PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS * 1000L)
+    }
+    queueWebsocketMessage(message, 0, metadata)
+    if(pairedRightMessage && !rightReady) {
+      Map queuedPair = getWebsocketOutboundQueue().find { Map entry ->
+        entry?.correlationId?.toString() == correlationId
+      }
+      if(queuedPair) { schedulePairedAudioClipSecondaryTimeout(queuedPair) }
+    }
+    logTrace("Queued audioClip dispatch as ${pairedRightMessage ? 'one paired entry' : 'primary-only entry'}: correlation=${correlationId}, reason=${!primaryReady ? 'primary socket/queue/subscription not ready' : 'secondary socket not open'}, queueSize=${getWebsocketOutboundQueue().size()}")
+    runtimeState.preparedAudioClipDispatchResult = 'queued'
+    runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
+    if(!isWebsocketConnected()) { wsConnect() }
+    else if(!isCurrentlySubcribedToAudioClipWS() && runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
+    return
+  } else {
+    Boolean primarySendReturned = false
+    try {
+      logTrace("Starting tight paired audioClip send pass: correlation=${correlationId}, primaryStatus=open, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}")
+      interfaces.webSocket.sendMessage(message)
+      primarySendReturned = true
+      if(pairedRightMessage && rightChannel) {
+        Boolean rightSent = rightChannel.playerLoadAudioClipForSynchronizedRelease(
+          pairedRightMessage, correlationId) == true
+        rightChannel.completeSynchronizedAudioClipRelease(correlationId)
+        logTrace("Tight paired audioClip send pass returned: correlation=${correlationId}, primary=sent, secondary=${rightSent ? 'sent' : 'failed'}")
+        if(!rightSent) {
+          logInfo("Secondary audio clip send failed after primary dispatch for ${correlationId}; not replaying the secondary clip")
+          runtimeState.preparedAudioClipDispatchResult = 'primaryOnly'
+        } else {
+          runtimeState.preparedAudioClipDispatchResult = 'sent'
+        }
+      } else {
+        logTrace("Primary audioClip send returned successfully without a paired channel: correlation=${correlationId}")
+        runtimeState.preparedAudioClipDispatchResult = 'sent'
+      }
+      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
+    } catch(Exception e) {
+      logTrace("Tight audioClip send pass threw: correlation=${correlationId}, primarySendReturned=${primarySendReturned}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, error=${e.message}")
+      if(primarySendReturned && pairedRightMessage) {
+        try {
+          rightChannel?.completeSynchronizedAudioClipRelease(correlationId)
+        } catch(Exception completionError) {
+          logTrace("Could not complete secondary release logging for ${correlationId}: ${completionError.message}")
+        }
+        logInfo("Secondary audio clip dispatch threw after primary dispatch for ${correlationId}; not replaying either channel")
+        runtimeState.preparedAudioClipDispatchResult = 'primaryOnly'
+      } else {
+        queueWebsocketMessage(message, 1, metadata)
+        runtimeState.preparedAudioClipDispatchResult = 'failed'
+      }
+      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
+      if(!primarySendReturned) { runtimeState.preparedAudioClipDispatchError = e.message?.toString() }
+    }
   }
 }
 
@@ -7598,11 +7789,15 @@ void completePreparedAudioClipDispatch() {
     logTrace("Sent prepared audioClip to Sonos player ${getId()}, correlation=${correlationId}")
     audioClipCommandSent(correlationId)
   } else if(result == 'queued') {
-    logTrace("Queued prepared audioClip for Sonos player ${getId()}, correlation=${correlationId}")
+    logTrace("Queued prepared audioClip for Sonos player ${getId()}, correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, queueSize=${getWebsocketOutboundQueue().size()}")
     if(!isWebsocketConnected()) { wsConnect() }
     else if(!isCurrentlySubcribedToAudioClipWS()) {
       if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
     } else if(getWebsocketOutboundQueue().size() > 0) { flushWebsocketOutboundQueue() }
+  } else if(result == 'primaryOnly') {
+    logTrace("Completing primary-only audioClip dispatch: player=${getId()}, correlation=${correlationId}; secondary will not be replayed")
+    logInfo("Primary audio clip sent for ${getId()}, correlation=${correlationId}; secondary dispatch failed and will not be replayed")
+    audioClipCommandSent(correlationId)
   } else if(result == 'failed') {
     logWarn("Prepared audioClip send failed for Sonos player ${getId()}, correlation=${correlationId}: ${error ?: 'unknown error'}; queued for retry")
     setWebSocketStatus('closed')
@@ -7612,12 +7807,7 @@ void completePreparedAudioClipDispatch() {
   }
 
   Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(activeClip?.rightChannel && rightChannel) {
-    logTrace("Finalizing paired-speaker audioClip release for Sonos player ${getId()}, child=${rightChannel.displayName} (${getRightChannelChildDNI()}), correlation=${activeClip.correlationId}")
-    rightChannel.completeSynchronizedAudioClipRelease(
-      activeClip.correlationId?.toString())
-  } else if(rightChannelMissing || activeClip?.rightChannel) {
+  if(rightChannelMissing || activeClip?.rightChannel && !getRightChannelChild()) {
     logWarn('Right channel audio clip requested but no right channel child device is available. Playing clip on left channel only.')
   }
 }
@@ -7750,21 +7940,8 @@ void prepareNextAudioClipForDispatch() {
 }
 
 void dispatchPreparedAudioClip() {
-  Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
-  if(!clipMessage || runtimeState.audioClipPlaying != true) { return }
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  Boolean sentToSocket = sendWsMessage(clipMessage.leftChannel,
-    [kind: 'audioClip', correlationId: clipMessage.correlationId as String])
-  if(sentToSocket) {
-    logTrace("Sent audioClip.loadAudioClip over WebSocket to Sonos player ${getId()}, correlation=${clipMessage.correlationId}, channel=left")
-  } else {
-    logTrace("Queued audioClip.loadAudioClip for WebSocket delivery to Sonos player ${getId()}, correlation=${clipMessage.correlationId}, channel=left")
-  }
-  if(clipMessage.rightChannel && rightChannel) {
-    rightChannel.playerLoadAudioClip(clipMessage.rightChannel)
-  } else if(clipMessage.rightChannel) {
-    logWarn('Right channel audio clip requested but no right channel child device is available. Playing clip on left channel only.')
-  }
+  startPreparedAudioClip()
+  completePreparedAudioClipDispatch()
 }
 // =============================================================================
 // End Websocket Commands
@@ -8350,6 +8527,7 @@ void removeCurrentlyPlayingItemFromQueue() {
   Map snapshot = runtimeState.lastTransportPlaybackSnapshot instanceof Map
       ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
   String currentTrackUri = normalizeQueueTrackUri(snapshot.trackUri?.toString())
+  String currentTrackPosition = snapshot.track?.toString()
   String transportState = snapshot.transportState?.toString()?.toUpperCase()
   if(!currentTrackUri || (transportState && !(transportState in ['PLAYING', 'PAUSED_PLAYBACK']))) {
     logInfo("Currently playing item is not in the Sonos queue for ${device.displayName}: no active track URI is available")
@@ -8362,16 +8540,17 @@ void removeCurrentlyPlayingItemFromQueue() {
   }
   String requestId = UUID.randomUUID().toString()
   state.queueBrowseRequestId = requestId
-  requestQueuePage(host, 0, [], requestId, 'remove-current', currentTrackUri)
+  requestQueuePage(host, 0, [], requestId, 'remove-current', currentTrackUri, currentTrackPosition)
 }
 
-void requestQueuePage(String host, Integer startingIndex, List<Map> entries, String requestId, String action = 'display', String currentTrackUri = null) {
+void requestQueuePage(String host, Integer startingIndex, List<Map> entries, String requestId, String action = 'display', String currentTrackUri = null, String currentTrackPosition = null) {
   Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [
     ObjectID: 'Q:0', BrowseFlag: 'BrowseDirectChildren', Filter: '*',
     StartingIndex: startingIndex, RequestedCount: 100, SortCriteria: ''
   ])
   postSonosSoapAsync('queueBrowseCallback', params, [host: host, startingIndex: startingIndex,
-    entries: entries, requestId: requestId, action: action, currentTrackUri: currentTrackUri])
+    entries: entries, requestId: requestId, action: action, currentTrackUri: currentTrackUri,
+    currentTrackPosition: currentTrackPosition])
 }
 
 void queueBrowseCallback(AsyncResponse response, Map data) {
@@ -8406,11 +8585,37 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
     }
     Integer nextIndex = (data.startingIndex as Integer) + returned
     if(returned > 0 && nextIndex < total && entries.size() < 2000) {
-      requestQueuePage(data.host.toString(), nextIndex, entries, data.requestId.toString(), data.action?.toString() ?: 'display', data.currentTrackUri?.toString())
+      requestQueuePage(data.host.toString(), nextIndex, entries, data.requestId.toString(), data.action?.toString() ?: 'display',
+        data.currentTrackUri?.toString(), data.currentTrackPosition?.toString())
     } else {
       state.remove('queueBrowseRequestId')
       if(data.action == 'remove-current') {
-        Map currentEntry = entries.find { Map entry -> entry.trackUri && entry.trackUri == data.currentTrackUri }
+        Integer currentTrackPosition = null
+        try { currentTrackPosition = data.currentTrackPosition?.toString()?.toInteger() } catch(Exception ignored) { }
+        Map currentEntry = null
+        if(currentTrackPosition != null && currentTrackPosition > 0 && currentTrackPosition <= entries.size()) {
+          Map positionedEntry = entries[currentTrackPosition - 1] as Map
+          if(positionedEntry.trackUri && positionedEntry.trackUri == data.currentTrackUri) {
+            currentEntry = positionedEntry
+          } else {
+            logInfo("Cannot remove currently playing queue item for ${device.displayName}: CurrentTrack position ${currentTrackPosition} does not match the current track URI")
+            setChildQueue(renderQueueHtml(entries))
+            return
+          }
+        } else if(currentTrackPosition != null && currentTrackPosition > 0) {
+          logInfo("Cannot remove currently playing queue item for ${device.displayName}: CurrentTrack position ${currentTrackPosition} is outside the ${entries.size}-item queue")
+          setChildQueue(renderQueueHtml(entries))
+          return
+        } else {
+          List<Map> matchingEntries = entries.findAll { Map entry -> entry.trackUri && entry.trackUri == data.currentTrackUri }
+          if(matchingEntries.size() == 1) {
+            currentEntry = matchingEntries[0]
+          } else if(matchingEntries.size() > 1) {
+            logWarn("Cannot remove currently playing queue item for ${device.displayName}: URI matches ${matchingEntries.size()} queue entries and CurrentTrack position is unavailable")
+            setChildQueue(renderQueueHtml(entries))
+            return
+          }
+        }
         if(currentEntry) {
           logInfo("Removing currently playing queue item '${currentEntry.title}' (${currentEntry.objectId}) from ${device.displayName}")
           removeQueueItem(currentEntry.objectId?.toString(), currentEntry.updateId?.toString())
@@ -9241,7 +9446,7 @@ void processWebsocketMessage(String message) {
       String errorReason = "${eventData?.errorCode ?: 'UNKNOWN'}: ${eventData?.reason ?: eventData}"
       failTransportCommand(eventType?.response?.toString(), errorReason)
       if(eventType?.response == 'stop' && eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
-        logTrace('Stop command unavailable for current stream; queued pause as the fallback')
+        logTrace('Stop command unavailable for current target; pause fallback queued and tracked independently')
       }
     }
     if(eventType?.namespace == 'groups' && (eventType?.response == 'createGroup' || eventType?.response == 'modifyGroupMembers')) {

@@ -357,7 +357,7 @@ class SonosAdvancedAppSpec extends Specification {
     ] as Event)
   }
 
-  def "explicit group refresh hydrates legacy playback states while inactive"() {
+  def "explicit group refresh forwards coordinator playback values to the group driver"() {
     given:
     coordinator.currentValues.status = 'playing'
     coordinator.currentValues.currentTrackName = 'Only the Good Die Young'
