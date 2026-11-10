@@ -18,6 +18,8 @@ import hubitat.scheduling.AsyncResponse
 @Field static final String VOLTAGE_DELTA_STATE = '/number/voltage_reporting_delta/set'
 @Field static final String CURRENT_DELTA_STATE = '/number/current_reporting_delta/set'
 @Field static final String POWER_DELTA_STATE = '/number/power_reporting_delta/set'
+@Field List<Map> configQueue = []
+@Field List<String> refreshQueue = []
 
 metadata {
     definition(name: 'ESPHome Power Monitoring Switch', namespace: 'dwinks', author: 'Daniel Winks') {
@@ -52,12 +54,14 @@ void updated() { initialize() }
 void uninstalled() { unschedule() }
 
 void initialize() {
+    unschedule()
+    configQueue.clear()
+    refreshQueue.clear()
     clearLegacyState()
     if (!connectionIp()) { sendOffline(); return }
     configureEspHome()
     checkConnection()
     refresh()
-    unschedule()
     runEvery5Minutes('checkConnection')
 }
 
@@ -71,7 +75,7 @@ private void clearLegacyState() {
 }
 
 void configureEspHome() {
-    state.configQueue = [
+    configQueue = [
         [path: HUBITAT_IP_STATE, value: connectionCallbackUrl()],
         [path: RELAY_RESTORE_STATE, value: settings.relayRestoreMode ?: 'ALWAYS_OFF'],
         [path: VOLTAGE_DELTA_STATE, value: settings.voltageDelta ?: 1.0],
@@ -82,29 +86,25 @@ void configureEspHome() {
 }
 
 void sendNextConfigRequest() {
-    List queue = (state.configQueue ?: []) as List
-    if (!queue) { state.remove('configQueue'); return }
-    Map request = queue.remove(0) as Map
-    if (queue) { state.configQueue = queue } else { state.remove('configQueue') }
+    if (!configQueue) { return }
+    Map request = configQueue.remove(0) as Map
     postEndpoint(request.path.toString(), request.value)
-    if (queue) { runInMillis(750, 'sendNextConfigRequest') }
+    if (configQueue) { runInMillis(750, 'sendNextConfigRequest') }
 }
 
 void on() { postEndpoint("${RELAY_STATE}/turn_on", null) }
 void off() { postEndpoint("${RELAY_STATE}/turn_off", null) }
 
 void refresh() {
-    state.refreshQueue = [RELAY_STATE, VOLTAGE_STATE, FREQUENCY_STATE, CURRENT_STATE, POWER_STATE, ENERGY_STATE]
+    refreshQueue = [RELAY_STATE, VOLTAGE_STATE, FREQUENCY_STATE, CURRENT_STATE, POWER_STATE, ENERGY_STATE]
     sendNextRefreshRequest()
 }
 
 void sendNextRefreshRequest() {
-    List queue = (state.refreshQueue ?: []) as List
-    if (!queue) { state.remove('refreshQueue'); return }
-    String path = queue.remove(0).toString()
-    if (queue) { state.refreshQueue = queue } else { state.remove('refreshQueue') }
+    if (!refreshQueue) { return }
+    String path = refreshQueue.remove(0)
     getEndpoint(path)
-    if (queue) { runInMillis(400, 'sendNextRefreshRequest') }
+    if (refreshQueue) { runInMillis(400, 'sendNextRefreshRequest') }
 }
 
 void checkConnection() { getEndpoint('/') }
