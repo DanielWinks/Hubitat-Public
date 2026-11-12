@@ -2225,4 +2225,53 @@ class SonosAdvPlayerSpec extends Specification {
     command << ['componentPlayTextNoRestoreLocal', 'componentLoadStreamUrlLocal', 'componentSetStreamUrlLocal']
   }
 
+  def "public playback commands treat zero as unspecified and minus one as explicit zero"() {
+    given:
+    List<BigDecimal> appliedVolumes = []
+    driver.metaClass.getParent = { -> null }
+    driver.metaClass.componentSetGroupLevelLocal = { BigDecimal level -> appliedVolumes.add(level) }
+    driver.metaClass.setAVTransportURIAndPlay = { String uri -> }
+    driver.device.dataValues.capabilities = ''
+
+    when:
+    driver.playTrack('http://example.test/track.mp3', 0)
+    driver.playHighPriorityTrack('http://example.test/announcement.mp3', 0)
+
+    then:
+    appliedVolumes.isEmpty()
+
+    when:
+    driver.playTrack('http://example.test/track.mp3', -1G)
+    driver.playHighPriorityTrack('http://example.test/announcement.mp3', -1G)
+
+    then:
+    appliedVolumes == [0G, 0G]
+  }
+
+  def "public optional playback volume normalizer preserves the explicit zero sentinel"() {
+    expect:
+    driver.normalizePublicPlaybackVolume(input) == expected
+
+    where:
+    input | expected
+    null  | null
+    0     | null
+    '0'   | null
+    0G    | null
+    -1G   | -1G
+    12G   | 12G
+  }
+
+  def "announcement volume resolves minus one sentinel without changing omitted-volume boost"() {
+    expect:
+    driver.calculateAnnouncementVolume(requested, 20, 5) == expected
+
+    where:
+    requested | expected
+    null      | 25
+    0G        | 0
+    -1G       | 0
+    12G       | 17
+  }
+
 }

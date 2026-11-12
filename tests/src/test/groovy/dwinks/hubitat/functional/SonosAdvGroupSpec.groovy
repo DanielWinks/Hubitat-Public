@@ -86,6 +86,47 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.pendingGroupCommands[0].sequence == 1
   }
 
+  def "optional playback volumes normalize webCoRE zero and preserve minus one sentinel"() {
+    given:
+    driver.metaClass.textToSpeech = { String text, String voice ->
+      [uri: 'http://example.test/announcement.mp3', duration: 2] as LinkedHashMap
+    }
+
+    when:
+    driver.playTrack('http://example.test/track.mp3', 0)
+    driver.playHighPriorityTrack('http://example.test/announcement.mp3', 0)
+    driver.enqueueLowPriorityTrack('http://example.test/queued.mp3', 0)
+    driver.playText('test', 0)
+    driver.playTextAndRestore('test', 0)
+    driver.playTextAndResume('test', 0)
+    driver.speak('test', 0)
+    driver.speakNoRestore('test', 0)
+    driver.playHighPriorityTTS('test', 0)
+    driver.playTrackAndRestore('http://example.test/clip.mp3', 0)
+    driver.playTrackAndResume('http://example.test/clip.mp3', 0)
+
+    then:
+    driver.runtimeState.pendingGroupCommands.size() == 11
+    driver.runtimeState.pendingGroupCommands.every { Map request -> request.args.volume == null }
+
+    when:
+    driver.playTrack('http://example.test/track.mp3', -1G)
+    driver.playHighPriorityTrack('http://example.test/announcement.mp3', -1G)
+    driver.enqueueLowPriorityTrack('http://example.test/queued.mp3', -1G)
+    driver.playText('test', -1G)
+    driver.playTextAndRestore('test', -1G)
+    driver.playTextAndResume('test', -1G)
+    driver.speak('test', -1G)
+    driver.speakNoRestore('test', -1G)
+    driver.playHighPriorityTTS('test', -1G)
+    driver.playTrackAndRestore('http://example.test/clip.mp3', -1G)
+    driver.playTrackAndResume('http://example.test/clip.mp3', -1G)
+
+    then:
+    driver.runtimeState.pendingGroupCommands.drop(11).size() == 11
+    driver.runtimeState.pendingGroupCommands.drop(11).every { Map request -> request.args.volume == '-1' }
+  }
+
   def "group command request IDs stay unique when the in-memory sequence resets"() {
     when:
     driver.requestGroupCommand('refresh')

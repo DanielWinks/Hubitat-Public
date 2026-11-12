@@ -113,18 +113,18 @@ metadata {
 
     command 'playHighPriorityTTS', [
       [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
-      [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]],
+      [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]],
       [name: 'Voice name', type: "ENUM", constraints: getCachedTTSVoiceNames(), defaultValue: getCurrentTTSVoice()]
     ]
 
     command 'playHighPriorityTrack', [
       [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
-      [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
+      [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
     ]
 
     command 'enqueueLowPriorityTrack', [
       [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
-      [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
+      [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
     ]
 
     // Playback control commands
@@ -474,23 +474,23 @@ void setState(String stateName, String stateValue) {
 }
 void clearState() { runtimeState.clear() }
 void playText(String text, Object volume = null) {
-  devicePlayText(text, coerceVolume(volume), null, false)
+  devicePlayText(text, normalizeLegacyOptionalPlaybackVolume(volume), null, false)
 }
 
 void playTextAndRestore(String text, Object volume = null) {
-  devicePlayText(text, coerceVolume(volume), null, true)
+  devicePlayText(text, normalizeLegacyOptionalPlaybackVolume(volume), null, true)
 }
 
 void playTextAndResume(String text, Object volume = null) {
-  devicePlayText(text, coerceVolume(volume), null, true)
+  devicePlayText(text, normalizeLegacyOptionalPlaybackVolume(volume), null, true)
 }
 
 void speak(String text, Object volume = null, String voice = null) {
-  devicePlayText(text, coerceVolume(volume), voice)
+  devicePlayText(text, normalizeLegacyOptionalPlaybackVolume(volume), voice)
 }
 
 void speakNoRestore(String text, Object volume = null, String voice = null) {
-  devicePlayTextNoRestore(text, coerceVolume(volume), voice)
+  devicePlayTextNoRestore(text, normalizeLegacyOptionalPlaybackVolume(volume), voice)
 }
 
 @CompileStatic
@@ -509,6 +509,14 @@ BigDecimal coerceVolume(Object volume) {
   }
   logWarn("Unsupported volume value '${volume}'; ignoring.")
   return null
+}
+
+/** Optional group playback volume compatibility: zero means omitted; -1 is passed through for explicit zero. */
+@CompileStatic
+BigDecimal normalizeLegacyOptionalPlaybackVolume(Object volume) {
+  BigDecimal normalized = coerceVolume(volume)
+  if(normalized != null && normalized.compareTo(BigDecimal.ZERO) == 0) { return null }
+  return normalized
 }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null, Boolean forceAudioClip = false) {
@@ -548,7 +556,7 @@ void playHighPriorityTTS(String text, Object volume = null, String voice = null)
       return
     }
     String correlationId = UUID.randomUUID().toString()
-    BigDecimal normalizedVolume = coerceVolume(volume)
+    BigDecimal normalizedVolume = normalizeLegacyOptionalPlaybackVolume(volume)
     requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: normalizedVolume?.toString(),
       correlationId: correlationId, duration: ttsMap.duration])
   } catch (Exception e) {
@@ -556,12 +564,13 @@ void playHighPriorityTTS(String text, Object volume = null, String voice = null)
   }
 }
 
-void playHighPriorityTrack(String uri, BigDecimal volume = null) {
+void playHighPriorityTrack(String uri, Object volume = null) {
   if(!uri) {
     logWarn('No URI provided to play')
     return
   }
-  requestGroupCommand('playHighPriorityTrack', [uri: uri, volume: volume?.toString()])
+  requestGroupCommand('playHighPriorityTrack', [uri: uri,
+    volume: normalizeLegacyOptionalPlaybackVolume(volume)?.toString()])
 }
 
 void playTrackAndRestore(String uri, Object volume = null) {
@@ -577,16 +586,17 @@ private void playTrackWithSynchronizedClip(String uri, Object volume) {
     logWarn('No URI provided to play')
     return
   }
-  requestGroupCommand('playAudioClip', [uri: uri, volume: coerceVolume(volume)?.toString(),
+  requestGroupCommand('playAudioClip', [uri: uri, volume: normalizeLegacyOptionalPlaybackVolume(volume)?.toString(),
     correlationId: UUID.randomUUID().toString()])
 }
 
-void enqueueLowPriorityTrack(String uri, BigDecimal volume = null) {
+void enqueueLowPriorityTrack(String uri, Object volume = null) {
   if(!uri) {
     logWarn('No URI provided to enqueue')
     return
   }
-  requestGroupCommand('enqueueLowPriorityTrack', [uri: uri, volume: volume?.toString()])
+  requestGroupCommand('enqueueLowPriorityTrack', [uri: uri,
+    volume: normalizeLegacyOptionalPlaybackVolume(volume)?.toString()])
 }
 
 void joinPlayersToCoordinator() {
@@ -1145,12 +1155,13 @@ void setVolumeZero() {
 /**
  * Play track - forwards to coordinator
  */
-void playTrack(String uri, BigDecimal volume = null) {
+void playTrack(String uri, Object volume = null) {
   if(!uri) {
     logWarn('No URI provided to play')
     return
   }
-  requestGroupCommand('playTrack', [uri: uri, volume: volume?.toString()])
+  requestGroupCommand('playTrack', [uri: uri,
+    volume: normalizeLegacyOptionalPlaybackVolume(volume)?.toString()])
 }
 
 /**

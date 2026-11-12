@@ -194,13 +194,13 @@ metadata {
 
   command 'playHighPriorityTTS', [
     [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
-    [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]],
+    [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]],
     [name: 'Voice name', type: "ENUM", constraints: getCachedTTSVoiceNames(), defaultValue: getCurrentTTSVoice()]
   ]
 
   command 'playHighPriorityTrack', [
     [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
-    [name:'Volume Level', type:"NUMBER", description:"Volume level (0 to 100)", constraints:["NUMBER"]]
+    [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
   ]
 
   attribute 'groupVolume', 'number'
@@ -1303,20 +1303,20 @@ void addPlayerToGroup(String playerIdentifier) {
   requestParentCoordinatorCommand('addPlayerToGroup', [identifier])
 }
 
-void playText(String text, BigDecimal volume = null) {
-  devicePlayText(text, volume)
+void playText(String text, Object volume = null) {
+  devicePlayText(text, normalizePublicPlaybackVolume(volume))
 }
 // Public speech entry points. Volume is typed as Object to tolerate callers
 // that pass Integer/Long/String (Rule Machine, webCoRE, user apps). Without
 // this the @CompileStatic signature throws ClassCastException on any caller
 // that doesn't hand us a literal BigDecimal.
 void playTextAndRestore(String text, Object volume = null) {
-  devicePlayTextWithAudioClip(text, coerceVolume(volume), null, 'playTextAndRestore')
+  devicePlayTextWithAudioClip(text, normalizePublicPlaybackVolume(volume), null, 'playTextAndRestore')
 }
 void playTextAndResume(String text, Object volume = null) {
-  devicePlayTextWithAudioClip(text, coerceVolume(volume), null, 'playTextAndResume')
+  devicePlayTextWithAudioClip(text, normalizePublicPlaybackVolume(volume), null, 'playTextAndResume')
 }
-void speak(String text, Object volume = null, String voice = null) { devicePlayText(text, coerceVolume(volume), voice) }
+void speak(String text, Object volume = null, String voice = null) { devicePlayText(text, normalizePublicPlaybackVolume(volume), voice) }
 
 @CompileStatic
 BigDecimal coerceVolume(Object volume) {
@@ -1336,22 +1336,32 @@ BigDecimal coerceVolume(Object volume) {
   return null
 }
 
+/** Optional playback volume compatibility: zero means omitted; -1 is retained as an explicit-zero sentinel. */
+@CompileStatic
+BigDecimal normalizePublicPlaybackVolume(Object volume) {
+  BigDecimal normalized = coerceVolume(volume)
+  if(normalized == null) { return null }
+  if(normalized.compareTo(BigDecimal.ZERO) == 0) { return null }
+  return normalized
+}
+
 @CompileStatic
 void setTrack(String uri) {
   if(deferCommandToParentDuringGroupOperation('setTrack', [uri])) { return }
   if(routeGroupedPlaybackCommandToCoordinator('setTrack', [uri])) { return }
   componentSetStreamUrlLocal(uri)
 }
-void playTrack(String uri, BigDecimal volume = null) {
-  if(deferCommandToParentDuringGroupOperation('playTrack', [uri, volume])) { return }
-  if(routeGroupedPlaybackCommandToCoordinator('playTrack', [uri, volume])) { return }
-  if(shouldUseAnnouncementAudioClip(false)) { playerLoadAudioClip(uri, volume) }
-  else{ componentLoadStreamUrlLocal(uri, volume) }
+void playTrack(String uri, Object volume = null) {
+  BigDecimal normalizedVolume = normalizePublicPlaybackVolume(volume)
+  if(deferCommandToParentDuringGroupOperation('playTrack', [uri, normalizedVolume])) { return }
+  if(routeGroupedPlaybackCommandToCoordinator('playTrack', [uri, normalizedVolume])) { return }
+  if(shouldUseAnnouncementAudioClip(false)) { playerLoadAudioClip(uri, normalizedVolume) }
+  else{ componentLoadStreamUrlLocal(uri, normalizedVolume) }
 }
 @CompileStatic
-void playTrackAndRestore(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
+void playTrackAndRestore(String uri, Object volume = null) { playerLoadAudioClip(uri, normalizePublicPlaybackVolume(volume)) }
 @CompileStatic
-void playTrackAndResume(String uri, BigDecimal volume = null) { playerLoadAudioClip(uri, volume) }
+void playTrackAndResume(String uri, Object volume = null) { playerLoadAudioClip(uri, normalizePublicPlaybackVolume(volume)) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
   if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) { return }
@@ -1451,28 +1461,31 @@ Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
   }
 }
 
-void playHighPriorityTTS(String text, BigDecimal volume = null, String voice = null) {
-  if(deferCommandToParentDuringGroupOperation('playHighPriorityTTS', [text, volume, voice])) { return }
+void playHighPriorityTTS(String text, Object volume = null, String voice = null) {
+  BigDecimal normalizedVolume = normalizePublicPlaybackVolume(volume)
+  if(deferCommandToParentDuringGroupOperation('playHighPriorityTTS', [text, normalizedVolume, voice])) { return }
   if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
     LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
-    playerLoadAudioClipHighPriority(tts.uri as String, volume, UUID.randomUUID().toString(), ttsDuration)
+    playerLoadAudioClipHighPriority(tts.uri as String, normalizedVolume, UUID.randomUUID().toString(), ttsDuration)
   } else {
-    volume = getAnnouncementVolume(volume)
-    componentPlayTextWithRestoreLocal(text, volume, voice)
+    BigDecimal announcementVolume = getAnnouncementVolume(normalizedVolume) as BigDecimal
+    componentPlayTextWithRestoreLocal(text, announcementVolume, voice)
   }
 }
 
 @CompileStatic
-void playHighPriorityTrack(String uri, BigDecimal volume = null) {
+void playHighPriorityTrack(String uri, Object volume = null) {
+  BigDecimal normalizedVolume = normalizePublicPlaybackVolume(volume)
   if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
-    playerLoadAudioClipHighPriority(uri, volume)
+    playerLoadAudioClipHighPriority(uri, normalizedVolume)
   } else {
-    componentLoadStreamUrlLocal(uri, volume)
+    componentLoadStreamUrlLocal(uri, normalizedVolume)
   }
 }
 
 void devicePlayTextNoRestore(String text, BigDecimal volume = null, String voice = null) {
+  volume = normalizePublicPlaybackVolume(volume)
   if(deferCommandToParentDuringGroupOperation('speakNoRestore', [text, volume, voice])) { return }
   volume = getAnnouncementVolume(volume)
   componentPlayTextNoRestoreLocal(text, volume, voice)
@@ -1681,6 +1694,7 @@ void completeGroupAnnouncementPlaybackHandoff(String correlationId, Boolean rest
 
 @CompileStatic
 void devicePlayTrack(String uri, BigDecimal volume = null) {
+  volume = normalizePublicPlaybackVolume(volume)
   componentLoadStreamUrlLocal(uri, volume)
 }
 
@@ -7506,12 +7520,19 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
   }
 }
 
-/** Explicit zero is a silent announcement, even when a TTS boost is configured. */
+/** Explicit zero (including the -1 public-command sentinel) stays silent despite a TTS boost. */
 @CompileStatic
 static Integer calculateAnnouncementVolume(BigDecimal requestedVolume, Integer currentVolume, Integer boost) {
+  if(requestedVolume != null && requestedVolume.compareTo(BigDecimal.valueOf(-1L)) == 0) { return 0 }
   if(requestedVolume != null && requestedVolume.compareTo(BigDecimal.ZERO) == 0) { return 0 }
   BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
   return Math.max(0, Math.min((baseVolume + boost) as Integer, 100))
+}
+
+@CompileStatic
+static BigDecimal resolveExplicitVolumeSentinel(BigDecimal volume) {
+  if(volume != null && volume.compareTo(BigDecimal.valueOf(-1L)) == 0) { return BigDecimal.ZERO }
+  return volume
 }
 
 @CompileStatic
@@ -8226,6 +8247,7 @@ void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, Stri
   logDebug("${device} play text ${text} (volume ${volume != null ? volume : 'not set'})")
   Map tts = textToSpeech(text, voice)
   String streamUrl = tts.uri
+  volume = resolveExplicitVolumeSentinel(volume)
   if(volume != null) {componentSetGroupLevelLocal(volume)}
   setAVTransportURIAndPlay(streamUrl)
 }
@@ -8254,6 +8276,7 @@ void componentPlayStreamWithRestoreLocal(String streamUrl, Integer duration, Big
   } else {
     logWarn("No AVTransport snapshot is available to restore after direct stream TTS ${correlationId}")
   }
+  volume = resolveExplicitVolumeSentinel(volume)
   if(volume != null) { componentSetGroupLevelLocal(volume) }
   setAVTransportURIAndPlay(streamUrl)
   if(snapshot != null) {
@@ -8763,12 +8786,14 @@ void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
 
 void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
   logDebug("${device} play track ${streamUrl} (volume ${volume != null ? volume : 'not set'})")
+  volume = resolveExplicitVolumeSentinel(volume)
   if(volume != null) {componentSetGroupLevelLocal(volume)}
   setAVTransportURIAndPlay(streamUrl)
 }
 
 void componentSetStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
   logDebug("${device} play track ${streamUrl} (volume ${volume != null ? volume : 'not set'})")
+  volume = resolveExplicitVolumeSentinel(volume)
   if(volume != null) {componentSetGroupLevelLocal(volume)}
   setAVTransportURI(streamUrl)
 }
