@@ -287,19 +287,8 @@
  *  - Default: 3 minutes
  *
  *  LOGGING SETTINGS (for troubleshooting):
- *
- *  logEnable (TRUE or FALSE):
- *  - TRUE = Log general informational messages
- *  - Recommended: TRUE (helps troubleshoot issues)
- *
- *  debugLogEnable (TRUE or FALSE):
- *  - TRUE = Log detailed technical information
- *  - Only enable when troubleshooting problems
- *  - Creates a lot of log entries
- *
- *  descriptionTextEnable (TRUE or FALSE):
- *  - TRUE = Log human-readable event descriptions
- *  - Recommended: TRUE (explains what the app is doing)
+ *  - Choose the minimum severity to include in the Hubitat logs.
+ *  - Trace and Debug can produce frequent diagnostic messages.
  *
  *  ============================================================================
  *  TIPS & BEST PRACTICES
@@ -403,31 +392,58 @@ import com.hubitat.app.DeviceWrapper
 import com.hubitat.hub.domain.Event
 
 void logError(String message) {
-  if (settings.logEnable != false) {
-    if(device) log.error "${device.label ?: device.name }: ${message}"
-    if(app) log.error "${app.label ?: app.name }: ${message}"
+  if (loggingEnabled('error')) {
+    if(device) { log.error("${device.label ?: device.name }: ${message}") }
+    if(app) { log.error("${app.label ?: app.name }: ${message}") }
   }
 }
 
 void logWarn(String message) {
-  if (settings.logEnable != false) {
-    if(device) log.warn "${device.label ?: device.name }: ${message}"
-    if(app) log.warn "${app.label ?: app.name }: ${message}"
+  if (loggingEnabled('warn')) {
+    if(device) { log.warn("${device.label ?: device.name }: ${message}") }
+    if(app) { log.warn("${app.label ?: app.name }: ${message}") }
   }
 }
 
 void logInfo(String message) {
-  if (settings.logEnable != false) {
-    if(device) log.info "${device.label ?: device.name }: ${message}"
-    if(app) log.info "${app.label ?: app.name }: ${message}"
+  if (loggingEnabled('info')) {
+    if(device) { log.info("${device.label ?: device.name }: ${message}") }
+    if(app) { log.info("${app.label ?: app.name }: ${message}") }
   }
 }
 
 void logDebug(String message) {
-  if (settings.logEnable != false && settings.debugLogEnable != false) {
-    if(device) log.debug "${device.label ?: device.name }: ${message}"
-    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  if (loggingEnabled('debug')) {
+    if(device) { log.debug("${device.label ?: device.name }: ${message}") }
+    if(app) { log.debug("${app.label ?: app.name }: ${message}") }
   }
+}
+
+void logTrace(String message) {
+  if (loggingEnabled('trace')) {
+    if(device) { log.trace("${device.label ?: device.name }: ${message}") }
+    if(app) { log.trace("${app.label ?: app.name }: ${message}") }
+  }
+}
+
+/** Keeps existing installations' boolean logging choices until logLevel is set. */
+private String getConfiguredLogLevel() {
+  if (settings?.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
+  if (settings?.logEnable == false) { return 'off' }
+  if (settings?.debugLogEnable == true) { return 'debug' }
+  return 'info'
+}
+
+private String normalizeLogLevel(String level) {
+  String normalized = level?.toLowerCase()
+  return ['trace', 'debug', 'info', 'warn', 'error', 'off'].contains(normalized) ? normalized : 'info'
+}
+
+private boolean loggingEnabled(String messageLevel) {
+  List<String> levels = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+  Integer configuredRank = levels.indexOf(getConfiguredLogLevel())
+  Integer messageRank = levels.indexOf(messageLevel)
+  return configuredRank >= 0 && messageRank >= configuredRank && messageRank < levels.indexOf('off')
 }
 
 // ============================================================================
@@ -613,38 +629,16 @@ Map mainPage() {
     }
 
     // ===== SECTION 3: LOGGING OPTIONS =====
-    // These control what messages appear in Hubitat's logs
-    // Useful for troubleshooting when things don't work as expected
+    // Choose the minimum severity to include in Hubitat's logs.
     section('<br><br><hr><h2>Logging</h2>') {
-      // Enable general informational messages
-      // Example: "Location entered Away mode", "Restoring previous setpoints"
-      input (
-        'logEnable',
-        'bool',
-        title: 'Enable Logging',
+      input(
+        'logLevel',
+        'enum',
+        title: 'Logging level',
+        options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
         required: false,
-        defaultValue: true
-      )
-
-      // Enable detailed technical debug messages
-      // Example: "contactSensorEventHandler: Kitchen Window is open"
-      // Only enable this when troubleshooting problems (creates many log entries)
-      input (
-        'debugLogEnable',
-        'bool',
-        title: 'Enable debug logging',
-        required: false,
-        defaultValue: false
-      )
-
-      // Enable human-readable event descriptions
-      // Example: "All windows/doors closed; restoring thermostat automation"
-      input (
-        'descriptionTextEnable',
-        'bool',
-        title: 'Enable descriptionText logging',
-        required: false,
-        defaultValue: true
+        defaultValue: getConfiguredLogLevel(),
+        submitOnChange: true
       )
     }
 
@@ -675,7 +669,7 @@ Map mainPage() {
  * - User clicks a "Configure" button (if you add one)
  * - App needs to reset its event subscriptions
  * - Something went wrong and needs a fresh start
- * - The library's updated() lifecycle hook calls this automatically
+ * - The app's updated() lifecycle hook calls this automatically when settings are saved
  *
  * WHAT IT DOES:
  * 1. Cancels all existing event subscriptions (stops listening to devices)
@@ -704,6 +698,16 @@ void configure() {
   // Now set everything up fresh
   // initialize() will create new subscriptions with current settings
   initialize()
+}
+
+/** Hubitat calls updated() when the user saves the app with Done. */
+void installed() {
+  initialize()
+}
+
+void updated() {
+  configure()
+  logCurrentThermostatState()
 }
 
 /**
@@ -770,6 +774,10 @@ void initialize() {
 
   String mode = location.getMode()
   logDebug("Active location mode: ${mode}")
+  // Track the last location mode whose profile has been applied. If mode
+  // handling is deferred for an open window, this remains the transition's
+  // starting point until the pending mode is applied.
+  state.appliedLocationMode = mode
 
   // If a window/door is already open at startup, defer mode handling entirely.
   // Turn the thermostat off and stash the current Hubitat mode so it is applied
@@ -778,6 +786,7 @@ void initialize() {
   if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
     logInfo("Window/door open at initialization; deferring mode application for \"${mode}\" and keeping thermostat off")
     state.pendingLocationMode = mode
+    state.pendingLocationModeTransition = false
     thermostat.off()
     state.disabledDueToOpenWindow = true
     runIn((settings.openWindowDuration ?: 3) * 60, 'disableThermostatDueToOpenWindow', [overwrite: true])
@@ -948,7 +957,7 @@ void contactSensorEventHandler(Event evt) {
   // evt.device.displayName = User-friendly name like "Kitchen Window"
   // evt.value = "open" or "closed"
   // ${...} inserts values into the string
-  // This log appears if settings.debugLogEnable is true
+  // This log appears when the configured level includes Debug.
   logDebug("contactSensorEventHandler: ${evt.device.displayName} is ${evt.value}")
 
   // Check if this feature is enabled in settings
@@ -997,9 +1006,13 @@ void contactSensorEventHandler(Event evt) {
       // handles the actual re-enable.
       String pending = state.pendingLocationMode
       if (pending) {
+        String previousMode = (state.pendingLocationModeFrom as String) ?: (state.appliedLocationMode as String) ?: 'Unknown'
+        boolean isModeTransition = (state.pendingLocationModeTransition == true)
         state.pendingLocationMode = null
+        state.pendingLocationModeFrom = null
+        state.pendingLocationModeTransition = false
         logInfo("Applying deferred mode change to \"${pending}\"")
-        applyModeFromHubitat(pending)
+        applyModeFromHubitat(pending, previousMode, isModeTransition)
       }
 
       // Authoritative single path for enabling the thermostat: re-checks
@@ -1051,7 +1064,7 @@ void disableThermostatDueToOpenWindow() {
     return
   }
 
-  // Log what we're doing (appears in logs if settings.logEnable is true)
+  // Log what we're doing when the configured level includes Info.
   // This helps troubleshoot: "Why did my thermostat turn off?"
   logInfo('Disabling thermostat due to open window/door')
 
@@ -1322,25 +1335,94 @@ void locationModeChangeHandler(Event evt) {
   // applies the stored pendingLocationMode when all windows close.
   if (settings.disableWithOpenWindowsOrDoors && anyContactSensorsOpen()) {
     logInfo("Window/door open; deferring mode change to \"${mode}\" until all windows close")
+    if (!state.pendingLocationMode) {
+      state.pendingLocationModeFrom = (state.appliedLocationMode as String) ?: 'Unknown'
+    }
     state.pendingLocationMode = mode
+    state.pendingLocationModeTransition = true
     return
   }
 
   state.pendingLocationMode = null
-  applyModeFromHubitat(mode)
+  state.pendingLocationModeFrom = null
+  state.pendingLocationModeTransition = false
+  String previousMode = (state.appliedLocationMode as String) ?: 'Unknown'
+  applyModeFromHubitat(mode, previousMode, true)
 }
 
 // Classify the raw Hubitat location mode and dispatch to handleModeChange().
 // Shared by locationModeChangeHandler(), initialize(), and the open-window
 // close handler so the classification logic lives in exactly one place.
-private void applyModeFromHubitat(String mode) {
+private void applyModeFromHubitat(String mode, String previousMode=null, boolean logTransition=false) {
+  String previousProfile = (state.currentOperatingState as String) ?: 'Unknown'
+  boolean savedSetpointsWerePending = (state.setpointsRestored == false)
+  String reason
+
   if (isAwayMode(mode)) {
+    reason = "Location mode '${mode}' matched the configured Away mode; applying the Away virtual thermostat profile."
     handleModeChange('Away', awayModeVirtualThermostat)
   } else if (isNightMode(mode)) {
+    reason = "Location mode '${mode}' matched the configured Night mode; applying the Night virtual thermostat profile."
     handleModeChange('Night', nightModeVirtualThermostat)
   } else {
+    reason = savedSetpointsWerePending ?
+      "Location mode '${mode}' is a normal mode; restoring the saved normal setpoints." :
+      "Location mode '${mode}' is a normal mode and saved normal setpoints are already active."
     handleModeChange(mode)
   }
+
+  state.appliedLocationMode = mode
+  if (logTransition) {
+    logThermostatTransition(previousMode ?: 'Unknown', mode, previousProfile, reason)
+  }
+}
+
+/** Logs the reason for a location-mode transition and the thermostat's resulting state. */
+private void logThermostatTransition(String previousMode, String newMode, String previousProfile, String reason) {
+  String currentProfile = (state.currentOperatingState as String) ?: 'Unknown'
+  String requestedProfile = modeProfile(newMode)
+  boolean profileApplied = currentProfile == requestedProfile &&
+    (requestedProfile != 'Normal' || state.setpointsRestored == true)
+  String transitionStatus = profileApplied ?
+    "The operating profile is now ${currentProfile}." :
+    "The requested profile was not fully applied; the operating profile is ${currentProfile} (previously ${previousProfile})."
+  String settingsSummary = thermostatSettingsSummary()
+  logInfo("Thermostat transition: ${previousMode} (${previousProfile}) -> ${newMode} (${requestedProfile}). ${reason} ${transitionStatus} New thermostat settings: ${settingsSummary}.")
+}
+
+/** Logs the active location mode, reason, and thermostat settings after Done. */
+private void logCurrentThermostatState() {
+  String mode = (location.getMode() as String) ?: 'Unknown'
+  String profile = (state.currentOperatingState as String) ?: modeProfile(mode)
+  String reason
+
+  if (state.pendingLocationMode) {
+    reason = "Open window/door protection is active; applying location mode '${state.pendingLocationMode}' is deferred until all sensors close."
+  } else if (isAwayMode(mode)) {
+    reason = "Location mode '${mode}' matches the configured Away mode."
+  } else if (isNightMode(mode)) {
+    reason = "Location mode '${mode}' matches the configured Night mode."
+  } else {
+    reason = "Location mode '${mode}' is a normal mode."
+  }
+
+  logInfo("Thermostat current state is ${mode} (${profile}). Why: ${reason} Current thermostat settings: ${thermostatSettingsSummary()}.")
+}
+
+/** Reads the thermostat's currently reported setpoints and operating modes. */
+private String thermostatSettingsSummary() {
+  String heatingSetpoint = thermostat.currentValue('heatingSetpoint')?.toString() ?: 'unknown'
+  String coolingSetpoint = thermostat.currentValue('coolingSetpoint')?.toString() ?: 'unknown'
+  String fanMode = thermostat.currentValue('thermostatFanMode')?.toString() ?: 'unknown'
+  String thermostatMode = thermostat.currentValue('thermostatMode')?.toString() ?: 'unknown'
+  return "heat setpoint=${heatingSetpoint}, cool setpoint=${coolingSetpoint}, fan mode=${fanMode}, thermostat mode=${thermostatMode}"
+}
+
+/** Returns the app's logical profile label for a raw Hubitat location mode. */
+private String modeProfile(String mode) {
+  if (isAwayMode(mode)) { return 'Away' }
+  if (isNightMode(mode)) { return 'Night' }
+  return 'Normal'
 }
 
 /**
@@ -1397,8 +1479,6 @@ private void applyModeFromHubitat(String mode) {
 private void handleModeChange(String modeName, DeviceWrapper modeThermostat=null) {
   // ===== CASE 1: ENTERING AWAY MODE =====
   if (modeName == 'Away') {
-    logInfo("Location entered Away mode (\"${location.getMode()}\")")
-
     if (state.setpointsRestored == true) {
       // We're in normal mode - need to save current temps before changing.
       // Guard: on first install in Away/Night, the thermostat may already show
@@ -1421,8 +1501,6 @@ private void handleModeChange(String modeName, DeviceWrapper modeThermostat=null
 
   // ===== CASE 2: ENTERING NIGHT MODE =====
   if (modeName == 'Night') {
-    logInfo("Location entered Night mode (\"${location.getMode()}\")")
-
     if (state.setpointsRestored == true) {
       // Same first-install guard as Away mode above
       if (state.initializedBefore == false) {
@@ -1447,8 +1525,6 @@ private void handleModeChange(String modeName, DeviceWrapper modeThermostat=null
 
   if (state.setpointsRestored == false) {
     // We have saved setpoints from Away or Night mode — time to restore
-    logInfo("Location entered \"${modeName}\" mode (was ${state.currentOperatingState}); restoring previous setpoints")
-
     state.currentOperatingState = 'Normal'
     restoreStoredSetpoints()
   }
@@ -1709,8 +1785,8 @@ private void restoreStoredSetpoints() {
  * evt.value = new value that was reported (e.g., "72" for temperature)
  *
  * LOG LEVEL:
- * logDebug = only shows if settings.debugLogEnable is turned on
- * This prevents cluttering logs with constant updates
+ * The event stream is logged at trace level to prevent routine updates from
+ * cluttering logs at the default info level.
  *
  * @param evt Event object containing device, attribute, and value information
  */
@@ -1719,7 +1795,7 @@ void thermostatEventHandler(Event evt) {
   // evt.type is the event source/type and is frequently null on device
   // attribute events — that's why the original bug report showed
   // "null: cooling". Log evt.name for clarity.
-  logDebug("thermostatEventHandler: ${evt.device.displayName}, ${evt.name}: ${evt.value}")
+  logTrace("thermostatEventHandler: ${evt.device.displayName}, ${evt.name}: ${evt.value}")
 
   // Reactive safety net. If the open-window protection is disabled, there
   // is nothing to react to.
