@@ -388,6 +388,14 @@ Map mainPage() {
         input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method',
           options: [automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting', alwaysCoordinatorStream: 'Always standard stream'],
           required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
+        input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync',
+          required: false, defaultValue: false, submitOnChange: true
+        if(settings.queueChimeSeparatelyFromTTS == true || settings.queueChimeSeparatelyFromTTS?.toString() == 'true') {
+          paragraph '<span style="color:#ffb020"><b>Warning:</b> This may cause a slight delay between chime and TTS start.</span>'
+        }
+        input 'suppressChimeOnSuccessiveTTS', 'bool', title: 'Suppress chime on successive TTS messages',
+          required: false, defaultValue: false, submitOnChange: true
+        paragraph 'When enabled, queued TTS messages after another TTS announcement start without an additional chime.'
         input 'automaticTtsTopologyChanges', 'bool', title: 'Automatic TTS topology changes', required: true, defaultValue: true, submitOnChange: true
         input 'useTemporaryStreamHolder', 'bool', title: 'Use a temporary stream holder', required: true, defaultValue: true, submitOnChange: true
         paragraph 'When enabled, an idle speaker can temporarily hold an active Sonos-managed stream while standard-stream TTS plays on its target. When disabled, announcements use synchronized audioClip playback to preserve the active stream. AirPlay streams are never handed to a holder.'
@@ -545,6 +553,8 @@ Map legacyBooleanSettingsPage() {
         automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
         alwaysCoordinatorStream: 'Always standard stream'
       ], required: true, defaultValue: 'alwaysNonInterrupting'
+      input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync', required: false, defaultValue: false
+      input 'suppressChimeOnSuccessiveTTS', 'bool', title: 'Suppress chime on successive TTS messages', required: false, defaultValue: false
       input 'logLevel', 'enum', title: 'Logging level',
         options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
         required: false, defaultValue: getConfiguredLogLevel()
@@ -3946,6 +3956,11 @@ String renderCustomSettingsMarkup() {
   html.append(renderCustomSelectCard('maximumTtsRetention', 'Maximum TTS retention', 'Maximum time a queued TTS message can wait before it is sent.', retentionOptions, '60'))
   html.append(renderCustomSelectCard('groupAnnouncementMode', 'Normal priority announcement method', 'Choose how standard announcements are routed.', announcementOptions, 'alwaysNonInterrupting'))
   html.append(renderCustomSelectCard('highPriorityAnnouncementMode', 'High priority announcement method', 'Choose how high priority announcements are routed.', announcementOptions, 'alwaysNonInterrupting'))
+  html.append(renderCustomSettingCard('queueChimeSeparatelyFromTTS', 'Queue chime separately from TTS for better sync', 'Coordinate the chime release across group members, then prepare and release the TTS clips together.'))
+  if(settings.queueChimeSeparatelyFromTTS == true || settings.queueChimeSeparatelyFromTTS?.toString() == 'true') {
+    html.append("<div class='sonos-setting-warning'><b>Warning:</b> This may cause a slight delay between chime and TTS start.</div>")
+  }
+  html.append(renderCustomSettingCard('suppressChimeOnSuccessiveTTS', 'Suppress chime on successive TTS messages', 'Skip a chime when another TTS announcement is active or already waiting in the group queue.'))
   if(getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream') {
     if(!isAutomaticTtsTopologyChangesEnabled()) {
       html.append("<div class='sonos-setting-warning'><b>Warning:</b> With automatic topology changes off, a standard-stream announcement to a group that is not currently grouped together may play only on the coordinator and any players already grouped with it.</div>")
@@ -3992,7 +4007,7 @@ void handleNewUiSettingChange(String buttonName) {
     logWarn("Ignored malformed custom setting action '${buttonName}'")
     return
   }
-  List<String> allowedSettings = ['automaticTtsTopologyChanges', 'useTemporaryStreamHolder', 'enableAlarmManagement', 'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates']
+  List<String> allowedSettings = ['automaticTtsTopologyChanges', 'useTemporaryStreamHolder', 'enableAlarmManagement', 'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates', 'queueChimeSeparatelyFromTTS', 'suppressChimeOnSuccessiveTTS']
   String settingName = parts[1]
   String value = parts[2]
   List<String> enumSettings = ['maximumTtsRetention', 'groupAnnouncementMode', 'highPriorityAnnouncementMode', 'logLevel']
@@ -4454,9 +4469,16 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
     submittedAt: now(),
     uri: args.uri?.toString(), volume: args.volume?.toString(),
     duration: (toBigDecimal(args.duration)?.intValue() ?: 0),
+    isTts: args.isTts == true,
     forceAudioClip: args.forceAudioClip == true,
     coordinatorId: coordinator.getDataValue('id')?.toString(),
     playerIds: players.collect { ChildDeviceWrapper p -> p.getDataValue('id')?.toString() }.findAll { it }]
+  if(args.containsKey('chimeBeforeStandardPriorityTTS')) {
+    item.chimeBeforeStandardPriorityTTS = args.chimeBeforeStandardPriorityTTS == true
+  }
+  if(args.containsKey('chimeBeforeHighPriorityTTS')) {
+    item.chimeBeforeHighPriorityTTS = args.chimeBeforeHighPriorityTTS == true
+  }
   if(!item.uri) {
     logWarn("Ignoring group announcement ${correlationId}: missing stream URI")
     return
@@ -4465,9 +4487,45 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
   Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
   Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : [pending: []]
+  List<Map> pendingAnnouncements = queue.pending instanceof List ? (List<Map>)queue.pending : []
+  Boolean hasEarlierTts = queue.active?.isTts == true || queue.priorityActive?.isTts == true ||
+      pendingAnnouncements.any { Map queued -> queued.isTts == true }
+  Boolean suppressSuccessiveChime = settings.suppressChimeOnSuccessiveTTS == true ||
+      settings.suppressChimeOnSuccessiveTTS?.toString() == 'true'
+  if(item.isTts == true && hasEarlierTts && suppressSuccessiveChime) {
+    item.chimeBeforeStandardPriorityTTS = false
+    item.chimeBeforeHighPriorityTTS = false
+    logDebug("Suppressing chime for successive TTS announcement ${correlationId} in ${groupDni}")
+  }
+  if(command == 'playHighPriorityTrack' && queue.priorityActive instanceof Map) {
+    pendingAnnouncements.add(0, item)
+    queue.pending = pendingAnnouncements
+    queues[groupDni] = queue
+    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    logDebug("Queued high priority announcement ${correlationId} behind active group high priority clip")
+    return
+  }
   if(command == 'playHighPriorityTrack' && queue.active instanceof Map) {
     String highPriorityMode = getAnnouncementMode(true)
     if(highPriorityMode != 'alwaysCoordinatorStream') {
+      Boolean separateChime = settings.queueChimeSeparatelyFromTTS == true ||
+          settings.queueChimeSeparatelyFromTTS?.toString() == 'true'
+      Boolean highPriorityChime = item.containsKey('chimeBeforeHighPriorityTTS')
+          ? item.chimeBeforeHighPriorityTTS == true
+          : (item.isTts == true && players.any { ChildDeviceWrapper player ->
+              player.getChimeBeforeHighPriorityTTS() == true
+            })
+      if(separateChime && item.isTts == true && highPriorityChime) {
+        item.mode = 'AUDIO_CLIP'
+        queue.priorityActive = item
+        queues[groupDni] = queue
+        state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+        dispatchGroupAnnouncementClip(item, players, true)
+        Integer timeoutSeconds = (item.duration ?: 0) > 0 ? Math.max((item.duration as Integer) + 30, 38) : 188
+        runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
+          correlationId: correlationId], overwrite: false])
+        return
+      }
       // Native audioClip HIGH priority can overlay an in-flight announcement or
       // an external source without replacing the coordinator's stream.
       dispatchGroupAnnouncementClip(item, players, true)
@@ -4532,7 +4590,7 @@ void startNextGroupAnnouncement(String groupDni) {
   Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
   Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
-  if(queue == null || queue.active instanceof Map) { return }
+  if(queue == null || queue.active instanceof Map || queue.priorityActive instanceof Map) { return }
   Boolean takeoverCanContinue = queue.externalTakeover == true && canContinueAnnouncementQueueDuringTakeover(groupDni)
   if(getActiveGroupOperation() != null || (hasActiveAnnouncementTopologyTransaction() && !takeoverCanContinue)) {
     logTrace("Deferring queued announcement for ${groupDni} while a Sonos topology transaction is active")
@@ -4919,7 +4977,8 @@ Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal vol
     return false
   }
   Map args = [uri: uri, volume: volume?.toString(), duration: duration ?: 0,
-    correlationId: correlationId, forceAudioClip: !isAutomaticTtsTopologyChangesEnabled()]
+    correlationId: correlationId, forceAudioClip: !isAutomaticTtsTopologyChangesEnabled(), isTts: true,
+    chimeBeforeStandardPriorityTTS: target.getChimeBeforeStandardPriorityTTS() == true]
   enqueueGroupAnnouncement(operationGroup, target, [target], 'playAudioClip', args, correlationId)
   logInfo("Queued direct-player active-stream TTS for ${target.displayName}; Sonos Advanced will select and release a temporary holder")
   return true
@@ -5795,15 +5854,28 @@ Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = fal
 void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, Boolean highPriority) {
   String correlationId = item.correlationId as String
   Integer duration = (item.duration ?: 0) as Integer
+  String chimeSettingKey = highPriority ? 'chimeBeforeHighPriorityTTS' : 'chimeBeforeStandardPriorityTTS'
+  Boolean chimeBeforeTTS = item.containsKey(chimeSettingKey)
+      ? item[chimeSettingKey] == true
+      : (item.isTts == true && players.any { ChildDeviceWrapper player ->
+          highPriority ? player.getChimeBeforeHighPriorityTTS() == true : player.getChimeBeforeStandardPriorityTTS() == true
+        })
+  Boolean separateChimeEnabled = settings.queueChimeSeparatelyFromTTS == true ||
+      settings.queueChimeSeparatelyFromTTS?.toString() == 'true'
+  Boolean separateChime = separateChimeEnabled && item.isTts == true && chimeBeforeTTS &&
+      players.every { ChildDeviceWrapper player -> player.canPrepareSynchronizedGroupChime(highPriority) == true }
+  item.chimePhase = separateChime
   String playerNames = players.collect { ChildDeviceWrapper player ->
     "${player.displayName} (${player.getDataValue('id')})"
   }.join(', ')
   logTrace("Preparing group audioClip ${correlationId} for players: ${playerNames}")
   players.each { ChildDeviceWrapper player ->
     if(highPriority) {
-      player.playerLoadAudioClipHighPriority(item.uri as String, toBigDecimal(item.volume), correlationId, duration, true)
+      player.playerLoadAudioClipHighPriority(item.uri as String, toBigDecimal(item.volume), correlationId,
+          duration, true, chimeBeforeTTS, separateChime)
     } else {
-      player.playerPrepareAudioClipForSynchronizedStart(item.uri as String, toBigDecimal(item.volume), correlationId, duration, true)
+      player.playerPrepareAudioClipForSynchronizedStart(item.uri as String, toBigDecimal(item.volume), correlationId,
+          duration, true, chimeBeforeTTS, separateChime)
     }
   }
   players.each { ChildDeviceWrapper player -> player.prepareAudioClipForDispatch() }
@@ -5824,18 +5896,30 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   if(!groupDni) {
     groupDni = queues.find { String dni, Map q ->
       Map activeItem = q?.active instanceof Map ? (Map)q.active : null
-      activeItem?.correlationId?.toString() == correlationId &&
-          normalizeGroupPlayerIds(activeItem.playerIds).contains(player.getDataValue('id')?.toString())
+      Map priorityItem = q?.priorityActive instanceof Map ? (Map)q.priorityActive : null
+      Map matchedItem = activeItem?.correlationId?.toString() == correlationId ? activeItem : priorityItem
+      matchedItem?.correlationId?.toString() == correlationId &&
+          normalizeGroupPlayerIds(matchedItem.playerIds).contains(player.getDataValue('id')?.toString())
     }?.key
   }
   if(!groupDni) { return }
   Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
-  Map active = queue?.active instanceof Map ? (Map)queue.active : null
+  Map priorityActive = queue?.priorityActive instanceof Map ? (Map)queue.priorityActive : null
+  Boolean isPrioritySidecar = priorityActive?.correlationId?.toString() == correlationId
+  Map active = isPrioritySidecar ? priorityActive : (queue?.active instanceof Map ? (Map)queue.active : null)
   if(active == null || active.correlationId?.toString() != correlationId) {
     logTrace("Ignoring stale group announcement callback ${correlationId} from ${player.getDataValue('id')}")
     return
   }
   if(phase == 'INTERRUPTED' && payload.externalPlayback == true) {
+    if(isPrioritySidecar) {
+      logInfo("High priority audioClip announcement ${correlationId} was interrupted by external playback")
+      clearGroupSynchronizedAudioClipHolds(active)
+      queue.remove('priorityActive')
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      return
+    }
     queue.externalTakeover = true
     queue.externalSourceUri = payload.replacementUri?.toString()
     logTrace("Received coordinator takeover correlation=${correlationId}, player=${player.getDataValue('id')}, playbackState=${payload.playbackState}, sourceUri=${payload.sourceUri}, replacementUri=${payload.replacementUri}; pending=${queue.pending?.size() ?: 0}")
@@ -5872,9 +5956,68 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
     // INTERRUPTED is not terminal here: HIGH priority clips suspend regular
     // clips and the player driver reports ACTIVE again when it resumes them.
     if(expected && expected.every { String id -> statuses[id] in ['DONE', 'FAILED', 'DISMISSED'] }) {
+      if(active.chimePhase == true) {
+        Map<String, String> ttsStatuses = [:]
+        statuses.each { String id, String status ->
+          if(status == 'DISMISSED') { ttsStatuses[id] = 'DISMISSED' }
+        }
+        active.chimePhase = false
+        active.waitingForSynchronizedTTSRelease = true
+        active.playerStatuses = ttsStatuses
+        queues[groupDni] = queue
+        state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+        runInMillis(100, 'releaseGroupAnnouncementTTSAfterChime', [overwrite: true,
+          data: [groupDni: groupDni, correlationId: correlationId]])
+        return
+      }
+      if(isPrioritySidecar) {
+        clearGroupSynchronizedAudioClipHolds(active)
+        queue.remove('priorityActive')
+        queues[groupDni] = queue
+        state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+        if(!(queue.active instanceof Map)) {
+          runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+        }
+        return
+      }
       finishGroupAnnouncement(groupDni, correlationId, 'DONE')
     }
   }
+  queues[groupDni] = queue
+  state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+}
+
+/** After the group chime phase completes, release each queued TTS clip in a second coordinated pass. */
+void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
+  String groupDni = data?.groupDni?.toString()
+  String correlationId = data?.correlationId?.toString()
+  if(!groupDni || !correlationId) { return }
+  Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
+  Map priorityItem = queue?.priorityActive instanceof Map ? (Map)queue.priorityActive : null
+  Boolean prioritySidecar = priorityItem?.correlationId?.toString() == correlationId
+  Map item = prioritySidecar ? priorityItem : (queue?.active instanceof Map ? (Map)queue.active : null)
+  if(item?.correlationId?.toString() != correlationId || item.waitingForSynchronizedTTSRelease != true) { return }
+  item.waitingForSynchronizedTTSRelease = false
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  List<ChildDeviceWrapper> players = normalizeGroupPlayerIds(item.playerIds)
+      .collect { String id -> rinconMap[id] }.findAll { it != null }
+  if(!correlationId || !players) {
+    logWarn("Cannot release synchronized TTS after chime for ${correlationId ?: groupDni}; group players are unavailable")
+    if(prioritySidecar) {
+      clearGroupSynchronizedAudioClipHolds(item)
+      queue.remove('priorityActive')
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    }
+    else { finishGroupAnnouncement(groupDni, correlationId, 'FAILED') }
+    return
+  }
+  players.each { ChildDeviceWrapper player -> player.prepareSynchronizedAudioClipAfterChime(correlationId) }
+  logTrace("Releasing synchronized TTS ${correlationId} after all group chimes completed")
+  players.each { ChildDeviceWrapper player -> player.startPreparedAudioClip() }
+  players.each { ChildDeviceWrapper player -> player.completePreparedAudioClipDispatch() }
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
 }
@@ -5885,8 +6028,19 @@ void groupAnnouncementWatchdog(Map data = null) {
   if(!groupDni || !correlationId) { return }
   Map queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
       ? (Map)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
-  Map active = queues[groupDni]?.active instanceof Map ? (Map)queues[groupDni].active : null
-  if(active?.correlationId?.toString() == correlationId) {
+  Map groupQueue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
+  Map active = groupQueue?.active instanceof Map ? (Map)groupQueue.active : null
+  Map priorityActive = groupQueue?.priorityActive instanceof Map ? (Map)groupQueue.priorityActive : null
+  if(priorityActive?.correlationId?.toString() == correlationId) {
+    logWarn("High priority group announcement ${correlationId} timed out; releasing its group queue hold")
+    clearGroupSynchronizedAudioClipHolds(priorityActive)
+    groupQueue.remove('priorityActive')
+    queues[groupDni] = groupQueue
+    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    if(!(groupQueue.active instanceof Map)) {
+      runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+    }
+  } else if(active?.correlationId?.toString() == correlationId) {
     Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
         ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
     if(transactions[correlationId]?.phase == 'RESTORING') {
@@ -5905,6 +6059,7 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
   if(queue?.active?.correlationId?.toString() != correlationId) { return }
   Map active = queue.active instanceof Map ? (Map)queue.active : null
   logInfo("Group announcement ${correlationId} finished (${reason}) for ${groupDni}")
+  clearGroupSynchronizedAudioClipHolds(active)
   Map<String, Map> topologyTransactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
   Map topologyTransaction = topologyTransactions[correlationId]
@@ -5939,6 +6094,16 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
     logWarn("Cannot restore playback for ${correlationId}: coordinator is unavailable")
   }
   completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, [restored: false, skipped: reason])
+}
+
+void clearGroupSynchronizedAudioClipHolds(Map item) {
+  String correlationId = item?.correlationId?.toString()
+  if(!correlationId) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  normalizeGroupPlayerIds(item.playerIds).each { String id ->
+    ChildDeviceWrapper player = rinconMap[id]
+    player?.clearSynchronizedAudioClipHold(correlationId)
+  }
 }
 
 void completeGroupAnnouncementPlaybackRestore(String groupDni, String correlationId, Map payload = [:]) {

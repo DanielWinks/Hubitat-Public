@@ -41,15 +41,24 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   }
 
   void playerLoadAudioClipHighPriority(String uri, BigDecimal volume, String correlationId,
-      Integer duration, Boolean deferStart = false) {
+      Integer duration, Boolean deferStart = false, Boolean chimeBeforeTTS = false,
+      Boolean holdAfterChime = false) {
     commands << [name: 'playerLoadAudioClipHighPriority', uri: uri, volume: volume,
-      correlationId: correlationId, duration: duration, deferStart: deferStart]
+      correlationId: correlationId, duration: duration, deferStart: deferStart,
+      chimeBeforeTTS: chimeBeforeTTS, holdAfterChime: holdAfterChime]
   }
 
   void playerPrepareAudioClipForSynchronizedStart(String uri, BigDecimal volume,
-      String correlationId, Integer duration, Boolean deferStart = false) {
+      String correlationId, Integer duration, Boolean deferStart = false,
+      Boolean chimeBeforeTTS = false, Boolean holdAfterChime = false) {
     commands << [name: 'playerPrepareAudioClipForSynchronizedStart', uri: uri,
-      volume: volume, correlationId: correlationId, duration: duration, deferStart: deferStart]
+      volume: volume, correlationId: correlationId, duration: duration, deferStart: deferStart,
+      chimeBeforeTTS: chimeBeforeTTS, holdAfterChime: holdAfterChime]
+  }
+
+  Boolean canPrepareSynchronizedGroupChime(Boolean highPriority) { return true }
+  void clearSynchronizedAudioClipHold(String correlationId) {
+    commands << [name: 'clearSynchronizedAudioClipHold', correlationId: correlationId]
   }
 
   void startPreparedAudioClip() { commands << [name: 'startPreparedAudioClip'] }
@@ -1144,6 +1153,44 @@ class SonosAdvancedAppSpec extends Specification {
     [coordinator, follower].every { SonosAppPlayerDouble player ->
       player.commands.every { it.name != 'playerLoadAudioClip' }
     }
+  }
+
+  def "separate group chime phase holds each player's TTS until the chime release"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.settings.queueChimeSeparatelyFromTTS = true
+    Map item = [correlationId: 'separate-chime', uri: 'http://example.test/tts.mp3',
+      volume: '10', duration: 5, isTts: true, chimeBeforeStandardPriorityTTS: true]
+
+    when:
+    appScript.dispatchGroupAnnouncementClip(item, [coordinator, follower], false)
+
+    then:
+    [coordinator, follower].every { SonosAppPlayerDouble player ->
+      Map prepared = player.commands.find { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
+      prepared?.chimeBeforeTTS == true && prepared?.holdAfterChime == true
+    }
+    [coordinator, follower].every { SonosAppPlayerDouble player ->
+      player.commands.any { it.name == 'prepareAudioClipForDispatch' } &&
+        player.commands.any { it.name == 'startPreparedAudioClip' }
+    }
+  }
+
+  def "successive queued TTS skips its group chime when suppression is enabled"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.settings.suppressChimeOnSuccessiveTTS = true
+    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [
+      active: [correlationId: 'active-tts', isTts: true], pending: []]]
+
+    when:
+    appScript.enqueueGroupAnnouncement(group, coordinator, [coordinator, follower],
+      'playAudioClip', [uri: 'http://example.test/tts.mp3', isTts: true,
+        chimeBeforeStandardPriorityTTS: true], 'successive-tts')
+
+    then:
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].pending.last().chimeBeforeStandardPriorityTTS == false
+    appScript.logs.any { it.contains('Suppressing chime for successive TTS announcement successive-tts') }
   }
 
   def "queued group audio clips dispatch immediately to every player"() {

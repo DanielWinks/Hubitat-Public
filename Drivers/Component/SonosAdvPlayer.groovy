@@ -251,7 +251,8 @@ metadata {
         input 'createSpeechEnhancementChildDevice', 'bool', title: 'Create child device for Speech Enhancement control', required: false, defaultValue: false
       }
       if(hasAudioClipCapability() == true) {
-        input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
+        input 'chimeBeforeStandardPriorityTTS', 'bool', title: 'Play chime before standard priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
+        input 'chimeBeforeHighPriorityTTS', 'bool', title: 'Play chime before high priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
       }
       input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
       input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
@@ -305,7 +306,11 @@ Boolean getCreateSleepTimerChildDevice() { return settings.createSleepTimerChild
 Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
 Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
 Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
-Boolean getChimeBeforeTTS() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
+Boolean getChimeBeforeStandardPriorityTTS() {
+  if(settings.chimeBeforeStandardPriorityTTS != null) { return settings.chimeBeforeStandardPriorityTTS }
+  return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
+}
+Boolean getChimeBeforeHighPriorityTTS() { return settings.chimeBeforeHighPriorityTTS != null ? settings.chimeBeforeHighPriorityTTS : false }
 // Retain the legacy setting for existing direct-player commands. Group
 // announcements use the parent app's single group policy instead.
 Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
@@ -888,7 +893,10 @@ void migrationCleanup() {
   if(settings.createRightChannelChildDevice == null) { settings.createRightChannelChildDevice = false }
   if(settings.createNightModeChildDevice == null) { settings.createNightModeChildDevice = false }
   if(settings.createSpeechEnhancementChildDevice == null) { settings.createSpeechEnhancementChildDevice = false }
-  if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
+  if(settings.chimeBeforeStandardPriorityTTS == null) {
+    settings.chimeBeforeStandardPriorityTTS = settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
+  }
+  if(settings.chimeBeforeHighPriorityTTS == null) { settings.chimeBeforeHighPriorityTTS = false }
   if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
   if(settings.enableRawWebsocketLogging == null) { settings.enableRawWebsocketLogging = false }
   if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
@@ -1467,7 +1475,8 @@ void playHighPriorityTTS(String text, Object volume = null, String voice = null)
   if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
     LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
-    playerLoadAudioClipHighPriority(tts.uri as String, normalizedVolume, UUID.randomUUID().toString(), ttsDuration)
+    playerLoadAudioClipHighPriority(tts.uri as String, normalizedVolume, UUID.randomUUID().toString(), ttsDuration,
+        false, getChimeBeforeHighPriorityTTS())
   } else {
     BigDecimal announcementVolume = getAnnouncementVolume(normalizedVolume) as BigDecimal
     componentPlayTextWithRestoreLocal(text, announcementVolume, voice)
@@ -1480,7 +1489,7 @@ void playHighPriorityTrack(String uri, Object volume = null) {
   if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
     playerLoadAudioClipHighPriority(uri, normalizedVolume)
   } else {
-    componentLoadStreamUrlLocal(uri, normalizedVolume)
+    componentLoadStreamUrlLocal(uri, normalizedVolume, true)
   }
 }
 
@@ -1502,6 +1511,8 @@ void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String cor
       ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
   Map previousAnnouncement = runtimeState.groupAnnouncementStream instanceof Map
       ? (Map)runtimeState.groupAnnouncementStream : null
+  Integer previousGroupVolume = getGroupVolumeState()
+  if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
   Map savedPlayback = existingSnapshot != null && previousAnnouncement != null
       ? new LinkedHashMap(existingSnapshot)
       : (runtimeState.lastTransportPlaybackSnapshot instanceof Map
@@ -1510,13 +1521,16 @@ void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String cor
     savedPlayback.correlationId = correlationId
     savedPlayback.captureAt = now()
     savedPlayback.announcementUri = uri
+    savedPlayback.previousGroupVolume = previousGroupVolume
+    savedPlayback.announcementVolume = targetVolume
     runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] = savedPlayback
     logDebug("Captured pre-announcement transport for ${correlationId}: uri=${savedPlayback.currentUri}, track=${savedPlayback.track}")
   } else {
     logWarn("No AVTransport snapshot is available to restore after announcement ${correlationId}")
   }
   runtimeState.groupAnnouncementStream = [correlationId: correlationId, uri: uri,
-      phase: 'LOADING', activeObserved: false]
+      phase: 'LOADING', activeObserved: false, previousGroupVolume: previousGroupVolume,
+      announcementVolume: targetVolume]
   logInfo("Starting group announcement stream ${correlationId} on coordinator ${getId()} at volume=${targetVolume}")
   componentSetGroupLevelLocal(new BigDecimal(targetVolume))
   setAVTransportURIAndPlay(uri, null, [groupAnnouncementCorrelationId: correlationId])
@@ -1526,30 +1540,56 @@ void playerPlayGroupAnnouncementStream(String uri, BigDecimal volume, String cor
 void restoreGroupAnnouncementPlayback(String correlationId) {
   Map snapshot = runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] instanceof Map
       ? (Map)runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] : null
-  if(snapshot == null || snapshot.correlationId?.toString() != correlationId) {
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  Boolean matchingAnnouncement = announcement?.correlationId?.toString() == correlationId
+  Boolean matchingSnapshot = snapshot?.correlationId?.toString() == correlationId
+  if(!matchingSnapshot && !matchingAnnouncement) {
     logDebug("No matching playback snapshot to restore for ${correlationId}")
     publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
     return
   }
-  String uri = snapshot.currentUri?.toString()
-  if(!uri) {
-    logWarn("Captured transport for ${correlationId} has no URI; skipping playback restore")
-    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
-    publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
-    return
-  }
+  String uri = matchingSnapshot ? snapshot.currentUri?.toString() : null
+  String announcementUri = matchingSnapshot ? snapshot.announcementUri?.toString() : announcement?.uri?.toString()
   String currentSource = device.currentValue('audioSource')?.toString()
-  if(currentSource && snapshot.announcementUri?.toString() && currentSource != snapshot.announcementUri.toString() &&
+  if(currentSource && announcementUri && currentSource != announcementUri &&
       state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
-    logInfo("Skipping playback restore for ${correlationId}; another source is active")
+    logInfo("Skipping playback and volume restore for ${correlationId}; another source is active")
     runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
     runtimeState.remove('groupAnnouncementStream')
     publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false, skipped: 'external-playback'])
     return
   }
+  Integer previousGroupVolume = matchingAnnouncement
+      ? (announcement.previousGroupVolume as Integer)
+      : (matchingSnapshot ? snapshot.previousGroupVolume as Integer : null)
+  Integer announcementVolume = matchingAnnouncement
+      ? (announcement.announcementVolume as Integer)
+      : (matchingSnapshot ? snapshot.announcementVolume as Integer : null)
+  restoreTemporaryAnnouncementVolume(correlationId, previousGroupVolume, announcementVolume)
+  if(!uri) {
+    logWarn("Captured transport for ${correlationId} has no URI; skipping playback restore")
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+    runtimeState.remove('groupAnnouncementStream')
+    publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: false])
+    return
+  }
   runtimeState.announcementPlaybackRestore = [correlationId: correlationId, snapshot: snapshot]
   logInfo("Restoring pre-announcement transport for ${correlationId}: ${uri}")
   setAVTransportURIForAnnouncementRestore(uri, snapshot.currentUriMetaData?.toString(), correlationId)
+}
+
+/** Restore the prior group level only if the announcement's volume is still active. */
+void restoreTemporaryAnnouncementVolume(String correlationId, Integer previousVolume, Integer announcementVolume) {
+  if(!correlationId || previousVolume == null || announcementVolume == null || previousVolume == announcementVolume) { return }
+  Integer currentVolume = getGroupVolumeState()
+  if(currentVolume == null) { currentVolume = getPlayerVolume() }
+  if(currentVolume != announcementVolume) {
+    logDebug("Skipping volume restore for ${correlationId}; volume changed to ${currentVolume} during the announcement")
+    return
+  }
+  logInfo("Restoring group volume after announcement ${correlationId} to ${previousVolume}")
+  componentSetGroupLevelLocal(new BigDecimal(previousVolume))
 }
 
 void setAVTransportURIForAnnouncementRestore(String uri, String metadata, String correlationId) {
@@ -7546,7 +7586,8 @@ Integer getAnnouncementVolume(BigDecimal requestedVolume) {
 
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null, String correlationId = null,
-    Integer duration = 0, Boolean deferStart = false) {
+    Integer duration = 0, Boolean deferStart = false, Boolean chimeBeforeTTS = false,
+    Boolean holdAfterChime = false) {
   if(deferCommandToParentDuringGroupOperation('loadHighPriorityAudioClip', [uri, volume, correlationId, duration])) { return }
   logTrace('playerLoadAudioClipHighPriority')
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
@@ -7592,6 +7633,42 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
     cancelAudioClipWatchdog()
   }
 
+  if(chimeBeforeTTS == true) {
+    String chimeCorrelationId = UUID.randomUUID().toString()
+    Map<String,String> chimeCommand = [
+      'namespace':'audioClip',
+      'command':'loadAudioClip',
+      'playerId':"${getId()}".toString()
+    ]
+    Map chimeArgs = [
+      'name': chimeCorrelationId,
+      'appId': 'com.hubitat.sonos',
+      'clipType': 'CHIME',
+      'priority': 'HIGH',
+      'volume': args.volume
+    ]
+    Map<String,Object> highPriorityChime = new LinkedHashMap<String,Object>()
+    highPriorityChime.put('leftChannel', JsonOutput.toJson([chimeCommand, chimeArgs]))
+    highPriorityChime.put('priority', 'HIGH')
+    highPriorityChime.put('duration', 8)
+    highPriorityChime.put('origin', 'high-priority-player-chime')
+    highPriorityChime.put('correlationId', chimeCorrelationId)
+    highPriorityChime.put('groupAnnouncementCorrelationId', holdAfterChime == true ? correlationId : null)
+    highPriorityChime.put('synchronizedGroupChime', holdAfterChime == true)
+    if(loadAudioClipOnRightChannel()) {
+      chimeCommand.playerId = "${getRightChannelId()}".toString()
+      highPriorityChime.put('rightChannel', JsonOutput.toJson([chimeCommand, chimeArgs]))
+    }
+    addAudioClipCorrelation(highPriorityChime)
+    highPriorityQueue.add(highPriorityChime)
+    if(holdAfterChime == true && correlationId) {
+      Map<String,Object> synchronizedHold = new LinkedHashMap<String,Object>()
+      synchronizedHold.put('correlationId', correlationId)
+      synchronizedHold.put('allowChimeDispatch', true)
+      runtimeState.put('groupSynchronizedAudioClipHold', synchronizedHold)
+    }
+  }
+
   // Add to high-priority queue
   highPriorityQueue.add(audioClip)
   traceAudioClipQueues('priority-enqueued')
@@ -7626,7 +7703,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  if(getAudioClipQueueIsEmpty() && getChimeBeforeTTS()) {playerLoadAudioClipChime(volume)}
+  if(getAudioClipQueueIsEmpty() && getChimeBeforeStandardPriorityTTS()) {playerLoadAudioClipChime(volume)}
   if(duration > 0) { audioClip.duration = duration }
   audioClip.uri = uri
   audioClip.origin = 'player-tts'
@@ -7640,7 +7717,8 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
  * ungrouped players on the same Hubitat scheduler tick.
  */
 void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal volume = null, String correlationId = null,
-    Integer duration = 0, Boolean deferStart = false) {
+    Integer duration = 0, Boolean deferStart = false, Boolean chimeBeforeTTS = null,
+    Boolean holdAfterChime = false) {
   if(getIsMuted()) {
     logTrace('Skipping synchronized audio clip because player is muted.')
     if(correlationId) { publishGroupAnnouncementProgress(correlationId, 'DISMISSED', [reason: 'muted']) }
@@ -7648,7 +7726,8 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
   }
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
   ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
-  if(queue.isEmpty() && getChimeBeforeTTS()) {
+  Boolean shouldChime = chimeBeforeTTS != null ? chimeBeforeTTS : getChimeBeforeStandardPriorityTTS()
+  if(queue.isEmpty() && shouldChime) {
     String chimeCorrelationId = UUID.randomUUID().toString()
     Map<String,String> chimeCommand = [
       'namespace':'audioClip',
@@ -7660,12 +7739,20 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
     Map chimeClip = [leftChannel: JsonOutput.toJson([chimeCommand,chimeArgs]), duration: 8]
     chimeClip.origin = 'synchronized-player-chime'
     chimeClip.correlationId = chimeCorrelationId
+    if(holdAfterChime == true) { chimeClip.groupAnnouncementCorrelationId = correlationId }
+    chimeClip.synchronizedGroupChime = holdAfterChime == true
     addAudioClipCorrelation(chimeClip)
     if(loadAudioClipOnRightChannel()) {
       chimeCommand.playerId = "${getRightChannelId()}".toString()
       chimeClip.rightChannel = JsonOutput.toJson([chimeCommand,chimeArgs])
     }
     queue.add(chimeClip)
+    if(holdAfterChime == true && correlationId) {
+      Map<String,Object> synchronizedHold = new LinkedHashMap<String,Object>()
+      synchronizedHold.put('correlationId', correlationId)
+      synchronizedHold.put('allowChimeDispatch', true)
+      runtimeState.put('groupSynchronizedAudioClipHold', synchronizedHold)
+    }
   }
   Map<String,String> command = [
     'namespace':'audioClip',
@@ -7696,6 +7783,10 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
 /** Select and fully track the next queued clip before a synchronized release pass. */
 void prepareAudioClipForDispatch() {
   if(runtimeState.audioClipPlaying != true) { prepareNextAudioClipForDispatch() }
+}
+
+Boolean canPrepareSynchronizedGroupChime(Boolean highPriority) {
+  return highPriority ? getDeviceAudioClipQueueHighPriority().isEmpty() : getDeviceAudioClipQueue().isEmpty()
 }
 
 void prepareAndStartAudioClip() {
@@ -7886,6 +7977,18 @@ void prepareNextAudioClipForDispatch() {
   traceAudioClipQueues('dequeue-entry')
   logTrace('dequeueAudioClip')
 
+  Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
+      ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
+  if(synchronizedHold != null) {
+    if(synchronizedHold.allowChimeDispatch == true) {
+      synchronizedHold.allowChimeDispatch = false
+      runtimeState.groupSynchronizedAudioClipHold = synchronizedHold
+    } else {
+      logTrace("Holding queued audioClip for synchronized group TTS ${synchronizedHold.correlationId}")
+      return
+    }
+  }
+
   // Check high-priority queue first
   ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
   Map clipMessage = highPriorityQueue.poll()
@@ -7959,6 +8062,23 @@ void prepareNextAudioClipForDispatch() {
   runtimeState.audioClipPlaying = true
   traceAudioClipQueues('dispatch-prepared')
   if(!isCurrentlySubcribedToAudioClipWS()) { subscribeToAudioClip() }
+}
+
+/** Release the queued TTS clip after every group member's separate chime has completed. */
+void prepareSynchronizedAudioClipAfterChime(String correlationId) {
+  Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
+      ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
+  if(!correlationId || synchronizedHold?.correlationId?.toString() != correlationId) { return }
+  runtimeState.remove('groupSynchronizedAudioClipHold')
+  prepareAudioClipForDispatch()
+}
+
+void clearSynchronizedAudioClipHold(String correlationId) {
+  Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
+      ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
+  if(correlationId && synchronizedHold?.correlationId?.toString() == correlationId) {
+    runtimeState.remove('groupSynchronizedAudioClipHold')
+  }
 }
 
 void dispatchPreparedAudioClip() {
@@ -8246,10 +8366,85 @@ String getLocalUpnpHostForGroupOperation() {
 void componentPlayTextNoRestoreLocal(String text, BigDecimal volume = null, String voice = null) {
   logDebug("${device} play text ${text} (volume ${volume != null ? volume : 'not set'})")
   Map tts = textToSpeech(text, voice)
-  String streamUrl = tts.uri
+  String streamUrl = tts?.uri?.toString()
+  if(!streamUrl) { logWarn('TTS did not return a stream URI'); return }
+  Integer duration = coerceClipDuration(tts?.duration) ?: 30
+  Integer previousGroupVolume = getGroupVolumeState()
+  if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
   volume = resolveExplicitVolumeSentinel(volume)
   if(volume != null) {componentSetGroupLevelLocal(volume)}
+  String correlationId = UUID.randomUUID().toString()
+  runtimeState.directStreamTtsVolumeRestore = [correlationId: correlationId, streamUri: streamUrl,
+      duration: duration, previousGroupVolume: previousGroupVolume, announcementVolume: volume as Integer]
   setAVTransportURIAndPlay(streamUrl)
+  runIn(Math.max(duration + 2, 5), 'restoreDirectStreamTtsVolume', [overwrite: true,
+      data: [correlationId: correlationId]])
+}
+
+void restoreDirectStreamTtsVolume(Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.directStreamTtsVolumeRestore instanceof Map
+      ? (Map)runtimeState.directStreamTtsVolumeRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  String currentSource = device.currentValue('audioSource')?.toString()
+  if(currentSource && currentSource != active.streamUri?.toString() &&
+      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+    logInfo("Skipping direct TTS volume restore ${correlationId}; another source is active")
+    runtimeState.remove('directStreamTtsVolumeRestore')
+    return
+  }
+  restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
+      active.announcementVolume as Integer)
+  runtimeState.remove('directStreamTtsVolumeRestore')
+}
+
+void scheduleDirectStreamTrackVolumeRestore(Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.directStreamTrackVolumeRestore instanceof Map
+      ? (Map)runtimeState.directStreamTrackVolumeRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  String currentSource = device.currentValue('audioSource')?.toString()
+  if(currentSource && currentSource != active.streamUri?.toString() &&
+      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+    logInfo("Skipping high priority track volume restore ${correlationId}; another source is active")
+    runtimeState.remove('directStreamTrackVolumeRestore')
+    return
+  }
+  Integer duration = parseSonosDurationSeconds(getCurrentTrackDuration())
+  Long startedAt = active.startedAt instanceof Number ? (active.startedAt as Long) : now()
+  if(duration == null || duration <= 0) {
+    Integer attempts = (active.durationLookupAttempts ?: 0) as Integer
+    if(attempts < 10) {
+      active.durationLookupAttempts = attempts + 1
+      runtimeState.directStreamTrackVolumeRestore = active
+      runIn(2, 'scheduleDirectStreamTrackVolumeRestore', [overwrite: true,
+          data: [correlationId: correlationId]])
+    } else {
+      logWarn("Could not determine the duration of high priority track ${correlationId}; volume will remain at its requested level")
+      runtimeState.remove('directStreamTrackVolumeRestore')
+    }
+    return
+  }
+  Integer remainingSeconds = Math.max(1, duration - ((now() - startedAt).intdiv(1000L) as Integer) + 2)
+  runIn(remainingSeconds, 'restoreDirectStreamTrackVolume', [overwrite: true,
+      data: [correlationId: correlationId]])
+}
+
+void restoreDirectStreamTrackVolume(Map data = null) {
+  String correlationId = data?.correlationId?.toString()
+  Map active = runtimeState.directStreamTrackVolumeRestore instanceof Map
+      ? (Map)runtimeState.directStreamTrackVolumeRestore : null
+  if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
+  String currentSource = device.currentValue('audioSource')?.toString()
+  if(currentSource && currentSource != active.streamUri?.toString() &&
+      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+    logInfo("Skipping high priority track volume restore ${correlationId}; another source is active")
+    runtimeState.remove('directStreamTrackVolumeRestore')
+    return
+  }
+  restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
+      active.announcementVolume as Integer)
+  runtimeState.remove('directStreamTrackVolumeRestore')
 }
 
 /** Stream TTS, then restore the previous transport if this stream still owns playback. */
@@ -8267,22 +8462,29 @@ void componentPlayStreamWithRestoreLocal(String streamUrl, Integer duration, Big
   Map snapshot = runtimeState.lastTransportPlaybackSnapshot instanceof Map
       ? new LinkedHashMap((Map)runtimeState.lastTransportPlaybackSnapshot) : null
   String correlationId = UUID.randomUUID().toString()
+  Integer previousGroupVolume = getGroupVolumeState()
+  if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
+  volume = resolveExplicitVolumeSentinel(volume)
+  Integer announcementVolume = volume as Integer
   if(snapshot != null) {
     snapshot.correlationId = correlationId
     snapshot.announcementUri = streamUrl
+    snapshot.previousGroupVolume = previousGroupVolume
+    snapshot.announcementVolume = announcementVolume
     runtimeState[ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY] = snapshot
     runtimeState.directStreamTtsRestore = [correlationId: correlationId, streamUri: streamUrl,
-      duration: duration]
+      duration: duration, previousGroupVolume: previousGroupVolume,
+      announcementVolume: announcementVolume]
   } else {
     logWarn("No AVTransport snapshot is available to restore after direct stream TTS ${correlationId}")
+    runtimeState.directStreamTtsRestore = [correlationId: correlationId, streamUri: streamUrl,
+      duration: duration, previousGroupVolume: previousGroupVolume,
+      announcementVolume: announcementVolume]
   }
-  volume = resolveExplicitVolumeSentinel(volume)
   if(volume != null) { componentSetGroupLevelLocal(volume) }
   setAVTransportURIAndPlay(streamUrl)
-  if(snapshot != null) {
-    runIn(Math.max(duration + 2, 5), 'restoreDirectStreamTts', [overwrite: true,
-      data: [correlationId: correlationId]])
-  }
+  runIn(Math.max(duration + 2, 5), 'restoreDirectStreamTts', [overwrite: true,
+    data: [correlationId: correlationId]])
 }
 
 void restoreDirectStreamTts(Map data = null) {
@@ -8293,6 +8495,8 @@ void restoreDirectStreamTts(Map data = null) {
   String currentSource = device.currentValue('audioSource')?.toString()
   if(currentSource && currentSource != active.streamUri?.toString()) {
     if(!(state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING'])) {
+      restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
+          active.announcementVolume as Integer)
       runtimeState.remove('directStreamTtsRestore')
       restoreGroupAnnouncementPlayback(correlationId)
       return
@@ -8302,6 +8506,8 @@ void restoreDirectStreamTts(Map data = null) {
     runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
     return
   }
+  restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
+      active.announcementVolume as Integer)
   runtimeState.remove('directStreamTtsRestore')
   restoreGroupAnnouncementPlayback(correlationId)
 }
@@ -8784,10 +8990,22 @@ void addURIToQueue(String enqueuedURI, String enqueuedURIMetaData = null) {
   postSonosSoapAsync('localControlCallback', params)
 }
 
-void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
+void componentLoadStreamUrlLocal(String streamUrl, BigDecimal volume = null, Boolean restoreVolumeAfterTrack = false) {
   logDebug("${device} play track ${streamUrl} (volume ${volume != null ? volume : 'not set'})")
   volume = resolveExplicitVolumeSentinel(volume)
-  if(volume != null) {componentSetGroupLevelLocal(volume)}
+  if(volume != null && restoreVolumeAfterTrack == true) {
+    Integer previousGroupVolume = getGroupVolumeState()
+    if(previousGroupVolume == null) { previousGroupVolume = getPlayerVolume() }
+    String correlationId = UUID.randomUUID().toString()
+    runtimeState.directStreamTrackVolumeRestore = [correlationId: correlationId, streamUri: streamUrl,
+        startedAt: now(), previousGroupVolume: previousGroupVolume, announcementVolume: volume as Integer]
+    componentSetGroupLevelLocal(volume)
+    setAVTransportURIAndPlay(streamUrl)
+    runIn(2, 'scheduleDirectStreamTrackVolumeRestore', [overwrite: true,
+        data: [correlationId: correlationId]])
+    return
+  }
+  if(volume != null) { componentSetGroupLevelLocal(volume) }
   setAVTransportURIAndPlay(streamUrl)
 }
 
@@ -9783,6 +10001,14 @@ private Integer coerceClipDuration(Object raw) {
   try { return new BigDecimal(raw.toString().trim()).intValue() }
   catch(NumberFormatException ignored) { return null }
   catch(ArithmeticException ignored) { return null }
+}
+
+private Integer parseSonosDurationSeconds(String rawDuration) {
+  if(!rawDuration || !(rawDuration ==~ /\d{1,}:\d{2}:\d{2}/)) { return null }
+  try {
+    List<String> parts = rawDuration.split(':') as List<String>
+    return (parts[0].toInteger() * 3600) + (parts[1].toInteger() * 60) + parts[2].toInteger()
+  } catch(Exception ignored) { return null }
 }
 
 void audioClipCommandSent(String correlationId) {

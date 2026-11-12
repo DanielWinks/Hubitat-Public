@@ -191,7 +191,8 @@ metadata {
   }
   preferences {
     section('Device Settings') {
-      input 'chimeBeforeTTS', 'bool', title: 'Play chime before standard priority TTS messages', required: false, defaultValue: false
+      input 'chimeBeforeStandardPriorityTTS', 'bool', title: 'Play chime before standard priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
+      input 'chimeBeforeHighPriorityTTS', 'bool', title: 'Play chime before high priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
     }
     section('Volume Control Settings') {
       input 'controlUngroupedIndividually', 'bool',
@@ -242,7 +243,11 @@ Boolean loggingEnabled(String messageLevel) {
   Integer messageIndex = LOG_LEVELS.indexOf(messageLevel)
   return configuredIndex >= 0 && messageIndex >= configuredIndex && messageIndex < LOG_LEVELS.indexOf('off')
 }
-Boolean getChimeBeforeTTSSetting() { return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false }
+Boolean getChimeBeforeStandardPriorityTTSSetting() {
+  if(settings.chimeBeforeStandardPriorityTTS != null) { return settings.chimeBeforeStandardPriorityTTS }
+  return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
+}
+Boolean getChimeBeforeHighPriorityTTSSetting() { return settings.chimeBeforeHighPriorityTTS != null ? settings.chimeBeforeHighPriorityTTS : false }
 Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
@@ -401,7 +406,10 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 void initialize() {
   migrateLegacyRuntimeState()
   removeDeprecatedGroupStates()
-  if(settings.chimeBeforeTTS == null) { settings.chimeBeforeTTS = false }
+  if(settings.chimeBeforeStandardPriorityTTS == null) {
+    settings.chimeBeforeStandardPriorityTTS = settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
+  }
+  if(settings.chimeBeforeHighPriorityTTS == null) { settings.chimeBeforeHighPriorityTTS = false }
   if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
   if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
   // Initialize volume/mute state from coordinator
@@ -532,7 +540,9 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null, 
     }
     String correlationId = UUID.randomUUID().toString()
     requestGroupCommand('playAudioClip', [uri: ttsMap.uri as String, volume: volume?.toString(),
-      correlationId: correlationId, duration: ttsMap.duration, forceAudioClip: forceAudioClip == true])
+      correlationId: correlationId, duration: ttsMap.duration, forceAudioClip: forceAudioClip == true,
+      isTts: true,
+      chimeBeforeStandardPriorityTTS: getChimeBeforeStandardPriorityTTSSetting()])
   } catch (Exception e) {
     logError("Error playing text: ${e.message}")
   }
@@ -558,7 +568,9 @@ void playHighPriorityTTS(String text, Object volume = null, String voice = null)
     String correlationId = UUID.randomUUID().toString()
     BigDecimal normalizedVolume = normalizeLegacyOptionalPlaybackVolume(volume)
     requestGroupCommand('playHighPriorityTrack', [uri: ttsMap.uri as String, volume: normalizedVolume?.toString(),
-      correlationId: correlationId, duration: ttsMap.duration])
+      correlationId: correlationId, duration: ttsMap.duration,
+      isTts: true,
+      chimeBeforeHighPriorityTTS: getChimeBeforeHighPriorityTTSSetting()])
   } catch (Exception e) {
     logError("Error playing high priority TTS: ${e.message}")
   }

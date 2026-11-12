@@ -9,5 +9,11 @@ to player and group commands such as `playTrack`, `playHighPriorityTrack`,
 `playText`, `playTextAndRestore`, `playTextAndResume`, `speak`,
 `speakNoRestore`, `playHighPriorityTTS`, and `enqueueLowPriorityTrack`.
 
+Non-audioClip TTS announcements temporarily set the Sonos group volume and
+restore the prior level when the message finishes, provided the volume has not
+been changed independently during playback. AudioClip announcements set the
+clip volume without changing the group volume. Regular `playTrack` playback
+keeps its requested volume as the listening level.
+
 Direct volume commands such as `setLevel(0)` and `setGroupVolume(0)` continue to
 set the volume to zero.
