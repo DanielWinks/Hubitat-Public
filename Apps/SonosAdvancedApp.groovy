@@ -6563,6 +6563,8 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     favoriteExpectedCoordinatorId: null,
     favoriteTopologyRefreshAt: 0L,
     favoriteTopologyObservations: [:],
+    favoriteTopologyFirstMatchingRoster: null,
+    favoriteTopologyLatestConflictingRoster: null,
     favoriteTopologyAttempt: 0,
     favoriteTopologyStableObservations: 0,
     favoriteTopologyLastObservedAt: 0L,
@@ -6775,6 +6777,8 @@ void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
   operation.favoriteExpectedCoordinatorId = null
   operation.favoriteTopologyRefreshAt = 0L
   operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyFirstMatchingRoster = null
+  operation.favoriteTopologyLatestConflictingRoster = null
   operation.favoriteTopologyAttempt = 0
   operation.favoriteTopologyStableObservations = 0
   operation.favoriteTopologyLastObservedAt = 0L
@@ -7014,6 +7018,35 @@ Map readFavoriteGroupTopology(Map operation) {
   List<Map> playerObservations = topology.observations instanceof List
       ? (List<Map>)topology.observations
       : []
+
+  Map firstMatchingRoster = operation?.favoriteTopologyFirstMatchingRoster instanceof Map
+      ? (Map)operation.favoriteTopologyFirstMatchingRoster
+      : null
+  Map latestConflictingRoster = operation?.favoriteTopologyLatestConflictingRoster instanceof Map
+      ? (Map)operation.favoriteTopologyLatestConflictingRoster
+      : null
+  if(firstMatchingRoster != null) {
+    Boolean usingConflict = latestConflictingRoster != null &&
+        ((latestConflictingRoster.observedAt ?: 0L) as Long) >
+            ((firstMatchingRoster.acceptedObservedAt ?: firstMatchingRoster.observedAt ?: 0L) as Long)
+    Map acceptedRoster = usingConflict ? latestConflictingRoster : firstMatchingRoster
+    List<String> freshPlayers = playerObservations.findAll { Map item -> item.fresh == true }
+        .collect { Map item -> item.playerId?.toString() }
+    if(usingConflict) {
+      logTrace("Post-Favorite topology uses most recent conflicting roster from ${acceptedRoster.playerId}: group=${acceptedRoster.groupId ?: 'unknown'}, coordinator=${acceptedRoster.coordinatorId ?: 'unknown'}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
+    } else {
+      String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
+      if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.resolvedCoordinatorId as String }
+      if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.desiredCoordinatorId as String }
+      if(acceptedRoster.playerId?.toString() == expectedCoordinatorId) {
+        logTrace("Post-Favorite topology uses fresh coordinator roster ${acceptedRoster.playerId}: group=${acceptedRoster.groupId}, coordinator=${acceptedRoster.coordinatorId}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
+      } else {
+        logTrace("Post-Favorite topology uses first matching roster from ${acceptedRoster.playerId}: group=${acceptedRoster.groupId}, coordinator=${acceptedRoster.coordinatorId}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
+      }
+    }
+    return topologyFromFavoriteRoster(acceptedRoster)
+  }
+
   String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
   if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.resolvedCoordinatorId as String }
   if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.desiredCoordinatorId as String }
@@ -7056,6 +7089,87 @@ Map readFavoriteGroupTopology(Map operation) {
   ]
   logTrace("Post-Favorite topology uses fresh coordinator roster ${expectedCoordinatorId}: group=${confirmedTopology.groupId}, coordinator=${confirmedTopology.coordinatorId}, members=${authoritativePlayerIds}, freshPlayers=${playerObservations.findAll { Map item -> item.fresh == true }.collect { Map item -> item.playerId }}")
   return confirmedTopology
+}
+
+Map topologyFromFavoriteRoster(Map roster) {
+  String groupId = roster?.groupId?.toString()
+  String coordinatorId = roster?.coordinatorId?.toString()
+  List<String> playerIds = normalizeGroupPlayerIds(roster?.playerIds)
+  String playerId = roster?.playerId?.toString()
+  Long observedAt = ((roster?.latestMatchingObservedAt ?: roster?.observedAt ?: 0L) as Long)
+  return [
+    fresh: true,
+    consistent: groupId != null && coordinatorId != null && !playerIds.isEmpty(),
+    groupId: groupId,
+    coordinatorId: coordinatorId,
+    playerIds: playerIds,
+    observations: [[
+      playerId: playerId,
+      groupId: groupId,
+      coordinatorId: coordinatorId,
+      playerIds: playerIds,
+      fresh: true,
+      observedAt: observedAt
+    ]],
+    authorityPlayerId: playerId,
+    fingerprint: "${playerId}:${groupId}:${coordinatorId}:${playerIds.join(',')}"
+  ]
+}
+
+Boolean sameFavoriteTopologyRoster(Map left, Map right) {
+  return left?.groupId?.toString() == right?.groupId?.toString() &&
+      left?.coordinatorId?.toString() == right?.coordinatorId?.toString() &&
+      normalizeGroupPlayerIds(left?.playerIds) == normalizeGroupPlayerIds(right?.playerIds)
+}
+
+void recordFavoriteTopologyRoster(Map operation, Map roster) {
+  if(operation == null || roster == null) { return }
+
+  Map firstMatchingRoster = operation.favoriteTopologyFirstMatchingRoster instanceof Map
+      ? (Map)operation.favoriteTopologyFirstMatchingRoster
+      : null
+  Map rosterSnapshot = [
+    playerId: roster.playerId?.toString(),
+    groupId: roster.groupId?.toString(),
+    coordinatorId: roster.coordinatorId?.toString(),
+    playerIds: normalizeGroupPlayerIds(roster.playerIds),
+    observedAt: ((roster.observedAt ?: 0L) as Long)
+  ]
+  Map rosterTopology = [
+    fresh: true,
+    consistent: true,
+    groupId: rosterSnapshot.groupId,
+    coordinatorId: rosterSnapshot.coordinatorId,
+    playerIds: rosterSnapshot.playerIds
+  ]
+
+  if(firstMatchingRoster == null) {
+    if(isFavoriteGroupTopologySatisfied(operation, rosterTopology)) {
+      rosterSnapshot.latestMatchingObservedAt = rosterSnapshot.observedAt
+      rosterSnapshot.acceptedObservedAt = rosterSnapshot.observedAt
+      operation.favoriteTopologyFirstMatchingRoster = rosterSnapshot
+    }
+    return
+  }
+
+  if(sameFavoriteTopologyRoster(rosterSnapshot, firstMatchingRoster)) {
+    Long previousObservedAt = ((firstMatchingRoster.latestMatchingObservedAt ?: firstMatchingRoster.observedAt ?: 0L) as Long)
+    if(rosterSnapshot.observedAt > previousObservedAt) {
+      firstMatchingRoster.latestMatchingObservedAt = rosterSnapshot.observedAt
+      firstMatchingRoster.latestMatchingPlayerId = rosterSnapshot.playerId
+      operation.favoriteTopologyFirstMatchingRoster = firstMatchingRoster
+    }
+    return
+  }
+
+  Map latestConflictingRoster = operation.favoriteTopologyLatestConflictingRoster instanceof Map
+      ? (Map)operation.favoriteTopologyLatestConflictingRoster
+      : null
+  Long latestConflictAt = ((latestConflictingRoster?.observedAt ?: 0L) as Long)
+  Long firstMatchingAt = ((firstMatchingRoster.acceptedObservedAt ?: firstMatchingRoster.observedAt ?: 0L) as Long)
+  if(rosterSnapshot.observedAt > firstMatchingAt && rosterSnapshot.observedAt > latestConflictAt) {
+    operation.favoriteTopologyLatestConflictingRoster = rosterSnapshot
+  }
 }
 
 String summarizeGroupOperationTopology(Map topology) {
@@ -7760,6 +7874,8 @@ void sendGroupFavoriteLoad(Map operation, Map topology) {
   operation.favoriteExpectedCoordinatorId = null
   operation.favoriteTopologyRefreshAt = 0L
   operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyFirstMatchingRoster = null
+  operation.favoriteTopologyLatestConflictingRoster = null
   operation.favoriteTopologyAttempt = 0
   operation.favoriteTopologyStableObservations = 0
   operation.favoriteTopologyLastObservedAt = 0L
@@ -8018,6 +8134,8 @@ void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
   operation.favoriteExpectedCoordinatorId = null
   operation.favoriteTopologyRefreshAt = 0L
   operation.favoriteTopologyObservations = [:]
+  operation.favoriteTopologyFirstMatchingRoster = null
+  operation.favoriteTopologyLatestConflictingRoster = null
   operation.favoriteTopologyAttempt = 0
   operation.favoriteTopologyStableObservations = 0
   operation.favoriteTopologyLastObservedAt = 0L
@@ -8131,7 +8249,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
       if(!waitingForFreshTopology) {
         if(((operation.favoriteTopologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS) {
           failGroupOperation(operation, 'FAVORITE_TOPOLOGY_NOT_CONFIRMED',
-              "Post-Favorite group topology was not observed from every required player: ${summarizeGroupOperationTopology(topology)}")
+              "No acceptable fresh post-Favorite group roster was observed: ${summarizeGroupOperationTopology(topology)}")
           return
         }
         refreshGroupFavoriteTopology(operation)
@@ -8528,6 +8646,13 @@ void groupFavoriteOperationEventHandler(Event event) {
               : [:]
           favoriteTopologyObservations[eventPlayerId] = topologyObservations[eventPlayerId]
           operation.favoriteTopologyObservations = favoriteTopologyObservations
+          recordFavoriteTopologyRoster(operation, [
+            playerId: eventPlayerId,
+            groupId: eventData.groupId?.toString(),
+            coordinatorId: eventData.coordinatorId?.toString(),
+            playerIds: normalizeGroupPlayerIds(eventData.playerIds),
+            observedAt: eventObservedAt
+          ])
 
           if(operation.favoriteTopologyVerified == true) {
             Map eventTopology = [

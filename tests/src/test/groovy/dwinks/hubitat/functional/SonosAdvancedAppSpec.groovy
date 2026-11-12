@@ -1771,6 +1771,73 @@ class SonosAdvancedAppSpec extends Specification {
     operation.favoriteExpectedGroupId == 'GROUP-1'
   }
 
+  def "post-Favorite topology accepts the first matching follower roster before the coordinator report"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('on', [:], 1)])
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 2)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    assert operation.phase == 'WAIT_FOR_FAVORITE'
+
+    when:
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    operation.favoriteTopologyStableObservations == 1
+    operation.favoriteTopologyVerified == false
+    appScript.logs.any { it.contains('Post-Favorite topology check') && it.contains('authority=RINCON_FOLLOW') }
+
+    when:
+    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    Map topology = appScript.readFavoriteGroupTopology(operation)
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    topology.authorityPlayerId == 'RINCON_FOLLOW'
+    operation.favoriteTopologyVerified == true
+    operation.favoriteTopologyStableObservations == 2
+    operation.favoriteExpectedGroupId == 'GROUP-1'
+    appScript.getActiveGroupOperation() != null
+  }
+
+  def "the latest conflicting post-Favorite roster overrides the first matching roster"() {
+    given:
+    appScript.processGroupCommandRequest([request: request('on', [:], 1)])
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 2)])
+    Map operation = appScript.getActiveGroupOperation()
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    emitRequiredTopology()
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    assert operation.phase == 'WAIT_FOR_FAVORITE'
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    assert operation.favoriteTopologyStableObservations == 1
+
+    when:
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-2', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    emitTopologyObservation('RINCON_COORD', 'GROUP-3', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    Map topology = appScript.readFavoriteGroupTopology(operation)
+
+    then:
+    topology.fresh == true
+    topology.groupId == 'GROUP-3'
+    topology.authorityPlayerId == 'RINCON_COORD'
+
+    when:
+    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+
+    then:
+    operation.phase == 'ENSURE_GROUP'
+    operation.favoriteAttempt == 1
+    group.statuses.last().status.status != 'SUCCEEDED'
+  }
+
   def "Favorite inherits the additive context and accepts the extra player"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
