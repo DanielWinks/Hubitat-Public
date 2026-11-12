@@ -93,36 +93,36 @@ class ESPHomeRATGDOGarageDoorSpec extends Specification {
     driver.parse('{"id":"cover/door","state":"OPEN","value":0.4,"current_operation":"IDLE"}')
 
     then:
-    driver.device.currentValue('position') == 0.4G
-    driver.device.currentValue('door') == 'partially open'
+    driver.events.findAll { Map event -> event.name == 'position' }.last().value == 0.4G
+    driver.events.findAll { Map event -> event.name == 'door' }.last().value == 'partially open'
 
     when: 'the door is moving while partially open'
     driver.parse('{"id":"cover/door","state":"OPEN","value":0.55,"current_operation":"OPENING"}')
 
     then:
-    driver.device.currentValue('position') == 0.55G
-    driver.device.currentValue('door') == 'opening'
+    driver.events.findAll { Map event -> event.name == 'position' }.last().value == 0.55G
+    driver.events.findAll { Map event -> event.name == 'door' }.last().value == 'opening'
 
     when: 'the door is moving closed while partially open'
     driver.parse('{"id":"cover/door","state":"OPEN","value":0.3,"current_operation":"CLOSING"}')
 
     then:
-    driver.device.currentValue('position') == 0.3G
-    driver.device.currentValue('door') == 'closing'
+    driver.events.findAll { Map event -> event.name == 'position' }.last().value == 0.3G
+    driver.events.findAll { Map event -> event.name == 'door' }.last().value == 'closing'
 
     when: 'the door is fully open'
     driver.parse('{"id":"cover/door","state":"OPEN","value":1.0,"current_operation":"IDLE"}')
 
     then:
-    driver.device.currentValue('position') == 1.0G
-    driver.device.currentValue('door') == 'open'
+    driver.events.findAll { Map event -> event.name == 'position' }.last().value == 1.0G
+    driver.events.findAll { Map event -> event.name == 'door' }.last().value == 'open'
 
     when: 'the door is fully closed'
     driver.parse('{"id":"cover/door","state":"CLOSED","value":0.0,"current_operation":"IDLE"}')
 
     then:
-    driver.device.currentValue('position') == 0.0G
-    driver.device.currentValue('door') == 'closed'
+    driver.events.findAll { Map event -> event.name == 'position' }.last().value == 0.0G
+    driver.events.findAll { Map event -> event.name == 'door' }.last().value == 'closed'
   }
 
   def "BLE device-tracker POSTs create and update presence children"() {
