@@ -2187,7 +2187,7 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.isCurrentAirPlayAudioSource()
   }
 
-  def "fallback announcements preserve zero with boost"() {
+  def "fallback announcements treat zero as omitted and minus one as explicit zero"() {
     given:
     List<BigDecimal> volumes = []
     driver.metaClass.getParent = { -> null }
@@ -2198,13 +2198,17 @@ class SonosAdvPlayerSpec extends Specification {
     driver.settings.ttsBoostAmount = 10
 
     when:
-    driver.invokeMethod(command, ['zero', 0G, null] as Object[])
+    driver.invokeMethod(command, ['zero', requestedVolume, null] as Object[])
 
     then:
-    volumes == [0G]
+    volumes == [expectedVolume]
 
     where:
-    command << ['devicePlayText', 'devicePlayTextNoRestore']
+    command                  | requestedVolume | expectedVolume
+    'speak'                  | 0               | 15G
+    'devicePlayTextNoRestore'| 0               | 15G
+    'speak'                  | -1G             | 0G
+    'devicePlayTextNoRestore'| -1G             | 0G
   }
 
   def "local stream playback applies explicit zero volume"() {
