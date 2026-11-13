@@ -28,12 +28,12 @@ jobs:
 
       - name: Compile lint suite
         working-directory: tests
-        run: gradle assemble --no-daemon
+        run: ./gradlew assemble --no-daemon
 
       - name: Run linter (with GitHub annotations)
         working-directory: tests
         run: |
-          gradle run --no-daemon \
+          ./gradlew run --no-daemon \
             -Pargs="../Apps ../Drivers ../Libraries --github" || \
           echo "::error::Lint produced errors"
         # We capture errors but don't fail the step here so CI can continue to
@@ -42,7 +42,7 @@ jobs:
       - name: Fail job if linter found ERROR-level violations
         working-directory: tests
         run: |
-          gradle run --no-daemon -Pargs="../Apps ../Drivers ../Libraries"
+          ./gradlew run --no-daemon -Pargs="../Apps ../Drivers ../Libraries"
 
   select-tests:
     name: Select relevant Spock tests
@@ -279,7 +279,7 @@ jobs:
           if not patterns:
               print(f"Shard {os.environ['TEST_SHARD']} has no selected Spock features.")
               raise SystemExit(0)
-          command = ['gradle', 'test', '--no-daemon']
+          command = ['./gradlew', 'test', '--no-daemon']
           for pattern in patterns:
               command.extend(['--tests', pattern])
           raise SystemExit(subprocess.run(command, check=False).returncode)
