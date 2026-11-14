@@ -1708,6 +1708,8 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "paired audio clip waits for both sockets and never replays secondary after primary dispatch"() {
     given:
+    String leftMessage = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'LEFT'], [name: 'pair-1']])
+    String rightMessage = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RIGHT'], [name: 'pair-1']])
     driver.device.dataValues.websocketStatus = 'open'
     driver.setWsSubscriptionValue('audioClip', 'Subscribed')
     driver.children.clear()
@@ -1728,8 +1730,8 @@ class SonosAdvPlayerSpec extends Specification {
     }
     rightChannel.metaClass.completeSynchronizedAudioClipRelease = { String correlationId -> }
     driver.children << rightChannel
-    driver.queueWebsocketMessage('left', 0, [kind: 'audioClip', correlationId: 'pair-1',
-      pairedRightChannelMessage: 'right'])
+    driver.queueWebsocketMessage(leftMessage, 0, [kind: 'audioClip', correlationId: 'pair-1',
+      pairedRightChannelMessage: rightMessage])
 
     when:
     driver.flushWebsocketOutboundQueue()
@@ -1737,8 +1739,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     websocketMessages.empty
     driver.runtimeState.websocketOutboundQueue.size() == 1
-    driver.runtimeState.websocketOutboundQueue[0].message == 'left'
-    driver.runtimeState.websocketOutboundQueue[0].pairedRightChannelMessage == 'right'
+    driver.runtimeState.websocketOutboundQueue[0].message == leftMessage
+    driver.runtimeState.websocketOutboundQueue[0].pairedRightChannelMessage == rightMessage
     childConnects == 1
 
     when:
@@ -1746,7 +1748,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushWebsocketOutboundQueue()
 
     then:
-    websocketMessages == ['left']
+    websocketMessages == [leftMessage]
     driver.runtimeState.websocketOutboundQueue == null
     driver.logs.any { it.toString().contains('Holding paired audioClip before either channel send') }
     driver.logs.any { it.toString().contains('AudioClip channel dispatch completed') }
@@ -1756,7 +1758,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushWebsocketOutboundQueue()
 
     then:
-    websocketMessages == ['left']
+    websocketMessages == [leftMessage]
     driver.runtimeState.websocketOutboundQueue == null
 
     cleanup:
@@ -1766,6 +1768,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "paired clip falls back to primary only after secondary open timeout"() {
     given:
+    String leftMessage = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'LEFT'], [name: 'timeout-pair']])
     driver.device.dataValues.websocketStatus = 'open'
     driver.setWsSubscriptionValue('audioClip', 'Subscribed')
     driver.children.clear()
@@ -1779,16 +1782,16 @@ class SonosAdvPlayerSpec extends Specification {
     }
     rightChannel.metaClass.completeSynchronizedAudioClipRelease = { String correlationId -> }
     driver.children << rightChannel
-    Map pair = [kind: 'audioClip', correlationId: 'timeout-pair', pairedRightChannelMessage: 'right',
+    Map pair = [kind: 'audioClip', correlationId: 'timeout-pair', pairedRightChannelMessage: JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RIGHT'], [name: 'timeout-pair']]),
       pairedSecondaryDeadline: driver.now() + 30000L]
-    driver.queueWebsocketMessage('left', 0, pair)
+    driver.queueWebsocketMessage(leftMessage, 0, pair)
     driver.schedulePairedAudioClipSecondaryTimeout(driver.getWebsocketOutboundQueue()[0])
 
     when:
     driver.expirePairedAudioClipSecondary([correlationId: 'timeout-pair'])
 
     then:
-    websocketMessages == ['left']
+    websocketMessages == [leftMessage]
     driver.runtimeState.websocketOutboundQueue == null
     driver.logs.any { it.toString().contains('did not report open within 30 seconds') }
     driver.logs.any { it.toString().contains('Secondary-open timeout expired') }
@@ -1801,28 +1804,120 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "websocket commands queue until the socket is open and flush in order"() {
     given:
+    String firstMessage = JsonOutput.toJson([[namespace: 'favorites', command: 'getFavorites', householdId: 'HOUSE_TEST'], [:]])
+    String secondMessage = JsonOutput.toJson([[namespace: 'playlists', command: 'getPlaylists', householdId: 'HOUSE_TEST'], [:]])
     driver.device.dataValues.websocketStatus = 'closed'
     driver.runtimeState.remove('websocketConnectPending')
 
     when:
-    driver.sendWsMessage('first-command')
-    driver.sendWsMessage('second-command')
+    driver.sendWsMessage(firstMessage)
+    driver.sendWsMessage(secondMessage)
 
     then:
     websocketMessages.empty
-    driver.runtimeState.websocketOutboundQueue*.message == ['first-command', 'second-command']
+    driver.runtimeState.websocketOutboundQueue*.message == [firstMessage, secondMessage]
 
     when:
     driver.setWebSocketStatus('open')
+    List<Map> subscriptions = (driver.runtimeState.websocketCommandLedger as List<Map>).findAll { Map entry ->
+      entry.wireCommand == 'subscribe'
+    }
+    subscriptions.each { Map entry ->
+      driver.processWebsocketMessage(JsonOutput.toJson([
+        [namespace: entry.namespace, response: 'subscribe', success: true, type: 'none'], [:]
+      ]))
+    }
 
     then:
-    Integer firstCommandIndex = websocketMessages.indexOf('first-command')
-    Integer secondCommandIndex = websocketMessages.indexOf('second-command')
+    Integer firstCommandIndex = websocketMessages.indexOf(firstMessage)
+    Integer secondCommandIndex = websocketMessages.indexOf(secondMessage)
     Integer subscriptionIndex = websocketMessages.findIndexOf { String message -> message.contains('"command":"subscribe"') }
     subscriptionIndex >= 0
     firstCommandIndex > subscriptionIndex
     secondCommandIndex > firstCommandIndex
     driver.runtimeState.websocketOutboundQueue == null
+  }
+
+  def "matching websocket response clears the command ledger with trace success"() {
+    given:
+    driver.playerSetPlayerVolume(10)
+    List<Map> pending = driver.runtimeState.websocketCommandLedger as List<Map>
+    Integer pendingCount = pending.size()
+
+    when:
+    driver.processWebsocketMessage('[{"namespace":"playerVolume","response":"setVolume","success":true,"type":"none"},{ }]')
+
+    then:
+    pendingCount == 1
+    driver.runtimeState.websocketCommandLedger == null
+    driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('playerVolume.setVolume') }
+  }
+
+  def "explicit websocket command rejection clears the ledger as failure without declaring socket stale"() {
+    given:
+    driver.playerSetPlayerVolume(10)
+    Integer generation = (driver.runtimeState.websocketConnectionGeneration ?: 0) as Integer
+
+    when:
+    driver.processWebsocketMessage('[{"namespace":"playerVolume","response":"setVolume","success":false,"type":"globalError"},{"errorCode":"ERROR_INVALID_ARGUMENT","reason":"invalid volume"}]')
+
+    then:
+    driver.runtimeState.websocketCommandLedger == null
+    driver.device.getDataValue('websocketStatus') == 'open'
+    (driver.runtimeState.websocketConnectionGeneration ?: 0) == generation
+    driver.logs.any { it.toString().contains('WebSocket command ledger failure') && it.toString().contains('ERROR_INVALID_ARGUMENT') }
+  }
+
+  def "socket silence queues eligible commands and expires them after sixty seconds"() {
+    given:
+    driver.playerSetPlayerVolume(10)
+    Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
+
+    when:
+    driver.websocketCommandLedgerTimeout([entryId: pending.entryId,
+      connectionGeneration: pending.connectionGeneration])
+
+    then:
+    driver.runtimeState.websocketCommandLedger == null
+    driver.runtimeState.websocketOutboundQueue*.message.any { String message -> message.contains('"command":"setVolume"') }
+    driver.device.getDataValue('websocketStatus') == 'closed'
+    driver.logs.any { it.toString().contains('no inbound response before command ACK timeout') }
+
+    when:
+    Map queued = (driver.runtimeState.websocketOutboundQueue as List<Map>)[0]
+    queued.expiresAt = driver.now() - 1L
+    driver.expireWebsocketOutboundQueueEntry([queueId: queued.queueId])
+
+    then:
+    driver.runtimeState.websocketOutboundQueue == null
+    driver.logs.any { it.toString().contains('Expired queued WebSocket command') }
+  }
+
+  def "disconnected command queue replaces absolute state but preserves relative commands"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'closed'
+    String volume20 = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume', playerId: 'RINCON_TEST'], [volume: 20]])
+    String volume30 = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume', playerId: 'RINCON_TEST'], [volume: 30]])
+    String volume40 = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume', playerId: 'RINCON_TEST'], [volume: 40]])
+    String next = JsonOutput.toJson([[namespace: 'playback', command: 'skipToNextTrack', groupId: 'GROUP_TEST'], [:]])
+    String previous = JsonOutput.toJson([[namespace: 'playback', command: 'skipToPreviousTrack', groupId: 'GROUP_TEST'], [:]])
+
+    when:
+    driver.queueWebsocketMessage(volume20)
+    driver.queueWebsocketMessage(volume30)
+    driver.queueWebsocketMessage(next)
+    driver.queueWebsocketMessage(volume40)
+    driver.queueWebsocketMessage(previous)
+
+    then:
+    List<Map> queued = driver.runtimeState.websocketOutboundQueue as List<Map>
+    queued.size() == 4
+    queued[0].wireCommand == 'setVolume'
+    ((List)new JsonSlurper().parseText(queued[0].message))[1].volume == 30
+    queued[1].wireCommand == 'skipToNextTrack'
+    queued[2].wireCommand == 'setVolume'
+    ((List)new JsonSlurper().parseText(queued[2].message))[1].volume == 40
+    queued[3].wireCommand == 'skipToPreviousTrack'
   }
 
   def "loading a Favorite expects playback and metadata subscription events"() {

@@ -147,7 +147,7 @@ class SonosAdvSecondariesSpec extends Specification {
     sendFailuresRemaining = 1
 
     when:
-    Boolean sent = driver.sendWsMessage('retry-me')
+    Boolean sent = driver.sendWsMessage('[{"namespace":"audioClip","command":"loadAudioClip","playerId":"RIGHT"},{"name":"retry-me"}]')
 
     then:
     !sent
@@ -159,16 +159,32 @@ class SonosAdvSecondariesSpec extends Specification {
   def "synchronized release completion logs a send without introducing a secondary queue"() {
     given:
     driver.device.dataValues.websocketStatus = 'open'
+    String message = '[{"namespace":"audioClip","command":"loadAudioClip","playerId":"RIGHT"},{"name":"corr-1"}]'
 
     when:
-    driver.playerLoadAudioClipForSynchronizedRelease('paired-clip', 'corr-1')
+    driver.playerLoadAudioClipForSynchronizedRelease(message, 'corr-1')
     driver.completeSynchronizedAudioClipRelease('corr-1')
 
     then:
-    sentMessages == ['paired-clip']
+    sentMessages == [message]
     driver.state.websocketOutboundQueue == null
     driver.state.synchronizedAudioClipReleases == [:]
     driver.logs.any { it.toString().contains('sent during synchronized release pass') }
+  }
+
+  def "secondary audio clip ACK clears its response ledger by correlation ID"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    String message = '[{"namespace":"audioClip","command":"loadAudioClip","playerId":"RIGHT"},{"name":"corr-ack"}]'
+
+    when:
+    driver.sendWsMessage(message)
+    driver.websocketMessage('[{"namespace":"audioClip","response":"loadAudioClip","success":true,"type":"audioClip"},{"name":"corr-ack"}]')
+
+    then:
+    sentMessages == [message]
+    driver.state.websocketCommandLedger == null
+    driver.logs.any { it.toString().contains('Secondary WebSocket command ledger success') }
   }
 
   def "paired release while disconnected requests connection but does not retain a child message"() {
