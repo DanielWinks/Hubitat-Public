@@ -4684,7 +4684,7 @@ void resumeAnnouncementsForPlayer(String playerDni) {
     Boolean targetsPlayer = pending.any { Map item ->
       normalizeGroupPlayerIds(item.playerIds).contains(getChildDevice(playerDni)?.getDataValue('id')?.toString())
     }
-    if(targetsPlayer && !(queue.active instanceof Map)) { runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true]) }
+    if(targetsPlayer && !(queue.active instanceof Map)) { runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true]) }
   }
 }
 
@@ -5772,7 +5772,7 @@ void completeAnnouncementTopologyTransaction(Map transaction) {
       queues[groupDni] = queue
       state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
       logInfo("Sonos stream handoff ${correlationId} ${transaction.restorationFailed == true ? 'completed with restoration unverified' : 'restored and verified'}; announcement queue may advance")
-      runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
       return
     }
     if(active?.mode?.toString() != 'AUDIO_CLIP' &&
@@ -5788,7 +5788,7 @@ void completeAnnouncementTopologyTransaction(Map transaction) {
     queues[groupDni] = queue
     state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
     logInfo("Topology transaction ${correlationId} complete; original topology restored or preserved and announcement queue may advance")
-    runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+    runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
   }
 }
 
@@ -5976,7 +5976,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
         queues[groupDni] = queue
         state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
         if(!(queue.active instanceof Map)) {
-          runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+          runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
         }
         return
       }
@@ -6038,7 +6038,7 @@ void groupAnnouncementWatchdog(Map data = null) {
     queues[groupDni] = groupQueue
     state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
     if(!(groupQueue.active instanceof Map)) {
-      runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
     }
   } else if(active?.correlationId?.toString() == correlationId) {
     Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
@@ -6076,7 +6076,7 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
       queues[groupDni] = queue
       state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
       logInfo("Releasing announcement queue for ${groupDni} after external playback takeover; the next automatic message can use audioClip while topology restoration waits")
-      runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
     }
     return
   }
@@ -6115,7 +6115,7 @@ void completeGroupAnnouncementPlaybackRestore(String groupDni, String correlatio
   queue.active = null
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-  runIn(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+  runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
 }
 
 void startNextGroupAnnouncementCallback(Map data = null) {
