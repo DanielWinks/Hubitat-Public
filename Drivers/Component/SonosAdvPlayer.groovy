@@ -202,6 +202,8 @@ metadata {
     [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
     [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
   ]
+  command 'stopAnnouncement'
+  command 'stopHighPriorityAnnouncement'
 
   attribute 'groupVolume', 'number'
   attribute 'groupMute', 'string'
@@ -2244,6 +2246,46 @@ void stop() {
   cancelPendingAmazonMusicAutoPlay()
   playerStop()
 }
+
+void stopAnnouncement() {
+  stopAudioClipAnnouncement(false)
+}
+
+void stopHighPriorityAnnouncement() {
+  stopAudioClipAnnouncement(true)
+}
+
+void stopAudioClipAnnouncement(Boolean highPriority) {
+  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
+  if(runtimeState.audioClipPlaying != true || activeClip == null) {
+    logDebug("No active ${highPriority ? 'high-priority ' : ''}announcement to stop")
+    return
+  }
+
+  Boolean activeClipIsHighPriority = activeClip.priority?.toString() == 'HIGH'
+  if(activeClipIsHighPriority != highPriority) {
+    logDebug("Active announcement priority does not match requested stop (${highPriority ? 'HIGH' : 'regular'})")
+    return
+  }
+
+  String sonosClipId = runtimeState.activeAudioClipSonosId?.toString()
+  String correlationId = activeClip.correlationId?.toString()
+  if(!sonosClipId) {
+    logWarn("Cannot stop announcement ${correlationId ?: 'unknown'} because Sonos has not reported its audioClip ID yet")
+    return
+  }
+
+  Map<String, String> command = [
+    'namespace': 'audioClip:1',
+    'command': 'cancelAudioClip',
+    'playerId': getId()
+  ]
+  Map<String, String> args = ['id': sonosClipId]
+  String message = JsonOutput.toJson([command, args])
+  sendWsMessage(message, [kind: 'audioClipCancel', correlationId: correlationId])
+  logInfo("Requested cancelAudioClip for ${highPriority ? 'high-priority ' : ''}announcement ${correlationId ?: sonosClipId}")
+}
+
 @CompileStatic
 void pause() {
   if(deferCommandToParentDuringGroupOperation('pause')) { return }
@@ -6635,7 +6677,7 @@ String expectedWebsocketResponseType(String namespace, String wireCommand) {
   if(namespace == 'playback' && wireCommand == 'getPlaybackStatus') { return 'playbackStatus' }
   if(namespace == 'playbackMetadata' && wireCommand == 'getMetadataStatus') { return 'metadataStatus' }
   if(namespace == 'groups' && wireCommand in ['createGroup', 'modifyGroupMembers']) { return 'groupInfo' }
-  if(namespace == 'audioClip' && wireCommand == 'loadAudioClip') { return 'audioClip' }
+  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand in ['loadAudioClip', 'cancelAudioClip']) { return 'audioClip' }
   return null
 }
 
