@@ -119,6 +119,22 @@ class SonosAdvGroupSpec extends Specification {
     driver.getEnableTrackPositionUpdates() == false
   }
 
+  def "disabling track position updates clears existing group attributes"() {
+    given:
+    driver.settings.enableTrackPositionUpdates = false
+    driver.device.dataValues.enableTrackPositionUpdates = 'true'
+    driver.device.currentValues.trackPosition = 84L
+    driver.device.currentValues.trackPositionUpdated = 123456L
+
+    when:
+    driver.synchronizeTrackPositionPreference()
+
+    then:
+    driver.device.currentValues.trackPosition == 0L
+    driver.device.currentValues.trackPositionUpdated == 0L
+    driver.device.dataValues.enableTrackPositionUpdates == 'false'
+  }
+
   def "optional playback volumes normalize webCoRE zero and preserve minus one sentinel"() {
     given:
     driver.metaClass.textToSpeech = { String text, String voice ->

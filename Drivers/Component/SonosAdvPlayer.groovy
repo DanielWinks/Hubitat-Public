@@ -581,7 +581,7 @@ void configure() {
   cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
   migrationCleanup()
-  device.updateDataValue('enableTrackPositionUpdates', getEnableTrackPositionUpdates().toString())
+  synchronizeTrackPositionPreference()
   // Remove transient parent-app bridge attributes from existing devices.
   clearGroupFavoriteOperationCurrentState()
   clearPlayerCommandRequestCurrentState()
@@ -619,6 +619,16 @@ void configure() {
     groupsRegistryInitialization()
     favoritesMapInitialization()
     if(getCreateSleepTimerChildDevice()) { getSleepTimer() }
+  }
+}
+
+void synchronizeTrackPositionPreference() {
+  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase() == 'true'
+  Boolean isEnabled = getEnableTrackPositionUpdates()
+  device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
+  if(wasEnabled && !isEnabled) {
+    device.sendEvent(name: 'trackPosition', value: 0L)
+    device.sendEvent(name: 'trackPositionUpdated', value: 0L)
   }
 }
 

@@ -242,6 +242,22 @@ class SonosAdvPlayerSpec extends Specification {
     driver.settings.enableTrackPositionUpdates == false
   }
 
+  def "disabling track position updates clears existing player attributes"() {
+    given:
+    driver.settings.enableTrackPositionUpdates = false
+    driver.device.dataValues.enableTrackPositionUpdates = 'true'
+    driver.device.currentValues.trackPosition = 84L
+    driver.device.currentValues.trackPositionUpdated = 123456L
+
+    when:
+    driver.synchronizeTrackPositionPreference()
+
+    then:
+    driver.device.currentValues.trackPosition == 0L
+    driver.device.currentValues.trackPositionUpdated == 0L
+    driver.device.dataValues.enableTrackPositionUpdates == 'false'
+  }
+
   def "disabled player position preference suppresses its events while retaining group updates"() {
     given:
     driver.settings.enableTrackPositionUpdates = false

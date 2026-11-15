@@ -442,6 +442,7 @@ void uninstalled() {
 void configure() {
   migrateLegacyRuntimeState()
   removeDeprecatedGroupStates()
+  synchronizeTrackPositionPreference()
   Boolean wasGuarded = runtimeState.lastOnlyUpdateWhenActive != false
   Boolean isGuarded = getOnlyUpdateWhenActiveSetting()
   runtimeState.lastOnlyUpdateWhenActive = isGuarded
@@ -449,6 +450,16 @@ void configure() {
     // Guard just disabled — clear held state and refresh to populate skipped attributes
     clearHeldState()
     runIn(2, 'refresh')
+  }
+}
+
+void synchronizeTrackPositionPreference() {
+  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase() == 'true'
+  Boolean isEnabled = getEnableTrackPositionUpdates()
+  device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
+  if(wasEnabled && !isEnabled) {
+    device.sendEvent(name: 'trackPosition', value: 0L)
+    device.sendEvent(name: 'trackPositionUpdated', value: 0L)
   }
 }
 
