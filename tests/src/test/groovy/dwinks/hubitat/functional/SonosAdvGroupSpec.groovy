@@ -138,8 +138,8 @@ class SonosAdvGroupSpec extends Specification {
     drainBatchEvents()
 
     then:
-    driver.device.currentValues.trackPosition == 0L
-    driver.device.currentValues.trackPositionUpdated == 0L
+    driver.events.find { Map event -> event.name == 'trackPosition' }?.value == 0L
+    driver.events.find { Map event -> event.name == 'trackPositionUpdated' }?.value == 0L
     driver.device.dataValues.enableTrackPositionUpdates == 'false'
   }
 

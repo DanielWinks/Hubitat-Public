@@ -404,7 +404,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     requests.empty
-    driver.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
+    driver.device.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
   }
 
   def "mute child commands send player mute requests"() {
@@ -463,7 +463,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     child.currentValue('switch') == switchState
-    driver.events.findAll { Map event -> event.name == 'mute' }*.value ==
+    driver.device.events.findAll { Map event -> event.name == 'mute' }*.value ==
       (previousState == muteState ? [] : [muteState])
 
     cleanup:
