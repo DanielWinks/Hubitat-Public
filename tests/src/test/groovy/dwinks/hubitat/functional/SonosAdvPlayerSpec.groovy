@@ -251,6 +251,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.synchronizeTrackPositionPreference()
+    driver.flushPendingLocalDeviceEvents()
 
     then:
     driver.device.currentValues.trackPosition == 0L
@@ -399,6 +400,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.setBalanceState(10)
     driver.device.currentValues.balance = 10
     driver.setBalanceState(10)
+    driver.flushPendingLocalDeviceEvents()
 
     then:
     requests.empty
@@ -429,6 +431,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.componentRefresh(child)
+    driver.drainComponentChildEvents()
 
     then:
     child.currentValue('switch') == switchState
@@ -455,6 +458,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.setMuteState(muteState)
+    driver.flushPendingLocalDeviceEvents()
+    driver.drainComponentChildEvents()
 
     then:
     child.currentValue('switch') == switchState
@@ -781,6 +786,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingTopologyXmlByDni.clear()
     driver.pendingTopologyWebsocketByDni.clear()
     driver.pendingTopologyKindByDni.clear()
+    driver.pendingLocalDeviceEvents.clear()
+    driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
   }

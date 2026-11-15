@@ -194,6 +194,12 @@ class MockDevice extends ChildDeviceWrapper {
     events << event
     if(event?.name) { currentValues[event.name as String] = event.value }
   }
+  void applyStateBatch(String jsonAttributes) {
+    Map attributes = (Map)new JsonSlurper().parseText(jsonAttributes)
+    attributes.each { Object name, Object value ->
+      if(name != null && value != null) { sendEvent(name: name.toString(), value: value) }
+    }
+  }
   List<Map> getCurrentStates() {
     currentValues.collect { String n, Object v -> [name: n, value: v] }
   }

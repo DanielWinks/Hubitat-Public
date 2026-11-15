@@ -42,6 +42,12 @@ class SonosAdvGroupSpec extends Specification {
     driver.heldPlaybackState.remove('SONOS-GROUP-TEST-DNI')
   }
 
+  private void drainBatchEvents() {
+    while(driver.state.pendingBatchEvents instanceof Map && !((Map)driver.state.pendingBatchEvents).isEmpty()) {
+      driver.drainBatchEvents()
+    }
+  }
+
   def "retargeting a group fade to the reported volume cancels queued steps"() {
     given:
     driver.groupDeviceVolumeFadeState.clear()
@@ -101,6 +107,7 @@ class SonosAdvGroupSpec extends Specification {
     when:
     driver.settings.enableTrackPositionUpdates = true
     driver.updateBatchPlaybackState(disabledBatch)
+    drainBatchEvents()
 
     then:
     driver.events.find { Map event -> event.name == 'trackPosition' }?.value == 42L
@@ -128,6 +135,7 @@ class SonosAdvGroupSpec extends Specification {
 
     when:
     driver.synchronizeTrackPositionPreference()
+    drainBatchEvents()
 
     then:
     driver.device.currentValues.trackPosition == 0L
@@ -336,6 +344,7 @@ class SonosAdvGroupSpec extends Specification {
       status: 'playing', transportStatus: 'playing', currentTrackName: 'Only the Good Die Young',
       currentArtistName: 'Billy Joel', volume: 26, mute: 'unmuted', currentlyJoinedPlayers: 'Living Room, Kitchen, Dining Room'
     ]))
+    drainBatchEvents()
 
     then:
     driver.device.currentValue('switch') == 'off'
@@ -380,6 +389,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.applyRefreshedPlaybackState(JsonOutput.toJson([
       status: 'playing', transportStatus: 'playing', currentTrackName: 'Coordinator track', volume: 26, mute: 'unmuted'
     ]))
+    drainBatchEvents()
 
     then:
     driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
@@ -399,6 +409,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.applyRefreshedPlaybackState(JsonOutput.toJson([
       status: 'playing', transportStatus: 'playing', currentTrackName: 'Active group track'
     ]))
+    drainBatchEvents()
 
     then:
     driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
