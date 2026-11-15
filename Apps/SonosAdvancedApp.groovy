@@ -281,6 +281,7 @@ preferences {
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
 @Field static final String LAST_SENT_CHILD_STATE_KEY = 'lastSentChildState'
 @Field static final String CHILD_STATE_DRAIN_SCHEDULED_KEY = 'childStateDrainScheduled'
+@Field static final Integer CHILD_STATE_DRAIN_MAX_CHILDREN = 2
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
 @Field static final String GROUP_STATE_DRAIN_SCHEDULED_KEY = 'groupStateDrainScheduled'
 @Field static final String NEW_UI_GROUP_EDITOR_MODE_KEY = 'newUiGroupEditorMode'
@@ -3085,8 +3086,9 @@ void createGroupDevices() {
 }
 
 /**
- * Group devices publish command requests as location events, keeping the
- * group driver from synchronously entering the app while holding its gate.
+ * Subscribe to command attributes published by app-owned child devices.
+ * Device-scoped events let the app handle requests without a synchronous
+ * driver-to-app call while the driver is holding its execution gate.
  */
 void subscribeToGroupCommandRequests() {
   app.getChildDevices().each { ChildDeviceWrapper child ->
@@ -4305,7 +4307,7 @@ void sendChildEvent(String dni, Map event) {
 }
 
 /** Queue only changed values and coalesce them by child and attribute. */
-void queueChildStateBatch(String dni, Map attributes) {
+synchronized void queueChildStateBatch(String dni, Map attributes) {
   if(!dni || !attributes) { return }
   Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
@@ -4340,20 +4342,27 @@ Boolean sameChildStateValue(Object left, Object right) {
  * returned. This method intentionally performs only the final child event
  * delivery and never calls back into a player or group command.
  */
-void drainQueuedChildEvents() {
+synchronized void drainQueuedChildEvents() {
   Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
       : [:]
   state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
-  state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
   if(pending.isEmpty()) {
+    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
     return
   }
 
+  Map<String, Map<String, Object>> remaining = [:]
   Map<String, Map<String, Object>> failed = [:]
   Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
+  Integer processedChildren = 0
   pending.each { String dni, Map<String, Object> eventsForChild ->
+    if(processedChildren >= CHILD_STATE_DRAIN_MAX_CHILDREN) {
+      remaining[dni] = eventsForChild
+      return
+    }
+    processedChildren++
     ChildDeviceWrapper child = getChildDevice(dni)
     if(child == null) {
       logWarn("drainQueuedChildEvents: no child device found for DNI ${dni}")
@@ -4373,18 +4382,30 @@ void drainQueuedChildEvents() {
     }
   }
   if(!lastSent.isEmpty()) { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
-  if(!failed.isEmpty()) {
-    Map<String, Map<String, Object>> retryAndNew = failed
-    Map<String, Map<String, Object>> arrivals = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-        ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
-    arrivals.each { String dni, Map<String, Object> attrs ->
-      Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
-      combined.putAll(attrs)
-      retryAndNew[dni] = combined
-    }
-    state[PENDING_CHILD_EVENT_QUEUE_KEY] = retryAndNew
+  Map<String, Map<String, Object>> arrivals = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
+  Map<String, Map<String, Object>> nextPending = [:]
+  mergeChildEventQueues(nextPending, remaining)
+  mergeChildEventQueues(nextPending, failed)
+  mergeChildEventQueues(nextPending, arrivals)
+  if(!nextPending.isEmpty()) {
+    state[PENDING_CHILD_EVENT_QUEUE_KEY] = nextPending
     state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
     runInMillis(1000, 'drainQueuedChildEvents', [overwrite: true])
+  } else {
+    state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
+    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
+  }
+}
+
+/** Merge queued child maps while allowing newer attribute values to replace older ones. */
+private void mergeChildEventQueues(Map<String, Map<String, Object>> target,
+    Map<String, Map<String, Object>> source) {
+  source.each { String dni, Map<String, Object> attributes ->
+    Map<String, Object> combined = target[dni] instanceof Map
+        ? new LinkedHashMap<String, Object>(target[dni]) : [:]
+    combined.putAll(attributes)
+    target[dni] = combined
   }
 }
 
@@ -6310,9 +6331,7 @@ void startNextGroupAnnouncementCallback(Map data = null) {
   if(groupDni) { startNextGroupAnnouncement(groupDni) }
 }
 
-/**
- * Queue a group command request received through the location event subscription.
- */
+/** Queue a group command request received from an owned Group child device. */
 void enqueueGroupCommandRequest(Map request) {
   if(!(request instanceof Map)) {
     return
@@ -6324,7 +6343,7 @@ void enqueueGroupCommandRequest(Map request) {
     logWarn("Ignoring group command request with invalid target or command: ${JsonOutput.toJson(request)}")
     return
   }
-  // Location events are hub-wide; another app instance may own this group.
+  // Ignore requests from devices this app instance does not own.
   if(getChildDevice(groupDni) == null) { return }
 
   String requestId = request.requestId as String

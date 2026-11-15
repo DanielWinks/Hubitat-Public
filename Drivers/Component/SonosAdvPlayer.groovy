@@ -10125,9 +10125,10 @@ void processWebsocketMessage(String message) {
       if(shouldHoldTopologyUpdate(websocketTopology)) {
         pendingTopologyWebsocketByDni.put(dni, message)
         pendingTopologyKindByDni.put(dni, 'ws')
-        // This location event feeds the parent's operation observer only; it
-        // does not update player current states or publish membership to group
-        // devices while the topology is between the requested start and end.
+        // Publish this topology snapshot for the app's player-state
+        // subscription. It does not modify playback attributes or publish
+        // membership to group devices while topology is between the requested
+        // start and end.
         publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         scheduleTopologyTimeoutFlush()
         logTrace('Holding groups websocket topology update until the affected player reaches its expected topology')

@@ -1101,6 +1101,79 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
   }
 
+  def "child state drain dispatches a bounded number of children and reschedules the remainder"() {
+    given:
+    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
+    appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
+    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
+
+    when:
+    appScript.drainQueuedChildEvents()
+
+    then:
+    follower.refreshedPlaybackUpdates.size() == 1
+    extra.refreshedPlaybackUpdates.size() == 1
+    coordinator.refreshedPlaybackUpdates.isEmpty()
+    appScript.state.pendingChildEvents == [(coordinator.deviceNetworkId): [transportStatus: 'stopped']]
+    appScript.state.childStateDrainScheduled == true
+    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
+
+    when:
+    appScript.drainQueuedChildEvents()
+
+    then:
+    coordinator.refreshedPlaybackUpdates.size() == 1
+    appScript.state.pendingChildEvents == null
+    appScript.state.childStateDrainScheduled == null
+  }
+
+  def "child state drain preserves events queued while a child batch is being delivered"() {
+    given:
+    follower.metaClass.applyStateBatch = { String json ->
+      appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
+      follower.refreshedPlaybackUpdates << json
+    }
+    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
+    appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
+    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
+
+    when:
+    appScript.drainQueuedChildEvents()
+
+    then:
+    follower.refreshedPlaybackUpdates.size() == 1
+    extra.refreshedPlaybackUpdates.size() == 1
+    coordinator.refreshedPlaybackUpdates.isEmpty()
+    appScript.state.pendingChildEvents == [(coordinator.deviceNetworkId): [transportStatus: 'playing']]
+    appScript.state.childStateDrainScheduled == true
+    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
+  }
+
+  def "failed child delivery retries behind unprocessed children"() {
+    given:
+    follower.metaClass.applyStateBatch = { String json -> throw new RuntimeException('simulated failure') }
+    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
+    appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
+    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
+
+    when:
+    appScript.drainQueuedChildEvents()
+
+    then:
+    extra.refreshedPlaybackUpdates.size() == 1
+    appScript.state.pendingChildEvents.keySet().toList() == [
+      coordinator.deviceNetworkId, follower.deviceNetworkId
+    ]
+
+    when:
+    appScript.drainQueuedChildEvents()
+
+    then:
+    coordinator.refreshedPlaybackUpdates.size() == 1
+    appScript.state.pendingChildEvents.containsKey(follower.deviceNetworkId)
+    appScript.state.childStateDrainScheduled == true
+  }
+
   def "player device state event carries its JSON payload in the event value"() {
     given:
     Map batch = [kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
