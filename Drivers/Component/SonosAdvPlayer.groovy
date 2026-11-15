@@ -10552,13 +10552,24 @@ void processWebsocketMessage(String message) {
     String stage = 'read audioClips payload'
     String callbackId = null
     String activeClipId = null
-    ArrayList<Map> audioClips = null
+    List<Map> audioClips = []
     Map<String, Map> clipProgress = null
     Boolean matchedCurrentClip = false
     String matchedCurrentStatus = null
     String callbackActiveClipId = null
     try {
-      audioClips = (ArrayList<Map>)eventData?.audioClips
+      Object rawAudioClips = eventData?.audioClips
+      if(rawAudioClips instanceof Collection) {
+        ((Collection)rawAudioClips).each { Object item ->
+          if(item instanceof Map) {
+            audioClips.add(new LinkedHashMap((Map)item))
+          } else {
+            logTrace("Audio clip callback ${callbackId ?: 'pending'}: skipping non-map audioClips entry")
+          }
+        }
+      } else if(rawAudioClips != null) {
+        logTrace('Audio clip callback payload has an unexpected audioClips value; treating as empty')
+      }
       callbackId = UUID.randomUUID().toString()
       activeClipId = runtimeState.activeAudioClipCorrelationId as String ?: 'none'
       callbackActiveClipId = runtimeState.activeAudioClipCorrelationId as String
@@ -10569,9 +10580,18 @@ void processWebsocketMessage(String message) {
       logTrace("Audio clip callback ${callbackId}: payload decoded; count=${audioClips?.size() ?: 0}, activeCorrelation=${callbackActiveClipId ?: 'none'}")
 
       stage = 'copy correlation progress state'
-      clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-          ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
-          : new LinkedHashMap<String, Map>()
+      clipProgress = new LinkedHashMap<String, Map>()
+      Object rawClipProgress = runtimeState.audioClipProgressByCorrelationId
+      if(rawClipProgress instanceof Map) {
+        ((Map)rawClipProgress).each { Object rawGuid, Object rawProgress ->
+          String guid = rawGuid?.toString()
+          if(guid && rawProgress instanceof Map) {
+            clipProgress[guid] = new LinkedHashMap((Map)rawProgress)
+          } else {
+            logTrace("Audio clip callback ${callbackId}: discarding malformed saved progress entry; guid=${guid ?: 'missing'}")
+          }
+        }
+      }
 
       stage = 'correlate and update clip status entries'
       audioClips?.each { Map clip ->
@@ -10581,6 +10601,11 @@ void processWebsocketMessage(String message) {
           return
         }
         logTrace("Audio clip callback ${callbackId}: processing guid=${clipGuid}, status=${clip?.status ?: 'unknown'}")
+        String clipStatus = clip?.status?.toString()
+        if(!clipStatus) {
+          logTrace("Audio clip callback ${callbackId}: skipping status for guid=${clipGuid} because status is missing")
+          return
+        }
         Map progress = clipProgress[clipGuid]
         if(progress == null && clipGuid == callbackActiveClipId) {
           progress = [correlationId: clipGuid, origin: 'audio-clip', phase: 'DISPATCHED',
@@ -10590,7 +10615,6 @@ void processWebsocketMessage(String message) {
           logTrace("Audio clip callback ${callbackId}: no tracked progress entry for guid=${clipGuid}; skipping")
           return
         }
-        String clipStatus = clip?.status?.toString()
         Long observedAt = now()
         progress.lastStatus = clipStatus
         progress.lastCallbackId = callbackId
@@ -10649,7 +10673,7 @@ void processWebsocketMessage(String message) {
         Integer activeDuration = coerceClipDuration(activeProgress?.duration)
         if(activeDuration != null && activeDuration > 0) {
           stage = 'schedule ACTIVE clip completion watchdog'
-          scheduleAudioClipDoneWatchdog(callbackActiveClipId, (activeProgress.activeAt ?: now()) as Long, activeDuration)
+          scheduleAudioClipDoneWatchdog(callbackActiveClipId, (activeProgress?.activeAt ?: now()) as Long, activeDuration)
         } else {
           stage = 'pause watchdog for ACTIVE clip without duration'
           pauseAudioClipWatchdog()
