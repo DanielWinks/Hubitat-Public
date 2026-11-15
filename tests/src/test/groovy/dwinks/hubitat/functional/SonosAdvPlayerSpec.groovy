@@ -256,6 +256,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.synchronizeTrackPositionPreference()
+    driver.flushPendingLocalDeviceEvents()
 
     then:
     driver.device.currentValues.trackPosition == 0L
@@ -404,10 +405,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.setBalanceState(10)
     driver.device.currentValues.balance = 10
     driver.setBalanceState(10)
+    driver.flushPendingLocalDeviceEvents()
 
     then:
     requests.empty
-    driver.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
+    driver.device.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
   }
 
   def "mute child commands send player mute requests"() {
@@ -434,6 +436,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.componentRefresh(child)
+    driver.drainComponentChildEvents()
 
     then:
     child.currentValue('switch') == switchState
@@ -460,10 +463,12 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.setMuteState(muteState)
+    driver.flushPendingLocalDeviceEvents()
+    driver.drainComponentChildEvents()
 
     then:
     child.currentValue('switch') == switchState
-    driver.events.findAll { Map event -> event.name == 'mute' }*.value ==
+    driver.device.events.findAll { Map event -> event.name == 'mute' }*.value ==
       (previousState == muteState ? [] : [muteState])
 
     cleanup:
@@ -786,6 +791,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingTopologyXmlByDni.clear()
     driver.pendingTopologyWebsocketByDni.clear()
     driver.pendingTopologyKindByDni.clear()
+    driver.pendingLocalDeviceEvents.clear()
+    driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
   }

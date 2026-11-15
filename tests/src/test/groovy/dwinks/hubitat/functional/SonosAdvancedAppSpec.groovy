@@ -132,6 +132,14 @@ class SonosAppGroupDouble extends ChildDeviceWrapper {
     refreshedPlaybackUpdates << json
   }
 
+  void applyStateBatch(String json) {
+    refreshedPlaybackUpdates << json
+  }
+
+  void updateBatchPlaybackState(String json) {
+    refreshedPlaybackUpdates << json
+  }
+
   void updateGroupOperationStatus(String statusJson, String groupingMode = null) {
     Map status = (Map)new JsonSlurper().parseText(statusJson)
     statuses << [status: status, groupingMode: groupingMode]
@@ -378,6 +386,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.processGroupCommandRequest([request: request('refresh')])
+    appScript.drainGroupStateUpdates()
 
     then:
     group.refreshedPlaybackUpdates.size() == 1
@@ -2364,6 +2373,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.refreshGroupDeviceState(group, coordinator, [coordinator, follower], [
       useProportionalVolume: true, controlUngroupedIndividually: false
     ])
+    appScript.drainGroupStateUpdates()
     Map attributes = (Map)new JsonSlurper().parseText(group.refreshedPlaybackUpdates.last())
 
     then:
