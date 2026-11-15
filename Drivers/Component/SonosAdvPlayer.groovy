@@ -71,6 +71,16 @@ void logException(String message) {
     if(app) log.exception "${app.label ?: app.name }: ${message}"
   }
 }
+void logException(String context, Exception exception) {
+  if(exception == null) {
+    logError("${context}: unknown exception")
+    return
+  }
+  List<String> stack = exception.stackTrace?.take(12)?.collect { Object frame -> frame.toString() } ?: []
+  String details = "${context}: ${exception.class.name}: ${exception.message ?: '(no message)'}"
+  if(!stack.isEmpty()) { details += "\n${stack.join('\n')}" }
+  logException(details)
+}
 void logTrace(String message) {
   if (loggingEnabled('trace')) {
     if(device) log.trace "${device.label ?: device.name }: ${message}"
@@ -3693,18 +3703,21 @@ void parse(String raw) {
     handleUpnpRawResponse(raw)
     return
   }
-  try {
-    if(!raw.startsWith('mac:')){
+  if(!raw.startsWith('mac:')) {
+    logTrace("WebSocket parse entered; payloadLength=${raw.length()}")
+    try {
       setLastWebsocketEvent()
+    } catch(Exception e) {
+      logException('WebSocket last-event timestamp update failed', e)
+    }
+    try {
       processWebsocketMessage(raw)
-      return
+    } catch(Exception e) {
+      logException('WebSocket message processing failed after JSON dispatch', e)
+      logWarn("WebSocket payload that failed processing: ${raw}")
     }
-  } catch (Exception e) {
-    logWarn("Ran into an issue parsing websocket: ${e}")
-
-    logWarn("JSON from failed websocket parse: ${raw}")
     return
-    }
+  }
   try {
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
@@ -10045,17 +10058,34 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 // =============================================================================
 void processWebsocketMessage(String message) {
   if(message == null || message == '') {return}
-  String dni = device.getDeviceNetworkId()
-  groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.computeIfAbsent(dni, { String ignored ->
-    new groovy.json.JsonSlurper()
-  } as java.util.function.Function<String, groovy.json.JsonSlurper>)
-  ArrayList json = (ArrayList)deviceSlurper.parseText(message)
-  if(json.size() < 2) {return}
-  LinkedHashMap deviceSettings = getDeviceSettings()
-
-  Map eventType = (json as List)[0]
-  Map eventData = (json as List)[1]
-  if(eventType == null || eventData == null) {return}
+  String dni
+  ArrayList json
+  LinkedHashMap deviceSettings
+  Map eventType
+  Map eventData
+  try {
+    dni = device.getDeviceNetworkId()
+    logTrace("WebSocket JSON decoding started; dni=${dni ?: 'unknown'}, payloadLength=${message.length()}")
+    groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.computeIfAbsent(dni, { String ignored ->
+      new groovy.json.JsonSlurper()
+    } as java.util.function.Function<String, groovy.json.JsonSlurper>)
+    json = (ArrayList)deviceSlurper.parseText(message)
+    if(json.size() < 2) {
+      logTrace("Ignoring WebSocket JSON envelope with ${json.size()} entries")
+      return
+    }
+    deviceSettings = getDeviceSettings()
+    eventType = (json as List)[0] as Map
+    eventData = (json as List)[1] as Map
+    if(eventType == null || eventData == null) {
+      logTrace('Ignoring WebSocket JSON envelope with a null event type or event body')
+      return
+    }
+  } catch(Exception e) {
+    logException('WebSocket JSON decoding or envelope extraction failed', e)
+    throw e
+  }
+  logTrace("WebSocket message dispatched; type=${eventType.type ?: 'unset'}, namespace=${eventType.namespace ?: 'unset'}, name=${eventType.name ?: 'unset'}, response=${eventType.response ?: 'unset'}")
   runtimeState[WS_LAST_INBOUND_AT_STATE_KEY] = now()
   runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] = ((runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long) + 1L
   observeExpectedSubscriptionEvent(eventType)
@@ -10519,85 +10549,123 @@ void processWebsocketMessage(String message) {
 
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    ArrayList<Map> audioClips = (ArrayList<Map>)eventData?.audioClips
-    String callbackId = UUID.randomUUID().toString()
-    String activeClipId = runtimeState.activeAudioClipCorrelationId as String ?: 'none'
-    List<String> statuses = audioClips?.collect { Map clip ->
-      "${clip?.status ?: 'unknown'}:sonosId=${clip?.id ?: 'unknown'}:name=${clip?.name ?: 'unknown'}"
-    } ?: []
-    logDebug("Audio clip status callback ${callbackId} receivedAt=${now()}, activeClip=${activeClipId}, statuses=${statuses}")
-    Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-        ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
-        : new LinkedHashMap<String, Map>()
+    String stage = 'read audioClips payload'
+    String callbackId = null
+    String activeClipId = null
+    ArrayList<Map> audioClips = null
+    Map<String, Map> clipProgress = null
     Boolean matchedCurrentClip = false
     String matchedCurrentStatus = null
-    String callbackActiveClipId = runtimeState.activeAudioClipCorrelationId as String
-    audioClips?.each { Map clip ->
-      String clipGuid = clip?.name?.toString()
-      if(!clipGuid) { return }
-      Map progress = clipProgress[clipGuid]
-      if(progress == null && clipGuid == callbackActiveClipId) {
-        progress = [correlationId: clipGuid, origin: 'audio-clip', phase: 'DISPATCHED',
-          dispatchedAt: runtimeState.audioClipQueueStartTime ?: now()]
-      }
-      if(progress == null) { return }
-      String clipStatus = clip?.status?.toString()
-      Long observedAt = now()
-      progress.lastStatus = clipStatus
-      progress.lastCallbackId = callbackId
-      progress.lastObservedAt = observedAt
-      if(clip?.id != null) { progress.sonosClipId = clip.id.toString() }
-      if(clipStatus == 'ACTIVE') {
-        if(progress.activeAt == null) { progress.activeAt = observedAt }
-        progress.phase = 'ACTIVE'
-      } else if(clipStatus == 'DONE') {
-        progress.phase = 'DONE'
-        progress.completedAt = observedAt
-      } else if(clipStatus in ['ERROR', 'DISMISSED', 'INTERRUPTED']) {
-        progress.phase = clipStatus
-        progress.completedAt = observedAt
-      }
-      clipProgress[clipGuid] = progress
-      publishAudioClipProgressEvent(progress, callbackId)
-      String groupAnnouncementId = progress.groupAnnouncementCorrelationId?.toString() ?: clipGuid
-      if(progress.groupAnnouncementCorrelationId || clipGuid == callbackActiveClipId) {
-        publishGroupAnnouncementProgress(groupAnnouncementId, clipStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']
-            ? (clipStatus == 'ERROR' ? 'FAILED' : clipStatus) : clipStatus)
-      }
-      logDebug("Audio clip GUID ${clipGuid} received Sonos status ${clipStatus ?: 'unknown'} callback=${callbackId} sonosId=${clip?.id ?: 'unknown'} observedAt=${observedAt}")
+    String callbackActiveClipId = null
+    try {
+      audioClips = (ArrayList<Map>)eventData?.audioClips
+      callbackId = UUID.randomUUID().toString()
+      activeClipId = runtimeState.activeAudioClipCorrelationId as String ?: 'none'
+      callbackActiveClipId = runtimeState.activeAudioClipCorrelationId as String
+      List<String> statuses = audioClips?.collect { Map clip ->
+        "${clip?.status ?: 'unknown'}:sonosId=${clip?.id ?: 'unknown'}:name=${clip?.name ?: 'unknown'}"
+      } ?: []
+      logDebug("Audio clip status callback ${callbackId} receivedAt=${now()}, activeClip=${activeClipId}, statuses=${statuses}")
+      logTrace("Audio clip callback ${callbackId}: payload decoded; count=${audioClips?.size() ?: 0}, activeCorrelation=${callbackActiveClipId ?: 'none'}")
 
-      // Only the currently playing GUID may advance or finish the queue. A late
-      // DONE for an older clip is recorded, but cannot dequeue over a newer clip.
-      if(clipGuid == callbackActiveClipId) {
-        matchedCurrentClip = true
-        matchedCurrentStatus = clipStatus
-        if(clip?.id != null) { runtimeState.activeAudioClipSonosId = clip.id.toString() }
-        if(clipStatus == 'ERROR') { logWarn("Audio clip ${clipGuid} returned ERROR status: ${clip}") }
+      stage = 'copy correlation progress state'
+      clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
+          ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+          : new LinkedHashMap<String, Map>()
+
+      stage = 'correlate and update clip status entries'
+      audioClips?.each { Map clip ->
+        String clipGuid = clip?.name?.toString()
+        if(!clipGuid) {
+          logTrace("Audio clip callback ${callbackId}: skipping status without a clip GUID")
+          return
+        }
+        logTrace("Audio clip callback ${callbackId}: processing guid=${clipGuid}, status=${clip?.status ?: 'unknown'}")
+        Map progress = clipProgress[clipGuid]
+        if(progress == null && clipGuid == callbackActiveClipId) {
+          progress = [correlationId: clipGuid, origin: 'audio-clip', phase: 'DISPATCHED',
+            dispatchedAt: runtimeState.audioClipQueueStartTime ?: now()]
+        }
+        if(progress == null) {
+          logTrace("Audio clip callback ${callbackId}: no tracked progress entry for guid=${clipGuid}; skipping")
+          return
+        }
+        String clipStatus = clip?.status?.toString()
+        Long observedAt = now()
+        progress.lastStatus = clipStatus
+        progress.lastCallbackId = callbackId
+        progress.lastObservedAt = observedAt
+        if(clip?.id != null) { progress.sonosClipId = clip.id.toString() }
+        if(clipStatus == 'ACTIVE') {
+          if(progress.activeAt == null) { progress.activeAt = observedAt }
+          progress.phase = 'ACTIVE'
+        } else if(clipStatus == 'DONE') {
+          progress.phase = 'DONE'
+          progress.completedAt = observedAt
+        } else if(clipStatus in ['ERROR', 'DISMISSED', 'INTERRUPTED']) {
+          progress.phase = clipStatus
+          progress.completedAt = observedAt
+        }
+        clipProgress[clipGuid] = progress
+
+        stage = "publish progress for clip ${clipGuid}"
+        publishAudioClipProgressEvent(progress, callbackId)
+        String groupAnnouncementId = progress.groupAnnouncementCorrelationId?.toString() ?: clipGuid
+        if(progress.groupAnnouncementCorrelationId || clipGuid == callbackActiveClipId) {
+          publishGroupAnnouncementProgress(groupAnnouncementId, clipStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']
+              ? (clipStatus == 'ERROR' ? 'FAILED' : clipStatus) : clipStatus)
+        }
+        logDebug("Audio clip GUID ${clipGuid} received Sonos status ${clipStatus ?: 'unknown'} callback=${callbackId} sonosId=${clip?.id ?: 'unknown'} observedAt=${observedAt}")
+
+        stage = "record active clip match for ${clipGuid}"
+        // Only the currently playing GUID may advance or finish the queue. A late
+        // DONE for an older clip is recorded, but cannot dequeue over a newer clip.
+        if(clipGuid == callbackActiveClipId) {
+          matchedCurrentClip = true
+          matchedCurrentStatus = clipStatus
+          if(clip?.id != null) { runtimeState.activeAudioClipSonosId = clip.id.toString() }
+          if(clipStatus == 'ERROR') { logWarn("Audio clip ${clipGuid} returned ERROR status: ${clip}") }
+        }
+        stage = 'correlate and update clip status entries'
       }
-    }
-    while(clipProgress.size() > 50) {
-      String oldestGuid = clipProgress.find { String guid, Map item ->
-        guid != (runtimeState.activeAudioClipCorrelationId as String) && item?.phase != 'DISPATCHED'
-      }?.key as String
-      if(!oldestGuid) { break }
-      clipProgress.remove(oldestGuid)
-    }
-    setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-    if(matchedCurrentStatus == 'ACTIVE') {
-      setAudioClipPlaying(true)
-      runtimeState.audioClipHadDisconnectAfterSend = false
-      Map activeProgress = clipProgress[callbackActiveClipId]
-      Integer activeDuration = coerceClipDuration(activeProgress?.duration)
-      if(activeDuration != null && activeDuration > 0) {
-        scheduleAudioClipDoneWatchdog(callbackActiveClipId, (activeProgress.activeAt ?: now()) as Long, activeDuration)
-      } else {
-        pauseAudioClipWatchdog()
+
+      stage = 'trim old correlation progress entries'
+      while(clipProgress.size() > 50) {
+        String oldestGuid = clipProgress.find { String guid, Map item ->
+          guid != (runtimeState.activeAudioClipCorrelationId as String) && item?.phase != 'DISPATCHED'
+        }?.key as String
+        if(!oldestGuid) { break }
+        clipProgress.remove(oldestGuid)
       }
-    } else if(matchedCurrentStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) {
-      setAudioClipPlaying(false)
-    }
-    if(!matchedCurrentClip) {
-      logTrace("Ignoring audio clip callback ${callbackId} for queue state; no status matched active clip GUID ${activeClipId}")
+
+      stage = 'persist correlation progress state'
+      setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
+
+      stage = 'apply ACTIVE status transition'
+      if(matchedCurrentStatus == 'ACTIVE') {
+        setAudioClipPlaying(true)
+        runtimeState.audioClipHadDisconnectAfterSend = false
+        Map activeProgress = clipProgress[callbackActiveClipId]
+        Integer activeDuration = coerceClipDuration(activeProgress?.duration)
+        if(activeDuration != null && activeDuration > 0) {
+          stage = 'schedule ACTIVE clip completion watchdog'
+          scheduleAudioClipDoneWatchdog(callbackActiveClipId, (activeProgress.activeAt ?: now()) as Long, activeDuration)
+        } else {
+          stage = 'pause watchdog for ACTIVE clip without duration'
+          pauseAudioClipWatchdog()
+        }
+      } else if(matchedCurrentStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) {
+        stage = "advance queue after terminal status ${matchedCurrentStatus}"
+        setAudioClipPlaying(false)
+      }
+      if(!matchedCurrentClip) {
+        logTrace("Audio clip callback ${callbackId}: no status matched active clip GUID ${activeClipId}; queue state unchanged")
+      }
+      stage = 'log audio clip callback completion'
+      logTrace("Audio clip callback ${callbackId}: processing completed; matched=${matchedCurrentClip}, matchedStatus=${matchedCurrentStatus ?: 'none'}")
+    } catch(Exception e) {
+      logException("Audio clip status callback ${callbackId ?: 'unassigned'} failed at stage '${stage}' (active=${callbackActiveClipId ?: activeClipId ?: 'none'})", e)
+      return
     }
   }
 
