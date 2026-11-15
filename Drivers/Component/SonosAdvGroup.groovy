@@ -164,6 +164,8 @@ metadata {
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
+    attribute 'trackPosition', 'number'
+    attribute 'trackPositionUpdated', 'number'
     attribute 'currentArtistName', 'string'
     attribute 'albumArtURI', 'string'
     attribute 'albumArtSmall', 'string'
@@ -205,6 +207,9 @@ metadata {
         required: false, defaultValue: true
     }
     section('State Update Settings') {
+      input 'enableTrackPositionUpdates', 'bool',
+        title: 'Enable track position updates',
+        required: false, defaultValue: false
       input 'onlyUpdateWhenActive', 'bool',
         title: 'Only update state when group is active',
         description: 'When enabled, playback state updates are skipped when the group\'s configured speakers are not all grouped together in Sonos. Reduces hub load when many groups share a coordinator.',
@@ -252,6 +257,7 @@ Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngrou
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
 Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
+Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
 
 void setLastGroupingMode(String groupingMode) {
   if(groupingMode != GROUPING_MODE_EXPLICIT && groupingMode != GROUPING_MODE_ADDITIVE) {
@@ -412,6 +418,7 @@ void initialize() {
   if(settings.chimeBeforeHighPriorityTTS == null) { settings.chimeBeforeHighPriorityTTS = false }
   if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
   if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
+  if(settings.enableTrackPositionUpdates == null) { settings.enableTrackPositionUpdates = false }
   // Initialize volume/mute state from coordinator
   runIn(5, 'refresh')
 }
@@ -920,6 +927,10 @@ void applyRefreshedPlaybackState(String jsonAttributes) {
 
 private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlaybackUpdate) {
   Map attributes = (Map)parseJson(jsonAttributes)
+  if(!getEnableTrackPositionUpdates()) {
+    attributes.remove('trackPosition')
+    attributes.remove('trackPositionUpdated')
+  }
 
   // Separate membership keys (always processed) from playback keys (guarded)
   Map membershipAttrs = [:]
@@ -993,6 +1004,7 @@ private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlayb
 private void applyPlaybackAttributes(Map attrs) {
   if(!attrs) { return }
   attrs.each { String attrName, Object attrValue ->
+    if(!getEnableTrackPositionUpdates() && attrName in ['trackPosition', 'trackPositionUpdated']) { return }
     if(attrValue != null) {
       if(attrName == 'volume') {
         sendVolumeStateEvents(attrValue as Integer)
@@ -1051,6 +1063,8 @@ private void resetPlaybackAttributes() {
     trackData: '{}',
     trackDescription: 'n/a',
     currentTrackDuration: 'n/a',
+    trackPosition: 0,
+    trackPositionUpdated: 0,
     currentArtistName: 'n/a',
     currentAlbumName: 'n/a',
     currentTrackName: 'n/a',

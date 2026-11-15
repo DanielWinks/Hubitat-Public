@@ -157,6 +157,8 @@ metadata {
   attribute 'currentCrossfadeMode', 'enum', [ 'on', 'off' ]
   attribute 'currentShuffleMode' , 'enum', [ 'on', 'off' ]
   attribute 'currentTrackDuration', 'string'
+  attribute 'trackPosition', 'number'
+  attribute 'trackPositionUpdated', 'number'
   attribute 'currentArtistName', 'string'
   attribute 'albumArtURI', 'string'
   attribute 'albumArtSmall', 'string'
@@ -221,6 +223,7 @@ metadata {
 
   preferences {
     section('Device Settings') {
+      input 'enableTrackPositionUpdates', 'bool', title: 'Enable track position updates', required: false, defaultValue: false
       input 'disableTrackDataEvents', 'bool', title: 'Disable track data events', required: false, defaultValue: true
       input 'includeTrackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
       input name: 'volumeAdjustAmountLow', title: 'Volume up/down Adjust (Speaker Levels 0-10)', type: 'enum', required: false, defaultValue: 5,
@@ -288,6 +291,7 @@ Boolean loggingEnabled(String messageLevel) {
 // Preference Getters And Passthrough Renames For Clarity
 // =============================================================================
 Boolean getDisableTrackDataEvents() { return settings.disableTrackDataEvents != null ? settings.disableTrackDataEvents : true }
+Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
 Boolean getIncludeTrackDataMetaData() { return settings.includeTrackDataMetaData != null ? settings.includeTrackDataMetaData : false }
 Integer getVolumeAdjustAmountLow() { return settings.volumeAdjustAmountLow != null ? settings.volumeAdjustAmountLow as Integer : 5 }
 Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != null ? settings.volumeAdjustAmountMid as Integer : 5 }
@@ -404,6 +408,8 @@ Boolean hasLineInCapability() {
 @Field static final String TRANSPORT_QUEUE_KEY = 'transportCommandQueue'
 @Field static final String TRANSPORT_ACTIVE_KEY = 'activeTransportCommand'
 @Field static final String TRANSPORT_STATUS_SNAPSHOT_KEY = 'transportStatusSnapshot'
+@Field static final String TRACK_POSITION_SNAPSHOT_KEY = 'trackPositionSnapshot'
+@Field static final Long TRACK_POSITION_SEEK_TOLERANCE_MILLIS = 2500L
 @Field static final String ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY = 'announcementPlaybackSnapshot'
 @Field static final Integer TRANSPORT_WATCHDOG_SECONDS = 4
 @Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
@@ -575,6 +581,7 @@ void configure() {
   cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
   migrationCleanup()
+  device.updateDataValue('enableTrackPositionUpdates', getEnableTrackPositionUpdates().toString())
   // Remove transient parent-app bridge attributes from existing devices.
   clearGroupFavoriteOperationCurrentState()
   clearPlayerCommandRequestCurrentState()
@@ -887,6 +894,7 @@ void migrationCleanup() {
   unschedule('registerRinconId')
   unschedule('checkSubscriptions')
   if(settings.disableTrackDataEvents == null) { settings.disableTrackDataEvents = true }
+  if(settings.enableTrackPositionUpdates == null) { settings.enableTrackPositionUpdates = false }
   if(settings.includeTrackDataMetaData == null) { settings.includeTrackDataMetaData = false }
   if(settings.volumeAdjustAmountLow == null) { settings.volumeAdjustAmountLow = 5 }
   if(settings.volumeAdjustAmountMid == null) { settings.volumeAdjustAmountMid = 5 }
@@ -5922,6 +5930,58 @@ void setCurrentTrackDuration(String currentTrackDuration){
 }
 String getCurrentTrackDuration() { return this.device.currentValue('currentTrackDuration') }
 
+/** Publish whole elapsed seconds and the Unix-millisecond sample time for meaningful playback changes. */
+void setTrackPositionFromPlaybackStatus(Map eventData, String playbackState, Long observedAt) {
+  if(!(eventData instanceof Map)) { return }
+  Map previous = runtimeState[TRACK_POSITION_SNAPSHOT_KEY] instanceof Map
+      ? (Map)runtimeState[TRACK_POSITION_SNAPSHOT_KEY] : null
+  Long positionMillis = toLongValue(eventData.positionMillis)
+  String itemId = eventData.itemId?.toString()
+  Map snapshot = [playbackState: playbackState, itemId: itemId,
+      positionMillis: positionMillis, observedAt: observedAt]
+  runtimeState[TRACK_POSITION_SNAPSHOT_KEY] = snapshot
+
+  Boolean trackChanged = previous != null && itemId != null && itemId != previous.itemId?.toString()
+  Boolean stateChanged = previous == null || playbackState != previous.playbackState?.toString()
+  Boolean positionDiscontinuity = false
+  Long previousPositionMillis = toLongValue(previous?.positionMillis)
+  Long previousObservedAt = toLongValue(previous?.observedAt)
+  if(previous != null && positionMillis != null && previousPositionMillis != null &&
+      itemId != null && itemId == previous.itemId?.toString() && !stateChanged) {
+    if(playbackState == 'PLAYBACK_STATE_PLAYING' && previousObservedAt != null) {
+      Long elapsedMillis = Math.max(0L, observedAt - previousObservedAt)
+      Long expectedPositionMillis = previousPositionMillis + elapsedMillis
+      positionDiscontinuity = Math.abs(positionMillis - expectedPositionMillis) > TRACK_POSITION_SEEK_TOLERANCE_MILLIS
+    } else if(playbackState == 'PLAYBACK_STATE_PAUSED') {
+      positionDiscontinuity = Math.abs(positionMillis - previousPositionMillis) > TRACK_POSITION_SEEK_TOLERANCE_MILLIS
+    }
+  }
+
+  Boolean terminalState = playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_STOPPED']
+  Boolean shouldPublish = stateChanged || trackChanged || positionDiscontinuity
+  if(!shouldPublish) { return }
+  if(positionMillis == null && !terminalState) {
+    logTrace("Ignoring track position update without positionMillis for state=${playbackState}")
+    return
+  }
+  Long positionSeconds = positionMillis != null ? positionMillis.intdiv(1000L) : 0L
+  setTrackPosition(positionSeconds, observedAt)
+}
+
+void setTrackPosition(Long positionSeconds, Long updatedAt) {
+  if(positionSeconds == null || updatedAt == null) { return }
+  if(getEnableTrackPositionUpdates()) {
+    queueLocalDeviceEvent('trackPosition', positionSeconds)
+    queueLocalDeviceEvent('trackPositionUpdated', updatedAt)
+  }
+  // Keep group devices independent: their own preference decides whether they
+  // apply these coordinator updates, even when this player suppresses its event.
+  queueGroupDeviceUpdate([trackPosition: positionSeconds, trackPositionUpdated: updatedAt])
+}
+
+Long getTrackPosition() { return this.device.currentValue('trackPosition') as Long }
+Long getTrackPositionUpdated() { return this.device.currentValue('trackPositionUpdated') as Long }
+
 @CompileStatic
 void setCurrentArtistName(String currentArtistName) {
   String value = currentArtistName ?: 'Not Available'
@@ -6414,6 +6474,10 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'currentShuffleMode',    value: getCurrentShuffleMode()])
   currentStates.add([name: 'currentCrossfadeMode',  value: getCrossfadeMode()])
   currentStates.add([name: 'currentTrackDuration',  value: getCurrentTrackDuration()])
+  if(getEnableTrackPositionUpdates()) {
+    currentStates.add([name: 'trackPosition', value: getTrackPosition()])
+    currentStates.add([name: 'trackPositionUpdated', value: getTrackPositionUpdated()])
+  }
   currentStates.add([name: 'currentArtistName',     value: getCurrentArtistName()])
   currentStates.add([name: 'currentAlbumName',      value: getCurrentAlbumName()])
   currentStates.add([name: 'currentTrackName',      value: getCurrentTrackName()])
@@ -6677,7 +6741,8 @@ String expectedWebsocketResponseType(String namespace, String wireCommand) {
   if(namespace == 'playback' && wireCommand == 'getPlaybackStatus') { return 'playbackStatus' }
   if(namespace == 'playbackMetadata' && wireCommand == 'getMetadataStatus') { return 'metadataStatus' }
   if(namespace == 'groups' && wireCommand in ['createGroup', 'modifyGroupMembers']) { return 'groupInfo' }
-  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand in ['loadAudioClip', 'cancelAudioClip']) { return 'audioClip' }
+  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'loadAudioClip') { return 'audioClip' }
+  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'cancelAudioClip') { return 'none' }
   return null
 }
 
@@ -10269,6 +10334,7 @@ void processWebsocketMessage(String message) {
     state.playbackStateObservedAt = playbackStateObservedAt
     publishPlaybackObservation()
     observeTransportPlaybackStatus(eventData)
+    setTrackPositionFromPlaybackStatus(eventData, currentState, playbackStateObservedAt)
     Map announcement = runtimeState.groupAnnouncementStream instanceof Map
         ? (Map)runtimeState.groupAnnouncementStream : null
     if(announcement != null) {

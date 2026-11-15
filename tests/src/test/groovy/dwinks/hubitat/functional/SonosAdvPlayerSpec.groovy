@@ -177,6 +177,85 @@ class SonosAdvPlayerSpec extends Specification {
     }
   }
 
+  def "track position publishes on playback changes and seek but ignores normal progress heartbeats"() {
+    given:
+    driver.settings.enableTrackPositionUpdates = true
+    driver.device.dataValues.isGroupCoordinator = 'true'
+    Long firstObservedAt = 100000L
+    driver.metaClass.now = { -> firstObservedAt }
+
+    when: 'the first playing status establishes the position'
+    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
+      itemId: 'item-1', positionMillis: 12345L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
+
+    then:
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPosition == 12L
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPositionUpdated == firstObservedAt
+    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPosition == 12L
+
+    when: 'ordinary elapsed progress matches the elapsed wall time'
+    driver.pendingLocalDeviceEvents.remove('SONOS-TEST-DNI')
+    driver.pendingGroupDeviceUpdates.remove('SONOS-TEST-DNI')
+    firstObservedAt = 105000L
+    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
+      itemId: 'item-1', positionMillis: 17345L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
+
+    then:
+    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
+    !driver.pendingGroupDeviceUpdates.containsKey('SONOS-TEST-DNI')
+
+    when: 'a seek is reported while playback remains active'
+    firstObservedAt = 106000L
+    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
+      itemId: 'item-1', positionMillis: 45000L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
+
+    then:
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPosition == 45L
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPositionUpdated == firstObservedAt
+
+    when: 'the track changes'
+    driver.pendingLocalDeviceEvents.remove('SONOS-TEST-DNI')
+    firstObservedAt = 107000L
+    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
+      itemId: 'item-2', positionMillis: 800L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
+
+    then:
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPosition == 0L
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPositionUpdated == firstObservedAt
+
+    cleanup:
+    GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
+    driver.metaClass = null
+  }
+
+  def "track position updates default off when the preference is null"() {
+    given:
+    driver.settings.remove('enableTrackPositionUpdates')
+
+    expect:
+    driver.getEnableTrackPositionUpdates() == false
+
+    when:
+    driver.migrationCleanup()
+
+    then:
+    driver.settings.enableTrackPositionUpdates == false
+  }
+
+  def "disabled player position preference suppresses its events while retaining group updates"() {
+    given:
+    driver.settings.enableTrackPositionUpdates = false
+    driver.device.dataValues.isGroupCoordinator = 'true'
+
+    when:
+    driver.setTrackPosition(64L, 123456L)
+
+    then:
+    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
+    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPosition == 64L
+    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPositionUpdated == 123456L
+  }
+
   def "HDMI metadata reports no signal separately from the playback state"() {
     given:
     String dni = driver.device.getDeviceNetworkId()

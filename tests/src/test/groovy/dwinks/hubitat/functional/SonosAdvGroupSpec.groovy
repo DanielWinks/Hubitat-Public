@@ -86,6 +86,39 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.pendingGroupCommands[0].sequence == 1
   }
 
+  def "track position preference controls updates received by the group device"() {
+    given:
+    driver.settings.enableTrackPositionUpdates = false
+    driver.settings.onlyUpdateWhenActive = false
+    String disabledBatch = JsonOutput.toJson([trackPosition: 42L, trackPositionUpdated: 123456L])
+
+    when:
+    driver.updateBatchPlaybackState(disabledBatch)
+
+    then:
+    !driver.events.any { Map event -> event.name in ['trackPosition', 'trackPositionUpdated'] }
+
+    when:
+    driver.settings.enableTrackPositionUpdates = true
+    driver.updateBatchPlaybackState(disabledBatch)
+
+    then:
+    driver.events.find { Map event -> event.name == 'trackPosition' }?.value == 42L
+    driver.events.find { Map event -> event.name == 'trackPositionUpdated' }?.value == 123456L
+  }
+
+  def "track position updates default off when the preference is null"() {
+    given:
+    driver.settings.remove('enableTrackPositionUpdates')
+
+    when:
+    driver.initialize()
+
+    then:
+    driver.settings.enableTrackPositionUpdates == false
+    driver.getEnableTrackPositionUpdates() == false
+  }
+
   def "optional playback volumes normalize webCoRE zero and preserve minus one sentinel"() {
     given:
     driver.metaClass.textToSpeech = { String text, String voice ->

@@ -1088,6 +1088,25 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
   }
 
+  def "player position preference suppresses position fanout to disabled followers"() {
+    given:
+    follower.dataValues.enableTrackPositionUpdates = 'false'
+    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      followerDNIs: [follower.deviceNetworkId],
+      followerAttrs: [trackPosition: 32L, trackPositionUpdated: 123456L, status: 'playing'],
+      playbackAttrs: [trackPosition: 32L, trackPositionUpdated: 123456L, status: 'playing']]
+
+    when:
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
+
+    then:
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
+    !appScript.state.pendingChildEvents[follower.deviceNetworkId].containsKey('trackPosition')
+    !appScript.state.pendingChildEvents[follower.deviceNetworkId].containsKey('trackPositionUpdated')
+    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].trackPosition == 32L
+    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].trackPositionUpdated == 123456L
+  }
+
   def "player playback observations are cached in app State Variables"() {
     given:
     Map batch = [kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,

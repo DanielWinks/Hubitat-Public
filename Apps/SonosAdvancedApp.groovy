@@ -4394,9 +4394,15 @@ void playerStateUpdateHandler(Event event) {
   if(!(kind in ['state', 'followers'])) { return }
   if(payload.followerDNIs instanceof List && payload.followerAttrs instanceof Map) {
     ((List)payload.followerDNIs).each { Object dni ->
-      if(dni != null && getChildDevice(dni.toString()) != null) {
+      ChildDeviceWrapper follower = dni != null ? getChildDevice(dni.toString()) : null
+      if(follower != null) {
+        Boolean trackPositionEnabled = isPlayerTrackPositionUpdatesEnabled(follower)
         ((Map)payload.followerAttrs).each { Object name, Object value ->
-          if(name != null && value != null) { sendChildEvent(dni.toString(), [name: name.toString(), value: value]) }
+          String attributeName = name?.toString()
+          Boolean isTrackPositionAttribute = attributeName in ['trackPosition', 'trackPositionUpdated']
+          if(name != null && value != null && (!isTrackPositionAttribute || trackPositionEnabled)) {
+            sendChildEvent(dni.toString(), [name: attributeName, value: value])
+          }
         }
       }
     }
@@ -9489,11 +9495,13 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
   }
 
   ['status', 'transportStatus', 'trackData', 'trackDescription', 'currentTrackDuration',
+   'trackPosition', 'trackPositionUpdated',
    'currentArtistName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
    'audioSource', 'currentAlbumName', 'currentTrackName', 'currentFavorite', 'currentPlaylist',
    'currentTrackNumber', 'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
    'queueTrackTotal', 'queueTrackPosition', 'currentRepeatOneMode', 'currentRepeatAllMode',
    'currentCrossfadeMode', 'currentShuffleMode'].each { String name ->
+    if(name in ['trackPosition', 'trackPositionUpdated'] && !isPlayerTrackPositionUpdatesEnabled(coordinator)) { return }
     Object value = coordinator.currentValue(name, true)
     if(value != null) { attributes[name] = value }
   }
@@ -9507,6 +9515,10 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
     // states even when the configured group is currently inactive.
     groupDevice.applyRefreshedPlaybackState(JsonOutput.toJson(attributes))
   }
+}
+
+Boolean isPlayerTrackPositionUpdatesEnabled(ChildDeviceWrapper player) {
+  return player?.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase() == 'true'
 }
 
 /**
@@ -9882,11 +9894,12 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     if(shouldBeActive && callerDevice != null) {
       ['albumArtURI', 'status', 'transportStatus', 'currentRepeatOneMode',
        'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
-       'currentTrackDuration', 'currentArtistName', 'currentAlbumName',
+       'currentTrackDuration', 'trackPosition', 'trackPositionUpdated', 'currentArtistName', 'currentAlbumName',
        'currentTrackName', 'trackDescription', 'trackData', 'currentFavorite',
        'currentPlaylist', 'nextAlbumName', 'nextArtistName', 'nextTrackName',
        'nextTrackAlbumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
        'audioSource', 'currentTrackNumber', 'groupVolume', 'groupMute'].each { String name ->
+        if(name in ['trackPosition', 'trackPositionUpdated'] && !isPlayerTrackPositionUpdatesEnabled(callerDevice)) { return }
         Object value = callerDevice.currentValue(name, true)
         if(value != null) {
           attributes[name] = value
