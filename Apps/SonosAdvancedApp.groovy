@@ -275,8 +275,10 @@ preferences {
 @Field static final Integer GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS = 3
 @Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
+@Field static final String LAST_SENT_CHILD_STATE_KEY = 'lastSentChildState'
+@Field static final String CHILD_STATE_DRAIN_SCHEDULED_KEY = 'childStateDrainScheduled'
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
-@Field static final Integer GROUP_STATE_DRAIN_MAX_ATTEMPTS = 3
+@Field static final String GROUP_STATE_DRAIN_SCHEDULED_KEY = 'groupStateDrainScheduled'
 @Field static final String NEW_UI_GROUP_EDITOR_MODE_KEY = 'newUiGroupEditorMode'
 @Field static final String NEW_UI_GROUP_ORIGINAL_NAME_KEY = 'newUiGroupOriginalName'
 @Field static final String NEW_UI_GROUP_DRAFT_KEY = 'newUiGroupDraft'
@@ -4255,16 +4257,38 @@ void sendChildEvent(String dni, Map event) {
   if(!dni || !event?.name) {
     return
   }
+  queueChildStateBatch(dni, [(event.name as String): event.value])
+}
+
+/** Queue only changed values and coalesce them by child and attribute. */
+void queueChildStateBatch(String dni, Map attributes) {
+  if(!dni || !attributes) { return }
+  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
+  Map<String, Object> sentForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
   Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
-      : [:]
-  Map<String, Object> childEvents = pending[dni] instanceof Map
-      ? pending[dni]
-      : [:]
-  childEvents[event.name as String] = event.value
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
+  Map<String, Object> childEvents = pending[dni] instanceof Map ? pending[dni] : [:]
+  attributes.each { Object rawName, Object value ->
+    String name = rawName?.toString()
+    if(name && value != null) {
+      Object prior = childEvents.containsKey(name) ? childEvents[name] : sentForChild[name]
+      if((!sentForChild.containsKey(name) && !childEvents.containsKey(name)) || !sameChildStateValue(prior, value)) {
+        childEvents[name] = value
+      }
+    }
+  }
+  if(childEvents.isEmpty()) { return }
   pending[dni] = childEvents
   state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
-  runIn(1, 'drainQueuedChildEvents', [overwrite: true])
+  if(state[CHILD_STATE_DRAIN_SCHEDULED_KEY] != true) {
+    state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
+    runInMillis(1000, 'drainQueuedChildEvents', [overwrite: true])
+  }
+}
+
+Boolean sameChildStateValue(Object left, Object right) {
+  return left == right
 }
 
 /**
@@ -4277,21 +4301,46 @@ void drainQueuedChildEvents() {
       ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
       : [:]
   state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
+  state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
   if(pending.isEmpty()) {
     return
   }
 
+  Map<String, Map<String, Object>> failed = [:]
+  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
   pending.each { String dni, Map<String, Object> eventsForChild ->
     ChildDeviceWrapper child = getChildDevice(dni)
     if(child == null) {
       logWarn("drainQueuedChildEvents: no child device found for DNI ${dni}")
+      failed[dni] = eventsForChild
       return
     }
-    eventsForChild.each { String name, Object value ->
-      if(value != null) {
-        child.sendEvent(name: name, value: value)
-      }
+    try {
+      child.applyStateBatch(JsonOutput.toJson(eventsForChild))
+      Map<String, Object> sentForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
+      sentForChild.putAll(eventsForChild)
+      lastSent[dni] = sentForChild
+    } catch(Exception e) {
+      Map<String, Object> latest = failed[dni] instanceof Map ? failed[dni] : [:]
+      latest.putAll(eventsForChild)
+      failed[dni] = latest
+      logWarn("Child state batch delivery to ${dni} failed and will be retried: ${e.message}")
     }
+  }
+  if(!lastSent.isEmpty()) { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
+  if(!failed.isEmpty()) {
+    Map<String, Map<String, Object>> retryAndNew = failed
+    Map<String, Map<String, Object>> arrivals = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+        ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
+    arrivals.each { String dni, Map<String, Object> attrs ->
+      Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
+      combined.putAll(attrs)
+      retryAndNew[dni] = combined
+    }
+    state[PENDING_CHILD_EVENT_QUEUE_KEY] = retryAndNew
+    state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
+    runInMillis(1000, 'drainQueuedChildEvents', [overwrite: true])
   }
 }
 
@@ -4397,13 +4446,15 @@ void playerStateUpdateHandler(Event event) {
       ChildDeviceWrapper follower = dni != null ? getChildDevice(dni.toString()) : null
       if(follower != null) {
         Boolean trackPositionEnabled = isPlayerTrackPositionUpdatesEnabled(follower)
+        Map<String, Object> followerAttributes = [:]
         ((Map)payload.followerAttrs).each { Object name, Object value ->
           String attributeName = name?.toString()
           Boolean isTrackPositionAttribute = attributeName in ['trackPosition', 'trackPositionUpdated']
           if(name != null && value != null && (!isTrackPositionAttribute || trackPositionEnabled)) {
-            sendChildEvent(dni.toString(), [name: attributeName, value: value])
+            followerAttributes[attributeName] = value
           }
         }
+        queueChildStateBatch(dni.toString(), followerAttributes)
       }
     }
   }
@@ -9511,9 +9562,7 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
     attributes.currentlyJoinedPlayers = memberNames.toString().replaceAll(/^\[|\]$/, '').trim()
   }
   if(!attributes.isEmpty()) {
-    // Explicit refreshes retain the legacy behavior of hydrating all playback
-    // states even when the configured group is currently inactive.
-    groupDevice.applyRefreshedPlaybackState(JsonOutput.toJson(attributes))
+    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), attributes)
   }
 }
 
@@ -9922,14 +9971,19 @@ void queueGroupDeviceState(String groupDni, Map attributes) {
   Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
       : [:]
+  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
+  Map<String, Object> sentForGroup = lastSent[groupDni] instanceof Map ? lastSent[groupDni] : [:]
   Map<String, Object> groupState = pending[groupDni] instanceof Map
       ? pending[groupDni]
       : [:]
   attributes.each { String name, Object value ->
-    if(value != null) {
+    Object previous = groupState.containsKey(name) ? groupState[name] : sentForGroup[name]
+    if(value != null && ((!groupState.containsKey(name) && !sentForGroup.containsKey(name)) || !sameChildStateValue(previous, value))) {
       groupState[name] = value
     }
   }
+  if(groupState.isEmpty()) { return }
   pending[groupDni] = groupState
   state[PENDING_GROUP_STATE_QUEUE_KEY] = pending
 
@@ -9938,19 +9992,23 @@ void queueGroupDeviceState(String groupDni, Map attributes) {
       : [:]
   attempts.remove(groupDni)
   state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
-  runIn(1, 'drainGroupStateUpdates', [overwrite: true])
+  if(state[GROUP_STATE_DRAIN_SCHEDULED_KEY] != true) {
+    state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
+    runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
+  }
 }
 
 /**
  * Deliver queued group state after the originating player callback has
- * returned. A bounded retry protects the app from a transient child-device
- * invocation failure without recreating the original synchronous call chain.
+ * returned. Failed batches remain queued and retry so transient child-device
+ * invocation failures cannot silently drop the latest synchronized values.
  */
 void drainGroupStateUpdates() {
   Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
       : [:]
   state.remove(PENDING_GROUP_STATE_QUEUE_KEY)
+  state.remove(GROUP_STATE_DRAIN_SCHEDULED_KEY)
   if(pending.isEmpty()) {
     state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
     return
@@ -9964,31 +10022,52 @@ void drainGroupStateUpdates() {
     ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
     if(groupDevice == null) {
       logWarn("drainGroupStateUpdates: no group device found for DNI ${groupDni}")
-      attempts.remove(groupDni)
+      attempts[groupDni] = (attempts[groupDni] ?: 0) + 1
+      retryQueue[groupDni] = attributes
       return
     }
     try {
       groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+      Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
+          ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
+      Map<String, Object> sentForGroup = lastSent[groupDni] instanceof Map ? lastSent[groupDni] : [:]
+      sentForGroup.putAll(attributes)
+      if(attributes.containsKey('volume')) { sentForGroup.groupVolume = attributes.volume }
+      if(attributes.containsKey('mute')) { sentForGroup.groupMute = attributes.mute }
+      lastSent[groupDni] = sentForGroup
+      state[LAST_SENT_CHILD_STATE_KEY] = lastSent
       attempts.remove(groupDni)
     } catch(Exception e) {
-      Integer attempt = attempts[groupDni] ?: 0
-      if(attempt < GROUP_STATE_DRAIN_MAX_ATTEMPTS) {
-        attempts[groupDni] = attempt + 1
-        retryQueue[groupDni] = attributes
-        logWarn("Group state delivery to ${groupDni} failed (attempt ${attempt + 1} of ${GROUP_STATE_DRAIN_MAX_ATTEMPTS}): ${e.message}")
-      } else {
-        attempts.remove(groupDni)
-        logError("Giving up group state delivery to ${groupDni} after ${GROUP_STATE_DRAIN_MAX_ATTEMPTS} retries: ${e.message}")
-      }
+      Integer attempt = (attempts[groupDni] ?: 0) + 1
+      attempts[groupDni] = attempt
+      retryQueue[groupDni] = attributes
+      logWarn("Group state delivery to ${groupDni} failed (attempt ${attempt}); retaining it for retry: ${e.message}")
     }
   }
   if(retryQueue.isEmpty()) {
+    Map<String, Map<String, Object>> arrivals = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
+        ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY] : [:]
+    if(!arrivals.isEmpty()) {
+      state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
+      state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
+      runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
+      return
+    }
     state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
     return
   }
-  state[PENDING_GROUP_STATE_QUEUE_KEY] = retryQueue
+  Map<String, Map<String, Object>> retryAndNew = retryQueue
+  Map<String, Map<String, Object>> arrivals = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY] : [:]
+  arrivals.each { String dni, Map<String, Object> attrs ->
+    Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
+    combined.putAll(attrs)
+    retryAndNew[dni] = combined
+  }
+  state[PENDING_GROUP_STATE_QUEUE_KEY] = retryAndNew
   state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
-  runIn(1, 'drainGroupStateUpdates', [overwrite: true])
+  state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
+  runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
 }
 
 /**

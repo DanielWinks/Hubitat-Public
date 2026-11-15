@@ -72,6 +72,10 @@ void logTrace(String message) {
 @Field static volatile String cachedTTSDefaultVoice = null
 @Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
+@Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
+@Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
+@Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
+@Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
   'groupCommandRequest',
   'groupingMode',
@@ -411,6 +415,8 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 
 void initialize() {
   migrateLegacyRuntimeState()
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  schedulePendingBatchEvents()
   removeDeprecatedGroupStates()
   if(settings.chimeBeforeStandardPriorityTTS == null) {
     settings.chimeBeforeStandardPriorityTTS = settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
@@ -441,6 +447,8 @@ void uninstalled() {
 
 void configure() {
   migrateLegacyRuntimeState()
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  schedulePendingBatchEvents()
   removeDeprecatedGroupStates()
   synchronizeTrackPositionPreference()
   Boolean wasGuarded = runtimeState.lastOnlyUpdateWhenActive != false
@@ -485,7 +493,11 @@ void migrateLegacyRuntimeState() {
   legacy.each { String key, Object value ->
     if(value != null) { runtime.putIfAbsent(key, value) }
   }
+  Object pendingBatchEvents = state[PENDING_BATCH_EVENTS_KEY]
+  Object batchEventsScheduled = state[BATCH_EVENTS_SCHEDULED_KEY]
   state.clear()
+  if(pendingBatchEvents != null) { state[PENDING_BATCH_EVENTS_KEY] = pendingBatchEvents }
+  if(batchEventsScheduled != null) { state[BATCH_EVENTS_SCHEDULED_KEY] = batchEventsScheduled }
 }
 void on() {
   setLastGroupingMode(GROUPING_MODE_EXPLICIT)
@@ -928,6 +940,11 @@ void updateBatchPlaybackState(String jsonAttributes) {
   processBatchPlaybackState(jsonAttributes, false)
 }
 
+/** Accept one coalesced parent batch through the normal group-state guard. */
+void applyStateBatch(String jsonAttributes) {
+  processBatchPlaybackState(jsonAttributes, false)
+}
+
 /**
  * Apply an explicit refresh from the parent app. Refresh playback is subject
  * to the same inactive-group guard as other playback updates.
@@ -957,9 +974,7 @@ private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlayb
 
   // Always apply membership attributes first
   Boolean wasActive = this.device.currentValue('switch') == 'on'
-  membershipAttrs.each { String attrName, Object attrValue ->
-    sendEvent(name: attrName, value: attrValue)
-  }
+  queueBatchEvents(membershipAttrs)
   // Determine isActive from the batch value if switch was included, since
   // sendEvent() may not propagate to currentValue() synchronously.
   Boolean isActive = membershipAttrs.containsKey('switch')
@@ -1014,17 +1029,76 @@ private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlayb
 
 private void applyPlaybackAttributes(Map attrs) {
   if(!attrs) { return }
+  Map<String, Object> eventBatch = [:]
   attrs.each { String attrName, Object attrValue ->
     if(!getEnableTrackPositionUpdates() && attrName in ['trackPosition', 'trackPositionUpdated']) { return }
     if(attrValue != null) {
       if(attrName == 'volume') {
-        sendVolumeStateEvents(attrValue as Integer)
+        eventBatch.volume = [value: attrValue, unit: '%']
+        eventBatch.groupVolume = attrValue
       } else if(attrName == 'mute') {
-        sendMuteStateEvents(attrValue as String)
+        eventBatch.mute = attrValue
+        eventBatch.groupMute = attrValue
       } else {
-        sendEvent(name: attrName, value: attrValue)
+        eventBatch[attrName] = attrValue
       }
     }
+  }
+  queueBatchEvents(eventBatch)
+}
+
+private void queueBatchEvents(Map attributes) {
+  if(!attributes) { return }
+  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
+      ? (Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY] : [:]
+  attributes.each { Object rawName, Object rawValue ->
+    String name = rawName?.toString()
+    if(name && rawValue != null) {
+      pending[name] = rawValue instanceof Map && ((Map)rawValue).containsKey('value')
+          ? rawValue : [value: rawValue, unit: null]
+    }
+  }
+  if(pending.isEmpty()) { return }
+  state[PENDING_BATCH_EVENTS_KEY] = pending
+  schedulePendingBatchEvents()
+}
+
+private void schedulePendingBatchEvents() {
+  if(state[PENDING_BATCH_EVENTS_KEY] instanceof Map && !((Map)state[PENDING_BATCH_EVENTS_KEY]).isEmpty()
+      && state[BATCH_EVENTS_SCHEDULED_KEY] != true) {
+    state[BATCH_EVENTS_SCHEDULED_KEY] = true
+    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+  }
+}
+
+void drainBatchEvents() {
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
+      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
+  if(pending.isEmpty()) {
+    state.remove(PENDING_BATCH_EVENTS_KEY)
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    return
+  }
+  List<String> names = new ArrayList<String>(pending.keySet()).take(BATCH_EVENTS_PER_DRAIN)
+  Map<String, Object> remaining = new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY])
+  names.each { String name ->
+    Map event = pending[name] instanceof Map ? (Map)pending[name] : [value: pending[name]]
+    try {
+      if(event.unit) { sendEvent(name: name, value: event.value, unit: event.unit) }
+      else { sendEvent(name: name, value: event.value) }
+      remaining.remove(name)
+    } catch(Exception e) {
+      logWarn("Could not emit batched ${name} event; retaining it for retry: ${e.message}")
+    }
+  }
+  if(remaining.isEmpty()) {
+    state.remove(PENDING_BATCH_EVENTS_KEY)
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  } else {
+    state[PENDING_BATCH_EVENTS_KEY] = remaining
+    state[BATCH_EVENTS_SCHEDULED_KEY] = true
+    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
   }
 }
 

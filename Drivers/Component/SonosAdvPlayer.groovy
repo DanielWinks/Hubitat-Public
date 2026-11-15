@@ -515,6 +515,10 @@ Boolean hasLineInCapability() {
 // grouped multi-player update by the order Sonos reports the group members.
 @Field static ConcurrentHashMap<String, Integer> pendingGroupedPlayerVolumes = new ConcurrentHashMap<String, Integer>()
 @Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
+@Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
+@Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
+@Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
+@Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 
 @Field static final Integer AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS = 15
 @Field static final Integer AUDIO_CLIP_DONE_GRACE_SECONDS = 15
@@ -558,6 +562,8 @@ void initialize() {
   Map queueEntry = getUpnpRequestQueue()
   if(queueEntry != null) { synchronized(queueEntry.lock) { queueEntry.retired = false } }
   migrateLegacyRuntimeState()
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  schedulePendingBatchEvents()
   cancelAudioClipWatchdog()
   resetSubscriptionMutexesForDevice()
   maybeCleanupStaticDriverState()
@@ -578,6 +584,8 @@ void requestFullSubscriptionRenewal(Integer delaySeconds, String reason) {
 void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  schedulePendingBatchEvents()
   cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
   migrationCleanup()
@@ -658,8 +666,12 @@ void migrateLegacyRuntimeState() {
       if(decodedValue != null) { runtime.putIfAbsent(key, decodedValue) }
     }
   }
+  Object pendingBatchEvents = state[PENDING_BATCH_EVENTS_KEY]
+  Object batchEventsScheduled = state[BATCH_EVENTS_SCHEDULED_KEY]
   state.clear()
   atomicState.clear()
+  if(pendingBatchEvents != null) { state[PENDING_BATCH_EVENTS_KEY] = pendingBatchEvents }
+  if(batchEventsScheduled != null) { state[BATCH_EVENTS_SCHEDULED_KEY] = batchEventsScheduled }
   ['currentlyPlayingClip', 'activeAudioClipMessage', 'audioClipProgressByCorrelationId'].each { String key ->
     Object value = runtime.get(key)
     if(value != null) { storeHiddenJsonState(key, summarizeHiddenJsonState(key, value), value) }
@@ -5374,6 +5386,61 @@ void removeWsDeviceDataKeys() {
 
 void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
   if(child != null) {child.sendEvent(name:name, value:value)}
+}
+
+/** Accept a parent-delivered attribute batch and emit it in bounded chunks. */
+synchronized void applyStateBatch(String jsonAttributes) {
+  Map attributes
+  try { attributes = (Map)parseJson(jsonAttributes) }
+  catch(Exception e) {
+    logWarn("Ignoring malformed child state batch: ${e.message}")
+    return
+  }
+  if(!(attributes instanceof Map) || attributes.isEmpty()) { return }
+  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
+      ? (Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY] : [:]
+  attributes.each { Object name, Object value ->
+    if(name != null && value != null) { pending[name.toString()] = value }
+  }
+  state[PENDING_BATCH_EVENTS_KEY] = pending
+  schedulePendingBatchEvents()
+}
+
+private void schedulePendingBatchEvents() {
+  if(state[PENDING_BATCH_EVENTS_KEY] instanceof Map && !((Map)state[PENDING_BATCH_EVENTS_KEY]).isEmpty()
+      && state[BATCH_EVENTS_SCHEDULED_KEY] != true) {
+    state[BATCH_EVENTS_SCHEDULED_KEY] = true
+    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+  }
+}
+
+synchronized void drainBatchEvents() {
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
+      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
+  if(pending.isEmpty()) {
+    state.remove(PENDING_BATCH_EVENTS_KEY)
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    return
+  }
+  List<String> names = new ArrayList<String>(pending.keySet()).take(BATCH_EVENTS_PER_DRAIN)
+  Map<String, Object> remaining = new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY])
+  names.each { String name ->
+    try {
+      device.sendEvent(name: name, value: pending[name])
+      remaining.remove(name)
+    } catch(Exception e) {
+      logWarn("Could not emit batched ${name} event; retaining it for retry: ${e.message}")
+    }
+  }
+  if(remaining.isEmpty()) {
+    state.remove(PENDING_BATCH_EVENTS_KEY)
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  } else {
+    state[PENDING_BATCH_EVENTS_KEY] = remaining
+    state[BATCH_EVENTS_SCHEDULED_KEY] = true
+    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+  }
 }
 
 Object getChildCurrentStateValue(DeviceWrapper child, String name, Boolean skipCache = false) {
