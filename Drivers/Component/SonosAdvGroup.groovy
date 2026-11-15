@@ -348,16 +348,6 @@ void acknowledgeGroupCommand(String requestId) {
   runIn(1, 'drainGroupCommandQueue', [overwrite: true])
 }
 
-private void sendVolumeStateEvents(Integer volumeLevel) {
-  sendEvent(name: 'volume', value: volumeLevel, unit: '%')
-  sendEvent(name: 'groupVolume', value: volumeLevel)
-}
-
-private void sendMuteStateEvents(String muteState) {
-  sendEvent(name: 'mute', value: muteState)
-  sendEvent(name: 'groupMute', value: muteState)
-}
-
 private Map getFavoriteLoadOptionsFromPlayMode(String playMode) {
   String normalizedPlayMode = playMode != null ? playMode.toUpperCase() : 'NORMAL'
   String repeatMode = 'off'
@@ -466,8 +456,7 @@ void synchronizeTrackPositionPreference() {
   Boolean isEnabled = getEnableTrackPositionUpdates()
   device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
   if(wasEnabled && !isEnabled) {
-    device.sendEvent(name: 'trackPosition', value: 0L)
-    device.sendEvent(name: 'trackPositionUpdated', value: 0L)
+    queueBatchEvents([trackPosition: 0L, trackPositionUpdated: 0L])
   }
 }
 

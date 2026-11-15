@@ -2747,10 +2747,17 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
     String dni = "${app.id}${ALARM_SWITCH_DNI_MARKER}${householdId}-${alarmId}"
     keep.add(dni)
     ChildDeviceWrapper child = getChildDevice(dni)
+    Boolean createdChild = child == null
     if(child == null) {
       try { child = addChildDevice('dwinks', 'Sonos Advanced Alarm Switch', dni,
         [name: 'Sonos Alarm', label: "Sonos Alarm: ${roomUuid} ${alarm.StartLocalTime ?: ''}", isComponent: true]) }
       catch(Exception e) { logWarn("Could not create Sonos alarm child ${alarmId}: ${e.message}"); return }
+    }
+    if(createdChild) {
+      Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
+          ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
+      lastSent.remove(dni)
+      state[LAST_SENT_CHILD_STATE_KEY] = lastSent
     }
     ChildDeviceWrapper roomPlayer = playersById[roomUuid]
     child.updateDataValue('householdId', householdId)
@@ -2760,18 +2767,21 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
     child.updateDataValue('localUpnpHost', roomPlayer?.getDataValue('localUpnpHost')?.toString() ?: '')
     child.updateDataValue('alarmData', JsonOutput.toJson(alarm))
     child.updateDataValue('parentAppId', app.id.toString())
-    child.sendEvent(name: 'switch', value: alarm.Enabled?.toString() == '1' ? 'on' : 'off')
-    child.sendEvent(name: 'alarmTime', value: alarm.StartLocalTime?.toString() ?: '')
-    child.sendEvent(name: 'alarmVolume', value: alarm.Volume?.toString()?.toInteger() ?: 0)
-    child.sendEvent(name: 'recurrence', value: alarm.Recurrence?.toString() ?: '')
-    child.sendEvent(name: 'room', value: roomPlayer?.label ?: roomUuid)
-    child.sendEvent(name: 'duration', value: alarm.Duration?.toString() ?: '')
-    child.sendEvent(name: 'alarmSource', value: alarm.ProgramURI?.toString() ?: '')
-    child.sendEvent(name: 'playMode', value: alarm.PlayMode?.toString() ?: '')
+    Map<String, Object> alarmAttributes = [
+      'switch': alarm.Enabled?.toString() == '1' ? 'on' : 'off',
+      alarmTime: alarm.StartLocalTime?.toString() ?: '',
+      alarmVolume: alarm.Volume?.toString()?.toInteger() ?: 0,
+      recurrence: alarm.Recurrence?.toString() ?: '',
+      room: roomPlayer?.label ?: roomUuid,
+      duration: alarm.Duration?.toString() ?: '',
+      alarmSource: alarm.ProgramURI?.toString() ?: '',
+      playMode: alarm.PlayMode?.toString() ?: ''
+    ]
     if(alarm.containsKey('IncludeLinkedZones')) {
       String linkedZones = alarm.IncludeLinkedZones?.toString()?.toLowerCase()
-      child.sendEvent(name: 'includeGroupedRooms', value: linkedZones in ['1', 'true'] ? 'true' : 'false')
+      alarmAttributes.includeGroupedRooms = linkedZones in ['1', 'true'] ? 'true' : 'false'
     }
+    queueChildStateBatch(dni, alarmAttributes)
     child.setLabel("Sonos Alarm: ${roomPlayer?.label ?: roomUuid} ${alarm.StartLocalTime ?: ''}")
   }
   getChildDevices().findAll { ChildDeviceWrapper child -> child.getDeviceNetworkId()?.contains(ALARM_SWITCH_DNI_MARKER) && child.getDeviceNetworkId()?.contains("${ALARM_SWITCH_DNI_MARKER}${householdId}-") && !keep.contains(child.getDeviceNetworkId()) }
