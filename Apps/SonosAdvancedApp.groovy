@@ -240,6 +240,10 @@ preferences {
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
 @Field static final String GROUP_COMMAND_REQUEST_EVENT = 'dwinksSonosAdvancedGroupCommand'
 @Field static final String PLAYER_STATE_UPDATE_EVENT = 'dwinksSonosAdvancedPlayerState'
+@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'sonosGroupCommandRequest'
+@Field static final String PLAYER_STATE_UPDATE_ATTRIBUTE = 'sonosPlayerStateUpdate'
+@Field static final String PLAYER_APP_REQUEST_ATTRIBUTE = 'sonosPlayerAppRequest'
+@Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final String PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY = 'sonosPlayerPlaybackObservations'
 @Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
@@ -2512,6 +2516,13 @@ void refreshStaticDriverActivePlayerRoster() {
       refreshedAt: refreshedAt,
       players: roster
     ]
+    String serializedRoster = JsonOutput.toJson(state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY])
+    children.each { ChildDeviceWrapper child ->
+      if(child.getDeviceNetworkId() && child.getDataValue('id')) {
+        child.updateDataValue('staticDriverActivePlayerRoster', serializedRoster)
+      }
+    }
+    refreshPlayerAnnouncementPolicySnapshots()
   } catch(Exception e) {
     logWarn("Could not refresh active player roster cache: ${e.message}")
   }
@@ -3078,13 +3089,36 @@ void createGroupDevices() {
  * group driver from synchronously entering the app while holding its gate.
  */
 void subscribeToGroupCommandRequests() {
-  unsubscribe(location, GROUP_COMMAND_REQUEST_EVENT, 'groupCommandRequestHandler')
-  subscribe(location, GROUP_COMMAND_REQUEST_EVENT, 'groupCommandRequestHandler')
-  unsubscribe(location, PLAYER_STATE_UPDATE_EVENT, 'playerStateUpdateHandler')
-  subscribe(location, PLAYER_STATE_UPDATE_EVENT, 'playerStateUpdateHandler')
+  app.getChildDevices().each { ChildDeviceWrapper child ->
+    String dni = child.getDeviceNetworkId()?.toString()
+    if(dni?.contains(GROUP_DEVICE_DNI_MARKER)) {
+      unsubscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
+      subscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
+    } else if(dni?.contains(ALARM_MANAGER_DNI_MARKER) || dni?.contains(ALARM_SWITCH_DNI_MARKER)) {
+      unsubscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
+      subscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
+    }
+  }
   getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
+    unsubscribe(playerDevice, PLAYER_STATE_UPDATE_ATTRIBUTE, 'playerStateUpdateHandler')
+    unsubscribe(playerDevice, PLAYER_APP_REQUEST_ATTRIBUTE, 'playerAppRequestHandler')
+    unsubscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
+    unsubscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
+    subscribe(playerDevice, PLAYER_STATE_UPDATE_ATTRIBUTE, 'playerStateUpdateHandler')
+    subscribe(playerDevice, PLAYER_APP_REQUEST_ATTRIBUTE, 'playerAppRequestHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
+  }
+}
+
+/** Keep player driver policy caches aligned with app settings and observations. */
+void refreshPlayerAnnouncementPolicySnapshots() {
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String dni = player.getDeviceNetworkId()?.toString()
+    if(!dni) { return }
+    player.updateDataValue('useAudioClipForPlayer', shouldUseAudioClipForPlayer(dni, false).toString())
+    player.updateDataValue('useAudioClipForHighPriorityTts', shouldUseAudioClipForPlayer(dni, true).toString())
+    player.updateDataValue('useAudioClipForAirPlay', shouldUseAudioClipForAirPlay().toString())
   }
 }
 
@@ -4358,7 +4392,9 @@ void drainQueuedChildEvents() {
 void playerStateUpdateHandler(Event event) {
   Map payload
   try {
-    payload = (Map)parseJson(event?.data?.toString())
+    String rawValue = event?.value?.toString()
+    String rawPayload = rawValue?.trim()?.startsWith('{') ? rawValue : event?.data?.toString()
+    payload = (Map)parseJson(rawPayload)
   } catch(Exception e) {
     logWarn("Ignoring malformed player state update: ${e.message}")
     return
@@ -4367,6 +4403,7 @@ void playerStateUpdateHandler(Event event) {
   String playerDni = payload.playerDni as String
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || !player.getDataValue('id')) { return }
+  runIn(1, 'refreshPlayerAnnouncementPolicySnapshots', [overwrite: true])
   if(payload.kind == 'wsRetry') {
     Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
         ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
@@ -4521,6 +4558,89 @@ void groupCommandRequestHandler(Event event) {
   }
 
   enqueueGroupCommandRequest(request)
+}
+
+/** Receive asynchronous requests from app-owned alarm child drivers. */
+void alarmRequestHandler(Event event) {
+  Map request
+  try { request = (Map)parseJson(event?.value?.toString()) }
+  catch(Exception e) {
+    logWarn("Ignoring malformed alarm child request: ${e.message}")
+    return
+  }
+  if(!(request instanceof Map) || !request.requestId) { return }
+  String sourceDni = request.sourceDni?.toString()
+  ChildDeviceWrapper source = sourceDni ? getChildDevice(sourceDni) : null
+  if(source == null) { return }
+
+  Map args = request.args instanceof Map ? (Map)request.args : [:]
+  String action = request.action?.toString()
+  if(request.channel == 'alarmManager' && sourceDni.contains(ALARM_MANAGER_DNI_MARKER)) {
+    String householdId = request.householdId?.toString()
+    switch(action) {
+      case 'refresh': refreshSonosAlarmsForHousehold(householdId); break
+      case 'create': createSonosAlarm(householdId, args); break
+      case 'createFromCatalogSource':
+        createSonosAlarmFromCatalogSource(householdId, args.sourceType?.toString(), args.sourceId?.toString(), args)
+        break
+      case 'destroy': destroySonosAlarm(householdId, args.alarmId?.toString(), args.roomUuid?.toString()); break
+      default: logWarn("Ignoring unsupported Alarm Manager request action '${action}'")
+    }
+    return
+  }
+  if(request.channel != 'alarmSwitch' || !sourceDni.contains(ALARM_SWITCH_DNI_MARKER)) { return }
+  Object value = request.value
+  switch(action) {
+    case 'setEnabled': setSonosAlarmEnabled(sourceDni, value?.toString() == 'true'); break
+    case 'refresh': refreshSonosAlarmsForHousehold(value?.toString()); break
+    case 'setTime': setSonosAlarmTime(sourceDni, value?.toString()); break
+    case 'setVolume': setSonosAlarmVolume(sourceDni, value != null ? value.toString().toInteger() : null); break
+    case 'setRecurrence': setSonosAlarmRecurrence(sourceDni, value?.toString()); break
+    case 'setDuration': setSonosAlarmDuration(sourceDni, value?.toString()); break
+    case 'setRoom': setSonosAlarmRoom(sourceDni, value?.toString()); break
+    case 'setSource':
+      Map sourceArgs = value instanceof Map ? (Map)value : [:]
+      setSonosAlarmSource(sourceDni, sourceArgs.programUri?.toString(), sourceArgs.programMetadata?.toString())
+      break
+    case 'setPlayMode': setSonosAlarmPlayMode(sourceDni, value?.toString()); break
+    case 'setIncludeGroupedRooms': setSonosAlarmIncludeGroupedRooms(sourceDni, value?.toString() == 'true'); break
+    default: logWarn("Ignoring unsupported Alarm Switch request action '${action}'")
+  }
+}
+
+/** Handle player requests that formerly called methods on the parent app. */
+void playerAppRequestHandler(Event event) {
+  Map request
+  try { request = (Map)parseJson(event?.value?.toString()) }
+  catch(Exception e) {
+    logWarn("Ignoring malformed player app request: ${e.message}")
+    return
+  }
+  String playerDni = request?.sourceDni?.toString()
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  if(player == null || !player.getDataValue('id') || request.channel != 'playerAppRequest') { return }
+  Map args = request.args instanceof Map ? (Map)request.args : [:]
+  switch(request.action?.toString()) {
+    case 'refreshRoster':
+      refreshStaticDriverActivePlayerRoster()
+      break
+    case 'refreshPolicy':
+      player.updateDataValue('useAudioClipForPlayer', shouldUseAudioClipForPlayer(playerDni, false).toString())
+      player.updateDataValue('useAudioClipForHighPriorityTts', shouldUseAudioClipForPlayer(playerDni, true).toString())
+      player.updateDataValue('useAudioClipForAirPlay', shouldUseAudioClipForAirPlay().toString())
+      break
+    case 'activeStreamTts':
+      String requestId = args.requestId?.toString()
+      Integer duration = args.duration != null ? args.duration.toString().toInteger() : 0
+      BigDecimal volume = null
+      try { volume = args.volume != null ? new BigDecimal(args.volume.toString()) : null }
+      catch(Exception e) { logWarn("Ignoring invalid volume in player TTS request ${requestId}") }
+      Boolean accepted = handlePlayerActiveStreamTts(playerDni, args.uri?.toString(), volume, duration,
+          args.correlationId?.toString())
+      if(requestId) { player.completeParentAppActiveStreamTts(requestId, accepted.toString()) }
+      break
+    default: logWarn("Ignoring unsupported player app request action '${request.action}'")
+  }
 }
 
 /** Queue group announcements so a coordinator stream and subsequent messages cannot race. */

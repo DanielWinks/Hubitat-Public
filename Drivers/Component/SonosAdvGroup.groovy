@@ -76,6 +76,7 @@ void logTrace(String message) {
 @Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
 @Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
 @Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
+@Field static final String SONOS_GROUP_COMMAND_ATTRIBUTE = 'sonosGroupCommandRequest'
 @Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
   'groupCommandRequest',
   'groupingMode',
@@ -95,6 +96,7 @@ metadata {
       "MusicPlayer"
     ]
   ) {
+    attribute SONOS_GROUP_COMMAND_ATTRIBUTE, 'string'
     capability 'MusicPlayer'
     capability 'AudioNotification'
     capability 'AudioVolume'
@@ -326,7 +328,7 @@ void drainGroupCommandQueue() {
 void emitGroupCommandRequest(Map data) {
   Map payload = data?.payload instanceof Map ? (Map)data.payload : data
   if(!(payload instanceof Map) || !payload.command) { return }
-  sendLocationEvent(name: 'dwinksSonosAdvancedGroupCommand', value: JsonOutput.toJson(payload), isStateChange: true)
+  sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
   logDebug("Delivered group command ${payload.command} (${payload.requestId}); waiting for parent acknowledgement")
   runIn(5, 'retryActiveGroupCommandRequest', [overwrite: true])
 }

@@ -22,6 +22,7 @@
  */
 
 import groovy.transform.Field
+import groovy.json.JsonOutput
 
 @Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
 @Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
@@ -42,6 +43,7 @@ metadata {
     singleThreaded: true,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvAlarmSwitch.groovy'
   ) {
+    attribute 'sonosAlarmRequest', 'string'
     capability 'Switch'
     capability 'Refresh'
     capability 'Actuator'
@@ -66,8 +68,17 @@ metadata {
   }
 }
 
-void on() { parent?.setSonosAlarmEnabled(device.deviceNetworkId, true) }
-void off() { parent?.setSonosAlarmEnabled(device.deviceNetworkId, false) }
+@Field static final String SONOS_ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
+
+void sendParentAppRequest(String action, Object value = null) {
+  Map payload = [version: 1, channel: 'alarmSwitch', action: action,
+    sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString()]
+  if(value != null) { payload.value = value }
+  sendEvent(name: SONOS_ALARM_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+}
+
+void on() { sendParentAppRequest('setEnabled', true) }
+void off() { sendParentAppRequest('setEnabled', false) }
 void installed() { initialize() }
 void updated() { initialize() }
 void initialize() { configure() }
@@ -78,16 +89,16 @@ void configure() {
 }
 void refresh() {
   String householdId = device.getDataValue('householdId')
-  if(householdId) { parent?.refreshSonosAlarmsForHousehold(householdId) }
+  if(householdId) { sendParentAppRequest('refresh', householdId) }
 }
-void setAlarmTime(String time) { parent?.setSonosAlarmTime(device.deviceNetworkId, time) }
-void setAlarmVolume(BigDecimal volume) { parent?.setSonosAlarmVolume(device.deviceNetworkId, volume?.intValue()) }
-void setRecurrence(String recurrence) { parent?.setSonosAlarmRecurrence(device.deviceNetworkId, recurrence) }
-void setDuration(String duration) { parent?.setSonosAlarmDuration(device.deviceNetworkId, duration) }
-void setAlarmRoom(String playerId) { parent?.setSonosAlarmRoom(device.deviceNetworkId, playerId) }
-void setAlarmSource(String programUri, String programMetadata) { parent?.setSonosAlarmSource(device.deviceNetworkId, programUri, programMetadata) }
-void setPlayMode(String playMode) { parent?.setSonosAlarmPlayMode(device.deviceNetworkId, playMode) }
-void setIncludeGroupedRooms(String include) { parent?.setSonosAlarmIncludeGroupedRooms(device.deviceNetworkId, include == 'true') }
+void setAlarmTime(String time) { sendParentAppRequest('setTime', time) }
+void setAlarmVolume(BigDecimal volume) { sendParentAppRequest('setVolume', volume?.intValue()) }
+void setRecurrence(String recurrence) { sendParentAppRequest('setRecurrence', recurrence) }
+void setDuration(String duration) { sendParentAppRequest('setDuration', duration) }
+void setAlarmRoom(String playerId) { sendParentAppRequest('setRoom', playerId) }
+void setAlarmSource(String programUri, String programMetadata) { sendParentAppRequest('setSource', [programUri: programUri, programMetadata: programMetadata]) }
+void setPlayMode(String playMode) { sendParentAppRequest('setPlayMode', playMode) }
+void setIncludeGroupedRooms(String include) { sendParentAppRequest('setIncludeGroupedRooms', include == 'true') }
 
 void applyStateBatch(String jsonAttributes) {
   Map attributes

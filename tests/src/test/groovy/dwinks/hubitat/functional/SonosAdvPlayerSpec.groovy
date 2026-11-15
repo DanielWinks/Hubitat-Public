@@ -17,6 +17,11 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
+  List<Map> playerStateMessages() {
+    driver.events.findAll { Map event -> event.name == 'sonosPlayerStateUpdate' }
+      .collect { Map event -> (Map)new JsonSlurper().parseText(event.value.toString()) }
+  }
+
   def "delayed stream callback cannot supersede a newer transport command"() {
     given:
     driver.asyncCalls.clear()
@@ -50,18 +55,18 @@ class SonosAdvPlayerSpec extends Specification {
     driver.setAVTransportURIAndPlayCallback(new hubitat.scheduling.AsyncResponse(status: 200), request)
 
     then:
-    driver.locationEvents.any { Map event ->
-      event.data?.kind == 'groupAnnouncementProgress' &&
-        event.data?.correlationId == 'announcement-guid' && event.data?.phase == 'INTERRUPTED' &&
-        event.data?.externalPlayback == true &&
-        event.data?.replacementUri == 'https://music.example.test/track.mp3'
+    playerStateMessages().any { Map event ->
+      event.kind == 'groupAnnouncementProgress' &&
+        event.correlationId == 'announcement-guid' && event.phase == 'INTERRUPTED' &&
+        event.externalPlayback == true &&
+        event.replacementUri == 'https://music.example.test/track.mp3'
     }
     driver.runtimeState.groupAnnouncementStream == null
   }
 
   def "paused coordinator stream completes correlated group announcement immediately"() {
     given:
-    driver.locationEvents.clear()
+    driver.events.clear()
     driver.device.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
     driver.device.currentValues.audioSource = 'http://example.test/announcement.mp3'
     driver.runtimeState.groupAnnouncementStream = [correlationId: 'announcement-paused',
@@ -74,10 +79,10 @@ class SonosAdvPlayerSpec extends Specification {
     ]))
 
     then:
-    driver.locationEvents.any { Map event ->
-      event.data?.kind == 'groupAnnouncementProgress' &&
-        event.data?.correlationId == 'announcement-paused' && event.data?.phase == 'DONE' &&
-        event.data?.playbackState == 'PLAYBACK_STATE_PAUSED' && event.data?.termination == 'paused'
+    playerStateMessages().any { Map event ->
+      event.kind == 'groupAnnouncementProgress' &&
+        event.correlationId == 'announcement-paused' && event.phase == 'DONE' &&
+        event.playbackState == 'PLAYBACK_STATE_PAUSED' && event.termination == 'paused'
     }
     driver.runtimeState.groupAnnouncementStream == null
   }
@@ -112,8 +117,8 @@ class SonosAdvPlayerSpec extends Specification {
     modeRequest.params.body.contains('<NewPlayMode>REPEAT_ALL</NewPlayMode>')
     playRequest.params.headers.SOAPAction.endsWith('#Play')
     driver.runtimeState.announcementPlaybackSnapshot == null
-    driver.locationEvents.any { Map event ->
-      event.data?.phase == 'PLAYBACK_RESTORED' && event.data?.correlationId == 'restore-guid'
+    playerStateMessages().any { Map event ->
+      event.phase == 'PLAYBACK_RESTORED' && event.correlationId == 'restore-guid'
     }
   }
 
@@ -149,8 +154,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.asyncCalls.empty
     driver.runtimeState.announcementPlaybackSnapshot == null
-    driver.locationEvents.any { Map event ->
-      event.data?.phase == 'PLAYBACK_RESTORED' && event.data?.skipped == 'external-playback'
+    playerStateMessages().any { Map event ->
+      event.phase == 'PLAYBACK_RESTORED' && event.skipped == 'external-playback'
     }
   }
 
@@ -171,9 +176,9 @@ class SonosAdvPlayerSpec extends Specification {
     (driver.state.playbackStateObservedAt as Long) > 0L
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackState') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackStateObservedAt') != true
-    driver.locationEvents.any { Map event ->
-      event.data?.kind == 'playbackObservation' && event.data?.playbackState == 'PLAYBACK_STATE_IDLE' &&
-        event.data?.playbackObservedAt == driver.state.playbackStateObservedAt
+    playerStateMessages().any { Map event ->
+      event.kind == 'playbackObservation' && event.playbackState == 'PLAYBACK_STATE_IDLE' &&
+        event.playbackObservedAt == driver.state.playbackStateObservedAt
     }
   }
 
@@ -288,8 +293,8 @@ class SonosAdvPlayerSpec extends Specification {
     (driver.state.audioSourceSignalObservedAt as Long) > 0L
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalStatus') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalObservedAt') != true
-    driver.locationEvents.any { Map event ->
-      event.data?.kind == 'playbackObservation' && event.data?.signalStatus == 'no-signal'
+    playerStateMessages().any { Map event ->
+      event.kind == 'playbackObservation' && event.signalStatus == 'no-signal'
     }
   }
 
@@ -1209,7 +1214,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.device.currentValues.groupCoordinatorId == 'RINCON_OLD_COORD'
     driver.device.currentValues.isGrouped == 'on'
-    Map topologyReport = driver.locationEvents.find { Map event -> event.data?.kind == 'topology' }?.data
+    Map topologyReport = playerStateMessages().find { Map event -> event.kind == 'topology' }
     topologyReport.groupId == 'RINCON_TEST:100'
     topologyReport.coordinatorId == 'RINCON_TEST'
     topologyReport.playerIds == ['RINCON_TEST']
@@ -1666,9 +1671,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferredParentUpdateGroupDevices([coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST']])
 
     then:
-    driver.locationEvents.size() == 1
-    driver.locationEvents[0].name == 'dwinksSonosAdvancedPlayerState'
-    driver.locationEvents[0].data == [kind: 'membership', coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST'], playerDni: 'SONOS-TEST-DNI']
+    playerStateMessages().size() == 1
+    playerStateMessages()[0] == [kind: 'membership', coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST'], playerDni: 'SONOS-TEST-DNI']
   }
 
   def "group state flush publishes one batched location event"() {
@@ -1679,11 +1683,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingGroupDeviceUpdates()
 
     then:
-    driver.locationEvents.size() == 1
-    driver.locationEvents[0].data.kind == 'state'
-    driver.locationEvents[0].data.followerAttrs == [status: 'playing', groupVolume: 25, groupMute: 'unmuted']
-    driver.locationEvents[0].data.volumeAttrs == [volume: 25, mute: 'unmuted']
-    driver.locationEvents[0].data.playbackAttrs == [status: 'playing']
+    playerStateMessages().size() == 1
+    playerStateMessages()[0].kind == 'state'
+    playerStateMessages()[0].followerAttrs == [status: 'playing', groupVolume: 25, groupMute: 'unmuted']
+    playerStateMessages()[0].volumeAttrs == [volume: 25, mute: 'unmuted']
+    playerStateMessages()[0].playbackAttrs == [status: 'playing']
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
   }
 
@@ -2278,7 +2282,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "muted synchronized group member reports terminal progress"() {
     given:
     driver.metaClass.getParent = { -> null }
-    driver.locationEvents.clear()
+    driver.events.clear()
     driver.device.currentValues.mute = 'muted'
     driver.getDeviceAudioClipQueue().clear()
     driver.getDeviceAudioClipQueueHighPriority().clear()
@@ -2290,10 +2294,10 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getDeviceAudioClipQueue().empty
-    driver.locationEvents.any { Map event ->
-      event.data?.kind == 'groupAnnouncementProgress' &&
-        event.data?.correlationId == 'muted-group-announcement' &&
-        event.data?.phase == 'DISMISSED' && event.data?.reason == 'muted'
+    playerStateMessages().any { Map event ->
+      event.kind == 'groupAnnouncementProgress' &&
+        event.correlationId == 'muted-group-announcement' &&
+        event.phase == 'DISMISSED' && event.reason == 'muted'
     }
   }
 

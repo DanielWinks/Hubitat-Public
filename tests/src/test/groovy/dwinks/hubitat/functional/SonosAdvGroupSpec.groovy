@@ -250,11 +250,11 @@ class SonosAdvGroupSpec extends Specification {
 
     then:
     parent.requests.empty
-    driver.events.empty
-    driver.locationEvents.size() == 1
-    driver.locationEvents[0].name == 'dwinksSonosAdvancedGroupCommand'
-    driver.locationEvents[0].isStateChange == true
-    new JsonSlurper().parseText(driver.locationEvents[0].value as String) == payload
+    driver.device.events.empty
+    driver.events.size() == 1
+    driver.events[0].name == 'sonosGroupCommandRequest'
+    driver.events[0].isStateChange == true
+    new JsonSlurper().parseText(driver.events[0].value as String) == payload
   }
 
   def "group command queue waits for parent acknowledgement before sending the next request"() {

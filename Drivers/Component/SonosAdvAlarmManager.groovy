@@ -22,6 +22,7 @@
  */
 
 import groovy.transform.Field
+import groovy.json.JsonOutput
 
 metadata {
   definition(
@@ -32,6 +33,7 @@ metadata {
     singleThreaded: true,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvAlarmManager.groovy'
   ) {
+    attribute 'sonosAlarmRequest', 'string'
     capability 'Refresh'
     capability 'Actuator'
 
@@ -76,14 +78,25 @@ metadata {
   }
 }
 
-void refresh() { parent?.refreshSonosAlarmsForHousehold(device.getDataValue('householdId')?.toString()) }
+@Field static final String SONOS_ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
+
+void logTrace(String message) { log.debug(message) }
+
+void sendParentAppRequest(String action, Map args = [:]) {
+  Map payload = [version: 1, channel: 'alarmManager', action: action,
+    sourceDni: device.getDeviceNetworkId(), householdId: device.getDataValue('householdId')?.toString(),
+    requestId: UUID.randomUUID().toString(), args: args ?: [:]]
+  sendEvent(name: SONOS_ALARM_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+}
+
+void refresh() { sendParentAppRequest('refresh') }
 void createAlarm(String startTime, String duration, String recurrence, String roomUuid,
     String programUri, String programMetadata, String playMode, BigDecimal volume,
     String includeGroupedRooms, String enabled) {
   Integer alarmVolume = volume?.intValue()
   if(alarmVolume == null || alarmVolume < 0 || alarmVolume > 100) { return }
   if(!roomUuid || !programUri) { return }
-  parent?.createSonosAlarm(device.getDataValue('householdId')?.toString(), [
+  sendParentAppRequest('create', [
     StartLocalTime: startTime, Duration: duration, Recurrence: recurrence,
     Enabled: enabled == 'true' ? '1' : '0', RoomUUID: roomUuid,
     ProgramURI: programUri, ProgramMetaData: programMetadata ?: '',
@@ -103,7 +116,7 @@ private void createAlarmFromCatalogSource(String sourceType, String sourceId, St
     String recurrence, String roomUuid, String playMode, BigDecimal volume, String includeGroupedRooms, String enabled) {
   Integer alarmVolume = volume?.intValue()
   if(!sourceId || !roomUuid || alarmVolume == null || alarmVolume < 0 || alarmVolume > 100) { return }
-  parent?.createSonosAlarmFromCatalogSource(device.getDataValue('householdId')?.toString(), sourceType, sourceId, [
+  sendParentAppRequest('createFromCatalogSource', [sourceType: sourceType, sourceId: sourceId,
     StartLocalTime: startTime, Duration: duration, Recurrence: recurrence,
     Enabled: enabled == 'true' ? '1' : '0', RoomUUID: roomUuid,
     PlayMode: playMode, Volume: alarmVolume.toString(),
@@ -112,7 +125,7 @@ private void createAlarmFromCatalogSource(String sourceType, String sourceId, St
 }
 void destroyAlarm(String alarmId, String roomUuid) {
   if(!alarmId || !roomUuid) { return }
-  parent?.destroySonosAlarm(device.getDataValue('householdId')?.toString(), alarmId, roomUuid)
+  sendParentAppRequest('destroy', [alarmId: alarmId, roomUuid: roomUuid])
 }
 
 String getCurrentTTSVoice() {

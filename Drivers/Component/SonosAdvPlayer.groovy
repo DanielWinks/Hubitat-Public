@@ -23,7 +23,6 @@
 
 import com.hubitat.app.ChildDeviceWrapper
 import com.hubitat.app.DeviceWrapper
-import com.hubitat.app.InstalledAppWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.hub.domain.Event
 import groovy.json.JsonOutput
@@ -99,6 +98,8 @@ metadata {
     singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
+  attribute 'sonosPlayerStateUpdate', 'string'
+  attribute 'sonosPlayerAppRequest', 'string'
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
 
   capability 'AudioNotification'
@@ -118,6 +119,10 @@ metadata {
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
   command 'setVolumeZero'
+  command 'completeParentAppActiveStreamTts', [
+    [name: 'Request ID', type: 'STRING'],
+    [name: 'Accepted', type: 'ENUM', constraints: ['true', 'false']]
+  ]
   command 'groupVolumeUp'
   command 'groupVolumeDown'
   command 'muteGroup'
@@ -386,6 +391,8 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
+@Field static final String PLAYER_STATE_UPDATE_ATTRIBUTE = 'sonosPlayerStateUpdate'
+@Field static final String PLAYER_APP_REQUEST_ATTRIBUTE = 'sonosPlayerAppRequest'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
 @Field static final String WS_COMMAND_LEDGER_STATE_KEY = 'websocketCommandLedger'
@@ -994,9 +1001,16 @@ void maybeCleanupStaticDriverState() {
   if((nowEpoch - lastCheck) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
   lastStaticStateCleanupAttemptEpoch = nowEpoch
 
-  InstalledAppWrapper parentApp = getParentApp()
-  if(parentApp == null) { return }
-  Map rosterSnapshot = parentApp.getStaticDriverActivePlayerRoster()
+  Map rosterSnapshot
+  String serializedRoster = device.getDataValue('staticDriverActivePlayerRoster')
+  if(serializedRoster) {
+    try { rosterSnapshot = (Map)new JsonSlurper().parseText(serializedRoster) }
+    catch(Exception e) { logDebug("Ignoring malformed parent app roster snapshot: ${e.message}") }
+  }
+  if(rosterSnapshot == null) {
+    sendParentAppRequest('refreshRoster')
+    return
+  }
   List<Map<String, String>> activePlayerRoster = validateStaticDriverActivePlayerRoster(rosterSnapshot, nowEpoch)
   if(activePlayerRoster == null) { return }
 
@@ -1455,7 +1469,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
   Boolean useAudioClip = hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(false)
   if(airPlaySource && hasAudioClipCapability() == true) {
     try {
-      useAudioClip = getParentApp()?.shouldUseAudioClipForAirPlay() == true
+      useAudioClip = readParentAppPolicy('useAudioClipForAirPlay', false)
     } catch(Exception e) {
       logWarn("Could not read AirPlay announcement policy; using the standard stream method: ${e.message}")
     }
@@ -1472,16 +1486,17 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     LinkedHashMap tts = textToSpeech(text, voice)
     String streamUrl = tts?.uri?.toString()
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
-    Boolean routedToParent = false
-    if(!airPlaySource && streamUrl && getParentApp() != null) {
-      try {
-        routedToParent = getParentApp().handlePlayerActiveStreamTts(device.getDeviceNetworkId(),
-            streamUrl, volume, ttsDuration, UUID.randomUUID().toString()) == true
-      } catch(Exception e) {
-        logWarn("Could not route active Sonos stream TTS through Sonos Advanced: ${e.message}")
-      }
-    }
-    if(!routedToParent) {
+    if(!airPlaySource && streamUrl) {
+      String requestId = UUID.randomUUID().toString()
+      Map<String, Object> pending = state.pendingParentAppTtsRequests instanceof Map
+          ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
+      pending[requestId] = [uri: streamUrl, volume: volume?.toString(), duration: ttsDuration,
+        correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip]
+      state.pendingParentAppTtsRequests = pending
+      sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
+        volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId])
+      return
+    } else {
       if(streamUrl) {
         if(useAudioClip) {
           playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
@@ -1534,16 +1549,44 @@ void devicePlayTextWithAudioClip(String text, BigDecimal volume = null, String v
 
 /** Ask the controller app for the shared group/player announcement policy. */
 Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
-  InstalledAppWrapper parentApp = getParentApp()
-  if(parentApp == null) {
-    logWarn('Cannot read the app announcement policy; using the standard stream method')
-    return false
-  }
-  try {
-    return parentApp.shouldUseAudioClipForPlayer(device.getDeviceNetworkId(), highPriority) == true
-  } catch(Exception e) {
-    logWarn("Could not read the app announcement policy; using the standard stream method: ${e.message}")
-    return false
+  return readParentAppPolicy(highPriority ? 'useAudioClipForHighPriorityTts' : 'useAudioClipForPlayer', false)
+}
+
+Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
+  String value = device.getDataValue(dataKey)
+  if(value == 'true') { return true }
+  if(value == 'false') { return false }
+  sendParentAppRequest('refreshPolicy')
+  return fallback
+}
+
+void sendParentAppRequest(String action, Map args = [:]) {
+  Map payload = [version: 1, channel: 'playerAppRequest', action: action,
+    sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
+  sendEvent(name: PLAYER_APP_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+}
+
+/** Complete the asynchronous parent-app decision for an active-stream TTS request. */
+void completeParentAppActiveStreamTts(String requestId, String accepted) {
+  Map<String, Object> pending = state.pendingParentAppTtsRequests instanceof Map
+      ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
+  Map request = pending[requestId] instanceof Map ? (Map)pending[requestId] : null
+  if(request == null) { return }
+  pending.remove(requestId)
+  state.pendingParentAppTtsRequests = pending
+  if(accepted == 'true') { return }
+
+  String uri = request.uri?.toString()
+  if(!uri) { return }
+  BigDecimal volume = null
+  try { volume = request.volume != null ? new BigDecimal(request.volume.toString()) : null }
+  catch(Exception e) { logWarn("Could not restore TTS volume for parent response ${requestId}: ${e.message}") }
+  Integer duration = (request.duration ?: 30) as Integer
+  if(request.useAudioClip == true && hasAudioClipCapability() == true) {
+    playerLoadAudioClip(uri, volume, duration, request.correlationId?.toString())
+  } else {
+    BigDecimal announcementVolume = getAnnouncementVolume(volume)
+    componentPlayStreamWithRestoreLocal(uri, duration, announcementVolume)
   }
 }
 
@@ -3897,7 +3940,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
       getSleepTimer()
     }
     if(!sleepTimerAttributes.isEmpty()) {
-      sleepTimerChild.applyStateBatch(JsonOutput.toJson(sleepTimerAttributes))
+      applyChildStateBatch(sleepTimerChild, JsonOutput.toJson(sleepTimerAttributes))
     }
   }
 
@@ -4322,9 +4365,6 @@ Boolean hasSid(String sid) {
 
 DeviceWrapper getThisDevice() {
   return this.device as DeviceWrapper
-}
-InstalledAppWrapper getParentApp() {
-  return getParent() as InstalledAppWrapper
 }
 String getSid(String sid) {
   return device.getDataValue(sid)
@@ -5405,7 +5445,6 @@ private void scheduleLocalDeviceEventDrain(Integer delayMs) {
   }
 }
 
-@CompileStatic
 synchronized void flushPendingLocalDeviceEvents() {
   String dni = device.getDeviceNetworkId()
   state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
@@ -5438,6 +5477,11 @@ synchronized void flushPendingLocalDeviceEvents() {
   } else {
     scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
   }
+}
+
+/** Dispatch the child driver's custom batch command across the Hubitat wrapper boundary. */
+void applyChildStateBatch(ChildDeviceWrapper child, String jsonAttributes) {
+  child.applyStateBatch(jsonAttributes)
 }
 
 private void scheduleComponentChildEventDrain(Integer delayMs) {
@@ -5477,33 +5521,33 @@ synchronized void drainComponentChildEvents() {
   Map<String, Map<String, Object>> lastSent = state[LAST_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_COMPONENT_CHILD_EVENTS_KEY] : [:]
   Integer emitted = 0
-  Iterator<Map.Entry<String, Map<String, Object>>> targets = pending.entrySet().iterator()
-  while(targets.hasNext() && emitted < COMPONENT_CHILD_EVENTS_PER_DRAIN) {
-    Map.Entry<String, Map<String, Object>> target = targets.next()
-    String dni = target.key
-    Map<String, Object> eventsForChild = target.value
+  List<String> targetDnis = new ArrayList<String>(pending.keySet())
+  for(String dni : targetDnis) {
+    if(emitted >= COMPONENT_CHILD_EVENTS_PER_DRAIN) { break }
+    Map<String, Object> eventsForChild = pending[dni] instanceof Map ? pending[dni] : [:]
     ChildDeviceWrapper child = getChildDevice(dni)
     if(child == null) {
       logWarn("drainComponentChildEvents: no child device found for DNI ${dni}; keeping queued values")
       emitted++
       continue
     }
-    Iterator<Map.Entry<String, Object>> events = eventsForChild.entrySet().iterator()
-    while(events.hasNext() && emitted < COMPONENT_CHILD_EVENTS_PER_DRAIN) {
-      Map.Entry<String, Object> event = events.next()
+    List<String> eventNames = new ArrayList<String>(eventsForChild.keySet())
+    for(String eventName : eventNames) {
+      if(emitted >= COMPONENT_CHILD_EVENTS_PER_DRAIN) { break }
+      Object eventValue = eventsForChild[eventName]
       try {
-        child.sendEvent(name: event.key, value: event.value)
+        child.sendEvent(name: eventName, value: eventValue)
         Map<String, Object> lastForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
-        lastForChild[event.key] = event.value
+        lastForChild[eventName] = eventValue
         lastSent[dni] = lastForChild
-        events.remove()
+        eventsForChild.remove(eventName)
         emitted++
       } catch(Exception e) {
-        logWarn("Could not emit ${event.key} to child ${dni}; retaining it for retry: ${e.message}")
+        logWarn("Could not emit ${eventName} to child ${dni}; retaining it for retry: ${e.message}")
         emitted++
       }
     }
-    if(eventsForChild.isEmpty()) { targets.remove() }
+    if(eventsForChild.isEmpty()) { pending.remove(dni) }
   }
   if(!lastSent.isEmpty()) { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastSent }
   if(pending.isEmpty()) {
@@ -6708,7 +6752,7 @@ void sendEventsToNewGroupMembers(List<String> newRincons) {
 void publishPlayerStateUpdate(Map payload) {
   Map eventData = new LinkedHashMap(payload)
   eventData['playerDni'] = device.getDeviceNetworkId()
-  sendLocationEvent(name: 'dwinksSonosAdvancedPlayerState', value: device.getDeviceNetworkId(), data: eventData, isStateChange: true)
+  sendEvent(name: PLAYER_STATE_UPDATE_ATTRIBUTE, value: JsonOutput.toJson(eventData), isStateChange: true)
 }
 
 void publishGroupTopologyUpdate(String groupId, String coordinatorId, List<String> playerIds) {

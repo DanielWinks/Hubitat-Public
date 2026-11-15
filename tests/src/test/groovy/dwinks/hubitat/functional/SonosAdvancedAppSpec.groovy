@@ -14,11 +14,15 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Long id = 101L
   List<Map> commands = []
   List<String> acknowledgedParentRequests = []
+  List<List<String>> completedAppTtsRequests = []
 
   void mute() { commands << [name: 'mute'] }
   void unmute() { commands << [name: 'unmute'] }
 
   void acknowledgeParentCommand(String requestId) { acknowledgedParentRequests << requestId }
+  void completeParentAppActiveStreamTts(String requestId, String accepted) {
+    completedAppTtsRequests << [requestId, accepted]
+  }
 
   void playerCreateGroup(List<String> playerIds, String musicContextGroupId = null) {
     commands << [name: 'playerCreateGroup', playerIds: playerIds, musicContextGroupId: musicContextGroupId]
@@ -1088,6 +1092,142 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
   }
 
+  def "player device state event carries its JSON payload in the event value"() {
+    given:
+    Map batch = [kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
+      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()]
+
+    when:
+    appScript.playerStateUpdateHandler([value: JsonOutput.toJson(batch)] as Event)
+
+    then:
+    appScript.state.sonosPlayerPlaybackObservations.RINCON_COORD.playbackState == 'PLAYBACK_STATE_PLAYING'
+  }
+
+  def "alarm device request event dispatches through the parent app handler"() {
+    given:
+    SonosAppPlayerDouble alarmManager = new SonosAppPlayerDouble(
+      deviceNetworkId: '259-SonosAlarmManager-HOUSE-1', displayName: 'Alarm Manager')
+    appScript.children << alarmManager
+    appScript.app.children = appScript.children
+    List<String> refreshedHouseholds = []
+    appScript.metaClass.refreshSonosAlarmsForHousehold = { String householdId ->
+      refreshedHouseholds << householdId
+    }
+
+    when:
+    appScript.alarmRequestHandler([value: JsonOutput.toJson([
+      version: 1, channel: 'alarmManager', action: 'refresh', sourceDni: alarmManager.deviceNetworkId,
+      householdId: 'HOUSE-1', requestId: 'alarm-request-1', args: [:]
+    ])] as Event)
+
+    then:
+    refreshedHouseholds == ['HOUSE-1']
+  }
+
+  def "alarm manager and switch requests dispatch every action with decoded arguments"() {
+    given:
+    String managerDni = '259-SonosAlarmManager-HOUSE-1'
+    String switchDni = '259-SonosAlarm-HOUSE-1-ALARM-1'
+    SonosAppPlayerDouble alarmManager = new SonosAppPlayerDouble(deviceNetworkId: managerDni)
+    SonosAppPlayerDouble alarmSwitch = new SonosAppPlayerDouble(deviceNetworkId: switchDni)
+    appScript.children << alarmManager
+    appScript.children << alarmSwitch
+    appScript.app.children = appScript.children
+    List<List> calls = []
+    appScript.metaClass.refreshSonosAlarmsForHousehold = { String householdId -> calls << ['refresh', householdId] }
+    appScript.metaClass.createSonosAlarm = { String householdId, Map args -> calls << ['create', householdId, args] }
+    appScript.metaClass.createSonosAlarmFromCatalogSource = { String householdId, String type, String id, Map args -> calls << ['createFromCatalogSource', householdId, type, id, args] }
+    appScript.metaClass.destroySonosAlarm = { String householdId, String id, String room -> calls << ['destroy', householdId, id, room] }
+    appScript.metaClass.setSonosAlarmEnabled = { String dni, Boolean value -> calls << ['setEnabled', dni, value] }
+    appScript.metaClass.setSonosAlarmTime = { String dni, String value -> calls << ['setTime', dni, value] }
+    appScript.metaClass.setSonosAlarmVolume = { String dni, Integer value -> calls << ['setVolume', dni, value] }
+    appScript.metaClass.setSonosAlarmRecurrence = { String dni, String value -> calls << ['setRecurrence', dni, value] }
+    appScript.metaClass.setSonosAlarmDuration = { String dni, String value -> calls << ['setDuration', dni, value] }
+    appScript.metaClass.setSonosAlarmRoom = { String dni, String value -> calls << ['setRoom', dni, value] }
+    appScript.metaClass.setSonosAlarmSource = { String dni, String uri, String metadata -> calls << ['setSource', dni, uri, metadata] }
+    appScript.metaClass.setSonosAlarmPlayMode = { String dni, String value -> calls << ['setPlayMode', dni, value] }
+    appScript.metaClass.setSonosAlarmIncludeGroupedRooms = { String dni, Boolean value -> calls << ['setIncludeGroupedRooms', dni, value] }
+    Closure sendRequest = { String channel, String action, String dni, Object value = null, Map args = [:] ->
+      Map request = [version: 1, channel: channel, action: action, sourceDni: dni,
+        requestId: "${channel}-${action}", args: args]
+      if(channel == 'alarmManager') { request.householdId = 'HOUSE-1' }
+      if(value != null) { request.value = value }
+      appScript.alarmRequestHandler([value: JsonOutput.toJson(request)] as Event)
+    }
+
+    when:
+    sendRequest('alarmManager', 'create', managerDni, null, [Volume: '5'])
+    sendRequest('alarmManager', 'createFromCatalogSource', managerDni, null,
+      [sourceType: 'favorite', sourceId: '42', Volume: '5'])
+    sendRequest('alarmManager', 'destroy', managerDni, null, [alarmId: '42', roomUuid: 'RINCON-1'])
+    sendRequest('alarmSwitch', 'setEnabled', switchDni, true)
+    sendRequest('alarmSwitch', 'refresh', switchDni, 'HOUSE-1')
+    sendRequest('alarmSwitch', 'setTime', switchDni, '07:30:00')
+    sendRequest('alarmSwitch', 'setVolume', switchDni, 5)
+    sendRequest('alarmSwitch', 'setRecurrence', switchDni, 'WEEKDAYS')
+    sendRequest('alarmSwitch', 'setDuration', switchDni, '00:15:00')
+    sendRequest('alarmSwitch', 'setRoom', switchDni, 'RINCON-1')
+    sendRequest('alarmSwitch', 'setSource', switchDni, [programUri: 'uri', programMetadata: 'meta'])
+    sendRequest('alarmSwitch', 'setPlayMode', switchDni, 'NORMAL')
+    sendRequest('alarmSwitch', 'setIncludeGroupedRooms', switchDni, true)
+
+    then:
+    calls*.first() == ['create', 'createFromCatalogSource', 'destroy', 'setEnabled', 'refresh',
+      'setTime', 'setVolume', 'setRecurrence', 'setDuration', 'setRoom', 'setSource',
+      'setPlayMode', 'setIncludeGroupedRooms']
+    calls[0][1..2] == ['HOUSE-1', [Volume: '5']]
+    calls[1][1..3] == ['HOUSE-1', 'favorite', '42']
+    calls[2] == ['destroy', 'HOUSE-1', '42', 'RINCON-1']
+    calls[3..-1].every { List call -> call[1] == switchDni || call[0] == 'refresh' }
+    calls.find { List call -> call[0] == 'setVolume' } == ['setVolume', switchDni, 5]
+    calls.find { List call -> call[0] == 'setSource' } == ['setSource', switchDni, 'uri', 'meta']
+  }
+
+  def "player app request event is handled and replied to through a device callback"() {
+    given:
+    appScript.metaClass.handlePlayerActiveStreamTts = { String playerDni, String uri,
+        BigDecimal volume, Integer duration, String correlationId ->
+      playerDni == coordinator.deviceNetworkId && uri == 'http://example.test/tts.mp3' &&
+        volume == 5G && duration == 3 && correlationId == 'tts-correlation'
+    }
+
+    when:
+    appScript.playerAppRequestHandler([value: JsonOutput.toJson([
+      version: 1, channel: 'playerAppRequest', action: 'activeStreamTts',
+      sourceDni: coordinator.deviceNetworkId, requestId: 'event-request-1',
+      args: [requestId: 'tts-request-1', uri: 'http://example.test/tts.mp3', volume: '5',
+        duration: 3, correlationId: 'tts-correlation']
+    ])] as Event)
+
+    then:
+    coordinator.completedAppTtsRequests == [['tts-request-1', 'true']]
+  }
+
+  def "player app cache refresh requests update driver roster and policy snapshots"() {
+    given:
+    List<String> refreshed = []
+    appScript.metaClass.refreshStaticDriverActivePlayerRoster = { -> refreshed << 'roster' }
+    appScript.settings.groupAnnouncementMode = 'alwaysNonInterrupting'
+    appScript.settings.highPriorityAnnouncementMode = 'alwaysCoordinatorStream'
+
+    when:
+    appScript.playerAppRequestHandler([value: JsonOutput.toJson([
+      version: 1, channel: 'playerAppRequest', action: 'refreshRoster',
+      sourceDni: coordinator.deviceNetworkId, requestId: 'roster-request', args: [:]
+    ])] as Event)
+    appScript.playerAppRequestHandler([value: JsonOutput.toJson([
+      version: 1, channel: 'playerAppRequest', action: 'refreshPolicy',
+      sourceDni: coordinator.deviceNetworkId, requestId: 'policy-request', args: [:]
+    ])] as Event)
+
+    then:
+    refreshed == ['roster']
+    coordinator.dataValues.useAudioClipForPlayer == 'true'
+    coordinator.dataValues.useAudioClipForHighPriorityTts == 'false'
+    coordinator.dataValues.useAudioClipForAirPlay == 'true'
+  }
+
   def "player position preference suppresses position fanout to disabled followers"() {
     given:
     follower.dataValues.enableTrackPositionUpdates = 'false'
@@ -1768,13 +1908,14 @@ class SonosAdvancedAppSpec extends Specification {
     topology.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW']
   }
 
-  def "repeated subscription setup keeps one location command subscription"() {
+  def "repeated subscription setup keeps one device event subscription per player"() {
     when:
     appScript.subscribeToGroupCommandRequests()
     appScript.subscribeToGroupCommandRequests()
 
     then:
-    appScript.subscriptions.count { it == [appScript.location, 'dwinksSonosAdvancedGroupCommand', 'groupCommandRequestHandler'] } == 1
+    appScript.subscriptions.count { it == [coordinator, 'sonosPlayerStateUpdate', 'playerStateUpdateHandler'] } == 1
+    appScript.subscriptions.count { it == [coordinator, 'sonosPlayerAppRequest', 'playerAppRequestHandler'] } == 1
   }
 
   def "Favorite is not loaded until the requested topology is stable twice"() {
