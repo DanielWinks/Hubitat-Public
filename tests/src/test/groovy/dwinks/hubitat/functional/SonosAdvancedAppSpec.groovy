@@ -154,6 +154,7 @@ class SonosAppGroupDouble extends ChildDeviceWrapper {
 class SonosAdvancedAppSpec extends Specification {
 
   @Shared File appFile = new File('../Apps/SonosAdvancedApp.groovy')
+  @Shared Class<? extends HubitatScriptHarness> appScriptClass
 
   HubitatScriptHarness appScript
   SonosAppGroupDouble group
@@ -162,9 +163,16 @@ class SonosAdvancedAppSpec extends Specification {
   SonosAppPlayerDouble extra
   Long topologyObservationSequence = 0L
 
-  def setup() {
+  def setupSpec() {
     assert appFile.exists(), "Could not find ${appFile.absolutePath}"
-    appScript = ScriptLoader.load(appFile, new File('../Libraries'), true)
+    appScriptClass = ScriptLoader.compile(appFile, new File('../Libraries'), true)
+  }
+
+  def setup() {
+    appScript = ScriptLoader.instantiate(appScriptClass)
+    appScript.discoveredSonoses.clear()
+    appScript.discoveredSonosSecondaries.clear()
+    appScript.zgtResubRequestAt.clear()
     appScript.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     appScript.logs.clear()
     appScript.events.clear()

@@ -21,6 +21,12 @@ class ScriptLoader {
 
   /** Load a single file. Includes resolved against `libraryDir` if given. */
   static HubitatScriptHarness load(File file, File libraryDir = null, Boolean relaxCompileStatic = false) {
+    instantiate(compile(file, libraryDir, relaxCompileStatic))
+  }
+
+  /** Compile a single file and return its reusable script class. */
+  static Class<? extends HubitatScriptHarness> compile(File file, File libraryDir = null,
+      Boolean relaxCompileStatic = false) {
     String src = file.text
     Preprocessor.Result pp = Preprocessor.process(src)
 
@@ -72,7 +78,12 @@ class ScriptLoader {
     if (!(s instanceof HubitatScriptHarness)) {
       throw new IllegalStateException("Loaded script is not a HubitatScriptHarness: ${s.class}")
     }
-    s as HubitatScriptHarness
+    s.class as Class<? extends HubitatScriptHarness>
+  }
+
+  /** Create an isolated harness instance from a previously compiled script class. */
+  static HubitatScriptHarness instantiate(Class<? extends HubitatScriptHarness> scriptClass) {
+    scriptClass.getDeclaredConstructor(Binding).newInstance(new Binding())
   }
 
   /**

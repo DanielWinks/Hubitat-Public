@@ -2,17 +2,25 @@ package dwinks.hubitat.functional
 
 import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
+import spock.lang.Shared
 import spock.lang.Specification
 
 class SonosAdvSecondariesSpec extends Specification {
+  @Shared Class<? extends HubitatScriptHarness> driverClass
   HubitatScriptHarness driver
   List<Map> connections = []
   List<String> sentMessages = []
   List<String> sendAttempts = []
   Integer sendFailuresRemaining = 0
 
+  def setupSpec() {
+    File file = new File('../Drivers/Component/SonosAdvSecondaries.groovy')
+    assert file.exists(), "Could not find ${file.absolutePath}"
+    driverClass = ScriptLoader.compile(file)
+  }
+
   def setup() {
-    driver = ScriptLoader.load(new File('../Drivers/Component/SonosAdvSecondaries.groovy'))
+    driver = ScriptLoader.instantiate(driverClass)
     driver.binding.setVariable('interfaces', [webSocket: new Expando(
       connect: { Map options, String url -> connections.add([url: url, options: options]) },
       sendMessage: { String message ->
