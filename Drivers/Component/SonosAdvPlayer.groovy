@@ -66,19 +66,16 @@ void logDebug(String message) {
   }
 }
 void logException(String message) {
-  if (loggingEnabled('error')) {
-    if(device) log.exception "${device.label ?: device.name }: ${message}"
-    if(app) log.exception "${app.label ?: app.name }: ${message}"
-  }
+  logError(message)
 }
 void logException(String context, Exception exception) {
   if(exception == null) {
     logError("${context}: unknown exception")
     return
   }
-  List<String> stack = exception.stackTrace?.take(12)?.collect { Object frame -> frame.toString() } ?: []
+  List<String> stackFrames = exception.stackTrace?.take(20)?.collect { Object frame -> frame.toString() } ?: []
   String details = "${context}: ${exception.class.name}: ${exception.message ?: '(no message)'}"
-  if(!stack.isEmpty()) { details += "\n${stack.join('\n')}" }
+  if(!stackFrames.isEmpty()) { details += " | stack=${stackFrames.join(' <- ')}" }
   logException(details)
 }
 void logTrace(String message) {
@@ -394,6 +391,7 @@ Boolean hasLineInCapability() {
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
 @Field static ConcurrentHashMap<String, String> pendingTopologyXmlByDni = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, Map> pendingTopologySnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyWebsocketByDni = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
@@ -541,10 +539,12 @@ Boolean hasLineInCapability() {
 @Field static final Integer LOCAL_EVENT_DRAIN_INTERVAL_MS = 200
 @Field static final String PENDING_COMPONENT_CHILD_EVENTS_KEY = 'pendingComponentChildEvents'
 @Field static final String COMPONENT_CHILD_DRAIN_SCHEDULED_KEY = 'componentChildDrainScheduled'
+@Field static final String COMPONENT_CHILD_RETRY_ATTEMPTS_KEY = 'componentChildRetryAttempts'
 @Field static final String LAST_COMPONENT_CHILD_EVENTS_KEY = 'lastComponentChildEvents'
 @Field static final Integer COMPONENT_CHILD_MAX_WAIT_MS = 500
 @Field static final Integer COMPONENT_CHILD_EVENTS_PER_DRAIN = 8
 @Field static final Integer COMPONENT_CHILD_DRAIN_INTERVAL_MS = 200
+@Field static final Integer COMPONENT_CHILD_RETRY_MAX_MS = 30000
 @Field static final String GROUP_DEVICE_UPDATE_SCHEDULED_KEY = 'groupDeviceUpdateScheduled'
 @Field static final Integer GROUP_DEVICE_UPDATE_MAX_WAIT_MS = 500
 @Field static final Integer GROUP_DEVICE_UPDATE_RETRY_MS = 1000
@@ -626,6 +626,7 @@ void configure() {
   schedulePendingBatchEvents()
   state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
+  resetComponentChildEventRetries()
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
   scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
   state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
@@ -1098,6 +1099,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(lastWsEventLog)
     clearedEntries += clearStaticMap(lastZgtXmlHash)
     clearedEntries += clearStaticMap(pendingTopologyXmlByDni)
+    clearedEntries += clearStaticMap(pendingTopologySnapshotByDni)
     clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
     clearedEntries += clearStaticMap(pendingTopologyKindByDni)
     clearedEntries += clearStaticMap(wsSubscriptionStatus)
@@ -1139,6 +1141,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastZgtXmlHash, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyXmlByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingTopologySnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
@@ -3292,7 +3295,19 @@ void invalidateComponentChildState(String dni) {
   Map<String, Map<String, Object>> lastSent = state[LAST_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[LAST_COMPONENT_CHILD_EVENTS_KEY]) : [:]
   lastSent.remove(dni)
-  state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastSent
+  if(lastSent.isEmpty()) { state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY) }
+  else { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastSent }
+  Map<String, Integer> retries = state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] instanceof Map
+      ? new LinkedHashMap<String, Integer>((Map<String, Integer>)state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY]) : [:]
+  retries.remove(dni)
+  if(retries.isEmpty()) { state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY) }
+  else { state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] = retries }
+}
+
+/** Drop queued events only when a child is intentionally removed or disabled. */
+void discardComponentChildState(String dni) {
+  if(!dni) { return }
+  invalidateComponentChildState(dni)
   Map<String, Map<String, Object>> pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[PENDING_COMPONENT_CHILD_EVENTS_KEY]) : [:]
   pending.remove(dni)
@@ -3317,10 +3332,11 @@ void createRemoveCrossfadeChildDevice(Boolean create) {
           label: "Sonos Crossfade Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'Crossfade')
+      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveCrossfadeChildDevice', e)
     }
-  } else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 
 void createRemoveShuffleChildDevice(Boolean create) {
@@ -3335,10 +3351,11 @@ void createRemoveShuffleChildDevice(Boolean create) {
           label: "Sonos Shuffle Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'Shuffle')
+      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveShuffleChildDevice', e)
     }
-  } else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 
 void createRemoveRepeatOneChildDevice(Boolean create) {
@@ -3353,11 +3370,12 @@ void createRemoveRepeatOneChildDevice(Boolean create) {
           label: "Sonos RepeatOne Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'RepeatOne')
+      scheduleComponentChildEventDrainNow(dni)
       logDebug("ChildDNI = ${child.getDeviceNetworkId()}")
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveRepeatOneChildDevice', e)
     }
-  } else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 
 void createRemoveRepeatAllChildDevice(Boolean create) {
@@ -3372,10 +3390,11 @@ void createRemoveRepeatAllChildDevice(Boolean create) {
           label: "Sonos RepeatAll Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'RepeatAll')
+      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveRepeatAllChildDevice', e)
     }
-  } else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 
 void createRemoveMuteChildDevice(Boolean create) {
@@ -3390,12 +3409,13 @@ void createRemoveMuteChildDevice(Boolean create) {
           label: "Sonos Mute Control - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'Mute')
+      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveMuteChildDevice', e)
     } catch (Exception e) {
       logException('createRemoveMuteChildDevice', e)
     }
-  } else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 
 void createRemoveBatteryStatusChildDevice(Boolean create) {
@@ -3662,11 +3682,12 @@ void createRemoveNightModeChildDevice(Boolean create) {
           label: "Sonos NightMode - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'NightMode')
+      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveNightModeChildDevice', e)
     }
   }
-  else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 
 void createRemoveSpeechEnhancementChildDevice(Boolean create) {
@@ -3681,11 +3702,12 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
           label: "Sonos SpeechEnhancement - ${this.getDataValue('name')}"]
       )
       child.updateDataValue('command', 'SpeechEnhancement')
+      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveSpeechEnhancementChildDevice', e)
     }
   }
-  else if(!create && child){ invalidateComponentChildState(dni); deleteChildDevice(dni) }
+  else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
 }
 // =============================================================================
 // Create Child Devices
@@ -3700,44 +3722,60 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
 void parse(String raw) {
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
+    logTrace("UPnP response parse entered; payloadLength=${raw.length()}")
     handleUpnpRawResponse(raw)
     return
   }
   if(!raw.startsWith('mac:')) {
-    logTrace("WebSocket parse entered; payloadLength=${raw.length()}")
+    logTrace("WebSocket parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     try {
       setLastWebsocketEvent()
+      logTrace('WebSocket last-event timestamp updated')
     } catch(Exception e) {
       logException('WebSocket last-event timestamp update failed', e)
     }
     try {
+      logTrace('WebSocket message dispatch beginning')
       processWebsocketMessage(raw)
+      logTrace('WebSocket message dispatch completed')
     } catch(Exception e) {
       logException('WebSocket message processing failed after JSON dispatch', e)
-      logWarn("WebSocket payload that failed processing: ${raw}")
+      logWarn("WebSocket payload processing failed; payloadLength=${raw.length()}")
     }
     return
   }
   try {
+    logTrace("UPnP NOTIFY parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
     String xmlBody = (String)message?.body
-    if(messageHeaders == null || messageHeaders.size() < 1) {return}
-    if(xmlBody == null || xmlBody == '') {return}
+    if(messageHeaders == null || messageHeaders.size() < 1) {
+      logTrace('Ignoring UPnP NOTIFY without parsed headers')
+      return
+    }
+    if(xmlBody == null || xmlBody == '') {
+      logTrace('Ignoring UPnP NOTIFY with an empty body')
+      return
+    }
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
+    logTrace("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
     if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
       try {
+        logTrace('AVTransport event processing beginning')
         setLastInboundAVTransportEvent()
         observeExpectedUpnpSubscriptionEvent('sid1')
         processAVTransportMessages(xmlBody, getLocalUpnpUrl())
+        logTrace('AVTransport event processing completed')
       } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
     }
     else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
       try {
+        logTrace('RenderingControl event processing beginning')
         observeExpectedUpnpSubscriptionEvent('sid2')
         setLastInboundMrRcEvent()
         processRenderingControlMessages(xmlBody)
-      } catch (Exception e) { logWarn("Ran into an issue parsing mrc: ${e}") }
+        logTrace('RenderingControl event processing completed')
+      } catch (Exception e) { logException('RenderingControl event processing failed', e) }
     }
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
       try {
@@ -3764,7 +3802,7 @@ void parse(String raw) {
     else {
       logDebug("Could not determine service type for message: ${message}")
     }
-  } catch (Exception e) { logWarn("parse() ran into an issue: ${e}") }
+  } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
 
 void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash = null) {
@@ -3774,9 +3812,11 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
   Integer previousHash = lastZgtXmlHash.get(deviceDni)
   if(previousHash != null && previousHash == payloadHash) { return }
 
-  Map topology = getZoneGroupTopologyForPlayer(xmlBody, getId())
+  Map topology = parseZoneGroupTopologySnapshot(xmlBody, getId())
   if(shouldHoldTopologyUpdate(topology)) {
     String previousPendingXml = pendingTopologyXmlByDni.put(deviceDni, xmlBody)
+    if(topology != null) { pendingTopologySnapshotByDni.put(deviceDni, topology) }
+    else { pendingTopologySnapshotByDni.remove(deviceDni) }
     pendingTopologyKindByDni.put(deviceDni, 'zgt')
     if(previousPendingXml != xmlBody) {
       logTrace('Holding topology update until the affected player reaches its expected topology')
@@ -3785,12 +3825,17 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
     return
   }
 
-  applyZoneGroupTopologyPayload(deviceDni, xmlBody, payloadHash)
+  applyZoneGroupTopologyPayload(deviceDni, xmlBody, payloadHash, topology)
 }
 
 void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash) {
+  Map topology = parseZoneGroupTopologySnapshot(xmlBody, getId())
+  applyZoneGroupTopologyPayload(dni, xmlBody, xmlHash, topology)
+}
+
+void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash, Map topology) {
   LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
-  if(processZoneGroupTopologyMessages(xmlBody, previousMembers)) {
+  if(processZoneGroupTopologySnapshot(topology, previousMembers)) {
     lastZgtXmlHash.put(dni, xmlHash)
     setLastInboundZgtEvent()
   }
@@ -3817,12 +3862,17 @@ void flushPendingTopologyUpdates() {
   setDeviceDataValue('expectedGroupTopology', '')
   String pendingKind = pendingTopologyKindByDni.remove(dni)
   String pendingXml = pendingTopologyXmlByDni.remove(dni)
+  Map pendingTopology = pendingTopologySnapshotByDni.remove(dni)
   String pendingWs = pendingTopologyWebsocketByDni.remove(dni)
   if(pendingKind == 'ws' && pendingWs) {
     processWebsocketMessage(pendingWs)
     logTrace('Published the latest groups websocket topology snapshot after its hold window elapsed')
   } else if(pendingKind == 'zgt' && pendingXml) {
-    applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode())
+    if(pendingTopology != null) {
+      applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode(), pendingTopology)
+    } else {
+      applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode())
+    }
     logTrace('Published the latest ZoneGroupTopology snapshot after its hold window elapsed')
   } else {
     return
@@ -3860,6 +3910,7 @@ void clearPendingTopologyForDevice() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
   pendingTopologyXmlByDni.remove(dni)
+  pendingTopologySnapshotByDni.remove(dni)
   pendingTopologyWebsocketByDni.remove(dni)
   pendingTopologyKindByDni.remove(dni)
 }
@@ -3877,7 +3928,8 @@ void scheduleTopologyTimeoutFlush() {
   }
 }
 
-Map getZoneGroupTopologyForPlayer(String xmlString, String playerId) {
+@CompileStatic
+Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
   if(!playerId || !isPlausibleXmlPayload(xmlString)) { return null }
   try {
     XmlSlurper parser = new XmlSlurper()
@@ -3887,16 +3939,63 @@ Map getZoneGroupTopologyForPlayer(String xmlString, String playerId) {
     if(!isPlausibleXmlPayload(unescaped)) { return null }
     GPathResult stateXmlParsed = parser.parseText(unescaped)
     GPathResult zoneGroups = (GPathResult)stateXmlParsed['ZoneGroups']
-    GPathResult member = zoneGroups.children().children().find { it['@UUID'] == playerId }
-    if(member == null) { return null }
-    GPathResult group = member.parent()
-    List<String> memberIds = group.children().findAll { it['@Invisible'] != '1' }
-      .collect { it['@UUID'].toString() }.sort()
-    return [coordinatorId: group['@Coordinator'].toString(), memberIds: memberIds]
+    String groupName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
+    GPathResult playerGroup = null
+    GPathResult player = null
+    GPathResult groups = zoneGroups.children()
+    for(GPathResult group : groups) {
+      if(playerGroup != null) { break }
+      for(GPathResult member : group.children()) {
+        if(member['@UUID'].toString() == playerId) {
+          playerGroup = group
+          player = member
+          break
+        }
+      }
+    }
+    if(playerGroup == null || player == null) {
+      return [playerFound: false, groupName: groupName]
+    }
+
+    String coordinatorId = playerGroup['@Coordinator'].toString()
+    String coordinatorName = null
+    LinkedHashSet<String> visibleMemberIds = new LinkedHashSet<String>()
+    LinkedHashSet<String> memberNames = new LinkedHashSet<String>()
+    for(GPathResult member : playerGroup.children()) {
+      String memberId = member['@UUID'].toString()
+      if(memberId == coordinatorId) { coordinatorName = member['@ZoneName'].toString() }
+      if(member['@Invisible'].toString() == '1') { continue }
+      visibleMemberIds.add(memberId)
+      memberNames.add(member['@ZoneName'].toString())
+    }
+    List<String> visibleMemberIdList = new ArrayList<String>(visibleMemberIds)
+    List<String> sortedMemberIds = new ArrayList<String>(visibleMemberIds)
+    Collections.sort(sortedMemberIds)
+    Map<String, String> batteryData = [:]
+    String moreInfo = player['@MoreInfo'].toString()
+    if(moreInfo) {
+      for(String part : moreInfo.tokenize(',')) {
+        List<String> entry = part.tokenize(':')
+        if(entry.size() > 1 && (entry[0] == 'BattTmp' || entry[0] == 'BattPct' || entry[0] == 'BattChg')) {
+          batteryData[entry[0]] = entry[1]
+        }
+      }
+    }
+    return [playerFound: true, coordinatorId: coordinatorId, coordinatorName: coordinatorName,
+      memberIds: sortedMemberIds, visibleMemberIds: visibleMemberIdList,
+      memberNames: new ArrayList<String>(memberNames),
+      groupName: groupName, batteryData: batteryData]
   } catch(Exception e) {
     logDebug("Could not inspect ZGT topology for ${playerId}: ${e.message}")
     return null
   }
+}
+
+Map getZoneGroupTopologyForPlayer(String xmlString, String playerId) {
+  Map topology = parseZoneGroupTopologySnapshot(xmlString, playerId)
+  return topology?.playerFound == true
+      ? [coordinatorId: topology.coordinatorId, memberIds: topology.memberIds]
+      : null
 }
 
 LinkedHashMap getMapForRaw(String raw) {
@@ -4103,44 +4202,27 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
     logDebug('Ignoring blank or non-XML ZGT property set')
     return false
   }
+  Map topology = parseZoneGroupTopologySnapshot(xmlString, getId())
+  return processZoneGroupTopologySnapshot(topology, oldGroupedRincons)
+}
 
-  XmlSlurper xmlParser = new XmlSlurper()
-  GPathResult propertyset = xmlParser.parseText(xmlString)
-  String zoneGroupStateString = ((GPathResult)propertyset['property']['ZoneGroupState']).text() //['ZoneGroupState']['ZoneGroups']
-  String unescapedZoneGroupState = unEscapeLastChangeXML(zoneGroupStateString)
-  if(!isPlausibleXmlPayload(unescapedZoneGroupState)) {
-    logDebug('Ignoring ZGT property set with blank or non-XML ZoneGroupState')
-    return false
-  }
-  GPathResult zoneGroupState = xmlParser.parseText(unescapedZoneGroupState)
-  GPathResult zoneGroups = (GPathResult)zoneGroupState['ZoneGroups']
-
-  // Cache the find result for this player to avoid repeated linear scans
-  GPathResult myZonePlayer = zoneGroups.children().children().find{it['@UUID'] == getId()}
-  if(myZonePlayer == null) {
+@CompileStatic
+Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
+  if(topology == null) { return false }
+  if(topology.playerFound != true) {
     logTrace("Player ${getId()} not found in ZoneGroupTopology!")
     return true
   }
-  GPathResult myGroup = myZonePlayer.parent()
 
-  LinkedHashSet<String> groupedRincons = new LinkedHashSet()
-  GPathResult currentGroupMembers = myGroup.children()
-
-  currentGroupMembers.each{
-    if(it['@Invisible'] == '1') {return}
-    groupedRincons.add(it['@UUID'].toString())
-  }
+  List<String> memberIds = topology.visibleMemberIds as List<String>
+  LinkedHashSet<String> groupedRincons = new LinkedHashSet<String>(memberIds ?: [])
+  logTrace("Reconciling topology snapshot; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, coordinator=${topology.coordinatorId}, groupId=${topology.groupId}, groupName=${topology.groupName}, memberNames=${topology.memberNames}, priorMembers=${oldGroupedRincons}, currentCount=${this.device.currentValue('groupMemberCount', true)}, currentIsGrouped=${this.device.currentValue('isGrouped', true)}, currentNames=${this.device.currentValue('groupMemberNames', true)}")
   if(groupedRincons.size() == 0) {
     logTrace("No grouped rincons found!")
   }
 
-  String currentGroupCoordinatorRincon = myGroup['@Coordinator']
-  GPathResult coordinatorZonePlayer = zoneGroups.children().children().find {
-    it['@UUID'] == currentGroupCoordinatorRincon
-  }
-  String currentGroupCoordinatorName = coordinatorZonePlayer != null
-      ? coordinatorZonePlayer['@ZoneName'].toString()
-      : null
+  String currentGroupCoordinatorRincon = topology.coordinatorId as String
+  String currentGroupCoordinatorName = topology.coordinatorName as String
   if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
   if(currentGroupCoordinatorRincon) {setGroupCoordinatorId(currentGroupCoordinatorRincon)}
 
@@ -4160,17 +4242,10 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
 
   setGroupPlayerIds(groupedRincons.toList())
 
-
-  LinkedHashSet currentGroupMemberNames = []
-  GPathResult allMembers = myGroup.children()
-  groupedRincons.each{ gr ->
-    GPathResult member = allMembers.find{it['@UUID'] == gr}
-    if(member != null) { currentGroupMemberNames.add(member['@ZoneName'].toString()) }
-  }
+  List<String> currentGroupMemberNames = topology.memberNames as List<String>
   Integer currentGroupMemberCount = groupedRincons.size()
 
-
-  String groupName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
+  String groupName = topology.groupName as String
   if(groupName && groupedRincons) {
     updateZoneGroupName(groupName)
   }
@@ -4180,16 +4255,15 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
   if(currentGroupMemberNames.size() > 0) {setGroupMemberNames(currentGroupMemberNames.toList())}
   if(groupName) {setGroupName(groupName)}
 
+  logTrace("Topology reconciliation queued; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, expectedCount=${currentGroupMemberCount}, expectedIsGrouped=${currentGroupMemberCount > 1 ? 'on' : 'off'}, expectedNames=${currentGroupMemberNames}, expectedGroupName=${groupName}, pendingLocalEvents=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
+
   if(processBatteryStatusChildDeviceMessages()) {
-    String moreInfoString = myZonePlayer['@MoreInfo']
-    if(moreInfoString) {
-      Map<String,String> moreInfo = moreInfoString.tokenize(',').collect{ it.tokenize(':') }.collectEntries{ [it[0].toString(),it[1].toString()]}
-      if(moreInfo.containsKey('BattTmp') && moreInfo.containsKey('BattPct') && moreInfo.containsKey('BattChg')) {
-        Integer battery =  moreInfo['BattPct'] as Integer
-        String powerSource = moreInfo['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains'
-        BigDecimal temperature = new BigDecimal(moreInfo['BattTmp'])
-        updateChildBatteryStatus(battery, powerSource, temperature)
-      }
+    Map<String, String> batteryData = topology.batteryData as Map<String, String>
+    if(batteryData != null && batteryData.containsKey('BattTmp') && batteryData.containsKey('BattPct') && batteryData.containsKey('BattChg')) {
+      Integer battery = batteryData['BattPct'] as Integer
+      String powerSource = batteryData['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains'
+      BigDecimal temperature = new BigDecimal(batteryData['BattTmp'])
+      updateChildBatteryStatus(battery, powerSource, temperature)
     }
   }
   return true
@@ -4315,16 +4389,44 @@ void setDialogLevelState(String value) {
 
 @CompileStatic
 void processRenderingControlMessages(String xmlString) {
+  logTrace("RenderingControl processor entered; xmlLength=${xmlString?.length() ?: 0}")
   GPathResult propertyset = parseSonosMessageXML(xmlString)
+  logTrace('RenderingControl XML parsed')
   GPathResult instanceId = (GPathResult)propertyset['property']['LastChange']['Event']['InstanceID']
+  logTrace("RenderingControl InstanceID located; childCount=${instanceId.children().size()}")
 
-  String volume = instanceId.children().findAll{GPathResult it -> it.name() == 'Volume' && it['@channel'] == 'Master'}['@val']
-  if(volume) { setPlayerVolume(volume as Integer) }
+  String volume = ''
+  String lfString = ''
+  String rfString = ''
+  String mute = ''
+  String loudness = ''
+  for(Object childObject : instanceId.children()) {
+    GPathResult child = (GPathResult)childObject
+    String elementName = child.name()
+    if(elementName == 'Volume' || elementName == 'Mute' || elementName == 'Loudness') {
+      String channel = child['@channel'].toString()
+      String value = child['@val'].toString()
+      logTrace("RenderingControl value extracted; element=${elementName}, channel=${channel ?: 'unset'}, value=${value ?: 'unset'}")
+      if(elementName == 'Volume') {
+        if(channel == 'Master') { volume = value }
+        else if(channel == 'LF') { lfString = value }
+        else if(channel == 'RF') { rfString = value }
+      } else if(channel == 'Master' && elementName == 'Mute') {
+        mute = value
+      } else if(channel == 'Master' && elementName == 'Loudness') {
+        loudness = value
+      }
+    }
+  }
+  if(volume) {
+    logTrace("RenderingControl Master volume conversion beginning; value=${volume}")
+    setPlayerVolume(volume as Integer)
+    logTrace('RenderingControl Master volume update completed')
+  }
 
-  String lfString = instanceId.children().findAll{((GPathResult)it).name() == 'Volume' && it['@channel'] == 'LF'}['@val'].toString()
   lfString = lfString ?: '0'
-  String rfString = instanceId.children().findAll{((GPathResult)it).name() == 'Volume' && it['@channel'] == 'RF'}['@val'].toString()
   rfString = rfString ?: '0'
+  logTrace("RenderingControl balance conversion beginning; left=${lfString}, right=${rfString}")
   Integer lf = Integer.parseInt(lfString)
   Integer rf = Integer.parseInt(rfString)
   Integer balance = 0
@@ -4334,26 +4436,48 @@ void processRenderingControlMessages(String xmlString) {
     balance = -((100 - rf) / 5) as Integer
   }
   setBalanceState(balance)
+  logTrace("RenderingControl balance update completed; balance=${balance}")
 
-  String mute = instanceId.children().findAll{((GPathResult)it).name() == 'Mute' && it['@channel'] == 'Master'}['@val']
   if(mute) {
+    logTrace("RenderingControl mute update beginning; value=${mute}")
     setMuteState(mute == '1' ? 'muted' : 'unmuted')
+    logTrace('RenderingControl mute update completed')
   }
 
   String bass = instanceId['Bass']['@val']
-  if(bass) { setBassState(bass as Integer) }
+  if(bass) {
+    logTrace("RenderingControl bass conversion beginning; value=${bass}")
+    setBassState(bass as Integer)
+    logTrace('RenderingControl bass update completed')
+  }
 
   String treble = instanceId['Treble']['@val']
-  if(treble) { setTrebleState(treble as Integer) }
+  if(treble) {
+    logTrace("RenderingControl treble conversion beginning; value=${treble}")
+    setTrebleState(treble as Integer)
+    logTrace('RenderingControl treble update completed')
+  }
 
-  String loudness = instanceId.children().findAll{((GPathResult)it).name() == 'Loudness' && it['@channel'] == 'Master'}['@val']
-  if(loudness) { setLoudnessState(loudness == '1' ? 'on' : 'off') }
+  if(loudness) {
+    logTrace("RenderingControl loudness update beginning; value=${loudness}")
+    setLoudnessState(loudness == '1' ? 'on' : 'off')
+    logTrace('RenderingControl loudness update completed')
+  }
 
   String nightMode = instanceId['NightMode']['@val']
-  if(nightMode) { setNightModeState(nightMode == '1' ? 'on' : 'off') }
+  if(nightMode) {
+    logTrace("RenderingControl night mode update beginning; value=${nightMode}")
+    setNightModeState(nightMode == '1' ? 'on' : 'off')
+    logTrace('RenderingControl night mode update completed')
+  }
 
   String dialogLevel = instanceId['DialogLevel']['@val']
-  if(dialogLevel) { setDialogLevelState(dialogLevel == '1' ? 'on' : 'off') }
+  if(dialogLevel) {
+    logTrace("RenderingControl dialog level update beginning; value=${dialogLevel}")
+    setDialogLevelState(dialogLevel == '1' ? 'on' : 'off')
+    logTrace('RenderingControl dialog level update completed')
+  }
+  logTrace('RenderingControl processor completed')
 }
 // =============================================================================
 // Parse Helper Methods
@@ -5435,8 +5559,12 @@ synchronized void queueLocalDeviceEvent(String name, Object value) {
   pendingLocalDeviceEvents.putIfAbsent(dni, new ConcurrentHashMap<String, Object>())
   ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents[dni]
   Object previous = pending.containsKey(name) ? pending[name] : lastSent?.get(name)
-  if((pending.containsKey(name) || lastSent?.containsKey(name)) && previous == value) { return }
+  if((pending.containsKey(name) || lastSent?.containsKey(name)) && previous == value) {
+    logTrace("Local event queue deduplicated; dni=${dni}, attribute=${name}, value=${value}, pending=${pending.size()}")
+    return
+  }
   pending.put(name, value)
+  logTrace("Local event queued; dni=${dni}, attribute=${name}, value=${value}, previous=${previous}, pending=${pending.size()}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}")
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
 }
 
@@ -5454,16 +5582,21 @@ Boolean shouldQueueLocalDeviceEvent(String name, Object value, Object currentVal
 private void scheduleLocalDeviceEventDrain(Integer delayMs) {
   if(state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] != true) {
     state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] = true
+    logTrace("Scheduling local event drain; dni=${device.getDeviceNetworkId()}, delayMs=${delayMs}, pending=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
     runInMillis(delayMs, 'flushPendingLocalDeviceEvents', [overwrite: true])
+  } else {
+    logTrace("Local event drain already scheduled; dni=${device.getDeviceNetworkId()}, requestedDelayMs=${delayMs}, pending=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
   }
 }
 
 synchronized void flushPendingLocalDeviceEvents() {
   String dni = device.getDeviceNetworkId()
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
+  logTrace("Local event drain started; dni=${dni}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}, pending=${pending?.size() ?: 0}")
+  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   if(!pending || pending.isEmpty()) {
     pendingLocalDeviceEvents.remove(dni)
+    logTrace("Local event drain found no pending events; dni=${dni}")
     return
   }
   ConcurrentHashMap<String, Object> lastSent = lastLocalDeviceEvents.get(dni)
@@ -5475,19 +5608,30 @@ synchronized void flushPendingLocalDeviceEvents() {
   List<String> names = new ArrayList<String>(pending.keySet()).take(LOCAL_EVENTS_PER_DRAIN)
   names.each { String attrName ->
     Object attrValue = pending.remove(attrName)
-    if(attrValue == null) { return }
-    if(lastSent.containsKey(attrName) && lastSent.get(attrName) == attrValue) { return }
+    if(attrValue == null) {
+      logTrace("Local event drain skipped null value; dni=${dni}, attribute=${attrName}, pending=${pending.size()}")
+      return
+    }
+    if(lastSent.containsKey(attrName) && lastSent.get(attrName) == attrValue) {
+      logTrace("Local event drain skipped already-sent value; dni=${dni}, attribute=${attrName}, value=${attrValue}, pending=${pending.size()}")
+      return
+    }
     try {
+      Object currentValue = this.device.currentValue(attrName, true)
+      logTrace("Local event send starting; dni=${dni}, attribute=${attrName}, value=${attrValue}, current=${currentValue}, lastSent=${lastSent.get(attrName)}")
       this.device.sendEvent(name: attrName, value: attrValue)
       lastSent.put(attrName, attrValue)
+      logTrace("Local event sendEvent returned; dni=${dni}, attribute=${attrName}, value=${attrValue}, currentAfter=${this.device.currentValue(attrName, true)}, pending=${pending.size()}")
     } catch(Exception e) {
       pending.putIfAbsent(attrName, attrValue)
-      logWarn("Could not emit local ${attrName} event; retaining it for retry: ${e.message}")
+      logWarn("Could not emit local ${attrName} event for dni=${dni}; retaining value=${attrValue} for retry, pending=${pending.size()}: ${e.message}")
     }
   }
   if(pending.isEmpty()) {
     pendingLocalDeviceEvents.remove(dni, pending)
+    logTrace("Local event drain completed; dni=${dni}, processed=${names.size()}, pending=0")
   } else {
+    logTrace("Local event drain yielded; dni=${dni}, processed=${names.size()}, pending=${pending.size()}, nextDelayMs=${LOCAL_EVENT_DRAIN_INTERVAL_MS}")
     scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
   }
 }
@@ -5504,6 +5648,29 @@ private void scheduleComponentChildEventDrain(Integer delayMs) {
     state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = true
     runInMillis(delayMs, 'drainComponentChildEvents', [overwrite: true])
   }
+}
+
+/** Retry promptly when a missing component child has been recreated. */
+private void scheduleComponentChildEventDrainNow(String dni) {
+  Map pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
+      ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
+  if(dni && pending.containsKey(dni)) {
+    unschedule('drainComponentChildEvents')
+    state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+    scheduleComponentChildEventDrain(1)
+  }
+}
+
+private void resetComponentChildEventRetries() {
+  state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
+}
+
+private Integer componentChildRetryDelay(Integer attempts) {
+  Integer delayMs = COMPONENT_CHILD_DRAIN_INTERVAL_MS
+  for(Integer attempt = 1; attempt < attempts && delayMs < COMPONENT_CHILD_RETRY_MAX_MS; attempt++) {
+    delayMs = Math.min(delayMs * 2, COMPONENT_CHILD_RETRY_MAX_MS)
+  }
+  return delayMs
 }
 
 private synchronized void queueComponentChildEvent(ChildDeviceWrapper child, String name, Object value) {
@@ -5533,6 +5700,10 @@ synchronized void drainComponentChildEvents() {
   }
   Map<String, Map<String, Object>> lastSent = state[LAST_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_COMPONENT_CHILD_EVENTS_KEY] : [:]
+  Map<String, Integer> retryAttempts = state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] instanceof Map
+      ? new LinkedHashMap<String, Integer>((Map<String, Integer>)state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY]) : [:]
+  Set<String> failedDnis = new LinkedHashSet<String>()
+  Set<String> successfulDnis = new LinkedHashSet<String>()
   Integer emitted = 0
   List<String> targetDnis = new ArrayList<String>(pending.keySet())
   for(String dni : targetDnis) {
@@ -5541,6 +5712,7 @@ synchronized void drainComponentChildEvents() {
     ChildDeviceWrapper child = getChildDevice(dni)
     if(child == null) {
       logWarn("drainComponentChildEvents: no child device found for DNI ${dni}; keeping queued values")
+      failedDnis.add(dni)
       emitted++
       continue
     }
@@ -5554,20 +5726,36 @@ synchronized void drainComponentChildEvents() {
         lastForChild[eventName] = eventValue
         lastSent[dni] = lastForChild
         eventsForChild.remove(eventName)
+        successfulDnis.add(dni)
         emitted++
       } catch(Exception e) {
         logWarn("Could not emit ${eventName} to child ${dni}; retaining it for retry: ${e.message}")
+        failedDnis.add(dni)
         emitted++
       }
     }
     if(eventsForChild.isEmpty()) { pending.remove(dni) }
   }
+  successfulDnis.each { String dni ->
+    if(!failedDnis.contains(dni)) { retryAttempts.remove(dni) }
+  }
+  failedDnis.each { String dni ->
+    Integer attempts = retryAttempts[dni] ?: 0
+    retryAttempts[dni] = Math.min(attempts + 1, 32)
+  }
+  if(retryAttempts.isEmpty()) { state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY) }
+  else { state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] = retryAttempts }
   if(!lastSent.isEmpty()) { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastSent }
   if(pending.isEmpty()) {
     state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
   } else {
     state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pending
-    scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
+    Integer nextDelay = COMPONENT_CHILD_DRAIN_INTERVAL_MS
+    for(String dni : pending.keySet()) {
+      Integer attempts = retryAttempts[dni]
+      if(attempts != null) { nextDelay = Math.max(nextDelay, componentChildRetryDelay(attempts)) }
+    }
+    scheduleComponentChildEventDrain(nextDelay)
   }
 }
 
@@ -6190,14 +6378,23 @@ String getMuteState() {
   return this.device.currentValue('mute')
 }
 void setMuteState(String muted) {
-  sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
   String previousMutedState = getMuteState() != null ? getMuteState() : 'unmuted'
-  if(!shouldQueueLocalDeviceEvent('mute', muted, previousMutedState)) { return }
-  if(muted == 'unmuted' && previousMutedState == 'muted' && getEnableAirPlayUnmuteVolumeFix()) {
-    logDebug("Restoring volume after unmute event to level: ${runtimeState.restoreLevelAfterUnmute}")
-    setLevel(runtimeState.restoreLevelAfterUnmute as Integer)
+  Boolean restoreEnabled = getEnableAirPlayUnmuteVolumeFix()
+  Object restoreLevel = runtimeState.restoreLevelAfterUnmute
+  logTrace("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
+  sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
+  if(!shouldQueueLocalDeviceEvent('mute', muted, previousMutedState)) {
+    logTrace("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
+    return
+  }
+  if(muted == 'unmuted' && previousMutedState == 'muted' && restoreEnabled) {
+    logTrace("Unmute volume restoration beginning; restoreLevel=${restoreLevel ?: 'unset'}")
+    logDebug("Restoring volume after unmute event to level: ${restoreLevel}")
+    setLevel(restoreLevel as Integer)
+    logTrace('Unmute volume restoration dispatched')
   }
   queueLocalDeviceEvent('mute', muted)
+  logTrace("setMuteState queued parent mute event; value=${muted}")
 }
 
 void setBassState(Integer bass) {
@@ -10081,14 +10278,17 @@ void processWebsocketMessage(String message) {
       logTrace('Ignoring WebSocket JSON envelope with a null event type or event body')
       return
     }
+    logTrace("WebSocket JSON envelope decoded; entryCount=${json.size()}, typeKeys=${eventType.keySet().join(',')}, dataKeys=${eventData.keySet().join(',')}")
   } catch(Exception e) {
-    logException('WebSocket JSON decoding or envelope extraction failed', e)
+    logTrace("WebSocket JSON decoding/envelope extraction failed; type=${e.class.name}, message=${e.message ?: '(no message)'}")
     throw e
   }
   logTrace("WebSocket message dispatched; type=${eventType.type ?: 'unset'}, namespace=${eventType.namespace ?: 'unset'}, name=${eventType.name ?: 'unset'}, response=${eventType.response ?: 'unset'}")
   runtimeState[WS_LAST_INBOUND_AT_STATE_KEY] = now()
   runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] = ((runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long) + 1L
+  logTrace('WebSocket expected-subscription observation beginning')
   observeExpectedSubscriptionEvent(eventType)
+  logTrace('WebSocket expected-subscription observation completed')
 
   if(loggingEnabled('trace')) {
     // Suppress consecutive duplicate WS event log messages to reduce logging load
@@ -10102,6 +10302,7 @@ void processWebsocketMessage(String message) {
 
   //Process subscriptions
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
+    logTrace("WebSocket subscription response processing beginning; namespace=${eventType?.namespace}, success=${eventType?.success}")
     logTrace("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was successful' : 'failed'}")
     if(eventType?.success == true && eventType?.namespace != null && eventType?.namespace != '') {
       setWsSubscriptionValue("${eventType?.namespace}", 'Subscribed')
@@ -10117,12 +10318,17 @@ void processWebsocketMessage(String message) {
         runIn(5, 'retryAudioClipSubscription', [overwrite: true])
       }
     }
+    logTrace('WebSocket subscription response processing completed')
   }
 
+  logTrace('WebSocket command-response observation beginning')
   observeWebsocketCommandResponse(eventType, eventData)
+  logTrace('WebSocket command-response observation completed')
 
   //Process groups
   if(eventType?.type == 'groups' && (eventType?.name == 'groups' || eventType?.response == 'getGroups')) {
+    Integer groupCount = eventData?.groups instanceof Collection ? ((Collection)eventData.groups).size() : 0
+    logTrace("WebSocket groups response processing beginning; groupCount=${groupCount}")
     publishHouseholdPlayerPresence(eventData)
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
@@ -10229,6 +10435,7 @@ void processWebsocketMessage(String message) {
       publishGroupTopologyUpdate(null, null, [])
       emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
     }
+    logTrace('WebSocket groups response processing completed')
   }
 
   //Process groupCoordinatorChanged
@@ -10244,6 +10451,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
+    logTrace('WebSocket favorites-version change processing beginning')
     if(checkIsFavPlaylistDelegate()) {
       getFavorites()
       getPlaylists()
@@ -10251,6 +10459,8 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
+    Integer favoriteItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
+    logTrace("WebSocket favorites-list processing beginning; itemCount=${favoriteItemCount}")
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
@@ -10406,6 +10616,8 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'playlistsList' && eventType?.response == 'getPlaylists' && eventType?.success == true) {
+    Integer playlistItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
+    logTrace("WebSocket playlists-list processing beginning; itemCount=${playlistItemCount}")
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.playlists
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
@@ -10549,6 +10761,7 @@ void processWebsocketMessage(String message) {
 
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
+    logTrace("WebSocket audio-clip status processing beginning; dataKeys=${eventData.keySet().join(',')}")
     String stage = 'read audioClips payload'
     String callbackId = null
     String activeClipId = null
@@ -10694,6 +10907,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
+    logTrace("WebSocket global-error processing beginning; namespace=${eventType?.namespace}, response=${eventType?.response}, errorCode=${eventData?.errorCode}")
     if(eventType?.namespace == 'audioClip') {
       logWarn("Audio clip command '${eventType?.response}' failed for active clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
       String failedCorrelationId = runtimeState.activeAudioClipCorrelationId as String
@@ -10754,6 +10968,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
+    logTrace("WebSocket playback-status processing beginning; state=${eventData?.playbackState ?: 'unset'}")
     String currentState = eventData?.playbackState?.toString()
     Long playbackStateObservedAt = now()
     state.playbackState = currentState
@@ -10806,6 +11021,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
+    logTrace("WebSocket metadata-status processing beginning; dataKeys=${eventData.keySet().join(',')}")
     observeAudioSourceSignalStatus(eventData)
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
@@ -10823,6 +11039,7 @@ void processWebsocketMessage(String message) {
 
   //Process playerVolume events
   if(eventType?.type == 'playerVolume' && eventType?.namespace == 'playerVolume') {
+    logTrace("WebSocket player-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
     if(eventData?.volume != null) {
       Integer vol = eventData.volume as Integer
       setPlayerVolume(vol)
@@ -10835,6 +11052,7 @@ void processWebsocketMessage(String message) {
 
   //Process groupVolume events
   if(eventType?.type == 'groupVolume' && eventType?.namespace == 'groupVolume') {
+    logTrace("WebSocket group-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
     if(eventData?.volume != null) {
       Integer groupVol = eventData.volume as Integer
       setGroupVolumeState(groupVol)
@@ -10846,6 +11064,7 @@ void processWebsocketMessage(String message) {
       queueGroupDeviceUpdate([_groupMute: groupMuteState])
     }
   }
+  logTrace('WebSocket message dispatch completed all matching handlers')
 }
 
 void observeAudioSourceSignalStatus(Map eventData) {

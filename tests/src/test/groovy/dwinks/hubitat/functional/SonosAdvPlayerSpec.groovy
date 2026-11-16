@@ -412,6 +412,63 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
   }
 
+  def "rendering control event updates master volume stereo balance mute and loudness"() {
+    given:
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
+      '&lt;Volume channel="Master" val="42"/&gt;&lt;Volume channel="LF" val="70"/&gt;' +
+      '&lt;Volume channel="RF" val="100"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
+      '&lt;Loudness channel="Master" val="1"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>' +
+      '</property></propertyset>'
+
+    when:
+    driver.processRenderingControlMessages(event)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [42]
+    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [6]
+    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
+    driver.device.events.findAll { Map item -> item.name == 'loudness' }*.value == ['on']
+  }
+
+  def "partial rendering control event preserves absent values and existing missing channel behavior"() {
+    given:
+    driver.device.currentValues.volume = 25
+    driver.device.currentValues.level = 25
+    driver.device.currentValues.mute = 'unmuted'
+    driver.device.currentValues.loudness = 'off'
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
+      '&lt;Volume channel="LF" val="80"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
+      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.processRenderingControlMessages(event)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.currentValue('volume') == 25
+    driver.device.currentValue('mute') == 'muted'
+    driver.device.currentValue('loudness') == 'off'
+    driver.device.events.findAll { Map item -> item.name == 'volume' }.empty
+    driver.device.events.findAll { Map item -> item.name == 'loudness' }.empty
+    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [4]
+  }
+
+  def "rendering control event with absent stereo channels keeps zero fallback balance"() {
+    given:
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
+      '&lt;Mute channel="Master" val="0"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>' +
+      '</property></propertyset>'
+
+    when:
+    driver.processRenderingControlMessages(event)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [20]
+    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['unmuted']
+  }
+
   def "mute child commands send player mute requests"() {
     given:
     com.hubitat.app.DeviceWrapper child = new com.hubitat.app.DeviceWrapper(dataValues: [command: 'Mute'])
@@ -480,6 +537,110 @@ class SonosAdvPlayerSpec extends Specification {
     'muted'   | 'unmuted' | 'off'
     'muted'   | 'muted'   | 'on'
     'unmuted' | 'unmuted' | 'off'
+  }
+
+  def "missing component child retains latest value and drains promptly after recreation"() {
+    given:
+    String dni = driver.getMuteControlChildDNI()
+    dwinks.hubitat.stubs.MockDevice eventSource = new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: dni)
+    dwinks.hubitat.stubs.MockDevice recreatedChild = new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: dni)
+    driver.children.clear()
+    driver.sendChildEvent(eventSource, 'switch', 'off')
+    driver.sendChildEvent(eventSource, 'switch', 'on')
+
+    when: 'the child is temporarily absent'
+    driver.drainComponentChildEvents()
+
+    then:
+    driver.state.pendingComponentChildEvents[dni] == [switch: 'on']
+    driver.state.componentChildRetryAttempts[dni] == 1
+    driver.scheduled.last()[0] == 200
+
+    when: 'configuration recreates the child'
+    driver.metaClass.addChildDevice = { String namespace, String type, String childDni, Map props ->
+      driver.children.add(recreatedChild)
+      return recreatedChild
+    }
+    driver.createRemoveMuteChildDevice(true)
+
+    then:
+    driver.state.pendingComponentChildEvents[dni] == [switch: 'on']
+    driver.scheduled.last()[0] == 1
+
+    when:
+    driver.drainComponentChildEvents()
+
+    then:
+    recreatedChild.events*.value == ['on']
+    driver.state.pendingComponentChildEvents == null
+    driver.state.componentChildRetryAttempts == null
+
+    cleanup:
+    driver.children.clear()
+  }
+
+  def "transient child sendEvent failure backs off and resets after recovery"() {
+    given:
+    dwinks.hubitat.stubs.MockDevice child = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getMuteControlChildDNI())
+    Integer failuresRemaining = 1
+    child.metaClass.sendEvent = { Map event ->
+      if(failuresRemaining > 0) {
+        failuresRemaining--
+        throw new RuntimeException('transient send failure')
+      }
+      child.events << event
+      child.currentValues[event.name as String] = event.value
+    }
+    driver.children.clear()
+    driver.children.add(child)
+    driver.sendChildEvent(child, 'switch', 'on')
+
+    when:
+    driver.drainComponentChildEvents()
+
+    then:
+    driver.state.pendingComponentChildEvents[child.deviceNetworkId] == [switch: 'on']
+    driver.state.componentChildRetryAttempts[child.deviceNetworkId] == 1
+    driver.scheduled.last()[0] == 200
+
+    when:
+    driver.drainComponentChildEvents()
+
+    then:
+    child.events*.value == ['on']
+    driver.state.pendingComponentChildEvents == null
+    driver.state.componentChildRetryAttempts == null
+
+    cleanup:
+    driver.children.clear()
+  }
+
+  def "component child retry delay grows exponentially and stays capped"() {
+    given:
+    String dni = driver.getMuteControlChildDNI()
+    dwinks.hubitat.stubs.MockDevice eventSource = new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: dni)
+    driver.children.clear()
+    driver.sendChildEvent(eventSource, 'switch', 'on')
+
+    when:
+    10.times {
+      driver.scheduled.clear()
+      driver.drainComponentChildEvents()
+    }
+
+    then:
+    driver.state.componentChildRetryAttempts[dni] == 10
+    driver.scheduled.last()[0] == 30000
+
+    when:
+    driver.configure()
+    driver.scheduled.clear()
+    driver.drainComponentChildEvents()
+
+    then:
+    driver.state.componentChildRetryAttempts[dni] == 1
+    driver.scheduled.last()[0] == 200
   }
 
   def "stereo companion selection supports either front channel and excludes surrounds"() {
@@ -789,6 +950,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.groupDeviceUpdateRetryAttempts.clear()
     driver.pendingGroupDeviceUpdates.clear()
     driver.pendingTopologyXmlByDni.clear()
+    driver.pendingTopologySnapshotByDni.clear()
     driver.pendingTopologyWebsocketByDni.clear()
     driver.pendingTopologyKindByDni.clear()
     driver.pendingLocalDeviceEvents.clear()
@@ -1104,6 +1266,62 @@ class SonosAdvPlayerSpec extends Specification {
     )
   }
 
+  def "changed topology payload is snapshotted once and applied from that snapshot"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    Integer parseCalls = 0
+    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
+      parseCalls++
+      [playerFound: true, coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST', 'RINCON_MEMBER'],
+       visibleMemberIds: ['RINCON_TEST', 'RINCON_MEMBER'], memberNames: ['Living Room', 'Kitchen'],
+       coordinatorName: 'Living Room', groupName: 'Downstairs', batteryData: [:]]
+    }
+    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
+      driver.runtimeState.appliedTopologySnapshot = topology
+      true
+    }
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>changed</topology>')
+
+    then:
+    parseCalls == 1
+    driver.runtimeState.appliedTopologySnapshot.coordinatorId == 'RINCON_TEST'
+    driver.runtimeState.appliedTopologySnapshot.memberNames == ['Living Room', 'Kitchen']
+    driver.lastZgtXmlHash['SONOS-TEST-DNI'] == '<topology>changed</topology>'.hashCode()
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>changed</topology>')
+
+    then:
+    parseCalls == 1
+  }
+
+  def "topology snapshot extracts visible roster names coordinator group and battery once"() {
+    given:
+    String zoneState = '<ZoneGroups><ZoneGroup Coordinator="RINCON_A">' +
+      '<ZoneGroupMember UUID="RINCON_B" ZoneName="Kitchen" MoreInfo="BattTmp:23,BattPct:80,BattChg:NOT_CHARGING"/>' +
+      '<ZoneGroupMember UUID="RINCON_A" ZoneName="Living Room"/>' +
+      '<ZoneGroupMember UUID="RINCON_H" ZoneName="Hidden" Invisible="1"/>' +
+      '</ZoneGroup></ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String xml = '<propertyset><property><ZoneGroupName>Downstairs</ZoneGroupName><ZoneGroupState>' +
+      escapedState + '</ZoneGroupState></property></propertyset>'
+
+    when:
+    Map topology = driver.parseZoneGroupTopologySnapshot(xml, 'RINCON_B')
+
+    then:
+    topology.playerFound == true
+    topology.coordinatorId == 'RINCON_A'
+    topology.coordinatorName == 'Living Room'
+    topology.memberIds == ['RINCON_A', 'RINCON_B']
+    topology.visibleMemberIds == ['RINCON_B', 'RINCON_A']
+    topology.memberNames == ['Kitchen', 'Living Room']
+    topology.groupName == 'Downstairs'
+    topology.batteryData == [BattTmp: '23', BattPct: '80', BattChg: 'NOT_CHARGING']
+  }
+
   def "topology change holds only affected player until its expected topology arrives"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
@@ -1111,12 +1329,13 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson([
       coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: driver.now() + 30000L
     ])
-    driver.metaClass.getZoneGroupTopologyForPlayer = { String xml, String playerId ->
+    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
       xml == '<topology>final</topology>'
-        ? [coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST']]
-        : [coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER']]
+        ? [playerFound: true, coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], visibleMemberIds: ['RINCON_TEST'], memberNames: []]
+        : [playerFound: true, coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER'], visibleMemberIds: ['RINCON_OTHER'], memberNames: []]
     }
-    driver.metaClass.processZoneGroupTopologyMessages = { String xml, LinkedHashSet oldMembers ->
+    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
+      String xml = topology.coordinatorId == 'RINCON_TEST' ? '<topology>final</topology>' : '<topology>intermediate</topology>'
       driver.runtimeState.appliedTopologyXml = xml
       true
     }
@@ -1166,7 +1385,12 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     driver.device.dataValues.id = 'RINCON_UNRELATED'
-    driver.metaClass.processZoneGroupTopologyMessages = { String xml, LinkedHashSet oldMembers ->
+    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
+      [playerFound: true, coordinatorId: 'RINCON_UNRELATED', memberIds: ['RINCON_UNRELATED'],
+       visibleMemberIds: ['RINCON_UNRELATED'], memberNames: []]
+    }
+    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
+      String xml = '<topology>unrelated-current</topology>'
       driver.runtimeState.appliedTopologyXml = xml
       true
     }
@@ -1186,9 +1410,16 @@ class SonosAdvPlayerSpec extends Specification {
       coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: (driver.now() as Long) - 1L
     ])
     driver.pendingTopologyXmlByDni['SONOS-TEST-DNI'] = '<topology>latest</topology>'
+    driver.pendingTopologySnapshotByDni['SONOS-TEST-DNI'] = [playerFound: true,
+      coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], visibleMemberIds: ['RINCON_TEST'], memberNames: []]
     driver.pendingTopologyKindByDni['SONOS-TEST-DNI'] = 'zgt'
-    driver.metaClass.processZoneGroupTopologyMessages = { String xml, LinkedHashSet oldMembers ->
-      driver.runtimeState.appliedTopologyXml = xml
+    Integer parseCalls = 0
+    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
+      parseCalls++
+      null
+    }
+    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
+      driver.runtimeState.appliedTopologyXml = '<topology>latest</topology>'
       true
     }
 
@@ -1198,7 +1429,9 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.runtimeState.appliedTopologyXml == '<topology>latest</topology>'
     !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+    !driver.pendingTopologySnapshotByDni.containsKey('SONOS-TEST-DNI')
     driver.device.dataValues.expectedGroupTopology == ''
+    parseCalls == 0
   }
 
   def "held groups websocket topology is reported to the parent without publishing player states"() {
