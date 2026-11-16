@@ -81,6 +81,7 @@ import groovy.transform.Field
 
 @Field static final Long RATE_WINDOW_MILLISECONDS = 300000L
 @Field static final Long GAP_THRESHOLD_MILLISECONDS = 900000L
+@Field static final Long REPORTING_GAP_WARNING_THRESHOLD_MILLISECONDS = 4500000L
 @Field static final Integer MAX_RATE_HISTORY_ENTRIES = 32
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 
@@ -786,7 +787,7 @@ void logHumidityEvent(BigDecimal humidityCurrent) {
   // Example: If previous was 5 minutes ago, this = 300000 milliseconds
   BigDecimal elapsedTimeSinceLastUpdate = unixTimeCurrent - unixTimePrevious
   Boolean measurementGap = elapsedTimeSinceLastUpdate > GAP_THRESHOLD_MILLISECONDS
-  if (measurementGap) {
+  if (elapsedTimeSinceLastUpdate > REPORTING_GAP_WARNING_THRESHOLD_MILLISECONDS) {
     logWarn("Humidity reporting gap detected: ${elapsedTimeSinceLastUpdate / 60000G} minutes")
   }
 
