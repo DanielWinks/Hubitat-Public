@@ -78,7 +78,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.issue_number }}
         with:
-          github-token: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const response = await fetch(
