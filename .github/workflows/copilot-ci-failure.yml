@@ -5,6 +5,8 @@ name: Assign CI failures to Copilot
 on:
   workflow_run:
     workflows:
+      - "Lint and Test"
+      - "Validate Sonos Advanced Beta"
       - "Create ThirdReality Bundle"
       - "Create Sonos Advanced Controller Bundle"
       - "Create UtilitiesAndLoggingLibrary Bundle"
@@ -32,19 +34,21 @@ jobs:
           script: |
             const wf = context.payload.workflow_run;
             const { owner, repo } = context.repo;
+            const baseBranch = wf.pull_requests?.[0]?.base?.ref || wf.head_branch;
             const title = `[CI failure] ${wf.name} on ${wf.head_branch} (${wf.head_sha.slice(0, 7)})`;
             const body = [
               `Automated follow-up for a failed GitHub Actions run.`,
               ``,
               `- **Workflow:** \`${wf.name}\``,
               `- **Branch:** \`${wf.head_branch}\``,
+              `- **Repair PR target:** \`${baseBranch}\``,
               `- **Commit:** \`${wf.head_sha}\``,
               `- **Triggering event:** \`${wf.event}\``,
               `- **Conclusion:** \`${wf.conclusion}\``,
               `- **Run:** ${wf.html_url}`,
               `- **Subject:** ${wf.display_title}`,
               ``,
-              `Investigate the failed run and relevant repository files. Fix the underlying cause, run the relevant checks, and open a pull request targeting \`${wf.head_branch}\`. Do not edit generated files under \`Bundles/\`; update their source and let the bundle workflow regenerate them. If the failure is transient or the cause is unclear, report the evidence and stop without guessing.`,
+              `Investigate the failed run and relevant repository files. Fix the underlying cause, run the relevant checks, and open a pull request targeting \`${baseBranch}\`. Do not edit generated files under \`Bundles/\`; update their source and let the bundle workflow regenerate them. If the failure is transient or the cause is unclear, report the evidence and stop without guessing.`,
             ].join('\n');
 
             const open = await github.paginate(github.rest.issues.listForRepo, {
@@ -91,7 +95,7 @@ jobs:
                   assignees: ['copilot-swe-agent[bot]'],
                   agent_assignment: {
                     target_repo: `${context.repo.owner}/${context.repo.repo}`,
-                    base_branch: context.payload.workflow_run.head_branch,
+                    base_branch: context.payload.workflow_run.pull_requests?.[0]?.base?.ref || context.payload.workflow_run.head_branch,
                     model: 'gpt-6-luna',
                     reasoning_effort: 'medium',
                     custom_instructions: 'Follow repository AGENTS.md and .github/copilot-instructions.md. Inspect the failed run logs. Do not edit generated Bundles files; fix source files and regenerate through the existing workflows. Run relevant checks and open a pull request with a concise explanation.',

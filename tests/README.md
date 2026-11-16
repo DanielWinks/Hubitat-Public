@@ -112,4 +112,7 @@ files; changes to shared test harness/build files run the full suite. A manual
 workflow dispatch also runs the full suite. Selected Spock feature methods are
 distributed across 10 parallel GitHub Actions shards, including when many
 selected features belong to one large spec. Lint findings show up as inline
-GitHub annotations on the Files Changed view.
+GitHub annotations on the Files Changed view. Failures in this workflow and
+the Sonos Advanced beta validation workflow are routed to Copilot's coding
+agent to investigate and, when it can determine a fix, open a pull request.
+This requires the repository's `COPILOT_ASSIGN_TOKEN` secret.
