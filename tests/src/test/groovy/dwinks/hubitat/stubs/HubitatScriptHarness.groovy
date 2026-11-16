@@ -18,6 +18,14 @@ import com.hubitat.hub.domain.Location
  */
 class HubitatScriptHarness extends Script {
 
+  HubitatScriptHarness() {
+    super()
+  }
+
+  HubitatScriptHarness(Binding binding) {
+    super(binding)
+  }
+
   /** Settings UI values - tests pre-populate this Map. */
   Map<String, Object> settings = [:]
 

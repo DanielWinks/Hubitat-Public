@@ -75,7 +75,7 @@ jobs:
         if: steps.issue.outputs.copilot_assigned != 'true'
         uses: actions/github-script@v7
         env:
-          GITHUB_TOKEN: ${{ secrets.COPILOT_ASSIGN_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.issue.outputs.issue_number }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
