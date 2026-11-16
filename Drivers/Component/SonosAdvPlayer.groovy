@@ -348,7 +348,7 @@ List<String> getCachedTTSVoiceNames() {
 void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
   cachedTTSVoiceNames = voiceNames
   cachedTTSDefaultVoice = defaultVoice
-  logTrace("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
+  logDebug("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
 }
 
 @CompileStatic
@@ -811,7 +811,7 @@ void fullRenewSubscriptions() {
   // clear its subscription markers before reconnecting, regardless of that status.
   logDebug('Closing existing WebSocket before full subscription renewal')
   try { wsClose() }
-  catch(Exception e) { logTrace("Could not close existing WebSocket during renewal: ${e.message}") }
+  catch(Exception e) { logDebug("Could not close existing WebSocket during renewal: ${e.message}") }
   setWebSocketStatus('closed')
 
   runIn(2, 'initializeWebsocketConnection', [overwrite: true])
@@ -864,7 +864,7 @@ void reconnectWebsocket(String reason) {
   logInfo("Reconnecting WebSocket: ${reason}")
   runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
   try { wsClose() }
-  catch(Exception e) { logTrace("Could not close WebSocket during reconnect: ${e.message}") }
+  catch(Exception e) { logDebug("Could not close WebSocket during reconnect: ${e.message}") }
   setWebSocketStatus('closed')
   runIn(1, 'initializeWebsocketConnection', [overwrite: true])
 }
@@ -1478,9 +1478,9 @@ void playTrackAndRestore(String uri, Object volume = null) { playerLoadAudioClip
 void playTrackAndResume(String uri, Object volume = null) { playerLoadAudioClip(uri, normalizePublicPlaybackVolume(volume)) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  logTrace("Speak request entered; hasText=${text != null && text.toString().trim() != ''}, requestedVolume=${volume}, voiceSpecified=${voice != null && voice != ''}, audioClipCapability=${hasAudioClipCapability()}")
+  logDebug("Speak request entered; hasText=${text != null && text.toString().trim() != ''}, requestedVolume=${volume}, voiceSpecified=${voice != null && voice != ''}, audioClipCapability=${hasAudioClipCapability()}")
   if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) {
-    logTrace('Speak request deferred to the parent app during an active group operation')
+    logDebug('Speak request deferred to the parent app during an active group operation')
     return
   }
   Boolean airPlaySource = isCurrentAirPlayAudioSource()
@@ -1499,7 +1499,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     LinkedHashMap tts = textToSpeech(text, voice)
     String streamUrl = tts?.uri?.toString()
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
-    logTrace("Speak TTS generated; route=local-airplay-audioClip, hasUri=${streamUrl != null && streamUrl != ''}, duration=${ttsDuration}")
+    logDebug("Speak TTS generated; route=local-airplay-audioClip, hasUri=${streamUrl != null && streamUrl != ''}, duration=${ttsDuration}")
     playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
   } else {
     LinkedHashMap tts = textToSpeech(text, voice)
@@ -1512,12 +1512,12 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
       pending[requestId] = [uri: streamUrl, volume: volume?.toString(), duration: ttsDuration,
         correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip]
       state.pendingParentAppTtsRequests = pending
-      logTrace("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
+      logDebug("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
       sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
         volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId])
       return
     } else {
-      logTrace("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
+      logDebug("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
       if(streamUrl) {
         if(useAudioClip) {
           playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
@@ -1584,7 +1584,7 @@ Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
 void sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'playerAppRequest', action: action,
     sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
-  logTrace("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
+  logDebug("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
   sendEvent(name: PLAYER_APP_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
 }
 
@@ -1594,13 +1594,13 @@ void completeParentAppActiveStreamTts(String requestId, String accepted) {
       ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
   Map request = pending[requestId] instanceof Map ? (Map)pending[requestId] : null
   if(request == null) {
-    logTrace("Ignoring parent active-stream TTS response for unknown or expired requestId=${requestId ?: 'none'}, accepted=${accepted}")
+    logDebug("Ignoring parent active-stream TTS response for unknown or expired requestId=${requestId ?: 'none'}, accepted=${accepted}")
     return
   }
   pending.remove(requestId)
   state.pendingParentAppTtsRequests = pending
   Long ageMs = request.createdAt != null ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
-  logTrace("Parent active-stream TTS response received; requestId=${requestId}, accepted=${accepted}, ageMs=${ageMs}, remainingRequests=${pending.size()}")
+  logDebug("Parent active-stream TTS response received; requestId=${requestId}, accepted=${accepted}, ageMs=${ageMs}, remainingRequests=${pending.size()}")
   if(accepted == 'true') { return }
 
   String uri = request.uri?.toString()
@@ -1610,11 +1610,11 @@ void completeParentAppActiveStreamTts(String requestId, String accepted) {
   catch(Exception e) { logWarn("Could not restore TTS volume for parent response ${requestId}: ${e.message}") }
   Integer duration = (request.duration ?: 30) as Integer
   if(request.useAudioClip == true && hasAudioClipCapability() == true) {
-    logTrace("Parent declined active-stream TTS; using local audioClip fallback requestId=${requestId}, correlation=${request.correlationId}")
+    logDebug("Parent declined active-stream TTS; using local audioClip fallback requestId=${requestId}, correlation=${request.correlationId}")
     playerLoadAudioClip(uri, volume, duration, request.correlationId?.toString())
   } else {
     BigDecimal announcementVolume = getAnnouncementVolume(volume)
-    logTrace("Parent declined active-stream TTS; using local stream fallback requestId=${requestId}, duration=${duration}")
+    logDebug("Parent declined active-stream TTS; using local stream fallback requestId=${requestId}, duration=${duration}")
     componentPlayStreamWithRestoreLocal(uri, duration, announcementVolume)
   }
 }
@@ -3461,7 +3461,7 @@ Boolean deviceHasBattery() {
 
   String deviceIp = getDeviceDataValue('deviceIp')
   if(deviceIp == null || deviceIp == '') {
-    logTrace('deviceHasBattery: deviceIp not set')
+    logDebug('deviceHasBattery: deviceIp not set')
     return false
   }
 
@@ -3477,7 +3477,7 @@ Boolean deviceHasBattery() {
       }
     }
   } catch(Exception e) {
-    logTrace("deviceHasBattery: Could not check battery status: ${e.message}")
+    logDebug("deviceHasBattery: Could not check battery status: ${e.message}")
   }
   return hasBattery
 }
@@ -3738,22 +3738,22 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
 void parse(String raw) {
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
-    logTrace("UPnP response parse entered; payloadLength=${raw.length()}")
+    logDebug("UPnP response parse entered; payloadLength=${raw.length()}")
     handleUpnpRawResponse(raw)
     return
   }
   if(!raw.startsWith('mac:')) {
-    logTrace("WebSocket parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
+    logDebug("WebSocket parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     try {
       setLastWebsocketEvent()
-      logTrace('WebSocket last-event timestamp updated')
+      logDebug('WebSocket last-event timestamp updated')
     } catch(Exception e) {
       logException('WebSocket last-event timestamp update failed', e)
     }
     try {
-      logTrace('WebSocket message dispatch beginning')
+      logDebug('WebSocket message dispatch beginning')
       processWebsocketMessage(raw)
-      logTrace('WebSocket message dispatch completed')
+      logDebug('WebSocket message dispatch completed')
     } catch(Exception e) {
       logException('WebSocket message processing failed after JSON dispatch', e)
       logWarn("WebSocket payload processing failed; payloadLength=${raw.length()}")
@@ -3761,36 +3761,36 @@ void parse(String raw) {
     return
   }
   try {
-    logTrace("UPnP NOTIFY parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
+    logDebug("UPnP NOTIFY parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
     String xmlBody = (String)message?.body
     if(messageHeaders == null || messageHeaders.size() < 1) {
-      logTrace('Ignoring UPnP NOTIFY without parsed headers')
+      logDebug('Ignoring UPnP NOTIFY without parsed headers')
       return
     }
     if(xmlBody == null || xmlBody == '') {
-      logTrace('Ignoring UPnP NOTIFY with an empty body')
+      logDebug('Ignoring UPnP NOTIFY with an empty body')
       return
     }
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
-    logTrace("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
+    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
     if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
       try {
-        logTrace('AVTransport event processing beginning')
+        logDebug('AVTransport event processing beginning')
         setLastInboundAVTransportEvent()
         observeExpectedUpnpSubscriptionEvent('sid1')
         processAVTransportMessages(xmlBody, getLocalUpnpUrl())
-        logTrace('AVTransport event processing completed')
+        logDebug('AVTransport event processing completed')
       } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
     }
     else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
       try {
-        logTrace('RenderingControl event processing beginning')
+        logDebug('RenderingControl event processing beginning')
         observeExpectedUpnpSubscriptionEvent('sid2')
         setLastInboundMrRcEvent()
         processRenderingControlMessages(xmlBody)
-        logTrace('RenderingControl event processing completed')
+        logDebug('RenderingControl event processing completed')
       } catch (Exception e) { logException('RenderingControl event processing failed', e) }
     }
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
@@ -3816,7 +3816,7 @@ void parse(String raw) {
       } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
     }
     else {
-      logDebug("Could not determine service type for message: ${message}")
+      logTrace("Could not determine service type for message: ${message}")
     }
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
@@ -3835,7 +3835,7 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
     else { pendingTopologySnapshotByDni.remove(deviceDni) }
     pendingTopologyKindByDni.put(deviceDni, 'zgt')
     if(previousPendingXml != xmlBody) {
-      logTrace('Holding topology update until the affected player reaches its expected topology')
+      logDebug('Holding topology update until the affected player reaches its expected topology')
     }
     scheduleTopologyTimeoutFlush()
     return
@@ -3882,14 +3882,14 @@ void flushPendingTopologyUpdates() {
   String pendingWs = pendingTopologyWebsocketByDni.remove(dni)
   if(pendingKind == 'ws' && pendingWs) {
     processWebsocketMessage(pendingWs)
-    logTrace('Published the latest groups websocket topology snapshot after its hold window elapsed')
+    logDebug('Published the latest groups websocket topology snapshot after its hold window elapsed')
   } else if(pendingKind == 'zgt' && pendingXml) {
     if(pendingTopology != null) {
       applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode(), pendingTopology)
     } else {
       applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode())
     }
-    logTrace('Published the latest ZoneGroupTopology snapshot after its hold window elapsed')
+    logDebug('Published the latest ZoneGroupTopology snapshot after its hold window elapsed')
   } else {
     return
   }
@@ -3916,7 +3916,7 @@ Boolean shouldHoldTopologyUpdate(Map topology) {
      topology.memberIds == expected.memberIds) {
     setDeviceDataValue('expectedGroupTopology', '')
     clearPendingTopologyForDevice()
-    logTrace('Observed expected topology for this player; releasing the update')
+    logDebug('Observed expected topology for this player; releasing the update')
     return false
   }
   return true
@@ -4049,7 +4049,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   String transportState = instanceId['TransportState']['@val']?.toString()
   String status = normalizeTransportStatus(transportState)
   if(transportState?.trim()?.equalsIgnoreCase('TRANSITIONING')) {
-    logTrace("Ignoring transient Sonos TransportState=TRANSITIONING from AVTransport event at ${localUpnpUrl}")
+    logDebug("Ignoring transient Sonos TransportState=TRANSITIONING from AVTransport event at ${localUpnpUrl}")
     return
   }
 
@@ -4093,7 +4093,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   Boolean isPlayingLocalTrack = false
   if(trackUri.startsWith('http') && trackUri == enqueuedUri && trackUri == avTransportURI) {
     isPlayingLocalTrack = true
-    logTrace("Playing Local Track")
+    logDebug("Playing Local Track")
   }
 
   setStatusTransportStatus(transportState, "AVTransport event from ${localUpnpUrl}")
@@ -4226,15 +4226,15 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
 Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
   if(topology == null) { return false }
   if(topology.playerFound != true) {
-    logTrace("Player ${getId()} not found in ZoneGroupTopology!")
+    logDebug("Player ${getId()} not found in ZoneGroupTopology!")
     return true
   }
 
   List<String> memberIds = topology.visibleMemberIds as List<String>
   LinkedHashSet<String> groupedRincons = new LinkedHashSet<String>(memberIds ?: [])
-  logTrace("Reconciling topology snapshot; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, coordinator=${topology.coordinatorId}, groupId=${topology.groupId}, groupName=${topology.groupName}, memberNames=${topology.memberNames}, priorMembers=${oldGroupedRincons}, currentCount=${this.device.currentValue('groupMemberCount', true)}, currentIsGrouped=${this.device.currentValue('isGrouped', true)}, currentNames=${this.device.currentValue('groupMemberNames', true)}")
+  logDebug("Reconciling topology snapshot; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, coordinator=${topology.coordinatorId}, groupId=${topology.groupId}, groupName=${topology.groupName}, memberNames=${topology.memberNames}, priorMembers=${oldGroupedRincons}, currentCount=${this.device.currentValue('groupMemberCount', true)}, currentIsGrouped=${this.device.currentValue('isGrouped', true)}, currentNames=${this.device.currentValue('groupMemberNames', true)}")
   if(groupedRincons.size() == 0) {
-    logTrace("No grouped rincons found!")
+    logDebug("No grouped rincons found!")
   }
 
   String currentGroupCoordinatorRincon = topology.coordinatorId as String
@@ -4248,12 +4248,12 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
     List<String> newRincons = new ArrayList<String>()
     newRincons.addAll(groupedRincons - oldGroupedRincons)
     if(newRincons.size() > 0 && isGroupCoordinator == true) {
-      logTrace("Sending events to newly joined member(s): ${newRincons}")
+      logDebug("Sending events to newly joined member(s): ${newRincons}")
       sendEventsToNewGroupMembers(newRincons)
     }
-    logTrace('ZGT message parsed, group member changes found.')
+    logDebug('ZGT message parsed, group member changes found.')
   } else {
-    logTrace('ZGT message parsed, no group member changes.')
+    logDebug('ZGT message parsed, no group member changes.')
   }
 
   setGroupPlayerIds(groupedRincons.toList())
@@ -4271,7 +4271,7 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   if(currentGroupMemberNames.size() > 0) {setGroupMemberNames(currentGroupMemberNames.toList())}
   if(groupName) {setGroupName(groupName)}
 
-  logTrace("Topology reconciliation queued; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, expectedCount=${currentGroupMemberCount}, expectedIsGrouped=${currentGroupMemberCount > 1 ? 'on' : 'off'}, expectedNames=${currentGroupMemberNames}, expectedGroupName=${groupName}, pendingLocalEvents=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
+  logDebug("Topology reconciliation queued; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, expectedCount=${currentGroupMemberCount}, expectedIsGrouped=${currentGroupMemberCount > 1 ? 'on' : 'off'}, expectedNames=${currentGroupMemberNames}, expectedGroupName=${groupName}, pendingLocalEvents=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
 
   if(processBatteryStatusChildDeviceMessages()) {
     Map<String, String> batteryData = topology.batteryData as Map<String, String>
@@ -4405,11 +4405,11 @@ void setDialogLevelState(String value) {
 
 @CompileStatic
 void processRenderingControlMessages(String xmlString) {
-  logTrace("RenderingControl processor entered; xmlLength=${xmlString?.length() ?: 0}")
+  logDebug("RenderingControl processor entered; xmlLength=${xmlString?.length() ?: 0}")
   GPathResult propertyset = parseSonosMessageXML(xmlString)
-  logTrace('RenderingControl XML parsed')
+  logDebug('RenderingControl XML parsed')
   GPathResult instanceId = (GPathResult)propertyset['property']['LastChange']['Event']['InstanceID']
-  logTrace("RenderingControl InstanceID located; childCount=${instanceId.children().size()}")
+  logDebug("RenderingControl InstanceID located; childCount=${instanceId.children().size()}")
 
   String volume = ''
   String lfString = ''
@@ -4422,7 +4422,7 @@ void processRenderingControlMessages(String xmlString) {
     if(elementName == 'Volume' || elementName == 'Mute' || elementName == 'Loudness') {
       String channel = child['@channel'].toString()
       String value = child['@val'].toString()
-      logTrace("RenderingControl value extracted; element=${elementName}, channel=${channel ?: 'unset'}, value=${value ?: 'unset'}")
+      logDebug("RenderingControl value extracted; element=${elementName}, channel=${channel ?: 'unset'}, value=${value ?: 'unset'}")
       if(elementName == 'Volume') {
         if(channel == 'Master') { volume = value }
         else if(channel == 'LF') { lfString = value }
@@ -4435,14 +4435,14 @@ void processRenderingControlMessages(String xmlString) {
     }
   }
   if(volume) {
-    logTrace("RenderingControl Master volume conversion beginning; value=${volume}")
+    logDebug("RenderingControl Master volume conversion beginning; value=${volume}")
     setPlayerVolume(volume as Integer)
-    logTrace('RenderingControl Master volume update completed')
+    logDebug('RenderingControl Master volume update completed')
   }
 
   lfString = lfString ?: '0'
   rfString = rfString ?: '0'
-  logTrace("RenderingControl balance conversion beginning; left=${lfString}, right=${rfString}")
+  logDebug("RenderingControl balance conversion beginning; left=${lfString}, right=${rfString}")
   Integer lf = Integer.parseInt(lfString)
   Integer rf = Integer.parseInt(rfString)
   Integer balance = 0
@@ -4452,48 +4452,48 @@ void processRenderingControlMessages(String xmlString) {
     balance = -((100 - rf) / 5) as Integer
   }
   setBalanceState(balance)
-  logTrace("RenderingControl balance update completed; balance=${balance}")
+  logDebug("RenderingControl balance update completed; balance=${balance}")
 
   if(mute) {
-    logTrace("RenderingControl mute update beginning; value=${mute}")
+    logDebug("RenderingControl mute update beginning; value=${mute}")
     setMuteState(mute == '1' ? 'muted' : 'unmuted')
-    logTrace('RenderingControl mute update completed')
+    logDebug('RenderingControl mute update completed')
   }
 
   String bass = instanceId['Bass']['@val']
   if(bass) {
-    logTrace("RenderingControl bass conversion beginning; value=${bass}")
+    logDebug("RenderingControl bass conversion beginning; value=${bass}")
     setBassState(bass as Integer)
-    logTrace('RenderingControl bass update completed')
+    logDebug('RenderingControl bass update completed')
   }
 
   String treble = instanceId['Treble']['@val']
   if(treble) {
-    logTrace("RenderingControl treble conversion beginning; value=${treble}")
+    logDebug("RenderingControl treble conversion beginning; value=${treble}")
     setTrebleState(treble as Integer)
-    logTrace('RenderingControl treble update completed')
+    logDebug('RenderingControl treble update completed')
   }
 
   if(loudness) {
-    logTrace("RenderingControl loudness update beginning; value=${loudness}")
+    logDebug("RenderingControl loudness update beginning; value=${loudness}")
     setLoudnessState(loudness == '1' ? 'on' : 'off')
-    logTrace('RenderingControl loudness update completed')
+    logDebug('RenderingControl loudness update completed')
   }
 
   String nightMode = instanceId['NightMode']['@val']
   if(nightMode) {
-    logTrace("RenderingControl night mode update beginning; value=${nightMode}")
+    logDebug("RenderingControl night mode update beginning; value=${nightMode}")
     setNightModeState(nightMode == '1' ? 'on' : 'off')
-    logTrace('RenderingControl night mode update completed')
+    logDebug('RenderingControl night mode update completed')
   }
 
   String dialogLevel = instanceId['DialogLevel']['@val']
   if(dialogLevel) {
-    logTrace("RenderingControl dialog level update beginning; value=${dialogLevel}")
+    logDebug("RenderingControl dialog level update beginning; value=${dialogLevel}")
     setDialogLevelState(dialogLevel == '1' ? 'on' : 'off')
-    logTrace('RenderingControl dialog level update completed')
+    logDebug('RenderingControl dialog level update completed')
   }
-  logTrace('RenderingControl processor completed')
+  logDebug('RenderingControl processor completed')
 }
 // =============================================================================
 // Parse Helper Methods
@@ -4526,7 +4526,7 @@ void setSid(String sid, String value) {
   setDeviceDataValue(sid, value)
 }
 void deleteSid(String sid) {
-  logTrace("Removing SID for ${sid}")
+  logDebug("Removing SID for ${sid}")
   device.removeDataValue(sid)
   device.removeDataValue("${sid}-expires")
   // Clean up in-memory expiry
@@ -4631,7 +4631,7 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
   Long queueGeneration = null
   synchronized(entry.lock) {
     if(entry.retired == true) {
-      logTrace("Ignoring UPnP ${operation} for ${sidKey}; request queue is retired generation=${entry.generation}")
+      logDebug("Ignoring UPnP ${operation} for ${sidKey}; request queue is retired generation=${entry.generation}")
       return
     }
     request.lifecycleGeneration = entry.generation
@@ -4658,10 +4658,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
     }
   }
   if(added) {
-    logTrace("Queued UPnP ${operation} ${eventUrl} guid=${request.guid} generation=${queueGeneration} depth=${pendingDepth} activeGuid=${activeGuid ?: 'none'}")
+    logDebug("Queued UPnP ${operation} ${eventUrl} guid=${request.guid} generation=${queueGeneration} depth=${pendingDepth} activeGuid=${activeGuid ?: 'none'}")
     dispatchNextUpnpRequest(entry)
   } else {
-    logTrace("Coalesced duplicate UPnP ${operation} ${eventUrl} sidKey=${sidKey} activeGuid=${activeGuid ?: 'none'} depth=${pendingDepth}")
+    logDebug("Coalesced duplicate UPnP ${operation} ${eventUrl} sidKey=${sidKey} activeGuid=${activeGuid ?: 'none'} depth=${pendingDepth}")
   }
 }
 
@@ -4686,7 +4686,7 @@ void dispatchNextUpnpRequest(Map entry) {
     remaining = (entry.queue as List<Map>).size()
   }
   if(request != null) {
-    logTrace("Claimed UPnP queue request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} generation=${request.lifecycleGeneration} queuedRemaining=${remaining}")
+    logDebug("Claimed UPnP queue request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} generation=${request.lifecycleGeneration} queuedRemaining=${remaining}")
     dispatchUpnpRequest(entry, request)
   }
 }
@@ -4760,7 +4760,7 @@ void dispatchUpnpRequest(Map entry, Map request) {
   String guid = request.guid as String
   Integer port = Integer.parseInt(portValue)
   Integer requestBytes = http.toString().getBytes('UTF-8').length
-  logTrace("UPnP outbound guid=${guid} operation=${request.operation} target=${target} endpoint=${host}:${portValue} callback=${callbackUrl ?: 'none'} sidHeader=${sidHeaderSent ? 'present' : 'none'} capturedSidPresent=${request.sid != null} timeout=${timeoutHeader ?: 'none'} bytes=${requestBytes}")
+  logDebug("UPnP outbound guid=${guid} operation=${request.operation} target=${target} endpoint=${host}:${portValue} callback=${callbackUrl ?: 'none'} sidHeader=${sidHeaderSent ? 'present' : 'none'} capturedSidPresent=${request.sid != null} timeout=${timeoutHeader ?: 'none'} bytes=${requestBytes}")
   StringBuilder responseBuffer = new StringBuilder()
   Boolean emitted = false
   Boolean trailingCallbackLogged = false
@@ -4782,20 +4782,20 @@ void dispatchUpnpRequest(Map entry, Map request) {
         if(emitted) {
           if(!trailingCallbackLogged) {
             trailingCallbackLogged = true
-            logTrace("Ignoring additional raw socket callbacks after response completion guid=${guid}")
+            logDebug("Ignoring additional raw socket callbacks after response completion guid=${guid}")
           }
           return
         }
         byte[] inputBytes = new byte[UPNP_MAX_HEADER_BYTES + 1]
         Integer bytesRead = input.read(inputBytes)
         if(bytesRead < 0) {
-          logTrace("UPnP socket EOF guid=${guid} bufferedBytes=${responseBuffer.length()}")
+          logDebug("UPnP socket EOF guid=${guid} bufferedBytes=${responseBuffer.length()}")
           if(!emitted) { emitted = true; parseCallback.call("UPNP_RESPONSE|${guid}|ERROR|eof") }
           return
         }
         responseBuffer.append(new String(inputBytes, 0, bytesRead, 'UTF-8'))
         Integer headerEnd = responseBuffer.indexOf('\r\n\r\n')
-        logTrace("UPnP socket read guid=${guid} bytesRead=${bytesRead} bufferedBytes=${responseBuffer.length()} headersComplete=${headerEnd >= 0}")
+        logDebug("UPnP socket read guid=${guid} bytesRead=${bytesRead} bufferedBytes=${responseBuffer.length()} headersComplete=${headerEnd >= 0}")
         if(headerEnd >= 0) {
           emitted = true
           if((headerEnd + 4) > UPNP_MAX_HEADER_BYTES) {
@@ -4816,7 +4816,7 @@ void dispatchUpnpRequest(Map entry, Map request) {
     interfaces.rawSocket.sendMessage(http.toString())
     synchronized(entry.lock) {
       if(entry.active?.guid == guid && request.phase == 'waiting') {
-        logTrace("Dispatched ${verb} ${target} guid=${guid} sidKey=${request.sidKey} attempt=${request.attempts} watchdogSeconds=${UPNP_REQUEST_TIMEOUT_SECONDS}")
+        logDebug("Dispatched ${verb} ${target} guid=${guid} sidKey=${request.sidKey} attempt=${request.attempts} watchdogSeconds=${UPNP_REQUEST_TIMEOUT_SECONDS}")
       }
     }
   } catch(Exception e) {
@@ -4831,20 +4831,20 @@ void handleUpnpRawResponse(String raw) {
   if(separator < 1) { return }
   String guid = rest.substring(0, separator)
   String payload = rest.substring(separator + 1)
-  logTrace("UPnP response callback guid=${guid} payloadBytes=${payload.getBytes('UTF-8').length}")
+  logDebug("UPnP response callback guid=${guid} payloadBytes=${payload.getBytes('UTF-8').length}")
   Map entry = upnpRequestQueues.get(getDNI())
-  if(entry == null) { logTrace("Ignoring UPnP response guid=${guid}; no queue for dni=${getDNI()}"); return }
+  if(entry == null) { logDebug("Ignoring UPnP response guid=${guid}; no queue for dni=${getDNI()}"); return }
   Map request = null
   Map response = null
   String error = null
   synchronized(entry.lock) {
     request = entry.active as Map
     if(request == null || request.guid != guid || request.phase == 'complete' || request.phase == 'expired') {
-      logTrace("Ignoring stale UPnP response guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
+      logDebug("Ignoring stale UPnP response guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
       return
     }
     if(request.phase == 'complete' || request.phase == 'expired') {
-      logTrace("Ignoring UPnP response guid=${guid} because owner phase=${request.phase}")
+      logDebug("Ignoring UPnP response guid=${guid} because owner phase=${request.phase}")
       return
     }
     if(payload.startsWith('ERROR|')) { error = payload }
@@ -4861,7 +4861,7 @@ void handleUpnpRawResponse(String raw) {
         if(colon > 0) { headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim()) }
       }
       response = [status: status, headers: headers]
-      logTrace("Parsed UPnP response guid=${guid} statusLine=${lines[0]} headerNames=${headers.keySet().join(',')}")
+      logDebug("Parsed UPnP response guid=${guid} statusLine=${lines[0]} headerNames=${headers.keySet().join(',')}")
     }
   }
   completeUpnpCurrent(entry, request, response, error)
@@ -4875,8 +4875,8 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
     request.phase = 'complete'
     completed = true
     Integer status = response?.status as Integer
-    logTrace("UPnP response guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
-    if(error) { logTrace("UPnP request failed guid=${request.guid} reason=${error}") }
+    logDebug("UPnP response guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
+    if(error) { logDebug("UPnP request failed guid=${request.guid} reason=${error}") }
     Map<String,String> headers = response?.headers as Map<String,String> ?: [:]
     String sidValue = headers['sid']
     if(request.operation == 'unsubscribe') {
@@ -4885,28 +4885,28 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         deleteSid(request.sidKey as String)
         sidRemoved = true
       }
-      logTrace("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
+      logDebug("UPnP unsubscribe outcome guid=${request.guid} sidKey=${request.sidKey} status=${status ?: 'none'} sidRemoved=${sidRemoved}")
     } else if(status == 200 && (sidValue || request.operation == 'renew')) {
       if(getSid(request.sidKey as String) == request.expectedCurrentSid) {
         Long timeout = parseGrantedTimeout(headers['timeout'])
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
-        logTrace("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
+        logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
         removeResub(request.subscribeMethod as String)
         if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
         clearSubscriptionRetryAttempts(request.subscribeMethod as String)
         clearSubscriptionRetryAttempts(request.resub as String)
       } else {
-        logTrace("Ignoring UPnP SID update guid=${request.guid} sidKey=${request.sidKey}; current SID ownership changed before response")
+        logDebug("Ignoring UPnP SID update guid=${request.guid} sidKey=${request.sidKey}; current SID ownership changed before response")
       }
     } else if(status == 412 && request.operation != 'unsubscribe') {
       if(request.expectedCurrentSid && getSid(request.sidKey as String) == request.expectedCurrentSid) {
         deleteSid(request.sidKey as String)
       }
-      logTrace("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
+      logDebug("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
       scheduleUpnpRetry(request, request.expectedCurrentSid ? 5 : 60)
     } else {
-      logTrace("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
+      logDebug("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
     }
     socket = detachOwnedUpnpSocketLocked(entry, request)
@@ -4936,7 +4936,7 @@ void completeUpnpWithoutResponse(Map entry, Map request, String reason) {
   synchronized(entry.lock) {
     if(entry.active?.guid != request.guid) { return }
     request.phase = 'complete'
-    logTrace("Completed UPnP request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} reason=${reason}")
+    logDebug("Completed UPnP request guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} reason=${reason}")
     entry.active = null
     completed = true
   }
@@ -4960,7 +4960,7 @@ void scheduleUpnpRetry(Map request, Integer delayOverride = null) {
 void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverride = null) {
   Integer delay = delayOverride != null ? delayOverride : (5 * (request.attempts as Integer))
   Map options = [data: [request: retryRequest], overwrite: true]
-  logTrace("Scheduling UPnP retry guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} delaySeconds=${delay} generation=${request.lifecycleGeneration}")
+  logDebug("Scheduling UPnP retry guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} delaySeconds=${delay} generation=${request.lifecycleGeneration}")
   switch(request.sidKey) {
     case 'sid1': runIn(delay, 'retryUpnpSid1', options); break
     case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
@@ -4975,16 +4975,16 @@ void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
 
 void retryUpnpRequest(Map data) {
   Map retry = data?.request as Map
-  if(retry == null) { logTrace('Ignoring UPnP retry callback without request data'); return }
+  if(retry == null) { logDebug('Ignoring UPnP retry callback without request data'); return }
   Map entry = upnpRequestQueues.get(getDNI())
-  if(entry == null) { logTrace("Ignoring UPnP retry guid=${retry.guid ?: 'none'}; no queue for dni=${getDNI()}"); return }
+  if(entry == null) { logDebug("Ignoring UPnP retry guid=${retry.guid ?: 'none'}; no queue for dni=${getDNI()}"); return }
   synchronized(entry.lock) {
     if(entry.retired == true) {
-      logTrace("Ignoring UPnP retry guid=${retry.guid ?: 'none'}; queue is retired generation=${entry.generation}")
+      logDebug("Ignoring UPnP retry guid=${retry.guid ?: 'none'}; queue is retired generation=${entry.generation}")
       return
     }
     if((retry.lifecycleGeneration as Long) != (entry.generation as Long)) {
-      logTrace("Ignoring stale UPnP retry after lifecycle change guid=${retry.guid}")
+      logDebug("Ignoring stale UPnP retry after lifecycle change guid=${retry.guid}")
       return
     }
     retry.guid = UUID.randomUUID().toString()
@@ -4992,7 +4992,7 @@ void retryUpnpRequest(Map data) {
     retry.dispatchedAt = null
     retry.deadlineAt = null
     (entry.queue as List<Map>).add(retry)
-    logTrace("Accepted UPnP retry guid=${retry.guid} operation=${retry.operation} sidKey=${retry.sidKey} attempt=${retry.attempts} generation=${entry.generation} depth=${(entry.queue as List<Map>).size()}")
+    logDebug("Accepted UPnP retry guid=${retry.guid} operation=${retry.operation} sidKey=${retry.sidKey} attempt=${retry.attempts} generation=${entry.generation} depth=${(entry.queue as List<Map>).size()}")
   }
   dispatchNextUpnpRequest(entry)
 }
@@ -5005,7 +5005,7 @@ Object detachOwnedUpnpSocketLocked(Map entry, Map request) {
 }
 void closeDetachedUpnpSocket(Object socket, Map request) {
   if(socket != null) {
-    try { socket.close() } catch(Exception e) { logTrace("Socket close failed guid=${request.guid}: ${e.message}") }
+    try { socket.close() } catch(Exception e) { logDebug("Socket close failed guid=${request.guid}: ${e.message}") }
   }
 }
 void upnpSubscriptionWatchdog(Map data) {
@@ -5017,11 +5017,11 @@ void upnpSubscriptionWatchdog(Map data) {
   synchronized(entry.lock) {
     request = entry.active as Map
     if(request == null || request.guid != guid || request.phase == 'complete' || request.phase == 'expired') {
-      logTrace("Ignoring stale UPnP watchdog guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
+      logDebug("Ignoring stale UPnP watchdog guid=${guid} activeGuid=${request?.guid ?: 'none'} phase=${request?.phase ?: 'none'}")
       return
     }
     request.phase = 'expired'
-    logTrace("UPnP watchdog expired guid=${guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} generation=${request.lifecycleGeneration}")
+    logDebug("UPnP watchdog expired guid=${guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} generation=${request.lifecycleGeneration}")
     socket = detachOwnedUpnpSocketLocked(entry, request)
     if((request.attempts as Integer) < UPNP_REQUEST_MAX_ATTEMPTS) { scheduleUpnpRetry(request) }
   }
@@ -5032,7 +5032,7 @@ void upnpSubscriptionWatchdog(Map data) {
   }
   dispatchNextUpnpRequest(entry)
 }
-void socketStatus(String status) { logTrace("UPnP raw socket status (diagnostic only): ${status}") }
+void socketStatus(String status) { logDebug("UPnP raw socket status (diagnostic only): ${status}") }
 
 void invalidateUpnpRequestsForDevice() {
   String dni = getDNI()
@@ -5044,7 +5044,7 @@ void invalidateUpnpRequestsForDevice() {
     Integer queuedCount = (entry.queue as List<Map>).size()
     String activeGuid = entry.active?.guid as String
     entry.generation = ((entry.generation ?: 0L) as Long) + 1L
-    logTrace("Invalidated UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
+    logDebug("Invalidated UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpSid3')
@@ -5073,7 +5073,7 @@ void retireUpnpRequestsForDevice() {
     String activeGuid = entry.active?.guid as String
     entry.retired = true
     entry.generation = ((entry.generation ?: 0L) as Long) + 1L
-    logTrace("Retired UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
+    logDebug("Retired UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
     unschedule('upnpSubscriptionWatchdog')
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
@@ -5105,22 +5105,22 @@ Integer cleanupUpnpRequestQueues(Set<String> activeDnis) {
 
 // Retained legacy schedule/callback names. Old HubAction responses carry no GUID
 // and therefore cannot be allowed to mutate current subscription ownership.
-void unlockSubscribeMutexAfterTimeout(String sid) { logTrace("Ignoring legacy UPnP fallback for ${sid}") }
-void unlockSid1SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
-void unlockSid2SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
-void unlockSid3SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
-void unlockSid4SubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
-void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logTrace('Ignoring legacy UPnP fallback callback') }
-void unlockUnsubscribeMutexAfterTimeout() { logTrace('Ignoring legacy UPnP fallback') }
-void unlockUnsubscribeMutexAfterTimeoutCallback() { logTrace('Ignoring legacy UPnP fallback callback') }
+void unlockSubscribeMutexAfterTimeout(String sid) { logDebug("Ignoring legacy UPnP fallback for ${sid}") }
+void unlockSid1SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSid2SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSid3SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSid4SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockUnsubscribeMutexAfterTimeout() { logDebug('Ignoring legacy UPnP fallback') }
+void unlockUnsubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 
 @CompileStatic
 void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {
-  logTrace("Ignoring legacy HubAction subscription callback for ${domain}; no request GUID is available")
+  logDebug("Ignoring legacy HubAction subscription callback for ${domain}; no request GUID is available")
 }
 
 void upnpUnsubscribeCallbackGeneric(String subId, String domain, HubResponse response) {
-  logTrace("Ignoring legacy HubAction unsubscribe callback for ${domain}; no request GUID is available")
+  logDebug("Ignoring legacy HubAction unsubscribe callback for ${domain}; no request GUID is available")
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/MediaRenderer/AVTransport/Event' //sid1
@@ -5486,7 +5486,7 @@ void setLastInboundMrRcEvent() {
 Boolean lastMrRcEventWithin(Long seconds) {
   Long now = Instant.now().getEpochSecond()
   Long last = getLastInboundMrRcEventEpoch()
-  logTrace("lastMrRcEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
+  logDebug("lastMrRcEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
   return (now - last) < seconds
 }
 
@@ -5504,7 +5504,7 @@ void setLastInboundZgtEvent() {
 Boolean lastZgtEventWithin(Integer seconds) {
   Long now = Instant.now().getEpochSecond()
   Long last = getLastInboundZgtEventEpoch()
-  logTrace("lastZgtEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
+  logDebug("lastZgtEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
   return (now - last) < seconds
 }
 
@@ -5522,7 +5522,7 @@ void setLastInboundMrGrcEvent() {
 Boolean lastMrGrcEventWithin(Integer seconds) {
   Long now = Instant.now().getEpochSecond()
   Long last = getLastInboundMrGrcEventEpoch()
-  logTrace("lastMrGrcEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
+  logDebug("lastMrGrcEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
   return (now - last) < seconds
 }
 
@@ -5540,7 +5540,7 @@ void setLastWebsocketEvent() {
 Boolean lastWebsocketEventWithin(Integer seconds) {
   Long now = Instant.now().getEpochSecond()
   Long last = getLastWebsocketEventEpoch()
-  logTrace("lastWebsocketEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
+  logDebug("lastWebsocketEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
   return (now - last) < seconds
 }
 
@@ -5593,19 +5593,19 @@ void queueLocalDeviceEvent(String name, Object value) {
     Object currentValue = this.device.currentValue(name, true)
 
     if(alreadyPending && previous == value) {
-      logTrace("Local event queue coalesced; dni=${dni}, attribute=${name}, value=${value}, pending=${pending.size()}")
+      logDebug("Local event queue coalesced; dni=${dni}, attribute=${name}, value=${value}, pending=${pending.size()}")
       // Re-arm the callback even for a coalesced value. The pending map, not
       // the scheduled flag, is authoritative about whether work remains.
       scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
       return
     }
     if(!alreadyPending && previous == value && currentValue == value) {
-      logTrace("Local event queue deduplicated against current device state; dni=${dni}, attribute=${name}, value=${value}")
+      logDebug("Local event queue deduplicated against current device state; dni=${dni}, attribute=${name}, value=${value}")
       return
     }
 
     pending.put(name, value)
-    logTrace("Local event queued; dni=${dni}, attribute=${name}, value=${value}, previous=${previous}, current=${currentValue}, pending=${pending.size()}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}")
+    logDebug("Local event queued; dni=${dni}, attribute=${name}, value=${value}, previous=${previous}, current=${currentValue}, pending=${pending.size()}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}")
     scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
   }
 }
@@ -5643,7 +5643,7 @@ private void scheduleLocalDeviceEventDrain(Integer delayMs) {
     Integer scheduleDelay = remainingMs > Integer.MAX_VALUE ? Integer.MAX_VALUE : remainingMs as Integer
     state[LOCAL_EVENT_DRAIN_DUE_AT_KEY] = dueAt
     state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] = true
-    logTrace("Scheduling or refreshing local event drain; dni=${dni}, delayMs=${scheduleDelay}, dueAt=${dueAt}, pending=${pending.size()}, previousScheduled=${existingDueAt != null}")
+    logDebug("Scheduling or refreshing local event drain; dni=${dni}, delayMs=${scheduleDelay}, dueAt=${dueAt}, pending=${pending.size()}, previousScheduled=${existingDueAt != null}")
     try {
       runInMillis(scheduleDelay, 'flushPendingLocalDeviceEvents', [overwrite: true])
     } catch(Exception e) {
@@ -5663,10 +5663,10 @@ void flushPendingLocalDeviceEvents() {
     state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
     state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
     ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-    logTrace("Local event drain claimed; dni=${dni}, pending=${pending?.size() ?: 0}")
+    logDebug("Local event drain claimed; dni=${dni}, pending=${pending?.size() ?: 0}")
     if(!pending || pending.isEmpty()) {
       if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
-      logTrace("Local event drain found no pending events; dni=${dni}")
+      logDebug("Local event drain found no pending events; dni=${dni}")
       return
     }
 
@@ -5691,13 +5691,13 @@ void flushPendingLocalDeviceEvents() {
       Object currentValue = this.device.currentValue(attrName, true)
       if(lastSent.containsKey(attrName) && lastSent.get(attrName) == attrValue && currentValue == attrValue) {
         lastSent.put(attrName, attrValue)
-        logTrace("Local event drain skipped duplicate sent value still present on device; dni=${dni}, attribute=${attrName}, value=${attrValue}")
+        logDebug("Local event drain skipped duplicate sent value still present on device; dni=${dni}, attribute=${attrName}, value=${attrValue}")
         return
       }
-      logTrace("Local event send starting; dni=${dni}, attribute=${attrName}, value=${attrValue}, current=${currentValue}, lastSent=${lastSent.get(attrName)}")
+      logDebug("Local event send starting; dni=${dni}, attribute=${attrName}, value=${attrValue}, current=${currentValue}, lastSent=${lastSent.get(attrName)}")
       this.device.sendEvent(name: attrName, value: attrValue)
       lastSent.put(attrName, attrValue)
-      logTrace("Local event sendEvent returned; dni=${dni}, attribute=${attrName}, value=${attrValue}, currentAfter=${this.device.currentValue(attrName, true)}")
+      logDebug("Local event sendEvent returned; dni=${dni}, attribute=${attrName}, value=${attrValue}, currentAfter=${this.device.currentValue(attrName, true)}")
     } catch(Exception e) {
       synchronized(lock) {
         ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
@@ -5718,9 +5718,9 @@ void flushPendingLocalDeviceEvents() {
       if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
       state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
       state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-      logTrace("Local event drain completed; dni=${dni}, processed=${batch.size()}, pending=0")
+      logDebug("Local event drain completed; dni=${dni}, processed=${batch.size()}, pending=0")
     } else {
-      logTrace("Local event drain yielded; dni=${dni}, processed=${batch.size()}, pending=${pending.size()}, nextDelayMs=${LOCAL_EVENT_DRAIN_INTERVAL_MS}")
+      logDebug("Local event drain yielded; dni=${dni}, processed=${batch.size()}, pending=${pending.size()}, nextDelayMs=${LOCAL_EVENT_DRAIN_INTERVAL_MS}")
       scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
     }
   }
@@ -6096,7 +6096,7 @@ String getGroupCoordinatorId() {
 void setGroupCoordinatorId(String groupCoordinatorId) {
   String previousGroupCoordinator = getGroupCoordinatorId()
   if(groupCoordinatorId == previousGroupCoordinator) { return }
-  logTrace("setGroupCoordinatorId ${groupCoordinatorId}")
+  logDebug("setGroupCoordinatorId ${groupCoordinatorId}")
   setDeviceDataValue('groupCoordinatorId', groupCoordinatorId)
   queueLocalDeviceEvent('groupCoordinatorId', groupCoordinatorId)
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
@@ -6115,12 +6115,12 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
     if(!subValid('sid1')) {
       clearCurrentPlayingStates()
       subscribeToCoordinatorSubs()
-      logTrace('Just became group coordinator, subscribing to AVT.')
+      logDebug('Just became group coordinator, subscribing to AVT.')
     }
   } else if(!isGroupCoordinator && previouslyWasGroupCoordinator) {
-      logTrace("Just added to group!")
+      logDebug("Just added to group!")
       unsubscribeFromAVTransport()
-  } else {logTrace("Group coordinator status has not changed.")}
+  } else {logDebug("Group coordinator status has not changed.")}
 }
 
 void subscribeToCoordinatorSubs() {
@@ -6179,7 +6179,7 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
       unsubscribeFromMrGrcEvents()
     }
   }
-  logTrace('Updating group device with new group membership information')
+  logDebug('Updating group device with new group membership information')
   parentUpdateGroupDevices(getId(), groupPlayerIds)
 }
 
@@ -6345,7 +6345,7 @@ void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
   if(announcement?.activeObserved == true && audioSourceUrl && audioSourceUrl != 'Not Available' &&
       audioSourceUrl != announcement.uri?.toString()) {
     String correlationId = announcement.correlationId?.toString()
-    logTrace("Observed external source replacing group announcement ${correlationId} on ${getId()}; expected=${announcement.uri}, observed=${audioSourceUrl}")
+    logDebug("Observed external source replacing group announcement ${correlationId} on ${getId()}; expected=${announcement.uri}, observed=${audioSourceUrl}")
     publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
       externalPlayback: true,
       replacementUri: audioSourceUrl,
@@ -6426,7 +6426,7 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
   }
   String normalizedState = transportState.trim().toUpperCase(Locale.US)
   if(normalizedState == 'TRANSITIONING') {
-    logTrace("Ignoring transient Sonos TransportState=TRANSITIONING from ${source}; preserving ${getTransportStatus() ?: 'unknown'}")
+    logDebug("Ignoring transient Sonos TransportState=TRANSITIONING from ${source}; preserving ${getTransportStatus() ?: 'unknown'}")
     return
   }
   String status = normalizeTransportStatus(transportState)
@@ -6472,14 +6472,14 @@ void setMuteState(String muted) {
   String previousMutedState = observedMutedState != null ? observedMutedState : 'unmuted'
   Boolean restoreEnabled = getEnableAirPlayUnmuteVolumeFix()
   Object restoreLevel = runtimeState.restoreLevelAfterUnmute
-  logTrace("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
+  logDebug("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
   sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
   if(!shouldQueueLocalDeviceEvent('mute', muted, observedMutedState)) {
-    logTrace("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
+    logDebug("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
     return
   }
   if(muted == 'unmuted' && previousMutedState == 'muted' && restoreEnabled) {
-    logTrace("Unmute volume restoration beginning; restoreLevel=${restoreLevel ?: 'unset'}")
+    logDebug("Unmute volume restoration beginning; restoreLevel=${restoreLevel ?: 'unset'}")
     Integer restoreVolume = null
     if(restoreLevel instanceof Number) {
       try {
@@ -6489,13 +6489,13 @@ void setMuteState(String muted) {
     if(restoreVolume != null && restoreVolume >= 0 && restoreVolume <= 100) {
       logDebug("Restoring volume after unmute event to level: ${restoreVolume}")
       setLevel(restoreVolume as BigDecimal)
-      logTrace('Unmute volume restoration dispatched')
+      logDebug('Unmute volume restoration dispatched')
     } else {
       logWarn('Skipping AirPlay unmute volume restore because the saved restore level is unavailable or invalid')
     }
   }
   queueLocalDeviceEvent('mute', muted)
-  logTrace("setMuteState queued parent mute event; value=${muted}")
+  logDebug("setMuteState queued parent mute event; value=${muted}")
 }
 
 void setBassState(Integer bass) {
@@ -6598,7 +6598,7 @@ void setTrackPositionFromPlaybackStatus(Map eventData, String playbackState, Lon
   Boolean shouldPublish = stateChanged || trackChanged || positionDiscontinuity
   if(!shouldPublish) { return }
   if(positionMillis == null && !terminalState) {
-    logTrace("Ignoring track position update without positionMillis for state=${playbackState}")
+    logDebug("Ignoring track position update without positionMillis for state=${playbackState}")
     return
   }
   Long positionSeconds = positionMillis != null ? positionMillis.intdiv(1000L) : 0L
@@ -6794,12 +6794,12 @@ Boolean getAudioClipQueueIsEmpty() {
 void traceAudioClipQueues(String stage) {
   if(!loggingEnabled('trace')) { return }
   Map active = runtimeState.activeAudioClipMessage as Map
-  logTrace("AudioClipQueue ${stage}: playing=${runtimeState.audioClipPlaying}, active=${runtimeState.activeAudioClipCorrelationId}, activePriority=${active?.priority ?: 'REGULAR'}, currentRegular=${(runtimeState.currentlyPlayingClip as Map)?.correlationId}, regular=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, high=${getDeviceAudioClipQueueHighPriority().collect { Map clip -> clip.correlationId }}, saved=${getDeviceAudioClipQueueSaved().collect { Map clip -> clip.correlationId }}")
+  logDebug("AudioClipQueue ${stage}: playing=${runtimeState.audioClipPlaying}, active=${runtimeState.activeAudioClipCorrelationId}, activePriority=${active?.priority ?: 'REGULAR'}, currentRegular=${(runtimeState.currentlyPlayingClip as Map)?.correlationId}, regular=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, high=${getDeviceAudioClipQueueHighPriority().collect { Map clip -> clip.correlationId }}, saved=${getDeviceAudioClipQueueSaved().collect { Map clip -> clip.correlationId }}")
 }
 
 void saveRegularAudioClipQueue() {
   traceAudioClipQueues('save-before-clear')
-  logTrace('saveRegularAudioClipQueue')
+  logDebug('saveRegularAudioClipQueue')
   ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
   ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
 
@@ -6825,7 +6825,7 @@ void saveRegularAudioClipQueue() {
 
 void restoreRegularAudioClipQueue() {
   traceAudioClipQueues('restore-before')
-  logTrace('restoreRegularAudioClipQueue')
+  logDebug('restoreRegularAudioClipQueue')
   ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
   ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
 
@@ -6898,7 +6898,7 @@ Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
 void setWebSocketStatus(String status) {
-  logTrace("Primary WebSocket status transition: previous=${getWebSocketStatus()}, next=${status}, outboundQueue=${getWebsocketOutboundQueue().size()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+  logDebug("Primary WebSocket status transition: previous=${getWebSocketStatus()}, next=${status}, outboundQueue=${getWebsocketOutboundQueue().size()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
@@ -6911,7 +6911,7 @@ void setWebSocketStatus(String status) {
     // otherwise its FIFO flush would put a queued operation ahead of them.
     List<Map> pendingCommands = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue()).findAll { Map entry ->
       if(entry.wireCommand == 'subscribe') {
-        logTrace("Discarding queued ${entry.namespace}.subscribe; recovery will issue a fresh subscription for generation=${generation}")
+        logDebug("Discarding queued ${entry.namespace}.subscribe; recovery will issue a fresh subscription for generation=${generation}")
         return false
       }
       return true
@@ -7053,7 +7053,7 @@ void flushPendingGroupDeviceUpdates() {
 @CompileStatic
 void sendEventsToNewGroupMembers(List<String> newRincons) {
   List<String> groupDNIs = newRincons.collect{getDNIFromRincon(it)}
-  logTrace("GroupDNIs ${groupDNIs}")
+  logDebug("GroupDNIs ${groupDNIs}")
   List<Map> eventsToSend = getCurrentPlayingStatesForGroup()
   Map<String, Object> attributes = [:]
   eventsToSend.each { Map event -> if(event.name != null && event.value != null) { attributes[event.name.toString()] = event.value } }
@@ -7152,7 +7152,7 @@ List<Map> getCurrentPlayingStatesForGroup() {
 // Websocket Connection and Initialization
 // =============================================================================
 void webSocketStatus(String message) {
-  logTrace("Primary WebSocket status callback received: message=${message}, currentStatus=${getWebSocketStatus()}, outboundQueue=${getWebsocketOutboundQueue().size()}")
+  logDebug("Primary WebSocket status callback received: message=${message}, currentStatus=${getWebSocketStatus()}, outboundQueue=${getWebsocketOutboundQueue().size()}")
   if(message == 'failure: null') {
     setWebSocketStatus('closed')
     scheduleWebSocketReconnect()
@@ -7285,7 +7285,7 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
     }
     Long newestPriorSequence = matching.collect { Map queued -> (queued.queueSequence ?: 0L) as Long }.max() ?: 0L
     if(newestPriorSequence > (entry.queueSequence as Long)) {
-      logTrace("Discarding older replay candidate for ${replacementKey}; newer queued intent already exists")
+      logDebug("Discarding older replay candidate for ${replacementKey}; newer queued intent already exists")
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
       return
     }
@@ -7295,7 +7295,7 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
       !(queued.replacementKey?.toString() == replacementKey &&
         replacedSequences.contains((queued.queueSequence ?: 0L) as Long))
     }
-    if(replaced > 0) { logTrace("Replaced ${replaced} queued WebSocket command(s) for key=${replacementKey}") }
+    if(replaced > 0) { logDebug("Replaced ${replaced} queued WebSocket command(s) for key=${replacementKey}") }
   }
   Boolean playModesMerged = false
   if(entry.namespace == 'playback' && entry.wireCommand == 'setPlayModes') {
@@ -7321,7 +7321,7 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
   retained.add(entry)
   retained.sort { Map left, Map right -> ((left.queueSequence ?: 0L) as Long) <=> ((right.queueSequence ?: 0L) as Long) }
   runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
-  logTrace("Queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} target=${entry.targetId ?: 'n/a'} queueId=${entry.queueId} expiresAt=${entry.expiresAt} queued=${retained.size()}")
+  logDebug("Queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} target=${entry.targetId ?: 'n/a'} queueId=${entry.queueId} expiresAt=${entry.expiresAt} queued=${retained.size()}")
   Long remainingMillis = Math.max(1L, (entry.expiresAt as Long) - now())
   Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
   runIn(delaySeconds, 'expireWebsocketOutboundQueueEntry',
@@ -7333,7 +7333,7 @@ List<Map> removeExpiredWebsocketQueueEntries(List<Map> queue) {
   List<Map> retained = []
   (queue ?: []).each { Map entry ->
     if(entry?.expiresAt != null && (entry.expiresAt as Long) <= currentTime) {
-      logTrace("Dropping expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${entry.queueId}")
+      logDebug("Dropping expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${entry.queueId}")
     } else if(entry != null) { retained.add(entry) }
   }
   return retained
@@ -7349,7 +7349,7 @@ void expireWebsocketOutboundQueueEntry(Map data = [:]) {
   queue.remove(entry)
   if(queue.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
   else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue }
-  logTrace("Expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${queueId}; it will not be replayed")
+  logDebug("Expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${queueId}; it will not be replayed")
 }
 
 Map describeWebSocketCommand(String message) {
@@ -7366,7 +7366,7 @@ Map describeWebSocketCommand(String message) {
     return [namespace: namespace, wireCommand: wireCommand, targetKind: targetKind,
         targetId: targetId, args: args, expectedResponseType: responseType]
   } catch(Exception e) {
-    logTrace("Could not describe outbound WebSocket command: ${e.message}")
+    logDebug("Could not describe outbound WebSocket command: ${e.message}")
     return [:]
   }
 }
@@ -7452,7 +7452,7 @@ void mergeQueuedPlayModeFields(Map prior, Map latest) {
     Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
     runIn(delaySeconds, 'expireWebsocketOutboundQueueEntry',
         [data: [queueId: prior.queueId?.toString()], overwrite: false])
-    logTrace("Merged queued playback.setPlayModes fields for group=${prior.targetId}: ${mergedModes.keySet()}")
+    logDebug("Merged queued playback.setPlayModes fields for group=${prior.targetId}: ${mergedModes.keySet()}")
   } catch(Exception e) { logWarn("Could not merge queued WebSocket play modes: ${e.message}") }
 }
 
@@ -7469,7 +7469,7 @@ void finishWebsocketSubscriptionBarrierIfReady() {
   if(needsTopology) {
     if(runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] != true) {
       runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] = true
-      logTrace('Holding WebSocket command replay until a fresh groups snapshot reconciles pending topology mutations')
+      logDebug('Holding WebSocket command replay until a fresh groups snapshot reconciles pending topology mutations')
       runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
       playerGetGroupsFull()
       List<Map> queuedDuringQuery = getWebsocketOutboundQueue()
@@ -7478,7 +7478,7 @@ void finishWebsocketSubscriptionBarrierIfReady() {
     }
     return
   }
-  logTrace("All WebSocket subscription responses settled for generation=${generation}; releasing queued commands")
+  logDebug("All WebSocket subscription responses settled for generation=${generation}; releasing queued commands")
   if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
 }
 
@@ -7512,7 +7512,7 @@ Map registerWebsocketCommandLedgerEntry(String message, Map outbound, Long creat
   outbound.ledgerEntryId = entryId
   runIn(WS_COMMAND_ACK_TIMEOUT_SECONDS, 'websocketCommandLedgerTimeout',
       [data: [entryId: entryId, connectionGeneration: generation], overwrite: false])
-  logTrace("WebSocket command ledger armed id=${entryId} generation=${generation} fingerprint=${entry.namespace}.${entry.wireCommand} target=${entry.targetId ?: 'n/a'} expectedType=${entry.expectedResponseType ?: 'unspecified'} timeout=${WS_COMMAND_ACK_TIMEOUT_SECONDS}s")
+  logDebug("WebSocket command ledger armed id=${entryId} generation=${generation} fingerprint=${entry.namespace}.${entry.wireCommand} target=${entry.targetId ?: 'n/a'} expectedType=${entry.expectedResponseType ?: 'unspecified'} timeout=${WS_COMMAND_ACK_TIMEOUT_SECONDS}s")
   return entry
 }
 
@@ -7526,7 +7526,7 @@ void removeWebsocketCommandLedgerEntryById(String entryId, String reason) {
       ledger.remove(removed)
       if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
       else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
-      logTrace("Removed WebSocket command ledger entry id=${entryId} fingerprint=${removed.namespace}.${removed.wireCommand}; reason=${reason}")
+      logDebug("Removed WebSocket command ledger entry id=${entryId} fingerprint=${removed.namespace}.${removed.wireCommand}; reason=${reason}")
     }
   }
 }
@@ -7565,7 +7565,7 @@ void observeWebsocketCommandResponse(Map eventType, Map eventData) {
   Boolean success = eventType.success == true
   String outcome = success ? 'success' : 'failure'
   String detail = success ? "type=${eventType.type}" : "type=${eventType.type}, error=${eventData?.errorCode ?: eventData?.reason ?: 'unspecified'}"
-  logTrace("WebSocket command ledger ${outcome}: id=${matched.entryId}, fingerprint=${namespace}.${response}, target=${matched.targetId ?: 'n/a'}, ${detail}")
+  logDebug("WebSocket command ledger ${outcome}: id=${matched.entryId}, fingerprint=${namespace}.${response}, target=${matched.targetId ?: 'n/a'}, ${detail}")
   if(success && matched.kind == 'transportCommand') {
     transportCommandAcknowledged(matched.transportCommandId?.toString(), response)
   }
@@ -7618,10 +7618,10 @@ void reconcileQueuedTopologyCommands(Map eventData) {
       members == desired
     }
     if(alreadyApplied) {
-      logTrace("Suppressed replay of ${entry.namespace}.${entry.wireCommand}; fresh groups snapshot already matches members=${desired}")
+      logDebug("Suppressed replay of ${entry.namespace}.${entry.wireCommand}; fresh groups snapshot already matches members=${desired}")
     } else {
       entry.remove('requiresTopologyReconciliation')
-      logTrace("Replaying ${entry.namespace}.${entry.wireCommand}; fresh groups snapshot did not match desired members=${desired}")
+      logDebug("Replaying ${entry.namespace}.${entry.wireCommand}; fresh groups snapshot did not match desired members=${desired}")
       retained.add(entry)
     }
   }
@@ -7665,7 +7665,7 @@ void requeuePendingWebsocketCommands(String reason) {
   ledger.each { Map entry ->
     cancelExpectedSubscriptionEvents(entry)
     if(((entry.expiresAt ?: 0L) as Long) <= currentTime) {
-      logTrace("Dropping expired unacknowledged command ${entry.namespace}.${entry.wireCommand} during recovery")
+      logDebug("Dropping expired unacknowledged command ${entry.namespace}.${entry.wireCommand} during recovery")
     } else if(!shouldReplayUnacknowledgedCommand(entry)) {
       logWarn("Not automatically replaying unacknowledged ${entry.namespace}.${entry.wireCommand}; its effect may already have occurred (${reason})")
     } else {
@@ -7678,7 +7678,7 @@ void requeuePendingWebsocketCommands(String reason) {
       if(entry.namespace == 'groups' && entry.wireCommand in ['createGroup', 'modifyGroupMembers']) {
         metadata.requiresTopologyReconciliation = true
       }
-      logTrace("Preserving unacknowledged WebSocket command for replay: ${entry.namespace}.${entry.wireCommand}, id=${entry.entryId}, expiresAt=${entry.expiresAt}")
+      logDebug("Preserving unacknowledged WebSocket command for replay: ${entry.namespace}.${entry.wireCommand}, id=${entry.entryId}, expiresAt=${entry.expiresAt}")
       queueWebsocketMessage(entry.message.toString(), 0, metadata)
     }
   }
@@ -7695,23 +7695,23 @@ void cancelWebsocketCommandLedgerForClosedConnection(String status) {
 
 void flushWebsocketOutboundQueue() {
   if(!isWebsocketConnected()) {
-    logTrace("Outbound WebSocket queue drain deferred; primary websocketStatus=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+    logDebug("Outbound WebSocket queue drain deferred; primary websocketStatus=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
     return
   }
   if(runtimeState[WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY] == true) {
-    logTrace("Outbound WebSocket queue drain deferred until subscription ACKs arrive; queued=${getWebsocketOutboundQueue().size()}")
+    logDebug("Outbound WebSocket queue drain deferred until subscription ACKs arrive; queued=${getWebsocketOutboundQueue().size()}")
     return
   }
   if(runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] == true) {
-    logTrace("Outbound WebSocket queue drain deferred until topology reconciliation completes; queued=${getWebsocketOutboundQueue().size()}")
+    logDebug("Outbound WebSocket queue drain deferred until topology reconciliation completes; queued=${getWebsocketOutboundQueue().size()}")
     return
   }
 
   List<Map> queue = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue())
   if(queue.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
   else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue }
-  logTrace("Starting outbound WebSocket queue drain: queued=${queue.size()}, primaryStatus=${getWebSocketStatus()}")
+  logDebug("Starting outbound WebSocket queue drain: queued=${queue.size()}, primaryStatus=${getWebSocketStatus()}")
   runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
   while(!queue.isEmpty()) {
     Map entry = (Map)queue.remove(0)
@@ -7719,7 +7719,7 @@ void flushWebsocketOutboundQueue() {
     Integer attempts = (entry?.attempts ?: 0) as Integer
     if(!message) { continue }
     if(entry?.kind == 'audioClip' && !isCurrentlySubcribedToAudioClipWS()) {
-      logTrace("Holding audioClip queue entry until primary audioClip subscription is active: correlation=${entry?.correlationId}, queueRemaining=${queue.size() + 1}")
+      logDebug("Holding audioClip queue entry until primary audioClip subscription is active: correlation=${entry?.correlationId}, queueRemaining=${queue.size() + 1}")
       queue.add(0, entry)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
       if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
@@ -7729,7 +7729,7 @@ void flushWebsocketOutboundQueue() {
     ChildDeviceWrapper pairedRightChannel = pairedRightMessage ? getRightChannelChild() : null
     Boolean secondaryExpired = entry.pairedSecondaryExpired == true
     if(pairedRightMessage && !secondaryExpired && (!pairedRightChannel || pairedRightChannel.getDataValue('websocketStatus') != 'open')) {
-      logTrace("Holding paired audioClip before either channel send: correlation=${entry.correlationId}, primary=open, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}, timeoutExpired=${secondaryExpired}")
+      logDebug("Holding paired audioClip before either channel send: correlation=${entry.correlationId}, primary=open, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}, timeoutExpired=${secondaryExpired}")
       queue.add(0, entry)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
       if(pairedRightChannel) {
@@ -7743,7 +7743,7 @@ void flushWebsocketOutboundQueue() {
     }
     Boolean primarySendReturned = false
     try {
-      logTrace("Dispatching audioClip primary channel: correlation=${entry?.correlationId}, paired=${pairedRightMessage != null}, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, secondaryExpired=${secondaryExpired}, attempts=${attempts}")
+      logDebug("Dispatching audioClip primary channel: correlation=${entry?.correlationId}, paired=${pairedRightMessage != null}, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, secondaryExpired=${secondaryExpired}, attempts=${attempts}")
       armExpectedSubscriptionEvents(entry)
       registerWebsocketCommandLedgerEntry(message, entry, entry.createdAt as Long)
       interfaces.webSocket.sendMessage(message)
@@ -7757,7 +7757,7 @@ void flushWebsocketOutboundQueue() {
           logInfo("Secondary audio clip send failed after primary dispatch for ${entry.correlationId}; not replaying the secondary clip")
         }
       }
-      logTrace("AudioClip channel dispatch completed: correlation=${entry?.correlationId}, primary=sent, secondary=${!pairedRightMessage ? 'not paired' : (secondaryExpired ? 'timed out; skipped' : (rightSent ? 'sent' : 'failed'))}")
+      logDebug("AudioClip channel dispatch completed: correlation=${entry?.correlationId}, primary=sent, secondary=${!pairedRightMessage ? 'not paired' : (secondaryExpired ? 'timed out; skipped' : (rightSent ? 'sent' : 'failed'))}")
       if(entry?.kind == 'audioClip') {
         audioClipCommandSent(entry.correlationId as String)
       } else if(entry?.kind == 'transportCommand') {
@@ -7767,13 +7767,13 @@ void flushWebsocketOutboundQueue() {
       }
     } catch(Exception e) {
       removeWebsocketCommandLedgerEntryById(entry?.ledgerEntryId?.toString(), 'send threw')
-      logTrace("Outbound WebSocket send threw for correlation=${entry?.correlationId ?: 'n/a'}, kind=${entry?.kind ?: 'unknown'}, attempt=${attempts + 1}: ${e.message}")
+      logDebug("Outbound WebSocket send threw for correlation=${entry?.correlationId ?: 'n/a'}, kind=${entry?.kind ?: 'unknown'}, attempt=${attempts + 1}: ${e.message}")
       if(primarySendReturned && pairedRightMessage) {
         logInfo("Secondary audio clip dispatch threw after primary dispatch for ${entry.correlationId}; not replaying either channel")
         try {
           pairedRightChannel?.completeSynchronizedAudioClipRelease(entry.correlationId?.toString())
         } catch(Exception completionError) {
-          logTrace("Could not complete secondary release logging for ${entry.correlationId}: ${completionError.message}")
+          logDebug("Could not complete secondary release logging for ${entry.correlationId}: ${completionError.message}")
         }
         audioClipCommandSent(entry.correlationId as String)
         continue
@@ -7801,30 +7801,30 @@ void flushWebsocketOutboundQueue() {
       return
     }
   }
-  logTrace("Outbound WebSocket queue drain completed: remaining=${getWebsocketOutboundQueue().size()}, primaryStatus=${getWebSocketStatus()}")
+  logDebug("Outbound WebSocket queue drain completed: remaining=${getWebsocketOutboundQueue().size()}, primaryStatus=${getWebSocketStatus()}")
 }
 
 void watchRightChannelWebsocket(ChildDeviceWrapper rightChannel) {
-  logTrace("Tracking right-channel WebSocket status through child-to-parent callbacks: child=${rightChannel?.displayName}, dni=${rightChannel?.getDeviceNetworkId()}, status=${rightChannel?.getDataValue('websocketStatus')}")
+  logDebug("Tracking right-channel WebSocket status through child-to-parent callbacks: child=${rightChannel?.displayName}, dni=${rightChannel?.getDeviceNetworkId()}, status=${rightChannel?.getDataValue('websocketStatus')}")
 }
 
 void rightChannelWebsocketStatusChanged(String status, String childDeviceNetworkId) {
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   if(rightChannel?.getDeviceNetworkId()?.toString() != childDeviceNetworkId) {
-    logTrace("Ignoring right-channel WebSocket status from unexpected child: dni=${childDeviceNetworkId}, expected=${rightChannel?.getDeviceNetworkId()}")
+    logDebug("Ignoring right-channel WebSocket status from unexpected child: dni=${childDeviceNetworkId}, expected=${rightChannel?.getDeviceNetworkId()}")
     return
   }
-  logTrace("Right-channel WebSocket status callback: value=${status}, child=${childDeviceNetworkId}, primaryStatus=${getWebSocketStatus()}, queued=${getWebsocketOutboundQueue().size()}")
+  logDebug("Right-channel WebSocket status callback: value=${status}, child=${childDeviceNetworkId}, primaryStatus=${getWebSocketStatus()}, queued=${getWebsocketOutboundQueue().size()}")
   if(status == 'open') {
     if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
-    else { logTrace('Right-channel socket opened first; paired entry remains queued until the primary socket opens') }
+    else { logDebug('Right-channel socket opened first; paired entry remains queued until the primary socket opens') }
   }
 }
 
 void rightChannelWebsocketCommandResponse(String result, String correlationId, String errorCode, String childDeviceNetworkId) {
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   if(rightChannel?.getDeviceNetworkId()?.toString() != childDeviceNetworkId) { return }
-  logTrace("Paired right-channel WebSocket audioClip response: result=${result}, correlation=${correlationId ?: 'n/a'}, error=${errorCode ?: 'n/a'}, child=${childDeviceNetworkId}")
+  logDebug("Paired right-channel WebSocket audioClip response: result=${result}, correlation=${correlationId ?: 'n/a'}, error=${errorCode ?: 'n/a'}, child=${childDeviceNetworkId}")
 }
 
 void schedulePairedAudioClipSecondaryTimeout(Map entry) {
@@ -7836,7 +7836,7 @@ void schedulePairedAudioClipSecondaryTimeout(Map entry) {
   Long remainingMillis = Math.max(0L, (entry.pairedSecondaryDeadline as Long) - now())
   Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
   entry.pairedSecondaryTimeoutScheduled = true
-  logTrace("Scheduled secondary-open timeout: correlation=${entry.correlationId}, delay=${delaySeconds}s, deadline=${entry.pairedSecondaryDeadline}, secondaryStatus=${getRightChannelChild()?.getDataValue('websocketStatus') ?: 'child unavailable'}")
+  logDebug("Scheduled secondary-open timeout: correlation=${entry.correlationId}, delay=${delaySeconds}s, deadline=${entry.pairedSecondaryDeadline}, secondaryStatus=${getRightChannelChild()?.getDataValue('websocketStatus') ?: 'child unavailable'}")
   runIn(delaySeconds, 'expirePairedAudioClipSecondary',
       [data: [correlationId: entry.correlationId.toString()], overwrite: false])
 }
@@ -7844,29 +7844,29 @@ void schedulePairedAudioClipSecondaryTimeout(Map entry) {
 void expirePairedAudioClipSecondary(Map data) {
   String correlationId = data?.correlationId?.toString()
   if(!correlationId) {
-    logTrace('Ignored secondary-open timeout without a correlation ID')
+    logDebug('Ignored secondary-open timeout without a correlation ID')
     return
   }
   List<Map> queue = getWebsocketOutboundQueue()
   Map entry = queue.find { Map queued -> queued?.correlationId?.toString() == correlationId }
   if(entry == null || entry.pairedSecondaryExpired == true) {
-    logTrace("Secondary-open timeout is stale; no pending paired queue entry remains for ${correlationId}")
+    logDebug("Secondary-open timeout is stale; no pending paired queue entry remains for ${correlationId}")
     return
   }
   ChildDeviceWrapper rightChannel = getRightChannelChild()
   if(rightChannel?.getDataValue('websocketStatus') == 'open') {
-    logTrace("Secondary socket reported open before timeout handling for ${correlationId}; preserving paired dispatch")
+    logDebug("Secondary socket reported open before timeout handling for ${correlationId}; preserving paired dispatch")
     if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
-    else { logTrace("Secondary opened before timeout for ${correlationId}, but primary remains ${getWebSocketStatus()}; preserving paired entry") }
+    else { logDebug("Secondary opened before timeout for ${correlationId}, but primary remains ${getWebSocketStatus()}; preserving paired entry") }
     return
   }
   entry.pairedSecondaryExpired = true
   entry.remove('pairedSecondaryTimeoutScheduled')
   runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-  logTrace("Secondary-open timeout expired: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, queued=${queue.size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}")
+  logDebug("Secondary-open timeout expired: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, queued=${queue.size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}")
   logInfo("Secondary socket did not report open within ${PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS} seconds for ${correlationId}; continuing with primary only")
   if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
-  else { logTrace("Primary-only fallback remains queued until primary socket opens: correlation=${correlationId}") }
+  else { logDebug("Primary-only fallback remains queued until primary socket opens: correlation=${correlationId}") }
 }
 
 Boolean sendWsMessage(String message, Map metadata = [:]) {
@@ -7938,7 +7938,7 @@ List<Map> expectedSubscriptionEventsForWsCommand(String message) {
       return [[namespace: 'groups', type: 'groups']]
     }
   } catch(Exception e) {
-    logTrace("Could not inspect WebSocket command for expected subscription events: ${e.message}")
+    logDebug("Could not inspect WebSocket command for expected subscription events: ${e.message}")
   }
   return []
 }
@@ -7961,7 +7961,7 @@ void armExpectedSubscriptionEvents(Map outbound) {
     runtimeState[WS_EXPECTED_EVENTS_KEY] = pending
   }
   outbound.expectedEventsGuid = guid
-  logTrace("Armed subscription event watchdog guid=${guid} expected=${expected}")
+  logDebug("Armed subscription event watchdog guid=${guid} expected=${expected}")
   scheduleExpectedSubscriptionEventWatchdog()
 }
 
@@ -7992,7 +7992,7 @@ void observeExpectedSubscriptionEvent(Map eventType) {
       if(expected.any { Map item -> subscriptionEventKey(item) == observed }) {
         if(!received.contains(observed)) { received.add(observed) }
         expectation.received = received
-        logTrace("Subscription event watchdog guid=${expectation.guid} observed=${observed} received=${received}")
+        logDebug("Subscription event watchdog guid=${expectation.guid} observed=${observed} received=${received}")
         List<Map> missing = expected.findAll { Map item -> !received.contains(subscriptionEventKey(item)) }
         if(missing.isEmpty()) {
           completedGuids.add(expectation.guid?.toString())
@@ -8150,7 +8150,7 @@ void subscribeToPlaylists() {
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
   logTrace(json)
-  logTrace('subscribeToPlaylists')
+  logDebug('subscribeToPlaylists')
   sendWsMessage(json)
 }
 
@@ -8320,7 +8320,7 @@ void enqueueTransportCommand(String command) {
     }
     queued.add(item)
     runtimeState[TRANSPORT_QUEUE_KEY] = queued
-    logTrace("Queued transport command ${command} (${item.id}); pending=${queued.size()}")
+    logDebug("Queued transport command ${command} (${item.id}); pending=${queued.size()}")
     runIn(1, 'drainTransportCommandQueue', [overwrite: true])
   }
 }
@@ -8354,7 +8354,7 @@ void sendTransportCommandAttempt(Map active) {
   active.attempts = ((active.attempts ?: 0) as Integer) + 1
   active.queuedOnSocket = true
   active.statusQueryPending = false
-  logTrace("Sending transport command ${commandName}, attempt ${active.attempts} (${active.id})")
+  logDebug("Sending transport command ${commandName}, attempt ${active.attempts} (${active.id})")
   sendWsMessage(message, [kind: 'transportCommand', transportCommandId: active.id])
 }
 
@@ -8364,7 +8364,7 @@ void transportCommandSocketSent(String commandId) {
   if(active == null || active.id?.toString() != commandId) { return }
   active.queuedOnSocket = false
   active.sentAt = now()
-  logTrace("Transport command ${active.command} (${commandId}) sent to Sonos WebSocket")
+  logDebug("Transport command ${active.command} (${commandId}) sent to Sonos WebSocket")
   runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand', [overwrite: true, data: [commandId: commandId]])
 }
 
@@ -8376,7 +8376,7 @@ void transportCommandAcknowledged(String commandId, String response) {
   active.acknowledgedResponse = response
   active.acknowledgedAt = now()
   unschedule('retryUnconfirmedTransportCommand')
-  logTrace("Transport command ${active.command} (${commandId}) received WebSocket ACK response=${response}; suppressing resend attempts")
+  logDebug("Transport command ${active.command} (${commandId}) received WebSocket ACK response=${response}; suppressing resend attempts")
 }
 
 void cancelUnsentTransportCommand(Map active) {
@@ -8398,12 +8398,12 @@ void watchTransportCommand(Map data = [:]) {
   String commandId = data?.commandId?.toString()
   if(active == null || active.id?.toString() != commandId) { return }
   if(active.queuedOnSocket == true) {
-    logTrace("Transport command ${active.command} (${commandId}) is still waiting in the WebSocket send queue")
+    logDebug("Transport command ${active.command} (${commandId}) is still waiting in the WebSocket send queue")
     runIn(30, 'watchTransportCommand', [overwrite: true, data: [commandId: commandId]])
     return
   }
   active.statusQueryPending = true
-  logTrace("Watchdog querying playback status for ${active.command} (${commandId})")
+  logDebug("Watchdog querying playback status for ${active.command} (${commandId})")
   getPlaybackStatus()
 }
 
@@ -8412,7 +8412,7 @@ void transportStatusQuerySocketSent(String commandId) {
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
   if(active == null || active.id?.toString() != commandId || active.statusQueryPending != true) { return }
   active.statusQuerySentAt = now()
-  logTrace("Watchdog status query sent for ${active.command} (${commandId})")
+  logDebug("Watchdog status query sent for ${active.command} (${commandId})")
   runIn(2, 'retryUnconfirmedTransportCommand', [overwrite: true, data: [commandId: commandId]])
 }
 
@@ -8456,7 +8456,7 @@ void observeTransportPlaybackStatus(Map eventData) {
   String playbackState = snapshot.playbackState as String
   if(command == 'play' && playbackState == 'PLAYBACK_STATE_BUFFERING') {
     active.statusQueryPending = false
-    logTrace("Transport command play (${active.id}) is buffering; extending the confirmation window")
+    logDebug("Transport command play (${active.id}) is buffering; extending the confirmation window")
     runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand',
         [overwrite: true, data: [commandId: active.id]])
     return
@@ -8482,7 +8482,7 @@ void observeTransportPlaybackStatus(Map eventData) {
   } else if(active.statusQueryPending == true) {
     active.statusQueryPending = false
     active.lastFailureReason = "status query returned ${playbackState ?: 'no playback state'} without confirming ${command}"
-    logTrace("Watchdog did not confirm ${command} (${active.id}); state=${playbackState}, itemId=${snapshot.itemId}, position=${snapshot.positionMillis}")
+    logDebug("Watchdog did not confirm ${command} (${active.id}); state=${playbackState}, itemId=${snapshot.itemId}, position=${snapshot.positionMillis}")
   }
 }
 
@@ -8803,7 +8803,7 @@ Integer getAnnouncementVolume(BigDecimal requestedVolume) {
   Integer currentVolume = getPlayerVolume()
   Integer boost = getTTSBoostAmount()
   Integer resolvedVolume = calculateAnnouncementVolume(requestedVolume, currentVolume, boost)
-  logTrace("Announcement volume: requested=${requestedVolume}, current=${currentVolume}, boost=${boost}, resolved=${resolvedVolume}")
+  logDebug("Announcement volume: requested=${requestedVolume}, current=${currentVolume}, boost=${boost}, resolved=${resolvedVolume}")
   return resolvedVolume
 }
 
@@ -8812,7 +8812,7 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
     Integer duration = 0, Boolean deferStart = false, Boolean chimeBeforeTTS = false,
     Boolean holdAfterChime = false) {
   if(deferCommandToParentDuringGroupOperation('loadHighPriorityAudioClip', [uri, volume, correlationId, duration])) { return }
-  logTrace('playerLoadAudioClipHighPriority')
+  logDebug('playerLoadAudioClipHighPriority')
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
 
   Map<String,String> command = [
@@ -8906,9 +8906,9 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 @CompileStatic
 void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0, String correlationId = null) {
   if(deferCommandToParentDuringGroupOperation('loadAudioClip', [uri, volume, duration, correlationId])) { return }
-  logTrace('playerLoadAudioClip')
+  logDebug('playerLoadAudioClip')
   if(getIsMuted()) {
-    logTrace('Skipping loadAudioClip notification because player is muted.')
+    logDebug('Skipping loadAudioClip notification because player is muted.')
     return
   }
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
@@ -8931,9 +8931,9 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
   audioClip.uri = uri
   audioClip.origin = 'player-tts'
   audioClip.correlationId = clipCorrelationId
-  logTrace("Enqueuing audio clip with URI: ${uri}, volume: ${args.volume}, duration: ${duration}")
+  logDebug("Enqueuing audio clip with URI: ${uri}, volume: ${args.volume}, duration: ${duration}")
   enqueueAudioClip(audioClip)
-  logTrace('Enqueued')
+  logDebug('Enqueued')
 }
 
 /** Queue a clip without starting it immediately so a parent can release several
@@ -8943,7 +8943,7 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
     Integer duration = 0, Boolean deferStart = false, Boolean chimeBeforeTTS = null,
     Boolean holdAfterChime = false) {
   if(getIsMuted()) {
-    logTrace('Skipping synchronized audio clip because player is muted.')
+    logDebug('Skipping synchronized audio clip because player is muted.')
     if(correlationId) { publishGroupAnnouncementProgress(correlationId, 'DISMISSED', [reason: 'muted']) }
     return
   }
@@ -8997,7 +8997,7 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
   queue.add(audioClip)
-  logTrace("Prepared loadAudioClip for Sonos player ${getId()}, correlation=${clipCorrelationId}, resolvedVolume=${args.volume}, queued=${queue.size()}, deferStart=${deferStart}")
+  logDebug("Prepared loadAudioClip for Sonos player ${getId()}, correlation=${clipCorrelationId}, resolvedVolume=${args.volume}, queued=${queue.size()}, deferStart=${deferStart}")
   if(!deferStart && runtimeState.audioClipPlaying != true) {
     runInMillis(100, 'prepareAndStartAudioClip', [overwrite: true])
   }
@@ -9021,14 +9021,14 @@ void prepareAndStartAudioClip() {
 /** Called in the tight group release loop; keep the two socket writes adjacent. */
 void startPreparedAudioClip() {
   if(runtimeState.audioClipPlaying != true) {
-    logTrace("No active prepared audioClip to release for Sonos player ${getId()}")
+    logDebug("No active prepared audioClip to release for Sonos player ${getId()}")
     return
   }
   Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
   String message = clipMessage?.leftChannel?.toString()
   String correlationId = clipMessage?.correlationId?.toString()
   if(!message || !correlationId) {
-    logTrace("Prepared audioClip is missing its primary message or correlation ID: player=${getId()}, hasMessage=${message != null}, correlation=${correlationId}")
+    logDebug("Prepared audioClip is missing its primary message or correlation ID: player=${getId()}, hasMessage=${message != null}, correlation=${correlationId}")
     runtimeState.preparedAudioClipDispatchResult = 'missing'
     return
   }
@@ -9042,7 +9042,7 @@ void startPreparedAudioClip() {
     }
   } else if(pairedRightMessage) {
     runtimeState.preparedAudioClipRightChannelMissing = true
-    logTrace("Paired audioClip has no right-channel child: correlation=${correlationId}; proceeding with primary only")
+    logDebug("Paired audioClip has no right-channel child: correlation=${correlationId}; proceeding with primary only")
     pairedRightMessage = null
   }
 
@@ -9050,7 +9050,7 @@ void startPreparedAudioClip() {
   if(pairedRightMessage) { metadata.pairedRightChannelMessage = pairedRightMessage }
   Boolean primaryReady = isWebsocketConnected() && getWebsocketOutboundQueue().isEmpty() && isCurrentlySubcribedToAudioClipWS()
   Boolean rightReady = !pairedRightMessage || rightChannel?.getDataValue('websocketStatus') == 'open'
-  logTrace("AudioClip paired-send readiness: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, primaryQueue=${getWebsocketOutboundQueue().size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: (pairedRightMessage ? 'child unavailable' : 'not paired')}, primaryReady=${primaryReady}, secondaryReady=${rightReady}")
+  logDebug("AudioClip paired-send readiness: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, primaryQueue=${getWebsocketOutboundQueue().size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: (pairedRightMessage ? 'child unavailable' : 'not paired')}, primaryReady=${primaryReady}, secondaryReady=${rightReady}")
   if(!primaryReady || !rightReady) {
     if(pairedRightMessage && !rightReady) {
       metadata.pairedSecondaryDeadline = now() + (PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS * 1000L)
@@ -9062,7 +9062,7 @@ void startPreparedAudioClip() {
       }
       if(queuedPair) { schedulePairedAudioClipSecondaryTimeout(queuedPair) }
     }
-    logTrace("Queued audioClip dispatch as ${pairedRightMessage ? 'one paired entry' : 'primary-only entry'}: correlation=${correlationId}, reason=${!primaryReady ? 'primary socket/queue/subscription not ready' : 'secondary socket not open'}, queueSize=${getWebsocketOutboundQueue().size()}")
+    logDebug("Queued audioClip dispatch as ${pairedRightMessage ? 'one paired entry' : 'primary-only entry'}: correlation=${correlationId}, reason=${!primaryReady ? 'primary socket/queue/subscription not ready' : 'secondary socket not open'}, queueSize=${getWebsocketOutboundQueue().size()}")
     runtimeState.preparedAudioClipDispatchResult = 'queued'
     runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
     if(!isWebsocketConnected()) { wsConnect() }
@@ -9076,7 +9076,7 @@ void startPreparedAudioClip() {
     audioOutbound.expiresAt = (audioOutbound.createdAt as Long) + WS_COMMAND_MAX_AGE_SECONDS * 1000L
     audioOutbound.putAll(describeWebSocketCommand(message))
     try {
-      logTrace("Starting tight paired audioClip send pass: correlation=${correlationId}, primaryStatus=open, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}")
+      logDebug("Starting tight paired audioClip send pass: correlation=${correlationId}, primaryStatus=open, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}")
       registerWebsocketCommandLedgerEntry(message, audioOutbound, audioOutbound.createdAt as Long)
       interfaces.webSocket.sendMessage(message)
       primarySendReturned = true
@@ -9084,7 +9084,7 @@ void startPreparedAudioClip() {
         Boolean rightSent = rightChannel.playerLoadAudioClipForSynchronizedRelease(
           pairedRightMessage, correlationId) == true
         rightChannel.completeSynchronizedAudioClipRelease(correlationId)
-        logTrace("Tight paired audioClip send pass returned: correlation=${correlationId}, primary=sent, secondary=${rightSent ? 'sent' : 'failed'}")
+        logDebug("Tight paired audioClip send pass returned: correlation=${correlationId}, primary=sent, secondary=${rightSent ? 'sent' : 'failed'}")
         if(!rightSent) {
           logInfo("Secondary audio clip send failed after primary dispatch for ${correlationId}; not replaying the secondary clip")
           runtimeState.preparedAudioClipDispatchResult = 'primaryOnly'
@@ -9092,18 +9092,18 @@ void startPreparedAudioClip() {
           runtimeState.preparedAudioClipDispatchResult = 'sent'
         }
       } else {
-        logTrace("Primary audioClip send returned successfully without a paired channel: correlation=${correlationId}")
+        logDebug("Primary audioClip send returned successfully without a paired channel: correlation=${correlationId}")
         runtimeState.preparedAudioClipDispatchResult = 'sent'
       }
       runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
     } catch(Exception e) {
-      logTrace("Tight audioClip send pass threw: correlation=${correlationId}, primarySendReturned=${primarySendReturned}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, error=${e.message}")
+      logDebug("Tight audioClip send pass threw: correlation=${correlationId}, primarySendReturned=${primarySendReturned}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, error=${e.message}")
       if(!primarySendReturned) { removeWebsocketCommandLedgerEntryById(audioOutbound.ledgerEntryId?.toString(), 'primary audioClip send threw') }
       if(primarySendReturned && pairedRightMessage) {
         try {
           rightChannel?.completeSynchronizedAudioClipRelease(correlationId)
         } catch(Exception completionError) {
-          logTrace("Could not complete secondary release logging for ${correlationId}: ${completionError.message}")
+          logDebug("Could not complete secondary release logging for ${correlationId}: ${completionError.message}")
         }
         logInfo("Secondary audio clip dispatch threw after primary dispatch for ${correlationId}; not replaying either channel")
         runtimeState.preparedAudioClipDispatchResult = 'primaryOnly'
@@ -9129,16 +9129,16 @@ void completePreparedAudioClipDispatch() {
   runtimeState.remove('preparedAudioClipRightChannelMissing')
 
   if(result == 'sent') {
-    logTrace("Sent prepared audioClip to Sonos player ${getId()}, correlation=${correlationId}")
+    logDebug("Sent prepared audioClip to Sonos player ${getId()}, correlation=${correlationId}")
     audioClipCommandSent(correlationId)
   } else if(result == 'queued') {
-    logTrace("Queued prepared audioClip for Sonos player ${getId()}, correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, queueSize=${getWebsocketOutboundQueue().size()}")
+    logDebug("Queued prepared audioClip for Sonos player ${getId()}, correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, queueSize=${getWebsocketOutboundQueue().size()}")
     if(!isWebsocketConnected()) { wsConnect() }
     else if(!isCurrentlySubcribedToAudioClipWS()) {
       if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
     } else if(getWebsocketOutboundQueue().size() > 0) { flushWebsocketOutboundQueue() }
   } else if(result == 'primaryOnly') {
-    logTrace("Completing primary-only audioClip dispatch: player=${getId()}, correlation=${correlationId}; secondary will not be replayed")
+    logDebug("Completing primary-only audioClip dispatch: player=${getId()}, correlation=${correlationId}; secondary will not be replayed")
     logInfo("Primary audio clip sent for ${getId()}, correlation=${correlationId}; secondary dispatch failed and will not be replayed")
     audioClipCommandSent(correlationId)
   } else if(result == 'failed') {
@@ -9158,9 +9158,9 @@ void completePreparedAudioClipDispatch() {
 
 @CompileStatic
 void playerLoadAudioClipChime(BigDecimal volume = null) {
-  logTrace('playerLoadAudioClipChime')
+  logDebug('playerLoadAudioClipChime')
   if(getIsMuted()) {
-    logTrace('Skipping loadAudioClip notification because player is muted.')
+    logDebug('Skipping loadAudioClip notification because player is muted.')
     return
   }
   Map<String,String> command = [
@@ -9184,11 +9184,11 @@ void playerLoadAudioClipChime(BigDecimal volume = null) {
 }
 
 void enqueueAudioClip(Map clipMessage) {
-  logTrace('enqueueAudioClip')
+  logDebug('enqueueAudioClip')
   addAudioClipCorrelation(clipMessage)
   ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
   Boolean alreadyPlaying = runtimeState.audioClipPlaying == true
-  logTrace("Audio clip enqueue decision correlation=${clipMessage.correlationId}, origin=${clipMessage.origin}, priority=${clipMessage.priority ?: 'REGULAR'}, alreadyPlaying=${alreadyPlaying}, active=${runtimeState.activeAudioClipCorrelationId ?: 'none'}, synchronizedHold=${runtimeState.groupSynchronizedAudioClipHold instanceof Map ? ((Map)runtimeState.groupSynchronizedAudioClipHold).correlationId : 'none'}, regularBefore=${queue.size()}, highBefore=${getDeviceAudioClipQueueHighPriority().size()}")
+  logDebug("Audio clip enqueue decision correlation=${clipMessage.correlationId}, origin=${clipMessage.origin}, priority=${clipMessage.priority ?: 'REGULAR'}, alreadyPlaying=${alreadyPlaying}, active=${runtimeState.activeAudioClipCorrelationId ?: 'none'}, synchronizedHold=${runtimeState.groupSynchronizedAudioClipHold instanceof Map ? ((Map)runtimeState.groupSynchronizedAudioClipHold).correlationId : 'none'}, regularBefore=${queue.size()}, highBefore=${getDeviceAudioClipQueueHighPriority().size()}")
 
   // Regular priority clips go to regular queue
   // High priority clips are now handled separately via playerLoadAudioClipHighPriority
@@ -9196,10 +9196,10 @@ void enqueueAudioClip(Map clipMessage) {
   logDebug("Queued audio clip ${clipMessage.correlationId} (${clipMessage.origin}) at ${clipMessage.enqueuedAt}; regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
 
   if(!alreadyPlaying) {
-    logTrace("Starting audio clip drain after enqueue correlation=${clipMessage.correlationId}")
+    logDebug("Starting audio clip drain after enqueue correlation=${clipMessage.correlationId}")
     dequeueAudioClip()
   } else {
-    logTrace("Audio clip remains queued behind active correlation=${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}; newCorrelation=${clipMessage.correlationId}, regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
+    logDebug("Audio clip remains queued behind active correlation=${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}; newCorrelation=${clipMessage.correlationId}, regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
   }
 }
 
@@ -9210,7 +9210,7 @@ void dequeueAudioClip() {
 
 void prepareNextAudioClipForDispatch() {
   traceAudioClipQueues('dequeue-entry')
-  logTrace('dequeueAudioClip')
+  logDebug('dequeueAudioClip')
 
   Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
       ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
@@ -9219,7 +9219,7 @@ void prepareNextAudioClipForDispatch() {
       synchronizedHold.allowChimeDispatch = false
       runtimeState.groupSynchronizedAudioClipHold = synchronizedHold
     } else {
-      logTrace("Holding queued audioClip for synchronized group TTS ${synchronizedHold.correlationId}")
+      logDebug("Holding queued audioClip for synchronized group TTS ${synchronizedHold.correlationId}")
       return
     }
   }
@@ -9239,7 +9239,7 @@ void prepareNextAudioClipForDispatch() {
   }
 
   if(!clipMessage) {
-    logTrace('No more audio clips to dequeue.')
+    logDebug('No more audio clips to dequeue.')
     removeHiddenJsonRuntimeState('currentlyPlayingClip')
     runtimeState.remove('activeAudioClipCorrelationId')
     runtimeState.remove('activeAudioClipSonosId')
@@ -9413,7 +9413,7 @@ void setNightMode(Boolean desiredValue) {
 
 @CompileStatic
 void setDialogMode(Boolean desiredValue) {
-  logTrace('setDialogMode')
+  logDebug('setDialogMode')
   String ip = getDeviceDataValue('localUpnpHost')
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: desiredValue ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
@@ -9483,7 +9483,7 @@ String armExpectedUpnpSubscriptionEvent(String sidKey, String action) {
   pending.add([guid: guid, sidKey: sidKey, action: action, attempts: 0,
       deadlineAt: now() + UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L])
   runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending
-  logTrace("Armed UPnP subscription event watchdog guid=${guid} action=${action} expected=${sidKey}")
+  logDebug("Armed UPnP subscription event watchdog guid=${guid} action=${action} expected=${sidKey}")
   scheduleExpectedUpnpEventWatchdog()
   return guid
 }
@@ -9769,13 +9769,13 @@ String recordStreamTransportIntent(String command) {
 }
 
 void setAVTransportURIAndPlay(String currentURI, String currentURIMetaData = null, Map callbackData = null) {
-  logTrace("setAVTransportURIAndPlay request player=${getId()}, uri=${currentURI}, announcementCorrelation=${callbackData?.groupAnnouncementCorrelationId ?: 'none'}, replacingGroupAnnouncement=${runtimeState.groupAnnouncementStream?.correlationId ?: 'none'}")
+  logDebug("setAVTransportURIAndPlay request player=${getId()}, uri=${currentURI}, announcementCorrelation=${callbackData?.groupAnnouncementCorrelationId ?: 'none'}, replacingGroupAnnouncement=${runtimeState.groupAnnouncementStream?.correlationId ?: 'none'}")
   String guid = recordStreamTransportIntent('setAVTransportURIAndPlay')
   if(!(callbackData?.groupAnnouncementCorrelationId) && runtimeState.groupAnnouncementStream instanceof Map) {
     Map announcement = (Map)runtimeState.groupAnnouncementStream
     runtimeState.pendingGroupAnnouncementTakeover = [transportGuid: guid,
       correlationId: announcement.correlationId?.toString(), replacementUri: currentURI]
-    logTrace("Staged group announcement takeover player=${getId()}, correlation=${announcement.correlationId}, transportGuid=${guid}, replacementUri=${currentURI}; waiting for Sonos SetAVTransportURI acceptance")
+    logDebug("Staged group announcement takeover player=${getId()}, correlation=${announcement.correlationId}, transportGuid=${guid}, replacementUri=${currentURI}; waiting for Sonos SetAVTransportURI acceptance")
   }
   String ip = getLocalUpnpHostForGroupOperation()
   if(ip == null || ip.isEmpty()) {
@@ -9837,11 +9837,11 @@ void commitPendingGroupAnnouncementTakeover(String transportGuid) {
   Map announcement = runtimeState.groupAnnouncementStream instanceof Map
       ? (Map)runtimeState.groupAnnouncementStream : null
   if(announcement?.correlationId?.toString() != pending.correlationId?.toString()) {
-    logTrace("Ignoring transport takeover ${transportGuid}; announcement ownership changed before Sonos accepted the URI")
+    logDebug("Ignoring transport takeover ${transportGuid}; announcement ownership changed before Sonos accepted the URI")
     return
   }
   String correlationId = pending.correlationId?.toString()
-  logTrace("Sonos accepted replacement stream for group announcement ${correlationId}; notifying parent app")
+  logDebug("Sonos accepted replacement stream for group announcement ${correlationId}; notifying parent app")
   publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
     externalPlayback: true,
     replacementUri: pending.replacementUri?.toString(),
@@ -9856,7 +9856,7 @@ void clearPendingGroupAnnouncementTakeover(String transportGuid, String reason) 
   Map pending = runtimeState.pendingGroupAnnouncementTakeover instanceof Map
       ? (Map)runtimeState.pendingGroupAnnouncementTakeover : null
   if(pending?.transportGuid?.toString() == transportGuid) {
-    logTrace("Clearing unaccepted group announcement takeover ${transportGuid}: ${reason}")
+    logDebug("Clearing unaccepted group announcement takeover ${transportGuid}: ${reason}")
     runtimeState.remove('pendingGroupAnnouncementTakeover')
   }
 }
@@ -10197,7 +10197,7 @@ void invalidateGroupAnnouncementStream(String reason, String replacementUri = nu
       ? (Map)runtimeState.groupAnnouncementStream : null
   if(announcement == null) { return }
   String correlationId = announcement.correlationId?.toString()
-  logTrace("Group announcement interruption candidate player=${getId()}, correlation=${correlationId}, phase=${announcement.phase}, activeObserved=${announcement.activeObserved}, reason=${reason}, replacementUri=${replacementUri}, playbackState=${state.playbackState}, audioSource=${device.currentValue('audioSource')}")
+  logDebug("Group announcement interruption candidate player=${getId()}, correlation=${correlationId}, phase=${announcement.phase}, activeObserved=${announcement.activeObserved}, reason=${reason}, replacementUri=${replacementUri}, playbackState=${state.playbackState}, audioSource=${device.currentValue('audioSource')}")
   logInfo("Interrupting group announcement stream ${correlationId} (${reason}); replacement=${replacementUri ?: 'unknown'}")
   if(correlationId && announcement.activeObserved == true) {
     publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
@@ -10368,33 +10368,33 @@ void processWebsocketMessage(String message) {
   Map eventData
   try {
     dni = device.getDeviceNetworkId()
-    logTrace("WebSocket JSON decoding started; dni=${dni ?: 'unknown'}, payloadLength=${message.length()}")
+    logDebug("WebSocket JSON decoding started; dni=${dni ?: 'unknown'}, payloadLength=${message.length()}")
     groovy.json.JsonSlurper deviceSlurper = jsonSlurpers.computeIfAbsent(dni, { String ignored ->
       new groovy.json.JsonSlurper()
     } as java.util.function.Function<String, groovy.json.JsonSlurper>)
     json = (ArrayList)deviceSlurper.parseText(message)
     if(json.size() < 2) {
-      logTrace("Ignoring WebSocket JSON envelope with ${json.size()} entries")
+      logDebug("Ignoring WebSocket JSON envelope with ${json.size()} entries")
       return
     }
     deviceSettings = getDeviceSettings()
     eventType = (json as List)[0] as Map
     eventData = (json as List)[1] as Map
     if(eventType == null || eventData == null) {
-      logTrace('Ignoring WebSocket JSON envelope with a null event type or event body')
+      logDebug('Ignoring WebSocket JSON envelope with a null event type or event body')
       return
     }
-    logTrace("WebSocket JSON envelope decoded; entryCount=${json.size()}, typeKeys=${eventType.keySet().join(',')}, dataKeys=${eventData.keySet().join(',')}")
+    logDebug("WebSocket JSON envelope decoded; entryCount=${json.size()}, typeKeys=${eventType.keySet().join(',')}, dataKeys=${eventData.keySet().join(',')}")
   } catch(Exception e) {
-    logTrace("WebSocket JSON decoding/envelope extraction failed; type=${e.class.name}, message=${e.message ?: '(no message)'}")
+    logDebug("WebSocket JSON decoding/envelope extraction failed; type=${e.class.name}, message=${e.message ?: '(no message)'}")
     throw e
   }
-  logTrace("WebSocket message dispatched; type=${eventType.type ?: 'unset'}, namespace=${eventType.namespace ?: 'unset'}, name=${eventType.name ?: 'unset'}, response=${eventType.response ?: 'unset'}")
+  logDebug("WebSocket message dispatched; type=${eventType.type ?: 'unset'}, namespace=${eventType.namespace ?: 'unset'}, name=${eventType.name ?: 'unset'}, response=${eventType.response ?: 'unset'}")
   runtimeState[WS_LAST_INBOUND_AT_STATE_KEY] = now()
   runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] = ((runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long) + 1L
-  logTrace('WebSocket expected-subscription observation beginning')
+  logDebug('WebSocket expected-subscription observation beginning')
   observeExpectedSubscriptionEvent(eventType)
-  logTrace('WebSocket expected-subscription observation completed')
+  logDebug('WebSocket expected-subscription observation completed')
 
   if(loggingEnabled('trace')) {
     // Suppress consecutive duplicate WS event log messages to reduce logging load
@@ -10408,8 +10408,8 @@ void processWebsocketMessage(String message) {
 
   //Process subscriptions
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
-    logTrace("WebSocket subscription response processing beginning; namespace=${eventType?.namespace}, success=${eventType?.success}")
-    logTrace("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was successful' : 'failed'}")
+    logDebug("WebSocket subscription response processing beginning; namespace=${eventType?.namespace}, success=${eventType?.success}")
+    logDebug("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was successful' : 'failed'}")
     if(eventType?.success == true && eventType?.namespace != null && eventType?.namespace != '') {
       setWsSubscriptionValue("${eventType?.namespace}", 'Subscribed')
     }
@@ -10424,17 +10424,17 @@ void processWebsocketMessage(String message) {
         runIn(5, 'retryAudioClipSubscription', [overwrite: true])
       }
     }
-    logTrace('WebSocket subscription response processing completed')
+    logDebug('WebSocket subscription response processing completed')
   }
 
-  logTrace('WebSocket command-response observation beginning')
+  logDebug('WebSocket command-response observation beginning')
   observeWebsocketCommandResponse(eventType, eventData)
-  logTrace('WebSocket command-response observation completed')
+  logDebug('WebSocket command-response observation completed')
 
   //Process groups
   if(eventType?.type == 'groups' && (eventType?.name == 'groups' || eventType?.response == 'getGroups')) {
     Integer groupCount = eventData?.groups instanceof Collection ? ((Collection)eventData.groups).size() : 0
-    logTrace("WebSocket groups response processing beginning; groupCount=${groupCount}")
+    logDebug("WebSocket groups response processing beginning; groupCount=${groupCount}")
     publishHouseholdPlayerPresence(eventData)
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
@@ -10445,10 +10445,10 @@ void processWebsocketMessage(String message) {
           pendingTopologyKindByDni.put(dni, 'ws')
           publishGroupTopologyUpdate(null, null, [])
           scheduleTopologyTimeoutFlush()
-          logTrace('Holding groups websocket topology update until the affected player reaches its expected topology')
+          logDebug('Holding groups websocket topology update until the affected player reaches its expected topology')
           return
         }
-        logTrace("Player ${getId()} not found in any group")
+        logDebug("Player ${getId()} not found in any group")
         publishGroupTopologyUpdate(null, null, [])
         emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
         return
@@ -10473,7 +10473,7 @@ void processWebsocketMessage(String message) {
         // start and end.
         publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         scheduleTopologyTimeoutFlush()
-        logTrace('Holding groups websocket topology update until the affected player reaches its expected topology')
+        logDebug('Holding groups websocket topology update until the affected player reaches its expected topology')
         return
       }
 
@@ -10482,7 +10482,7 @@ void processWebsocketMessage(String message) {
       String oldCoordinatorId = getGroupCoordinatorId()
       List<String> oldPlayerIds = getGroupPlayerIds()
       if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds) {
-        logTrace('Groups websocket event received but group data unchanged, skipping processing')
+        logDebug('Groups websocket event received but group data unchanged, skipping processing')
         publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         emitGroupFavoriteOperationEvent('groups', [
           groupId: groupId,
@@ -10511,7 +10511,7 @@ void processWebsocketMessage(String message) {
       try {
         List<String> groupMemberNames = playerIds.collect { String pid -> playerNameMap[pid] }.findAll { it != null }
         setGroupMemberNames(groupMemberNames)
-      } catch (Exception e) { logTrace('Could not get group member names, continuing on...') }
+      } catch (Exception e) { logDebug('Could not get group member names, continuing on...') }
 
       if(hasSecondaries() == true && players != null && players.size() > 0) {
         Map p = (Map)players.find{ it?.id == getId() }
@@ -10537,11 +10537,11 @@ void processWebsocketMessage(String message) {
       // A successful groups response can contain no groups while a player is
       // leaving or joining a topology. Publish that negative observation so a
       // parent operation cannot continue using stale cached group data.
-      logTrace('Groups websocket response contained no group for player ' + getId())
+      logDebug('Groups websocket response contained no group for player ' + getId())
       publishGroupTopologyUpdate(null, null, [])
       emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
     }
-    logTrace('WebSocket groups response processing completed')
+    logDebug('WebSocket groups response processing completed')
   }
 
   //Process groupCoordinatorChanged
@@ -10557,7 +10557,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
-    logTrace('WebSocket favorites-version change processing beginning')
+    logDebug('WebSocket favorites-version change processing beginning')
     if(checkIsFavPlaylistDelegate()) {
       getFavorites()
       getPlaylists()
@@ -10566,7 +10566,7 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
     Integer favoriteItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
-    logTrace("WebSocket favorites-list processing beginning; itemCount=${favoriteItemCount}")
+    logDebug("WebSocket favorites-list processing beginning; itemCount=${favoriteItemCount}")
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
@@ -10723,7 +10723,7 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'playlistsList' && eventType?.response == 'getPlaylists' && eventType?.success == true) {
     Integer playlistItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
-    logTrace("WebSocket playlists-list processing beginning; itemCount=${playlistItemCount}")
+    logDebug("WebSocket playlists-list processing beginning; itemCount=${playlistItemCount}")
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.playlists
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
@@ -10867,7 +10867,7 @@ void processWebsocketMessage(String message) {
 
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    logTrace("WebSocket audio-clip status processing beginning; dataKeys=${eventData.keySet().join(',')}")
+    logDebug("WebSocket audio-clip status processing beginning; dataKeys=${eventData.keySet().join(',')}")
     String stage = 'read audioClips payload'
     String callbackId = null
     String activeClipId = null
@@ -10883,11 +10883,11 @@ void processWebsocketMessage(String message) {
           if(item instanceof Map) {
             audioClips.add(new LinkedHashMap((Map)item))
           } else {
-            logTrace("Audio clip callback ${callbackId ?: 'pending'}: skipping non-map audioClips entry")
+            logDebug("Audio clip callback ${callbackId ?: 'pending'}: skipping non-map audioClips entry")
           }
         }
       } else if(rawAudioClips != null) {
-        logTrace('Audio clip callback payload has an unexpected audioClips value; treating as empty')
+        logDebug('Audio clip callback payload has an unexpected audioClips value; treating as empty')
       }
       callbackId = UUID.randomUUID().toString()
       activeClipId = runtimeState.activeAudioClipCorrelationId as String ?: 'none'
@@ -10896,7 +10896,7 @@ void processWebsocketMessage(String message) {
         "${clip?.status ?: 'unknown'}:sonosId=${clip?.id ?: 'unknown'}:name=${clip?.name ?: 'unknown'}"
       } ?: []
       logDebug("Audio clip status callback ${callbackId} receivedAt=${now()}, activeClip=${activeClipId}, statuses=${statuses}")
-      logTrace("Audio clip callback ${callbackId}: payload decoded; count=${audioClips?.size() ?: 0}, activeCorrelation=${callbackActiveClipId ?: 'none'}")
+      logDebug("Audio clip callback ${callbackId}: payload decoded; count=${audioClips?.size() ?: 0}, activeCorrelation=${callbackActiveClipId ?: 'none'}")
 
       stage = 'copy correlation progress state'
       clipProgress = new LinkedHashMap<String, Map>()
@@ -10907,7 +10907,7 @@ void processWebsocketMessage(String message) {
           if(guid && rawProgress instanceof Map) {
             clipProgress[guid] = new LinkedHashMap((Map)rawProgress)
           } else {
-            logTrace("Audio clip callback ${callbackId}: discarding malformed saved progress entry; guid=${guid ?: 'missing'}")
+            logDebug("Audio clip callback ${callbackId}: discarding malformed saved progress entry; guid=${guid ?: 'missing'}")
           }
         }
       }
@@ -10916,13 +10916,13 @@ void processWebsocketMessage(String message) {
       audioClips?.each { Map clip ->
         String clipGuid = clip?.name?.toString()
         if(!clipGuid) {
-          logTrace("Audio clip callback ${callbackId}: skipping status without a clip GUID")
+          logDebug("Audio clip callback ${callbackId}: skipping status without a clip GUID")
           return
         }
-        logTrace("Audio clip callback ${callbackId}: processing guid=${clipGuid}, status=${clip?.status ?: 'unknown'}")
+        logDebug("Audio clip callback ${callbackId}: processing guid=${clipGuid}, status=${clip?.status ?: 'unknown'}")
         String clipStatus = clip?.status?.toString()
         if(!clipStatus) {
-          logTrace("Audio clip callback ${callbackId}: skipping status for guid=${clipGuid} because status is missing")
+          logDebug("Audio clip callback ${callbackId}: skipping status for guid=${clipGuid} because status is missing")
           return
         }
         Map progress = clipProgress[clipGuid]
@@ -10931,7 +10931,7 @@ void processWebsocketMessage(String message) {
             dispatchedAt: runtimeState.audioClipQueueStartTime ?: now()]
         }
         if(progress == null) {
-          logTrace("Audio clip callback ${callbackId}: no tracked progress entry for guid=${clipGuid}; skipping")
+          logDebug("Audio clip callback ${callbackId}: no tracked progress entry for guid=${clipGuid}; skipping")
           return
         }
         Long observedAt = now()
@@ -11002,10 +11002,10 @@ void processWebsocketMessage(String message) {
         setAudioClipPlaying(false)
       }
       if(!matchedCurrentClip) {
-        logTrace("Audio clip callback ${callbackId}: no status matched active clip GUID ${activeClipId}; queue state unchanged")
+        logDebug("Audio clip callback ${callbackId}: no status matched active clip GUID ${activeClipId}; queue state unchanged")
       }
       stage = 'log audio clip callback completion'
-      logTrace("Audio clip callback ${callbackId}: processing completed; matched=${matchedCurrentClip}, matchedStatus=${matchedCurrentStatus ?: 'none'}")
+      logDebug("Audio clip callback ${callbackId}: processing completed; matched=${matchedCurrentClip}, matchedStatus=${matchedCurrentStatus ?: 'none'}")
     } catch(Exception e) {
       logException("Audio clip status callback ${callbackId ?: 'unassigned'} failed at stage '${stage}' (active=${callbackActiveClipId ?: activeClipId ?: 'none'})", e)
       return
@@ -11013,7 +11013,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'globalError' && eventType?.success == false) {
-    logTrace("WebSocket global-error processing beginning; namespace=${eventType?.namespace}, response=${eventType?.response}, errorCode=${eventData?.errorCode}")
+    logDebug("WebSocket global-error processing beginning; namespace=${eventType?.namespace}, response=${eventType?.response}, errorCode=${eventData?.errorCode}")
     if(eventType?.namespace == 'audioClip') {
       logWarn("Audio clip command '${eventType?.response}' failed for active clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
       String failedCorrelationId = runtimeState.activeAudioClipCorrelationId as String
@@ -11026,7 +11026,7 @@ void processWebsocketMessage(String message) {
       String errorReason = "${eventData?.errorCode ?: 'UNKNOWN'}: ${eventData?.reason ?: eventData}"
       failTransportCommand(eventType?.response?.toString(), errorReason)
       if(eventType?.response == 'stop' && eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
-        logTrace('Stop command unavailable for current target; pause fallback queued and tracked independently')
+        logDebug('Stop command unavailable for current target; pause fallback queued and tracked independently')
       }
     }
     if(eventType?.namespace == 'groups' && (eventType?.response == 'createGroup' || eventType?.response == 'modifyGroupMembers')) {
@@ -11074,7 +11074,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
-    logTrace("WebSocket playback-status processing beginning; state=${eventData?.playbackState ?: 'unset'}")
+    logDebug("WebSocket playback-status processing beginning; state=${eventData?.playbackState ?: 'unset'}")
     String currentState = eventData?.playbackState?.toString()
     Long playbackStateObservedAt = now()
     state.playbackState = currentState
@@ -11086,7 +11086,7 @@ void processWebsocketMessage(String message) {
         ? (Map)runtimeState.groupAnnouncementStream : null
     if(announcement != null) {
       String announcementGuid = announcement.correlationId?.toString()
-      logTrace("Group announcement playback observation player=${getId()}, correlation=${announcementGuid}, playbackState=${currentState}, itemId=${eventData?.itemId}, source=${device.currentValue('audioSource')}, activeObserved=${announcement.activeObserved}")
+      logDebug("Group announcement playback observation player=${getId()}, correlation=${announcementGuid}, playbackState=${currentState}, itemId=${eventData?.itemId}, source=${device.currentValue('audioSource')}, activeObserved=${announcement.activeObserved}")
       if(currentState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
         announcement.activeObserved = true
         announcement.phase = 'ACTIVE'
@@ -11127,7 +11127,7 @@ void processWebsocketMessage(String message) {
   }
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    logTrace("WebSocket metadata-status processing beginning; dataKeys=${eventData.keySet().join(',')}")
+    logDebug("WebSocket metadata-status processing beginning; dataKeys=${eventData.keySet().join(',')}")
     observeAudioSourceSignalStatus(eventData)
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
@@ -11145,7 +11145,7 @@ void processWebsocketMessage(String message) {
 
   //Process playerVolume events
   if(eventType?.type == 'playerVolume' && eventType?.namespace == 'playerVolume') {
-    logTrace("WebSocket player-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
+    logDebug("WebSocket player-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
     if(eventData?.volume != null) {
       Integer vol = eventData.volume as Integer
       setPlayerVolume(vol)
@@ -11158,7 +11158,7 @@ void processWebsocketMessage(String message) {
 
   //Process groupVolume events
   if(eventType?.type == 'groupVolume' && eventType?.namespace == 'groupVolume') {
-    logTrace("WebSocket group-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
+    logDebug("WebSocket group-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
     if(eventData?.volume != null) {
       Integer groupVol = eventData.volume as Integer
       setGroupVolumeState(groupVol)
@@ -11170,14 +11170,14 @@ void processWebsocketMessage(String message) {
       queueGroupDeviceUpdate([_groupMute: groupMuteState])
     }
   }
-  logTrace('WebSocket message dispatch completed all matching handlers')
+  logDebug('WebSocket message dispatch completed all matching handlers')
 }
 
 void observeAudioSourceSignalStatus(Map eventData) {
   Map container = eventData?.container instanceof Map ? (Map)eventData.container : [:]
   String containerType = container.type?.toString()
   if(!containerType) {
-    logTrace("Ignoring metadata status without a container for ${getId()}; retaining last source signal observation")
+    logDebug("Ignoring metadata status without a container for ${getId()}; retaining last source signal observation")
     return
   }
   state.audioSourceMetadataType = containerType
@@ -11195,7 +11195,7 @@ void observeAudioSourceSignalStatus(Map eventData) {
   state.audioSourceSignalStatus = signalStatus
   state.audioSourceSignalObservedAt = observedAt
   publishPlaybackObservation()
-  logTrace("Home theater input observation player=${getId()}, containerType=${containerType}, streamDescription=${streamDescription}, signalStatus=${signalStatus}")
+  logDebug("Home theater input observation player=${getId()}, containerType=${containerType}, streamDescription=${streamDescription}, signalStatus=${signalStatus}")
 }
 
 void publishPlaybackObservation() {
@@ -11235,15 +11235,15 @@ static String extractContainerKey(Map eventData) {
 }
 
 void checkFavAndPlaylist(Map data) {
-  logTrace('Checking currently playing favorite and playlist...')
+  logDebug('Checking currently playing favorite and playlist...')
   Boolean mapsPopulated = true
   if(favoritesMap == null || favoritesMap.size() < 1) {
-    logTrace('Favorites map is empty, requesting favorites...')
+    logDebug('Favorites map is empty, requesting favorites...')
     getFavorites()
     mapsPopulated = false
   }
   if(playlistsMap == null || playlistsMap.size() < 1) {
-    logTrace('Playlists map is empty, requesting playlists...')
+    logDebug('Playlists map is empty, requesting playlists...')
     getPlaylists()
     mapsPopulated = false
   }
@@ -11302,7 +11302,7 @@ void addAudioClipCorrelation(Map clipMessage) {
 
 void publishAudioClipProgressEvent(Map progress, String callbackId) {
   if(!(progress instanceof Map) || !progress.correlationId) { return }
-  logTrace("Audio clip ${progress.correlationId} progress: phase=${progress.phase}, status=${progress.lastStatus}, callback=${callbackId ?: progress.lastCallbackId ?: 'n/a'}")
+  logDebug("Audio clip ${progress.correlationId} progress: phase=${progress.phase}, status=${progress.lastStatus}, callback=${callbackId ?: progress.lastCallbackId ?: 'n/a'}")
 }
 
 void publishGroupAnnouncementProgress(String correlationId, String phase, Map details = null) {
@@ -11437,7 +11437,7 @@ void audioClipWatchdog(Map data = [:]) {
   if(runtimeState.audioClipPlaying != true || !correlationId ||
       correlationId != (runtimeState.activeAudioClipCorrelationId as String) ||
       !watchdogId || watchdogId != runtimeState.audioClipWatchdogRequestId) {
-    logTrace("Ignoring stale audio clip watchdog guid=${correlationId ?: 'unknown'} watchdog=${watchdogId ?: 'unknown'}")
+    logDebug("Ignoring stale audio clip watchdog guid=${correlationId ?: 'unknown'} watchdog=${watchdogId ?: 'unknown'}")
     return
   }
   if(!isWebsocketConnected()) {

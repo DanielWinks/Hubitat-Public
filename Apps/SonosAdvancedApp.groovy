@@ -344,9 +344,9 @@ Map mainPage() {
   if(useOldUi) {
     stopDiscovery()
   }
-  logTrace("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, latestVersion=${state.latestVersion}, dismissedVersion=${state.dismissedUpdateVersion}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
+  logDebug("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, latestVersion=${state.latestVersion}, dismissedVersion=${state.dismissedUpdateVersion}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
   checkForUpdates()
-  logTrace('mainPage returned from asynchronous update-check dispatch')
+  logDebug('mainPage returned from asynchronous update-check dispatch')
   dynamicPage(title: useOldUi ? 'Sonos Advanced Controller' : '<p hidden>Sonos Advanced Controller</p>') {
     section {
       if(useOldUi) {
@@ -644,7 +644,7 @@ void renderNewUiPageContent() {
 
 void startDiscoverySession() {
   if(atomicState.discoveryRunning != true) {
-    logTrace('Starting a new discovery session; clearing per-session probe reservations')
+    logDebug('Starting a new discovery session; clearing per-session probe reservations')
     subscribeToSsdpEvents(location)
     atomicState.discoveryRunning = true
     ssdpDiscover()
@@ -1158,7 +1158,7 @@ String renderNewUiUpnpStatus(Map row, String sid, Boolean groupedOnly = false) {
         ? newUiStatusBadge('Active', 'active', "${sid} is within its current renewal window")
         : newUiStatusBadge('Inactive', 'inactive', "${sid} is not currently valid")
   } catch(Exception e) {
-    logTrace("Could not read ${sid} status for ${row.id}: ${e.message}")
+    logDebug("Could not read ${sid} status for ${row.id}: ${e.message}")
     return newUiStatusBadge('Unknown', 'unknown', "${sid} status is unavailable")
   }
 }
@@ -1175,7 +1175,7 @@ String renderNewUiWebSocketStatus(Map row) {
       status = row.player.getWebSocketStatus()
     }
   } catch(Exception e) {
-    logTrace("Could not read WebSocket status for ${row.id}: ${e.message}")
+    logDebug("Could not read WebSocket status for ${row.id}: ${e.message}")
   }
 
   String normalized = status?.toString()?.trim()?.toLowerCase()
@@ -1863,7 +1863,7 @@ Map groupPage() {
 // Button Handlers
 // =============================================================================
 void appButtonHandler(String buttonName) {
-  logTrace("Received app button action '${buttonName}'")
+  logDebug("Received app button action '${buttonName}'")
   if(buttonName?.startsWith('newUiMobile')) {
     buttonName = buttonName.replaceFirst('newUiMobile', 'newUi')
   }
@@ -1896,7 +1896,7 @@ void appButtonHandler(String buttonName) {
     state.latestReleaseUrl = null
     app.updateLabel('Sonos Advanced Controller')
     app.sendEvent(name: 'newUiUpdateNotice', value: 'dismissed')
-    logTrace("Update notice dismissed; updateAvailable=${state.updateAvailable}, dismissedVersion=${state.dismissedUpdateVersion}")
+    logDebug("Update notice dismissed; updateAvailable=${state.updateAvailable}, dismissedVersion=${state.dismissedUpdateVersion}")
     return
   }
   if(buttonName == 'btnExtend60') { extendDiscovery(60) }
@@ -3098,7 +3098,7 @@ void subscribeToGroupCommandRequests() {
       unsubscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
       subscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
       subscribedGroups++
-      logTrace("Subscribed group command handler for groupDni=${dni}, attribute=${GROUP_COMMAND_REQUEST_ATTRIBUTE}")
+      logDebug("Subscribed group command handler for groupDni=${dni}, attribute=${GROUP_COMMAND_REQUEST_ATTRIBUTE}")
     } else if(dni?.contains(ALARM_MANAGER_DNI_MARKER) || dni?.contains(ALARM_SWITCH_DNI_MARKER)) {
       unsubscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
       subscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
@@ -3114,9 +3114,9 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     subscribedPlayers++
-    logTrace("Subscribed player app request handler for playerDni=${playerDevice.getDeviceNetworkId()}, attribute=${PLAYER_APP_REQUEST_ATTRIBUTE}")
+    logDebug("Subscribed player app request handler for playerDni=${playerDevice.getDeviceNetworkId()}, attribute=${PLAYER_APP_REQUEST_ATTRIBUTE}")
   }
-  logTrace("Child request subscriptions configured; groups=${subscribedGroups}, players=${subscribedPlayers}")
+  logDebug("Child request subscriptions configured; groups=${subscribedGroups}, players=${subscribedPlayers}")
 }
 
 /** Keep player driver policy caches aligned with app settings and observations. */
@@ -3479,7 +3479,7 @@ void stopDiscovery() {
       unregisterMDNSListener('_sonos._tcp')
       unregisterMDNSListener('_http._tcp')
     }
-  } catch(Exception e) { logTrace("Could not unregister mDNS listeners: ${e.message}") }
+  } catch(Exception e) { logDebug("Could not unregister mDNS listeners: ${e.message}") }
 }
 
 void updateDiscoveryTimer() {
@@ -3489,7 +3489,7 @@ void updateDiscoveryTimer() {
   }
 
   Integer remainingSecs = Math.max(0, (Integer)(((atomicState.discoveryEndTime as Long) - now()) / 1000))
-  logTrace("updateDiscoveryTimer: sending event with ${remainingSecs} seconds remaining")
+  logDebug("updateDiscoveryTimer: sending event with ${remainingSecs} seconds remaining")
   app.sendEvent(name: 'discoveryTimer', value: "Discovery time remaining: ${remainingSecs} seconds")
 
   if(remainingSecs > 0) {
@@ -3503,7 +3503,7 @@ void extendDiscovery(Integer seconds) {
   logInfo("Extending discovery by ${seconds} seconds")
   if(atomicState.discoveryRunning != true) {
     // Restart discovery without clearing already-discovered devices
-    logTrace('Starting a fresh discovery session while retaining devices already found')
+    logDebug('Starting a fresh discovery session while retaining devices already found')
     atomicState.discoveryRunning = true
     atomicState.discoveryProbeAttempts = [:]
     subscribeToSsdpEvents(location)
@@ -3582,7 +3582,7 @@ void processMdnsDiscovery() {
     ['_sonos._tcp', '_http._tcp'].each { String serviceType ->
       List<Map> mdnsEntries = (getMDNSEntries(serviceType) ?: []) as List<Map>
       totalEntries += mdnsEntries.size()
-      logTrace("Found ${mdnsEntries.size()} entries for mDNS service ${serviceType}")
+      logDebug("Found ${mdnsEntries.size()} entries for mDNS service ${serviceType}")
       mdnsEntries.each { Map entry ->
         String serviceName = (entry.server ?: entry.name ?: '').toString()
         String addresses = (entry.ip4Addresses ?: entry.ipAddress ?: '').toString()
@@ -3595,7 +3595,7 @@ void processMdnsDiscovery() {
           logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}:${port}")
           processDiscoveredSonosDevice(ipAddress)
         } else {
-          logTrace("Ignoring non-Sonos mDNS entry ${serviceName} (${serviceType}) at ${ipAddress}:${port}")
+          logDebug("Ignoring non-Sonos mDNS entry ${serviceName} (${serviceType}) at ${ipAddress}:${port}")
         }
       }
     }
@@ -3616,11 +3616,11 @@ Boolean isIpAlreadyDiscovered(String ipAddress) {
 
 Boolean reserveDiscoveryProbe(String ipAddress) {
   if(!ipAddress) {
-    logTrace('Skipping discovery probe because the candidate IP address is empty')
+    logDebug('Skipping discovery probe because the candidate IP address is empty')
     return false
   }
   if(atomicState.discoveryRunning != true) {
-    logTrace("Skipping discovery probe for ${ipAddress}; discovery session is stopped")
+    logDebug("Skipping discovery probe for ${ipAddress}; discovery session is stopped")
     return false
   }
   synchronized(this) {
@@ -3628,80 +3628,80 @@ Boolean reserveDiscoveryProbe(String ipAddress) {
     // Keep every IP reserved for the full discovery session, including failures and
     // unsupported secondary speakers. A new session resets this map in ssdpDiscover().
     if(attempts.containsKey(ipAddress)) {
-      logTrace("Skipping discovery probe for ${ipAddress}; already attempted this session at ${attempts[ipAddress]}")
+      logDebug("Skipping discovery probe for ${ipAddress}; already attempted this session at ${attempts[ipAddress]}")
       return false
     }
     Map updated = new LinkedHashMap(attempts)
     updated[ipAddress] = now()
     atomicState.discoveryProbeAttempts = updated
-    logTrace("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
+    logDebug("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
     return true
   }
 }
 
 void requestDiscoveryDeviceDescription(String ipAddress, LinkedHashMap playerInfo) {
   if(atomicState.discoveryRunning != true) {
-    logTrace("Skipping device-description request for ${ipAddress}; discovery stopped before player-info callback")
+    logDebug("Skipping device-description request for ${ipAddress}; discovery stopped before player-info callback")
     return
   }
   Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3,
     requestContentType: 'application/xml', contentType: 'application/xml']
   try {
-    logTrace("Dispatching asynchronous device-description probe for ${ipAddress} (timeout=3s)")
+    logDebug("Dispatching asynchronous device-description probe for ${ipAddress} (timeout=3s)")
     asynchttpGet('discoveryDeviceDescriptionCallback', params, [ipAddress: ipAddress, playerInfo: playerInfo])
   } catch(Exception e) {
-    logTrace("Could not dispatch device-description probe for ${ipAddress}: ${e.message}")
+    logDebug("Could not dispatch device-description probe for ${ipAddress}: ${e.message}")
   }
 }
 
 void discoveryPlayerInfoCallback(AsyncResponse response, Map data) {
   String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { logTrace('Player-info callback received without an IP address'); return }
+  if(!ipAddress) { logDebug('Player-info callback received without an IP address'); return }
   if(atomicState.discoveryRunning != true) {
-    logTrace("Ignoring player-info callback for ${ipAddress}; discovery session has stopped")
+    logDebug("Ignoring player-info callback for ${ipAddress}; discovery session has stopped")
     return
   }
   if(response == null || response.hasError()) {
-    logTrace("Player-info probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
+    logDebug("Player-info probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
     return
   }
   try {
     Map playerInfo = response.getJson() as Map
     if(!playerInfo) {
-      logTrace("Player-info probe for ${ipAddress} returned an empty or non-object JSON response (status=${response.status})")
+      logDebug("Player-info probe for ${ipAddress} returned an empty or non-object JSON response (status=${response.status})")
       return
     }
-    logTrace("Player-info probe succeeded for ${ipAddress} (status=${response.status}, playerId=${playerInfo.playerId}, name=${playerInfo.device?.name})")
+    logDebug("Player-info probe succeeded for ${ipAddress} (status=${response.status}, playerId=${playerInfo.playerId}, name=${playerInfo.device?.name})")
     requestDiscoveryDeviceDescription(ipAddress, new LinkedHashMap(playerInfo))
-  } catch(Exception e) { logTrace("Could not parse player-info response for ${ipAddress} (status=${response.status}): ${e.message}") }
+  } catch(Exception e) { logDebug("Could not parse player-info response for ${ipAddress} (status=${response.status}): ${e.message}") }
 }
 
 void discoveryDeviceDescriptionCallback(AsyncResponse response, Map data) {
   String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { logTrace('Device-description callback received without an IP address'); return }
+  if(!ipAddress) { logDebug('Device-description callback received without an IP address'); return }
   if(atomicState.discoveryRunning != true) {
-    logTrace("Ignoring device-description callback for ${ipAddress}; discovery session has stopped")
+    logDebug("Ignoring device-description callback for ${ipAddress}; discovery session has stopped")
     return
   }
   if(response == null || response.hasError()) {
-    logTrace("Device-description probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
+    logDebug("Device-description probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
     return
   }
   try {
     String responseBody = response.getData() as String
     if(!responseBody) {
-      logTrace("Device-description probe for ${ipAddress} returned an empty body (status=${response.status})")
+      logDebug("Device-description probe for ${ipAddress} returned an empty body (status=${response.status})")
       return
     }
     GPathResult description = new XmlSlurper().parseText(responseBody)
-    logTrace("Device-description probe succeeded for ${ipAddress} (status=${response.status}, model=${description.device.modelName.text()})")
+    logDebug("Device-description probe succeeded for ${ipAddress} (status=${response.status}, model=${description.device.modelName.text()})")
     processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
-  } catch(Exception e) { logTrace("Could not parse device-description response for ${ipAddress} (status=${response.status}): ${e.message}") }
+  } catch(Exception e) { logDebug("Could not parse device-description response for ${ipAddress} (status=${response.status}): ${e.message}") }
 }
 
 void requestDiscoveryPlayerInfo(String ipAddress) {
   if(atomicState.discoveryRunning != true) {
-    logTrace("Skipping player-info request for ${ipAddress}; discovery session has stopped")
+    logDebug("Skipping player-info request for ${ipAddress}; discovery session has stopped")
     return
   }
   Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
@@ -3709,9 +3709,9 @@ void requestDiscoveryPlayerInfo(String ipAddress) {
     requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
   Map callbackData = [ipAddress: ipAddress]
   try {
-    logTrace("Dispatching asynchronous player-info probe for ${ipAddress}:1443 (timeout=3s)")
+    logDebug("Dispatching asynchronous player-info probe for ${ipAddress}:1443 (timeout=3s)")
     asynchttpGet('discoveryPlayerInfoCallback', params, callbackData)
-  } catch(Exception e) { logTrace("Could not dispatch player-info probe for ${ipAddress}: ${e.message}") }
+  } catch(Exception e) { logDebug("Could not dispatch player-info probe for ${ipAddress}: ${e.message}") }
 }
 
 void processDiscoveredSonosDevice(String ipAddress) {
@@ -3721,9 +3721,9 @@ void processDiscoveredSonosDevice(String ipAddress) {
     return
   }
 
-  logTrace("Considering mDNS discovery candidate at ${ipAddress}")
+  logDebug("Considering mDNS discovery candidate at ${ipAddress}")
   if(isIpAlreadyDiscovered(ipAddress)) {
-    logTrace("Skipping mDNS candidate ${ipAddress}; device is already in discovered results")
+    logDebug("Skipping mDNS candidate ${ipAddress}; device is already in discovered results")
     return
   }
   if(!reserveDiscoveryProbe(ipAddress)) { return }
@@ -3751,11 +3751,11 @@ void ssdpEventHandler(Event event) {
 void processParsedSsdpEvent(LinkedHashMap event) {
   String ipAddress = convertHexToIP(event?.networkAddress as String)
   String ipPort = convertHexToInt(event?.deviceAddress as String).toString()
-  logTrace("Considering SSDP discovery candidate at ${ipAddress}:${ipPort}")
+  logDebug("Considering SSDP discovery candidate at ${ipAddress}:${ipPort}")
 
   // Devices send multiple SSDP responses; reserve each IP before issuing async probes.
   if(isIpAlreadyDiscovered(ipAddress)) {
-    logTrace("Skipping SSDP candidate ${ipAddress}; device is already in discovered results")
+    logDebug("Skipping SSDP candidate ${ipAddress}; device is already in discovered results")
     return
   }
   if(!reserveDiscoveryProbe(ipAddress)) {
@@ -3781,7 +3781,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
 
   if(mac && playerInfoDevice?.name) {
-    logTrace("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
+    logDebug("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
   }
 
   // Use MAC as primary key, but also check for duplicate IPs/playerIds to prevent same device listed multiple times
@@ -3796,21 +3796,21 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
     existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
     existingDevice.localUpnpHost = "${ipAddress}:1400"
-    logTrace("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
+    logDebug("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
   }
   if(!isDuplicate) {
     isDuplicate = discoveredSonoses.any { key, value ->
       LinkedHashMap existingDevice = value as LinkedHashMap
       existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
     }
-    if(isDuplicate) { logTrace("Device already discovered in primaries (IP/ID match) - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
+    if(isDuplicate) { logDebug("Device already discovered in primaries (IP/ID match) - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
   }
   if(!isDuplicate) {
     isDuplicate = discoveredSonosSecondaries.containsKey(mac) || discoveredSonosSecondaries.any { key, value ->
       LinkedHashMap existingDevice = value as LinkedHashMap
       existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
     }
-    if(isDuplicate) { logTrace("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
+    if(isDuplicate) { logDebug("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
   }
 
   if(isDuplicate) { return }
@@ -3851,7 +3851,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     if(!secondaryExists) {
       discoveredSonosSecondaries[mac] = discoveredSonosSecondary
       persistDiscoveredSonosSecondaries()
-      logTrace("Found secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
+      logInfo("Discovered secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
     }
     // Secondary devices should never appear in the main discovered list
     scheduleMethod(2, 'sendFoundSonosEvents')
@@ -3864,7 +3864,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
     scheduleMethod(2, 'sendFoundSonosEvents')
   } else {
-    logTrace("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
+    logDebug("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
 }
 
@@ -4463,7 +4463,7 @@ void playerStateUpdateHandler(Event event) {
       if(payload.signalObservedAt != null) { observation.signalObservedAt = payload.signalObservedAt }
       observations[playerId] = observation
       state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] = observations
-      logTrace("Cached playback observation for ${playerId}: state=${payload.playbackState}, signal=${payload.signalStatus}")
+      logDebug("Cached playback observation for ${playerId}: state=${payload.playbackState}, signal=${payload.signalStatus}")
     }
     return
   }
@@ -4498,7 +4498,7 @@ void playerStateUpdateHandler(Event event) {
         favoriteObservations[playerId] = observations[playerId]
         operation.favoriteTopologyObservations = favoriteObservations
       }
-      logTrace("Received topology report from ${playerId} for operation ${operation.operationId} at ${observedAt}")
+      logDebug("Received topology report from ${playerId} for operation ${operation.operationId} at ${observedAt}")
       saveActiveGroupOperation(operation)
       runIn(1, 'advanceGroupFavoriteOperation', [
         overwrite: true,
@@ -4577,7 +4577,7 @@ void groupCommandRequestHandler(Event event) {
     return
   }
 
-  logTrace("Received group command event; groupDni=${request?.groupDni ?: 'unknown'}, command=${request?.command ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sequence=${request?.sequence ?: 'unknown'}")
+  logDebug("Received group command event; groupDni=${request?.groupDni ?: 'unknown'}, command=${request?.command ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sequence=${request?.sequence ?: 'unknown'}")
 
   enqueueGroupCommandRequest(request)
 }
@@ -4641,11 +4641,11 @@ void playerAppRequestHandler(Event event) {
   String playerDni = request?.sourceDni?.toString()
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || !player.getDataValue('id') || request.channel != 'playerAppRequest') {
-    logTrace("Ignoring player app request action=${request?.action ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sourceDni=${playerDni ?: 'unknown'}, owned=${player != null}, hasPlayerId=${player?.getDataValue('id') != null}, channel=${request?.channel ?: 'unknown'}")
+    logDebug("Ignoring player app request action=${request?.action ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sourceDni=${playerDni ?: 'unknown'}, owned=${player != null}, hasPlayerId=${player?.getDataValue('id') != null}, channel=${request?.channel ?: 'unknown'}")
     return
   }
   Map args = request.args instanceof Map ? (Map)request.args : [:]
-  logTrace("Received player app request action=${request.action ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${playerDni}")
+  logDebug("Received player app request action=${request.action ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${playerDni}")
   switch(request.action?.toString()) {
     case 'refreshRoster':
       refreshStaticDriverActivePlayerRoster()
@@ -4661,10 +4661,10 @@ void playerAppRequestHandler(Event event) {
       BigDecimal volume = null
       try { volume = args.volume != null ? new BigDecimal(args.volume.toString()) : null }
       catch(Exception e) { logWarn("Ignoring invalid volume in player TTS request ${requestId}") }
-      logTrace("Handling player active-stream TTS requestId=${requestId ?: 'unknown'}, correlation=${args.correlationId ?: 'unknown'}, duration=${duration}, hasUri=${args.uri != null && args.uri.toString() != ''}")
+      logDebug("Handling player active-stream TTS requestId=${requestId ?: 'unknown'}, correlation=${args.correlationId ?: 'unknown'}, duration=${duration}, hasUri=${args.uri != null && args.uri.toString() != ''}")
       Boolean accepted = handlePlayerActiveStreamTts(playerDni, args.uri?.toString(), volume, duration,
           args.correlationId?.toString())
-      logTrace("Player active-stream TTS decision requestId=${requestId ?: 'unknown'}, accepted=${accepted}")
+      logDebug("Player active-stream TTS decision requestId=${requestId ?: 'unknown'}, accepted=${accepted}")
       if(requestId) { player.completeParentAppActiveStreamTts(requestId, accepted.toString()) }
       break
     default: logWarn("Ignoring unsupported player app request action '${request.action}'")
@@ -4808,12 +4808,12 @@ void startNextGroupAnnouncement(String groupDni) {
   if(queue == null || queue.active instanceof Map || queue.priorityActive instanceof Map) { return }
   Boolean takeoverCanContinue = queue.externalTakeover == true && canContinueAnnouncementQueueDuringTakeover(groupDni)
   if(getActiveGroupOperation() != null || (hasActiveAnnouncementTopologyTransaction() && !takeoverCanContinue)) {
-    logTrace("Deferring queued announcement for ${groupDni} while a Sonos topology transaction is active")
+    logDebug("Deferring queued announcement for ${groupDni} while a Sonos topology transaction is active")
     runIn(2, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true])
     return
   }
   if(takeoverCanContinue) {
-    logTrace("Continuing queued announcements for ${groupDni} in the temporary topology while external playback remains active")
+    logDebug("Continuing queued announcements for ${groupDni} in the temporary topology while external playback remains active")
   }
   List<Map> pending = queue.pending instanceof List ? (List<Map>)queue.pending : []
   Long maxRetentionMs = getMaximumTtsRetentionMs()
@@ -4965,7 +4965,7 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
   String playbackState = playbackActivity.playbackState?.toString()
   Boolean playing = playbackActivity.active == true
   Boolean externalTakeover = queue.externalTakeover == true
-  logTrace("Announcement route check group=${groupDni}, correlation=${item.correlationId}, priority=${highPriority ? 'high' : 'normal'}, mode=${announcementMode}, playbackState=${playbackState}, playbackObservedAt=${playbackActivity.observedAt}, playbackSignal=${playbackActivity.signal}, transportStatus=${transportStatus}, audioSource=${currentAudioSource}, priorTtsUri=${queue.ownStreamUri}, externalTakeover=${externalTakeover}")
+  logDebug("Announcement route check group=${groupDni}, correlation=${item.correlationId}, priority=${highPriority ? 'high' : 'normal'}, mode=${announcementMode}, playbackState=${playbackState}, playbackObservedAt=${playbackActivity.observedAt}, playbackSignal=${playbackActivity.signal}, transportStatus=${transportStatus}, audioSource=${currentAudioSource}, priorTtsUri=${queue.ownStreamUri}, externalTakeover=${externalTakeover}")
   if(externalTakeover && !playing) {
     queue.remove('externalTakeover')
     externalTakeover = false
@@ -4974,7 +4974,7 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
   Boolean playingPreviousAnnouncement = playing && queue.ownStreamUri?.toString() &&
       currentAudioSource == queue.ownStreamUri.toString()
   if(playingPreviousAnnouncement && !externalTakeover) {
-    logTrace("Coordinator is still playing the previous queued announcement stream ${queue.ownStreamUri}; treating the group as otherwise idle")
+    logDebug("Coordinator is still playing the previous queued announcement stream ${queue.ownStreamUri}; treating the group as otherwise idle")
     playing = false
   }
   Boolean useAudioClip = announcementMode == 'alwaysNonInterrupting' ||
@@ -5145,7 +5145,7 @@ Boolean canSafelyRegroupForAutomaticAnnouncement(List<ChildDeviceWrapper> player
     Boolean coordinatorActive = isPlayerActivelyPlaying(sourceCoordinator)
     Boolean activeStream = playerActive || coordinatorActive
     if(activeStream && targetIds.contains(currentCoordinatorId)) {
-      logTrace("Automatic topology preflight blocked: target ${playerId} is attached to active coordinator ${currentCoordinatorId}")
+      logDebug("Automatic topology preflight blocked: target ${playerId} is attached to active coordinator ${currentCoordinatorId}")
       return false
     }
   }
@@ -5173,12 +5173,12 @@ Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal vol
     Integer duration, String correlationId) {
   ChildDeviceWrapper target = playerDni ? getChildDevice(playerDni) : null
   if(target == null || !uri) {
-    logTrace("Active-stream TTS rejected: targetMissing=${target == null}, uriPresent=${uri != null && uri != ''}, playerDni=${playerDni ?: 'unknown'}")
+    logDebug("Active-stream TTS rejected: targetMissing=${target == null}, uriPresent=${uri != null && uri != ''}, playerDni=${playerDni ?: 'unknown'}")
     return false
   }
   String targetId = target.getDataValue('id')?.toString()
   if(!targetId) {
-    logTrace("Active-stream TTS rejected: player ${target.displayName} has no Sonos player ID, playerDni=${playerDni}")
+    logDebug("Active-stream TTS rejected: player ${target.displayName} has no Sonos player ID, playerDni=${playerDni}")
     return false
   }
   String audioSource = target.currentValue('audioSource', true)?.toString()
@@ -5187,7 +5187,7 @@ Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal vol
   Boolean groupedFollower = groupCoordinatorId && groupCoordinatorId != targetId
   Boolean activelyPlaying = isPlayerActivelyPlaying(target)
   if(airPlaySource || groupedFollower || !activelyPlaying) {
-    logTrace("Active-stream TTS rejected for player=${target.displayName}; airPlay=${airPlaySource}, coordinator=${groupCoordinatorId ?: 'unknown'}, targetId=${targetId}, groupedFollower=${groupedFollower}, activelyPlaying=${activelyPlaying}, audioSource=${audioSource ?: 'unknown'}")
+    logDebug("Active-stream TTS rejected for player=${target.displayName}; airPlay=${airPlaySource}, coordinator=${groupCoordinatorId ?: 'unknown'}, targetId=${targetId}, groupedFollower=${groupedFollower}, activelyPlaying=${activelyPlaying}, audioSource=${audioSource ?: 'unknown'}")
     return false
   }
   List<ChildDeviceWrapper> groupDevices = getCurrentGroupDevices()
@@ -5202,7 +5202,7 @@ Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal vol
     correlationId: correlationId, forceAudioClip: !isAutomaticTtsTopologyChangesEnabled(), isTts: true,
     chimeBeforeStandardPriorityTTS: target.getChimeBeforeStandardPriorityTTS() == true]
   enqueueGroupAnnouncement(operationGroup, target, [target], 'playAudioClip', args, correlationId)
-  logTrace("Active-stream TTS accepted for player=${target.displayName}, groupDni=${operationGroup.deviceNetworkId}, correlation=${correlationId ?: 'unknown'}, forceAudioClip=${args.forceAudioClip}")
+  logDebug("Active-stream TTS accepted for player=${target.displayName}, groupDni=${operationGroup.deviceNetworkId}, correlation=${correlationId ?: 'unknown'}, forceAudioClip=${args.forceAudioClip}")
   logInfo("Queued direct-player active-stream TTS for ${target.displayName}; Sonos Advanced will select and release a temporary holder")
   return true
 }
@@ -5225,7 +5225,7 @@ Map findIdleStreamHolder(List<ChildDeviceWrapper> targetPlayers, Map snapshot) {
   ChildDeviceWrapper sourcePlayer = buildRinconMap()[sourcePlayerId]
   String householdId = sourcePlayer?.getDataValue('householdId')?.toString()
   if(!householdId) {
-    logTrace("Stream holder search skipped: target ${sourcePlayerId} has no household id")
+    logDebug("Stream holder search skipped: target ${sourcePlayerId} has no household id")
     return null
   }
 
@@ -5235,19 +5235,19 @@ Map findIdleStreamHolder(List<ChildDeviceWrapper> targetPlayers, Map snapshot) {
     String candidateId = candidate?.getDataValue('id')?.toString()
     if(!candidateId || targetIds.contains(candidateId) ||
         candidate.getDataValue('householdId')?.toString() != householdId) {
-      logTrace("Stream holder candidate ${candidateId ?: 'unknown'} skipped: outside target household or targeted")
+      logDebug("Stream holder candidate ${candidateId ?: 'unknown'} skipped: outside target household or targeted")
       continue
     }
     Map candidateTopology = observations[candidateId]
     List<String> candidateMembers = normalizeGroupPlayerIds(candidateTopology?.playerIds)
     if(!candidateTopology?.groupId || candidateTopology?.coordinatorId?.toString() != candidateId ||
         candidateMembers != [candidateId]) {
-      logTrace("Stream holder candidate ${candidateId} skipped: topology group=${candidateTopology?.groupId}, coordinator=${candidateTopology?.coordinatorId}, players=${candidateMembers}")
+      logDebug("Stream holder candidate ${candidateId} skipped: topology group=${candidateTopology?.groupId}, coordinator=${candidateTopology?.coordinatorId}, players=${candidateMembers}")
       continue
     }
     Map playback = playbackObservations[candidateId]
     if(playback?.playbackState?.toString() != 'PLAYBACK_STATE_IDLE') {
-      logTrace("Stream holder candidate ${candidateId} skipped: playback state=${playback?.playbackState}")
+      logDebug("Stream holder candidate ${candidateId} skipped: playback state=${playback?.playbackState}")
       continue
     }
     Long playbackObservedAt = null
@@ -5255,32 +5255,32 @@ Map findIdleStreamHolder(List<ChildDeviceWrapper> targetPlayers, Map snapshot) {
     catch(Exception ignored) { playbackObservedAt = null }
     Long snapshotAt = snapshot.refreshAt as Long
     if(playbackObservedAt == null || snapshotAt == null || playbackObservedAt < snapshotAt) {
-      logTrace("Stream holder candidate ${candidateId} skipped: playback observation ${playbackObservedAt} is older than snapshot ${snapshotAt}")
+      logDebug("Stream holder candidate ${candidateId} skipped: playback observation ${playbackObservedAt} is older than snapshot ${snapshotAt}")
       continue
     }
     Map activity = getPlayerPlaybackActivity(candidate)
     if(activity.active == true || activity.ageMs == null || (activity.ageMs as Long) > 15000L) {
-      logTrace("Stream holder candidate ${candidateId} skipped: activity=${activity}")
+      logDebug("Stream holder candidate ${candidateId} skipped: activity=${activity}")
       continue
     }
     String audioSource = playback.audioSource?.toString() ?: candidate.currentValue('audioSource', true)?.toString()
     if(audioSource?.startsWith('x-sonos-htastream:') == true) {
-      logTrace("Stream holder candidate ${candidateId} skipped: HDMI source ${audioSource}")
+      logDebug("Stream holder candidate ${candidateId} skipped: HDMI source ${audioSource}")
       continue
     }
     String playlist = candidate.currentValue('currentPlaylist', true)?.toString()
     String favorite = candidate.currentValue('currentFavorite', true)?.toString()
     if(playlist && !(playlist in ['No playlist playing', 'Not Available', 'n/a'])) {
-      logTrace("Stream holder candidate ${candidateId} skipped: retained playlist ${playlist}")
+      logDebug("Stream holder candidate ${candidateId} skipped: retained playlist ${playlist}")
       continue
     }
     if(favorite && !(favorite in ['No favorite playing', 'Not Available', 'n/a'])) {
-      logTrace("Stream holder candidate ${candidateId} skipped: retained favorite ${favorite}")
+      logDebug("Stream holder candidate ${candidateId} skipped: retained favorite ${favorite}")
       continue
     }
     String priorMuteState = candidate.currentValue('mute', true)?.toString()
     if(!(priorMuteState in ['muted', 'unmuted'])) {
-      logTrace("Stream holder candidate ${candidateId} skipped: mute state is unavailable")
+      logDebug("Stream holder candidate ${candidateId} skipped: mute state is unavailable")
       continue
     }
     logDebug("Selected temporary stream holder ${candidateId} with idle playback, singleton group ${candidateTopology.groupId}, and mute state ${priorMuteState}")
@@ -5335,7 +5335,7 @@ Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = nu
 void beginGroupAnnouncementTopologySnapshot(String groupDni, Map queue, Map item,
     List<ChildDeviceWrapper> players) {
   if(getActiveGroupOperation() != null || hasActiveAnnouncementTopologyTransaction()) {
-    logTrace("Deferring topology snapshot for announcement ${item.correlationId} until the active group operation completes")
+    logDebug("Deferring topology snapshot for announcement ${item.correlationId} until the active group operation completes")
     runIn(2, 'retryGroupAnnouncementTopologySnapshot', [overwrite: true,
       data: [groupDni: groupDni, correlationId: item.correlationId]])
     return
@@ -5379,7 +5379,7 @@ void beginGroupAnnouncementTopologySnapshot(String groupDni, Map queue, Map item
   Integer timeoutSeconds = 12
   runIn(timeoutSeconds, 'groupAnnouncementTopologySnapshotTimeout', [overwrite: true,
     data: [correlationId: item.correlationId]])
-  logTrace("Collecting fresh topology for group announcement ${item.correlationId}; players=${requiredIds.sort()}")
+  logDebug("Collecting fresh topology for group announcement ${item.correlationId}; players=${requiredIds.sort()}")
 }
 
 void retryGroupAnnouncementTopologySnapshot(Map data = null) {
@@ -6070,7 +6070,7 @@ Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = fal
   Map playbackActivity = getPlayerPlaybackActivity(coordinator)
   String playbackState = playbackActivity.playbackState?.toString()
   Boolean active = playbackActivity.active == true
-  logTrace("Player announcement route check player=${playerDni}, coordinator=${coordinatorId}, priority=${highPriority ? 'high' : 'normal'}, mode=${mode}, playbackState=${playbackState}, playbackObservedAt=${playbackActivity.observedAt}, playbackSignal=${playbackActivity.signal}, transportStatus=${transportStatus}, useAudioClip=${active}")
+  logDebug("Player announcement route check player=${playerDni}, coordinator=${coordinatorId}, priority=${highPriority ? 'high' : 'normal'}, mode=${mode}, playbackState=${playbackState}, playbackObservedAt=${playbackActivity.observedAt}, playbackSignal=${playbackActivity.signal}, transportStatus=${transportStatus}, useAudioClip=${active}")
   return active
 }
 
@@ -6091,7 +6091,7 @@ void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, B
   String playerNames = players.collect { ChildDeviceWrapper player ->
     "${player.displayName} (${player.getDataValue('id')})"
   }.join(', ')
-  logTrace("Preparing group audioClip ${correlationId} for players: ${playerNames}")
+  logDebug("Preparing group audioClip ${correlationId} for players: ${playerNames}")
   players.each { ChildDeviceWrapper player ->
     if(highPriority) {
       player.playerLoadAudioClipHighPriority(item.uri as String, toBigDecimal(item.volume), correlationId,
@@ -6102,7 +6102,7 @@ void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, B
     }
   }
   players.each { ChildDeviceWrapper player -> player.prepareAudioClipForDispatch() }
-  logTrace("Releasing group audioClip ${correlationId} to players: ${playerNames}")
+  logDebug("Releasing group audioClip ${correlationId} to players: ${playerNames}")
   players.each { ChildDeviceWrapper player ->
     player.startPreparedAudioClip()
   }
@@ -6131,7 +6131,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   Boolean isPrioritySidecar = priorityActive?.correlationId?.toString() == correlationId
   Map active = isPrioritySidecar ? priorityActive : (queue?.active instanceof Map ? (Map)queue.active : null)
   if(active == null || active.correlationId?.toString() != correlationId) {
-    logTrace("Ignoring stale group announcement callback ${correlationId} from ${player.getDataValue('id')}")
+    logDebug("Ignoring stale group announcement callback ${correlationId} from ${player.getDataValue('id')}")
     return
   }
   if(phase == 'INTERRUPTED' && payload.externalPlayback == true) {
@@ -6145,7 +6145,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
     }
     queue.externalTakeover = true
     queue.externalSourceUri = payload.replacementUri?.toString()
-    logTrace("Received coordinator takeover correlation=${correlationId}, player=${player.getDataValue('id')}, playbackState=${payload.playbackState}, sourceUri=${payload.sourceUri}, replacementUri=${payload.replacementUri}; pending=${queue.pending?.size() ?: 0}")
+    logDebug("Received coordinator takeover correlation=${correlationId}, player=${player.getDataValue('id')}, playbackState=${payload.playbackState}, sourceUri=${payload.sourceUri}, replacementUri=${payload.replacementUri}; pending=${queue.pending?.size() ?: 0}")
     logInfo("Coordinator stream ${correlationId} was interrupted by external playback; queued Automatic announcements will use audioClip while it remains active")
     queues[groupDni] = queue
     state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
@@ -6159,7 +6159,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   Map<String, String> statuses = active.playerStatuses instanceof Map ? (Map<String, String>)active.playerStatuses : [:]
   String playerId = player.getDataValue('id')?.toString()
   if(playerId) { statuses[playerId] = phase; active.playerStatuses = statuses }
-  logTrace("Group announcement ${correlationId} callback from ${playerId}: ${phase}; observed=${statuses}")
+  logDebug("Group announcement ${correlationId} callback from ${playerId}: ${phase}; observed=${statuses}")
   if(phase == 'ACTIVE') {
     Integer duration = (active.duration ?: 0) as Integer
     Integer timeoutSeconds = duration > 0 ? Math.max(duration + 20, 30) : 180
@@ -6168,7 +6168,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   }
   String mode = active.mode?.toString()
   String coordinatorId = active.coordinatorId?.toString()
-  logTrace("Group announcement ${correlationId} progress routing: mode=${mode ?: 'unset'}, coordinator=${coordinatorId ?: 'unset'}, callbackPlayer=${playerId ?: 'unset'}, phase=${phase}")
+  logDebug("Group announcement ${correlationId} progress routing: mode=${mode ?: 'unset'}, coordinator=${coordinatorId ?: 'unset'}, callbackPlayer=${playerId ?: 'unset'}, phase=${phase}")
   if(mode != 'AUDIO_CLIP') {
     if(playerId == coordinatorId && phase in ['DONE', 'FAILED']) {
       finishGroupAnnouncement(groupDni, correlationId, phase)
@@ -6238,7 +6238,7 @@ void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
     return
   }
   players.each { ChildDeviceWrapper player -> player.prepareSynchronizedAudioClipAfterChime(correlationId) }
-  logTrace("Releasing synchronized TTS ${correlationId} after all group chimes completed")
+  logDebug("Releasing synchronized TTS ${correlationId} after all group chimes completed")
   players.each { ChildDeviceWrapper player -> player.startPreparedAudioClip() }
   players.each { ChildDeviceWrapper player -> player.completePreparedAudioClipDispatch() }
   queues[groupDni] = queue
@@ -6267,7 +6267,7 @@ void groupAnnouncementWatchdog(Map data = null) {
     Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
         ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
     if(transactions[correlationId]?.phase == 'RESTORING') {
-      logTrace("Ignoring group announcement watchdog ${correlationId}; topology restoration is already underway")
+      logDebug("Ignoring group announcement watchdog ${correlationId}; topology restoration is already underway")
       return
     }
     logWarn("Group announcement ${correlationId} timed out; advancing queue")
@@ -6362,7 +6362,7 @@ void enqueueGroupCommandRequest(Map request) {
   }
   // Location events are hub-wide; ignore requests for groups owned by another app instance.
   if(getChildDevice(groupDni) == null) {
-    logTrace("Ignoring group command ${command} (${request?.requestId ?: 'no request ID'}) for unowned group ${groupDni}")
+    logDebug("Ignoring group command ${command} (${request?.requestId ?: 'no request ID'}) for unowned group ${groupDni}")
     return
   }
 
@@ -6374,7 +6374,7 @@ void enqueueGroupCommandRequest(Map request) {
       ? (List<String>)receivedRequests[groupDni]
       : []
   if(requestId && receivedForGroup.contains(requestId)) {
-    logTrace("Ignoring duplicate group command request ${requestId} (${command}) for ${groupDni}; acknowledging without redispatch")
+    logDebug("Ignoring duplicate group command request ${requestId} (${command}) for ${groupDni}; acknowledging without redispatch")
     acknowledgeGroupCommandRequest(groupDni, requestId)
     return
   }
@@ -6383,7 +6383,7 @@ void enqueueGroupCommandRequest(Map request) {
   // scheduler latency cannot strand an announcement in the delayed command
   // queue; each clip is already prepared on all players before release.
   if(command in ['playAudioClip', 'playHighPriorityTrack', 'enqueueLowPriorityTrack']) {
-    logTrace("Dispatching time-sensitive group audio command ${command} immediately for ${groupDni}, request=${requestId ?: 'none'}")
+    logDebug("Dispatching time-sensitive group audio command ${command} immediately for ${groupDni}, request=${requestId ?: 'none'}")
     if(requestId) {
       receivedForGroup.add(requestId)
       if(receivedForGroup.size() > 200) { receivedForGroup = receivedForGroup.takeRight(200) }
@@ -6424,10 +6424,10 @@ void acknowledgeGroupCommandRequest(String groupDni, String requestId) {
     logWarn("Cannot acknowledge group command ${requestId ?: 'unknown'}: group device ${groupDni} is no longer owned by this app")
     return
   }
-  logTrace("Sending group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
+  logDebug("Sending group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
   try {
     groupDevice.acknowledgeGroupCommand(requestId)
-    logTrace("Sent group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
+    logDebug("Sent group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
   } catch(Exception e) {
     logWarn("Could not send group command acknowledgement ${requestId ?: 'unknown'} for ${groupDni}: ${e.message}")
   }
@@ -6490,7 +6490,7 @@ void processGroupCommandRequest(Map data) {
     // explicit group activation. Hold commands that would cancel topology until
     // the group operation completes; explicit ungroup/removal commands remain
     // able to supersede it, and Favorite loads retain their attach behavior.
-    logTrace("Waiting for topology change to complete before processing group command ${command} for ${groupDni}")
+    logDebug("Waiting for topology change to complete before processing group command ${command} for ${groupDni}")
     deferGroupCommandRequest(request)
     return
   }
@@ -7238,7 +7238,7 @@ void registerGroupOperationOnPlayers(Map operation, Collection ids) {
       }
       registered.add(playerId)
       requestedAt[playerId] = now()
-      logTrace("Registered operation ${operation.operationId} on ${playerId} with request ${requestId}")
+      logDebug("Registered operation ${operation.operationId} on ${playerId} with request ${requestId}")
     } catch(Exception e) {
       requestedAt[playerId] = now()
       logWarn("Could not register group operation ${operation.operationId} on ${playerId}: ${e.message}")
@@ -7432,15 +7432,15 @@ Map readFavoriteGroupTopology(Map operation) {
     List<String> freshPlayers = playerObservations.findAll { Map item -> item.fresh == true }
         .collect { Map item -> item.playerId?.toString() }
     if(usingConflict) {
-      logTrace("Post-Favorite topology uses most recent conflicting roster from ${acceptedRoster.playerId}: group=${acceptedRoster.groupId ?: 'unknown'}, coordinator=${acceptedRoster.coordinatorId ?: 'unknown'}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
+      logDebug("Post-Favorite topology uses most recent conflicting roster from ${acceptedRoster.playerId}: group=${acceptedRoster.groupId ?: 'unknown'}, coordinator=${acceptedRoster.coordinatorId ?: 'unknown'}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
     } else {
       String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
       if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.resolvedCoordinatorId as String }
       if(!expectedCoordinatorId) { expectedCoordinatorId = operation?.desiredCoordinatorId as String }
       if(acceptedRoster.playerId?.toString() == expectedCoordinatorId) {
-        logTrace("Post-Favorite topology uses fresh coordinator roster ${acceptedRoster.playerId}: group=${acceptedRoster.groupId}, coordinator=${acceptedRoster.coordinatorId}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
+        logDebug("Post-Favorite topology uses fresh coordinator roster ${acceptedRoster.playerId}: group=${acceptedRoster.groupId}, coordinator=${acceptedRoster.coordinatorId}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
       } else {
-        logTrace("Post-Favorite topology uses first matching roster from ${acceptedRoster.playerId}: group=${acceptedRoster.groupId}, coordinator=${acceptedRoster.coordinatorId}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
+        logDebug("Post-Favorite topology uses first matching roster from ${acceptedRoster.playerId}: group=${acceptedRoster.groupId}, coordinator=${acceptedRoster.coordinatorId}, members=${normalizeGroupPlayerIds(acceptedRoster.playerIds)}, freshPlayers=${freshPlayers}")
       }
     }
     return topologyFromFavoriteRoster(acceptedRoster)
@@ -7461,7 +7461,7 @@ Map readFavoriteGroupTopology(Map operation) {
     List<String> freshnessSummary = playerObservations.collect { Map item ->
       return "${item.playerId}:${item.fresh == true}"
     }
-    logTrace("Post-Favorite topology has no complete fresh report from expected coordinator ${expectedCoordinatorId ?: '(unknown)'}; per-player observations=${freshnessSummary}")
+    logDebug("Post-Favorite topology has no complete fresh report from expected coordinator ${expectedCoordinatorId ?: '(unknown)'}; per-player observations=${freshnessSummary}")
     return topology
   }
 
@@ -7472,7 +7472,7 @@ Map readFavoriteGroupTopology(Map operation) {
         normalizeGroupPlayerIds(item.playerIds) != authoritativePlayerIds)
   }
   if(hasConflictingFreshObservation) {
-    logTrace("Post-Favorite topology coordinator ${expectedCoordinatorId} conflicts with another fresh player report; requiring another observation")
+    logDebug("Post-Favorite topology coordinator ${expectedCoordinatorId} conflicts with another fresh player report; requiring another observation")
     return topology
   }
 
@@ -7486,7 +7486,7 @@ Map readFavoriteGroupTopology(Map operation) {
     authorityPlayerId: expectedCoordinatorId,
     fingerprint: "${expectedCoordinatorId}:${coordinatorObservation.groupId}:${coordinatorObservation.coordinatorId}:${authoritativePlayerIds.join(',')}"
   ]
-  logTrace("Post-Favorite topology uses fresh coordinator roster ${expectedCoordinatorId}: group=${confirmedTopology.groupId}, coordinator=${confirmedTopology.coordinatorId}, members=${authoritativePlayerIds}, freshPlayers=${playerObservations.findAll { Map item -> item.fresh == true }.collect { Map item -> item.playerId }}")
+  logDebug("Post-Favorite topology uses fresh coordinator roster ${expectedCoordinatorId}: group=${confirmedTopology.groupId}, coordinator=${confirmedTopology.coordinatorId}, members=${authoritativePlayerIds}, freshPlayers=${playerObservations.findAll { Map item -> item.fresh == true }.collect { Map item -> item.playerId }}")
   return confirmedTopology
 }
 
@@ -8183,7 +8183,7 @@ void refreshGroupOperationTopology(Map data = [:], Boolean resetStability = true
   }
   operation.topologyRefreshAt = now()
   operation.topologyCheckRequestId = UUID.randomUUID().toString()
-  logTrace("Starting topology observation ${operation.topologyCheckRequestId} for operation ${operation.operationId}")
+  logDebug("Starting topology observation ${operation.topologyCheckRequestId} for operation ${operation.operationId}")
   operation.topologyObservations = [:]
   if(resetStability == true) {
     operation.stableObservations = 0
@@ -8212,7 +8212,7 @@ void refreshGroupFavoriteTopology(Map operation, Boolean resetStability = true) 
   if(operation == null || !operation.favoriteId) { return }
   operation.favoriteTopologyRefreshAt = now()
   operation.favoriteTopologyRequestId = UUID.randomUUID().toString()
-  logTrace("Starting post-Favorite topology observation ${operation.favoriteTopologyRequestId} for operation ${operation.operationId}")
+  logDebug("Starting post-Favorite topology observation ${operation.favoriteTopologyRequestId} for operation ${operation.operationId}")
   operation.favoriteTopologyAttempt = ((operation.favoriteTopologyAttempt ?: 0) as Integer) + 1
   operation.favoriteTopologyObservations = [:]
   if(resetStability == true) {
@@ -8640,7 +8640,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
 
   if(verifyingFavoriteTopology) {
     Boolean finalTopologySatisfied = isFavoriteGroupTopologySatisfied(operation, topology)
-    logTrace("Post-Favorite topology check for ${operation.operationId}: fresh=${topology.fresh == true}, consistent=${topology.consistent == true}, satisfied=${finalTopologySatisfied}, authority=${topology.authorityPlayerId ?: 'all configured players'}, observations=${summarizeGroupOperationTopology(topology)}")
+    logDebug("Post-Favorite topology check for ${operation.operationId}: fresh=${topology.fresh == true}, consistent=${topology.consistent == true}, satisfied=${finalTopologySatisfied}, authority=${topology.authorityPlayerId ?: 'all configured players'}, observations=${summarizeGroupOperationTopology(topology)}")
     if(topology.fresh != true) {
       Long refreshAt = operation.favoriteTopologyRefreshAt as Long ?: 0L
       Boolean waitingForFreshTopology = refreshAt > 0L &&
@@ -8963,7 +8963,7 @@ void groupFavoriteOperationEventHandler(Event event) {
       List<String> eventRegisteredPlayers = normalizeGroupPlayerIds(operation.registrationEventPlayerIds)
       eventRegisteredPlayers.add(eventPlayerId)
       operation.registrationEventPlayerIds = eventRegisteredPlayers.unique().sort()
-      logTrace("Player ${eventPlayerId} acknowledged registration request ${payload.requestId ?: '(legacy)'} for operation ${operation.operationId}")
+      logDebug("Player ${eventPlayerId} acknowledged registration request ${payload.requestId ?: '(legacy)'} for operation ${operation.operationId}")
     }
   }
   switch(eventName) {
@@ -9341,7 +9341,7 @@ void enqueuePlayerCommandRequest(Map request) {
 
 void acknowledgePlayerCommandRequest(ChildDeviceWrapper source, String requestId) {
   source.acknowledgeParentCommand(requestId)
-  logTrace("Acknowledged receipt of parent command ${requestId} for ${source.getDeviceNetworkId()}")
+  logDebug("Acknowledged receipt of parent command ${requestId} for ${source.getDeviceNetworkId()}")
 }
 
 void drainPlayerCommandRequests() {
@@ -9405,7 +9405,7 @@ void processPlayerCommandRequest(Map data) {
   if(activeOperation && !activeOperation.favoriteId && activeOperation.phase != 'COMPLETE' &&
       normalizeGroupPlayerIds(activeOperation.requiredPlayerIds).contains(sourcePlayerId) &&
       isPlayerPlaybackCommandThatWaitsForGroupOperation(command)) {
-    logTrace("Waiting for topology change to complete before processing player command ${command} from ${playerDni}")
+    logDebug("Waiting for topology change to complete before processing player command ${command} from ${playerDni}")
     deferGroupPlayerCommand(request)
     return
   }
@@ -10068,7 +10068,7 @@ String unEscapeMetaData(String text) {
 // Component Methods for Child Event Processing
 // =============================================================================
 void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
-  logTrace('updateGroupDevices')
+  logDebug('updateGroupDevices')
   if(!coordinatorId || !playersInGroup) {
     return
   }
@@ -11346,11 +11346,11 @@ void completeUpdateCheck(Map data, String currentVersion) {
   String latestVersion = manifest.version.toString()
   Boolean manual = data.manual == true
   Integer comparison = compareVersions(currentVersion, latestVersion)
-  logTrace("Async update check cached installed=${currentVersion}, latest=${latestVersion}, comparison=${comparison}")
+  logDebug("Async update check cached installed=${currentVersion}, latest=${latestVersion}, comparison=${comparison}")
   state.lastUpdateCheck = now()
   state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
   Boolean updateDismissed = state.dismissedUpdateVersion?.toString() == latestVersion
-  logTrace("Completing update check; currentVersion=${currentVersion}, latestVersion=${latestVersion}, comparison=${comparison}, dismissedVersion=${state.dismissedUpdateVersion}, updateDismissed=${updateDismissed}")
+  logDebug("Completing update check; currentVersion=${currentVersion}, latestVersion=${latestVersion}, comparison=${comparison}, dismissedVersion=${state.dismissedUpdateVersion}, updateDismissed=${updateDismissed}")
   if(comparison < 0 && !updateDismissed) {
     state.updateAvailable = true
     state.latestVersion = latestVersion

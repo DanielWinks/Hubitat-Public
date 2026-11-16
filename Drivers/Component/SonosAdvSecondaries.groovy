@@ -121,7 +121,7 @@ void webSocketStatus(String message) {
     scheduleWebsocketReconnect()
   }
   notifyParentWebsocketStatus(this.device.getDataValue('websocketStatus')?.toString())
-  logTrace("WebSocket status callback: ${message}; storedStatus=${this.device.getDataValue('websocketStatus')}")
+  logDebug("WebSocket status callback: ${message}; storedStatus=${this.device.getDataValue('websocketStatus')}")
 }
 
 /** Notify the owning player directly; Hubitat drivers do not expose app-style subscribe(). */
@@ -129,16 +129,16 @@ void notifyParentWebsocketStatus(String status) {
   try {
     if(parent != null) {
       parent.rightChannelWebsocketStatusChanged(status, this.device.getDeviceNetworkId())
-      logTrace("Notified parent player of secondary WebSocket status: status=${status}")
+      logDebug("Notified parent player of secondary WebSocket status: status=${status}")
     }
   } catch(Exception e) {
-    logTrace("Could not notify parent player of secondary WebSocket status ${status}: ${e.message}")
+    logDebug("Could not notify parent player of secondary WebSocket status ${status}: ${e.message}")
   }
 }
 
 void wsConnect() {
   if(this.device.getDataValue('websocketStatus') == 'open' || state.websocketConnectPending == true) {
-    logTrace("Skipping secondary WebSocket connect; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
+    logDebug("Skipping secondary WebSocket connect; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
     return
   }
   try {
@@ -150,7 +150,7 @@ void wsConnect() {
     Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
     state.websocketConnectPending = true
     this.device.updateDataValue('websocketStatus', 'connecting')
-    logTrace("Starting secondary WebSocket connection to ${websocketUrl}")
+    logDebug("Starting secondary WebSocket connection to ${websocketUrl}")
     interfaces.webSocket.connect(websocketUrl, headers: headers, ignoreSSLIssues: true)
   } catch (Exception e) {
     state.remove('websocketConnectPending')
@@ -166,7 +166,7 @@ void wsClose() { interfaces.webSocket.close() }
 Boolean sendWsMessage(String message) {
   if(!message) { return false }
   if(this.device.getDataValue('websocketStatus') != 'open') {
-    logTrace("Not sending secondary WebSocket message; socket status=${this.device.getDataValue('websocketStatus')}, messageLength=${message.length()}")
+    logDebug("Not sending secondary WebSocket message; socket status=${this.device.getDataValue('websocketStatus')}, messageLength=${message.length()}")
     initializeWebsocketConnection()
     logWarn('WebSocket message was not sent because the secondary socket is not open; paired dispatch must retry as a group')
     return false
@@ -179,13 +179,13 @@ Boolean sendWsMessage(String message) {
   try {
     String ledgerId = registerSecondaryAudioClipLedgerEntry(message, descriptor)
     interfaces.webSocket.sendMessage(message)
-    logTrace("Secondary WebSocket sendMessage returned successfully; ledgerId=${ledgerId ?: 'not-ledgered'}")
+    logDebug("Secondary WebSocket sendMessage returned successfully; ledgerId=${ledgerId ?: 'not-ledgered'}")
     return true
   } catch(Exception e) {
     failPendingAudioClipLedger("send failed: ${e.message}")
     this.device.updateDataValue('websocketStatus', 'error')
     sendEvent(name: 'websocketStatus', value: 'error', isStateChange: true)
-    logTrace("Secondary WebSocket sendMessage threw; status changed to error: ${e.message}")
+    logDebug("Secondary WebSocket sendMessage threw; status changed to error: ${e.message}")
     logWarn("WebSocket send failed: ${e.message}")
     scheduleWebsocketReconnect()
     return false
@@ -202,17 +202,17 @@ void scheduleWebsocketReconnect() {
   Integer delaySeconds = WS_RECONNECT_DELAYS[attempts]
   state.websocketReconnectAttempts = attempts + 1
   state.websocketReconnectScheduled = true
-  logTrace("Scheduling secondary WebSocket reconnect attempt ${attempts + 1}/${WS_MAX_RECONNECT_ATTEMPTS} in ${delaySeconds}s")
+  logDebug("Scheduling secondary WebSocket reconnect attempt ${attempts + 1}/${WS_MAX_RECONNECT_ATTEMPTS} in ${delaySeconds}s")
   runIn(delaySeconds, 'retryWebsocketConnection', [overwrite: true])
 }
 
 void retryWebsocketConnection() {
   state.remove('websocketReconnectScheduled')
   if(state.websocketConnectPending == true || this.device.getDataValue('websocketStatus') == 'open') {
-    logTrace("Skipping secondary WebSocket retry; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
+    logDebug("Skipping secondary WebSocket retry; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
     return
   }
-  logTrace("Attempting secondary WebSocket reconnect ${state.websocketReconnectAttempts ?: 0}/${WS_MAX_RECONNECT_ATTEMPTS}")
+  logDebug("Attempting secondary WebSocket reconnect ${state.websocketReconnectAttempts ?: 0}/${WS_MAX_RECONNECT_ATTEMPTS}")
   wsConnect()
 }
 
@@ -305,14 +305,14 @@ Boolean playerLoadAudioClipForSynchronizedRelease(String json, String correlatio
       release.error = e.message?.toString()
     }
   } else {
-    logTrace("Paired audioClip secondary send skipped because socket is not open: correlation=${correlationId}, websocketStatus=${websocketStatus}")
+    logDebug("Paired audioClip secondary send skipped because socket is not open: correlation=${correlationId}, websocketStatus=${websocketStatus}")
     initializeWebsocketConnection()
     release.result = 'failed'
     release.error = 'Secondary socket was not open during paired release'
   }
   pending[correlationId] = release
   state.synchronizedAudioClipReleases = pending
-  logTrace("Paired audioClip secondary release result recorded: correlation=${correlationId}, result=${release.result}, websocketStatusNow=${this.device.getDataValue('websocketStatus')}")
+  logDebug("Paired audioClip secondary release result recorded: correlation=${correlationId}, result=${release.result}, websocketStatusNow=${this.device.getDataValue('websocketStatus')}")
   return release.result == 'sent'
 }
 
@@ -324,14 +324,14 @@ void completeSynchronizedAudioClipRelease(String correlationId) {
   Map release = pending.remove(correlationId) as Map
   state.synchronizedAudioClipReleases = pending
   if(release == null) {
-    logTrace("No paired-speaker audioClip release record found during completion for ${correlationId}")
+    logDebug("No paired-speaker audioClip release record found during completion for ${correlationId}")
     return
   }
-  logTrace("Completing paired-speaker audioClip release for ${correlationId}: result=${release.result}, websocketStatusAtRelease=${release.websocketStatusAtRelease}, websocketStatusNow=${this.device.getDataValue('websocketStatus')}")
+  logDebug("Completing paired-speaker audioClip release for ${correlationId}: result=${release.result}, websocketStatusAtRelease=${release.websocketStatusAtRelease}, websocketStatusNow=${this.device.getDataValue('websocketStatus')}")
   if(release.result == 'failed') {
     logWarn("Paired-speaker audioClip send failed for ${correlationId}: ${release.error ?: 'unknown error'}")
   } else if(release.result == 'sent') {
-    logTrace("Paired-speaker audioClip sent during synchronized release pass for ${correlationId}")
+    logDebug("Paired-speaker audioClip sent during synchronized release pass for ${correlationId}")
   }
 }
 // =============================================================================
@@ -368,17 +368,17 @@ void parse(String message) {
         (!returnedCorrelation || entry.correlationId?.toString() == returnedCorrelation)
     } as Map
     if(matched == null) {
-      logTrace("Secondary WebSocket received unmatched audioClip response: correlation=${returnedCorrelation ?: 'n/a'}, success=${eventType.success}, type=${eventType.type}")
+      logDebug("Secondary WebSocket received unmatched audioClip response: correlation=${returnedCorrelation ?: 'n/a'}, success=${eventType.success}, type=${eventType.type}")
       return
     }
     ledger.remove(matched)
     if(ledger.isEmpty()) { state.remove('websocketCommandLedger') }
     else { state.websocketCommandLedger = ledger }
     String result = eventType.success == true ? 'success' : 'failure'
-    logTrace("Secondary WebSocket command ledger ${result}: id=${matched.entryId}, audioClip.loadAudioClip correlation=${matched.correlationId}, type=${eventType.type}, error=${eventData.errorCode ?: eventData.reason ?: 'n/a'}")
+    logDebug("Secondary WebSocket command ledger ${result}: id=${matched.entryId}, audioClip.loadAudioClip correlation=${matched.correlationId}, type=${eventType.type}, error=${eventData.errorCode ?: eventData.reason ?: 'n/a'}")
     notifyParentWebsocketCommandResponse(result, matched.correlationId?.toString(), eventData.errorCode?.toString())
   } catch(Exception e) {
-    logTrace("Could not parse secondary WebSocket message: ${e.message}")
+    logDebug("Could not parse secondary WebSocket message: ${e.message}")
   }
 }
 
@@ -390,7 +390,7 @@ Map describeSecondaryWebsocketCommand(String message) {
     return [namespace: command.namespace?.toString(), wireCommand: command.command?.toString(),
       correlationId: args.name?.toString()]
   } catch(Exception e) {
-    logTrace("Could not inspect secondary WebSocket command: ${e.message}")
+    logDebug("Could not inspect secondary WebSocket command: ${e.message}")
     return [:]
   }
 }
@@ -408,7 +408,7 @@ String registerSecondaryAudioClipLedgerEntry(String message, Map descriptor) {
   state.websocketCommandLedger = ledger
   runIn(WS_COMMAND_ACK_TIMEOUT_SECONDS, 'secondaryAudioClipLedgerTimeout',
       [data: [entryId: entryId, connectionGeneration: generation], overwrite: false])
-  logTrace("Secondary WebSocket command ledger armed id=${entryId}, audioClip.loadAudioClip correlation=${entry.correlationId}, timeout=${WS_COMMAND_ACK_TIMEOUT_SECONDS}s")
+  logDebug("Secondary WebSocket command ledger armed id=${entryId}, audioClip.loadAudioClip correlation=${entry.correlationId}, timeout=${WS_COMMAND_ACK_TIMEOUT_SECONDS}s")
   return entryId
 }
 
@@ -448,7 +448,7 @@ void failPendingAudioClipLedger(String reason) {
 void notifyParentWebsocketCommandResponse(String result, String correlationId, String errorCode) {
   try {
     if(parent != null) { parent.rightChannelWebsocketCommandResponse(result, correlationId, errorCode, this.device.getDeviceNetworkId()) }
-  } catch(Exception e) { logTrace("Could not notify parent of secondary command response: ${e.message}") }
+  } catch(Exception e) { logDebug("Could not notify parent of secondary command response: ${e.message}") }
 }
 // =============================================================================
 // End Parse

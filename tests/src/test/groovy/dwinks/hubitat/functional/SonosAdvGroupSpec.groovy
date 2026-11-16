@@ -282,6 +282,50 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.any { List call -> call[1] == 'drainGroupCommandQueue' }
   }
 
+  def "initialize retries a persisted active group command and preserves pending requests"() {
+    given:
+    Map active = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'active-request', command: 'playHighPriorityTrack']
+    Map pending = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'pending-request', command: 'refresh']
+    driver.runtimeState.activeGroupCommandRequest = active
+    driver.runtimeState.pendingGroupCommands = [pending]
+
+    when:
+    driver.initialize()
+
+    then:
+    driver.runtimeState.activeGroupCommandRequest == active
+    driver.runtimeState.pendingGroupCommands == [pending]
+    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'retryActiveGroupCommandRequest' }
+  }
+
+  def "configure drains persisted pending group commands when no request is active"() {
+    given:
+    Map pending = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'pending-request', command: 'refresh']
+    driver.runtimeState.pendingGroupCommands = [pending]
+
+    when:
+    driver.configure()
+
+    then:
+    !driver.runtimeState.activeGroupCommandRequest
+    driver.runtimeState.pendingGroupCommands == [pending]
+    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'drainGroupCommandQueue' }
+  }
+
+  def "a mismatched acknowledgement cannot release the active group command"() {
+    given:
+    driver.requestGroupCommand('refresh')
+    driver.drainGroupCommandQueue()
+    Map active = (Map)driver.runtimeState.activeGroupCommandRequest
+
+    when:
+    driver.acknowledgeGroupCommand('different-request')
+
+    then:
+    driver.runtimeState.activeGroupCommandRequest == active
+    driver.logs.any { String line -> line.contains('Ignored group command acknowledgement') }
+  }
+
   def "setVolumeZero publishes a zero-volume group command without an argument"() {
     when:
     driver.setVolumeZero()

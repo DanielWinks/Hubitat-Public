@@ -80,7 +80,7 @@ metadata {
 
 @Field static final String SONOS_ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 
-void logTrace(String message) { log.debug(message) }
+void logDebug(String message) { log.debug(message) }
 
 void sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'alarmManager', action: action,
@@ -140,7 +140,7 @@ List<String> getCachedTTSVoiceNames() {
 void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
   cachedTTSVoiceNames = voiceNames
   cachedTTSDefaultVoice = defaultVoice
-  logTrace("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
+  logDebug("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
 }
 
 @Field static volatile List<String> cachedTTSVoiceNames = null

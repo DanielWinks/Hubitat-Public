@@ -320,7 +320,7 @@ void drainGroupCommandQueue() {
     Map active = (Map)runtimeState.activeGroupCommandRequest
     List<Map> pending = runtimeState.pendingGroupCommands instanceof List
         ? (List<Map>)runtimeState.pendingGroupCommands : []
-    logTrace("Group command drain blocked by unacknowledged ${active.command} (${active.requestId}); pending=${pending.size()}")
+    logDebug("Group command drain blocked by unacknowledged ${active.command} (${active.requestId}); pending=${pending.size()}")
     return
   }
   List<Map> pending = runtimeState.pendingGroupCommands instanceof List ? (List<Map>)runtimeState.pendingGroupCommands : []
@@ -328,7 +328,7 @@ void drainGroupCommandQueue() {
   Map payload = pending.remove(0)
   runtimeState.pendingGroupCommands = pending
   runtimeState.activeGroupCommandRequest = payload
-  logTrace("Promoted group command ${payload.command} (${payload.requestId}) to active; pending=${pending.size()}, ageMs=${Math.max(0L, now() - ((payload.createdAt ?: now()) as Long))}")
+  logDebug("Promoted group command ${payload.command} (${payload.requestId}) to active; pending=${pending.size()}, ageMs=${Math.max(0L, now() - ((payload.createdAt ?: now()) as Long))}")
   emitGroupCommandRequest(payload)
 }
 
@@ -336,7 +336,7 @@ void emitGroupCommandRequest(Map data) {
   Map payload = data?.payload instanceof Map ? (Map)data.payload : data
   if(!(payload instanceof Map) || !payload.command) { return }
   Long ageMs = payload.createdAt != null ? Math.max(0L, now() - (payload.createdAt as Long)) : -1L
-  logTrace("Emitting group command request id=${payload.requestId}, command=${payload.command}, sequence=${payload.sequence ?: 'unknown'}, ageMs=${ageMs}, pending=${(runtimeState.pendingGroupCommands instanceof List ? ((List)runtimeState.pendingGroupCommands).size() : 0)}")
+  logDebug("Emitting group command request id=${payload.requestId}, command=${payload.command}, sequence=${payload.sequence ?: 'unknown'}, ageMs=${ageMs}, pending=${(runtimeState.pendingGroupCommands instanceof List ? ((List)runtimeState.pendingGroupCommands).size() : 0)}")
   sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
   logDebug("Delivered group command ${payload.command} (${payload.requestId}); waiting for parent acknowledgement")
   runIn(GROUP_COMMAND_RETRY_INTERVAL_SECONDS, 'retryActiveGroupCommandRequest', [overwrite: true])
@@ -351,7 +351,7 @@ void retryActiveGroupCommandRequest() {
     logWarn("Retrying unacknowledged group command ${payload.command} (${payload.requestId}); ageMs=${ageMs}, pending=${pendingCount}")
     emitGroupCommandRequest(payload)
   } else {
-    logTrace('Group command retry fired with no active request; scheduling a queue drain')
+    logDebug('Group command retry fired with no active request; scheduling a queue drain')
     runIn(1, 'drainGroupCommandQueue', [overwrite: true])
   }
 }
@@ -359,7 +359,7 @@ void retryActiveGroupCommandRequest() {
 void acknowledgeGroupCommand(String requestId) {
   Map active = runtimeState.activeGroupCommandRequest instanceof Map ? (Map)runtimeState.activeGroupCommandRequest : null
   if(!active || !requestId || requestId != active.requestId) {
-    logTrace("Ignored group command acknowledgement requestId=${requestId ?: 'none'}, active=${active?.requestId ?: 'none'}")
+    logDebug("Ignored group command acknowledgement requestId=${requestId ?: 'none'}, active=${active?.requestId ?: 'none'}")
     return
   }
   unschedule('retryActiveGroupCommandRequest')
@@ -376,13 +376,13 @@ void recoverGroupCommandQueue() {
   List<Map> pending = runtimeState.pendingGroupCommands instanceof List
       ? (List<Map>)runtimeState.pendingGroupCommands : []
   if(active) {
-    logTrace("Recovering group command queue with active ${active.command} (${active.requestId}); pending=${pending.size()}")
+    logDebug("Recovering group command queue with active ${active.command} (${active.requestId}); pending=${pending.size()}")
     runIn(1, 'retryActiveGroupCommandRequest', [overwrite: true])
   } else if(!pending.isEmpty()) {
-    logTrace("Recovering group command queue with ${pending.size()} pending requests and no active request")
+    logDebug("Recovering group command queue with ${pending.size()} pending requests and no active request")
     runIn(1, 'drainGroupCommandQueue', [overwrite: true])
   } else {
-    logTrace('Group command queue recovery found no outstanding work')
+    logDebug('Group command queue recovery found no outstanding work')
   }
 }
 
@@ -437,7 +437,7 @@ List<String> getCachedTTSVoiceNames() {
 void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
   cachedTTSVoiceNames = voiceNames
   cachedTTSDefaultVoice = defaultVoice
-  logTrace("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
+  logDebug("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
 }
 
 
