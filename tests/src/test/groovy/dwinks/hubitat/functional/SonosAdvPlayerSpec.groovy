@@ -469,6 +469,25 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['unmuted']
   }
 
+  def "unmute skips AirPlay volume restore when saved level is missing or invalid"() {
+    given:
+    driver.settings.enableAirPlayUnmuteVolumeFix = true
+    driver.device.currentValues.mute = 'muted'
+    if(restoreLevel != null) { driver.runtimeState.restoreLevelAfterUnmute = restoreLevel }
+
+    when:
+    driver.setMuteState('unmuted')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.events.findAll { Map event -> event.name == 'mute' }*.value == ['unmuted']
+    websocketMessages.empty
+    driver.logs.any { it.toString().contains('saved restore level is unavailable or invalid') }
+
+    where:
+    restoreLevel << [null, 'invalid', 101, -1, 10.5G]
+  }
+
   def "mute child commands send player mute requests"() {
     given:
     com.hubitat.app.DeviceWrapper child = new com.hubitat.app.DeviceWrapper(dataValues: [command: 'Mute'])
@@ -2683,6 +2702,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.state.audioSourceMetadataType = 'linein.airplay'
     driver.state.audioSourceMetadataObservedAt = driver.now()
     driver.device.dataValues.capabilities = 'AUDIO_CLIP'
+    driver.device.dataValues.useAudioClipForAirPlay = 'true'
     driver.runtimeState.audioClipPlaying = true
 
     when:
@@ -2709,9 +2729,9 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     List<BigDecimal> volumes = []
     driver.metaClass.getParent = { -> null }
-    driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3'] as LinkedHashMap }
+    driver.metaClass.textToSpeech = { String text, String voice -> [:] as LinkedHashMap }
     driver.metaClass.componentPlayTextNoRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
-    driver.metaClass.componentPlayStreamWithRestoreLocal = { String uri, Integer duration, BigDecimal level -> volumes.add(level) }
+    driver.metaClass.componentPlayTextWithRestoreLocal = { String text, BigDecimal level, String voice -> volumes.add(level) }
     driver.device.currentValues.volume = 5
     driver.settings.ttsBoostAmount = 10
 

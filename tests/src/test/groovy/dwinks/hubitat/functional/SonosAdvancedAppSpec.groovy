@@ -15,6 +15,7 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<Map> commands = []
   List<String> acknowledgedParentRequests = []
   List<List<String>> completedAppTtsRequests = []
+  List<String> refreshedPlaybackUpdates = []
 
   void mute() { commands << [name: 'mute'] }
   void unmute() { commands << [name: 'unmute'] }
@@ -107,6 +108,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   void getPlaybackStatus() { commands << [name: 'getPlaybackStatus'] }
   void getPlaybackMetadataStatus() { commands << [name: 'getPlaybackMetadataStatus'] }
+  void applyRefreshedPlaybackState(String json) { refreshedPlaybackUpdates << json }
+  void applyStateBatch(String json) { refreshedPlaybackUpdates << json }
+  void updateBatchPlaybackState(String json) { refreshedPlaybackUpdates << json }
   void playerPlay() { commands << [name: 'playerPlay'] }
   void play() { commands << [name: 'play'] }
   void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {

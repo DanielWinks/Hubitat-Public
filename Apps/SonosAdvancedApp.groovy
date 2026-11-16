@@ -37,6 +37,7 @@ import hubitat.scheduling.AsyncResponse
 // Library: Utilities and Logging (inlined)
 // =============================================================================
 @Field static final List<String> APP_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+@Field static final Integer CHILD_STATE_DRAIN_BATCH_SIZE = 2
 
 void logError(String message) {
   if(loggingEnabled('error')) {
@@ -281,7 +282,6 @@ preferences {
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
 @Field static final String LAST_SENT_CHILD_STATE_KEY = 'lastSentChildState'
 @Field static final String CHILD_STATE_DRAIN_SCHEDULED_KEY = 'childStateDrainScheduled'
-@Field static final Integer CHILD_STATE_DRAIN_MAX_CHILDREN = 2
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
 @Field static final String GROUP_STATE_DRAIN_SCHEDULED_KEY = 'groupStateDrainScheduled'
 @Field static final String NEW_UI_GROUP_EDITOR_MODE_KEY = 'newUiGroupEditorMode'
@@ -3086,16 +3086,19 @@ void createGroupDevices() {
 }
 
 /**
- * Subscribe to command attributes published by app-owned child devices.
- * Device-scoped events let the app handle requests without a synchronous
- * driver-to-app call while the driver is holding its execution gate.
+ * Group devices publish command requests as location events, keeping the
+ * group driver from synchronously entering the app while holding its gate.
  */
 void subscribeToGroupCommandRequests() {
+  Integer subscribedGroups = 0
+  Integer subscribedPlayers = 0
   app.getChildDevices().each { ChildDeviceWrapper child ->
     String dni = child.getDeviceNetworkId()?.toString()
     if(dni?.contains(GROUP_DEVICE_DNI_MARKER)) {
       unsubscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
       subscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
+      subscribedGroups++
+      logTrace("Subscribed group command handler for groupDni=${dni}, attribute=${GROUP_COMMAND_REQUEST_ATTRIBUTE}")
     } else if(dni?.contains(ALARM_MANAGER_DNI_MARKER) || dni?.contains(ALARM_SWITCH_DNI_MARKER)) {
       unsubscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
       subscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
@@ -3110,7 +3113,10 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, PLAYER_APP_REQUEST_ATTRIBUTE, 'playerAppRequestHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
+    subscribedPlayers++
+    logTrace("Subscribed player app request handler for playerDni=${playerDevice.getDeviceNetworkId()}, attribute=${PLAYER_APP_REQUEST_ATTRIBUTE}")
   }
+  logTrace("Child request subscriptions configured; groups=${subscribedGroups}, players=${subscribedPlayers}")
 }
 
 /** Keep player driver policy caches aligned with app settings and observations. */
@@ -4307,7 +4313,7 @@ void sendChildEvent(String dni, Map event) {
 }
 
 /** Queue only changed values and coalesce them by child and attribute. */
-synchronized void queueChildStateBatch(String dni, Map attributes) {
+void queueChildStateBatch(String dni, Map attributes) {
   if(!dni || !attributes) { return }
   Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
@@ -4342,27 +4348,27 @@ Boolean sameChildStateValue(Object left, Object right) {
  * returned. This method intentionally performs only the final child event
  * delivery and never calls back into a player or group command.
  */
-synchronized void drainQueuedChildEvents() {
+void drainQueuedChildEvents() {
   Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
       : [:]
   state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
+  state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
   if(pending.isEmpty()) {
-    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
     return
   }
 
-  Map<String, Map<String, Object>> remaining = [:]
   Map<String, Map<String, Object>> failed = [:]
+  Map<String, Map<String, Object>> deferred = [:]
   Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
-  Integer processedChildren = 0
+  Integer deliveredOrAttempted = 0
   pending.each { String dni, Map<String, Object> eventsForChild ->
-    if(processedChildren >= CHILD_STATE_DRAIN_MAX_CHILDREN) {
-      remaining[dni] = eventsForChild
+    if(deliveredOrAttempted >= CHILD_STATE_DRAIN_BATCH_SIZE) {
+      deferred[dni] = eventsForChild
       return
     }
-    processedChildren++
+    deliveredOrAttempted++
     ChildDeviceWrapper child = getChildDevice(dni)
     if(child == null) {
       logWarn("drainQueuedChildEvents: no child device found for DNI ${dni}")
@@ -4382,30 +4388,23 @@ synchronized void drainQueuedChildEvents() {
     }
   }
   if(!lastSent.isEmpty()) { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
-  Map<String, Map<String, Object>> arrivals = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
-  Map<String, Map<String, Object>> nextPending = [:]
-  mergeChildEventQueues(nextPending, remaining)
-  mergeChildEventQueues(nextPending, failed)
-  mergeChildEventQueues(nextPending, arrivals)
-  if(!nextPending.isEmpty()) {
-    state[PENDING_CHILD_EVENT_QUEUE_KEY] = nextPending
+  if(!failed.isEmpty()) {
+    Map<String, Map<String, Object>> retryAndNew = deferred
+    failed.each { String dni, Map<String, Object> attrs ->
+      Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
+      combined.putAll(attrs)
+      retryAndNew[dni] = combined
+    }
+    Map<String, Map<String, Object>> arrivals = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+        ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
+    arrivals.each { String dni, Map<String, Object> attrs ->
+      Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
+      combined.putAll(attrs)
+      retryAndNew[dni] = combined
+    }
+    state[PENDING_CHILD_EVENT_QUEUE_KEY] = retryAndNew
     state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
     runInMillis(1000, 'drainQueuedChildEvents', [overwrite: true])
-  } else {
-    state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
-    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
-  }
-}
-
-/** Merge queued child maps while allowing newer attribute values to replace older ones. */
-private void mergeChildEventQueues(Map<String, Map<String, Object>> target,
-    Map<String, Map<String, Object>> source) {
-  source.each { String dni, Map<String, Object> attributes ->
-    Map<String, Object> combined = target[dni] instanceof Map
-        ? new LinkedHashMap<String, Object>(target[dni]) : [:]
-    combined.putAll(attributes)
-    target[dni] = combined
   }
 }
 
@@ -4578,6 +4577,8 @@ void groupCommandRequestHandler(Event event) {
     return
   }
 
+  logTrace("Received group command event; groupDni=${request?.groupDni ?: 'unknown'}, command=${request?.command ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sequence=${request?.sequence ?: 'unknown'}")
+
   enqueueGroupCommandRequest(request)
 }
 
@@ -4639,8 +4640,12 @@ void playerAppRequestHandler(Event event) {
   }
   String playerDni = request?.sourceDni?.toString()
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
-  if(player == null || !player.getDataValue('id') || request.channel != 'playerAppRequest') { return }
+  if(player == null || !player.getDataValue('id') || request.channel != 'playerAppRequest') {
+    logTrace("Ignoring player app request action=${request?.action ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sourceDni=${playerDni ?: 'unknown'}, owned=${player != null}, hasPlayerId=${player?.getDataValue('id') != null}, channel=${request?.channel ?: 'unknown'}")
+    return
+  }
   Map args = request.args instanceof Map ? (Map)request.args : [:]
+  logTrace("Received player app request action=${request.action ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${playerDni}")
   switch(request.action?.toString()) {
     case 'refreshRoster':
       refreshStaticDriverActivePlayerRoster()
@@ -4656,8 +4661,10 @@ void playerAppRequestHandler(Event event) {
       BigDecimal volume = null
       try { volume = args.volume != null ? new BigDecimal(args.volume.toString()) : null }
       catch(Exception e) { logWarn("Ignoring invalid volume in player TTS request ${requestId}") }
+      logTrace("Handling player active-stream TTS requestId=${requestId ?: 'unknown'}, correlation=${args.correlationId ?: 'unknown'}, duration=${duration}, hasUri=${args.uri != null && args.uri.toString() != ''}")
       Boolean accepted = handlePlayerActiveStreamTts(playerDni, args.uri?.toString(), volume, duration,
           args.correlationId?.toString())
+      logTrace("Player active-stream TTS decision requestId=${requestId ?: 'unknown'}, accepted=${accepted}")
       if(requestId) { player.completeParentAppActiveStreamTts(requestId, accepted.toString()) }
       break
     default: logWarn("Ignoring unsupported player app request action '${request.action}'")
@@ -5166,14 +5173,21 @@ Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal vol
     Integer duration, String correlationId) {
   ChildDeviceWrapper target = playerDni ? getChildDevice(playerDni) : null
   if(target == null || !uri) {
+    logTrace("Active-stream TTS rejected: targetMissing=${target == null}, uriPresent=${uri != null && uri != ''}, playerDni=${playerDni ?: 'unknown'}")
     return false
   }
   String targetId = target.getDataValue('id')?.toString()
-  if(!targetId) { return false }
+  if(!targetId) {
+    logTrace("Active-stream TTS rejected: player ${target.displayName} has no Sonos player ID, playerDni=${playerDni}")
+    return false
+  }
   String audioSource = target.currentValue('audioSource', true)?.toString()
   String groupCoordinatorId = target.getDataValue('groupCoordinatorId')?.toString()
-  if(isAirPlayAudioSource(audioSource) || (groupCoordinatorId && groupCoordinatorId != targetId) ||
-      !isPlayerActivelyPlaying(target)) {
+  Boolean airPlaySource = isAirPlayAudioSource(audioSource)
+  Boolean groupedFollower = groupCoordinatorId && groupCoordinatorId != targetId
+  Boolean activelyPlaying = isPlayerActivelyPlaying(target)
+  if(airPlaySource || groupedFollower || !activelyPlaying) {
+    logTrace("Active-stream TTS rejected for player=${target.displayName}; airPlay=${airPlaySource}, coordinator=${groupCoordinatorId ?: 'unknown'}, targetId=${targetId}, groupedFollower=${groupedFollower}, activelyPlaying=${activelyPlaying}, audioSource=${audioSource ?: 'unknown'}")
     return false
   }
   List<ChildDeviceWrapper> groupDevices = getCurrentGroupDevices()
@@ -5188,6 +5202,7 @@ Boolean handlePlayerActiveStreamTts(String playerDni, String uri, BigDecimal vol
     correlationId: correlationId, forceAudioClip: !isAutomaticTtsTopologyChangesEnabled(), isTts: true,
     chimeBeforeStandardPriorityTTS: target.getChimeBeforeStandardPriorityTTS() == true]
   enqueueGroupAnnouncement(operationGroup, target, [target], 'playAudioClip', args, correlationId)
+  logTrace("Active-stream TTS accepted for player=${target.displayName}, groupDni=${operationGroup.deviceNetworkId}, correlation=${correlationId ?: 'unknown'}, forceAudioClip=${args.forceAudioClip}")
   logInfo("Queued direct-player active-stream TTS for ${target.displayName}; Sonos Advanced will select and release a temporary holder")
   return true
 }
@@ -6331,7 +6346,9 @@ void startNextGroupAnnouncementCallback(Map data = null) {
   if(groupDni) { startNextGroupAnnouncement(groupDni) }
 }
 
-/** Queue a group command request received from an owned Group child device. */
+/**
+ * Queue a group command request received through the location event subscription.
+ */
 void enqueueGroupCommandRequest(Map request) {
   if(!(request instanceof Map)) {
     return
@@ -6343,8 +6360,11 @@ void enqueueGroupCommandRequest(Map request) {
     logWarn("Ignoring group command request with invalid target or command: ${JsonOutput.toJson(request)}")
     return
   }
-  // Ignore requests from devices this app instance does not own.
-  if(getChildDevice(groupDni) == null) { return }
+  // Location events are hub-wide; ignore requests for groups owned by another app instance.
+  if(getChildDevice(groupDni) == null) {
+    logTrace("Ignoring group command ${command} (${request?.requestId ?: 'no request ID'}) for unowned group ${groupDni}")
+    return
+  }
 
   String requestId = request.requestId as String
   Map<String, List<String>> receivedRequests = state.receivedGroupCommandRequestIds instanceof Map
@@ -6400,9 +6420,17 @@ void enqueueGroupCommandRequest(Map request) {
 
 void acknowledgeGroupCommandRequest(String groupDni, String requestId) {
   ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
-  if(groupDevice == null) { return }
-  groupDevice.acknowledgeGroupCommand(requestId)
-  logTrace("Acknowledged receipt of group command ${requestId} for ${groupDni}")
+  if(groupDevice == null) {
+    logWarn("Cannot acknowledge group command ${requestId ?: 'unknown'}: group device ${groupDni} is no longer owned by this app")
+    return
+  }
+  logTrace("Sending group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
+  try {
+    groupDevice.acknowledgeGroupCommand(requestId)
+    logTrace("Sent group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
+  } catch(Exception e) {
+    logWarn("Could not send group command acknowledgement ${requestId ?: 'unknown'} for ${groupDni}: ${e.message}")
+  }
 }
 
 void drainGroupCommandRequests() {

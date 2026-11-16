@@ -126,10 +126,6 @@ metadata {
   command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
   command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
   command 'setVolumeZero'
-  command 'completeParentAppActiveStreamTts', [
-    [name: 'Request ID', type: 'STRING'],
-    [name: 'Accepted', type: 'ENUM', constraints: ['true', 'false']]
-  ]
   command 'groupVolumeUp'
   command 'groupVolumeDown'
   command 'muteGroup'
@@ -1482,7 +1478,11 @@ void playTrackAndRestore(String uri, Object volume = null) { playerLoadAudioClip
 void playTrackAndResume(String uri, Object volume = null) { playerLoadAudioClip(uri, normalizePublicPlaybackVolume(volume)) }
 
 void devicePlayText(String text, BigDecimal volume = null, String voice = null) {
-  if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) { return }
+  logTrace("Speak request entered; hasText=${text != null && text.toString().trim() != ''}, requestedVolume=${volume}, voiceSpecified=${voice != null && voice != ''}, audioClipCapability=${hasAudioClipCapability()}")
+  if(deferCommandToParentDuringGroupOperation('speak', [text, volume, voice])) {
+    logTrace('Speak request deferred to the parent app during an active group operation')
+    return
+  }
   Boolean airPlaySource = isCurrentAirPlayAudioSource()
   Boolean useAudioClip = hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(false)
   if(airPlaySource && hasAudioClipCapability() == true) {
@@ -1499,6 +1499,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     LinkedHashMap tts = textToSpeech(text, voice)
     String streamUrl = tts?.uri?.toString()
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
+    logTrace("Speak TTS generated; route=local-airplay-audioClip, hasUri=${streamUrl != null && streamUrl != ''}, duration=${ttsDuration}")
     playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
   } else {
     LinkedHashMap tts = textToSpeech(text, voice)
@@ -1511,10 +1512,12 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
       pending[requestId] = [uri: streamUrl, volume: volume?.toString(), duration: ttsDuration,
         correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip]
       state.pendingParentAppTtsRequests = pending
+      logTrace("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
       sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
         volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId])
       return
     } else {
+      logTrace("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
       if(streamUrl) {
         if(useAudioClip) {
           playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
@@ -1581,6 +1584,7 @@ Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
 void sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'playerAppRequest', action: action,
     sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
+  logTrace("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
   sendEvent(name: PLAYER_APP_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
 }
 
@@ -1589,9 +1593,14 @@ void completeParentAppActiveStreamTts(String requestId, String accepted) {
   Map<String, Object> pending = state.pendingParentAppTtsRequests instanceof Map
       ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
   Map request = pending[requestId] instanceof Map ? (Map)pending[requestId] : null
-  if(request == null) { return }
+  if(request == null) {
+    logTrace("Ignoring parent active-stream TTS response for unknown or expired requestId=${requestId ?: 'none'}, accepted=${accepted}")
+    return
+  }
   pending.remove(requestId)
   state.pendingParentAppTtsRequests = pending
+  Long ageMs = request.createdAt != null ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
+  logTrace("Parent active-stream TTS response received; requestId=${requestId}, accepted=${accepted}, ageMs=${ageMs}, remainingRequests=${pending.size()}")
   if(accepted == 'true') { return }
 
   String uri = request.uri?.toString()
@@ -1601,9 +1610,11 @@ void completeParentAppActiveStreamTts(String requestId, String accepted) {
   catch(Exception e) { logWarn("Could not restore TTS volume for parent response ${requestId}: ${e.message}") }
   Integer duration = (request.duration ?: 30) as Integer
   if(request.useAudioClip == true && hasAudioClipCapability() == true) {
+    logTrace("Parent declined active-stream TTS; using local audioClip fallback requestId=${requestId}, correlation=${request.correlationId}")
     playerLoadAudioClip(uri, volume, duration, request.correlationId?.toString())
   } else {
     BigDecimal announcementVolume = getAnnouncementVolume(volume)
+    logTrace("Parent declined active-stream TTS; using local stream fallback requestId=${requestId}, duration=${duration}")
     componentPlayStreamWithRestoreLocal(uri, duration, announcementVolume)
   }
 }
@@ -3334,7 +3345,7 @@ void createRemoveCrossfadeChildDevice(Boolean create) {
       logDebug("Creating CrossfadeControl device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos Crossfade Control',
-          label: "Sonos Crossfade Control - ${this.getDataValue('name')}"]
+          label: "Sonos Crossfade Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'Crossfade')
       scheduleComponentChildEventDrainNow(dni)
@@ -3353,7 +3364,7 @@ void createRemoveShuffleChildDevice(Boolean create) {
       logDebug("Creating Shuffle Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos Shuffle Control',
-          label: "Sonos Shuffle Control - ${this.getDataValue('name')}"]
+          label: "Sonos Shuffle Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'Shuffle')
       scheduleComponentChildEventDrainNow(dni)
@@ -3372,7 +3383,7 @@ void createRemoveRepeatOneChildDevice(Boolean create) {
       logDebug("Creating RepeatOne Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos RepeatOne Control',
-          label: "Sonos RepeatOne Control - ${this.getDataValue('name')}"]
+          label: "Sonos RepeatOne Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'RepeatOne')
       scheduleComponentChildEventDrainNow(dni)
@@ -3392,7 +3403,7 @@ void createRemoveRepeatAllChildDevice(Boolean create) {
       logDebug("Creating RepeatAll Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos RepeatAll Control',
-          label: "Sonos RepeatAll Control - ${this.getDataValue('name')}"]
+          label: "Sonos RepeatAll Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'RepeatAll')
       scheduleComponentChildEventDrainNow(dni)
@@ -3411,7 +3422,7 @@ void createRemoveMuteChildDevice(Boolean create) {
       logDebug("Creating Mute Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos Mute Control',
-          label: "Sonos Mute Control - ${this.getDataValue('name')}"]
+          label: "Sonos Mute Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'Mute')
       scheduleComponentChildEventDrainNow(dni)
@@ -3432,7 +3443,7 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
       logDebug("Creating Battery Status device")
       child = addChildDevice('dwinks', 'Sonos Advanced Battery Status', dni,
         [ name: 'Sonos Battery Status',
-          label: "Sonos Battery Status - ${this.getDataValue('name')}"]
+          label: "Sonos Battery Status - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveBatteryStatusChildDevice', e)
@@ -3479,7 +3490,7 @@ void createRemoveFavoritesChildDevice(Boolean create) {
       logDebug("Creating Favorites device")
       child = addChildDevice('dwinks', 'Sonos Advanced Favorites', dni,
         [ name: 'Sonos Favorites',
-          label: "Sonos Favorites - ${this.getDataValue('name')}"]
+          label: "Sonos Favorites - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveFavoritesChildDevice', e)
@@ -3495,7 +3506,7 @@ void createRemovePlaylistChildDevice(Boolean create) {
       logDebug("Creating Playlist device")
       child = addChildDevice('dwinks', 'Sonos Advanced Playlist', dni,
         [ name: 'Sonos Playlist',
-          label: "Sonos Playlist - ${this.getDataValue('name')}"]
+          label: "Sonos Playlist - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
     } catch (UnknownDeviceTypeException e) {
       logException('createRemovePlaylistChildDevice', e)
@@ -3510,7 +3521,7 @@ void createRemoveQueueChildDevice(Boolean create) {
     try {
       logDebug("Creating Queue device")
       child = addChildDevice('dwinks', 'Sonos Advanced Queue', dni,
-        [name: 'Sonos Queue', label: "Sonos Queue - ${this.getDataValue('name')}"])
+        [name: 'Sonos Queue', label: "Sonos Queue - ${(device.getDataValue('name') ?: device.displayName)}"])
     } catch (UnknownDeviceTypeException e) {
       logException("createRemoveQueueChildDevice: ${e.message}")
     } catch (Exception e) {
@@ -3684,7 +3695,7 @@ void createRemoveNightModeChildDevice(Boolean create) {
       logDebug("Creating NightMode device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos NightMode Control',
-          label: "Sonos NightMode - ${this.getDataValue('name')}"]
+          label: "Sonos NightMode - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'NightMode')
       scheduleComponentChildEventDrainNow(dni)
@@ -3704,7 +3715,7 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
       logDebug("Creating SpeechEnhancement device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
         [ name: 'Sonos SpeechEnhancement Control',
-          label: "Sonos SpeechEnhancement - ${this.getDataValue('name')}"]
+          label: "Sonos SpeechEnhancement - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'SpeechEnhancement')
       scheduleComponentChildEventDrainNow(dni)
@@ -3943,7 +3954,7 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
     String unescaped = unEscapeLastChangeXML(stateXml)
     if(!isPlausibleXmlPayload(unescaped)) { return null }
     GPathResult stateXmlParsed = parser.parseText(unescaped)
-    GPathResult zoneGroups = (GPathResult)stateXmlParsed['ZoneGroups']
+    GPathResult zoneGroups = stateXmlParsed
     String groupName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
     GPathResult playerGroup = null
     GPathResult player = null
@@ -4022,7 +4033,7 @@ String unEscapeMetaData(String text) {
 
 @CompileStatic
 String unEscapeLastChangeXML(String text) {
-  return text.replace('&lt;','<').replace('&gt;','>')
+  return text.replace('&lt;','<').replace('&gt;','>').replace('&quot;','\"').replace('&apos;',"'").replace('&amp;','&')
 }
 
 @CompileStatic
@@ -6457,20 +6468,31 @@ String getMuteState() {
   return this.device.currentValue('mute')
 }
 void setMuteState(String muted) {
-  String previousMutedState = getMuteState() != null ? getMuteState() : 'unmuted'
+  String observedMutedState = getMuteState()
+  String previousMutedState = observedMutedState != null ? observedMutedState : 'unmuted'
   Boolean restoreEnabled = getEnableAirPlayUnmuteVolumeFix()
   Object restoreLevel = runtimeState.restoreLevelAfterUnmute
   logTrace("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
   sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
-  if(!shouldQueueLocalDeviceEvent('mute', muted, previousMutedState)) {
+  if(!shouldQueueLocalDeviceEvent('mute', muted, observedMutedState)) {
     logTrace("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
     return
   }
   if(muted == 'unmuted' && previousMutedState == 'muted' && restoreEnabled) {
     logTrace("Unmute volume restoration beginning; restoreLevel=${restoreLevel ?: 'unset'}")
-    logDebug("Restoring volume after unmute event to level: ${restoreLevel}")
-    setLevel(restoreLevel as Integer)
-    logTrace('Unmute volume restoration dispatched')
+    Integer restoreVolume = null
+    if(restoreLevel instanceof Number) {
+      try {
+        restoreVolume = new BigDecimal(restoreLevel.toString()).intValueExact()
+      } catch(Exception ignored) { }
+    }
+    if(restoreVolume != null && restoreVolume >= 0 && restoreVolume <= 100) {
+      logDebug("Restoring volume after unmute event to level: ${restoreVolume}")
+      setLevel(restoreVolume as BigDecimal)
+      logTrace('Unmute volume restoration dispatched')
+    } else {
+      logWarn('Skipping AirPlay unmute volume restore because the saved restore level is unavailable or invalid')
+    }
   }
   queueLocalDeviceEvent('mute', muted)
   logTrace("setMuteState queued parent mute event; value=${muted}")
@@ -9165,14 +9187,19 @@ void enqueueAudioClip(Map clipMessage) {
   logTrace('enqueueAudioClip')
   addAudioClipCorrelation(clipMessage)
   ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
+  Boolean alreadyPlaying = runtimeState.audioClipPlaying == true
+  logTrace("Audio clip enqueue decision correlation=${clipMessage.correlationId}, origin=${clipMessage.origin}, priority=${clipMessage.priority ?: 'REGULAR'}, alreadyPlaying=${alreadyPlaying}, active=${runtimeState.activeAudioClipCorrelationId ?: 'none'}, synchronizedHold=${runtimeState.groupSynchronizedAudioClipHold instanceof Map ? ((Map)runtimeState.groupSynchronizedAudioClipHold).correlationId : 'none'}, regularBefore=${queue.size()}, highBefore=${getDeviceAudioClipQueueHighPriority().size()}")
 
   // Regular priority clips go to regular queue
   // High priority clips are now handled separately via playerLoadAudioClipHighPriority
   queue.add(clipMessage)
   logDebug("Queued audio clip ${clipMessage.correlationId} (${clipMessage.origin}) at ${clipMessage.enqueuedAt}; regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
 
-  if(runtimeState.audioClipPlaying != true) {
+  if(!alreadyPlaying) {
+    logTrace("Starting audio clip drain after enqueue correlation=${clipMessage.correlationId}")
     dequeueAudioClip()
+  } else {
+    logTrace("Audio clip remains queued behind active correlation=${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}; newCorrelation=${clipMessage.correlationId}, regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
   }
 }
 
