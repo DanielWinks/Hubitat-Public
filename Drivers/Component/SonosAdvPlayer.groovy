@@ -534,9 +534,11 @@ Boolean hasLineInCapability() {
 @Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
 @Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final String LOCAL_EVENT_DRAIN_SCHEDULED_KEY = 'localDeviceEventDrainScheduled'
+@Field static final String LOCAL_EVENT_DRAIN_DUE_AT_KEY = 'localDeviceEventDrainDueAt'
 @Field static final Integer LOCAL_EVENT_MAX_WAIT_MS = 500
 @Field static final Integer LOCAL_EVENTS_PER_DRAIN = 8
 @Field static final Integer LOCAL_EVENT_DRAIN_INTERVAL_MS = 200
+@Field static ConcurrentHashMap<String, Object> localDeviceEventLocks = new ConcurrentHashMap<String, Object>()
 @Field static final String PENDING_COMPONENT_CHILD_EVENTS_KEY = 'pendingComponentChildEvents'
 @Field static final String COMPONENT_CHILD_DRAIN_SCHEDULED_KEY = 'componentChildDrainScheduled'
 @Field static final String COMPONENT_CHILD_RETRY_ATTEMPTS_KEY = 'componentChildRetryAttempts'
@@ -576,6 +578,8 @@ Boolean hasLineInCapability() {
 // =============================================================================
 void uninstalled() {
   unschedule('flushPendingLocalDeviceEvents')
+  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+  state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
   unschedule('drainComponentChildEvents')
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
@@ -596,7 +600,6 @@ void initialize() {
   migrateLegacyRuntimeState()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
   scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
@@ -624,7 +627,6 @@ void configure() {
   migrateLegacyRuntimeState()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
   resetComponentChildEventRetries()
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
@@ -1094,6 +1096,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(groupDeviceUpdateRetryAttempts)
     clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastLocalDeviceEvents)
+    clearedEntries += clearStaticMap(localDeviceEventLocks)
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
@@ -1136,6 +1139,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(groupDeviceUpdateRetryAttempts, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastLocalDeviceEvents, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(localDeviceEventLocks, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
@@ -1289,6 +1293,7 @@ void clearStaticDriverStateForCurrentDevice() {
       groupDeviceUpdateRetryAttempts?.remove(dni)
       pendingLocalDeviceEvents?.remove(dni)
       lastLocalDeviceEvents?.remove(dni)
+      localDeviceEventLocks?.remove(dni)
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
@@ -5551,21 +5556,47 @@ Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
 
 void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
 
-/** Queue one local attribute until the fixed maximum-wait drain window. */
-synchronized void queueLocalDeviceEvent(String name, Object value) {
+private Object getLocalDeviceEventLock(String dni) {
+  Object lock = localDeviceEventLocks.get(dni)
+  if(lock == null) {
+    Object created = new Object()
+    Object existing = localDeviceEventLocks.putIfAbsent(dni, created)
+    lock = existing ?: created
+  }
+  return lock
+}
+
+/** Queue one local attribute until its fixed maximum-wait drain deadline. */
+void queueLocalDeviceEvent(String name, Object value) {
   if(!name || value == null) { return }
   String dni = device.getDeviceNetworkId()
-  ConcurrentHashMap<String, Object> lastSent = lastLocalDeviceEvents.get(dni)
-  pendingLocalDeviceEvents.putIfAbsent(dni, new ConcurrentHashMap<String, Object>())
-  ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents[dni]
-  Object previous = pending.containsKey(name) ? pending[name] : lastSent?.get(name)
-  if((pending.containsKey(name) || lastSent?.containsKey(name)) && previous == value) {
-    logTrace("Local event queue deduplicated; dni=${dni}, attribute=${name}, value=${value}, pending=${pending.size()}")
-    return
+  if(!dni) { return }
+  Object lock = getLocalDeviceEventLock(dni)
+  synchronized(lock) {
+    lastLocalDeviceEvents.putIfAbsent(dni, new ConcurrentHashMap<String, Object>())
+    ConcurrentHashMap<String, Object> lastSent = lastLocalDeviceEvents.get(dni)
+    pendingLocalDeviceEvents.putIfAbsent(dni, new ConcurrentHashMap<String, Object>())
+    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
+    Boolean alreadyPending = pending.containsKey(name)
+    Object previous = alreadyPending ? pending.get(name) : lastSent?.get(name)
+    Object currentValue = this.device.currentValue(name, true)
+
+    if(alreadyPending && previous == value) {
+      logTrace("Local event queue coalesced; dni=${dni}, attribute=${name}, value=${value}, pending=${pending.size()}")
+      // Re-arm the callback even for a coalesced value. The pending map, not
+      // the scheduled flag, is authoritative about whether work remains.
+      scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
+      return
+    }
+    if(!alreadyPending && previous == value && currentValue == value) {
+      logTrace("Local event queue deduplicated against current device state; dni=${dni}, attribute=${name}, value=${value}")
+      return
+    }
+
+    pending.put(name, value)
+    logTrace("Local event queued; dni=${dni}, attribute=${name}, value=${value}, previous=${previous}, current=${currentValue}, pending=${pending.size()}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}")
+    scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
   }
-  pending.put(name, value)
-  logTrace("Local event queued; dni=${dni}, attribute=${name}, value=${value}, previous=${previous}, pending=${pending.size()}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}")
-  scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
 }
 
 Boolean shouldQueueLocalDeviceEvent(String name, Object value, Object currentValue) {
@@ -5578,61 +5609,109 @@ Boolean shouldQueueLocalDeviceEvent(String name, Object value, Object currentVal
   return groupPending?.containsKey(groupAttribute) && groupPending.get(groupAttribute) != value
 }
 
-/** Drain local device events in bounded chunks without resetting the first-event deadline. */
+/** Ensure a callback exists for all pending local events. A stale state flag
+ * must never suppress scheduling; repeated calls overwrite the same callback
+ * using the earliest pending deadline. */
 private void scheduleLocalDeviceEventDrain(Integer delayMs) {
-  if(state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] != true) {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  Object lock = getLocalDeviceEventLock(dni)
+  synchronized(lock) {
+    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
+    if(!pending || pending.isEmpty()) {
+      state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+      state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+      return
+    }
+
+    Long currentTime = now() as Long
+    Long requestedDueAt = currentTime + Math.max(1, delayMs ?: LOCAL_EVENT_DRAIN_INTERVAL_MS) as Long
+    Long existingDueAt = state[LOCAL_EVENT_DRAIN_DUE_AT_KEY] as Long
+    Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+    Long remainingMs = Math.max(1L, dueAt - currentTime)
+    Integer scheduleDelay = remainingMs > Integer.MAX_VALUE ? Integer.MAX_VALUE : remainingMs as Integer
+    state[LOCAL_EVENT_DRAIN_DUE_AT_KEY] = dueAt
     state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] = true
-    logTrace("Scheduling local event drain; dni=${device.getDeviceNetworkId()}, delayMs=${delayMs}, pending=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
-    runInMillis(delayMs, 'flushPendingLocalDeviceEvents', [overwrite: true])
-  } else {
-    logTrace("Local event drain already scheduled; dni=${device.getDeviceNetworkId()}, requestedDelayMs=${delayMs}, pending=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
+    logTrace("Scheduling or refreshing local event drain; dni=${dni}, delayMs=${scheduleDelay}, dueAt=${dueAt}, pending=${pending.size()}, previousScheduled=${existingDueAt != null}")
+    try {
+      runInMillis(scheduleDelay, 'flushPendingLocalDeviceEvents', [overwrite: true])
+    } catch(Exception e) {
+      state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+      state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+      logWarn("Could not schedule local event drain for dni=${dni}; pending=${pending.size()}: ${e.message}")
+    }
   }
 }
 
-synchronized void flushPendingLocalDeviceEvents() {
+void flushPendingLocalDeviceEvents() {
   String dni = device.getDeviceNetworkId()
-  ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-  logTrace("Local event drain started; dni=${dni}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}, pending=${pending?.size() ?: 0}")
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-  if(!pending || pending.isEmpty()) {
-    pendingLocalDeviceEvents.remove(dni)
-    logTrace("Local event drain found no pending events; dni=${dni}")
-    return
+  if(!dni) { return }
+  Object lock = getLocalDeviceEventLock(dni)
+  List<Map<String, Object>> batch = []
+  synchronized(lock) {
+    state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+    state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
+    logTrace("Local event drain claimed; dni=${dni}, pending=${pending?.size() ?: 0}")
+    if(!pending || pending.isEmpty()) {
+      if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
+      logTrace("Local event drain found no pending events; dni=${dni}")
+      return
+    }
+
+    List<String> names = new ArrayList<String>(pending.keySet()).take(LOCAL_EVENTS_PER_DRAIN)
+    names.each { String attrName ->
+      Object attrValue = pending.remove(attrName)
+      if(attrValue != null) { batch.add([name: attrName, value: attrValue]) }
+    }
   }
+
   ConcurrentHashMap<String, Object> lastSent = lastLocalDeviceEvents.get(dni)
   if(lastSent == null) {
     ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
     ConcurrentHashMap<String, Object> existing = lastLocalDeviceEvents.putIfAbsent(dni, created)
     lastSent = existing ?: created
   }
-  List<String> names = new ArrayList<String>(pending.keySet()).take(LOCAL_EVENTS_PER_DRAIN)
-  names.each { String attrName ->
-    Object attrValue = pending.remove(attrName)
-    if(attrValue == null) {
-      logTrace("Local event drain skipped null value; dni=${dni}, attribute=${attrName}, pending=${pending.size()}")
-      return
-    }
-    if(lastSent.containsKey(attrName) && lastSent.get(attrName) == attrValue) {
-      logTrace("Local event drain skipped already-sent value; dni=${dni}, attribute=${attrName}, value=${attrValue}, pending=${pending.size()}")
-      return
-    }
+
+  batch.each { Map<String, Object> event ->
+    String attrName = event.name as String
+    Object attrValue = event.value
     try {
       Object currentValue = this.device.currentValue(attrName, true)
+      if(lastSent.containsKey(attrName) && lastSent.get(attrName) == attrValue && currentValue == attrValue) {
+        lastSent.put(attrName, attrValue)
+        logTrace("Local event drain skipped duplicate sent value still present on device; dni=${dni}, attribute=${attrName}, value=${attrValue}")
+        return
+      }
       logTrace("Local event send starting; dni=${dni}, attribute=${attrName}, value=${attrValue}, current=${currentValue}, lastSent=${lastSent.get(attrName)}")
       this.device.sendEvent(name: attrName, value: attrValue)
       lastSent.put(attrName, attrValue)
-      logTrace("Local event sendEvent returned; dni=${dni}, attribute=${attrName}, value=${attrValue}, currentAfter=${this.device.currentValue(attrName, true)}, pending=${pending.size()}")
+      logTrace("Local event sendEvent returned; dni=${dni}, attribute=${attrName}, value=${attrValue}, currentAfter=${this.device.currentValue(attrName, true)}")
     } catch(Exception e) {
-      pending.putIfAbsent(attrName, attrValue)
-      logWarn("Could not emit local ${attrName} event for dni=${dni}; retaining value=${attrValue} for retry, pending=${pending.size()}: ${e.message}")
+      synchronized(lock) {
+        ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
+        if(pending == null) {
+          ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
+          ConcurrentHashMap<String, Object> existing = pendingLocalDeviceEvents.putIfAbsent(dni, created)
+          pending = existing ?: created
+        }
+        pending.putIfAbsent(attrName, attrValue)
+        logWarn("Could not emit local ${attrName} event for dni=${dni}; retaining value=${attrValue} for retry, pending=${pending.size()}: ${e.message}")
+      }
     }
   }
-  if(pending.isEmpty()) {
-    pendingLocalDeviceEvents.remove(dni, pending)
-    logTrace("Local event drain completed; dni=${dni}, processed=${names.size()}, pending=0")
-  } else {
-    logTrace("Local event drain yielded; dni=${dni}, processed=${names.size()}, pending=${pending.size()}, nextDelayMs=${LOCAL_EVENT_DRAIN_INTERVAL_MS}")
-    scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
+
+  synchronized(lock) {
+    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
+    if(!pending || pending.isEmpty()) {
+      if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
+      state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+      state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+      logTrace("Local event drain completed; dni=${dni}, processed=${batch.size()}, pending=0")
+    } else {
+      logTrace("Local event drain yielded; dni=${dni}, processed=${batch.size()}, pending=${pending.size()}, nextDelayMs=${LOCAL_EVENT_DRAIN_INTERVAL_MS}")
+      scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
+    }
   }
 }
 

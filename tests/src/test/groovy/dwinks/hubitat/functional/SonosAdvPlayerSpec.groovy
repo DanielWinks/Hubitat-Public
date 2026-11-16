@@ -964,6 +964,90 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass = null
   }
 
+  def "local event enqueue re-arms a drain when its scheduled marker is stale"() {
+    given:
+    driver.state.localDeviceEventDrainScheduled = true
+
+    when:
+    driver.queueLocalDeviceEvent('isGrouped', 'on')
+
+    then:
+    driver.scheduled.any { List item -> item[1] == 'flushPendingLocalDeviceEvents' }
+    driver.state.localDeviceEventDrainScheduled == true
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].isGrouped == 'on'
+  }
+
+  def "local event rescheduling preserves the original maximum-wait deadline"() {
+    given:
+    List<Long> clock = [1000L]
+    driver.metaClass.now = { -> clock[0] }
+
+    when:
+    driver.queueLocalDeviceEvent('groupMemberCount', 2)
+    Long firstDueAt = driver.state.localDeviceEventDrainDueAt as Long
+    clock[0] = 1300L
+    driver.queueLocalDeviceEvent('groupMemberCount', 1)
+
+    then:
+    firstDueAt == 1500L
+    driver.state.localDeviceEventDrainDueAt == firstDueAt
+    driver.scheduled.last()[0] == 200
+    driver.scheduled.last()[1] == 'flushPendingLocalDeviceEvents'
+  }
+
+  def "local event drain schedules values enqueued while it sends a batch"() {
+    given:
+    driver.queueLocalDeviceEvent('groupName', 'Cora’s Room + 1')
+    driver.device.metaClass.sendEvent = { Map event ->
+      delegate.events << event
+      delegate.currentValues[event.name as String] = event.value
+      if(event.name == 'groupName') {
+        driver.queueLocalDeviceEvent('groupMemberCount', 2)
+      }
+    }
+
+    when:
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.currentValues.groupName == 'Cora’s Room + 1'
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].groupMemberCount == 2
+    driver.scheduled.last()[1] == 'flushPendingLocalDeviceEvents'
+
+    when:
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.currentValues.groupMemberCount == 2
+    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
+  }
+
+  def "failed local event remains queued and is delivered on a later drain"() {
+    given:
+    Integer attempts = 0
+    driver.queueLocalDeviceEvent('isGrouped', 'on')
+    driver.device.metaClass.sendEvent = { Map event ->
+      attempts++
+      if(attempts == 1) { throw new IllegalStateException('temporary event failure') }
+      delegate.events << event
+      delegate.currentValues[event.name as String] = event.value
+    }
+
+    when:
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].isGrouped == 'on'
+    driver.scheduled.last()[1] == 'flushPendingLocalDeviceEvents'
+
+    when:
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.currentValues.isGrouped == 'on'
+    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
+  }
+
   def "retargeting a fade to the reported volume cancels queued steps"() {
     given:
     driver.volumeFadeState.clear()
