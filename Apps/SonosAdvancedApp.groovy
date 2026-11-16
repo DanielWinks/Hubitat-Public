@@ -4388,7 +4388,7 @@ void drainQueuedChildEvents() {
     }
   }
   if(!lastSent.isEmpty()) { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
-  if(!failed.isEmpty()) {
+  if(!failed.isEmpty() || !deferred.isEmpty()) {
     Map<String, Map<String, Object>> retryAndNew = deferred
     failed.each { String dni, Map<String, Object> attrs ->
       Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
