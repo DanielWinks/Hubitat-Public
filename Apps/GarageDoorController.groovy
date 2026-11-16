@@ -106,6 +106,7 @@ import groovy.transform.Field
 
 @Field static final Integer RELAY_PULSE_DELAY_MS   = 750   // How long the relay stays on (momentary pulse)
 @Field static final Integer SENSOR_SETTLE_DELAY_MS  = 5000  // Command timeout: max wait for door to respond to open/close
+@Field static final Integer DISAGREEMENT_CONFIRMATION_DELAY_MS = 1500
 
 // -- Button control -----------------------------------------------------------
 
@@ -456,7 +457,7 @@ Boolean hasRATGDO() {
 //
 // =============================================================================
 
-void processContactSensors() {
+void processContactSensors(Boolean confirmingDisagreement = false, String expectedDisagreementKey = null) {
     ChildDeviceWrapper doorController = getDoorController()
 
     // Persist each sensor's current contact state on the child device so
@@ -480,7 +481,8 @@ void processContactSensors() {
         String ratgdoState = ratgdoDoor.currentValue(ATTR_DOOR)?.toString() ?: STATE_UNKNOWN
         String currentChildState = doorController.currentValue(ATTR_DOOR)?.toString() ?: STATE_UNKNOWN
         alertRATGDODisagreement(ratgdoState, contactDoorState, currentChildState,
-                                upperSensorTrippedCount, lowerSensorTrippedCount)
+                                upperSensorTrippedCount, lowerSensorTrippedCount,
+                                confirmingDisagreement, expectedDisagreementKey)
         doorState = resolveRATGDODoorState(ratgdoState, contactDoorState, currentChildState)
         logInfo("Door state resolved: '${doorState}' (ratgdo=${ratgdoState}, contacts=${contactDoorState}, upperTripped=${upperSensorTrippedCount}, lowerTripped=${lowerSensorTrippedCount})")
     } else {
@@ -502,23 +504,36 @@ void processContactSensors() {
 }
 
 /**
- * Notifies configured devices when a settled RATGDO endpoint conflicts with
- * the state derived from the contact sensors. Repeated sensor/RATGDO events
- * for the same mismatch are suppressed until the readings agree again.
+ * Waits briefly before notifying configured devices about a RATGDO endpoint
+ * conflict. Sensor transitions can briefly report inconsistent states, so
+ * the mismatch is re-evaluated after the confirmation delay.
  */
 void alertRATGDODisagreement(String ratgdoState, String contactDoorState, String currentChildState,
-                             Integer upperSensorTrippedCount, Integer lowerSensorTrippedCount) {
+                             Integer upperSensorTrippedCount, Integer lowerSensorTrippedCount,
+                             Boolean confirmingDisagreement = false, String expectedDisagreementKey = null) {
     Boolean ratgdoAtEndpoint = ratgdoState == STATE_OPEN || ratgdoState == STATE_CLOSED
     Boolean staleEndpointDuringMotion =
         (currentChildState == STATE_OPENING && ratgdoState == STATE_CLOSED && contactDoorState != STATE_CLOSED) ||
         (currentChildState == STATE_CLOSING && ratgdoState == STATE_OPEN && contactDoorState != STATE_OPEN)
     Boolean disagreement = ratgdoAtEndpoint && ratgdoState != contactDoorState && !staleEndpointDuringMotion
     if (!disagreement) {
+        unschedule('confirmRATGDODisagreement')
+        state.remove('pendingRATGDODisagreement')
         state.remove('ratgdoSensorDisagreement')
         return
     }
 
     String disagreementKey = "${ratgdoState}:${contactDoorState}"
+    if (!confirmingDisagreement && state.ratgdoSensorDisagreement == disagreementKey) { return }
+    if (confirmingDisagreement && expectedDisagreementKey != disagreementKey) {
+        scheduleRATGDODisagreementConfirmation(disagreementKey)
+        return
+    }
+    if (!confirmingDisagreement) {
+        scheduleRATGDODisagreementConfirmation(disagreementKey)
+        return
+    }
+    state.remove('pendingRATGDODisagreement')
     if (state.ratgdoSensorDisagreement == disagreementKey) { return }
     state.ratgdoSensorDisagreement = disagreementKey
 
@@ -527,6 +542,20 @@ void alertRATGDODisagreement(String ratgdoState, String contactDoorState, String
     if (notificationDevices) {
         notificationDevices*.deviceNotification(message)
     }
+}
+
+void scheduleRATGDODisagreementConfirmation(String disagreementKey) {
+    if (state.pendingRATGDODisagreement == disagreementKey) { return }
+    state.pendingRATGDODisagreement = disagreementKey
+    runInMillis(DISAGREEMENT_CONFIRMATION_DELAY_MS, 'confirmRATGDODisagreement',
+                [data: [expectedKey: disagreementKey], overwrite: true])
+}
+
+void confirmRATGDODisagreement(Map data) {
+    String expectedKey = data?.expectedKey?.toString()
+    if (!expectedKey || state.pendingRATGDODisagreement != expectedKey) { return }
+    state.remove('pendingRATGDODisagreement')
+    processContactSensors(true, expectedKey)
 }
 
 /**
