@@ -77,7 +77,9 @@ void logTrace(String message) {
 @Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
 @Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final Integer GROUP_COMMAND_RETRY_INTERVAL_SECONDS = 5
+// Declared so the parent app can subscribe; emitted values are immediately removed from current state.
 @Field static final String SONOS_GROUP_COMMAND_ATTRIBUTE = 'sonosGroupCommandRequest'
+@Field static final List<String> TRANSIENT_GROUP_EVENT_ATTRIBUTES = ['sonosGroupCommandRequest']
 @Field static final String SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY = 'skipPendingCommandPurgeOnUpdated'
 @Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
   'groupCommandRequest',
@@ -273,12 +275,12 @@ void setLastGroupingMode(String groupingMode) {
   device.updateDataValue('lastGroupingMode', groupingMode)
 }
 
-void removeDeprecatedGroupStates() {
-  DEPRECATED_GROUP_STATE_ATTRIBUTES.each { String attributeName ->
+void removeStaleGroupStates() {
+  (DEPRECATED_GROUP_STATE_ATTRIBUTES + TRANSIENT_GROUP_EVENT_ATTRIBUTES).each { String attributeName ->
     try {
       device.deleteCurrentState(attributeName)
     } catch(Exception e) {
-      logDebug("Could not remove deprecated group state ${attributeName}: ${e.message}")
+      logDebug("Could not remove stale group state ${attributeName}: ${e.message}")
     }
   }
 }
@@ -339,13 +341,28 @@ void emitGroupCommandRequest(Map data) {
   Long ageMs = payload.createdAt != null ? Math.max(0L, now() - (payload.createdAt as Long)) : -1L
   logDebug("Emitting group command request id=${payload.requestId}, command=${payload.command}, sequence=${payload.sequence ?: 'unknown'}, ageMs=${ageMs}, pending=${(runtimeState.pendingGroupCommands instanceof List ? ((List)runtimeState.pendingGroupCommands).size() : 0)}")
   try {
-    sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+    emitTransientGroupCommandEvent(payload)
   } catch(Exception e) {
     logWarn("Group command event emission failed id=${payload.requestId}, command=${payload.command}, sequence=${payload.sequence ?: 'unknown'}: ${e.message}")
     throw e
   }
   logDebug("Delivered group command ${payload.command} (${payload.requestId}); waiting for parent acknowledgement")
   runIn(GROUP_COMMAND_RETRY_INTERVAL_SECONDS, 'retryActiveGroupCommandRequest', [overwrite: true])
+}
+
+/** Publish the request event to app subscribers without retaining it as current device state. */
+void emitTransientGroupCommandEvent(Map payload) {
+  try {
+    sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+  } finally {
+    clearTransientGroupCommandState()
+    runIn(1, 'clearTransientGroupCommandState', [overwrite: true])
+  }
+}
+
+void clearTransientGroupCommandState() {
+  try { device.deleteCurrentState(SONOS_GROUP_COMMAND_ATTRIBUTE) }
+  catch(Exception e) { logWarn("Could not clear transient group command state: ${e.message}") }
 }
 
 void retryActiveGroupCommandRequest() {
@@ -454,7 +471,7 @@ void initialize() {
   migrateLegacyRuntimeState()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
-  removeDeprecatedGroupStates()
+  removeStaleGroupStates()
   applyInitializationDefaults()
   recoverGroupCommandQueue()
   // Initialize volume/mute state from coordinator
@@ -488,9 +505,9 @@ void clearPendingCommandsForInitialization() {
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
   try {
-    sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson([
+    emitTransientGroupCommandEvent([
       action: 'initializationPurge', groupDni: dni, createdAt: now()
-    ]), isStateChange: true)
+    ])
   } catch(Exception e) {
     logWarn("Could not publish parent-app command purge for ${dni}: ${e.message}")
   }
@@ -519,7 +536,7 @@ void configure() {
   migrateLegacyRuntimeState()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
-  removeDeprecatedGroupStates()
+  removeStaleGroupStates()
   synchronizeTrackPositionPreference()
   recoverGroupCommandQueue()
   Boolean wasGuarded = runtimeState.lastOnlyUpdateWhenActive != false

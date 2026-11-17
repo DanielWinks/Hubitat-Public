@@ -2267,6 +2267,26 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.every { String message -> !message.contains('loadPlaylist') && !message.contains('"command":"play"') }
   }
 
+  def "playback status publishes play modes including crossfade"() {
+    given:
+    driver.device.events.clear()
+    driver.device.currentValues.currentCrossfadeMode = 'off'
+    driver.device.currentValues.currentShuffleMode = 'off'
+    driver.device.currentValues.currentRepeatAllMode = 'off'
+    driver.device.currentValues.currentRepeatOneMode = 'off'
+
+    when:
+    driver.processWebsocketMessage(JsonOutput.toJson([
+      [namespace: 'playback', type: 'playbackStatus'],
+      [playbackState: 'PLAYBACK_STATE_PAUSED', playModes: [repeat: false, repeatOne: false, shuffle: true, crossfade: true]]
+    ]))
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.events.any { Map event -> event.name == 'currentCrossfadeMode' && event.value == 'on' }
+    driver.device.events.any { Map event -> event.name == 'currentShuffleMode' && event.value == 'on' }
+  }
+
   def "deterministic playlist load errors are surfaced without retrying"() {
     given:
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
@@ -2356,6 +2376,20 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
   }
 
+  def "group update enqueue re-arms a flush when its scheduled marker is stale"() {
+    given:
+    driver.scheduled.clear()
+    driver.state.groupDeviceUpdateScheduled = true
+
+    when:
+    driver.queueGroupDeviceUpdate([currentTrackName: 'My Wave'])
+
+    then:
+    driver.scheduled.any { List item -> item[1] == 'flushPendingGroupDeviceUpdates' }
+    driver.state.groupDeviceUpdateScheduled == true
+    driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').currentTrackName == 'My Wave'
+  }
+
   def "follower group volume forwarding is deferred through the parent boundary"() {
     given:
     driver.device.dataValues.isGroupCoordinator = 'false'
@@ -2395,6 +2429,12 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.pendingParentCoordinatorCommands.size() == 1
     !driver.runtimeState.activeParentCoordinatorCommand
     driver.scheduled.any { List call -> call[1] == 'drainParentCoordinatorCommandQueue' }
+  }
+
+  def "parent command acknowledgement is not exposed as a player command"() {
+    expect:
+    !new File('../Drivers/Component/SonosAdvPlayer.groovy').text.contains("command 'acknowledgeParentCommand'")
+    driver.metaClass.respondsTo(driver, 'acknowledgeParentCommand', String).size() == 1
   }
 
   def "grouped player volume is staggered without issuing playback commands"() {

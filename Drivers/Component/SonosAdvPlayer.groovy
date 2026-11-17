@@ -227,7 +227,6 @@ metadata {
   command 'setSpeechEnhancement', [[ name: 'Speech Enhancement (Soundbar only)*', type: 'ENUM', description: 'Toggle Speech Enhancement on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
 
   command 'selectLineIn', [[name: 'Source Player', type: 'STRING', description: 'RINCON ID, IP address, or player name of source device (optional, defaults to this player)']]
-  command 'acknowledgeParentCommand', [[name: 'Request ID*', type: 'STRING', description: 'Parent controller receipt acknowledgement']]
   command 'selectTV'
 
   command 'playHighPriorityTTS', [
@@ -7333,10 +7332,11 @@ synchronized void queueGroupDeviceUpdate(Map attributes) {
 }
 
 private void scheduleGroupDeviceUpdateDrain(Integer delayMs) {
-  if(state[GROUP_DEVICE_UPDATE_SCHEDULED_KEY] != true) {
-    state[GROUP_DEVICE_UPDATE_SCHEDULED_KEY] = true
-    runInMillis(delayMs, 'flushPendingGroupDeviceUpdates', [overwrite: true])
-  }
+  // The persisted marker can outlive its Hubitat job (for example, across a
+  // driver update or scheduler recovery). Always replace/create the job when
+  // new work arrives so a stale true marker cannot strand playback state.
+  state[GROUP_DEVICE_UPDATE_SCHEDULED_KEY] = true
+  runInMillis(delayMs, 'flushPendingGroupDeviceUpdates', [overwrite: true])
 }
 
 Map<String, Object> getPendingGroupDeviceUpdateSnapshot(String dni) {
@@ -11472,6 +11472,20 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
     logDebug("WebSocket playback-status processing beginning; state=${eventData?.playbackState ?: 'unset'}")
+    Map playModes = eventData?.playModes instanceof Map ? (Map)eventData.playModes : null
+    if(playModes != null) {
+      if(playModes.repeat instanceof Boolean && playModes.repeatOne instanceof Boolean && playModes.shuffle instanceof Boolean) {
+        Boolean repeat = playModes.repeat as Boolean
+        Boolean repeatOne = playModes.repeatOne as Boolean
+        Boolean shuffle = playModes.shuffle as Boolean
+        String playMode = shuffle ? (repeatOne ? 'SHUFFLE_REPEAT_ONE' : (repeat ? 'SHUFFLE' : 'SHUFFLE_NOREPEAT')) :
+            (repeatOne ? 'REPEAT_ONE' : (repeat ? 'REPEAT_ALL' : 'NORMAL'))
+        setPlayMode(playMode)
+      }
+      if(playModes.crossfade instanceof Boolean) {
+        setCrossfadeMode((playModes.crossfade as Boolean) ? 'on' : 'off')
+      }
+    }
     String currentState = eventData?.playbackState?.toString()
     Long playbackStateObservedAt = now()
     state.playbackState = currentState

@@ -119,6 +119,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.unschedules.contains('regroupSafetyTimeout')
     driver.events.find { Map event -> event.name == 'sonosGroupCommandRequest' }
       ?.value?.toString()?.contains('initializationPurge')
+    !driver.device.currentValues.containsKey('sonosGroupCommandRequest')
     driver.scheduled.any { List item -> item[1] == 'refresh' }
   }
 
@@ -293,6 +294,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.events[0].name == 'sonosGroupCommandRequest'
     driver.events[0].isStateChange == true
     new JsonSlurper().parseText(driver.events[0].value as String) == payload
+    !driver.device.currentValues.containsKey('sonosGroupCommandRequest')
+    driver.scheduled.any { List job -> job[1] == 'clearTransientGroupCommandState' }
   }
 
   def "group command queue waits for parent acknowledgement before sending the next request"() {
