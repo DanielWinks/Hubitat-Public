@@ -261,7 +261,7 @@ preferences {
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY = 'playerInitializationOffturnBurstStartedAt'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY = 'playerInitializationOffturnProbeReleaseAt'
 @Field static final Integer PLAYER_INITIALIZATION_START_TIMEOUT_SECONDS = 2
-@Field static final Integer PLAYER_INITIALIZATION_HARD_TIMEOUT_SECONDS = 90
+@Field static final Integer PLAYER_INITIALIZATION_HARD_TIMEOUT_SECONDS = 180
 @Field static final Integer PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS = 105
 @Field static final Integer PLAYER_INITIALIZATION_ZGT_WATCHDOG_SECONDS = 30
 @Field static final Integer PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS = 60
@@ -2627,7 +2627,7 @@ void configure(Boolean startup = false) {
 }
 
 /** Re-seed the serialized player initialization queue after a hub reboot. */
-void systemStartHandler(Map event = [:]) {
+void systemStartHandler(Object event = null) {
   unschedule('playerInitializationStartWatchdog')
   unschedule('playerInitializationHardWatchdog')
   unschedule('startNextPlayerInitialization')
@@ -2760,6 +2760,17 @@ void enqueuePlayerInitialization(String dni, String reason, Boolean boot = false
         ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
   }
   boot = boot || state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true
+  Map currentZgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  if(driverStartupRequest && boot && currentZgt.status == 'exhausted' && currentZgt.topologyReady != true) {
+    logInfo("Manual initialization request for ${dni} is restarting the exhausted boot ZGT election")
+    unschedule('retryZgtInitializationElection')
+    retryZgtInitializationElection()
+    queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
+        ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
+    active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
+  }
   Map existing = queue.find { Map request -> request.dni?.toString() == dni }
   String bootGeneration = boot ? state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString() : null
   if(active.containsKey(dni)) { return }
@@ -2957,14 +2968,16 @@ void failZgtInitializationCandidate(String dni, String reason) {
       ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
   Map failedRequest = active.remove(dni)
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
+  ChildDeviceWrapper failedPlayer = getChildDevice(dni)
+  try {
+    failedPlayer?.updateDataValue('appZgtSubscribe', 'false')
+    failedPlayer?.updateDataValue('appZgtLeaderGeneration', '')
+  } catch(Exception e) { logDebug("Could not revoke ZGT role for failed candidate ${dni}: ${e.message}") }
   if(failedRequest != null) {
     // These callbacks are request-ID guarded. Keep other players' watchdogs
     // intact now that normal initialization can run concurrently again.
     try {
-      ChildDeviceWrapper failedPlayer = getChildDevice(dni)
       failedPlayer?.updateDataValue('appInitializationRequestId', '')
-      failedPlayer?.updateDataValue('appZgtSubscribe', 'false')
-      failedPlayer?.updateDataValue('appZgtLeaderGeneration', '')
       failedPlayer?.cancelAppMediatedInitialization(failedRequest.requestId?.toString())
     } catch(Exception e) { logDebug("Could not cancel failed ZGT candidate ${dni}: ${e.message}") }
     failedRequest.remove('requestId')
@@ -2979,6 +2992,9 @@ void failZgtInitializationCandidate(String dni, String reason) {
   logWarn("ZGT candidate ${dni} failed: ${reason}; promoting another eligible speaker")
   String nextDni = selectNextZgtInitializationCandidate()
   if(nextDni == null) {
+    zgt.status = 'exhausted'
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    logWarn('No unfailed eligible mains-powered ZGT speaker remains; waiting for an explicit retry or the scheduled election retry')
     runIn(PLAYER_INITIALIZATION_HOURLY_RETRY_SECONDS, 'retryZgtInitializationElection', [overwrite: true])
     return
   }
@@ -3060,6 +3076,21 @@ void scheduleZgtTopologyWatchdog() {
         topologyChangedAt: zgt.topologyChangedAt]])
 }
 
+Boolean topologyUpdateMatchesHouseholdSnapshot(ChildDeviceWrapper player, Map payload) {
+  String playerId = player?.getDataValue('id')?.toString()
+  Map household = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
+      ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
+  List<Map> groups = household.groups instanceof List ? (List<Map>)household.groups : []
+  if(!playerId || groups.isEmpty() || !(payload?.playerIds instanceof List)) { return false }
+  Map knownGroup = groups.find { Map group -> normalizeGroupPlayerIds(group.playerIds).contains(playerId) }
+  if(knownGroup == null) { return false }
+  List<String> expectedPlayers = normalizeGroupPlayerIds(knownGroup.playerIds).sort()
+  List<String> reportedPlayers = normalizeGroupPlayerIds(payload.playerIds).sort()
+  String expectedCoordinator = knownGroup.coordinatorId?.toString()
+  String reportedCoordinator = payload.coordinatorId?.toString()
+  return expectedPlayers == reportedPlayers && expectedCoordinator == reportedCoordinator
+}
+
 void zgtTopologyWatchdog(Map data = [:]) {
   Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
@@ -3102,7 +3133,7 @@ void playerInitializationHardWatchdog(Map data = [:]) {
   String requestId = data?.requestId?.toString()
   Map active = dni ? activeByDni[dni] : null
   if(active == null || active.requestId?.toString() != requestId) { return }
-  finishPlayerInitialization(requestId, false, 'initialization exceeded the 90 second hard timeout')
+  finishPlayerInitialization(requestId, false, 'initialization exceeded the 180 second hard timeout')
 }
 
 void finishPlayerInitialization(String requestId, Boolean succeeded, String detail = '') {
@@ -3143,7 +3174,7 @@ void finishPlayerInitialization(String requestId, Boolean succeeded, String deta
       state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgtState
     }
   } else {
-    if(detail?.contains('90 second hard timeout') || detail?.contains('did not settle within 90 seconds')) {
+    if(detail?.contains('180 second hard timeout') || detail?.contains('did not settle within 180 seconds')) {
       logDebug("Player initialization timed out for ${dni}: ${detail}")
     } else {
       logWarn("Player initialization failed for ${dni}: ${detail}")
@@ -5159,7 +5190,11 @@ void playerStateUpdateHandler(Object event) {
     return
   }
   if(kind == 'topology') {
-    scheduleZgtTopologyWatchdog()
+    if(topologyUpdateMatchesHouseholdSnapshot(player, payload)) {
+      logDebug("Topology update from ${playerDni} matches the app household snapshot; ZGT watchdog unchanged")
+    } else {
+      scheduleZgtTopologyWatchdog()
+    }
     if(handleGroupAnnouncementTopologyEvent(player, payload)) { return }
     Map operation = getActiveGroupOperation()
     String playerId = player.getDataValue('id')?.toString()
@@ -10632,7 +10667,13 @@ List<String> getUserGroupsDNIsFromUserGroups() {
 
 List<ChildDeviceWrapper> getCurrentPlayerDevices() {
   List<ChildDeviceWrapper> currentPlayers = []
-  app.getChildDevices().each{child -> if(child.getDataValue('id')) { currentPlayers.add(child)}}
+  app.getChildDevices().each{child ->
+    String dni = child.getDeviceNetworkId()?.toString() ?: ''
+    if(child.getDataValue('id') && !dni.contains(GROUP_DEVICE_DNI_MARKER) &&
+        !dni.contains(ALARM_MANAGER_DNI_MARKER)) {
+      currentPlayers.add(child)
+    }
+  }
   return currentPlayers
 }
 

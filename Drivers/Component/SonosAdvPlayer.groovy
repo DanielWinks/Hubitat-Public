@@ -93,6 +93,22 @@ void logPayloadAtTrace(String debugMessage, String traceMessage) {
   }
 }
 
+void logZgtXmlAtTrace(String dni, String xmlBody) {
+  if(getConfiguredLogLevel() != 'trace') {
+    logDebug("Received ZGT NOTIFY for ${dni}; XML body omitted; bodyLength=${xmlBody.length()}")
+    return
+  }
+  Integer chunkSize = 900
+  Integer chunkCount = (Integer)Math.ceil(xmlBody.length() / (double)chunkSize)
+  String payloadHash = Integer.toHexString(xmlBody.hashCode())
+  for(Integer chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+    Integer start = chunkIndex * chunkSize
+    Integer end = Math.min(start + chunkSize, xmlBody.length())
+    String chunk = xmlBody.substring(start, end)
+    logTrace("UPnP ZGT NOTIFY XML; dni=${dni}; chunk=${chunkIndex + 1}/${chunkCount}; totalLength=${xmlBody.length()}; hash=${payloadHash}; data=${chunk}")
+  }
+}
+
 void logWebSocketCommandPayload(Map command, String json) {
   String namespace = command?.get('namespace')?.toString() ?: 'unknown'
   String commandName = command?.get('command')?.toString() ?: 'unknown'
@@ -424,7 +440,7 @@ Boolean hasLineInCapability() {
 @Field static final String APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY = 'appMediatedInitializationConnectionGranted'
 @Field static final String SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY = 'skipPendingCommandPurgeOnUpdated'
 @Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
-@Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 90
+@Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 180
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 @Field static final Integer WS_COMMAND_ACK_TIMEOUT_SECONDS = 3
 @Field static final Integer WS_COMMAND_MAX_AGE_SECONDS = 60
@@ -1081,7 +1097,7 @@ void resubscribeAfterRenewal() {
     if(rightChannel != null && getRightChannelRincon()) {
       watchRightChannelWebsocket(rightChannel)
       try { rightChannel.beginParentMediatedConnection(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY].toString()) }
-      catch(Exception e) { logDebug("Could not start paired right-channel initialization: ${e.message}") }
+      catch(Exception e) { logWarn("Could not start best-effort right-channel initialization for ${rightChannel.getDeviceNetworkId()}: ${e.message}") }
     }
     runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
   }
@@ -1097,7 +1113,7 @@ void checkAppMediatedInitializationReady() {
   }
   Long startedAt = (runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] ?: now()) as Long
   if(now() - startedAt >= APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS * 1000L) {
-    finishAppMediatedInitialization(false, 'WebSocket or subscription setup did not settle within 90 seconds')
+    finishAppMediatedInitialization(false, 'WebSocket or subscription setup did not settle within 180 seconds')
     return
   }
   if(runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] != true ||
@@ -1118,11 +1134,12 @@ void checkAppMediatedInitializationReady() {
     }
   }
   ChildDeviceWrapper rightChannel = getRightChannelChild()
-  Boolean rightChannelReady = rightChannel == null || !getRightChannelRincon() ||
-      rightChannel.getDataValue('websocketStatus') == 'open'
-  if(pendingWebsocketSubscription || pendingUpnpRequest || !rightChannelReady) {
+  if(pendingWebsocketSubscription || pendingUpnpRequest) {
     runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
     return
+  }
+  if(rightChannel != null && getRightChannelRincon() && rightChannel.getDataValue('websocketStatus') != 'open') {
+    logWarn("Right-channel WebSocket is not ready after left-channel subscriptions settled; continuing initialization best-effort (dni=${rightChannel.getDeviceNetworkId()}, status=${rightChannel.getDataValue('websocketStatus') ?: 'unknown'})")
   }
   finishAppMediatedInitialization(true, 'WebSocket and subscription setup settled')
 }
@@ -1140,7 +1157,7 @@ void finishAppMediatedInitialization(Boolean succeeded, String detail) {
   publishPlayerStateUpdate([kind: succeeded ? 'initializationComplete' : 'initializationFailed',
       requestId: requestId, detail: detail])
   if(succeeded) { logInfo("App-mediated initialization complete: ${detail}") }
-  else if(detail?.contains('90 seconds') || detail?.contains('hard timeout')) {
+  else if(detail?.contains('180 seconds') || detail?.contains('hard timeout')) {
     logDebug("App-mediated initialization timed out: ${detail}")
   }
   else { logWarn("App-mediated initialization failed: ${detail}") }
@@ -4085,14 +4102,14 @@ void parse(String raw) {
     else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
       try {
         observeExpectedUpnpSubscriptionEvent('sid3')
-        if(xmlBody.contains('ThirdPartyMediaServersX') || xmlBody.contains('AvailableSoftwareUpdate')) { return }
         if(!isPlausibleXmlPayload(xmlBody)) {
           logDebug('Ignoring blank or non-XML ZGT event payload')
           return
         }
+        String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+        logZgtXmlAtTrace(zgtDni, xmlBody)
         // Compare against the last successfully parsed payload. Invalid XML must
         // not become the dedup baseline or count as a healthy inbound event.
-        String zgtDni = device.getDeviceNetworkId()
         Integer xmlHash = xmlBody.hashCode()
         deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, xmlHash)
       } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
@@ -4273,7 +4290,8 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
     String unescaped = unEscapeLastChangeXML(stateXml)
     if(!isPlausibleXmlPayload(unescaped)) { return null }
     GPathResult stateXmlParsed = parser.parseText(unescaped)
-    GPathResult zoneGroups = stateXmlParsed
+    GPathResult wrappedZoneGroups = (GPathResult)stateXmlParsed['ZoneGroups']
+    GPathResult zoneGroups = wrappedZoneGroups.size() > 0 ? wrappedZoneGroups : stateXmlParsed
     String groupName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
     GPathResult playerGroup = null
     GPathResult player = null
@@ -4301,6 +4319,14 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
         groupName: group['@ZoneGroupName'].toString() ?: groupName])
     }
     if(playerGroup == null || player == null) {
+      List<String> observedMemberIds = []
+      for(GPathResult group : groups) {
+        for(GPathResult member : group.children()) {
+          observedMemberIds.add(member['@UUID'].toString())
+        }
+      }
+      logPayloadAtTrace("Player ${playerId} not found in parsed ZoneGroupTopology; observedMemberCount=${observedMemberIds.size()}; groups=${householdGroups.size()}",
+        "ZGT player lookup failed; requestedPlayerId=${playerId}; observedMemberIds=${observedMemberIds}; householdGroups=${householdGroups}")
       return [playerFound: false, groupName: groupName, groups: householdGroups]
     }
 
@@ -8172,7 +8198,12 @@ void rightChannelWebsocketStatusChanged(String status, String childDeviceNetwork
     logDebug("Ignoring right-channel WebSocket status from unexpected child: dni=${childDeviceNetworkId}, expected=${rightChannel?.getDeviceNetworkId()}")
     return
   }
-  logDebug("Right-channel WebSocket status callback: value=${status}, child=${childDeviceNetworkId}, primaryStatus=${getWebSocketStatus()}, queued=${getWebsocketOutboundQueue().size()}")
+  String statusDetail = "value=${status}, child=${childDeviceNetworkId}, primaryStatus=${getWebSocketStatus()}, queued=${getWebsocketOutboundQueue().size()}"
+  if(status in ['error', 'connect timed out', 'unknown']) {
+    logWarn("Best-effort right-channel WebSocket failure: ${statusDetail}")
+  } else {
+    logDebug("Right-channel WebSocket status callback: ${statusDetail}")
+  }
   if(status == 'open') {
     if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
     else { logDebug('Right-channel socket opened first; paired entry remains queued until the primary socket opens') }

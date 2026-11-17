@@ -86,6 +86,53 @@ class SonosAdvPlayerSpec extends Specification {
     playerStateMessages().any { Map event -> event.kind == 'initializationRequested' }
   }
 
+  def "app-mediated initialization uses a 180 second settle timeout"() {
+    given:
+    Long startedAt = 1000000L
+    driver.runtimeState.appMediatedInitializationRequestId = 'init-180'
+    driver.runtimeState.appMediatedInitializationStartedAt = startedAt
+    driver.runtimeState.appMediatedInitializationUpnpStarted = true
+    driver.runtimeState.appMediatedInitializationResubscriptionsStarted = true
+    driver.metaClass.now = { -> startedAt + 180000L }
+
+    when:
+    driver.checkAppMediatedInitializationReady()
+
+    then:
+    driver.APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS == 180
+    playerStateMessages().any { Map event ->
+      event.kind == 'initializationFailed' && event.requestId == 'init-180' &&
+        event.detail == 'WebSocket or subscription setup did not settle within 180 seconds'
+    }
+    driver.logs.any { String log -> log.contains('App-mediated initialization timed out') }
+  }
+
+  def "app-mediated initialization succeeds when only the best-effort right channel is unavailable"() {
+    given:
+    driver.runtimeState.appMediatedInitializationRequestId = 'init-right-channel-best-effort'
+    driver.runtimeState.appMediatedInitializationStartedAt = driver.now()
+    driver.runtimeState.appMediatedInitializationUpnpStarted = true
+    driver.runtimeState.appMediatedInitializationResubscriptionsStarted = true
+    driver.device.dataValues.websocketStatus = 'open'
+    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getRightChannelChildDNI())
+    rightChannel.dataValues.websocketStatus = 'error'
+    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
+    driver.children << rightChannel
+
+    when:
+    driver.checkAppMediatedInitializationReady()
+
+    then:
+    playerStateMessages().any { Map event ->
+      event.kind == 'initializationComplete' && event.requestId == 'init-right-channel-best-effort'
+    }
+    !playerStateMessages().any { Map event ->
+      event.kind == 'initializationFailed' && event.requestId == 'init-right-channel-best-effort'
+    }
+    driver.logs.any { String message -> message.contains('Right-channel WebSocket is not ready') }
+  }
+
   def "external transport replacement reports correlated interruption of active group announcement"() {
     given:
     driver.device.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
@@ -1569,7 +1616,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "topology snapshot includes every household group for the app ZGT source"() {
     given:
-    String zoneState = '<ZoneGroups>' +
+    String zoneState = '<ZoneGroupState><ZoneGroups>' +
       '<ZoneGroup ID="G1" Coordinator="RINCON_A" ZoneGroupName="Downstairs">' +
       '<ZoneGroupMember UUID="RINCON_A" ZoneName="Living Room"/>' +
       '<ZoneGroupMember UUID="RINCON_B" ZoneName="Kitchen"/>' +
@@ -1577,7 +1624,7 @@ class SonosAdvPlayerSpec extends Specification {
       '<ZoneGroup ID="G2" Coordinator="RINCON_C" ZoneGroupName="Office">' +
       '<ZoneGroupMember UUID="RINCON_C" ZoneName="Office"/>' +
       '</ZoneGroup>' +
-      '</ZoneGroups>'
+      '</ZoneGroups></ZoneGroupState>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
     String xml = '<propertyset><property><ZoneGroupName>Household</ZoneGroupName><ZoneGroupState>' +
       escapedState + '</ZoneGroupState></property></propertyset>'
@@ -1592,6 +1639,37 @@ class SonosAdvPlayerSpec extends Specification {
     topology.groups[0].playerIds == ['RINCON_A', 'RINCON_B']
     topology.groups[1].coordinatorId == 'RINCON_C'
     topology.groups[1].playerIds == ['RINCON_C']
+  }
+
+  def "ZGT notification with unrelated service properties still publishes household topology"() {
+    given:
+    driver.device.dataValues.appZgtSubscribe = 'true'
+    driver.device.dataValues.appZgtLeaderGeneration = 'leader-test'
+    String zoneState = '<ZoneGroups><ZoneGroup ID="G1" Coordinator="RINCON_TEST">' +
+      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/>' +
+      '</ZoneGroup></ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body = '<propertyset><property><ThirdPartyMediaServersX>1</ThirdPartyMediaServersX></property>' +
+      '<property><AvailableSoftwareUpdate>0</AvailableSoftwareUpdate></property>' +
+      '<property><ZoneGroupName>Household</ZoneGroupName><ZoneGroupState>' + escapedState +
+      '</ZoneGroupState></property></propertyset>'
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
+      'X-SONOS-SERVICETYPE: ZoneGroupTopology\r\n' +
+      'SID: uuid:test-zgt\r\n' +
+      'Content-Length: ' + body.getBytes('UTF-8').length + '\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'NOTIFY /zgt HTTP/1.1': ''], body: body]
+    }
+    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers -> true }
+
+    when:
+    driver.parse(raw)
+
+    then:
+    parentPlayerUpdates.any { Map event ->
+      event.kind == 'zgtTopology' && event.leaderGeneration == 'leader-test' &&
+        event.topology.groups.size() == 1 && event.topology.groups[0].groupId == 'G1'
+    }
   }
 
   def "only app-elected ZGT player subscribes to ZoneGroupTopology"() {
@@ -1771,6 +1849,45 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.logs.size() == 2
     driver.logs.every { String entry -> entry.contains('visible') }
+  }
+
+  def "raw diagnostic payloads are logged only at trace level"() {
+    given:
+    String xml = '<ZoneGroupState>' + ('x' * 2400) + '</ZoneGroupState>'
+    driver.logs.clear()
+    driver.settings.logLevel = 'info'
+
+    when:
+    driver.logZgtXmlAtTrace('TEST-DNI', xml)
+
+    then:
+    driver.logs.empty
+
+    when:
+    driver.settings.logLevel = 'debug'
+    driver.logZgtXmlAtTrace('TEST-DNI', xml)
+
+    then:
+    driver.logs.size() == 2
+    driver.logs.every { String entry -> entry.contains('XML body omitted') && !entry.contains(xml) }
+
+    when:
+    driver.logs.clear()
+    driver.settings.logLevel = 'trace'
+    driver.logZgtXmlAtTrace('TEST-DNI', xml)
+    List<Map> chunks = driver.logs.findAll { String entry ->
+      entry.startsWith('TRACE Test Device: UPnP ZGT NOTIFY XML;')
+    }.collect { String entry ->
+      List<String> marker = (entry =~ /chunk=(\d+)\/(\d+)/)[0] as List<String>
+      [index: marker[1] as Integer, data: entry.substring(entry.indexOf(' data=') + 6)]
+    }.sort { Map left, Map right -> left.index <=> right.index }
+
+    then:
+    chunks.size() > 1
+    chunks.every { Map chunk -> chunk.data.toString().length() <= 900 }
+    chunks.collect { Map chunk -> chunk.data }.join() == xml
+    driver.logs.findAll { String entry -> entry.contains('UPnP ZGT NOTIFY XML;') }
+      .every { String entry -> entry.length() < 1400 }
   }
 
   def "second priority clip waits for active priority playback and preserves suspended regular clips"() {

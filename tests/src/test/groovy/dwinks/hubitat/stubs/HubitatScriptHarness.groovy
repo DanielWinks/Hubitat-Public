@@ -89,6 +89,9 @@ class HubitatScriptHarness extends Script {
   void subscribe(Object target, String attribute, String handler) {
     subscriptions << [target, attribute, handler]
   }
+  void subscribe(Object target, String attribute, Closure handler) {
+    subscriptions << [target, attribute, handler]
+  }
   void subscribe(Object target, String handler) {
     subscriptions << [target, null, handler]
   }
