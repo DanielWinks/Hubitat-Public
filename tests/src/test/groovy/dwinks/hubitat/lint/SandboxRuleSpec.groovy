@@ -80,4 +80,17 @@ class SandboxRuleSpec extends Specification {
     then:
     v.any { it.message.contains("'new File") || it.message.contains('java.io.File') }
   }
+
+  def "real NWS driver can be checked without crashing on map lookups"() {
+    given:
+    File driver = new File('../Drivers/weather/NWSForecast.groovy')
+    assert driver.isFile()
+    ParseResult pr = HubitatScriptParser.parse(driver)
+
+    when:
+    List<Violation> v = new SandboxRule().check(pr)
+
+    then:
+    !v.any { it.message.startsWith('Rule threw') }
+  }
 }

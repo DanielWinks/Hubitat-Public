@@ -104,7 +104,10 @@ class SandboxRule implements Rule {
       String mname = AstUtil.methodName(call)
       String receiver = receiverName(call)
       if (mname != null && receiver != null) {
-        Set<String> blocked = DISALLOWED_CALLS[receiver]
+        // Use Map.get explicitly here. Groovy's statically compiled map
+        // subscript can coerce an absent-key fallback map to the declared
+        // Set value type for some parsed Hubitat scripts.
+        Set<String> blocked = DISALLOWED_CALLS.get(receiver)
         if (blocked != null && blocked.contains(mname)) {
           out << new Violation(file, call.lineNumber, call.columnNumber, ruleName, Severity.ERROR,
             "Disallowed call '${receiver}.${mname}(...)' - Hubitat sandbox will reject this.")
