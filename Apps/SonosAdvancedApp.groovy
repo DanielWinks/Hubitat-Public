@@ -8233,6 +8233,17 @@ Map readGroupOperationTopology(Map operation) {
     return topology
   }
   List<String> playerIds = normalizeGroupPlayerIds(acceptedObservation.playerIds)
+  Long acceptedObservedAt = acceptedObservation.observedAt as Long ?: 0L
+  Boolean newerConflictingReport = freshObservations.any { Map item ->
+    Long observedAt = item.observedAt as Long ?: 0L
+    observedAt > acceptedObservedAt &&
+        (item.groupId?.toString() != acceptedObservation.groupId?.toString() ||
+         item.coordinatorId?.toString() != acceptedObservation.coordinatorId?.toString() ||
+         normalizeGroupPlayerIds(item.playerIds) != playerIds)
+  }
+  if(newerConflictingReport) {
+    return topology
+  }
   topology.fresh = true
   topology.consistent = true
   topology.groupId = acceptedObservation.groupId as String
