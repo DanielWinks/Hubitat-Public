@@ -11,7 +11,7 @@ repositories {
 }
 
 ext {
-  groovyVersion = '4.0.24'
+  groovyVersion = '4.0.33'
   spockVersion  = '2.4-M5-groovy-4.0'
 }
 
@@ -38,7 +38,7 @@ application {
 
 java {
   toolchain {
-    languageVersion = JavaLanguageVersion.of(21)
+    languageVersion = JavaLanguageVersion.of(27)
   }
 }
 
