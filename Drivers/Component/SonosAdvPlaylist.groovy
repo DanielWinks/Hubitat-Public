@@ -24,7 +24,7 @@
 metadata {
   definition(
     name: 'Sonos Advanced Playlist',
-    version: '0.17.1',
+    version: '0.17.2',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
