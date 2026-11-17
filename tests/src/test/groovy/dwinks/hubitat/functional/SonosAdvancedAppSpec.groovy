@@ -2504,16 +2504,8 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     operation.favoriteTopologyStableObservations == 1
-    operation.favoriteTopologyVerified == false
-    appScript.logs.any { it.contains('Post-Favorite topology uses fresh coordinator roster RINCON_COORD') }
-
-    when:
-    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
-
-    then:
     operation.favoriteTopologyVerified == true
-    operation.favoriteTopologyStableObservations == 2
+    appScript.logs.any { it.contains('Post-Favorite topology uses fresh coordinator roster RINCON_COORD') }
     operation.favoriteExpectedGroupId == 'GROUP-1'
   }
 
@@ -2534,18 +2526,8 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     operation.favoriteTopologyStableObservations == 1
-    operation.favoriteTopologyVerified == false
-    appScript.logs.any { it.contains('Post-Favorite topology check') && it.contains('authority=RINCON_FOLLOW') }
-
-    when:
-    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
-    Map topology = appScript.readFavoriteGroupTopology(operation)
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
-
-    then:
-    topology.authorityPlayerId == 'RINCON_FOLLOW'
     operation.favoriteTopologyVerified == true
-    operation.favoriteTopologyStableObservations == 2
+    appScript.logs.any { it.contains('Post-Favorite topology check') && it.contains('authority=RINCON_FOLLOW') }
     operation.favoriteExpectedGroupId == 'GROUP-1'
     appScript.getActiveGroupOperation() != null
   }

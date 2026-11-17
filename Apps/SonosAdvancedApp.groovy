@@ -8567,7 +8567,7 @@ void updateGroupTopologyStability(Map operation, Map topology) {
     operation.topologyLastObservedAt = latestObservedAt
   } else if(fingerprint != operation.topologyFingerprint) {
     operation.topologyFingerprint = fingerprint
-    operation.stableObservations = 1
+    operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
     operation.topologyLastObservedAt = latestObservedAt
   }
 }
@@ -9536,25 +9536,14 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     }
 
     updateFavoriteGroupTopologyStability(operation, topology)
-    if(((operation.favoriteTopologyStableObservations ?: 0) as Integer) < GROUP_OPERATION_STABILITY_OBSERVATIONS) {
-      if(((operation.favoriteTopologyAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_TOPOLOGY_ATTEMPTS) {
-        failGroupOperation(operation, 'FAVORITE_TOPOLOGY_NOT_STABLE',
-            "Post-Favorite group topology did not remain stable: ${summarizeGroupOperationTopology(topology)}")
-        return
-      }
-      refreshGroupFavoriteTopology(operation, false)
-      publishGroupOperationStatus(operation, 'VERIFYING_TOPOLOGY')
-      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
-        overwrite: true,
-        data: [operationId: operation.operationId]
-      ])
-      return
-    }
-
+    // A fresh ZGT roster that confirms every required member and the expected
+    // coordinator is authoritative. Do not demand duplicate reports: ZGT
+    // already reports the formed group, and extra polls can turn valid groups
+    // into false topology failures while other speakers' reports catch up.
     operation.favoriteTopologyVerified = true
     operation.topologyRefreshAt = operation.favoriteTopologyRefreshAt
     operation.topologyObservations = operation.favoriteTopologyObservations ?: [:]
-    operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+    operation.stableObservations = 1
     operation.topologyFingerprint = topology.fingerprint
     operation.resolvedCoordinatorId = topology.coordinatorId as String
     operation.favoriteExpectedGroupId = topology.groupId as String
