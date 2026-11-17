@@ -17,11 +17,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up JDK 27 EA
+      - name: Set up JDK 27
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '27-ea'
+          java-version: '27'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -242,11 +242,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up JDK 27 EA
+      - name: Set up JDK 27
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '27-ea'
+          java-version: '27'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3

@@ -21,11 +21,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up Java
+      - name: Set up JDK 27
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "27"
 
       - name: Run Sonos regression tests
         working-directory: tests
