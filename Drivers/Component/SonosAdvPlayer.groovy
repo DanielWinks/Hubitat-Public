@@ -119,8 +119,6 @@ metadata {
     singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
-  attribute 'sonosPlayerStateUpdate', 'string'
-  attribute 'sonosPlayerAppRequest', 'string'
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
 
   capability 'AudioNotification'
@@ -409,8 +407,6 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
-@Field static final String PLAYER_STATE_UPDATE_ATTRIBUTE = 'sonosPlayerStateUpdate'
-@Field static final String PLAYER_APP_REQUEST_ATTRIBUTE = 'sonosPlayerAppRequest'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
 @Field static final String WS_COMMAND_LEDGER_STATE_KEY = 'websocketCommandLedger'
@@ -810,6 +806,8 @@ void configure() {
   migrationCleanup()
   synchronizeTrackPositionPreference()
   // Remove transient parent-app bridge attributes from existing devices.
+  device.deleteCurrentState('sonosPlayerStateUpdate')
+  device.deleteCurrentState('sonosPlayerAppRequest')
   clearGroupFavoriteOperationCurrentState()
   clearPlayerCommandRequestCurrentState()
   // Remove the retired audio clip progress state from devices upgraded from
@@ -1765,9 +1763,10 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
         correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip, createdAt: requestCreatedAt]
       state.pendingParentAppTtsRequests = pending
       logDebug("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
-      sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
+      Boolean accepted = sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
         volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId,
         createdAt: requestCreatedAt])
+      completeParentAppActiveStreamTts(requestId, (accepted == true).toString())
       return
     } else {
       logDebug("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
@@ -1834,17 +1833,19 @@ Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
   return fallback
 }
 
-void sendParentAppRequest(String action, Map args = [:]) {
+Boolean sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'playerAppRequest', action: action,
     sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
   logDebug("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
+  Boolean response = null
   try {
-    sendEvent(name: PLAYER_APP_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+    response = parent != null ? (Boolean)parent.playerAppRequest(payload) : null
   } catch(Exception e) {
-    logWarn("Parent app request event emission failed action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}: ${e.message}")
+    logWarn("Parent app request callback failed action=${action}, requestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}: ${e.message}")
     throw e
   }
-  logDebug("Parent app request event emitted action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
+  logDebug("Parent app request callback returned action=${action}, requestId=${payload.requestId}, accepted=${response}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
+  return response
 }
 
 /** Complete the asynchronous parent-app decision for an active-stream TTS request. */
@@ -7331,7 +7332,7 @@ void sendEventsToNewGroupMembers(List<String> newRincons) {
 void publishPlayerStateUpdate(Map payload) {
   Map eventData = new LinkedHashMap(payload)
   eventData['playerDni'] = device.getDeviceNetworkId()
-  sendEvent(name: PLAYER_STATE_UPDATE_ATTRIBUTE, value: JsonOutput.toJson(eventData), isStateChange: true)
+  if(parent != null) { parent.playerStateUpdate(eventData) }
 }
 
 void publishGroupTopologyUpdate(String groupId, String coordinatorId, List<String> playerIds) {

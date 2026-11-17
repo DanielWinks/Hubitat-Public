@@ -14,13 +14,14 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared HubitatScriptHarness driver
   @Shared List<String> websocketMessages = []
   @Shared List<Map> rawConnections = []
+  @Shared List<Map> parentPlayerUpdates = []
+  @Shared List<Map> parentPlayerRequests = []
   @Shared List<List> websocketConnections = []
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
   List<Map> playerStateMessages() {
-    driver.events.findAll { Map event -> event.name == 'sonosPlayerStateUpdate' }
-      .collect { Map event -> (Map)new JsonSlurper().parseText(event.value.toString()) }
+    parentPlayerUpdates.collect { Map event -> new LinkedHashMap(event) }
   }
 
   def "delayed stream callback cannot supersede a newer transport command"() {
@@ -82,7 +83,7 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.state.containsKey('pendingParentCoordinatorCommands')
     !driver.atomicState.containsKey('transportCommandQueue')
     !driver.runtimeState.containsKey('audioClipProgressByCorrelationId')
-    driver.events.find { Map event -> event.name == 'sonosPlayerStateUpdate' }?.value?.toString()?.contains('initializationRequested')
+    playerStateMessages().any { Map event -> event.kind == 'initializationRequested' }
   }
 
   def "external transport replacement reports correlated interruption of active group announcement"() {
@@ -978,6 +979,8 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def setup() {
+    parentPlayerUpdates.clear()
+    parentPlayerRequests.clear()
     driver.binding.getVariable('interfaces').rawSocket = rawSocket
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
@@ -998,6 +1001,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.clear()
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
+    driver.metaClass.getParent = { -> new Expando(
+      playerStateUpdate: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
+      playerAppRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload) }
+    ) }
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
     driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
     driver.location.metaClass.getHub = { -> new Expando(localIP: '192.168.1.4', localSrvPortTCP: 39501) }
@@ -1038,6 +1045,10 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def "driver initialize only asks the parent app for an initialization turn"() {
+    given:
+    driver.device.currentValues.sonosPlayerStateUpdate = '{"kind":"old"}'
+    driver.device.currentValues.sonosPlayerAppRequest = '{"action":"old"}'
+
     when:
     driver.initialize()
 
@@ -1046,6 +1057,9 @@ class SonosAdvPlayerSpec extends Specification {
     playerStateMessages()[0].kind == 'initializationRequested'
     playerStateMessages()[0].reason == 'driver initialize'
     playerStateMessages()[0].clearPendingCommands == true
+    !driver.device.currentValues.containsKey('sonosPlayerStateUpdate')
+    !driver.device.currentValues.containsKey('sonosPlayerAppRequest')
+    !driver.events.any { Map event -> event.name in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
     driver.scheduled.empty
     websocketConnections.empty
   }

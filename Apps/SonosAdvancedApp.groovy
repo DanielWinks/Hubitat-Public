@@ -248,9 +248,7 @@ preferences {
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
 @Field static final String GROUP_COMMAND_REQUEST_EVENT = 'dwinksSonosAdvancedGroupCommand'
-@Field static final String PLAYER_STATE_UPDATE_EVENT = 'dwinksSonosAdvancedPlayerState'
 @Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'sonosGroupCommandRequest'
-@Field static final String PLAYER_STATE_UPDATE_ATTRIBUTE = 'sonosPlayerStateUpdate'
 @Field static final String PLAYER_INITIALIZATION_QUEUE_STATE_KEY = 'playerInitializationQueue'
 @Field static final String PLAYER_INITIALIZATION_ACTIVE_STATE_KEY = 'playerInitializationActive'
 @Field static final String PLAYER_INITIALIZATION_DEFERRED_STATE_KEY = 'playerInitializationDeferred'
@@ -266,9 +264,10 @@ preferences {
 @Field static final Integer PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS = 5
 @Field static final Integer PLAYER_INITIALIZATION_MAX_IN_PROGRESS = 3
 @Field static final Integer PLAYER_INITIALIZATION_HOURLY_RETRY_SECONDS = 3600
-@Field static final String PLAYER_APP_REQUEST_ATTRIBUTE = 'sonosPlayerAppRequest'
 @Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final String PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY = 'sonosPlayerPlaybackObservations'
+@Field static final String PENDING_PLAYER_STATE_UPDATES_STATE_KEY = 'pendingPlayerStateUpdates'
+@Field static final String PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerStateUpdateDrainScheduled'
 @Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
@@ -2695,16 +2694,8 @@ void enqueueAllPlayerInitializations(Map data = [:]) {
   players.each { ChildDeviceWrapper player ->
     String dni = player.getDeviceNetworkId()?.toString()
     String websocketUrl = player.getDataValue('websocketUrl')?.toString()
-    Boolean eventRequestedInitialization = false
-    try {
-      String rawUpdate = player.currentValue(PLAYER_STATE_UPDATE_ATTRIBUTE)?.toString()
-      Map latestUpdate = rawUpdate ? (Map)parseJson(rawUpdate) : [:]
-      eventRequestedInitialization = latestUpdate?.kind == 'initializationRequested'
-    } catch(Exception e) {
-      logTrace("Could not inspect saved initialization request for ${dni}: ${e.message}")
-    }
     Boolean socketUnavailable = player.getDataValue('websocketStatus') != 'open'
-    if(dni && websocketUrl && (boot || eventRequestedInitialization || socketUnavailable)) {
+    if(dni && websocketUrl && (boot || socketUnavailable)) {
       enqueuePlayerInitialization(dni, reason, boot)
     }
   }
@@ -2819,6 +2810,16 @@ void startNextPlayerInitialization() {
     try {
       player.updateDataValue('appInitializationRequestId', requestId)
       player.beginAppMediatedInitialization(requestId)
+      Map<String, Map> startedPlayers = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+          ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
+      Map startedRequest = startedPlayers[dni]
+      if(startedRequest?.requestId?.toString() == requestId && startedRequest.phase == 'waiting-start') {
+        startedRequest.phase = 'initializing'
+        startedRequest.startedAt = now()
+        startedPlayers[dni] = startedRequest
+        state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = startedPlayers
+        logDebug("Child ${dni} accepted initialization request=${requestId}")
+      }
     } catch(Exception e) {
       logWarn("Could not start initialization for ${dni}: ${e.message}")
       finishPlayerInitialization(requestId, false, "start invocation failed: ${e.message}")
@@ -3449,16 +3450,13 @@ void subscribeToGroupCommandRequests() {
     }
   }
   getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
-    unsubscribe(playerDevice, PLAYER_STATE_UPDATE_ATTRIBUTE, 'playerStateUpdateHandler')
-    unsubscribe(playerDevice, PLAYER_APP_REQUEST_ATTRIBUTE, 'playerAppRequestHandler')
+    unsubscribe(playerDevice, 'sonosPlayerStateUpdate', 'playerStateUpdateHandler')
+    unsubscribe(playerDevice, 'sonosPlayerAppRequest', 'playerAppRequestHandler')
     unsubscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     unsubscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
-    subscribe(playerDevice, PLAYER_STATE_UPDATE_ATTRIBUTE, 'playerStateUpdateHandler')
-    subscribe(playerDevice, PLAYER_APP_REQUEST_ATTRIBUTE, 'playerAppRequestHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     subscribedPlayers++
-    logDebug("Subscribed player app request handler for playerDni=${playerDevice.getDeviceNetworkId()}, attribute=${PLAYER_APP_REQUEST_ATTRIBUTE}")
   }
   logDebug("Child request subscriptions configured; groups=${subscribedGroups}, players=${subscribedPlayers}")
 }
@@ -4753,16 +4751,40 @@ void drainQueuedChildEvents() {
   }
 }
 
-/** Receive a player state batch without holding the player callback open. */
-void playerStateUpdateHandler(Event event) {
+/** Handle driver-reported player state batches. */
+void playerStateUpdate(Map payload) {
+  if(!(payload instanceof Map) || payload.isEmpty()) { return }
+  List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
+  pending.add(new LinkedHashMap(payload))
+  state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] = pending
+  if(state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] != true) {
+    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
+    runInMillis(25, 'drainQueuedPlayerStateUpdates', [overwrite: true])
+  }
+}
+
+void drainQueuedPlayerStateUpdates() {
+  List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
+  state.remove(PENDING_PLAYER_STATE_UPDATES_STATE_KEY)
+  state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+  pending.each { Map payload -> playerStateUpdateHandler(payload) }
+}
+
+void playerStateUpdateHandler(Object event) {
   Map payload
-  try {
-    String rawValue = event?.value?.toString()
-    String rawPayload = rawValue?.trim()?.startsWith('{') ? rawValue : event?.data?.toString()
-    payload = (Map)parseJson(rawPayload)
-  } catch(Exception e) {
-    logWarn("Ignoring malformed player state update: ${e.message}")
-    return
+  if(event instanceof Map && !((Map)event).containsKey('value') && !((Map)event).containsKey('data')) {
+    payload = (Map)event
+  } else {
+    try {
+      String rawValue = event?.value?.toString()
+      String rawPayload = rawValue?.trim()?.startsWith('{') ? rawValue : event?.data?.toString()
+      payload = (Map)parseJson(rawPayload)
+    } catch(Exception e) {
+      logWarn("Ignoring malformed player state update: ${e.message}")
+      return
+    }
   }
   if(!(payload instanceof Map)) { return }
   String playerDni = payload.playerDni as String
@@ -5005,29 +5027,38 @@ void alarmRequestHandler(Event event) {
   }
 }
 
-/** Handle player requests that formerly called methods on the parent app. */
-void playerAppRequestHandler(Event event) {
+/** Handle player requests sent directly by the child player driver. */
+Boolean playerAppRequest(Map request) {
+  return playerAppRequestHandler(request)
+}
+
+Boolean playerAppRequestHandler(Object event) {
   Map request
-  try { request = (Map)parseJson(event?.value?.toString()) }
-  catch(Exception e) {
-    logWarn("Ignoring malformed player app request: ${e.message}")
-    return
+  if(event instanceof Map && !((Map)event).containsKey('value') && !((Map)event).containsKey('data')) {
+    request = (Map)event
+  } else {
+    try { request = (Map)parseJson(event?.value?.toString()) }
+    catch(Exception e) {
+      logWarn("Ignoring malformed player app request: ${e.message}")
+      return false
+    }
   }
   String playerDni = request?.sourceDni?.toString()
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || !player.getDataValue('id') || request.channel != 'playerAppRequest') {
     logDebug("Ignoring player app request action=${request?.action ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sourceDni=${playerDni ?: 'unknown'}, owned=${player != null}, hasPlayerId=${player?.getDataValue('id') != null}, channel=${request?.channel ?: 'unknown'}")
-    return
+    return false
   }
   Map args = request.args instanceof Map ? (Map)request.args : [:]
   if(request.action?.toString() == 'activeStreamTts' &&
       isRequestOlderThanDeviceCommandClear(playerDni, args.createdAt)) {
     logDebug("Ignoring stale player TTS request ${args.requestId ?: 'unknown'} from before initialization for ${playerDni}")
-    return
+    return false
   }
   Long eventAgeMs = args.createdAt != null
       ? Math.max(0L, now() - (args.createdAt as Long)) : -1L
   logDebug("Received player app request action=${request.action ?: 'unknown'}, eventRequestId=${request.requestId ?: 'unknown'}, ttsRequestId=${args.requestId ?: 'none'}, correlation=${args.correlationId ?: 'none'}, sourceDni=${playerDni}, ageMs=${eventAgeMs}")
+  Boolean activeStreamAccepted = null
   switch(request.action?.toString()) {
     case 'refreshRoster':
       refreshStaticDriverActivePlayerRoster()
@@ -5047,18 +5078,13 @@ void playerAppRequestHandler(Event event) {
       Boolean accepted = handlePlayerActiveStreamTts(playerDni, args.uri?.toString(), volume, duration,
           args.correlationId?.toString())
       logDebug("Player active-stream TTS decision requestId=${requestId ?: 'unknown'}, accepted=${accepted}")
-      if(requestId) {
-        try {
-          player.completeParentAppActiveStreamTts(requestId, accepted.toString())
-          logDebug("Player active-stream TTS response sent eventRequestId=${request.requestId ?: 'unknown'}, requestId=${requestId}, accepted=${accepted}, sourceDni=${playerDni}")
-        } catch(Exception e) {
-          logWarn("Player active-stream TTS response failed eventRequestId=${request.requestId ?: 'unknown'}, requestId=${requestId}, sourceDni=${playerDni}: ${e.message}")
-          throw e
-        }
-      }
+      activeStreamAccepted = accepted
       break
-    default: logWarn("Ignoring unsupported player app request action '${request.action}'")
+    default:
+      logWarn("Ignoring unsupported player app request action '${request.action}'")
+      return false
   }
+  return activeStreamAccepted
 }
 
 /** Queue group announcements so a coordinator stream and subsequent messages cannot race. */

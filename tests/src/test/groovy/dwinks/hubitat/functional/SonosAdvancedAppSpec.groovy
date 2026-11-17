@@ -235,6 +235,7 @@ class SonosAdvancedAppSpec extends Specification {
     follower.initializationRequests.size() == 1
     extra.initializationRequests.size() == 1
     appScript.state.playerInitializationActive.size() == 3
+    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].phase == 'initializing'
     appScript.scheduled.count { List job -> job[0] == 2 && job[1] == 'playerInitializationStartWatchdog' } == 3
     appScript.scheduled.count { List job -> job[0] == 90 && job[1] == 'playerInitializationHardWatchdog' } == 3
 
@@ -1305,7 +1306,8 @@ class SonosAdvancedAppSpec extends Specification {
       playbackAttrs: [status: 'playing']]
 
     when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
+    appScript.playerStateUpdate(batch)
+    appScript.drainQueuedPlayerStateUpdates()
 
     then:
     appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
@@ -1477,7 +1479,7 @@ class SonosAdvancedAppSpec extends Specification {
     calls.find { List call -> call[0] == 'setSource' } == ['setSource', switchDni, 'uri', 'meta']
   }
 
-  def "player app request event is handled and replied to through a device callback"() {
+  def "player app request callback returns the active-stream decision"() {
     given:
     appScript.metaClass.handlePlayerActiveStreamTts = { String playerDni, String uri,
         BigDecimal volume, Integer duration, String correlationId ->
@@ -1486,15 +1488,15 @@ class SonosAdvancedAppSpec extends Specification {
     }
 
     when:
-    appScript.playerAppRequestHandler([value: JsonOutput.toJson([
+    Boolean accepted = appScript.playerAppRequest([
       version: 1, channel: 'playerAppRequest', action: 'activeStreamTts',
       sourceDni: coordinator.deviceNetworkId, requestId: 'event-request-1',
       args: [requestId: 'tts-request-1', uri: 'http://example.test/tts.mp3', volume: '5',
         duration: 3, correlationId: 'tts-correlation']
-    ])] as Event)
+    ])
 
     then:
-    coordinator.completedAppTtsRequests == [['tts-request-1', 'true']]
+    accepted == true
   }
 
   def "player app cache refresh requests update driver roster and policy snapshots"() {
@@ -1548,7 +1550,8 @@ class SonosAdvancedAppSpec extends Specification {
       signalStatus: 'no-signal', signalObservedAt: appScript.now()]
 
     when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
+    appScript.playerStateUpdate(batch)
+    appScript.drainQueuedPlayerStateUpdates()
 
     then:
     appScript.state.sonosPlayerPlaybackObservations.RINCON_COORD.playbackState == 'PLAYBACK_STATE_PLAYING'
