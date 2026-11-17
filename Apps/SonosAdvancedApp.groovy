@@ -273,6 +273,7 @@ preferences {
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
 @Field static final String PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY = 'receivedPlayerCommandRequestIds'
+@Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
@@ -4772,6 +4773,7 @@ void playerStateUpdateHandler(Event event) {
       ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
   Map active = activeByDni[playerDni]
   if(payload.kind == 'initializationRequested') {
+    if(payload.clearPendingCommands == true) { clearPendingCommandsForDevice(playerDni) }
     enqueuePlayerInitialization(playerDni, payload.reason?.toString() ?: 'child initialization request',
         state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true)
     return
@@ -5018,6 +5020,11 @@ void playerAppRequestHandler(Event event) {
     return
   }
   Map args = request.args instanceof Map ? (Map)request.args : [:]
+  if(request.action?.toString() == 'activeStreamTts' &&
+      isRequestOlderThanDeviceCommandClear(playerDni, args.createdAt)) {
+    logDebug("Ignoring stale player TTS request ${args.requestId ?: 'unknown'} from before initialization for ${playerDni}")
+    return
+  }
   Long eventAgeMs = args.createdAt != null
       ? Math.max(0L, now() - (args.createdAt as Long)) : -1L
   logDebug("Received player app request action=${request.action ?: 'unknown'}, eventRequestId=${request.requestId ?: 'unknown'}, ttsRequestId=${args.requestId ?: 'none'}, correlation=${args.correlationId ?: 'none'}, sourceDni=${playerDni}, ageMs=${eventAgeMs}")
@@ -6739,8 +6746,16 @@ void enqueueGroupCommandRequest(Map request) {
 
   String groupDni = request?.groupDni as String
   String command = request?.command as String
+  if(request?.action?.toString() == 'initializationPurge' && groupDni && getChildDevice(groupDni) != null) {
+    clearPendingCommandsForDevice(groupDni)
+    return
+  }
   if(!groupDni || !command) {
     logWarn("Ignoring group command request with invalid target or command: ${JsonOutput.toJson(request)}")
+    return
+  }
+  if(isRequestOlderThanDeviceCommandClear(groupDni, request.createdAt)) {
+    logDebug("Ignoring stale group command request ${request.requestId ?: 'unknown'} from before initialization for ${groupDni}")
     return
   }
   // Location events are hub-wide; ignore requests for groups owned by another app instance.
@@ -6813,6 +6828,126 @@ void acknowledgeGroupCommandRequest(String groupDni, String requestId) {
     logDebug("Sent group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
   } catch(Exception e) {
     logWarn("Could not send group command acknowledgement ${requestId ?: 'unknown'} for ${groupDni}: ${e.message}")
+  }
+}
+
+/**
+ * Drop commands and announcements owned by a child whose driver is explicitly
+ * initializing. The driver invokes this before requesting its initialization
+ * turn, so none of the old work can be replayed during recovery.
+ */
+void clearPendingCommandsForDevice(String deviceDni) {
+  if(!deviceDni) { return }
+
+  Map<String, Long> clearTimes = state[DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Long>((Map<String, Long>)state[DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY]) : [:]
+  clearTimes[deviceDni] = now()
+  state[DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY] = clearTimes
+
+  Map<String, List<Map>> pendingGroups = state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[GROUP_COMMAND_QUEUE_STATE_KEY]) : [:]
+  pendingGroups.remove(deviceDni)
+  if(pendingGroups.isEmpty()) { state.remove(GROUP_COMMAND_QUEUE_STATE_KEY) }
+  else { state[GROUP_COMMAND_QUEUE_STATE_KEY] = pendingGroups }
+
+  Map<String, List<Map>> pendingPlayers = state[PLAYER_COMMAND_QUEUE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[PLAYER_COMMAND_QUEUE_STATE_KEY]) : [:]
+  pendingPlayers.remove(deviceDni)
+  if(pendingPlayers.isEmpty()) { state.remove(PLAYER_COMMAND_QUEUE_STATE_KEY) }
+  else { state[PLAYER_COMMAND_QUEUE_STATE_KEY] = pendingPlayers }
+
+  List<Map> deferredGroups = state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_GROUP_COMMANDS_STATE_KEY] : []
+  deferredGroups = deferredGroups.findAll { Map request -> request.groupDni?.toString() != deviceDni }
+  if(deferredGroups.isEmpty()) { state.remove(DEFERRED_GROUP_COMMANDS_STATE_KEY) }
+  else { state[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferredGroups }
+
+  List<Map> deferredPlayers = state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] instanceof List
+      ? (List<Map>)state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] : []
+  deferredPlayers = deferredPlayers.findAll { Map request -> request.playerDni?.toString() != deviceDni }
+  if(deferredPlayers.isEmpty()) { state.remove(DEFERRED_PLAYER_COMMANDS_STATE_KEY) }
+  else { state[DEFERRED_PLAYER_COMMANDS_STATE_KEY] = deferredPlayers }
+
+  ChildDeviceWrapper child = getChildDevice(deviceDni)
+  String playerId = child?.getDataValue('id')?.toString()
+  Map<String, Map> announcementQueues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY]) : [:]
+  Map<String, Map> topologyTransactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY]) : [:]
+  Set<String> clearedAnnouncementIds = new LinkedHashSet<String>()
+  if(announcementQueues[deviceDni] instanceof Map) {
+    Map removedQueue = announcementQueues.remove(deviceDni)
+    [removedQueue?.active, removedQueue?.priorityActive].each { Map item ->
+      if(item != null) { clearPendingAnnouncementCommands(item) }
+      if(item?.correlationId) { clearedAnnouncementIds.add(item.correlationId.toString()) }
+    }
+    ((removedQueue?.pending instanceof List) ? (List<Map>)removedQueue.pending : []).each { Map item ->
+      clearPendingAnnouncementCommands(item)
+      if(item?.correlationId) { clearedAnnouncementIds.add(item.correlationId.toString()) }
+    }
+  }
+  if(playerId) {
+    new ArrayList<String>(announcementQueues.keySet()).each { String groupDni ->
+      Map queue = announcementQueues[groupDni] instanceof Map ? (Map)announcementQueues[groupDni] : null
+      if(queue == null) { return }
+      ['active', 'priorityActive'].each { String slot ->
+        Map item = queue[slot] instanceof Map ? (Map)queue[slot] : null
+        if(item != null && normalizeGroupPlayerIds(item.playerIds).contains(playerId)) {
+          clearPendingAnnouncementCommands(item)
+          if(item.correlationId) { clearedAnnouncementIds.add(item.correlationId.toString()) }
+          queue.remove(slot)
+        }
+      }
+      List<Map> queuedAnnouncements = queue.pending instanceof List ? (List<Map>)queue.pending : []
+      List<Map> retainedAnnouncements = queuedAnnouncements.findAll { Map item ->
+        Boolean targeted = normalizeGroupPlayerIds(item.playerIds).contains(playerId)
+        if(targeted) {
+          clearPendingAnnouncementCommands(item)
+          if(item.correlationId) { clearedAnnouncementIds.add(item.correlationId.toString()) }
+        }
+        return !targeted
+      }
+      if(retainedAnnouncements.isEmpty() && !(queue.active instanceof Map) && !(queue.priorityActive instanceof Map)) {
+        announcementQueues.remove(groupDni)
+      } else {
+        queue.pending = retainedAnnouncements
+      }
+    }
+  }
+  topologyTransactions.entrySet().removeAll { Map.Entry<String, Map> entry ->
+    Boolean targeted = clearedAnnouncementIds.contains(entry.key) || entry.value?.groupDni?.toString() == deviceDni ||
+        (playerId && normalizeGroupPlayerIds(entry.value?.targetPlayerIds).contains(playerId))
+    return targeted
+  }
+  if(announcementQueues.isEmpty()) { state.remove(GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY) }
+  else { state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = announcementQueues }
+  if(topologyTransactions.isEmpty()) { state.remove(GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY) }
+  else { state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] = topologyTransactions }
+
+  logInfo("Cleared parent-app pending commands for ${deviceDni}; discardedAnnouncements=${clearedAnnouncementIds.size()}")
+}
+
+void clearPendingAnnouncementCommands(Map item) {
+  if(!(item instanceof Map)) { return }
+  clearGroupSynchronizedAudioClipHolds(item)
+  String correlationId = item.correlationId?.toString()
+  if(!correlationId) { return }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  normalizeGroupPlayerIds(item.playerIds).each { String playerId ->
+    ChildDeviceWrapper player = rinconMap[playerId]
+    try { player?.clearPendingAudioClipCorrelation(correlationId) }
+    catch(Exception e) { logDebug("Could not clear queued announcement ${correlationId} on ${playerId}: ${e.message}") }
+  }
+}
+
+Boolean isRequestOlderThanDeviceCommandClear(String deviceDni, Object createdAt) {
+  if(!deviceDni || createdAt == null || !(state[DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY] instanceof Map)) { return false }
+  try {
+    Long clearedAt = ((Map)state[DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY])[deviceDni]?.toString()?.toLong()
+    Long requestCreatedAt = createdAt.toString().toLong()
+    return clearedAt != null && requestCreatedAt <= clearedAt
+  } catch(Exception ignored) {
+    return false
   }
 }
 
@@ -9689,6 +9824,10 @@ void enqueuePlayerCommandRequest(Map request) {
   ChildDeviceWrapper source = playerDni ? getChildDevice(playerDni) : null
   if(!playerDni || !command || source == null) {
     logWarn("Ignoring player command request with invalid target or command: ${JsonOutput.toJson(request)}")
+    return
+  }
+  if(isRequestOlderThanDeviceCommandClear(playerDni, request.createdAt)) {
+    logDebug("Ignoring stale player command request ${request.requestId ?: 'unknown'} from before initialization for ${playerDni}")
     return
   }
   String requestId = request.requestId as String

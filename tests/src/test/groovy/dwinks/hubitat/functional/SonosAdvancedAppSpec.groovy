@@ -68,6 +68,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   void clearSynchronizedAudioClipHold(String correlationId) {
     commands << [name: 'clearSynchronizedAudioClipHold', correlationId: correlationId]
   }
+  void clearPendingAudioClipCorrelation(String correlationId) {
+    commands << [name: 'clearPendingAudioClipCorrelation', correlationId: correlationId]
+  }
 
   void startPreparedAudioClip() { commands << [name: 'startPreparedAudioClip'] }
   void prepareAudioClipForDispatch() { commands << [name: 'prepareAudioClipForDispatch'] }
@@ -247,6 +250,108 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.playerInitializationActive.size() == 2
     !appScript.state.playerInitializationActive.containsKey(coordinator.deviceNetworkId)
+  }
+
+  def "initialization purge removes only the selected child's parent queues and announcements"() {
+    given:
+    appScript.state.pendingPlayerCommandRequests = [
+      (follower.deviceNetworkId): [[playerDni: follower.deviceNetworkId, command: 'play']],
+      (extra.deviceNetworkId): [[playerDni: extra.deviceNetworkId, command: 'pause']]
+    ]
+    appScript.state.pendingGroupCommandRequests = [
+      'GROUP-DNI': [[groupDni: 'GROUP-DNI', command: 'on']],
+      'OTHER-GROUP': [[groupDni: 'OTHER-GROUP', command: 'off']]
+    ]
+    appScript.state.deferredGroupPlayerCommands = [
+      [playerDni: follower.deviceNetworkId, command: 'play'],
+      [playerDni: extra.deviceNetworkId, command: 'pause']
+    ]
+    appScript.state.groupAnnouncementQueues = [
+      'GROUP-DNI': [active: [correlationId: 'follower-active', playerIds: ['RINCON_FOLLOW']],
+        pending: [[correlationId: 'follower-pending', playerIds: ['RINCON_FOLLOW']]]],
+      'OTHER-GROUP': [active: [correlationId: 'extra-active', playerIds: ['RINCON_EXTRA']], pending: []]
+    ]
+    appScript.state.groupAnnouncementTopologyTransactions = [
+      'follower-active': [correlationId: 'follower-active', targetPlayerIds: ['RINCON_FOLLOW']],
+      'extra-active': [correlationId: 'extra-active', targetPlayerIds: ['RINCON_EXTRA']]
+    ]
+
+    when:
+    appScript.clearPendingCommandsForDevice(follower.deviceNetworkId)
+
+    then:
+    !appScript.state.pendingPlayerCommandRequests.containsKey(follower.deviceNetworkId)
+    appScript.state.pendingPlayerCommandRequests[extra.deviceNetworkId].size() == 1
+    appScript.state.pendingGroupCommandRequests['GROUP-DNI'].size() == 1
+    appScript.state.deferredGroupPlayerCommands*.playerDni == [extra.deviceNetworkId]
+    !appScript.state.groupAnnouncementQueues.containsKey('GROUP-DNI')
+    appScript.state.groupAnnouncementQueues['OTHER-GROUP'].active.correlationId == 'extra-active'
+    !appScript.state.groupAnnouncementTopologyTransactions.containsKey('follower-active')
+    appScript.state.groupAnnouncementTopologyTransactions.containsKey('extra-active')
+    appScript.state.deviceCommandClearTimes[follower.deviceNetworkId] != null
+
+    when:
+    appScript.enqueuePlayerCommandRequest([playerDni: follower.deviceNetworkId,
+      requestId: 'late-player-command', command: 'play', createdAt: appScript.state.deviceCommandClearTimes[follower.deviceNetworkId]])
+
+    then:
+    !appScript.state.pendingPlayerCommandRequests.containsKey(follower.deviceNetworkId)
+  }
+
+  def "initialization purge removes all parent queues for a group child"() {
+    given:
+    appScript.state.pendingGroupCommandRequests = [
+      'GROUP-DNI': [[groupDni: 'GROUP-DNI', command: 'groupPlayers']],
+      'OTHER-GROUP': [[groupDni: 'OTHER-GROUP', command: 'ungroupPlayers']]
+    ]
+    appScript.state.groupAnnouncementQueues = [
+      'GROUP-DNI': [active: [correlationId: 'active-tts', isTts: true],
+        priorityActive: [correlationId: 'priority-tts', isTts: true],
+        pending: [[correlationId: 'queued-tts', isTts: true]]],
+      'OTHER-GROUP': [active: null, pending: []]
+    ]
+    appScript.state.groupAnnouncementTopologyTransactions = [
+      'active-tts': [groupDni: 'GROUP-DNI'], 'other': [groupDni: 'OTHER-GROUP']
+    ]
+
+    when:
+    appScript.groupCommandRequestHandler([value: JsonOutput.toJson([
+      action: 'initializationPurge', groupDni: 'GROUP-DNI', createdAt: appScript.now()
+    ])] as Event)
+
+    then:
+    !appScript.state.pendingGroupCommandRequests.containsKey('GROUP-DNI')
+    appScript.state.pendingGroupCommandRequests.containsKey('OTHER-GROUP')
+    !appScript.state.groupAnnouncementQueues.containsKey('GROUP-DNI')
+    appScript.state.groupAnnouncementQueues.containsKey('OTHER-GROUP')
+    !appScript.state.groupAnnouncementTopologyTransactions.containsKey('active-tts')
+    appScript.state.groupAnnouncementTopologyTransactions.containsKey('other')
+
+    when:
+    appScript.enqueueGroupCommandRequest([groupDni: 'GROUP-DNI', requestId: 'late-group-command',
+      command: 'groupPlayers', createdAt: appScript.state.deviceCommandClearTimes['GROUP-DNI']])
+
+    then:
+    !appScript.state.pendingGroupCommandRequests.containsKey('GROUP-DNI')
+  }
+
+  def "player initialization event clears parent commands before queuing initialization"() {
+    given:
+    appScript.state.pendingPlayerCommandRequests = [
+      (coordinator.deviceNetworkId): [[playerDni: coordinator.deviceNetworkId, command: 'play']]
+    ]
+
+    when:
+    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
+      kind: 'initializationRequested', playerDni: coordinator.deviceNetworkId,
+      reason: 'driver initialize', clearPendingCommands: true
+    ])] as Event)
+
+    then:
+    !(appScript.state.pendingPlayerCommandRequests instanceof Map) ||
+      !appScript.state.pendingPlayerCommandRequests.containsKey(coordinator.deviceNetworkId)
+    appScript.state.playerInitializationQueue*.dni.contains(coordinator.deviceNetworkId)
+    appScript.state.deviceCommandClearTimes[coordinator.deviceNetworkId] != null
   }
 
   def "first driver initialization request arms a delayed boot batch"() {

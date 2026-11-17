@@ -78,6 +78,7 @@ void logTrace(String message) {
 @Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final Integer GROUP_COMMAND_RETRY_INTERVAL_SECONDS = 5
 @Field static final String SONOS_GROUP_COMMAND_ATTRIBUTE = 'sonosGroupCommandRequest'
+@Field static final String SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY = 'skipPendingCommandPurgeOnUpdated'
 @Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
   'groupCommandRequest',
   'groupingMode',
@@ -447,10 +448,20 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 
 
 void initialize() {
+  if(runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) != true) {
+    clearPendingCommandsForInitialization()
+  }
   migrateLegacyRuntimeState()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
   removeDeprecatedGroupStates()
+  applyInitializationDefaults()
+  recoverGroupCommandQueue()
+  // Initialize volume/mute state from coordinator
+  runIn(5, 'refresh')
+}
+
+void applyInitializationDefaults() {
   if(settings.chimeBeforeStandardPriorityTTS == null) {
     settings.chimeBeforeStandardPriorityTTS = settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
   }
@@ -458,15 +469,40 @@ void initialize() {
   if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
   if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
   if(settings.enableTrackPositionUpdates == null) { settings.enableTrackPositionUpdates = false }
-  recoverGroupCommandQueue()
-  // Initialize volume/mute state from coordinator
-  runIn(5, 'refresh')
+}
+
+/** Clear work owned by this group only at an explicit device initialization. */
+void clearPendingCommandsForInitialization() {
+  // The command queue used to live in state. Clear that persisted form before
+  // migrateLegacyRuntimeState() copies old keys into runtimeState.
+  ['pendingGroupCommands', 'activeGroupCommandRequest', 'groupCommandSequence',
+   'pendingRegroup'].each { String key ->
+    state.remove(key)
+    runtimeState.remove(key)
+  }
+  unschedule('regroupSafetyTimeout')
+  unschedule('drainGroupCommandQueue')
+  unschedule('retryActiveGroupCommandRequest')
+  unschedule('groupDeviceVolumeFadeStep')
+  String dni = device.getDeviceNetworkId()
+  groupDeviceVolumeFadeState.remove(dni)
+  lastGroupDeviceVolumeFadeCallTime.remove(dni)
+  try {
+    sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson([
+      action: 'initializationPurge', groupDni: dni, createdAt: now()
+    ]), isStateChange: true)
+  } catch(Exception e) {
+    logWarn("Could not publish parent-app command purge for ${dni}: ${e.message}")
+  }
+  logInfo("Cleared pending group commands for initialization (${dni})")
 }
 
 void installed() { initialize() }
 
 void updated() {
-  initialize()
+  runtimeState[SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY] = true
+  try { initialize() }
+  finally { runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) }
   configure()
 }
 

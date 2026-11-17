@@ -92,6 +92,36 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.pendingGroupCommands[0].sequence == 1
   }
 
+  def "initialize clears pending and active group command work before recovery"() {
+    given:
+    driver.runtimeState.pendingGroupCommands = [[command: 'on']]
+    driver.runtimeState.activeGroupCommandRequest = [requestId: 'stale', command: 'off']
+    driver.state.pendingGroupCommands = [[command: 'legacy-on']]
+    driver.state.activeGroupCommandRequest = [requestId: 'legacy', command: 'legacy-off']
+    driver.state.pendingRegroup = true
+    driver.groupDeviceVolumeFadeState.put('SONOS-GROUP-TEST-DNI', [target: 20])
+    driver.lastGroupDeviceVolumeFadeCallTime.put('SONOS-GROUP-TEST-DNI', 123L)
+
+    when:
+    driver.initialize()
+
+    then:
+    !driver.runtimeState.containsKey('pendingGroupCommands')
+    !driver.runtimeState.containsKey('activeGroupCommandRequest')
+    !driver.state.containsKey('pendingGroupCommands')
+    !driver.state.containsKey('activeGroupCommandRequest')
+    !driver.state.containsKey('pendingRegroup')
+    !driver.runtimeState.containsKey('pendingRegroup')
+    driver.groupDeviceVolumeFadeState.isEmpty()
+    driver.lastGroupDeviceVolumeFadeCallTime.isEmpty()
+    driver.unschedules.contains('drainGroupCommandQueue')
+    driver.unschedules.contains('retryActiveGroupCommandRequest')
+    driver.unschedules.contains('regroupSafetyTimeout')
+    driver.events.find { Map event -> event.name == 'sonosGroupCommandRequest' }
+      ?.value?.toString()?.contains('initializationPurge')
+    driver.scheduled.any { List item -> item[1] == 'refresh' }
+  }
+
   def "track position preference controls updates received by the group device"() {
     given:
     driver.settings.enableTrackPositionUpdates = false
@@ -282,7 +312,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.any { List call -> call[1] == 'drainGroupCommandQueue' }
   }
 
-  def "initialize retries a persisted active group command and preserves pending requests"() {
+  def "initialize discards persisted active and pending group commands"() {
     given:
     Map active = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'active-request', command: 'playHighPriorityTrack']
     Map pending = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'pending-request', command: 'refresh']
@@ -293,9 +323,9 @@ class SonosAdvGroupSpec extends Specification {
     driver.initialize()
 
     then:
-    driver.runtimeState.activeGroupCommandRequest == active
-    driver.runtimeState.pendingGroupCommands == [pending]
-    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'retryActiveGroupCommandRequest' }
+    !driver.runtimeState.activeGroupCommandRequest
+    !driver.runtimeState.pendingGroupCommands
+    !driver.scheduled.any { List call -> call[1] == 'retryActiveGroupCommandRequest' }
   }
 
   def "configure drains persisted pending group commands when no request is active"() {

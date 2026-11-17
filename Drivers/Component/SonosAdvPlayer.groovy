@@ -426,6 +426,7 @@ Boolean hasLineInCapability() {
 @Field static final String APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY = 'appMediatedInitializationResubscriptionsStarted'
 @Field static final String APP_INITIALIZATION_UPNP_STARTED_STATE_KEY = 'appMediatedInitializationUpnpStarted'
 @Field static final String APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY = 'appMediatedInitializationConnectionGranted'
+@Field static final String SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY = 'skipPendingCommandPurgeOnUpdated'
 @Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
 @Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 90
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
@@ -608,10 +609,116 @@ void uninstalled() {
   clearStaticDriverStateForCurrentDevice()
 }
 void installed() { initialize() }
-void updated() { initialize() }
+void updated() {
+  runtimeState[SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY] = true
+  try { initialize() }
+  finally { runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) }
+}
 
 void initialize() {
+  if(runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) != true) {
+    clearPendingCommandsForInitialization()
+    publishPlayerStateUpdate([kind: 'initializationRequested', reason: 'driver initialize',
+      clearPendingCommands: true])
+    return
+  }
   requestAppMediatedInitialization('driver initialize')
+}
+
+/** Clear work owned by this player only at an explicit device initialization. */
+void clearPendingCommandsForInitialization() {
+  String playerId = getId()
+  String dni = device.getDeviceNetworkId()
+  if(playerId) {
+    audioClipQueueInitialization()
+    getDeviceAudioClipQueue().clear()
+    getDeviceAudioClipQueueHighPriority().clear()
+    getDeviceAudioClipQueueSaved().clear()
+    getDeviceAudioClipQueueTimers().clear()
+    pendingGroupedPlayerVolumes.remove(playerId)
+  }
+  clearFavoriteRetryState()
+  clearPlaylistRetryState()
+  cancelVolumeFade()
+
+  // Older releases persisted command queues in state/atomicState. Remove them
+  // before migrateLegacyRuntimeState() can copy them back into runtimeState.
+  ['pendingParentAppTtsRequests', 'pendingParentCoordinatorCommands',
+   'activeParentCoordinatorCommand', 'parentCommandSequence',
+   TRANSPORT_QUEUE_KEY, TRANSPORT_ACTIVE_KEY,
+   WS_OUTBOUND_QUEUE_STATE_KEY, WS_COMMAND_LEDGER_STATE_KEY,
+   'activeAudioClipCorrelationId', 'activeAudioClipSonosId', 'audioClipPlaying',
+   'audioClipCommandSent', 'audioClipHadDisconnectAfterSend',
+   'audioClipProgressByCorrelationId', 'audioClipQueueStartTime',
+   'audioClipQueueTotalDuration', 'groupSynchronizedAudioClipHold',
+   'groupAnnouncementStream', 'announcementPlaybackRestore',
+   ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY, 'streamTransportIntentGuid',
+   'activeAudioClipMessage', 'currentlyPlayingClip'].each { String key ->
+    state.remove(key)
+    atomicState.remove(key)
+    runtimeState.remove(key)
+  }
+  unschedule('drainParentCoordinatorCommandQueue')
+  unschedule('retryParentCoordinatorCommand')
+
+  unschedule('drainTransportCommandQueue')
+  unschedule('watchTransportCommand')
+  unschedule('retryUnconfirmedTransportCommand')
+
+  unschedule('websocketCommandLedgerTimeout')
+  unschedule('expireWebsocketOutboundQueueEntry')
+  invalidateUpnpRequestsForDevice()
+
+  cancelAudioClipWatchdog()
+  removeHiddenJsonRuntimeState('activeAudioClipMessage')
+  removeHiddenJsonRuntimeState('currentlyPlayingClip')
+  removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
+  logInfo("Cleared pending player commands for initialization (${dni})")
+}
+
+/** Remove one parent-owned announcement clip from this player's local queues. */
+void clearPendingAudioClipCorrelation(String correlationId) {
+  if(!correlationId || !getId()) { return }
+  Map<String, Object> pendingTts = state.pendingParentAppTtsRequests instanceof Map
+      ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
+  pendingTts.entrySet().removeAll { Map.Entry<String, Object> entry ->
+    ((Map)entry.value)?.correlationId?.toString() == correlationId
+  }
+  if(pendingTts.isEmpty()) { state.remove('pendingParentAppTtsRequests') }
+  else { state.pendingParentAppTtsRequests = pendingTts }
+  audioClipQueueInitialization()
+  getDeviceAudioClipQueue().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+  getDeviceAudioClipQueueHighPriority().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+  getDeviceAudioClipQueueSaved().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+  List<Map> outbound = getWebsocketOutboundQueue()
+  outbound.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+  if(outbound.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
+  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = outbound }
+  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+  ledger.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+  if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
+  else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
+  Map active = (Map)getAtomicStateValue('activeAudioClipMessage')
+  if(active?.correlationId?.toString() == correlationId) {
+    cancelAudioClipWatchdog()
+    runtimeState.remove('activeAudioClipCorrelationId')
+    runtimeState.remove('activeAudioClipSonosId')
+    runtimeState.remove('audioClipHadDisconnectAfterSend')
+    removeHiddenJsonRuntimeState('activeAudioClipMessage')
+    removeHiddenJsonRuntimeState('currentlyPlayingClip')
+  }
+  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
+      ? (Map)runtimeState.groupAnnouncementStream : null
+  if(announcement?.correlationId?.toString() == correlationId) {
+    runtimeState.remove('groupAnnouncementStream')
+    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
+  }
+  Map restore = runtimeState.announcementPlaybackRestore instanceof Map
+      ? (Map)runtimeState.announcementPlaybackRestore : null
+  if(restore?.correlationId?.toString() == correlationId) {
+    runtimeState.remove('announcementPlaybackRestore')
+  }
 }
 
 /** Perform lifecycle setup only after the parent app grants an initialization turn. */
@@ -2272,6 +2379,7 @@ void requestParentCoordinatorCommand(String command, List args = []) {
     playerDni: device.getDeviceNetworkId(),
     requestId: UUID.randomUUID().toString(),
     sequence: sequence,
+    createdAt: now(),
     command: command,
     args: args ?: []
   ]

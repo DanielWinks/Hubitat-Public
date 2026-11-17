@@ -43,6 +43,48 @@ class SonosAdvPlayerSpec extends Specification {
     command << ['pause', 'stop', 'play', 'skipToNextTrack', 'skipToPreviousTrack']
   }
 
+  def "initialize clears all local pending command queues before requesting parent initialization"() {
+    given:
+    driver.audioClipQueueInitialization()
+    driver.getDeviceAudioClipQueue().add([correlationId: 'regular'])
+    driver.getDeviceAudioClipQueueHighPriority().add([correlationId: 'high'])
+    driver.getDeviceAudioClipQueueSaved().add([correlationId: 'saved'])
+    driver.getDeviceAudioClipQueueTimers().put('clip-uri', 123L)
+    driver.state.pendingParentAppTtsRequests = [tts: [uri: 'http://example.test/tts.mp3']]
+    driver.runtimeState.pendingParentCoordinatorCommands = [[command: 'play']]
+    driver.runtimeState.activeParentCoordinatorCommand = [command: 'pause']
+    driver.runtimeState.transportCommandQueue = [[command: 'stop']]
+    driver.runtimeState.activeTransportCommand = [command: 'play']
+    driver.runtimeState.websocketOutboundQueue = [[namespace: 'playback', wireCommand: 'play']]
+    driver.runtimeState.websocketCommandLedger = [[namespace: 'playback', wireCommand: 'pause']]
+    driver.runtimeState.activeAudioClipCorrelationId = 'active-clip'
+    driver.atomicState.activeAudioClipMessage = [correlationId: 'active-clip']
+    driver.state.pendingParentCoordinatorCommands = [[command: 'legacy-play']]
+    driver.atomicState.transportCommandQueue = [[command: 'legacy-stop']]
+    driver.atomicState.audioClipProgressByCorrelationId = [legacy: [phase: 'QUEUED']]
+
+    when:
+    driver.initialize()
+
+    then:
+    driver.getDeviceAudioClipQueue().isEmpty()
+    driver.getDeviceAudioClipQueueHighPriority().isEmpty()
+    driver.getDeviceAudioClipQueueSaved().isEmpty()
+    driver.getDeviceAudioClipQueueTimers().isEmpty()
+    !driver.state.containsKey('pendingParentAppTtsRequests')
+    !driver.runtimeState.containsKey('pendingParentCoordinatorCommands')
+    !driver.runtimeState.containsKey('activeParentCoordinatorCommand')
+    !driver.runtimeState.containsKey('transportCommandQueue')
+    !driver.runtimeState.containsKey('activeTransportCommand')
+    !driver.runtimeState.containsKey('websocketOutboundQueue')
+    !driver.runtimeState.containsKey('websocketCommandLedger')
+    !driver.runtimeState.containsKey('activeAudioClipCorrelationId')
+    !driver.state.containsKey('pendingParentCoordinatorCommands')
+    !driver.atomicState.containsKey('transportCommandQueue')
+    !driver.runtimeState.containsKey('audioClipProgressByCorrelationId')
+    driver.events.find { Map event -> event.name == 'sonosPlayerStateUpdate' }?.value?.toString()?.contains('initializationRequested')
+  }
+
   def "external transport replacement reports correlated interruption of active group announcement"() {
     given:
     driver.device.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
@@ -1003,8 +1045,51 @@ class SonosAdvPlayerSpec extends Specification {
     playerStateMessages().size() == 1
     playerStateMessages()[0].kind == 'initializationRequested'
     playerStateMessages()[0].reason == 'driver initialize'
+    playerStateMessages()[0].clearPendingCommands == true
     driver.scheduled.empty
     websocketConnections.empty
+  }
+
+  def "subscription renewal requests do not purge pending player commands"() {
+    given:
+    driver.runtimeState.transportCommandQueue = [[command: 'play']]
+    driver.runtimeState.pendingParentCoordinatorCommands = [[command: 'pause']]
+    driver.state.pendingParentAppTtsRequests = [tts: [uri: 'http://example.test/tts.mp3']]
+
+    when:
+    driver.requestFullSubscriptionRenewal(0, 'full subscription renewal')
+
+    then:
+    driver.runtimeState.transportCommandQueue.size() == 1
+    driver.runtimeState.pendingParentCoordinatorCommands.size() == 1
+    driver.state.pendingParentAppTtsRequests.size() == 1
+    playerStateMessages().last().clearPendingCommands == null
+  }
+
+  def "parent announcement purge removes only the matching clip correlation"() {
+    given:
+    driver.audioClipQueueInitialization()
+    driver.getDeviceAudioClipQueue().addAll([
+      [correlationId: 'announcement'], [correlationId: 'unrelated']
+    ])
+    driver.getDeviceAudioClipQueueHighPriority().add([correlationId: 'announcement'])
+    driver.runtimeState.websocketOutboundQueue = [
+      [kind: 'audioClip', correlationId: 'announcement'],
+      [kind: 'audioClip', correlationId: 'unrelated']
+    ]
+    driver.runtimeState.activeAudioClipMessage = [correlationId: 'announcement']
+    driver.runtimeState.activeAudioClipCorrelationId = 'announcement'
+    driver.runtimeState.audioClipPlaying = true
+
+    when:
+    driver.clearPendingAudioClipCorrelation('announcement')
+
+    then:
+    driver.getDeviceAudioClipQueue()*.correlationId == ['unrelated']
+    driver.getDeviceAudioClipQueueHighPriority().isEmpty()
+    driver.runtimeState.websocketOutboundQueue*.correlationId == ['unrelated']
+    !driver.runtimeState.activeAudioClipCorrelationId
+    driver.runtimeState.audioClipPlaying == false
   }
 
   def "parent initialization reports start before scheduling recovery work"() {
