@@ -665,6 +665,8 @@ void clearPendingCommandsForInitialization() {
   unschedule('expireWebsocketOutboundQueueEntry')
   invalidateUpnpRequestsForDevice()
 
+  device.deleteCurrentState('sonosPlayerStateUpdate')
+  device.deleteCurrentState('sonosPlayerAppRequest')
   cancelAudioClipWatchdog()
   removeHiddenJsonRuntimeState('activeAudioClipMessage')
   removeHiddenJsonRuntimeState('currentlyPlayingClip')

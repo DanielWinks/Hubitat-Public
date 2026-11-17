@@ -2810,16 +2810,6 @@ void startNextPlayerInitialization() {
     try {
       player.updateDataValue('appInitializationRequestId', requestId)
       player.beginAppMediatedInitialization(requestId)
-      Map<String, Map> startedPlayers = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-          ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-      Map startedRequest = startedPlayers[dni]
-      if(startedRequest?.requestId?.toString() == requestId && startedRequest.phase == 'waiting-start') {
-        startedRequest.phase = 'initializing'
-        startedRequest.startedAt = now()
-        startedPlayers[dni] = startedRequest
-        state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = startedPlayers
-        logDebug("Child ${dni} accepted initialization request=${requestId}")
-      }
     } catch(Exception e) {
       logWarn("Could not start initialization for ${dni}: ${e.message}")
       finishPlayerInitialization(requestId, false, "start invocation failed: ${e.message}")

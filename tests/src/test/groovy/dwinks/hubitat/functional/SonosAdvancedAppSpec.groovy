@@ -235,7 +235,7 @@ class SonosAdvancedAppSpec extends Specification {
     follower.initializationRequests.size() == 1
     extra.initializationRequests.size() == 1
     appScript.state.playerInitializationActive.size() == 3
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].phase == 'initializing'
+    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].phase == 'waiting-start'
     appScript.scheduled.count { List job -> job[0] == 2 && job[1] == 'playerInitializationStartWatchdog' } == 3
     appScript.scheduled.count { List job -> job[0] == 90 && job[1] == 'playerInitializationHardWatchdog' } == 3
 
@@ -244,6 +244,11 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
       kind: 'initializationStarted', playerDni: coordinator.deviceNetworkId, requestId: requestId
     ])] as Event)
+
+    then:
+    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].phase == 'initializing'
+
+    when:
     appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
       kind: 'initializationComplete', playerDni: coordinator.deviceNetworkId, requestId: requestId
     ])] as Event)
@@ -2210,8 +2215,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.subscribeToGroupCommandRequests()
 
     then:
-    appScript.subscriptions.count { it == [coordinator, 'sonosPlayerStateUpdate', 'playerStateUpdateHandler'] } == 1
-    appScript.subscriptions.count { it == [coordinator, 'sonosPlayerAppRequest', 'playerAppRequestHandler'] } == 1
+    appScript.subscriptions.count { it == [coordinator, 'playerCommandRequest', 'playerCommandRequestHandler'] } == 1
+    appScript.subscriptions.count { it == [coordinator, 'groupFavoriteOperation', 'groupFavoriteOperationEventHandler'] } == 1
+    !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
   }
 
   def "Favorite is not loaded until the requested topology is stable twice"() {

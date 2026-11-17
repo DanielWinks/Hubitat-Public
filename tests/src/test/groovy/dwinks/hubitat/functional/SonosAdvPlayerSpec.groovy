@@ -2766,7 +2766,6 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "muted synchronized group member reports terminal progress"() {
     given:
-    driver.metaClass.getParent = { -> null }
     driver.events.clear()
     driver.device.currentValues.mute = 'muted'
     driver.getDeviceAudioClipQueue().clear()
