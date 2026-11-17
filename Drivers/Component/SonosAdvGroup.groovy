@@ -1015,6 +1015,33 @@ void applyStateBatch(String jsonAttributes) {
   processBatchPlaybackState(jsonAttributes, false)
 }
 
+/** Receive the app's canonical household topology and reconcile this group's membership. */
+void applyAppHouseholdTopology(String topologyJson) {
+  if(!topologyJson) { return }
+  try {
+    Map topology = (Map)parseJson(topologyJson)
+    if(!(topology.groups instanceof List)) { return }
+    device.updateDataValue('householdTopology', topologyJson)
+    String configuredCoordinator = device.getDataValue('groupCoordinatorId')?.toString()
+    List<String> configuredPlayers = configuredCoordinator ? [configuredCoordinator] : []
+    String configuredFollowerIds = device.getDataValue('playerIds')?.toString()
+    if(configuredFollowerIds) { configuredPlayers.addAll(configuredFollowerIds.tokenize(',')) }
+    Map activeGroup = ((List<Map>)topology.groups).find { Map item ->
+      List<String> memberIds = item.playerIds instanceof List
+          ? ((List)item.playerIds).collect { Object id -> id?.toString() } : []
+      configuredPlayers && configuredPlayers.every { String id -> memberIds.contains(id) }
+    }
+    List<String> activeNames = activeGroup?.playerNames instanceof List
+        ? ((List)activeGroup.playerNames).collect { Object name -> name?.toString() } : []
+    updateBatchPlaybackState(JsonOutput.toJson([
+      switch: activeGroup != null ? 'on' : 'off',
+      currentlyJoinedPlayers: activeNames.join(', ')
+    ]))
+  } catch(Exception e) {
+    logWarn("Could not apply app household topology snapshot: ${e.message}")
+  }
+}
+
 /**
  * Apply an explicit refresh from the parent app. Refresh playback is subject
  * to the same inactive-group guard as other playback updates.

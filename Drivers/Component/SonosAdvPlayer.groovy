@@ -751,7 +751,7 @@ void requestAppMediatedInitialization(String reason) {
 }
 
 /** Called only by the parent app after it grants this player the initialization turn. */
-void beginAppMediatedInitialization(String requestId) {
+void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false, String leaderGeneration = null) {
   publishPlayerStateUpdate([kind: 'initializationStarted', requestId: requestId])
   logDebug("Starting app-mediated initialization; request=${requestId}")
   if(!requestId) {
@@ -763,6 +763,10 @@ void beginAppMediatedInitialization(String requestId) {
     return
   }
   runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] = requestId
+  runtimeState['appZgtSubscribe'] = subscribeZgt == true
+  runtimeState['appZgtLeaderGeneration'] = leaderGeneration ?: ''
+  device.updateDataValue('appZgtSubscribe', (subscribeZgt == true).toString())
+  device.updateDataValue('appZgtLeaderGeneration', leaderGeneration ?: '')
   runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = now()
   runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = false
   runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = false
@@ -2710,10 +2714,25 @@ void previousTrack() {
 }
 @CompileStatic
 void subscribeToEvents() {
-  subscribeToZgtEvents()
+  if(isAppZgtSubscriber()) {
+    subscribeToZgtEvents()
+  } else {
+    unsubscribeFromZgtEvents()
+  }
   if(getIsGrouped()) { subscribeToMrGrcEvents() } // sid4 only needed when grouped; setGroupPlayerIds() handles transitions
   subscribeToMrRcEvents()
   markAppMediatedUpnpSubscriptionsStarted()
+}
+
+Boolean isAppZgtSubscriber() {
+  return device.getDataValue('appZgtSubscribe') == 'true' &&
+      device.getDataValue('appZgtLeaderGeneration')?.toString()
+}
+
+void requestAppZgtResubscription() {
+  if(!isAppZgtSubscriber()) { return }
+  if(subValid('sid3')) { resubscribeToZgtEvents() }
+  else { subscribeToZgtEvents() }
 }
 
 void markAppMediatedUpnpSubscriptionsStarted() {
@@ -4125,6 +4144,35 @@ void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash, 
   if(processZoneGroupTopologySnapshot(topology, previousMembers)) {
     lastZgtXmlHash.put(dni, xmlHash)
     setLastInboundZgtEvent()
+    if(isAppZgtSubscriber() && topology?.playerFound == true && topology?.groups instanceof List) {
+      Map householdTopology = [householdId: device.getDataValue('householdId'),
+        groups: topology.groups, observedAt: now()]
+      publishPlayerStateUpdate([kind: 'zgtTopology', topology: householdTopology,
+        leaderGeneration: device.getDataValue('appZgtLeaderGeneration')?.toString(), observedAt: now()])
+    }
+  }
+}
+
+void applyAppHouseholdTopology(String topologyJson) {
+  if(!topologyJson) { return }
+  try {
+    Map topology = (Map)new JsonSlurper().parseText(topologyJson)
+    if(!(topology.groups instanceof List)) { return }
+    String playerId = getId()
+    Map ownGroup = ((List<Map>)topology.groups).find { Map group ->
+      group.playerIds instanceof List && ((List)group.playerIds).collect { Object id -> id?.toString() }.contains(playerId)
+    }
+    if(ownGroup == null) { return }
+    Map playerTopology = [playerFound: true, groupId: ownGroup.groupId?.toString(),
+      coordinatorId: ownGroup.coordinatorId?.toString(), coordinatorName: ownGroup.coordinatorName?.toString(),
+      visibleMemberIds: ((List)ownGroup.playerIds).collect { Object id -> id.toString() },
+      memberNames: ownGroup.playerNames instanceof List ? ownGroup.playerNames : [],
+      groupName: ownGroup.groupName?.toString(), batteryData: [:]]
+    LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
+    setDeviceDataValue('householdTopology', topologyJson)
+    processZoneGroupTopologySnapshot(playerTopology, previousMembers)
+  } catch(Exception e) {
+    logWarn("Could not apply app household topology snapshot: ${e.message}")
   }
 }
 
@@ -4230,18 +4278,30 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
     GPathResult playerGroup = null
     GPathResult player = null
     GPathResult groups = zoneGroups.children()
+    List<Map> householdGroups = []
     for(GPathResult group : groups) {
-      if(playerGroup != null) { break }
+      String groupCoordinatorId = group['@Coordinator'].toString()
+      String groupId = group['@ID'].toString() ?: groupCoordinatorId
+      List<String> groupPlayerIds = []
+      List<String> groupPlayerNames = []
       for(GPathResult member : group.children()) {
-        if(member['@UUID'].toString() == playerId) {
+        String memberId = member['@UUID'].toString()
+        String memberName = member['@ZoneName'].toString()
+        if(member['@Invisible'].toString() != '1') {
+          groupPlayerIds.add(memberId)
+          groupPlayerNames.add(memberName)
+        }
+        if(memberId == playerId) {
           playerGroup = group
           player = member
-          break
         }
       }
+      householdGroups.add([groupId: groupId, coordinatorId: groupCoordinatorId,
+        playerIds: groupPlayerIds, playerNames: groupPlayerNames,
+        groupName: group['@ZoneGroupName'].toString() ?: groupName])
     }
     if(playerGroup == null || player == null) {
-      return [playerFound: false, groupName: groupName]
+      return [playerFound: false, groupName: groupName, groups: householdGroups]
     }
 
     String coordinatorId = playerGroup['@Coordinator'].toString()
@@ -4268,10 +4328,11 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
         }
       }
     }
-    return [playerFound: true, coordinatorId: coordinatorId, coordinatorName: coordinatorName,
+    String playerGroupId = playerGroup['@ID'].toString() ?: coordinatorId
+    return [playerFound: true, groupId: playerGroupId, coordinatorId: coordinatorId, coordinatorName: coordinatorName,
       memberIds: sortedMemberIds, visibleMemberIds: visibleMemberIdList,
       memberNames: new ArrayList<String>(memberNames),
-      groupName: groupName, batteryData: batteryData]
+      groupName: groupName, batteryData: batteryData, groups: householdGroups]
   } catch(Exception e) {
     logDebug("Could not inspect ZGT topology for ${playerId}: ${e.message}")
     return null
@@ -5163,6 +5224,9 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
         logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
+        if(request.sidKey == 'sid3' && isAppZgtSubscriber()) {
+          publishZgtSubscriptionStatus('accepted', "${request.operation} accepted with SID")
+        }
         removeResub(request.subscribeMethod as String)
         if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
         clearSubscriptionRetryAttempts(request.subscribeMethod as String)
@@ -5179,6 +5243,9 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
     } else {
       logDebug("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
+      if(request.sidKey == 'sid3' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS && isAppZgtSubscriber()) {
+        publishZgtSubscriptionStatus('failed', "${request.operation} exhausted retries (status=${status ?: 'none'}, error=${error ?: 'none'})")
+      }
     }
     socket = detachOwnedUpnpSocketLocked(entry, request)
   }
@@ -5212,6 +5279,16 @@ void completeUpnpWithoutResponse(Map entry, Map request, String reason) {
     completed = true
   }
   if(completed) { dispatchNextUpnpRequest(entry) }
+  if(completed && request.sidKey == 'sid3' && request.operation == 'subscribe' &&
+      reason == 'already-valid' && isAppZgtSubscriber()) {
+    publishZgtSubscriptionStatus('accepted', 'existing ZGT SID is still valid')
+  }
+}
+
+void publishZgtSubscriptionStatus(String status, String detail) {
+  publishPlayerStateUpdate([kind: 'zgtSubscription', status: status,
+    leaderGeneration: device.getDataValue('appZgtLeaderGeneration')?.toString(),
+    detail: detail, observedAt: now()])
 }
 void completeUpnpFailure(Map entry, Map request, String reason) {
   completeUpnpCurrent(entry, request, null, reason)
@@ -5495,6 +5572,7 @@ void unsubscribeFromMrRcEventsCallback(HubResponse response) {
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToZgtEvents() {
+  if(!isAppZgtSubscriber()) { return }
   String sub = 'subscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'
@@ -5509,12 +5587,14 @@ void subscribeToZgtEvents() {
 // coordinator changed. Otherwise we batch burst-y callers into a single 2s
 // delayed subscribe so storms of 499s coalesce into one network request.
 void requestZgtResub() {
+  if(!isAppZgtSubscriber()) { return }
   if(subValid('sid3')) { return }
   runIn(2, 'subscribeToZgtEvents', [overwrite: true])
 }
 
 @CompileStatic
 void resubscribeToZgtEvents() {
+  if(!isAppZgtSubscriber()) { return }
   String resub = 'resubscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'

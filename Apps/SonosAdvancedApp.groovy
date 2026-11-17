@@ -255,11 +255,15 @@ preferences {
 @Field static final String PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY = 'playerInitializationBootGeneration'
 @Field static final String PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY = 'playerInitializationBootPending'
 @Field static final String PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY = 'playerInitializationBootAttempts'
+@Field static final String PLAYER_INITIALIZATION_ZGT_STATE_KEY = 'playerInitializationZgt'
+@Field static final String HOUSEHOLD_TOPOLOGY_STATE_KEY = 'sonosHouseholdTopology'
 @Field static final String PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY = 'playerInitializationNotBefore'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY = 'playerInitializationOffturnBurstStartedAt'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY = 'playerInitializationOffturnProbeReleaseAt'
 @Field static final Integer PLAYER_INITIALIZATION_START_TIMEOUT_SECONDS = 2
 @Field static final Integer PLAYER_INITIALIZATION_HARD_TIMEOUT_SECONDS = 90
+@Field static final Integer PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS = 105
+@Field static final Integer PLAYER_INITIALIZATION_ZGT_WATCHDOG_SECONDS = 30
 @Field static final Integer PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS = 60
 @Field static final Integer PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS = 5
 @Field static final Integer PLAYER_INITIALIZATION_MAX_IN_PROGRESS = 3
@@ -2563,6 +2567,10 @@ void configure(Boolean startup = false) {
     state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = [:]
     state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = []
     state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = [:]
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = [
+      bootGeneration: state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY],
+      failedCandidates: [], topologyReady: false
+    ]
   }
   state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] = now() + PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS * 1000L
   scheduleUpdateCheck()
@@ -2631,6 +2639,10 @@ void beginPlayerInitializationBootBatch(String reason, Long releaseAtOverride = 
   state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY] = UUID.randomUUID().toString()
   state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = true
   state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = [:]
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = [
+    bootGeneration: state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY],
+    failedCandidates: [], topologyReady: false
+  ]
   state.remove(PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY)
   state.remove(PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY)
   Long releaseAt = releaseAtOverride ?: (now() + PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS * 1000L)
@@ -2769,8 +2781,60 @@ void enqueuePlayerInitialization(String dni, String reason, Boolean boot = false
   }
   queue.add(request)
   state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
+  if(boot || state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true) {
+    selectNextZgtInitializationCandidate()
+  }
   logDebug("Queued player initialization for ${dni}; reason=${reason}, boot=${bootGeneration != null}, queued=${queue.size()}")
   runIn(1, 'startNextPlayerInitialization', [overwrite: true])
+}
+
+Boolean isZgtEligiblePlayer(ChildDeviceWrapper player) {
+  if(player == null || !player.getDataValue('websocketUrl')) { return false }
+  String powerSource = player.getDataValue('powerSource')?.toString()?.toLowerCase()
+  if(powerSource == 'battery') { return false }
+  String model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString()?.toLowerCase()
+  if(!model) { return false }
+  return !(model.contains('roam') || model.contains('move'))
+}
+
+String selectNextZgtInitializationCandidate() {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(zgt.topologyReady == true && zgt.bootGeneration == state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]) {
+    return zgt.candidateDni?.toString()
+  }
+  if(zgt.candidateDni) { return zgt.candidateDni.toString() }
+  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
+  List<String> failed = zgt.failedCandidates instanceof List
+      ? (List<String>)zgt.failedCandidates : []
+  Map candidateRequest = queue.find { Map request ->
+    String dni = request.dni?.toString()
+    ChildDeviceWrapper candidate = dni ? getChildDevice(dni) : null
+    dni && !failed.contains(dni) && isZgtEligiblePlayer(candidate)
+  }
+  if(candidateRequest == null && state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true) {
+    Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
+    ChildDeviceWrapper promoted = getCurrentPlayerDevices().find { ChildDeviceWrapper item ->
+      String dni = item.getDeviceNetworkId()?.toString()
+      dni && !failed.contains(dni) && !active.containsKey(dni) && isZgtEligiblePlayer(item)
+    }
+    if(promoted != null) {
+      candidateRequest = [dni: promoted.getDeviceNetworkId(), reason: 'ZGT subscriber promotion', requestedAt: now()]
+      queue.add(candidateRequest)
+      state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
+    }
+  }
+  if(candidateRequest == null) { return null }
+  zgt.candidateDni = candidateRequest.dni.toString()
+  zgt.leaderGeneration = UUID.randomUUID().toString()
+  zgt.status = 'selected'
+  zgt.selectedAt = now()
+  zgt.bootGeneration = state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  logInfo("Selected ${zgt.candidateDni} as provisional ZGT speaker for boot ${zgt.bootGeneration}")
+  return zgt.candidateDni.toString()
 }
 
 void startNextPlayerInitialization() {
@@ -2784,11 +2848,27 @@ void startNextPlayerInitialization() {
   }
   Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
       ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
+  Boolean waitingForBootTopology = state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true &&
+      ((state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+          ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]).topologyReady != true)
+  Map existingZgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  String zgtCandidateDni = waitingForBootTopology
+      ? selectNextZgtInitializationCandidate() : existingZgtState.candidateDni?.toString()
+  if(waitingForBootTopology && !zgtCandidateDni) {
+    logWarn('Boot initialization is waiting for an eligible mains-powered ZGT speaker')
+    return
+  }
+  if(waitingForBootTopology && active.containsKey(zgtCandidateDni)) { return }
   if(active.size() >= PLAYER_INITIALIZATION_MAX_IN_PROGRESS) { return }
   List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
   while(!queue.isEmpty() && active.size() < PLAYER_INITIALIZATION_MAX_IN_PROGRESS) {
-    Map request = queue.remove(0)
+    Integer requestIndex = waitingForBootTopology
+        ? queue.findIndexOf { Map item -> item.dni?.toString() == zgtCandidateDni }
+        : 0
+    if(requestIndex == null || requestIndex < 0) { break }
+    Map request = queue.remove((int)requestIndex)
     String dni = request?.dni?.toString()
     if(!dni || active.containsKey(dni)) { continue }
     ChildDeviceWrapper player = dni ? getChildDevice(dni) : null
@@ -2799,6 +2879,17 @@ void startNextPlayerInitialization() {
     String requestId = UUID.randomUUID().toString()
     Map activeRequest = new LinkedHashMap(request)
     activeRequest.putAll([requestId: requestId, phase: 'waiting-start', dequeuedAt: now()])
+    Boolean subscribeZgt = zgtCandidateDni != null && dni == zgtCandidateDni
+    Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+    if(subscribeZgt) {
+      activeRequest.leaderGeneration = zgtState.leaderGeneration
+      activeRequest.zgtRole = true
+      zgtState.status = 'initializing'
+      zgtState.requestId = requestId
+      zgtState.deadlineAt = now() + PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS * 1000L
+      state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgtState
+    }
     state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
     active[dni] = activeRequest
     state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
@@ -2806,10 +2897,17 @@ void startNextPlayerInitialization() {
         [overwrite: false, data: [dni: dni, requestId: requestId]])
     runIn(PLAYER_INITIALIZATION_HARD_TIMEOUT_SECONDS, 'playerInitializationHardWatchdog',
         [overwrite: false, data: [dni: dni, requestId: requestId]])
+    if(subscribeZgt) {
+      runIn(PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS, 'playerInitializationZgtWatchdog',
+          [overwrite: false, data: [dni: dni, leaderGeneration: zgtState.leaderGeneration,
+            bootGeneration: zgtState.bootGeneration]])
+    }
     logInfo("Granting initialization turn to ${player.displayName}; inProgress=${active.size()}, queued=${queue.size()}, request=${requestId}")
     try {
       player.updateDataValue('appInitializationRequestId', requestId)
-      player.beginAppMediatedInitialization(requestId)
+      player.updateDataValue('appZgtSubscribe', subscribeZgt.toString())
+      player.updateDataValue('appZgtLeaderGeneration', subscribeZgt ? zgtState.leaderGeneration.toString() : '')
+      player.beginAppMediatedInitialization(requestId, subscribeZgt, subscribeZgt ? zgtState.leaderGeneration.toString() : '')
     } catch(Exception e) {
       logWarn("Could not start initialization for ${dni}: ${e.message}")
       finishPlayerInitialization(requestId, false, "start invocation failed: ${e.message}")
@@ -2821,7 +2919,170 @@ void startNextPlayerInitialization() {
   }
   state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-  if(queue.isEmpty() && active.isEmpty()) { state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = false }
+  Map finalZgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  if(queue.isEmpty() && active.isEmpty() &&
+      (state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true || finalZgtState.topologyReady == true)) {
+    state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = false
+  }
+}
+
+void playerInitializationZgtWatchdog(Map data = [:]) {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  if(zgt.topologyReady == true || zgt.candidateDni?.toString() != data?.dni?.toString() ||
+      zgt.leaderGeneration?.toString() != data?.leaderGeneration?.toString() ||
+      zgt.bootGeneration?.toString() != data?.bootGeneration?.toString()) { return }
+  failZgtInitializationCandidate(data.dni?.toString(), 'No valid household ZGT payload arrived before the readiness timeout')
+}
+
+void failZgtInitializationCandidate(String dni, String reason) {
+  if(!dni) { return }
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(zgt.candidateDni?.toString() != dni || zgt.topologyReady == true) { return }
+  List<String> failed = zgt.failedCandidates instanceof List
+      ? new ArrayList<String>((List<String>)zgt.failedCandidates) : []
+  if(!failed.contains(dni)) { failed.add(dni) }
+  zgt.failedCandidates = failed
+  zgt.lastFailure = [dni: dni, reason: reason, at: now(), leaderGeneration: zgt.leaderGeneration]
+  zgt.candidateDni = null
+  zgt.leaderGeneration = null
+  zgt.requestId = null
+  zgt.deadlineAt = null
+  zgt.status = 'promoting'
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+
+  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
+  Map failedRequest = active.remove(dni)
+  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
+  if(failedRequest != null) {
+    // These callbacks are request-ID guarded. Keep other players' watchdogs
+    // intact now that normal initialization can run concurrently again.
+    try {
+      ChildDeviceWrapper failedPlayer = getChildDevice(dni)
+      failedPlayer?.updateDataValue('appInitializationRequestId', '')
+      failedPlayer?.updateDataValue('appZgtSubscribe', 'false')
+      failedPlayer?.updateDataValue('appZgtLeaderGeneration', '')
+      failedPlayer?.cancelAppMediatedInitialization(failedRequest.requestId?.toString())
+    } catch(Exception e) { logDebug("Could not cancel failed ZGT candidate ${dni}: ${e.message}") }
+    failedRequest.remove('requestId')
+    failedRequest.remove('phase')
+    failedRequest.remove('dequeuedAt')
+    failedRequest.bootAttempt = 0
+    List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
+        ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
+    if(!queue.any { Map request -> request.dni?.toString() == dni }) { queue.add(failedRequest) }
+    state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
+  }
+  logWarn("ZGT candidate ${dni} failed: ${reason}; promoting another eligible speaker")
+  String nextDni = selectNextZgtInitializationCandidate()
+  if(nextDni == null) {
+    runIn(PLAYER_INITIALIZATION_HOURLY_RETRY_SECONDS, 'retryZgtInitializationElection', [overwrite: true])
+    return
+  }
+  runIn(1, 'startNextPlayerInitialization', [overwrite: true])
+}
+
+void retryZgtInitializationElection() {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(zgt.topologyReady == true || state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true) { return }
+  zgt.failedCandidates = []
+  zgt.candidateDni = null
+  zgt.leaderGeneration = null
+  zgt.status = 'retrying'
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  startNextPlayerInitialization()
+}
+
+void acceptHouseholdTopology(String playerDni, Map payload) {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(!playerDni || zgt.candidateDni?.toString() != playerDni ||
+      zgt.leaderGeneration?.toString() != payload?.leaderGeneration?.toString()) {
+    logDebug("Ignoring household topology from non-current ZGT speaker ${playerDni ?: 'unknown'}")
+    return
+  }
+  Map topology = payload.topology instanceof Map ? new LinkedHashMap((Map)payload.topology) : [:]
+  List<Map> groups = topology.groups instanceof List ? (List<Map>)topology.groups : []
+  if(groups.isEmpty() || groups.any { Map group -> !group.groupId || !(group.playerIds instanceof List) }) {
+    failZgtInitializationCandidate(playerDni, 'ZGT speaker supplied an incomplete household topology snapshot')
+    return
+  }
+  Long observedAt = (topology.observedAt ?: payload.observedAt ?: now()) as Long
+  Map prior = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
+      ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
+  if(prior.bootGeneration?.toString() == zgt.bootGeneration?.toString() &&
+      ((prior.observedAt ?: 0L) as Long) > observedAt) {
+    logDebug("Ignoring older household topology snapshot from ${playerDni}")
+    return
+  }
+  topology.putAll([schemaVersion: 1, sourcePlayerDni: playerDni,
+    leaderGeneration: zgt.leaderGeneration, bootGeneration: zgt.bootGeneration, observedAt: observedAt])
+  state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = topology
+  zgt.topologyReady = true
+  zgt.status = 'ready'
+  zgt.lastInboundAt = observedAt
+  zgt.topologyFingerprint = topology.groups.collect { Map item ->
+    "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
+  }.sort().join('|')
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  unschedule('playerInitializationZgtWatchdog')
+  unschedule('zgtTopologyWatchdog')
+  String json = JsonOutput.toJson(topology)
+  getCurrentPlayerDevices().each { ChildDeviceWrapper child ->
+    try {
+      child.updateDataValue('householdTopology', json)
+      child.applyAppHouseholdTopology(json)
+    } catch(Exception e) { logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}") }
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper child ->
+    try {
+      child.updateDataValue('householdTopology', json)
+      child.applyAppHouseholdTopology(json)
+    } catch(Exception e) { logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}") }
+  }
+  logInfo("Accepted full household topology from ${playerDni}; groups=${groups.size()}")
+  runIn(1, 'startNextPlayerInitialization', [overwrite: true])
+}
+
+void scheduleZgtTopologyWatchdog() {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(!zgt.candidateDni || zgt.topologyReady != true) { return }
+  zgt.topologyChangedAt = now()
+  zgt.recoveryAttempt = 0
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  runIn(PLAYER_INITIALIZATION_ZGT_WATCHDOG_SECONDS, 'zgtTopologyWatchdog', [overwrite: true,
+      data: [dni: zgt.candidateDni, leaderGeneration: zgt.leaderGeneration,
+        topologyChangedAt: zgt.topologyChangedAt]])
+}
+
+void zgtTopologyWatchdog(Map data = [:]) {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(zgt.candidateDni?.toString() != data?.dni?.toString() ||
+      zgt.leaderGeneration?.toString() != data?.leaderGeneration?.toString() ||
+      zgt.topologyReady != true || zgt.topologyChangedAt != data?.topologyChangedAt) { return }
+  Long lastInbound = (zgt.lastInboundAt ?: 0L) as Long
+  Long changedAt = (data.topologyChangedAt ?: 0L) as Long
+  if(lastInbound >= changedAt) { return }
+  if(((zgt.recoveryAttempt ?: 0) as Integer) == 0) {
+    ChildDeviceWrapper player = getChildDevice(data.dni?.toString())
+    try { player?.requestAppZgtResubscription() }
+    catch(Exception e) { logWarn("Could not request ZGT resubscription from ${data.dni}: ${e.message}") }
+    zgt.recoveryAttempt = 1
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    runIn(15, 'zgtTopologyWatchdog', [overwrite: true, data: data])
+    return
+  }
+  zgt.topologyReady = false
+  zgt.failedCandidates = ((zgt.failedCandidates instanceof List ? (List<String>)zgt.failedCandidates : []) + [data.dni.toString()]).unique()
+  zgt.status = 'failed-after-topology-change'
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  failZgtInitializationCandidate(data.dni?.toString(), 'No inbound ZGT followed a topology change and resubscription request')
 }
 
 void playerInitializationStartWatchdog(Map data = [:]) {
@@ -2850,6 +3111,12 @@ void finishPlayerInitialization(String requestId, Boolean succeeded, String deta
   Map active = activeByDni.values().find { Map request -> request.requestId?.toString() == requestId }
   if(active == null || active.requestId?.toString() != requestId) { return }
   String dni = active.dni?.toString()
+  Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  if(!succeeded && zgtState.candidateDni?.toString() == dni && zgtState.topologyReady != true) {
+    failZgtInitializationCandidate(dni, detail ?: 'ZGT speaker initialization failed')
+    return
+  }
   activeByDni.remove(dni)
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = activeByDni
   if(dni) {
@@ -2870,6 +3137,11 @@ void finishPlayerInitialization(String requestId, Boolean succeeded, String deta
     attempts.remove(dni)
     state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = attempts
     logInfo("Player initialization completed for ${dni}")
+    if(zgtState.candidateDni?.toString() == dni && zgtState.topologyReady != true) {
+      zgtState.status = 'awaiting-topology'
+      zgtState.initializationCompletedAt = now()
+      state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgtState
+    }
   } else {
     if(detail?.contains('90 second hard timeout') || detail?.contains('did not settle within 90 seconds')) {
       logDebug("Player initialization timed out for ${dni}: ${detail}")
@@ -4808,6 +5080,24 @@ void playerStateUpdateHandler(Object event) {
     finishPlayerInitialization(requestId, false, payload.detail?.toString() ?: 'child reported initialization failure')
     return
   }
+  if(payload.kind == 'zgtSubscription') {
+    Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+    if(zgt.candidateDni?.toString() == playerDni &&
+        zgt.leaderGeneration?.toString() == payload.leaderGeneration?.toString()) {
+      zgt.subscriptionStatus = payload.status?.toString()
+      zgt.subscriptionObservedAt = payload.observedAt ?: now()
+      state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+      if(payload.status == 'failed') {
+        failZgtInitializationCandidate(playerDni, payload.detail?.toString() ?: 'ZGT subscription failed')
+      }
+    }
+    return
+  }
+  if(payload.kind == 'zgtTopology') {
+    acceptHouseholdTopology(playerDni, payload)
+    return
+  }
   runIn(1, 'refreshPlayerAnnouncementPolicySnapshots', [overwrite: true])
   if(payload.kind == 'wsRetry') {
     Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
@@ -4815,6 +5105,13 @@ void playerStateUpdateHandler(Object event) {
     offlinePlayers[playerDni] = [id: player.getDataValue('id'), name: player.displayName,
       retryDelay: (payload.retryDelay ?: 30) as Integer]
     state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+    Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+        ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+    if(zgt.candidateDni?.toString() == playerDni) {
+      zgt.topologyReady = false
+      state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+      failZgtInitializationCandidate(playerDni, 'ZGT speaker WebSocket became unreachable')
+    }
     return
   }
   if(payload.kind == 'wsConnected') {
@@ -4823,6 +5120,9 @@ void playerStateUpdateHandler(Object event) {
     offlinePlayers.remove(playerDni)
     state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
     resumeAnnouncementsForPlayer(playerDni)
+    if(state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true) {
+      runIn(1, 'startNextPlayerInitialization', [overwrite: true])
+    }
     return
   }
   if(payload.kind == 'householdPresence') {
@@ -4859,6 +5159,7 @@ void playerStateUpdateHandler(Object event) {
     return
   }
   if(kind == 'topology') {
+    scheduleZgtTopologyWatchdog()
     if(handleGroupAnnouncementTopologyEvent(player, payload)) { return }
     Map operation = getActiveGroupOperation()
     String playerId = player.getDataValue('id')?.toString()

@@ -1567,6 +1567,52 @@ class SonosAdvPlayerSpec extends Specification {
     topology.batteryData == [BattTmp: '23', BattPct: '80', BattChg: 'NOT_CHARGING']
   }
 
+  def "topology snapshot includes every household group for the app ZGT source"() {
+    given:
+    String zoneState = '<ZoneGroups>' +
+      '<ZoneGroup ID="G1" Coordinator="RINCON_A" ZoneGroupName="Downstairs">' +
+      '<ZoneGroupMember UUID="RINCON_A" ZoneName="Living Room"/>' +
+      '<ZoneGroupMember UUID="RINCON_B" ZoneName="Kitchen"/>' +
+      '</ZoneGroup>' +
+      '<ZoneGroup ID="G2" Coordinator="RINCON_C" ZoneGroupName="Office">' +
+      '<ZoneGroupMember UUID="RINCON_C" ZoneName="Office"/>' +
+      '</ZoneGroup>' +
+      '</ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String xml = '<propertyset><property><ZoneGroupName>Household</ZoneGroupName><ZoneGroupState>' +
+      escapedState + '</ZoneGroupState></property></propertyset>'
+
+    when:
+    Map topology = driver.parseZoneGroupTopologySnapshot(xml, 'RINCON_B')
+
+    then:
+    topology.playerFound == true
+    topology.groups.size() == 2
+    topology.groups*.groupId == ['G1', 'G2']
+    topology.groups[0].playerIds == ['RINCON_A', 'RINCON_B']
+    topology.groups[1].coordinatorId == 'RINCON_C'
+    topology.groups[1].playerIds == ['RINCON_C']
+  }
+
+  def "only app-elected ZGT player subscribes to ZoneGroupTopology"() {
+    given:
+    List<String> zgtCalls = []
+    driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
+    driver.metaClass.unsubscribeFromZgtEvents = { -> zgtCalls << 'unsubscribe' }
+    driver.metaClass.subscribeToMrRcEvents = { -> }
+    driver.metaClass.markAppMediatedUpnpSubscriptionsStarted = { -> }
+    driver.device.dataValues.appZgtSubscribe = 'false'
+
+    when:
+    driver.subscribeToEvents()
+    driver.device.dataValues.appZgtSubscribe = 'true'
+    driver.device.dataValues.appZgtLeaderGeneration = 'leader-1'
+    driver.subscribeToEvents()
+
+    then:
+    zgtCalls == ['unsubscribe', 'subscribe']
+  }
+
   def "topology change holds only affected player until its expected topology arrives"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
