@@ -113,7 +113,7 @@ String formatEpoch(Long epochSeconds) {
 metadata {
   definition(
     name: 'Sonos Advanced Player',
-    version: '0.17.2',
+    version: '0.17.3',
     namespace: 'dwinks',
     author: 'Daniel Winks',
     singleThreaded: false,
