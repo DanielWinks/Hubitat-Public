@@ -1790,6 +1790,23 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.every { String entry -> !entry.contains('Audio clip watchdog fired') }
   }
 
+  def "done watchdog schedules when queue start time is missing"() {
+    given:
+    driver.runtimeState.activeAudioClipCorrelationId = 'active-clip'
+    driver.runtimeState.remove('audioClipQueueStartTime')
+
+    when:
+    driver.scheduleAudioClipDoneWatchdog('active-clip', 1000L, 10)
+
+    then:
+    driver.scheduled.size() == 1
+    driver.scheduled[0][1] == 'audioClipWatchdog'
+    driver.scheduled[0][2].data.correlationId == 'active-clip'
+    driver.scheduled[0][2].data.phase == 'WAITING_FOR_DONE'
+    !driver.runtimeState.containsKey('audioClipQueueStartTime')
+    driver.runtimeState.audioClipQueueTotalDuration > 0
+  }
+
   def "legacy player state migrates to the DNI runtime map and is cleared from Hubitat state"() {
     given:
     driver.state.audioClipPlaying = true

@@ -11675,8 +11675,9 @@ void scheduleAudioClipWatchdog(String correlationId, String phase, Long deadline
   Long deadlineAt = deadline ?: now()
   Integer delaySeconds = Math.max(1, (int)Math.ceil((deadlineAt - now()) / 1000.0d))
   runtimeState.audioClipWatchdogRequestId = watchdogId
-  runtimeState.audioClipQueueStartTime = phase == 'WAITING_FOR_ACTIVE'
+  Long queueStart = phase == 'WAITING_FOR_ACTIVE'
       ? (runtimeState.audioClipSentAt as Long) : (runtimeState.audioClipQueueStartTime as Long)
+  if(queueStart != null) { runtimeState.audioClipQueueStartTime = queueStart }
   runtimeState.audioClipQueueTotalDuration = delaySeconds
   logDebug("Scheduled audio clip watchdog guid=${correlationId} phase=${phase} watchdog=${watchdogId} deadline=${deadlineAt} firesIn=${delaySeconds}s")
   runIn(delaySeconds, 'audioClipWatchdog', [overwrite: true,
