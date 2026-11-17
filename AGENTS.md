@@ -230,7 +230,11 @@ runtime semantics and UI behavior. Some apps expose test endpoints
 New behavior should have a focused regression test when practical, especially
 for parsers, HTTP response handling, retries, state transitions, device
 tracking, and pure calculations. See `tests/README.md` for the full list of rules, harness capabilities,
-and how to add new tests.
+and how to add new tests. Whenever behavior changes in an App, Driver, or
+Library, update or add the affected regression tests in the same change. Treat
+test updates as required, and run the relevant specs after changing behavior.
+If the current harness cannot exercise a behavior, explain the limitation and
+add suitable structural or static coverage where practical.
 
 ## Adding a New Package
 

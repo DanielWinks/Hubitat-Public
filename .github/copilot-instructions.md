@@ -41,7 +41,7 @@ Typical runtime flow:
 
 ## Editing and release workflow (developer workflow)
 
-- There is no build step in this repo — files are raw Groovy for Hubitat. To test/run code you must deploy to a Hubitat hub (or use a Hubitat development environment).
+- Production files are raw Groovy for Hubitat, and the `tests/` Gradle project provides local linting and Spock regression tests. Do not rely on hub deployment as the only way to test a change.
 - Packaging: to publish an app/driver for HPM, add a package manifest under `PackageManifests/<PackageName>/packageManifest.json` and update the root `repository.json` if creating a new top-level package.
 
 ## How an AI should modify code
@@ -50,6 +50,7 @@ Typical runtime flow:
 - Respect Hubitat lifecycle hooks: keep `initialize()`, `installed()`, `updated()` (when present) and subscription patterns intact.
 - Use the repo's logging utilities and preference flags rather than adding ad-hoc printlns or `System.out`.
 - When adding web endpoints, follow the `getLocalUri()/getCloudUri()` pattern and `tryCreateAccessToken()` usage as in `SunriseSimulation.groovy`.
+- Whenever a code change affects behavior, update or add its affected regression tests in the same change, then run the relevant test specs and lint. Treat test updates as required; if the harness cannot cover a behavior, explain why and add structural or static coverage where practical.
 
 ## Using connected Hubitat MCP servers
 

@@ -20,9 +20,12 @@ Then run the relevant test class or full suite:
 ./gradlew test
 ```
 
-For release-ready changes, run `./gradlew lint`. Add focused harness specs
-for state transitions, schedules/subscriptions, button events, HTTP parsing or
-retries, device tracking, and pure calculations when practical.
+Update or add the affected regression specs in the same change whenever
+behavior changes; test updates are required, not optional. Add focused harness
+coverage for state transitions, schedules/subscriptions, button events, HTTP
+parsing or retries, device tracking, and pure calculations. If the current
+harness cannot exercise a behavior, explain the gap and add structural or
+static coverage where practical. For release-ready changes, run `./gradlew lint`.
 
 Treat syntax, callback, capability, sandbox, and static-typing errors as
 blockers. Separate changed-file failures from pre-existing repository failures.

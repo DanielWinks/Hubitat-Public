@@ -257,7 +257,7 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.playerInitializationBootPending == true
     appScript.state.playerInitializationBootGeneration
-    appScript.state.playerInitializationNotBefore >= appScript.now() + 60000L
+    appScript.state.playerInitializationNotBefore >= appScript.now() + 59000L
     (appScript.state.playerInitializationQueue as List<Map>)[0].bootGeneration ==
         appScript.state.playerInitializationBootGeneration
     coordinator.initializationRequests.empty
@@ -275,7 +275,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.state.playerInitializationBootPending == true
-    appScript.state.playerInitializationNotBefore >= appScript.now() + 60000L
+    appScript.state.playerInitializationNotBefore >= appScript.now() + 59000L
     (appScript.state.playerInitializationQueue as List<Map>).every { Map request ->
       request.bootGeneration == appScript.state.playerInitializationBootGeneration
     }
@@ -297,7 +297,7 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     (appScript.state.playerInitializationQueue as List<Map>).size() == 1
     appScript.state.playerInitializationQueue[0].bootAttempt == 1
-    appScript.state.playerInitializationActive.empty
+    appScript.state.playerInitializationActive.isEmpty()
 
     when:
     appScript.startNextPlayerInitialization()

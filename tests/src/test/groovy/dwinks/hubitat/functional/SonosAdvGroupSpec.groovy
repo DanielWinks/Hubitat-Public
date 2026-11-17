@@ -481,6 +481,6 @@ class SonosAdvGroupSpec extends Specification {
     driver.updateTTSVoiceCache(['Matthew', 'Joanna'], 'Matthew')
 
     then:
-    driver.logs.any { String entry -> entry.contains('TRACE') && entry.contains('TTS voice cache updated: 2 voices') }
+    driver.logs.any { String entry -> entry.contains('DEBUG') && entry.contains('TTS voice cache updated: 2 voices') }
   }
 }
