@@ -1380,22 +1380,9 @@ class SonosAdvancedAppSpec extends Specification {
     topology.consistent == true
     topology.authorityPlayerId == 'RINCON_COORD'
     topology.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW']
-    appScript.getActiveGroupOperation().stableObservations == 1
-    coordinator.commands.findAll { it.name == 'playerCreateGroup' }.empty
-
-    when:
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
-
-    then:
-    appScript.getActiveGroupOperation().stableObservations == 1
-    coordinator.commands.find { it.name == 'playerCreateGroup' } == null
-
-    when:
-    emitTopologyObservation('RINCON_COORD', 'GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
-
-    then:
     appScript.getActiveGroupOperation() == null
+    group.statuses.last().status.status == 'SUCCEEDED'
+    coordinator.commands.findAll { it.name == 'playerCreateGroup' }.empty
   }
 
   def "explicit group refreshes missing topology confirmation without repeating createGroup"() {
@@ -1488,7 +1475,7 @@ class SonosAdvancedAppSpec extends Specification {
     Map topology = appScript.readGroupOperationTopology(operation)
 
     then:
-    topology.fresh == false
+    topology.fresh == true
     topology.consistent == false
     topology.observations.find { it.playerId == 'RINCON_FOLLOW' }.groupId == null
     appScript.getActiveGroupOperation() != null
@@ -2457,7 +2444,7 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
   }
 
-  def "Favorite is not loaded until the requested topology is stable twice"() {
+  def "Favorite loads after the first fresh ZGT confirms the requested topology"() {
     given:
     appScript.processGroupCommandRequest([request: request('on', [:], 1)])
     appScript.processGroupCommandRequest([request: request('loadFavoriteFull', [
@@ -2469,14 +2456,6 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.clear()
 
     when:
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
-
-    then:
-    coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' } == null
-    appScript.getActiveGroupOperation().stableObservations == 1
-
-    when:
-    emitRequiredTopology()
     appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
 
     then:
@@ -2509,7 +2488,7 @@ class SonosAdvancedAppSpec extends Specification {
     operation.favoriteExpectedGroupId == 'GROUP-1'
   }
 
-  def "post-Favorite topology accepts the first matching follower roster before the coordinator report"() {
+  def "post-Favorite topology accepts the first matching ZGT roster"() {
     given:
     appScript.processGroupCommandRequest([request: request('on', [:], 1)])
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 2)])
@@ -2527,7 +2506,7 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     operation.favoriteTopologyStableObservations == 1
     operation.favoriteTopologyVerified == true
-    appScript.logs.any { it.contains('Post-Favorite topology check') && it.contains('authority=RINCON_FOLLOW') }
+    appScript.logs.any { it.contains('Post-Favorite topology check') && it.contains('authority=RINCON_COORD') }
     operation.favoriteExpectedGroupId == 'GROUP-1'
     appScript.getActiveGroupOperation() != null
   }

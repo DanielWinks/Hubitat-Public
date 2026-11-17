@@ -298,7 +298,6 @@ preferences {
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
 @Field static final Integer GROUP_OPERATION_HARD_DEADLINE_SECONDS = 180
 @Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
-@Field static final Integer GROUP_OPERATION_STABILITY_OBSERVATIONS = 2
 @Field static final Integer GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS = 4
 @Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
 @Field static final Integer GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS = 10
@@ -8207,58 +8206,41 @@ Map readGroupOperationTopology(Map operation) {
       : [:]
   Long refreshAt = (operation?.topologyRefreshAt ?: 0L) as Long
   Map topology = readGroupTopologyFromObservations(operation, observations, refreshAt)
-  if(operation?.groupingMode != GROUPING_MODE_EXPLICIT) {
+  List<Map> freshObservations = topology.observations instanceof List
+      ? ((List<Map>)topology.observations).findAll { Map item -> item.fresh == true }
+      : []
+  if(freshObservations.isEmpty()) {
     return topology
   }
 
-  // A fresh groups response from the configured coordinator describes its
-  // complete group roster. Do not require a second response from every member:
-  // a member can miss the request while the coordinator already confirms the
-  // exact group topology.
-  String coordinatorId = operation?.desiredCoordinatorId as String
-  Map coordinatorObservation = topology.observations instanceof List
-      ? ((List<Map>)topology.observations).find { Map item ->
-          item.playerId?.toString() == coordinatorId && item.fresh == true
-        }
-      : null
-  if(coordinatorObservation == null || !coordinatorObservation.groupId ||
-      !coordinatorObservation.coordinatorId || !coordinatorObservation.playerIds) {
-    // The `groups` response is a household-wide roster, so another configured
-    // player can confirm the exact requested topology if the coordinator's
-    // WebSocket response is delayed or lost.
-    Map memberConfirmation = topology.observations instanceof List
-        ? ((List<Map>)topology.observations).find { Map item ->
-            item.fresh == true && item.groupId && item.coordinatorId && item.playerIds &&
-                item.coordinatorId.toString() == coordinatorId &&
-                normalizeGroupPlayerIds(item.playerIds) == normalizeGroupPlayerIds(operation.requiredPlayerIds)
-          }
-        : null
-    if(memberConfirmation != null) {
-      topology.fresh = true
-      topology.consistent = true
-      topology.groupId = memberConfirmation.groupId as String
-      topology.coordinatorId = memberConfirmation.coordinatorId as String
-      topology.playerIds = normalizeGroupPlayerIds(memberConfirmation.playerIds)
-      topology.authorityPlayerId = memberConfirmation.playerId as String
-      topology.fingerprint = "${memberConfirmation.playerId}:${memberConfirmation.groupId}:${memberConfirmation.coordinatorId}:${topology.playerIds.join(',')}"
-      return topology
-    }
+  // Each fresh ZGT roster describes the complete group. Trust the first one
+  // that satisfies the requested members and coordinator instead of waiting
+  // for every speaker to emit a duplicate roster.
+  String preferredReporterId = operation?.desiredCoordinatorId as String
+  if(!preferredReporterId && operation?.groupingMode == GROUPING_MODE_CURRENT) {
+    preferredReporterId = operation?.resolvedCoordinatorId as String
+  }
+  List<Map> orderedObservations = preferredReporterId
+      ? freshObservations.findAll { Map item -> item.playerId?.toString() == preferredReporterId } +
+          freshObservations.findAll { Map item -> item.playerId?.toString() != preferredReporterId }
+      : freshObservations
+  Map acceptedObservation = orderedObservations.find { Map item ->
+    Map candidate = [fresh: true, consistent: true, groupId: item.groupId,
+        coordinatorId: item.coordinatorId, playerIds: item.playerIds]
+    return isGroupTopologySatisfied(operation, candidate)
+  }
+  if(acceptedObservation == null) {
     return topology
   }
-
-  List<String> playerIds = normalizeGroupPlayerIds(coordinatorObservation.playerIds)
-  if(playerIds.isEmpty()) {
-    return topology
-  }
-  String groupId = coordinatorObservation.groupId as String
-  String observedCoordinatorId = coordinatorObservation.coordinatorId as String
+  List<String> playerIds = normalizeGroupPlayerIds(acceptedObservation.playerIds)
   topology.fresh = true
   topology.consistent = true
-  topology.groupId = groupId
-  topology.coordinatorId = observedCoordinatorId
+  topology.groupId = acceptedObservation.groupId as String
+  topology.coordinatorId = acceptedObservation.coordinatorId as String
   topology.playerIds = playerIds
-  topology.authorityPlayerId = coordinatorId
-  topology.fingerprint = "${coordinatorId}:${groupId}:${observedCoordinatorId}:${playerIds.join(',')}"
+  topology.observations = [acceptedObservation]
+  topology.authorityPlayerId = acceptedObservation.playerId as String
+  topology.fingerprint = "${acceptedObservation.playerId}:${acceptedObservation.groupId}:${acceptedObservation.coordinatorId}:${playerIds.join(',')}"
   return topology
 }
 
@@ -8567,7 +8549,7 @@ void updateGroupTopologyStability(Map operation, Map topology) {
     operation.topologyLastObservedAt = latestObservedAt
   } else if(fingerprint != operation.topologyFingerprint) {
     operation.topologyFingerprint = fingerprint
-    operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+    operation.stableObservations = 1
     operation.topologyLastObservedAt = latestObservedAt
   }
 }
@@ -9652,15 +9634,6 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     operation.topologyMutationSent = false
   }
   updateGroupTopologyStability(operation, topology)
-  if(((operation.stableObservations ?: 0) as Integer) < GROUP_OPERATION_STABILITY_OBSERVATIONS) {
-    saveActiveGroupOperation(operation)
-    refreshGroupOperationTopology([operationId: operation.operationId], false)
-    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
-      overwrite: true,
-      data: [operationId: operation.operationId]
-    ])
-    return
-  }
 
   if(!operation.favoriteId) {
     completeGroupOperation(operation)
@@ -9690,7 +9663,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
       // Retry only the Favorite load; topology has already been verified and
       // no grouping command is repeated for a media acknowledgement failure.
       operation.phase = 'ENSURE_GROUP'
-      operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+      operation.stableObservations = 1
       operation.lastCommandAt = 0L
       saveActiveGroupOperation(operation)
       sendGroupFavoriteLoad(operation, topology)
@@ -9764,7 +9737,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
       // failed to start playback. Once playback is active, never interrupt it
       // with another Favorite request merely because metadata is late.
       operation.phase = 'ENSURE_GROUP'
-      operation.stableObservations = GROUP_OPERATION_STABILITY_OBSERVATIONS
+      operation.stableObservations = 1
       operation.lastCommandAt = 0L
       operation.topologyDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
       saveActiveGroupOperation(operation)
