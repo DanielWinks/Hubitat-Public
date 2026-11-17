@@ -65,6 +65,14 @@ void logTrace(String message) {
   }
 }
 
+void logPayloadAtTrace(String debugMessage, String traceMessage) {
+  if(getConfiguredLogLevel() == 'trace') {
+    logTrace(traceMessage)
+  } else {
+    logDebug(debugMessage)
+  }
+}
+
 String getConfiguredLogLevel() {
   if(settings?.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
   if(settings?.logEnable == false) { return 'off' }
@@ -3924,7 +3932,8 @@ void processMdnsDiscovery() {
         String ipAddress = addresses.tokenize(',')?.first()?.trim()
         Integer port = (entry.port ?: 0) as Integer
 
-        logTrace("mDNS entry: service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}, raw=${entry}")
+        logPayloadAtTrace("mDNS entry service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}; payload omitted",
+            "mDNS entry: service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}, raw=${entry}")
 
         if(serviceType == '_sonos._tcp' || serviceName.toLowerCase().contains('sonos') || (ipAddress && port == 1400)) {
           logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}:${port}")
@@ -4939,7 +4948,9 @@ void groupCommandRequestHandler(Event event) {
     return
   }
 
-  logDebug("Received group command event; groupDni=${request?.groupDni ?: 'unknown'}, command=${request?.command ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sequence=${request?.sequence ?: 'unknown'}")
+  Long requestAgeMs = request?.createdAt != null
+      ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
+  logDebug("Received group command event; groupDni=${request?.groupDni ?: 'unknown'}, command=${request?.command ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sequence=${request?.sequence ?: 'unknown'}, ageMs=${requestAgeMs}")
 
   enqueueGroupCommandRequest(request)
 }
@@ -5007,7 +5018,9 @@ void playerAppRequestHandler(Event event) {
     return
   }
   Map args = request.args instanceof Map ? (Map)request.args : [:]
-  logDebug("Received player app request action=${request.action ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${playerDni}")
+  Long eventAgeMs = args.createdAt != null
+      ? Math.max(0L, now() - (args.createdAt as Long)) : -1L
+  logDebug("Received player app request action=${request.action ?: 'unknown'}, eventRequestId=${request.requestId ?: 'unknown'}, ttsRequestId=${args.requestId ?: 'none'}, correlation=${args.correlationId ?: 'none'}, sourceDni=${playerDni}, ageMs=${eventAgeMs}")
   switch(request.action?.toString()) {
     case 'refreshRoster':
       refreshStaticDriverActivePlayerRoster()
@@ -5027,7 +5040,15 @@ void playerAppRequestHandler(Event event) {
       Boolean accepted = handlePlayerActiveStreamTts(playerDni, args.uri?.toString(), volume, duration,
           args.correlationId?.toString())
       logDebug("Player active-stream TTS decision requestId=${requestId ?: 'unknown'}, accepted=${accepted}")
-      if(requestId) { player.completeParentAppActiveStreamTts(requestId, accepted.toString()) }
+      if(requestId) {
+        try {
+          player.completeParentAppActiveStreamTts(requestId, accepted.toString())
+          logDebug("Player active-stream TTS response sent eventRequestId=${request.requestId ?: 'unknown'}, requestId=${requestId}, accepted=${accepted}, sourceDni=${playerDni}")
+        } catch(Exception e) {
+          logWarn("Player active-stream TTS response failed eventRequestId=${request.requestId ?: 'unknown'}, requestId=${requestId}, sourceDni=${playerDni}: ${e.message}")
+          throw e
+        }
+      }
       break
     default: logWarn("Ignoring unsupported player app request action '${request.action}'")
   }
@@ -7053,7 +7074,7 @@ void processGroupCommandRequest(Map data) {
         logWarn("Unsupported group command '${command}'")
     }
   } catch(Exception e) {
-    logWarn("Group command ${command} failed for ${groupDni}: ${e.message}")
+    logWarn("Group command ${command} failed for ${groupDni}, requestId=${requestId ?: 'unknown'}, correlation=${args.correlationId ?: 'none'}: ${e.message}")
   }
 }
 
@@ -11321,8 +11342,8 @@ void sendLocalCommandAsync(Map args) {
   }
   Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
       ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  logDebug("Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}")
-  logTrace("sendLocalCommandAsync: ${params}")
+  String requestSummary = "Dispatching local HTTP ${retryData.method ?: 'POST'} request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  logPayloadAtTrace(requestSummary, "sendLocalCommandAsync: ${params}")
   asynchttpPost(callbackMethod, params, callbackData)
 }
 
@@ -11338,7 +11359,7 @@ Map sendLocalJsonQuerySync(Map args) {
   } else if(params.headers != null && params.headers['X-Sonos-Api-Key'] == null) {
     params.headers['X-Sonos-Api-Key'] = '123e4567-e89b-12d3-a456-426655440000'
   }
-  logTrace("sendLocalQuerySync: ${params}")
+  logPayloadAtTrace("Sending local HTTP GET request uri=${params.uri}; payload omitted", "sendLocalQuerySync: ${params}")
   httpGet(params) { resp ->
     if (resp && resp.data && resp.success) { return resp.data }
     else { logError("sendLocalJsonQuerySync: unexpected response: ${resp?.data}") }
@@ -11367,8 +11388,8 @@ void sendLocalQueryAsync(Map args) {
   }
   Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
       ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  logDebug("Dispatching local HTTP GET request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}")
-  logTrace("sendLocalQueryAsync: ${params}")
+  String requestSummary = "Dispatching local HTTP GET request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  logPayloadAtTrace(requestSummary, "sendLocalQueryAsync: ${params}")
   asynchttpGet(callbackMethod, params, callbackData)
 }
 
@@ -11396,8 +11417,8 @@ void sendLocalJsonAsync(Map args) {
   }
   Map retryData = callbackData instanceof Map && ((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) instanceof Map
       ? (Map)((Map)callbackData).get(LOCAL_CONTROL_RETRY_DATA_KEY) : [:]
-  logDebug("Dispatching local HTTP POST request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}")
-  logTrace("sendLocalJsonAsync: ${params}")
+  String requestSummary = "Dispatching local HTTP POST request ${retryData.requestId ?: 'untracked'} attempt=${retryData.attemptNumber ?: 1} attemptId=${retryData.attemptId ?: 'untracked'} uri=${params.uri}; payload omitted"
+  logPayloadAtTrace(requestSummary, "sendLocalJsonAsync: ${params}")
   asynchttpPost(callbackMethod, params, callbackData)
 }
 
@@ -11446,7 +11467,7 @@ void localControlCallback(AsyncResponse response, Map data) {
       state.remove(LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY)
       resetHttpRetryCounter(LOCAL_CONTROL_RETRY_STATE_KEY)
     }
-    logTrace("localControlCallback: ${response.getData()}")
+    logPayloadAtTrace('Successful local HTTP response received; body omitted', "localControlCallback: ${response.getData()}")
   }
 }
 

@@ -85,6 +85,20 @@ void logTrace(String message) {
   }
 }
 
+void logPayloadAtTrace(String debugMessage, String traceMessage) {
+  if(getConfiguredLogLevel() == 'trace') {
+    logTrace(traceMessage)
+  } else {
+    logDebug(debugMessage)
+  }
+}
+
+void logWebSocketCommandPayload(Map command, String json) {
+  String namespace = command?.get('namespace')?.toString() ?: 'unknown'
+  String commandName = command?.get('command')?.toString() ?: 'unknown'
+  logPayloadAtTrace("Sending Sonos WebSocket command ${namespace}.${commandName}; payload omitted", json)
+}
+
 // The shared utilities library is intentionally not included in this driver.
 // Keep the small timestamp formatter needed by the legacy SID visibility path
 // local so the standalone driver has the same behavior after publication.
@@ -1639,12 +1653,14 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
       String requestId = UUID.randomUUID().toString()
       Map<String, Object> pending = state.pendingParentAppTtsRequests instanceof Map
           ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
+      Long requestCreatedAt = now()
       pending[requestId] = [uri: streamUrl, volume: volume?.toString(), duration: ttsDuration,
-        correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip]
+        correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip, createdAt: requestCreatedAt]
       state.pendingParentAppTtsRequests = pending
       logDebug("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
       sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
-        volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId])
+        volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId,
+        createdAt: requestCreatedAt])
       return
     } else {
       logDebug("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
@@ -1715,7 +1731,13 @@ void sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'playerAppRequest', action: action,
     sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
   logDebug("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
-  sendEvent(name: PLAYER_APP_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+  try {
+    sendEvent(name: PLAYER_APP_REQUEST_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+  } catch(Exception e) {
+    logWarn("Parent app request event emission failed action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}: ${e.message}")
+    throw e
+  }
+  logDebug("Parent app request event emitted action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
 }
 
 /** Complete the asynchronous parent-app decision for an active-stream TTS request. */
@@ -3953,7 +3975,8 @@ void parse(String raw) {
       } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
     }
     else {
-      logTrace("Could not determine service type for message: ${message}")
+      logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
+          "Could not determine service type for message: ${message}")
     }
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
@@ -8274,7 +8297,7 @@ void subscribeToGroups() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8287,7 +8310,7 @@ void subscribeToFavorites() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8300,8 +8323,7 @@ void subscribeToPlaylists() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
-  logDebug('subscribeToPlaylists')
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8314,7 +8336,7 @@ void subscribeToAudioClip() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   runtimeState.audioClipSubscriptionRequestPending = true
   sendWsMessage(json, [kind: 'audioClipSubscribe'])
 }
@@ -8335,7 +8357,7 @@ void subscribeToPlayback(String groupId) {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8348,7 +8370,7 @@ void subscribeToPlaybackMetadata(String groupId) {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8361,7 +8383,7 @@ void subscribeToPlayerVolume() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8374,7 +8396,7 @@ void subscribeToGroupVolume(String groupId) {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8387,7 +8409,7 @@ void getPlaybackMetadataStatus() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8400,7 +8422,7 @@ void getPlaybackStatus() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
   if(active != null && active.statusQueryPending == true) {
@@ -8419,7 +8441,7 @@ void subscribeToFavorites(String groupId) {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 // =============================================================================
@@ -8722,7 +8744,7 @@ void playerSetPlayModes(Map playModes) {
   ]
   Map args = [ 'playModes': playModes ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8737,7 +8759,7 @@ void playerSetPlayerVolume(Integer volume) {
     'volume': volume,
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8752,7 +8774,7 @@ void playerSetPlayerMute(Boolean muted) {
     'muted': muted
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8767,7 +8789,7 @@ void playerSetPlayerRelativeVolume(Integer volumeDelta) {
     'volumeDelta': volumeDelta
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8782,7 +8804,7 @@ void playerSetGroupVolume(Integer volume) {
     'volume': volume
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8797,7 +8819,7 @@ void playerSetGroupMute(Boolean muted) {
     'muted': muted
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8812,7 +8834,7 @@ void playerSetGroupRelativeVolume(Integer volumeDelta) {
     'volumeDelta': volumeDelta
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8825,7 +8847,7 @@ void getFavorites() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8838,7 +8860,7 @@ void getPlaylists() {
   ]
   Map args = [:]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -8883,7 +8905,7 @@ private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean
     'playOnCompletion': playOnCompletion
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 
   // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
@@ -8920,7 +8942,7 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
     'playOnCompletion': playOnCompletion
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 
   // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
@@ -9489,7 +9511,7 @@ void playerGetGroupsFull() {
   ]
   Map args = ['includeDeviceInfo': true]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -9517,7 +9539,7 @@ void sendCreateGroupRequest(List<String> playerIds, String musicContextGroupId =
     'playerIds': playerIds
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -9536,7 +9558,7 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
     'playerIdsToRemove': playerIdsToRemove
   ]
   String json = JsonOutput.toJson([command,args])
-  logTrace(json)
+  logWebSocketCommandPayload(command, json)
   sendWsMessage(json)
 }
 
@@ -9588,7 +9610,7 @@ void localControlCallback(AsyncResponse response, Map data) {
     try{logErrorXml("Request ErrorXml: ${response.getErrorXml()}")} catch(Exception e){}
   }
   if(response?.status == 200 && response && response.hasError() == false) {
-    logTrace("localControlCallback: ${response.getData()}")
+    logPayloadAtTrace('Successful local HTTP response received; body omitted', "localControlCallback: ${response.getData()}")
   }
 }
 
@@ -10554,7 +10576,9 @@ void processWebsocketMessage(String message) {
     if(eventSig != lastSig) {
       logTrace("WS event: ${eventType}")
     }
-    if(deviceSettings.enableRawWebsocketLogging == true) { logTrace("WS raw: ${message}") }
+  }
+  if(deviceSettings.enableRawWebsocketLogging == true) {
+    logPayloadAtTrace('WebSocket raw message received; payload omitted', "WS raw: ${message}")
   }
 
   //Process subscriptions

@@ -337,7 +337,12 @@ void emitGroupCommandRequest(Map data) {
   if(!(payload instanceof Map) || !payload.command) { return }
   Long ageMs = payload.createdAt != null ? Math.max(0L, now() - (payload.createdAt as Long)) : -1L
   logDebug("Emitting group command request id=${payload.requestId}, command=${payload.command}, sequence=${payload.sequence ?: 'unknown'}, ageMs=${ageMs}, pending=${(runtimeState.pendingGroupCommands instanceof List ? ((List)runtimeState.pendingGroupCommands).size() : 0)}")
-  sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+  try {
+    sendEvent(name: SONOS_GROUP_COMMAND_ATTRIBUTE, value: JsonOutput.toJson(payload), isStateChange: true)
+  } catch(Exception e) {
+    logWarn("Group command event emission failed id=${payload.requestId}, command=${payload.command}, sequence=${payload.sequence ?: 'unknown'}: ${e.message}")
+    throw e
+  }
   logDebug("Delivered group command ${payload.command} (${payload.requestId}); waiting for parent acknowledgement")
   runIn(GROUP_COMMAND_RETRY_INTERVAL_SECONDS, 'retryActiveGroupCommandRequest', [overwrite: true])
 }
