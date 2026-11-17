@@ -411,7 +411,11 @@ String getBaseControlXML(Map service, String action, Map controlValues = null) {
 
 @CompileStatic
 Map getSoapActionParams(String deviceIp, Map service, String action, Map controlValues = null) {
-  logTrace("Get SOAP action params: IP=${deviceIp} Service=${service} Action=${action} ControlValues=${controlValues}")
+  if(getConfiguredLogLevel() == 'trace') {
+    logTrace("Get SOAP action params: IP=${deviceIp} Service=${service} Action=${action} ControlValues=${controlValues}")
+  } else {
+    logDebug("Preparing SOAP action ${action} for ${deviceIp}; control payload omitted")
+  }
   String body = getBaseControlXML(service, action, controlValues)
   String uri = "http://${deviceIp}${service.controlURL}"
   String soapAction = "${service.serviceType}#${action}"
