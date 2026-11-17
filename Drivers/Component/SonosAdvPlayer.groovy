@@ -407,6 +407,13 @@ Boolean hasLineInCapability() {
 @Field static final String WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY = 'websocketReplayWaitingForSubscriptions'
 @Field static final String WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY = 'websocketReplayWaitingForTopology'
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
+@Field static final String APP_INITIALIZATION_REQUEST_ID_STATE_KEY = 'appMediatedInitializationRequestId'
+@Field static final String APP_INITIALIZATION_STARTED_AT_STATE_KEY = 'appMediatedInitializationStartedAt'
+@Field static final String APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY = 'appMediatedInitializationResubscriptionsStarted'
+@Field static final String APP_INITIALIZATION_UPNP_STARTED_STATE_KEY = 'appMediatedInitializationUpnpStarted'
+@Field static final String APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY = 'appMediatedInitializationConnectionGranted'
+@Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
+@Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 90
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 @Field static final Integer WS_COMMAND_ACK_TIMEOUT_SECONDS = 3
 @Field static final Integer WS_COMMAND_MAX_AGE_SECONDS = 60
@@ -590,6 +597,11 @@ void installed() { initialize() }
 void updated() { initialize() }
 
 void initialize() {
+  requestAppMediatedInitialization('driver initialize')
+}
+
+/** Perform lifecycle setup only after the parent app grants an initialization turn. */
+void prepareAppMediatedInitialization() {
   invalidateUpnpRequestsForDevice()
   Map queueEntry = getUpnpRequestQueue()
   if(queueEntry != null) { synchronized(queueEntry.lock) { queueEntry.retired = false } }
@@ -605,9 +617,6 @@ void initialize() {
   resetSubscriptionMutexesForDevice()
   maybeCleanupStaticDriverState()
   configure()
-  // Stagger resubscriptions across devices to avoid overwhelming the hub on cold boot
-  Integer staggerDelay = getRandomLockRetry(3, 20)
-  requestFullSubscriptionRenewal(staggerDelay, 'Initialize')
   scheduleWebsocketHealthCheck()
 }
 
@@ -615,8 +624,54 @@ void initialize() {
  * same method with overwrite enabled, coalescing close-together requests.
  */
 void requestFullSubscriptionRenewal(Integer delaySeconds, String reason) {
-  logInfo("Scheduling full subscription recovery after ${reason} in ${delaySeconds} seconds")
-  runIn(delaySeconds, 'fullRenewSubscriptions', [overwrite: true])
+  requestAppMediatedInitialization(reason ?: 'full subscription renewal')
+}
+
+void requestAppMediatedInitialization(String reason) {
+  publishPlayerStateUpdate([kind: 'initializationRequested', reason: reason ?: 'device request'])
+}
+
+/** Called only by the parent app after it grants this player the initialization turn. */
+void beginAppMediatedInitialization(String requestId) {
+  publishPlayerStateUpdate([kind: 'initializationStarted', requestId: requestId])
+  logDebug("Starting app-mediated initialization; request=${requestId}")
+  if(!requestId) {
+    publishPlayerStateUpdate([kind: 'initializationFailed', requestId: requestId, detail: 'missing parent request ID'])
+    return
+  }
+  if(device.getDataValue('appInitializationRequestId')?.toString() != requestId) {
+    logDebug("Ignoring stale app-mediated initialization request=${requestId}")
+    return
+  }
+  runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] = requestId
+  runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = now()
+  runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = false
+  runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = false
+  runtimeState[APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] = true
+  runtimeState.remove('appMediatedInitializationFailure')
+  try {
+    prepareAppMediatedInitialization()
+    performFullSubscriptionRenewal()
+  } catch(Exception e) {
+    logWarn("App-mediated initialization setup failed before subscription recovery: ${e.message}")
+    finishAppMediatedInitialization(false, "driver setup failed: ${e.message}")
+  }
+}
+
+void cancelAppMediatedInitialization(String requestId) {
+  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString() != requestId) { return }
+  runtimeState.remove(APP_INITIALIZATION_REQUEST_ID_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_STARTED_AT_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_UPNP_STARTED_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY)
+  runtimeState.remove('appMediatedInitializationFailure')
+  unschedule('initializeWebsocketConnection')
+  unschedule('websocketConnectWatchdog')
+  unschedule('retryWebSocketConnection')
+  unschedule('subscribeToEvents')
+  unschedule('resubscribeAfterRenewal')
+  unschedule('checkAppMediatedInitializationReady')
 }
 void configure() {
   invalidateUpnpRequestsForDevice()
@@ -788,7 +843,12 @@ void registerRinconId() {
   unschedule('checkSubscriptions')
 }
 
+/** Compatibility callback: any persisted legacy schedule is redirected through the app queue. */
 void fullRenewSubscriptions() {
+  requestAppMediatedInitialization('legacy scheduled full subscription renewal')
+}
+
+void performFullSubscriptionRenewal() {
   releaseFavPlaylistDelegate()
   clearWsSubscriptionStatus()
   unsubscribeFromAVTransport()
@@ -803,6 +863,7 @@ void fullRenewSubscriptions() {
 
   if(!localUpnpHost || !websocketUrl) {
     logInfo('Device data not yet configured (fresh install). Subscriptions will be established after configuration by parent app.')
+    finishAppMediatedInitialization(false, 'local Sonos or WebSocket connection data is missing')
     return
   }
 
@@ -889,6 +950,75 @@ void resubscribeAfterRenewal() {
       subscribeToPlaybackMetadata(groupId)
     }
   }
+  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
+    runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = true
+    ChildDeviceWrapper rightChannel = getRightChannelChild()
+    if(rightChannel != null && getRightChannelRincon()) {
+      watchRightChannelWebsocket(rightChannel)
+      try { rightChannel.beginParentMediatedConnection(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY].toString()) }
+      catch(Exception e) { logDebug("Could not start paired right-channel initialization: ${e.message}") }
+    }
+    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
+  }
+}
+
+void checkAppMediatedInitializationReady() {
+  String requestId = runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString()
+  if(!requestId) { return }
+  String failure = runtimeState.appMediatedInitializationFailure?.toString()
+  if(failure) {
+    finishAppMediatedInitialization(false, failure)
+    return
+  }
+  Long startedAt = (runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] ?: now()) as Long
+  if(now() - startedAt >= APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS * 1000L) {
+    finishAppMediatedInitialization(false, 'WebSocket or subscription setup did not settle within 90 seconds')
+    return
+  }
+  if(runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] != true ||
+      runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] != true || !isWebsocketConnected()) {
+    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
+    return
+  }
+  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+  List<Map> outbound = getWebsocketOutboundQueue()
+  Boolean pendingWebsocketSubscription = ledger.any { Map entry -> entry.wireCommand == 'subscribe' } ||
+      outbound.any { Map entry -> entry.wireCommand == 'subscribe' }
+  Map upnpQueue = getUpnpRequestQueue()
+  Boolean pendingUpnpRequest = false
+  if(upnpQueue != null) {
+    synchronized(upnpQueue.lock) {
+      pendingUpnpRequest = upnpQueue.active != null || !(upnpQueue.queue as List).isEmpty()
+    }
+  }
+  ChildDeviceWrapper rightChannel = getRightChannelChild()
+  Boolean rightChannelReady = rightChannel == null || !getRightChannelRincon() ||
+      rightChannel.getDataValue('websocketStatus') == 'open'
+  if(pendingWebsocketSubscription || pendingUpnpRequest || !rightChannelReady) {
+    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
+    return
+  }
+  finishAppMediatedInitialization(true, 'WebSocket and subscription setup settled')
+}
+
+void finishAppMediatedInitialization(Boolean succeeded, String detail) {
+  String requestId = runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString()
+  if(!requestId) { return }
+  unschedule('checkAppMediatedInitializationReady')
+  runtimeState.remove(APP_INITIALIZATION_REQUEST_ID_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_STARTED_AT_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_UPNP_STARTED_STATE_KEY)
+  runtimeState.remove(APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY)
+  runtimeState.remove('appMediatedInitializationFailure')
+  publishPlayerStateUpdate([kind: succeeded ? 'initializationComplete' : 'initializationFailed',
+      requestId: requestId, detail: detail])
+  if(succeeded) { logInfo("App-mediated initialization complete: ${detail}") }
+  else if(detail?.contains('90 seconds') || detail?.contains('hard timeout')) {
+    logDebug("App-mediated initialization timed out: ${detail}")
+  }
+  else { logWarn("App-mediated initialization failed: ${detail}") }
 }
 
 void secondaryConfiguration() {
@@ -2450,6 +2580,13 @@ void subscribeToEvents() {
   subscribeToZgtEvents()
   if(getIsGrouped()) { subscribeToMrGrcEvents() } // sid4 only needed when grouped; setGroupPlayerIds() handles transitions
   subscribeToMrRcEvents()
+  markAppMediatedUpnpSubscriptionsStarted()
+}
+
+void markAppMediatedUpnpSubscriptionsStarted() {
+  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
+    runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = true
+  }
 }
 
 @CompileStatic
@@ -7219,11 +7356,15 @@ Integer webSocketRetryIntervalSeconds(Long elapsedSeconds) {
 void retryWebSocketConnection() {
   runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
   logDebug("Attempting WebSocket reconnection...")
-  wsConnect()
+  requestAppMediatedInitialization('WebSocket reconnect retry')
 }
 
 void wsConnect() {
   if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) { return }
+  if(runtimeState[APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] != true) {
+    requestAppMediatedInitialization('WebSocket connection requested outside app initialization turn')
+    return
+  }
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
   runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
@@ -7565,6 +7706,9 @@ void observeWebsocketCommandResponse(Map eventType, Map eventData) {
   Boolean success = eventType.success == true
   String outcome = success ? 'success' : 'failure'
   String detail = success ? "type=${eventType.type}" : "type=${eventType.type}, error=${eventData?.errorCode ?: eventData?.reason ?: 'unspecified'}"
+  if(matched.wireCommand == 'subscribe' && !success && runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
+    runtimeState.appMediatedInitializationFailure = "WebSocket subscription ${namespace} was rejected: ${detail}"
+  }
   logDebug("WebSocket command ledger ${outcome}: id=${matched.entryId}, fingerprint=${namespace}.${response}, target=${matched.targetId ?: 'n/a'}, ${detail}")
   if(success && matched.kind == 'transportCommand') {
     transportCommandAcknowledged(matched.transportCommandId?.toString(), response)
@@ -7819,6 +7963,11 @@ void rightChannelWebsocketStatusChanged(String status, String childDeviceNetwork
     if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
     else { logDebug('Right-channel socket opened first; paired entry remains queued until the primary socket opens') }
   }
+}
+
+/** Route right-channel lifecycle and retry requests through the parent app's player queue. */
+void requestSecondaryWebsocketInitialization(String reason) {
+  requestAppMediatedInitialization("right-channel: ${reason ?: 'secondary request'}")
 }
 
 void rightChannelWebsocketCommandResponse(String result, String correlationId, String errorCode, String childDeviceNetworkId) {
@@ -8082,7 +8231,9 @@ void resubscribeWebsocketNamespace(String namespace) {
 }
 
 void initializeWebsocketConnection() { wsConnect() }
-void renewWebsocketConnection() { initializeWebsocketConnection() }
+void renewWebsocketConnection() {
+  if(!isWebsocketConnected()) { requestAppMediatedInitialization('scheduled WebSocket renewal') }
+}
 // =============================================================================
 // End Websocket Connection and Initialization
 // =============================================================================

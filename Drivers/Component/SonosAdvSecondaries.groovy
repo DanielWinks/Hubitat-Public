@@ -30,6 +30,12 @@ void logError(String message) {
     if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
+void logDebug(String message) {
+  if (settings.logEnable != false && settings.debugLogEnable != false) {
+    if(device) log.debug "${device.label ?: device.name }: ${message}"
+    if(app) log.debug "${app.label ?: app.name }: ${message}"
+  }
+}
 void logWarn(String message) {
   if (settings.logEnable != false) {
     if(device) log.warn "${device.label ?: device.name }: ${message}"
@@ -74,7 +80,10 @@ metadata {
 // Initialize And Configure
 // =============================================================================
 void initialize() { configure() }
-void configure() { initializeWebsocketConnection() }
+void configure() {
+  try { parent?.requestSecondaryWebsocketInitialization('secondary device lifecycle initialize') }
+  catch(Exception e) { logDebug("Could not request parent-mediated secondary initialization: ${e.message}") }
+}
 // =============================================================================
 // End Initialize And Configure
 // =============================================================================
@@ -141,6 +150,11 @@ void wsConnect() {
     logDebug("Skipping secondary WebSocket connect; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
     return
   }
+  if(state.parentInitializationGranted != true) {
+    try { parent?.requestSecondaryWebsocketInitialization('secondary WebSocket connection requested') }
+    catch(Exception e) { logDebug("Could not request parent-mediated secondary reconnect: ${e.message}") }
+    return
+  }
   try {
     String websocketUrl = this.device.getDataValue('websocketUrl') ?: getLocalWsUrl()
     if(!websocketUrl) {
@@ -149,11 +163,13 @@ void wsConnect() {
     }
     Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
     state.websocketConnectPending = true
+    state.parentInitializationGranted = false
     this.device.updateDataValue('websocketStatus', 'connecting')
     logDebug("Starting secondary WebSocket connection to ${websocketUrl}")
     interfaces.webSocket.connect(websocketUrl, headers: headers, ignoreSSLIssues: true)
   } catch (Exception e) {
     state.remove('websocketConnectPending')
+    state.parentInitializationGranted = false
     logError("Failed to connect websocket: ${e.message}")
     this.device.updateDataValue('websocketStatus', 'error')
     sendEvent(name: 'websocketStatus', value: 'error', isStateChange: true)
@@ -218,6 +234,12 @@ void retryWebsocketConnection() {
 
 void initializeWebsocketConnection() {
   if(state.websocketReconnectAttempts == null) { state.websocketReconnectAttempts = 0 }
+  wsConnect()
+}
+
+void beginParentMediatedConnection(String requestId) {
+  state.parentInitializationGranted = true
+  logDebug("Starting parent-mediated secondary WebSocket connection; request=${requestId}")
   wsConnect()
 }
 void renewWebsocketConnection() {

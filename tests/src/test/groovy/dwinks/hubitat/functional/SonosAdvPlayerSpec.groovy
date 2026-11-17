@@ -14,6 +14,7 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared HubitatScriptHarness driver
   @Shared List<String> websocketMessages = []
   @Shared List<Map> rawConnections = []
+  @Shared List<List> websocketConnections = []
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
@@ -927,7 +928,7 @@ class SonosAdvPlayerSpec extends Specification {
       ),
       webSocket: new Expando(
         sendMessage: { String message -> websocketMessages << message },
-        connect: { Object... ignored -> },
+        connect: { Object... args -> websocketConnections << args.toList() },
         close: { -> }
       )
     ])
@@ -944,6 +945,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.scheduled.clear()
     driver.unschedules.clear()
     websocketMessages.clear()
+    websocketConnections.clear()
     rawConnections.clear()
     rawRequests.clear()
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
@@ -955,6 +957,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
+    driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
     driver.location.metaClass.getHub = { -> new Expando(localIP: '192.168.1.4', localSrvPortTCP: 39501) }
     driver.upnpRequestQueues.clear()
     driver.eventTimestamps.clear()
@@ -976,6 +979,46 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
+  }
+
+  def "websocket connect requests the parent initialization turn when not granted"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'closed'
+
+    when:
+    driver.wsConnect()
+
+    then:
+    websocketConnections.empty
+    playerStateMessages().any { Map event ->
+      event.kind == 'initializationRequested' && event.reason.contains('outside app initialization turn')
+    }
+  }
+
+  def "driver initialize only asks the parent app for an initialization turn"() {
+    when:
+    driver.initialize()
+
+    then:
+    playerStateMessages().size() == 1
+    playerStateMessages()[0].kind == 'initializationRequested'
+    playerStateMessages()[0].reason == 'driver initialize'
+    driver.scheduled.empty
+    websocketConnections.empty
+  }
+
+  def "parent initialization reports start before scheduling recovery work"() {
+    given:
+    driver.device.dataValues.appInitializationRequestId = 'request-1'
+
+    when:
+    driver.beginAppMediatedInitialization('request-1')
+
+    then:
+    playerStateMessages()[0].kind == 'initializationStarted'
+    playerStateMessages()[0].requestId == 'request-1'
+    driver.logs.any { it.contains('Starting app-mediated initialization') }
+    driver.scheduled.any { List job -> job[1] == 'initializeWebsocketConnection' }
   }
 
   def cleanup() {

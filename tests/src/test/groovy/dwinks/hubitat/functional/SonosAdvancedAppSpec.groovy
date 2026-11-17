@@ -16,6 +16,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<String> acknowledgedParentRequests = []
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
+  List<String> initializationRequests = []
+
+  void beginAppMediatedInitialization(String requestId) { initializationRequests << requestId }
 
   void mute() { commands << [name: 'mute'] }
   void unmute() { commands << [name: 'unmute'] }
@@ -202,6 +205,7 @@ class SonosAdvancedAppSpec extends Specification {
     player.dataValues.groupId = groupId
     player.dataValues.groupCoordinatorId = coordinatorId
     player.dataValues.groupPlayerIds = playerIds
+    player.dataValues.websocketUrl = "ws://192.0.2.${id.hashCode().abs() % 200 + 1}:1443/websocket/api"
     player.dataValues.isGroupCoordinator = isCoordinator.toString()
     player.currentValues.transportStatus = 'stopped'
     player
@@ -214,6 +218,96 @@ class SonosAdvancedAppSpec extends Specification {
   void makeAnnouncementRosterExact() {
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
     follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
+  }
+
+  def "player initialization queue grants up to three children at a time"() {
+    when:
+    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', false)
+    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', false)
+    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', false)
+    appScript.startNextPlayerInitialization()
+
+    then:
+    coordinator.initializationRequests.size() == 1
+    follower.initializationRequests.size() == 1
+    extra.initializationRequests.size() == 1
+    appScript.state.playerInitializationActive.size() == 3
+    appScript.scheduled.count { List job -> job[0] == 2 && job[1] == 'playerInitializationStartWatchdog' } == 3
+    appScript.scheduled.count { List job -> job[0] == 90 && job[1] == 'playerInitializationHardWatchdog' } == 3
+
+    when:
+    String requestId = coordinator.initializationRequests[0]
+    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
+      kind: 'initializationStarted', playerDni: coordinator.deviceNetworkId, requestId: requestId
+    ])] as Event)
+    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
+      kind: 'initializationComplete', playerDni: coordinator.deviceNetworkId, requestId: requestId
+    ])] as Event)
+
+    then:
+    appScript.state.playerInitializationActive.size() == 2
+    !appScript.state.playerInitializationActive.containsKey(coordinator.deviceNetworkId)
+  }
+
+  def "first driver initialization request arms a delayed boot batch"() {
+    when:
+    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'driver initialize', false)
+    appScript.startNextPlayerInitialization()
+
+    then:
+    appScript.state.playerInitializationBootPending == true
+    appScript.state.playerInitializationBootGeneration
+    appScript.state.playerInitializationNotBefore >= appScript.now() + 60000L
+    (appScript.state.playerInitializationQueue as List<Map>)[0].bootGeneration ==
+        appScript.state.playerInitializationBootGeneration
+    coordinator.initializationRequests.empty
+    appScript.state.playerInitializationQueue.size() == 1
+    appScript.scheduled.any { List job -> job[0] == 60 && job[1] == 'startNextPlayerInitialization' }
+  }
+
+  def "burst of off-turn WebSocket requests arms a delayed boot batch"() {
+    when:
+    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId,
+      'WebSocket connection requested outside app initialization turn', false)
+    appScript.enqueuePlayerInitialization(follower.deviceNetworkId,
+      'WebSocket connection requested outside app initialization turn', false)
+    appScript.classifyPlayerInitializationRequestBurst()
+
+    then:
+    appScript.state.playerInitializationBootPending == true
+    appScript.state.playerInitializationNotBefore >= appScript.now() + 60000L
+    (appScript.state.playerInitializationQueue as List<Map>).every { Map request ->
+      request.bootGeneration == appScript.state.playerInitializationBootGeneration
+    }
+    coordinator.initializationRequests.empty
+    follower.initializationRequests.empty
+  }
+
+  def "reboot initialization gets one tail retry then defers to hourly retry"() {
+    given:
+    appScript.state.playerInitializationBootGeneration = 'boot-generation-1'
+    appScript.state.playerInitializationBootPending = true
+
+    when:
+    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
+    appScript.startNextPlayerInitialization()
+    String firstRequest = coordinator.initializationRequests[0]
+    appScript.playerInitializationStartWatchdog([dni: coordinator.deviceNetworkId, requestId: firstRequest])
+
+    then:
+    (appScript.state.playerInitializationQueue as List<Map>).size() == 1
+    appScript.state.playerInitializationQueue[0].bootAttempt == 1
+    appScript.state.playerInitializationActive.empty
+
+    when:
+    appScript.startNextPlayerInitialization()
+    String secondRequest = coordinator.initializationRequests[1]
+    appScript.playerInitializationStartWatchdog([dni: coordinator.deviceNetworkId, requestId: secondRequest])
+
+    then:
+    appScript.state.playerInitializationQueue.empty
+    appScript.state.playerInitializationDeferred[coordinator.deviceNetworkId] != null
+    appScript.scheduled.any { List job -> job[0] == 3600 && job[1] == 'retryDeferredPlayerInitializations' }
   }
 
   def "parent stamps coordinator transfer expectations on each affected player"() {
