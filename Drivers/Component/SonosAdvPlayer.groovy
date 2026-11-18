@@ -445,7 +445,8 @@ Boolean hasLineInCapability() {
 @Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
 @Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 180
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
-@Field static final Integer WS_COMMAND_ACK_TIMEOUT_SECONDS = 3
+@Field static final Integer WS_PING_INTERVAL_SECONDS = 15
+@Field static final Integer WS_COMMAND_LEDGER_EXPIRY_SECONDS = 60
 @Field static final Integer WS_COMMAND_MAX_AGE_SECONDS = 60
 @Field static final Integer WS_OUTBOUND_QUEUE_MAX_SIZE = 128
 @Field static final Integer PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS = 30
@@ -683,7 +684,7 @@ void clearPendingCommandsForInitialization() {
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
 
-  unschedule('websocketCommandLedgerTimeout')
+  unschedule('expireWebsocketCommandLedgerEntry')
   unschedule('expireWebsocketOutboundQueueEntry')
   invalidateUpnpRequestsForDevice()
 
@@ -7319,6 +7320,10 @@ void removeQueuedAudioClipCommand(String correlationId) {
 @CompileStatic
 Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 'open' }
 
+Boolean isWebsocketSendAllowed() {
+  return isWebsocketConnected() && runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true
+}
+
 @CompileStatic
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
@@ -7735,7 +7740,10 @@ void wsConnect() {
   runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
     logInfo("Requesting primary WebSocket connection; previousStatus=${getWebSocketStatus()}, retryCount=${runtimeState.wsRetryCount ?: 0}")
-    interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
+    // Hubitat's native ping detects a half-open transport independently of
+    // command responses. A missing application ACK must not cycle the socket.
+    interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers,
+        ignoreSSLIssues: true, pingInterval: WS_PING_INTERVAL_SECONDS)
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
     unschedule('renewWebsocketConnection')
     unschedule('retryWebSocketConnection')
@@ -8041,9 +8049,9 @@ Map registerWebsocketCommandLedgerEntry(String message, Map outbound, Long creat
     runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger
   }
   outbound.ledgerEntryId = entryId
-  runIn(WS_COMMAND_ACK_TIMEOUT_SECONDS, 'websocketCommandLedgerTimeout',
+  runIn(WS_COMMAND_LEDGER_EXPIRY_SECONDS, 'expireWebsocketCommandLedgerEntry',
       [data: [entryId: entryId, connectionGeneration: generation], overwrite: false])
-  logDebug("WebSocket command ledger armed id=${entryId} generation=${generation} fingerprint=${entry.namespace}.${entry.wireCommand} target=${entry.targetId ?: 'n/a'} expectedType=${entry.expectedResponseType ?: 'unspecified'} timeout=${WS_COMMAND_ACK_TIMEOUT_SECONDS}s")
+  logDebug("WebSocket command ledger armed id=${entryId} generation=${generation} fingerprint=${entry.namespace}.${entry.wireCommand} target=${entry.targetId ?: 'n/a'} expectedType=${entry.expectedResponseType ?: 'unspecified'}")
   return entry
 }
 
@@ -8166,7 +8174,8 @@ void reconcileQueuedTopologyCommands(Map eventData) {
   if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
 }
 
-void websocketCommandLedgerTimeout(Map data = [:]) {
+/** Expire correlation state only. Command response silence is not transport evidence. */
+void expireWebsocketCommandLedgerEntry(Map data = [:]) {
   String entryId = data?.entryId?.toString()
   Long generation = data?.connectionGeneration != null ? (data.connectionGeneration as Long) : -1L
   Map entry
@@ -8177,17 +8186,11 @@ void websocketCommandLedgerTimeout(Map data = [:]) {
     if(pending != null) { entry = new LinkedHashMap(pending) }
   }
   if(entry == null || entry.connectionGeneration != generation) { return }
-  Long inboundSequence = (runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long
-  Boolean socketSilent = inboundSequence <= ((entry.inboundSequenceAtSend ?: 0L) as Long)
-  logWarn("WebSocket command received no matching response before ${WS_COMMAND_ACK_TIMEOUT_SECONDS}s: ${entry.namespace}.${entry.wireCommand}, id=${entryId}, inboundSinceSend=${!socketSilent}")
-  if(socketSilent || entry.wireCommand == 'subscribe') {
-    Boolean recovered = requeuePendingWebsocketCommands("no matching response for ${entry.namespace}.${entry.wireCommand}")
-    if(recovered) {
-      reconnectWebsocket(socketSilent ? 'no inbound response before command ACK timeout' : 'subscription ACK timeout')
-    }
-    return
+  removeWebsocketCommandLedgerEntryById(entryId, 'response correlation expired; transport state unchanged')
+  if(entry.wireCommand == 'subscribe') {
+    logWarn("WebSocket subscription ${entry.namespace}.subscribe produced no response before correlation expiry; leaving the connection open")
+    finishWebsocketSubscriptionBarrierIfReady()
   }
-  removeWebsocketCommandLedgerEntryById(entryId, 'response timeout; socket had unrelated inbound traffic')
 }
 
 Boolean shouldReplayUnacknowledgedCommand(Map entry) {
@@ -8242,7 +8245,7 @@ void cancelWebsocketCommandLedgerForClosedConnection(String status) {
 }
 
 void flushWebsocketOutboundQueue() {
-  if(!isWebsocketConnected()) {
+  if(!isWebsocketSendAllowed()) {
     logDebug("Outbound WebSocket queue drain deferred; primary websocketStatus=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
     return
@@ -8262,6 +8265,13 @@ void flushWebsocketOutboundQueue() {
   logDebug("Starting outbound WebSocket queue drain: queued=${queue.size()}, primaryStatus=${getWebSocketStatus()}")
   runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
   while(!queue.isEmpty()) {
+    if(!isWebsocketSendAllowed()) {
+      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      scheduleNextWebsocketOutboundQueueExpiry()
+      logDebug("Stopping outbound WebSocket drain because transport is no longer sendable; remaining=${queue.size()}")
+      if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
+      return
+    }
     Map entry = (Map)queue.remove(0)
     String message = entry?.message as String
     Integer attempts = (entry?.attempts ?: 0) as Integer
@@ -8447,7 +8457,7 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
     logWarn('Refusing to send a WebSocket command without a known response fingerprint')
     return false
   }
-  if(!isWebsocketConnected()) {
+  if(!isWebsocketSendAllowed()) {
     queueWebsocketMessage(message, 0, metadata)
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
     return false

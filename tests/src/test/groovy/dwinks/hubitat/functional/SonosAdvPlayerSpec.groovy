@@ -2782,6 +2782,23 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('playerVolume.setVolume') }
   }
 
+  def "primary websocket ledger expiry cleans correlation without reconnecting"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+
+    when:
+    driver.playerSetPlayerVolume(10)
+    Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
+    driver.expireWebsocketCommandLedgerEntry([entryId: pending.entryId,
+      connectionGeneration: pending.connectionGeneration])
+
+    then:
+    driver.runtimeState.websocketCommandLedger == null
+    driver.runtimeState.websocketOutboundQueue == null
+    driver.device.getDataValue('websocketStatus') == 'open'
+    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
   def "claimed websocket ledger batch is detached from commands registered afterward"() {
     given:
     driver.playerSetPlayerVolume(10)
@@ -2828,29 +2845,53 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.any { it.toString().contains('WebSocket command ledger failure') && it.toString().contains('ERROR_INVALID_ARGUMENT') }
   }
 
-  def "socket silence queues eligible commands and expires them after sixty seconds"() {
+  def "command response silence expires correlation without queueing or reconnecting"() {
     given:
     driver.playerSetPlayerVolume(10)
     Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
 
     when:
-    driver.websocketCommandLedgerTimeout([entryId: pending.entryId,
+    driver.expireWebsocketCommandLedgerEntry([entryId: pending.entryId,
       connectionGeneration: pending.connectionGeneration])
 
     then:
     driver.runtimeState.websocketCommandLedger == null
-    driver.runtimeState.websocketOutboundQueue*.message.any { String message -> message.contains('"command":"setVolume"') }
-    driver.device.getDataValue('websocketStatus') == 'closed'
-    driver.logs.any { it.toString().contains('no inbound response before command ACK timeout') }
+    driver.runtimeState.websocketOutboundQueue == null
+    driver.device.getDataValue('websocketStatus') == 'open'
+    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
+  def "websocket connection enables native ping liveness checks"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'closed'
+    driver.runtimeState[driver.APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] = true
 
     when:
-    Map queued = (driver.runtimeState.websocketOutboundQueue as List<Map>)[0]
-    queued.expiresAt = driver.now() - 1L
-    driver.expireWebsocketOutboundQueueEntry([queueId: queued.queueId])
+    driver.wsConnect()
 
     then:
-    driver.runtimeState.websocketOutboundQueue == null
-    driver.logs.any { it.toString().contains('Expired queued WebSocket command') }
+    websocketConnections.size() == 1
+    websocketConnections[0].any { Object argument ->
+      argument instanceof Map && (argument as Map).pingInterval == driver.WS_PING_INTERVAL_SECONDS
+    }
+    driver.WS_PING_INTERVAL_SECONDS > 0
+  }
+
+  def "websocket send gate queues work while a connection attempt is pending"() {
+    given:
+    String message = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume',
+      playerId: 'RINCON_TEST'], [volume: 30]])
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.runtimeState[driver.WS_CONNECT_PENDING_STATE_KEY] = true
+
+    when:
+    Boolean sent = driver.sendWsMessage(message)
+
+    then:
+    !sent
+    websocketMessages.empty
+    websocketConnections.empty
+    driver.runtimeState.websocketOutboundQueue*.message == [message]
   }
 
   def "outbound command expirations use one earliest-deadline scheduler job"() {
