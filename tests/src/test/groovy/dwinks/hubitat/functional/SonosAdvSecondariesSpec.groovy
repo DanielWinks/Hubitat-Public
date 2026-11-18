@@ -103,6 +103,34 @@ class SonosAdvSecondariesSpec extends Specification {
     driver.logs.any { it.toString().contains('Notified parent player of secondary WebSocket status') }
   }
 
+  def "duplicate open callback does not increment connection generation"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.state.websocketConnectionGeneration = 3L
+
+    when:
+    driver.webSocketStatus('status: open')
+
+    then:
+    driver.state.websocketConnectionGeneration == 3L
+    driver.state.websocketConnectPending == null
+    driver.logs.any { it.toString().contains('Ignoring duplicate secondary WebSocket open callback') }
+  }
+
+  def "closing callback from replaced socket preserves pending connection"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'connecting'
+    driver.state.websocketConnectPending = true
+
+    when:
+    driver.webSocketStatus('status: closing')
+
+    then:
+    driver.device.getDataValue('websocketStatus') == 'connecting'
+    driver.state.websocketConnectPending == true
+    !driver.scheduled.any { List job -> job[1] == 'retryWebsocketConnection' }
+  }
+
   def "missing connection data does not open a socket or schedule renewal"() {
     when:
     driver.wsConnect()

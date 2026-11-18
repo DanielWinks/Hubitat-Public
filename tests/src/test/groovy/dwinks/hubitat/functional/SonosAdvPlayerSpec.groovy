@@ -1091,6 +1091,34 @@ class SonosAdvPlayerSpec extends Specification {
     }
   }
 
+  def "duplicate open callback does not replay subscription setup"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.runtimeState.websocketConnectionGeneration = 4L
+
+    when:
+    driver.webSocketStatus('status: open')
+
+    then:
+    driver.runtimeState.websocketConnectionGeneration == 4L
+    driver.runtimeState.websocketConnectPending == null
+    driver.logs.any { it.toString().contains('Ignoring duplicate primary WebSocket open callback') }
+  }
+
+  def "closing callback from replaced socket does not cancel pending connect"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'connecting'
+    driver.runtimeState.websocketConnectPending = true
+
+    when:
+    driver.webSocketStatus('status: closing')
+
+    then:
+    driver.device.getDataValue('websocketStatus') == 'connecting'
+    driver.runtimeState.websocketConnectPending == true
+    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
   def "driver initialize only asks the parent app for an initialization turn"() {
     given:
     driver.device.currentValues.sonosPlayerStateUpdate = '{"kind":"old"}'

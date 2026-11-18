@@ -7323,7 +7323,8 @@ Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
 void setWebSocketStatus(String status) {
-  logDebug("Primary WebSocket status transition: previous=${getWebSocketStatus()}, next=${status}, outboundQueue=${getWebsocketOutboundQueue().size()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+  String previousStatus = getWebSocketStatus()
+  logDebug("Primary WebSocket status transition: previous=${previousStatus}, next=${status}, outboundQueue=${getWebsocketOutboundQueue().size()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
@@ -7647,6 +7648,10 @@ void webSocketStatus(String message) {
     scheduleWebSocketReconnect()
   }
   else if(message == 'status: open') {
+    if(isWebsocketConnected() && runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) {
+      logTrace('Ignoring duplicate primary WebSocket open callback')
+      return
+    }
     unschedule('websocketConnectWatchdog')
     runtimeState.websocketOpenedAt = (now() / 1000L) as Long
     runtimeState.remove(WS_DISCONNECTED_SINCE_KEY)
@@ -7656,6 +7661,16 @@ void webSocketStatus(String message) {
     publishPlayerStateUpdate([kind: 'wsConnected'])
   }
   else if(message == 'status: closing') {
+    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
+      // connect() may replace the prior transport. A closing callback can belong
+      // to that transport while the replacement attempt is already in flight.
+      logDebug('Ignoring primary WebSocket closing callback while replacement connection is pending')
+      return
+    }
+    if(getWebSocketStatus() == 'closing') {
+      logTrace('Ignoring duplicate primary WebSocket closing callback')
+      return
+    }
     setWebSocketStatus('closing')
   }
   else {
@@ -7708,7 +7723,10 @@ void retryWebSocketConnection() {
 }
 
 void wsConnect() {
-  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) { return }
+  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
+    logTrace("Skipping primary WebSocket connect; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+    return
+  }
   if(runtimeState[APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] != true) {
     requestAppMediatedInitialization('WebSocket connection requested outside app initialization turn')
     return
@@ -7716,6 +7734,7 @@ void wsConnect() {
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
   runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
+    logInfo("Requesting primary WebSocket connection; previousStatus=${getWebSocketStatus()}, retryCount=${runtimeState.wsRetryCount ?: 0}")
     interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers, ignoreSSLIssues: true)
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
     unschedule('renewWebsocketConnection')
@@ -7739,6 +7758,7 @@ void websocketConnectWatchdog() {
 }
 
 void wsClose() {
+  logInfo("Closing primary WebSocket; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
   interfaces.webSocket.close()
 }
 

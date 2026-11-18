@@ -95,6 +95,10 @@ void configure() {
 // =============================================================================
 void webSocketStatus(String message) {
   if(message == 'status: open') {
+    if(this.device.getDataValue('websocketStatus') == 'open' && state.websocketConnectPending != true) {
+      logDebug('Ignoring duplicate secondary WebSocket open callback')
+      return
+    }
     state.remove('websocketConnectPending')
     state.remove('websocketReconnectAttempts')
     state.websocketConnectionGeneration = ((state.websocketConnectionGeneration ?: 0L) as Long) + 1L
@@ -107,6 +111,16 @@ void webSocketStatus(String message) {
     runIn(RESUB_INTERVAL - 100, 'renewWebsocketConnection')
   }
   else if(message == 'status: closing') {
+    if(state.websocketConnectPending == true) {
+      // Hubitat may report the replaced transport closing after connect() has
+      // already started the replacement. Preserve the pending attempt.
+      logDebug('Ignoring secondary WebSocket closing callback while replacement connection is pending')
+      return
+    }
+    if(this.device.getDataValue('websocketStatus') == 'closing') {
+      logDebug('Ignoring duplicate secondary WebSocket closing callback')
+      return
+    }
     state.remove('websocketConnectPending')
     this.device.updateDataValue('websocketStatus', 'closing')
     failPendingAudioClipLedger('socket closing; paired command will not be replayed')
@@ -161,11 +175,12 @@ void wsConnect() {
       logWarn('Websocket URL not configured, cannot connect')
       return
     }
+    String previousStatus = this.device.getDataValue('websocketStatus')?.toString() ?: 'unknown'
     Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
     state.websocketConnectPending = true
     state.parentInitializationGranted = false
     this.device.updateDataValue('websocketStatus', 'connecting')
-    logDebug("Starting secondary WebSocket connection to ${websocketUrl}")
+    logDebug("Requesting secondary WebSocket connection; previousStatus=${previousStatus}, retryCount=${state.websocketReconnectAttempts ?: 0}")
     interfaces.webSocket.connect(websocketUrl, headers: headers, ignoreSSLIssues: true)
   } catch (Exception e) {
     state.remove('websocketConnectPending')
@@ -177,7 +192,10 @@ void wsConnect() {
   }
 }
 
-void wsClose() { interfaces.webSocket.close() }
+void wsClose() {
+  logDebug("Closing secondary WebSocket; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
+  interfaces.webSocket.close()
+}
 
 Boolean sendWsMessage(String message) {
   if(!message) { return false }
