@@ -30,6 +30,12 @@ void logError(String message) {
     if(app) log.error "${app.label ?: app.name }: ${message}"
   }
 }
+void logInfo(String message) {
+  if (settings.logEnable != false) {
+    if(device) log.info "${device.label ?: device.name }: ${message}"
+    if(app) log.info "${app.label ?: app.name }: ${message}"
+  }
+}
 void logDebug(String message) {
   if (settings.logEnable != false && settings.debugLogEnable != false) {
     if(device) log.debug "${device.label ?: device.name }: ${message}"
@@ -81,7 +87,7 @@ metadata {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
-  try { parent?.requestSecondaryWebsocketInitialization('secondary device lifecycle initialize') }
+  try { parent?.requestSecondaryWebsocketInitialization('secondary device lifecycle initialize', this.device.getDeviceNetworkId()) }
   catch(Exception e) { logDebug("Could not request parent-mediated secondary initialization: ${e.message}") }
 }
 // =============================================================================
@@ -165,7 +171,7 @@ void wsConnect() {
     return
   }
   if(state.parentInitializationGranted != true) {
-    try { parent?.requestSecondaryWebsocketInitialization('secondary WebSocket connection requested') }
+    try { parent?.requestSecondaryWebsocketInitialization('secondary WebSocket connection requested', this.device.getDeviceNetworkId()) }
     catch(Exception e) { logDebug("Could not request parent-mediated secondary reconnect: ${e.message}") }
     return
   }
@@ -255,7 +261,12 @@ void initializeWebsocketConnection() {
   wsConnect()
 }
 
-void beginParentMediatedConnection(String requestId) {
+void beginParentMediatedConnection(String requestId, Boolean resetRetries = false) {
+  if(resetRetries == true) {
+    unschedule('retryWebsocketConnection')
+    state.remove('websocketReconnectScheduled')
+    state.websocketReconnectAttempts = 0
+  }
   state.parentInitializationGranted = true
   logDebug("Starting parent-mediated secondary WebSocket connection; request=${requestId}")
   wsConnect()

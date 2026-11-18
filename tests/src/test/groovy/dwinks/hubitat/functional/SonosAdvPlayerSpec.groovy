@@ -107,6 +107,34 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.any { String log -> log.contains('App-mediated initialization timed out') }
   }
 
+  def "right-channel initialization grants only that child a socket connection"() {
+    given:
+    List<List> grants = []
+    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
+      deviceNetworkId: driver.getRightChannelChildDNI())
+    rightChannel.metaClass.beginParentMediatedConnection = { String requestId, Boolean resetRetries ->
+      grants << [requestId, resetRetries]
+    }
+    driver.children << rightChannel
+
+    when:
+    driver.requestSecondaryWebsocketInitialization('secondary device lifecycle initialize',
+      driver.getRightChannelChildDNI())
+
+    then:
+    grants.size() == 1
+    grants[0][1] == true
+    !playerStateMessages().any { Map event -> event.kind == 'initializationRequested' }
+    parentPlayerRequests.empty
+
+    when: 'an unexpected child asks for access'
+    driver.requestSecondaryWebsocketInitialization('secondary WebSocket connection requested', 'other-child')
+
+    then:
+    grants.size() == 1
+    driver.logs.any { String message -> message.contains('Ignoring secondary WebSocket request from unexpected child') }
+  }
+
   def "app-mediated initialization succeeds when only the best-effort right channel is unavailable"() {
     given:
     driver.runtimeState.appMediatedInitializationRequestId = 'init-right-channel-best-effort'

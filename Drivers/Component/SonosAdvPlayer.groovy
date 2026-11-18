@@ -8379,9 +8379,17 @@ void rightChannelWebsocketStatusChanged(String status, String childDeviceNetwork
   }
 }
 
-/** Route right-channel lifecycle and retry requests through the parent app's player queue. */
-void requestSecondaryWebsocketInitialization(String reason) {
-  requestAppMediatedInitialization("right-channel: ${reason ?: 'secondary request'}")
+/** Authorize a right-channel-only connection without restarting the primary player. */
+void requestSecondaryWebsocketInitialization(String reason, String childDeviceNetworkId) {
+  ChildDeviceWrapper rightChannel = getRightChannelChild()
+  if(rightChannel == null || rightChannel.getDeviceNetworkId()?.toString() != childDeviceNetworkId) {
+    logWarn("Ignoring secondary WebSocket request from unexpected child: dni=${childDeviceNetworkId ?: 'unknown'}")
+    return
+  }
+  Boolean resetRetries = reason == 'secondary device lifecycle initialize'
+  String requestId = UUID.randomUUID().toString()
+  logDebug("Granting right-channel-only WebSocket request; reason=${reason ?: 'secondary request'}, child=${childDeviceNetworkId}, resetRetries=${resetRetries}")
+  rightChannel.beginParentMediatedConnection(requestId, resetRetries)
 }
 
 void rightChannelWebsocketCommandResponse(String result, String correlationId, String errorCode, String childDeviceNetworkId) {

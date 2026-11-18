@@ -11,7 +11,7 @@ class SonosAdvSecondariesSpec extends Specification {
   List<Map> connections = []
   List<String> sentMessages = []
   List<String> sendAttempts = []
-  List<String> initializationRequests = []
+  List<Map> initializationRequests = []
   Integer sendFailuresRemaining = 0
 
   def setupSpec() {
@@ -23,7 +23,9 @@ class SonosAdvSecondariesSpec extends Specification {
   def setup() {
     driver = ScriptLoader.instantiate(driverClass)
     Expando mockParent = new Expando()
-    mockParent.requestSecondaryWebsocketInitialization = { String reason -> initializationRequests << reason }
+    mockParent.requestSecondaryWebsocketInitialization = { String reason, String childDni ->
+      initializationRequests << [reason: reason, childDni: childDni]
+    }
     driver.binding.setVariable('parent', mockParent)
     driver.binding.setVariable('interfaces', [webSocket: new Expando(
       connect: { Map options, String url -> connections.add([url: url, options: options]) },
@@ -42,13 +44,14 @@ class SonosAdvSecondariesSpec extends Specification {
   def "connect uses the child IP when discovery did not supply a websocket URL"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.51'
+    driver.device.deviceNetworkId = 'parent-right-channel'
 
     when:
     driver.initialize()
 
     then:
     connections.empty
-    initializationRequests == ['secondary device lifecycle initialize']
+    initializationRequests == [[reason: 'secondary device lifecycle initialize', childDni: 'parent-right-channel']]
 
     when: 'the parent grants this child its initialization turn'
     driver.beginParentMediatedConnection('request-1')
@@ -83,6 +86,19 @@ class SonosAdvSecondariesSpec extends Specification {
 
     then:
     connections*.url == ['wss://192.168.1.60:1443/websocket/api']
+  }
+
+  def "info logging helper accepts GString messages"() {
+    given:
+    Integer retryCount = 3
+
+    when:
+    driver.logInfo("Requesting secondary WebSocket connection; previousStatus=error, retryCount=${retryCount}")
+
+    then:
+    driver.logs.any { String entry ->
+      entry.contains('INFO') && entry.contains('Requesting secondary WebSocket connection; previousStatus=error, retryCount=3')
+    }
   }
 
   def "open status notifies the parent player directly"() {
@@ -156,7 +172,9 @@ class SonosAdvSecondariesSpec extends Specification {
     driver.state.websocketOutboundQueue == null
     connections.empty
     initializationRequests.size() == 2
-    initializationRequests.every { String reason -> reason == 'secondary WebSocket connection requested' }
+    initializationRequests.every { Map request ->
+      request.reason == 'secondary WebSocket connection requested' && request.childDni == driver.device.deviceNetworkId
+    }
     driver.state.websocketConnectPending != true
 
     when:
@@ -165,6 +183,25 @@ class SonosAdvSecondariesSpec extends Specification {
     then:
     sentMessages.empty
     driver.device.getDataValue('websocketStatus') == 'open'
+  }
+
+  def "explicit initialize grant clears the exhausted retry limit for this child"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.51'
+    driver.device.deviceNetworkId = 'parent-right-channel'
+    driver.state.websocketReconnectAttempts = 3
+    driver.state.websocketReconnectScheduled = true
+
+    when:
+    driver.initialize()
+    driver.beginParentMediatedConnection('request-retry', true)
+
+    then:
+    driver.state.websocketReconnectAttempts == 0
+    driver.state.websocketReconnectScheduled == null
+    driver.scheduled.every { List job -> job[1] != 'retryWebsocketConnection' }
+    driver.state.websocketConnectPending == true
+    connections*.url == ['wss://192.168.1.51:1443/websocket/api']
   }
 
   def "secondary sends while opening wait for the parent coordinated release"() {
@@ -250,7 +287,7 @@ class SonosAdvSecondariesSpec extends Specification {
     then:
     driver.state.websocketOutboundQueue == null
     connections.empty
-    initializationRequests == ['secondary WebSocket connection requested']
+    initializationRequests*.reason == ['secondary WebSocket connection requested']
     driver.logs.any { it.toString().contains('Secondary socket was not open during paired release') }
   }
 
