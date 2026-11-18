@@ -2013,6 +2013,61 @@ class SonosAdvPlayerSpec extends Specification {
     driver.findFavoriteById('999') == null
   }
 
+  def "random ID selection samples entries from sparse ID lists"() {
+    given:
+    List<String> favoriteIds = ['3', '40', '9001']
+    List<String> playlistIds = ['playlist-2', 'playlist-98', 'playlist-10004']
+
+    expect:
+    (0..<100).every { driver.selectRandomAvailableId(favoriteIds) in favoriteIds }
+    (0..<100).every { driver.selectRandomAvailableId(playlistIds) in playlistIds }
+    driver.selectRandomAvailableId([]) == null
+  }
+
+  def "loadFavorite without an ID chooses an available sparse favorite ID"() {
+    given:
+    driver.getFavoritesMap()['object-1'] = [id: '3', name: 'First']
+    driver.getFavoritesMap()['object-2'] = [id: '9001', name: 'Second']
+
+    when:
+    driver.loadFavorite()
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
+    payload[1].favoriteId in ['3', '9001']
+  }
+
+  def "loadPlaylist without an ID chooses an available sparse playlist ID"() {
+    given:
+    driver.getPlaylistsMap()['playlist-2'] = [id: 'playlist-2', name: 'First']
+    driver.getPlaylistsMap()['playlist-10004'] = [id: 'playlist-10004', name: 'Second']
+
+    when:
+    driver.loadPlaylist()
+
+    then:
+    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadPlaylist"') })
+    payload[1].playlistId in ['playlist-2', 'playlist-10004']
+  }
+
+  def "random favorite load waits for the asynchronous favorites query when the cache is empty"() {
+    when:
+    driver.loadFavorite()
+
+    then:
+    driver.runtimeState.pendingRandomMediaLoads == ['favorite']
+    websocketMessages.any { String message -> message.contains('"command":"getFavorites"') }
+
+    when:
+    driver.getFavoritesMap()['object-1'] = [id: '9001', name: 'Second']
+    driver.completePendingRandomMediaLoads('favorite')
+
+    then:
+    driver.runtimeState.pendingRandomMediaLoads.isEmpty()
+    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
+    payload[1].favoriteId == '9001'
+  }
+
   def "Amazon favorite gets its play workaround before the first confirmation check"() {
     given:
     driver.getFavoritesMap()['object-service-account'] = [

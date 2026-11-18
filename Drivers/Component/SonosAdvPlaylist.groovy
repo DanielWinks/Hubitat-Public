@@ -62,7 +62,7 @@ void addCurrentlyPlayingToPlaylist(String playlistIdOrName) { parent?.addCurrent
 void setPlaylists(String playlists) {state.playlists = playlists}
 
 // Load Playlist Commands - Full Control
-void loadPlaylist(String playlistId) {
+void loadPlaylist(String playlistId = null) {
   parent?.loadPlaylist(playlistId)
 }
 

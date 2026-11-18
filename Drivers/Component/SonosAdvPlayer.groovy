@@ -2780,7 +2780,16 @@ void markAppMediatedUpnpSubscriptionsStarted() {
 }
 
 @CompileStatic
-void loadFavorite(String favoriteId) {
+void loadFavorite(String favoriteId = null) {
+  if(favoriteId == null || favoriteId.trim() == '') {
+    String randomFavoriteId = selectRandomAvailableId(getFavoriteIds())
+    if(randomFavoriteId == null) {
+      queueRandomMediaLoad('favorite')
+      getFavorites()
+      return
+    }
+    favoriteId = randomFavoriteId
+  }
   String queueMode = "REPLACE"
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
@@ -3053,7 +3062,16 @@ void clearPlayerCommandRequestCurrentState() {
 
 // Playlist Methods
 @CompileStatic
-void loadPlaylist(String playlistId) {
+void loadPlaylist(String playlistId = null) {
+  if(playlistId == null || playlistId.trim() == '') {
+    String randomPlaylistId = selectRandomAvailableId(getPlaylistIds())
+    if(randomPlaylistId == null) {
+      queueRandomMediaLoad('playlist')
+      getPlaylists()
+      return
+    }
+    playlistId = randomPlaylistId
+  }
   String queueMode = "REPLACE"
   String autoPlay = 'true'
   String repeatMode = 'repeat all'
@@ -7510,6 +7528,64 @@ ConcurrentHashMap<String, LinkedHashMap> getPlaylistsMap() {
   return playlistsMap
 }
 
+@CompileStatic
+List<String> getFavoriteIds() {
+  List<String> ids = []
+  for(Map favorite : getFavoritesMap().values()) {
+    String id = favorite?.get('id')?.toString()
+    if(id != null && id.trim() != '') { ids.add(id) }
+  }
+  return ids
+}
+
+@CompileStatic
+List<String> getPlaylistIds() {
+  List<String> ids = []
+  for(Map playlist : getPlaylistsMap().values()) {
+    String id = playlist?.get('id')?.toString()
+    if(id != null && id.trim() != '') { ids.add(id) }
+  }
+  return ids
+}
+
+@CompileStatic
+String selectRandomAvailableId(List<String> ids) {
+  if(ids == null || ids.isEmpty()) { return null }
+  return ids.get(rand.nextInt(ids.size()))
+}
+
+void queueRandomMediaLoad(String type) {
+  List<String> pending = (List<String>)runtimeState.get('pendingRandomMediaLoads')
+  if(pending == null) { pending = [] }
+  pending.add(type)
+  runtimeState.pendingRandomMediaLoads = pending
+}
+
+void completePendingRandomMediaLoads(String type) {
+  List<String> pending = (List<String>)runtimeState.get('pendingRandomMediaLoads')
+  if(pending == null || !pending.contains(type)) { return }
+  List<String> remaining = []
+  pending.each { String pendingType ->
+    if(pendingType == type) {
+      String selectedId = selectRandomAvailableId(type == 'favorite' ? getFavoriteIds() : getPlaylistIds())
+      if(selectedId != null) {
+        if(type == 'favorite') { loadFavorite(selectedId) }
+        else { loadPlaylist(selectedId) }
+      } else {
+        logWarn("Cannot randomly load ${type}: no available IDs were returned")
+      }
+    } else { remaining.add(pendingType) }
+  }
+  runtimeState.pendingRandomMediaLoads = remaining
+}
+
+void failPendingRandomMediaLoads(String type) {
+  List<String> pending = (List<String>)runtimeState.get('pendingRandomMediaLoads')
+  if(pending == null) { return }
+  runtimeState.pendingRandomMediaLoads = pending.findAll { String pendingType -> pendingType != type }
+  logWarn("Cannot randomly load ${type}: the available ID query failed")
+}
+
 void clearPlaylistsMap() {
   playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
 }
@@ -11018,6 +11094,7 @@ void processWebsocketMessage(String message) {
     Integer favoriteItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
     logDebug("WebSocket favorites-list processing beginning; itemCount=${favoriteItemCount}")
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
+    if(respData == null || respData.isEmpty()) { clearFavoritesMap() }
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
 
@@ -11169,12 +11246,17 @@ void processWebsocketMessage(String message) {
         }
       }
     }
+    completePendingRandomMediaLoads('favorite')
+  }
+  if(eventType?.response == 'getFavorites' && eventType?.success != true) {
+    failPendingRandomMediaLoads('favorite')
   }
 
   if(eventType?.type == 'playlistsList' && eventType?.response == 'getPlaylists' && eventType?.success == true) {
     Integer playlistItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
     logDebug("WebSocket playlists-list processing beginning; itemCount=${playlistItemCount}")
     ArrayList<Map> respData = (ArrayList<Map>)eventData?.playlists
+    if(respData == null || respData.isEmpty()) { clearPlaylistsMap() }
     if(respData != null && respData.size() > 0) {
       Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
 
@@ -11313,6 +11395,10 @@ void processWebsocketMessage(String message) {
         }
       }
     }
+    completePendingRandomMediaLoads('playlist')
+  }
+  if(eventType?.response == 'getPlaylists' && eventType?.success != true) {
+    failPendingRandomMediaLoads('playlist')
   }
 
 

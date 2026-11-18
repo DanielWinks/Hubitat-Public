@@ -1389,11 +1389,7 @@ void getFavorites() {
 /**
  * Load a favorite by ID
  */
-void loadFavorite(String favoriteId) {
-  if(!favoriteId) {
-    logWarn('No favorite ID provided')
-    return
-  }
+void loadFavorite(String favoriteId = null) {
   requestGroupCommand('loadFavorite', [favoriteId: favoriteId])
 }
 
@@ -1429,11 +1425,7 @@ void getPlaylists() {
 /**
  * Load a playlist by ID
  */
-void loadPlaylist(String playlistId) {
-  if(!playlistId) {
-    logWarn('No playlist ID provided')
-    return
-  }
+void loadPlaylist(String playlistId = null) {
   requestGroupCommand('loadPlaylist', [playlistId: playlistId])
 }
 

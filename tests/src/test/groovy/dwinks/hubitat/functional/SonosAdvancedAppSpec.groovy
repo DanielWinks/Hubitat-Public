@@ -13,6 +13,8 @@ import spock.lang.Specification
 class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Long id = 101L
   List<Map> commands = []
+  Map favoritesMap = [:]
+  Map playlistsMap = [:]
   List<String> acknowledgedParentRequests = []
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
@@ -125,6 +127,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   void updateBatchPlaybackState(String json) { refreshedPlaybackUpdates << json }
   void playerPlay() { commands << [name: 'playerPlay'] }
   void play() { commands << [name: 'play'] }
+  Map getFavoritesMap() { return favoritesMap }
+  Map getPlaylistsMap() { return playlistsMap }
+  void getFavorites() { commands << [name: 'getFavorites'] }
+  void getPlaylists() { commands << [name: 'getPlaylists'] }
+  void loadPlaylist(String playlistId) { commands << [name: 'loadPlaylist', playlistId: playlistId] }
   void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {
     commands << [name: 'playerPlayForGroupOperation', operationId: operationId,
       attemptId: attemptId, requestId: requestId]
@@ -1504,6 +1511,60 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.find { it.name == 'loadFavoriteForGroupOperation' } == null
     coordinator.commands.find { it.name == 'playerGetGroupsFull' } != null
     follower.commands.find { it.name == 'playerGetGroupsFull' } != null
+  }
+
+  def "group favorite load without an ID selects from available sparse IDs"() {
+    given:
+    coordinator.favoritesMap = [
+      first: [id: '3'],
+      second: [id: '9001']
+    ]
+
+    when:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [:], 1)])
+
+    then:
+    appScript.getActiveGroupOperation().favoriteId in ['3', '9001']
+  }
+
+  def "group playlist load without an ID selects from available sparse IDs and explicit IDs remain intact"() {
+    given:
+    coordinator.playlistsMap = [
+      'playlist-2': [id: 'playlist-2'],
+      'playlist-10004': [id: 'playlist-10004']
+    ]
+
+    when:
+    appScript.processGroupCommandRequest([request: request('loadPlaylist', [:], 1)])
+
+    then:
+    coordinator.commands.find { it.name == 'loadPlaylist' }.playlistId in ['playlist-2', 'playlist-10004']
+
+    when:
+    appScript.processGroupCommandRequest([request: request('loadPlaylist', [playlistId: 'playlist-explicit-88'], 2)])
+
+    then:
+    coordinator.commands.findAll { it.name == 'loadPlaylist' }*.playlistId == [
+      coordinator.commands.find { it.name == 'loadPlaylist' }.playlistId,
+      'playlist-explicit-88'
+    ]
+  }
+
+  def "group random favorite load waits for the coordinator favorites query when cache is empty"() {
+    when:
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: ' '], 1)])
+
+    then:
+    appScript.state.pendingRandomGroupMediaLoads.size() == 1
+    coordinator.commands.any { it.name == 'getFavorites' }
+
+    when:
+    coordinator.favoritesMap = [item: [id: 'favorite-gap-27']]
+    appScript.retryRandomGroupMediaLoads()
+
+    then:
+    appScript.getActiveGroupOperation().favoriteId == 'favorite-gap-27'
+    !appScript.state.containsKey('pendingRandomGroupMediaLoads')
   }
 
   def "a negative group observation prevents stale cached topology from satisfying the operation"() {

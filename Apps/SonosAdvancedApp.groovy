@@ -279,6 +279,8 @@ preferences {
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
+@Field static final String PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY = 'pendingRandomGroupMediaLoads'
+@Field static final Integer RANDOM_GROUP_MEDIA_LOAD_MAX_ATTEMPTS = 5
 @Field static final String DEFERRED_GROUP_COMMANDS_STATE_KEY = 'deferredGroupOperationCommands'
 @Field static final String GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY = 'groupAnnouncementQueues'
 @Field static final String GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY = 'groupAnnouncementTopologyTransactions'
@@ -7491,8 +7493,18 @@ void processGroupCommandRequest(Map data) {
         if(coordinator) { coordinator.getFavorites() }
         break
       case 'loadFavorite':
+        String favoriteId = args.favoriteId?.toString()?.trim()
+        if(!favoriteId) {
+          List<String> favoriteIds = getGroupMediaIds(coordinator, 'favorite')
+          favoriteId = chooseRandomGroupMediaId(favoriteIds)
+          if(!favoriteId) {
+            if(coordinator) { queueRandomGroupMediaLoad(request, 'favorite', coordinator) }
+            else { logWarn("Cannot randomly load favorite for ${groupDni}: coordinator is unavailable") }
+            return
+          }
+        }
         startGroupFavoriteOperation(groupDevice, [
-          favoriteId: args.favoriteId as String,
+          favoriteId: favoriteId,
           repeatMode: 'off',
           queueMode: 'replace',
           shuffleMode: 'off',
@@ -7515,7 +7527,17 @@ void processGroupCommandRequest(Map data) {
         break
       case 'loadPlaylist':
         cancelActiveGroupOperation(groupDni, 'PLAYLIST_REQUESTED')
-        if(coordinator) { coordinator.loadPlaylist(args.playlistId as String) }
+        if(coordinator) {
+          String playlistId = args.playlistId?.toString()?.trim()
+          if(!playlistId) {
+            playlistId = chooseRandomGroupMediaId(getGroupMediaIds(coordinator, 'playlist'))
+            if(!playlistId) {
+              queueRandomGroupMediaLoad(request, 'playlist', coordinator)
+              return
+            }
+          }
+          coordinator.loadPlaylist(playlistId)
+        }
         break
       case 'loadPlaylistFull':
         cancelActiveGroupOperation(groupDni, 'PLAYLIST_REQUESTED')
@@ -7545,6 +7567,80 @@ Boolean isGroupOperationCommand(String command) {
     'loadFavorite', 'loadFavoriteFull',
     'off', 'removePlayersFromCoordinator', 'ungroupPlayers'
   ]
+}
+
+List<String> getGroupMediaIds(ChildDeviceWrapper coordinator, String mediaType) {
+  if(coordinator == null) { return [] }
+  Map catalog = mediaType == 'favorite'
+      ? (Map)coordinator.getFavoritesMap()
+      : (Map)coordinator.getPlaylistsMap()
+  List<String> ids = []
+  if(catalog instanceof Map) {
+    catalog.values().each { Object item ->
+      if(item instanceof Map) {
+        String id = ((Map)item).get('id')?.toString()?.trim()
+        if(id) { ids.add(id) }
+      }
+    }
+  }
+  return ids
+}
+
+String chooseRandomGroupMediaId(List<String> ids) {
+  if(ids == null || ids.isEmpty()) { return null }
+  return ids.get(new java.util.Random().nextInt(ids.size()))
+}
+
+void queueRandomGroupMediaLoad(Map request, String mediaType, ChildDeviceWrapper coordinator) {
+  List<Map> pending = state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] instanceof List
+      ? (List<Map>)state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY]
+      : []
+  pending.add([
+    request: new LinkedHashMap(request),
+    mediaType: mediaType,
+    coordinatorDni: coordinator.getDeviceNetworkId(),
+    attempts: 0
+  ])
+  state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] = pending
+  if(mediaType == 'favorite') { coordinator.getFavorites() }
+  else { coordinator.getPlaylists() }
+  runIn(2, 'retryRandomGroupMediaLoads', [overwrite: true])
+}
+
+void retryRandomGroupMediaLoads() {
+  List<Map> pending = state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] instanceof List
+      ? (List<Map>)state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY]
+      : []
+  state.remove(PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY)
+  List<Map> remaining = []
+  pending.each { Map item ->
+    ChildDeviceWrapper coordinator = getChildDevice(item.coordinatorDni as String)
+    String mediaType = item.mediaType as String
+    String selectedId = chooseRandomGroupMediaId(getGroupMediaIds(coordinator, mediaType))
+    if(selectedId) {
+      Map request = new LinkedHashMap((Map)item.request)
+      Map args = request.args instanceof Map ? new LinkedHashMap((Map)request.args) : [:]
+      args[mediaType == 'favorite' ? 'favoriteId' : 'playlistId'] = selectedId
+      request.args = args
+      processGroupCommandRequest([request: request])
+    } else {
+      Integer attempts = (item.attempts ?: 0) as Integer
+      if(attempts + 1 >= RANDOM_GROUP_MEDIA_LOAD_MAX_ATTEMPTS) {
+        logWarn("Cannot randomly load ${mediaType} for ${item.request?.groupDni}: no IDs were returned after ${attempts + 1} attempts")
+      } else {
+        item.attempts = attempts + 1
+        remaining.add(item)
+        if(coordinator != null) {
+          if(mediaType == 'favorite') { coordinator.getFavorites() }
+          else { coordinator.getPlaylists() }
+        }
+      }
+    }
+  }
+  if(!remaining.isEmpty()) {
+    state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] = remaining
+    runIn(2, 'retryRandomGroupMediaLoads', [overwrite: true])
+  }
 }
 
 Boolean isPlaybackCommandThatWaitsForTopology(String command) {

@@ -60,7 +60,7 @@ void getFavorites() {parent?.getFavorites()}
 void setFavorites(String favorites) {state.favorites = favorites}
 
 // Load Favorite Commands - Full Control
-void loadFavorite(String favoriteId) {
+void loadFavorite(String favoriteId = null) {
   parent?.loadFavorite(favoriteId)
 }
 
