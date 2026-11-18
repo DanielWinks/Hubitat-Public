@@ -625,7 +625,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationZgt.topologyChangedAt != null
   }
 
-  def "household topology is not delivered to non-player children with an id data value"() {
+  def "household topology is not delivered to alarm manager without an id data value"() {
     given:
     appScript.state.playerInitializationBootGeneration = 'boot-zgt-child-filter'
     appScript.state.playerInitializationBootPending = true
@@ -636,7 +636,6 @@ class SonosAdvancedAppSpec extends Specification {
     SonosAppPlayerDouble alarmManager = new SonosAppPlayerDouble(
       deviceNetworkId: '283-SonosAlarmManager-HOUSEHOLD', displayName: 'Sonos Alarm Manager', label: 'Sonos Alarm Manager'
     )
-    alarmManager.dataValues.id = 'HOUSEHOLD'
     appScript.children = [group, coordinator, follower, extra, alarmManager]
     appScript.app.children = appScript.children
 
@@ -652,6 +651,7 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     coordinator.dataValues.householdTopology != null
     alarmManager.dataValues.householdTopology == null
+    !(alarmManager in appScript.getCurrentGroupDevices())
     !appScript.logs.any { String log -> log.contains('Could not deliver household topology') }
   }
 

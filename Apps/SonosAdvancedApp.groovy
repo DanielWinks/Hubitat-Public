@@ -10631,7 +10631,12 @@ List<ChildDeviceWrapper> getCurrentPlayerDevices() {
 
 List<ChildDeviceWrapper> getCurrentGroupDevices() {
   List<ChildDeviceWrapper> currentGroupDevs = []
-  app.getChildDevices().each{child -> if(child.getDataValue('id') == null) { currentGroupDevs.add(child)}}
+  app.getChildDevices().each{child ->
+    String dni = child.getDeviceNetworkId()?.toString() ?: ''
+    if(child.getDataValue('id') == null && !dni.contains(ALARM_MANAGER_DNI_MARKER)) {
+      currentGroupDevs.add(child)
+    }
+  }
   return currentGroupDevs
 }
 
