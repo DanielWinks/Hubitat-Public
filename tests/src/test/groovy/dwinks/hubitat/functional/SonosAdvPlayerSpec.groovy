@@ -2797,6 +2797,25 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.any { it.toString().contains('Expired queued WebSocket command') }
   }
 
+  def "outbound command expirations use one earliest-deadline scheduler job"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'closed'
+
+    when:
+    (1..40).each { Integer sequence ->
+      String message = JsonOutput.toJson([[namespace: 'playback', command: 'skipToNextTrack',
+        groupId: "GROUP-${sequence}"], [:]])
+      driver.queueWebsocketMessage(message)
+    }
+
+    then:
+    (driver.runtimeState.websocketOutboundQueue as List<Map>).size() == 40
+    driver.scheduled.count { List job -> job[1] == 'expireWebsocketOutboundQueueEntry' &&
+      job[2]?.overwrite == true } == 1
+    driver.runtimeState.websocketOutboundQueueExpiryAt ==
+      (driver.runtimeState.websocketOutboundQueue as List<Map>).collect { Map entry -> entry.expiresAt as Long }.min()
+  }
+
   def "disconnected command queue replaces absolute state but preserves relative commands"() {
     given:
     driver.device.dataValues.websocketStatus = 'closed'

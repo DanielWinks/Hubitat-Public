@@ -427,6 +427,7 @@ Boolean hasLineInCapability() {
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
+@Field static final String WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY = 'websocketOutboundQueueExpiryAt'
 @Field static final String WS_COMMAND_LEDGER_STATE_KEY = 'websocketCommandLedger'
 @Field static final String WS_CONNECTION_GENERATION_STATE_KEY = 'websocketConnectionGeneration'
 @Field static final String WS_COMMAND_SEQUENCE_STATE_KEY = 'websocketCommandSequence'
@@ -7348,6 +7349,7 @@ void setWebSocketStatus(String status) {
       subscriptionCommands.addAll(pendingCommands)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
     }
+    scheduleNextWebsocketOutboundQueueExpiry()
     finishWebsocketSubscriptionBarrierIfReady()
   }
   else {
@@ -7774,6 +7776,7 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
     if(newestPriorSequence > (entry.queueSequence as Long)) {
       logDebug("Discarding older replay candidate for ${replacementKey}; newer queued intent already exists")
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
+      scheduleNextWebsocketOutboundQueueExpiry()
       return
     }
     Integer replaced = matching.size()
@@ -7798,21 +7801,20 @@ void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = 
   }
   if(playModesMerged) {
     runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
+    scheduleNextWebsocketOutboundQueueExpiry()
     return
   }
   if(retained.size() >= WS_OUTBOUND_QUEUE_MAX_SIZE) {
     logWarn("Dropping newest queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'}: queue reached ${WS_OUTBOUND_QUEUE_MAX_SIZE} entries")
     runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
+    scheduleNextWebsocketOutboundQueueExpiry()
     return
   }
   retained.add(entry)
   retained.sort { Map left, Map right -> ((left.queueSequence ?: 0L) as Long) <=> ((right.queueSequence ?: 0L) as Long) }
   runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
   logDebug("Queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} target=${entry.targetId ?: 'n/a'} queueId=${entry.queueId} expiresAt=${entry.expiresAt} queued=${retained.size()}")
-  Long remainingMillis = Math.max(1L, (entry.expiresAt as Long) - now())
-  Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
-  runIn(delaySeconds, 'expireWebsocketOutboundQueueEntry',
-      [data: [queueId: entry.queueId.toString()], overwrite: false])
+  scheduleNextWebsocketOutboundQueueExpiry()
 }
 
 List<Map> removeExpiredWebsocketQueueEntries(List<Map> queue) {
@@ -7826,17 +7828,40 @@ List<Map> removeExpiredWebsocketQueueEntries(List<Map> queue) {
   return retained
 }
 
-void expireWebsocketOutboundQueueEntry(Map data = [:]) {
-  String queueId = data?.queueId?.toString()
-  if(!queueId) { return }
+/** One timer services all queued-command expirations, ordered by expiresAt. */
+void scheduleNextWebsocketOutboundQueueExpiry() {
   List<Map> queue = getWebsocketOutboundQueue()
-  Map entry = queue.find { Map item -> item?.queueId?.toString() == queueId }
-  if(entry == null) { return }
-  if(((entry.expiresAt ?: 0L) as Long) > now()) { return }
-  queue.remove(entry)
-  if(queue.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue }
-  logDebug("Expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${queueId}; it will not be replayed")
+  List<Long> deadlines = queue.collect { Map entry ->
+    entry.expiresAt == null ? null : (entry.expiresAt as Long)
+  }.findAll { Long deadline -> deadline != null }
+  Long nextDeadline = deadlines.isEmpty() ? null : deadlines.min()
+  Long scheduledDeadline = (runtimeState[WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY] ?: 0L) as Long
+  if(nextDeadline == null) {
+    if(scheduledDeadline > 0L) { unschedule('expireWebsocketOutboundQueueEntry') }
+    runtimeState.remove(WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY)
+    return
+  }
+  if(scheduledDeadline > 0L && scheduledDeadline <= nextDeadline) { return }
+  unschedule('expireWebsocketOutboundQueueEntry')
+  runtimeState[WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY] = nextDeadline
+  runInMillis(Math.max(1L, nextDeadline - now()), 'expireWebsocketOutboundQueueEntry', [overwrite: true])
+}
+
+void expireWebsocketOutboundQueueEntry(Map data = [:]) {
+  runtimeState.remove(WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY)
+  Long currentTime = now()
+  List<Map> queue = getWebsocketOutboundQueue()
+  List<Map> retained = queue.findAll { Map entry ->
+    Long deadline = (entry?.expiresAt ?: 0L) as Long
+    if(deadline <= currentTime) {
+      logDebug("Expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${entry.queueId}; it will not be replayed")
+      return false
+    }
+    return true
+  }
+  if(retained.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
+  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained }
+  scheduleNextWebsocketOutboundQueueExpiry()
 }
 
 Map describeWebSocketCommand(String message) {
@@ -7935,10 +7960,6 @@ void mergeQueuedPlayModeFields(Map prior, Map latest) {
     prior.createdAt = Math.min((prior.createdAt ?: now()) as Long, (latest.createdAt ?: now()) as Long)
     prior.expiresAt = Math.min((prior.expiresAt ?: now()) as Long, (latest.expiresAt ?: now()) as Long)
     prior.queueSequence = Math.min((prior.queueSequence ?: 0L) as Long, (latest.queueSequence ?: 0L) as Long)
-    Long remainingMillis = Math.max(1L, (prior.expiresAt as Long) - now())
-    Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
-    runIn(delaySeconds, 'expireWebsocketOutboundQueueEntry',
-        [data: [queueId: prior.queueId?.toString()], overwrite: false])
     logDebug("Merged queued playback.setPlayModes fields for group=${prior.targetId}: ${mergedModes.keySet()}")
   } catch(Exception e) { logWarn("Could not merge queued WebSocket play modes: ${e.message}") }
 }
@@ -8229,6 +8250,7 @@ void flushWebsocketOutboundQueue() {
       logDebug("Holding audioClip queue entry until primary audioClip subscription is active: correlation=${entry?.correlationId}, queueRemaining=${queue.size() + 1}")
       queue.add(0, entry)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      scheduleNextWebsocketOutboundQueueExpiry()
       if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
       return
     }
@@ -8239,6 +8261,7 @@ void flushWebsocketOutboundQueue() {
       logDebug("Holding paired audioClip before either channel send: correlation=${entry.correlationId}, primary=open, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}, timeoutExpired=${secondaryExpired}")
       queue.add(0, entry)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      scheduleNextWebsocketOutboundQueueExpiry()
       if(pairedRightChannel) {
         watchRightChannelWebsocket(pairedRightChannel)
         pairedRightChannel.initializeWebsocketConnection()
@@ -8292,6 +8315,7 @@ void flushWebsocketOutboundQueue() {
           entry.attempts = nextAttempt
           queue.add(0, entry)
           runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+          scheduleNextWebsocketOutboundQueueExpiry()
           logWarn("Keeping unsent audio clip WebSocket message (${entry.kind}, ${entry.correlationId ?: 'subscription'}) queued after ${nextAttempt} send attempts: ${e.message}")
           setWebSocketStatus('closed')
           scheduleWebSocketReconnect()
@@ -8303,11 +8327,13 @@ void flushWebsocketOutboundQueue() {
       entry.attempts = nextAttempt
       queue.add(0, entry)
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
+      scheduleNextWebsocketOutboundQueueExpiry()
       setWebSocketStatus('closed')
       scheduleWebSocketReconnect()
       return
     }
   }
+  scheduleNextWebsocketOutboundQueueExpiry()
   logDebug("Outbound WebSocket queue drain completed: remaining=${getWebsocketOutboundQueue().size()}, primaryStatus=${getWebSocketStatus()}")
 }
 

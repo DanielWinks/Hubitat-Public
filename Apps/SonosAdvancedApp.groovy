@@ -249,6 +249,8 @@ preferences {
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
 @Field static final String PLAYER_INITIALIZATION_QUEUE_STATE_KEY = 'playerInitializationQueue'
 @Field static final String PLAYER_INITIALIZATION_ACTIVE_STATE_KEY = 'playerInitializationActive'
+@Field static final String PLAYER_INITIALIZATION_LEDGER_STATE_KEY = 'playerInitializationLedger'
+@Field static final String PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY = 'playerInitializationWatchdogDeadline'
 @Field static final String PLAYER_INITIALIZATION_DEFERRED_STATE_KEY = 'playerInitializationDeferred'
 @Field static final String PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY = 'playerInitializationBootGeneration'
 @Field static final String PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY = 'playerInitializationBootPending'
@@ -258,8 +260,8 @@ preferences {
 @Field static final String PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY = 'playerInitializationNotBefore'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY = 'playerInitializationOffturnBurstStartedAt'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY = 'playerInitializationOffturnProbeReleaseAt'
-@Field static final Integer PLAYER_INITIALIZATION_START_TIMEOUT_SECONDS = 2
-@Field static final Integer PLAYER_INITIALIZATION_HARD_TIMEOUT_SECONDS = 180
+@Field static final Integer PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS = 180
+@Field static final Integer PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS = 600
 @Field static final Integer PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS = 105
 @Field static final Integer PLAYER_INITIALIZATION_ZGT_WATCHDOG_SECONDS = 30
 @Field static final Integer PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS = 60
@@ -2568,7 +2570,7 @@ void configure(Boolean startup = false) {
     state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = [:]
     state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = [
       bootGeneration: state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY],
-      failedCandidates: [], topologyReady: false
+      failedCandidates: [], topologyReady: false, initializationComplete: false
     ]
   }
   state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] = now() + PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS * 1000L
@@ -2627,10 +2629,55 @@ void configure(Boolean startup = false) {
 
 /** Re-seed the serialized player initialization queue after a hub reboot. */
 void systemStartHandler(Object event = null) {
-  unschedule('playerInitializationStartWatchdog')
   unschedule('playerInitializationHardWatchdog')
+  state.remove(PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY)
   unschedule('startNextPlayerInitialization')
+  recoverInterruptedPlayerInitializations()
   beginPlayerInitializationBootBatch('Hubitat systemStart event')
+  rearmPlayerStateUpdateDrainAfterRestart()
+}
+
+/** A reboot can discard the scheduled drain while persisting its state flag. */
+void rearmPlayerStateUpdateDrainAfterRestart() {
+  state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+  List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
+      ? (List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] : []
+  if(!pending.isEmpty()) {
+    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
+    runInMillis(25, 'drainQueuedPlayerStateUpdates', [overwrite: true])
+  }
+}
+
+/** Requeue grants that were active before a hub reboot and invalidate their callbacks. */
+void recoverInterruptedPlayerInitializations() {
+  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
+  if(active.isEmpty()) { return }
+  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
+  Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
+  active.values().each { Map request ->
+    String dni = request.dni?.toString()
+    String requestId = request.requestId?.toString()
+    Map entry = requestId && ledger[requestId] instanceof Map
+        ? new LinkedHashMap((Map)ledger[requestId]) : [:]
+    entry.putAll([status: 'interrupted by hub restart', failedAt: now()])
+    if(requestId) { ledger[requestId] = entry }
+    if(dni && !queue.any { Map queued -> queued.dni?.toString() == dni }) {
+      Map recovered = new LinkedHashMap(request)
+      recovered.remove('requestId')
+      recovered.remove('phase')
+      recovered.remove('attemptNumber')
+      recovered.remove('initializationStartedAt')
+      recovered.bootAttempt = 0
+      recovered.reason = 'recovered after hub restart'
+      queue.add(recovered)
+    }
+  }
+  state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
+  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = [:]
 }
 
 /** Arm a boot batch and keep any early child requests queued until the hub has settled. */
@@ -2640,7 +2687,7 @@ void beginPlayerInitializationBootBatch(String reason, Long releaseAtOverride = 
   state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = [:]
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = [
     bootGeneration: state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY],
-    failedCandidates: [], topologyReady: false
+    failedCandidates: [], topologyReady: false, initializationComplete: false
   ]
   state.remove(PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY)
   state.remove(PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY)
@@ -2858,29 +2905,36 @@ void startNextPlayerInitialization() {
   }
   Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
       ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  Boolean waitingForBootTopology = state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true &&
-      ((state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
-          ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]).topologyReady != true)
   Map existingZgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  Boolean waitingForBootTopology = state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true &&
+      existingZgtState.topologyReady != true
   String zgtCandidateDni = waitingForBootTopology
       ? selectNextZgtInitializationCandidate() : existingZgtState.candidateDni?.toString()
   if(waitingForBootTopology && !zgtCandidateDni) {
     logWarn('Boot initialization is waiting for an eligible mains-powered ZGT speaker')
     return
   }
+  // Household topology must be accepted and applied to all children before
+  // regular players are released; remaining ZGT socket setup may continue.
   if(waitingForBootTopology && active.containsKey(zgtCandidateDni)) { return }
   if(active.size() >= PLAYER_INITIALIZATION_MAX_IN_PROGRESS) { return }
   List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
   while(!queue.isEmpty() && active.size() < PLAYER_INITIALIZATION_MAX_IN_PROGRESS) {
+    Boolean firstPassQueued = queue.any { Map item -> ((item.bootAttempt ?: 0) as Integer) == 0 }
     Integer requestIndex = waitingForBootTopology
         ? queue.findIndexOf { Map item -> item.dni?.toString() == zgtCandidateDni }
-        : 0
+        : (firstPassQueued ? queue.findIndexOf { Map item -> ((item.bootAttempt ?: 0) as Integer) == 0 } : 0)
     if(requestIndex == null || requestIndex < 0) { break }
     Map request = queue.remove((int)requestIndex)
     String dni = request?.dni?.toString()
     if(!dni || active.containsKey(dni)) { continue }
+    Boolean isRetry = ((request.bootAttempt ?: 0) as Integer) > 0
+    if(isRetry && active.values().any { Map item -> ((item.attemptNumber ?: 1) as Integer) == 1 }) {
+      queue.add((int)requestIndex, request)
+      break
+    }
     ChildDeviceWrapper player = dni ? getChildDevice(dni) : null
     if(player == null || !player.getDataValue('websocketUrl')) {
       logWarn("Skipping queued player initialization; child or WebSocket URL is unavailable for ${dni ?: 'unknown'}")
@@ -2888,8 +2942,10 @@ void startNextPlayerInitialization() {
     }
     String requestId = UUID.randomUUID().toString()
     Map activeRequest = new LinkedHashMap(request)
-    activeRequest.putAll([requestId: requestId, phase: 'waiting-start', dequeuedAt: now()])
-    Boolean subscribeZgt = zgtCandidateDni != null && dni == zgtCandidateDni
+    Long initializationStartedAt = now()
+    activeRequest.putAll([requestId: requestId, phase: 'initializing', initializationStartedAt: initializationStartedAt,
+      dequeuedAt: initializationStartedAt, attemptNumber: ((request.bootAttempt ?: 0) as Integer) + 1])
+    Boolean subscribeZgt = waitingForBootTopology && zgtCandidateDni != null && dni == zgtCandidateDni
     Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
         ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
     if(subscribeZgt) {
@@ -2897,22 +2953,33 @@ void startNextPlayerInitialization() {
       activeRequest.zgtRole = true
       zgtState.status = 'initializing'
       zgtState.requestId = requestId
-      zgtState.deadlineAt = now() + PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS * 1000L
+      zgtState.deadlineAt = initializationStartedAt + PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS * 1000L
       state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgtState
     }
     state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
     active[dni] = activeRequest
     state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-    runIn(PLAYER_INITIALIZATION_START_TIMEOUT_SECONDS, 'playerInitializationStartWatchdog',
-        [overwrite: false, data: [dni: dni, requestId: requestId]])
-    runIn(PLAYER_INITIALIZATION_HARD_TIMEOUT_SECONDS, 'playerInitializationHardWatchdog',
-        [overwrite: false, data: [dni: dni, requestId: requestId]])
+    Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
+        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
+    ledger[requestId] = [requestId: requestId, dni: dni, status: "initialization sent to ${dni}",
+      initializationStartTime: initializationStartedAt, initializationSentAt: initializationStartedAt,
+      events: [[status: 'initialization start time', at: initializationStartedAt],
+        [status: "initialization sent to ${dni}", at: initializationStartedAt]],
+      attempt: activeRequest.attemptNumber, zgt: subscribeZgt, timeoutSeconds: activeRequest.attemptNumber == 1
+        ? PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS : PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS]
+    while(ledger.size() > 100) { ledger.remove(ledger.keySet().iterator().next()) }
+    state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+    Integer timeoutSeconds = (Integer)ledger[requestId].timeoutSeconds
+    activeRequest.deadlineAt = initializationStartedAt + timeoutSeconds * 1000L
+    active[dni] = activeRequest
+    state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
+    scheduleNextPlayerInitializationWatchdog()
     if(subscribeZgt) {
       runIn(PLAYER_INITIALIZATION_ZGT_TIMEOUT_SECONDS, 'playerInitializationZgtWatchdog',
-          [overwrite: false, data: [dni: dni, leaderGeneration: zgtState.leaderGeneration,
+          [overwrite: true, data: [dni: dni, leaderGeneration: zgtState.leaderGeneration,
             bootGeneration: zgtState.bootGeneration]])
     }
-    logInfo("Granting initialization turn to ${player.displayName}; inProgress=${active.size()}, queued=${queue.size()}, request=${requestId}")
+    logInfo("Initialization start time for ${dni}: ${initializationStartedAt}; initialization sent to ${dni}; attempt=${activeRequest.attemptNumber}, inProgress=${active.size()}, queued=${queue.size()}, request=${requestId}")
     try {
       player.updateDataValue('appInitializationRequestId', requestId)
       player.updateDataValue('appZgtSubscribe', subscribeZgt.toString())
@@ -2932,9 +2999,11 @@ void startNextPlayerInitialization() {
   Map finalZgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
   if(queue.isEmpty() && active.isEmpty() &&
-      (state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true || finalZgtState.topologyReady == true)) {
+      (state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true ||
+          finalZgtState.topologyReady == true)) {
     state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = false
   }
+  scheduleNextPlayerInitializationWatchdog()
 }
 
 void playerInitializationZgtWatchdog(Map data = [:]) {
@@ -2943,6 +3012,15 @@ void playerInitializationZgtWatchdog(Map data = [:]) {
   if(zgt.topologyReady == true || zgt.candidateDni?.toString() != data?.dni?.toString() ||
       zgt.leaderGeneration?.toString() != data?.leaderGeneration?.toString() ||
       zgt.bootGeneration?.toString() != data?.bootGeneration?.toString()) { return }
+  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
+  Map activeRequest = active[data?.dni?.toString()]
+  if(activeRequest?.requestId?.toString() == zgt.requestId?.toString()) {
+    // ZGT discovery can time out independently, but it must not short-circuit
+    // the app-level three/ten-minute init-completion deadline.
+    runIn(30, 'playerInitializationZgtWatchdog', [overwrite: true, data: data])
+    return
+  }
   failZgtInitializationCandidate(data.dni?.toString(), 'No valid household ZGT payload arrived before the readiness timeout')
 }
 
@@ -2950,7 +3028,13 @@ void failZgtInitializationCandidate(String dni, String reason) {
   if(!dni) { return }
   Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
-  if(zgt.candidateDni?.toString() != dni || zgt.topologyReady == true) { return }
+  if(zgt.candidateDni?.toString() != dni) { return }
+  String zgtRequestId = zgt.requestId?.toString()
+  Map priorLedger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] : [:]
+  Map priorEntry = zgtRequestId && priorLedger[zgtRequestId] instanceof Map
+      ? (Map)priorLedger[zgtRequestId] : [:]
+  Integer failedAttemptNumber = (priorEntry.attempt ?: 1) as Integer
   List<String> failed = zgt.failedCandidates instanceof List
       ? new ArrayList<String>((List<String>)zgt.failedCandidates) : []
   if(!failed.contains(dni)) { failed.add(dni) }
@@ -2960,6 +3044,8 @@ void failZgtInitializationCandidate(String dni, String reason) {
   zgt.leaderGeneration = null
   zgt.requestId = null
   zgt.deadlineAt = null
+  zgt.topologyReady = false
+  zgt.initializationComplete = false
   zgt.status = 'promoting'
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
 
@@ -2967,6 +3053,21 @@ void failZgtInitializationCandidate(String dni, String reason) {
       ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
   Map failedRequest = active.remove(dni)
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
+  scheduleNextPlayerInitializationWatchdog()
+  if(failedRequest != null) {
+    String failedRequestId = failedRequest.requestId?.toString()
+    Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
+        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
+    Map entry = failedRequestId && ledger[failedRequestId] instanceof Map
+        ? new LinkedHashMap((Map)ledger[failedRequestId]) : [:]
+    String terminalStatus = entry.status?.toString() == 'timed out' ? 'timed out' : 'init failed'
+    entry.putAll([status: terminalStatus, failedAt: now(), detail: reason])
+    List<Map> events = entry.events instanceof List ? new ArrayList<Map>((List<Map>)entry.events) : []
+    events.add([status: terminalStatus, at: now(), detail: reason])
+    entry.events = events
+    if(failedRequestId) { ledger[failedRequestId] = entry }
+    state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+  }
   ChildDeviceWrapper failedPlayer = getChildDevice(dni)
   try {
     failedPlayer?.updateDataValue('appZgtSubscribe', 'false')
@@ -2982,13 +3083,28 @@ void failZgtInitializationCandidate(String dni, String reason) {
     failedRequest.remove('requestId')
     failedRequest.remove('phase')
     failedRequest.remove('dequeuedAt')
-    failedRequest.bootAttempt = 0
+    Integer failedAttempt = (failedRequest.bootAttempt ?: 0) as Integer
+    if(failedAttempt < 1) {
+      failedRequest.bootAttempt = 1
+    }
     List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
         ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-    if(!queue.any { Map request -> request.dni?.toString() == dni }) { queue.add(failedRequest) }
+    if(failedAttempt < 1 && !queue.any { Map request -> request.dni?.toString() == dni }) { queue.add(failedRequest) }
+    if(failedAttempt >= 1) {
+      Map deferred = state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] instanceof Map
+          ? (Map)state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] : [:]
+      deferred[dni] = [failedAt: now(), reason: reason]
+      state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] = deferred
+      logWarn("Player initialization failed for ${dni} on attempt 2; ${reason}")
+      scheduleDeferredPlayerInitializationRetry()
+    }
     state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
   }
-  logWarn("ZGT candidate ${dni} failed: ${reason}; promoting another eligible speaker")
+  if(failedAttemptNumber > 1) {
+    logWarn("ZGT candidate ${dni} failed on attempt ${failedAttemptNumber}: ${reason}; promoting another eligible speaker")
+  } else {
+    logInfo("ZGT candidate ${dni} failed on attempt ${failedAttemptNumber}: ${reason}; promoting another eligible speaker")
+  }
   String nextDni = selectNextZgtInitializationCandidate()
   if(nextDni == null) {
     zgt.status = 'exhausted'
@@ -3072,7 +3188,7 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
     } catch(Exception e) { logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}") }
   }
   zgt.topologyReady = true
-  zgt.status = 'ready'
+  zgt.status = zgt.initializationComplete == true ? 'ready' : 'awaiting-init-complete'
   zgt.lastInboundAt = observedAt
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
   logInfo("Accepted full household topology from ${playerDni}; groups=${groups.size()}")
@@ -3131,40 +3247,71 @@ void zgtTopologyWatchdog(Map data = [:]) {
   failZgtInitializationCandidate(data.dni?.toString(), 'No inbound ZGT followed a topology change and resubscription request')
 }
 
-void playerInitializationStartWatchdog(Map data = [:]) {
-  Map<String, Map> activeByDni = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+/** Maintain one app job for the earliest active initialization deadline. */
+void scheduleNextPlayerInitializationWatchdog() {
+  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  String dni = data?.dni?.toString()
-  String requestId = data?.requestId?.toString()
-  Map active = dni ? activeByDni[dni] : null
-  if(active == null || active.requestId?.toString() != requestId || active.phase != 'waiting-start') { return }
-  finishPlayerInitialization(requestId, false, 'child did not report initialization start within 2 seconds')
+  List<Long> deadlines = active.values().collect { Map request ->
+    request.deadlineAt == null ? null : (request.deadlineAt as Long)
+  }.findAll { Long deadline -> deadline != null }
+  Long nextDeadline = deadlines.isEmpty() ? null : deadlines.min()
+  Long scheduledDeadline = (state[PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY] ?: 0L) as Long
+  if(nextDeadline == null) {
+    if(scheduledDeadline > 0L) { unschedule('playerInitializationHardWatchdog') }
+    state.remove(PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY)
+    return
+  }
+  if(scheduledDeadline == nextDeadline) { return }
+  unschedule('playerInitializationHardWatchdog')
+  state[PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY] = nextDeadline
+  runInMillis(Math.max(1L, nextDeadline - now()), 'playerInitializationHardWatchdog', [overwrite: true])
 }
 
 void playerInitializationHardWatchdog(Map data = [:]) {
+  state.remove(PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY)
   Map<String, Map> activeByDni = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  String dni = data?.dni?.toString()
-  String requestId = data?.requestId?.toString()
-  Map active = dni ? activeByDni[dni] : null
-  if(active == null || active.requestId?.toString() != requestId) { return }
-  finishPlayerInitialization(requestId, false, 'initialization exceeded the 180 second hard timeout')
+  Long currentTime = now()
+  List<Map> expired = activeByDni.values().findAll { Map request ->
+    request.deadlineAt != null && (request.deadlineAt as Long) <= currentTime
+  }.collect { Map request -> new LinkedHashMap(request) }
+  expired.each { Map request ->
+    Integer attempt = (request.attemptNumber ?: 1) as Integer
+    Integer timeoutSeconds = attempt > 1 ? PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS : PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS
+    finishPlayerInitialization(request.requestId?.toString(), false,
+        "initialization exceeded the ${timeoutSeconds} second timeout", true)
+  }
+  scheduleNextPlayerInitializationWatchdog()
 }
 
-void finishPlayerInitialization(String requestId, Boolean succeeded, String detail = '') {
+void finishPlayerInitialization(String requestId, Boolean succeeded, String detail = '', Boolean timedOut = false) {
   Map<String, Map> activeByDni = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
       ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
   Map active = activeByDni.values().find { Map request -> request.requestId?.toString() == requestId }
   if(active == null || active.requestId?.toString() != requestId) { return }
   String dni = active.dni?.toString()
+  Long finishedAt = now()
+  Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
+  Map ledgerEntry = ledger[requestId] instanceof Map ? new LinkedHashMap((Map)ledger[requestId]) : [:]
+  ledgerEntry.putAll([status: succeeded ? 'init complete' : (timedOut ? 'timed out' : 'init failed'),
+    completedAt: succeeded ? finishedAt : null, failedAt: succeeded ? null : finishedAt,
+    detail: detail, elapsedMs: finishedAt - ((active.initializationStartTime ?: finishedAt) as Long)])
+  List<Map> ledgerEvents = ledgerEntry.events instanceof List ? new ArrayList<Map>((List<Map>)ledgerEntry.events) : []
+  ledgerEvents.add([status: ledgerEntry.status, at: finishedAt, detail: detail])
+  ledgerEntry.events = ledgerEvents
+  ledger[requestId] = ledgerEntry
+  state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
   Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
-  if(!succeeded && zgtState.candidateDni?.toString() == dni && zgtState.topologyReady != true) {
+  if(!succeeded && state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true &&
+      zgtState.candidateDni?.toString() == dni && zgtState.topologyReady != true) {
     failZgtInitializationCandidate(dni, detail ?: 'ZGT speaker initialization failed')
     return
   }
   activeByDni.remove(dni)
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = activeByDni
+  scheduleNextPlayerInitializationWatchdog()
   if(dni) {
     try {
       ChildDeviceWrapper completedPlayer = getChildDevice(dni)
@@ -3183,20 +3330,15 @@ void finishPlayerInitialization(String requestId, Boolean succeeded, String deta
     attempts.remove(dni)
     state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = attempts
     logInfo("Player initialization completed for ${dni}")
-    if(zgtState.candidateDni?.toString() == dni && zgtState.topologyReady != true) {
-      zgtState.status = 'awaiting-topology'
+    if(zgtState.candidateDni?.toString() == dni && state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true) {
+      zgtState.initializationComplete = true
+      zgtState.status = zgtState.topologyReady == true ? 'ready' : 'awaiting-topology'
       zgtState.initializationCompletedAt = now()
       state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgtState
     }
   } else {
-    if(detail?.contains('180 second hard timeout') || detail?.contains('did not settle within 180 seconds')) {
-      logDebug("Player initialization timed out for ${dni}: ${detail}")
-    } else {
-      logWarn("Player initialization failed for ${dni}: ${detail}")
-    }
-    String bootGeneration = active.bootGeneration?.toString()
     Integer bootAttempt = (active.bootAttempt ?: 0) as Integer
-    if(bootGeneration && bootGeneration == state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString() && bootAttempt < 1) {
+    if(bootAttempt < 1) {
       Map attempts = state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] instanceof Map
           ? (Map)state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] : [:]
       attempts[dni] = bootAttempt + 1
@@ -3208,8 +3350,13 @@ void finishPlayerInitialization(String requestId, Boolean succeeded, String deta
           ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
       queue.add(active)
       state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-      logInfo("Requeued ${dni} at the back for its one reboot initialization retry")
+      if(timedOut) {
+        logInfo("Player initialization timed out for ${dni} on attempt 1; retry queued: ${detail}")
+      } else {
+        logInfo("Player initialization failed for ${dni} on attempt 1; retry queued: ${detail}")
+      }
     } else {
+      logWarn("Player initialization failed for ${dni} on attempt 2; ${timedOut ? 'timed out' : 'driver reported failure'}: ${detail}")
       Map deferred = state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] instanceof Map
           ? (Map)state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] : [:]
       deferred[dni] = [failedAt: now(), reason: detail]
