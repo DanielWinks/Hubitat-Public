@@ -6438,6 +6438,10 @@ void setGroupId(String groupId) {
 }
 
 void subscribeToPlaybackDebounce(Map data = null) {
+  if(getIsGroupCoordinator() != true) {
+    logDebug('Skipping delayed group subscription because this player is no longer the coordinator')
+    return
+  }
   String groupId = data?.groupId
   if(groupId != null && groupId != '') {
     subscribeToPlayback(groupId)
@@ -8501,6 +8505,10 @@ void watchExpectedSubscriptionEvents() {
 }
 
 void resubscribeWebsocketNamespace(String namespace) {
+  if(namespace in ['playback', 'playbackMetadata', 'groupVolume'] && getIsGroupCoordinator() != true) {
+    logDebug("Skipping ${namespace} resubscription because this player is not the group coordinator")
+    return
+  }
   String groupId = getGroupId()
   if(namespace in ['playback', 'playbackMetadata', 'groupVolume'] && !groupId) {
     logWarn("Cannot resubscribe to ${namespace}: no current group ID")

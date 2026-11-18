@@ -2799,6 +2799,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "missing subscription events trigger one namespace resubscription"() {
     given:
+    driver.device.dataValues.isGroupCoordinator = 'true'
     String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
     driver.sendWsMessage(command)
     List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
@@ -2811,6 +2812,22 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.any { String message -> message.contains('"namespace":"playbackMetadata"') && message.contains('"command":"subscribe"') }
     websocketMessages.any { String message -> message.contains('"namespace":"playback"') && message.contains('"command":"subscribe"') }
     (driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>)[0].attempts == 1
+  }
+
+  def "follower refuses delayed and watchdog group namespace subscriptions"() {
+    given:
+    driver.device.dataValues.isGroupCoordinator = 'false'
+    driver.device.dataValues.groupId = 'GROUP_TEST'
+    driver.device.dataValues.websocketStatus = 'open'
+
+    when:
+    driver.subscribeToPlaybackDebounce([groupId: 'GROUP_TEST'])
+    driver.resubscribeWebsocketNamespace('playbackMetadata')
+
+    then:
+    websocketMessages.empty
+    driver.runtimeState.websocketCommandLedger == null
+    driver.logs.count { it.toString().contains('Skipping') } >= 2
   }
 
   def "SOAP state changes expect a matching UPnP event and renew its subscription on timeout"() {
