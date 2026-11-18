@@ -332,9 +332,7 @@ class SonosAdvancedAppSpec extends Specification {
     ]
 
     when:
-    appScript.groupCommandRequestHandler([value: JsonOutput.toJson([
-      action: 'initializationPurge', groupDni: 'GROUP-DNI', createdAt: appScript.now()
-    ])] as Event)
+    appScript.enqueueGroupCommandRequest([action: 'initializationPurge', groupDni: 'GROUP-DNI', createdAt: appScript.now()])
 
     then:
     !appScript.state.pendingGroupCommandRequests.containsKey('GROUP-DNI')
@@ -1483,12 +1481,8 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "queued group requests preserve grouping-before-Favorite order"() {
     when:
-    appScript.groupCommandRequestHandler([
-      value: JsonOutput.toJson(request('loadFavorite', [favoriteId: '42'], 2))
-    ] as Event)
-    appScript.groupCommandRequestHandler([
-      value: JsonOutput.toJson(request('on', [:], 1))
-    ] as Event)
+    appScript.enqueueGroupCommandRequest(request('loadFavorite', [favoriteId: '42'], 2))
+    appScript.enqueueGroupCommandRequest(request('on', [:], 1))
     appScript.drainGroupCommandRequests()
 
     then:
@@ -1497,32 +1491,29 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation().registeredPlayerIds.containsAll(['RINCON_COORD', 'RINCON_FOLLOW'])
   }
 
-  def "location requests from another app instance are ignored"() {
+  def "direct group requests from another app instance are rejected"() {
     when:
-    appScript.groupCommandRequestHandler([
-      value: JsonOutput.toJson([groupDni: 'OTHER-GROUP', requestId: 'OTHER-GROUP-1', command: 'on', args: [:]])
-    ] as Event)
+    appScript.groupAppRequest([channel: 'groupAppRequest', groupDni: 'OTHER-GROUP', requestId: 'OTHER-GROUP-1', command: 'on', args: [:]])
 
     then:
     !appScript.state.groupCommandRequests
     !appScript.scheduled.any { it[1] == 'drainGroupCommandRequests' }
   }
 
-  def "group requests are acknowledged once and duplicate deliveries are not re-enqueued"() {
+  def "direct group requests are accepted and duplicate deliveries are not re-enqueued"() {
     given:
     Map groupRequest = request('refresh', [:], 1)
-    // Exercise the UUID format emitted by SonosAdvGroup, rather than the
-    // legacy group-DNI/sequence request ID format.
     groupRequest.requestId = '6b684b7d-8f6c-4b18-9cf1-2eaad384bf5a'
+    groupRequest.channel = 'groupAppRequest'
 
     when:
-    appScript.enqueueGroupCommandRequest(groupRequest)
+    Boolean accepted = appScript.groupAppRequest(groupRequest)
     appScript.enqueueGroupCommandRequest(groupRequest)
 
     then:
+    accepted
     appScript.state.pendingGroupCommandRequests['GROUP-DNI'].size() == 1
     appScript.state.pendingGroupCommandRequests['GROUP-DNI'][0].requestId == groupRequest.requestId
-    group.acknowledgedGroupRequests == [groupRequest.requestId, groupRequest.requestId]
     appScript.logs.count { String entry ->
       entry.contains("Ignoring duplicate group command request ${groupRequest.requestId}")
     } == 1
@@ -1877,7 +1868,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { it.contains('Suppressing chime for successive TTS announcement successive-tts') }
   }
 
-  def "queued group audio clips dispatch immediately to every player"() {
+  def "direct group audio requests dispatch immediately to every player"() {
     given:
     makeAnnouncementRosterExact()
     coordinator.currentValues.isGrouped = 'on'
@@ -1896,7 +1887,7 @@ class SonosAdvancedAppSpec extends Specification {
         player.commands.any { it.name == 'startPreparedAudioClip' }
     }
     !appScript.scheduled.any { it[1] == 'drainGroupCommandRequests' }
-    group.acknowledgedGroupRequests == [groupRequest.requestId]
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.command == 'playAudioClip'
   }
 
   def "idle group announcement starts one stream on its coordinator"() {
@@ -2441,6 +2432,7 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.subscriptions.count { it == [coordinator, 'playerCommandRequest', 'playerCommandRequestHandler'] } == 1
     appScript.subscriptions.count { it == [coordinator, 'groupFavoriteOperation', 'groupFavoriteOperationEventHandler'] } == 1
+    !appScript.subscriptions.any { it[1] == 'sonosGroupCommandRequest' }
     !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
   }
 

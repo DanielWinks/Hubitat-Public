@@ -247,8 +247,6 @@ preferences {
 // on the same device back to back.
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
-@Field static final String GROUP_COMMAND_REQUEST_EVENT = 'dwinksSonosAdvancedGroupCommand'
-@Field static final String GROUP_COMMAND_REQUEST_ATTRIBUTE = 'sonosGroupCommandRequest'
 @Field static final String PLAYER_INITIALIZATION_QUEUE_STATE_KEY = 'playerInitializationQueue'
 @Field static final String PLAYER_INITIALIZATION_ACTIVE_STATE_KEY = 'playerInitializationActive'
 @Field static final String PLAYER_INITIALIZATION_DEFERRED_STATE_KEY = 'playerInitializationDeferred'
@@ -3722,21 +3720,12 @@ void createGroupDevices() {
   removeOrphans()
 }
 
-/**
- * Group devices publish command requests as location events, keeping the
- * group driver from synchronously entering the app while holding its gate.
- */
+/** Set up child event subscriptions used by player and alarm request paths. */
 void subscribeToGroupCommandRequests() {
-  Integer subscribedGroups = 0
   Integer subscribedPlayers = 0
   app.getChildDevices().each { ChildDeviceWrapper child ->
     String dni = child.getDeviceNetworkId()?.toString()
-    if(dni?.contains(GROUP_DEVICE_DNI_MARKER)) {
-      unsubscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
-      subscribe(child, GROUP_COMMAND_REQUEST_ATTRIBUTE, 'groupCommandRequestHandler')
-      subscribedGroups++
-      logDebug("Subscribed group command handler for groupDni=${dni}, attribute=${GROUP_COMMAND_REQUEST_ATTRIBUTE}")
-    } else if(dni?.contains(ALARM_MANAGER_DNI_MARKER) || dni?.contains(ALARM_SWITCH_DNI_MARKER)) {
+    if(dni?.contains(ALARM_MANAGER_DNI_MARKER) || dni?.contains(ALARM_SWITCH_DNI_MARKER)) {
       unsubscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
       subscribe(child, ALARM_REQUEST_ATTRIBUTE, 'alarmRequestHandler')
     }
@@ -3750,7 +3739,7 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     subscribedPlayers++
   }
-  logDebug("Child request subscriptions configured; groups=${subscribedGroups}, players=${subscribedPlayers}")
+  logDebug("Child request subscriptions configured; players=${subscribedPlayers}")
 }
 
 /** Keep player driver policy caches aligned with app settings and observations. */
@@ -5273,35 +5262,6 @@ void resetLongBackoffPlayersSeenInHousehold(Object observedPlayers) {
     }
   }
   state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
-}
-
-/**
- * Receive a command request emitted by a Sonos Advanced Group device. Group
- * drivers deliberately publish requests instead of synchronously traversing
- * back through the parent app. The app owns child-device lookup and forwards
- * only to player devices, so this handler cannot form an app -> group -> app
- * call cycle.
- */
-void groupCommandRequestHandler(Event event) {
-  String rawRequest = event?.value?.toString()
-  if(!rawRequest) {
-    logWarn('Ignoring empty group command request')
-    return
-  }
-
-  Map request
-  try {
-    request = (Map)parseJson(rawRequest)
-  } catch(Exception e) {
-    logWarn("Ignoring malformed group command request: ${e.message}")
-    return
-  }
-
-  Long requestAgeMs = request?.createdAt != null
-      ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
-  logDebug("Received group command event; groupDni=${request?.groupDni ?: 'unknown'}, command=${request?.command ?: 'unknown'}, requestId=${request?.requestId ?: 'unknown'}, sequence=${request?.sequence ?: 'unknown'}, ageMs=${requestAgeMs}")
-
-  enqueueGroupCommandRequest(request)
 }
 
 /** Receive asynchronous requests from app-owned alarm child drivers. */
@@ -7087,32 +7047,47 @@ void startNextGroupAnnouncementCallback(Map data = null) {
   if(groupDni) { startNextGroupAnnouncement(groupDni) }
 }
 
-/**
- * Queue a group command request received through the location event subscription.
- */
-void enqueueGroupCommandRequest(Map request) {
+/** Handle requests sent directly by a child group driver. */
+Boolean groupAppRequest(Map request) {
+  if(!(request instanceof Map) || request.channel != 'groupAppRequest') {
+    logDebug("Ignoring invalid group app request channel=${request?.channel ?: 'unknown'}")
+    return false
+  }
+  String groupDni = request.groupDni?.toString()
+  if(!groupDni || getChildDevice(groupDni) == null) {
+    logDebug("Ignoring group app request action=${request.action ?: request.command ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${groupDni ?: 'unknown'}, owned=${groupDni ? getChildDevice(groupDni) != null : false}")
+    return false
+  }
+  Long requestAgeMs = request.createdAt != null
+      ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
+  logDebug("Received group app request action=${request.action ?: request.command ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${groupDni}, sequence=${request.sequence ?: 'unknown'}, ageMs=${requestAgeMs}")
+  return enqueueGroupCommandRequest(request)
+}
+
+/** Queue a validated group command request for ordered processing. */
+Boolean enqueueGroupCommandRequest(Map request) {
   if(!(request instanceof Map)) {
-    return
+    return false
   }
 
   String groupDni = request?.groupDni as String
   String command = request?.command as String
   if(request?.action?.toString() == 'initializationPurge' && groupDni && getChildDevice(groupDni) != null) {
     clearPendingCommandsForDevice(groupDni)
-    return
+    return true
   }
   if(!groupDni || !command) {
     logWarn("Ignoring group command request with invalid target or command: ${JsonOutput.toJson(request)}")
-    return
+    return false
   }
   if(isRequestOlderThanDeviceCommandClear(groupDni, request.createdAt)) {
     logDebug("Ignoring stale group command request ${request.requestId ?: 'unknown'} from before initialization for ${groupDni}")
-    return
+    return false
   }
-  // Location events are hub-wide; ignore requests for groups owned by another app instance.
+  // Child drivers call the parent directly; still verify ownership before dispatch.
   if(getChildDevice(groupDni) == null) {
     logDebug("Ignoring group command ${command} (${request?.requestId ?: 'no request ID'}) for unowned group ${groupDni}")
-    return
+    return false
   }
 
   String requestId = request.requestId as String
@@ -7123,12 +7098,11 @@ void enqueueGroupCommandRequest(Map request) {
       ? (List<String>)receivedRequests[groupDni]
       : []
   if(requestId && receivedForGroup.contains(requestId)) {
-    logDebug("Ignoring duplicate group command request ${requestId} (${command}) for ${groupDni}; acknowledging without redispatch")
-    acknowledgeGroupCommandRequest(groupDni, requestId)
-    return
+    logDebug("Ignoring duplicate group command request ${requestId} (${command}) for ${groupDni}; not redispatching")
+    return true
   }
 
-  // Audio clips are time-sensitive. Dispatch them from the event handler so
+  // Audio clips are time-sensitive. Dispatch them from the callback so
   // scheduler latency cannot strand an announcement in the delayed command
   // queue; each clip is already prepared on all players before release.
   if(command in ['playAudioClip', 'playHighPriorityTrack', 'enqueueLowPriorityTrack']) {
@@ -7138,10 +7112,9 @@ void enqueueGroupCommandRequest(Map request) {
       if(receivedForGroup.size() > 200) { receivedForGroup = receivedForGroup.takeRight(200) }
       receivedRequests[groupDni] = receivedForGroup
       state.receivedGroupCommandRequestIds = receivedRequests
-      acknowledgeGroupCommandRequest(groupDni, requestId)
     }
     processGroupCommandRequest([request: request])
-    return
+    return true
   }
 
   // Requests from a group device can arrive in the same scheduler tick as a
@@ -7162,24 +7135,9 @@ void enqueueGroupCommandRequest(Map request) {
     if(receivedForGroup.size() > 200) { receivedForGroup = receivedForGroup.takeRight(200) }
     receivedRequests[groupDni] = receivedForGroup
     state.receivedGroupCommandRequestIds = receivedRequests
-    acknowledgeGroupCommandRequest(groupDni, requestId)
   }
   runIn(1, 'drainGroupCommandRequests', [overwrite: true])
-}
-
-void acknowledgeGroupCommandRequest(String groupDni, String requestId) {
-  ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
-  if(groupDevice == null) {
-    logWarn("Cannot acknowledge group command ${requestId ?: 'unknown'}: group device ${groupDni} is no longer owned by this app")
-    return
-  }
-  logDebug("Sending group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
-  try {
-    groupDevice.acknowledgeGroupCommand(requestId)
-    logDebug("Sent group command acknowledgement requestId=${requestId ?: 'unknown'}, groupDni=${groupDni}")
-  } catch(Exception e) {
-    logWarn("Could not send group command acknowledgement ${requestId ?: 'unknown'} for ${groupDni}: ${e.message}")
-  }
+  return true
 }
 
 /**

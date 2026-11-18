@@ -9,9 +9,11 @@ import spock.lang.Specification
 
 class SonosGroupParentDouble {
   List<Map> requests = []
+  Boolean accepted = true
 
-  void enqueueGroupCommandRequest(Map request) {
+  Boolean groupAppRequest(Map request) {
     requests << request
+    return accepted
   }
 }
 
@@ -39,6 +41,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.device.currentValues.clear()
     driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
     driver.device.dataValues.playerIds = 'RINCON_FOLLOW'
+    driver.parent = new SonosGroupParentDouble()
     driver.heldPlaybackState.remove('SONOS-GROUP-TEST-DNI')
   }
 
@@ -46,6 +49,10 @@ class SonosAdvGroupSpec extends Specification {
     while(driver.state.pendingBatchEvents instanceof Map && !((Map)driver.state.pendingBatchEvents).isEmpty()) {
       driver.drainBatchEvents()
     }
+  }
+
+  private List<Map> groupRequests() {
+    return ((SonosGroupParentDouble)driver.parent).requests.findAll { Map request -> request.command }
   }
 
   def "retargeting a group fade to the reported volume cancels queued steps"() {
@@ -58,9 +65,10 @@ class SonosAdvGroupSpec extends Specification {
     driver.groupDeviceVolumeFadeStep()
     driver.device.currentValues.volume = 6
     driver.metaClass.now = { -> 14000L }
+    Integer existingRequestCount = groupRequests().size()
     driver.unschedules.clear()
     driver.scheduled.clear()
-    driver.runtimeState.pendingGroupCommands.clear()
+    driver.runtimeState.remove('pendingGroupCommands')
 
     when:
     driver.setLevel(6G, 10G)
@@ -69,7 +77,7 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.groupDeviceVolumeFadeState.isEmpty()
     driver.unschedules.contains('groupDeviceVolumeFadeStep')
-    driver.runtimeState.pendingGroupCommands.isEmpty()
+    groupRequests().size() == existingRequestCount
     driver.scheduled.isEmpty()
 
     cleanup:
@@ -77,19 +85,20 @@ class SonosAdvGroupSpec extends Specification {
     driver.metaClass = null
   }
 
-  def "group commands publish an asynchronous request instead of looking up the parent"() {
+  def "group commands call the parent directly and log whether the request was accepted"() {
     when:
     driver.on()
 
     then:
-    driver.scheduled.size() == 1
-    driver.scheduled[0][0] == 1
-    driver.scheduled[0][1] == 'drainGroupCommandQueue'
-    driver.runtimeState.pendingGroupCommands[0].command == 'on'
-    driver.runtimeState.pendingGroupCommands[0].groupDni == 'SONOS-GROUP-TEST-DNI'
-    driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
-    UUID.fromString(driver.runtimeState.pendingGroupCommands[0].requestId as String)
-    driver.runtimeState.pendingGroupCommands[0].sequence == 1
+    driver.parent.requests.size() == 1
+    driver.parent.requests[0].command == 'on'
+    driver.parent.requests[0].groupDni == 'SONOS-GROUP-TEST-DNI'
+    driver.parent.requests[0].args.groupingMode == 'EXPLICIT'
+    driver.parent.requests[0].channel == 'groupAppRequest'
+    UUID.fromString(driver.parent.requests[0].requestId as String)
+    driver.parent.requests[0].sequence == 1
+    driver.logs.any { String entry -> entry.contains('accepted=true') }
+    driver.scheduled.isEmpty()
   }
 
   def "initialize clears pending and active group command work before recovery"() {
@@ -117,9 +126,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.unschedules.contains('drainGroupCommandQueue')
     driver.unschedules.contains('retryActiveGroupCommandRequest')
     driver.unschedules.contains('regroupSafetyTimeout')
-    driver.events.find { Map event -> event.name == 'sonosGroupCommandRequest' }
-      ?.value?.toString()?.contains('initializationPurge')
-    !driver.device.currentValues.containsKey('sonosGroupCommandRequest')
+    driver.parent.requests.any { Map request -> request.action == 'initializationPurge' }
     driver.scheduled.any { List item -> item[1] == 'refresh' }
   }
 
@@ -194,8 +201,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.playTrackAndResume('http://example.test/clip.mp3', 0)
 
     then:
-    driver.runtimeState.pendingGroupCommands.size() == 11
-    driver.runtimeState.pendingGroupCommands.every { Map request -> request.args.volume == null }
+    groupRequests().size() == 11
+    groupRequests().every { Map request -> request.args.volume == null }
 
     when:
     driver.playTrack('http://example.test/track.mp3', -1G)
@@ -211,23 +218,23 @@ class SonosAdvGroupSpec extends Specification {
     driver.playTrackAndResume('http://example.test/clip.mp3', -1G)
 
     then:
-    driver.runtimeState.pendingGroupCommands.drop(11).size() == 11
-    driver.runtimeState.pendingGroupCommands.drop(11).every { Map request -> request.args.volume == '-1' }
+    groupRequests().drop(11).size() == 11
+    groupRequests().drop(11).every { Map request -> request.args.volume == '-1' }
   }
 
   def "group command request IDs stay unique when the in-memory sequence resets"() {
     when:
     driver.requestGroupCommand('refresh')
-    String firstRequestId = driver.runtimeState.pendingGroupCommands[0].requestId as String
+    String firstRequestId = groupRequests()[0].requestId as String
     driver.runtimeState.remove('groupCommandSequence')
     driver.requestGroupCommand('refresh')
-    String secondRequestId = driver.runtimeState.pendingGroupCommands[1].requestId as String
+    String secondRequestId = groupRequests()[1].requestId as String
 
     then:
     UUID.fromString(firstRequestId).toString() == firstRequestId
     UUID.fromString(secondRequestId).toString() == secondRequestId
     firstRequestId != secondRequestId
-    driver.runtimeState.pendingGroupCommands*.sequence == [1, 1]
+    groupRequests()*.sequence == [1, 1]
   }
 
   def "joinPlayersToCoordinator publishes an additive grouping request"() {
@@ -235,8 +242,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.joinPlayersToCoordinator()
 
     then:
-    driver.runtimeState.pendingGroupCommands[0].command == 'joinPlayersToCoordinator'
-    driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'ADDITIVE'
+    groupRequests()[0].command == 'joinPlayersToCoordinator'
+    groupRequests()[0].args.groupingMode == 'ADDITIVE'
   }
 
   def "addPlayerToGroup queues only the supplied player identifier"() {
@@ -244,8 +251,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.addPlayerToGroup('Bedroom')
 
     then:
-    driver.runtimeState.pendingGroupCommands[0].command == 'addPlayerToGroup'
-    driver.runtimeState.pendingGroupCommands[0].args == [playerIdentifier: 'Bedroom']
+    groupRequests()[0].command == 'addPlayerToGroup'
+    groupRequests()[0].args == [playerIdentifier: 'Bedroom']
   }
 
   def "groupPlayers publishes an explicit request without the legacy ungroup delay"() {
@@ -253,8 +260,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.groupPlayers()
 
     then:
-    driver.runtimeState.pendingGroupCommands[0].command == 'groupPlayers'
-    driver.runtimeState.pendingGroupCommands[0].args.groupingMode == 'EXPLICIT'
+    groupRequests()[0].command == 'groupPlayers'
+    groupRequests()[0].args.groupingMode == 'EXPLICIT'
     driver.scheduled.every { List call -> call[1] != 'regroupSafetyTimeout' }
   }
 
@@ -263,8 +270,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.evictUnlistedPlayers()
 
     then:
-    driver.runtimeState.pendingGroupCommands[0].command == 'evictUnlistedPlayers'
-    driver.runtimeState.pendingGroupCommands[0].args == [
+    groupRequests()[0].command == 'evictUnlistedPlayers'
+    groupRequests()[0].args == [
       groupingMode: 'EXPLICIT', evictUnlistedOnly: true
     ]
   }
@@ -274,89 +281,22 @@ class SonosAdvGroupSpec extends Specification {
     driver.refresh()
 
     then:
-    driver.runtimeState.pendingGroupCommands[0].command == 'refresh'
+    groupRequests()[0].command == 'refresh'
     driver.events.empty
   }
 
-  def "deferred group commands publish an event without entering the parent"() {
+  def "group command callback reports rejection without scheduling a retry or creating an event"() {
     given:
-    SonosGroupParentDouble parent = new SonosGroupParentDouble()
-    driver.binding.setVariable('parent', parent)
-    Map payload = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'request-1', command: 'refresh', args: [:]]
+    ((SonosGroupParentDouble)driver.parent).accepted = false
 
     when:
-    driver.emitGroupCommandRequest([payload: payload])
+    driver.refresh()
 
     then:
-    parent.requests.empty
-    driver.device.events.empty
-    driver.events.size() == 1
-    driver.events[0].name == 'sonosGroupCommandRequest'
-    driver.events[0].isStateChange == true
-    new JsonSlurper().parseText(driver.events[0].value as String) == payload
-    !driver.device.currentValues.containsKey('sonosGroupCommandRequest')
-    driver.scheduled.any { List job -> job[1] == 'clearTransientGroupCommandState' }
-  }
-
-  def "group command queue waits for parent acknowledgement before sending the next request"() {
-    given:
-    driver.requestGroupCommand('speak', [text: 'first'])
-    driver.requestGroupCommand('speak', [text: 'second'])
-
-    when:
-    driver.drainGroupCommandQueue()
-    Map first = (Map)driver.runtimeState.activeGroupCommandRequest
-    driver.acknowledgeGroupCommand(first.requestId as String)
-
-    then:
-    first.command == 'speak'
-    driver.runtimeState.pendingGroupCommands.size() == 1
-    !driver.runtimeState.activeGroupCommandRequest
-    driver.scheduled.any { List call -> call[1] == 'drainGroupCommandQueue' }
-  }
-
-  def "initialize discards persisted active and pending group commands"() {
-    given:
-    Map active = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'active-request', command: 'playHighPriorityTrack']
-    Map pending = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'pending-request', command: 'refresh']
-    driver.runtimeState.activeGroupCommandRequest = active
-    driver.runtimeState.pendingGroupCommands = [pending]
-
-    when:
-    driver.initialize()
-
-    then:
-    !driver.runtimeState.activeGroupCommandRequest
-    !driver.runtimeState.pendingGroupCommands
-    !driver.scheduled.any { List call -> call[1] == 'retryActiveGroupCommandRequest' }
-  }
-
-  def "configure drains persisted pending group commands when no request is active"() {
-    given:
-    Map pending = [groupDni: 'SONOS-GROUP-TEST-DNI', requestId: 'pending-request', command: 'refresh']
-    driver.runtimeState.pendingGroupCommands = [pending]
-
-    when:
-    driver.configure()
-
-    then:
-    !driver.runtimeState.activeGroupCommandRequest
-    driver.runtimeState.pendingGroupCommands == [pending]
-    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'drainGroupCommandQueue' }
-  }
-
-  def "a mismatched acknowledgement cannot release the active group command"() {
-    given:
-    driver.requestGroupCommand('refresh')
-    driver.drainGroupCommandQueue()
-    Map active = (Map)driver.runtimeState.activeGroupCommandRequest
-
-    when:
-    driver.acknowledgeGroupCommand('different-request')
-
-    then:
-    driver.runtimeState.activeGroupCommandRequest == active
-    driver.logs.any { String line -> line.contains('Ignored group command acknowledgement') }
+    groupRequests().size() == 1
+    driver.logs.any { String line -> line.contains('accepted=false') }
+    driver.scheduled.isEmpty()
+    driver.events.empty
   }
 
   def "setVolumeZero publishes a zero-volume group command without an argument"() {
@@ -364,8 +304,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.setVolumeZero()
 
     then:
-    driver.runtimeState.pendingGroupCommands[0].command == 'setVolume'
-    driver.runtimeState.pendingGroupCommands[0].args.level == 0
+    groupRequests()[0].command == 'setVolume'
+    groupRequests()[0].args.level == 0
   }
 
   def "group operation status records the selected grouping mode"() {
@@ -404,10 +344,10 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.state.isEmpty()
     driver.runtimeState.groupCommandSequence == 9
-    UUID.fromString(driver.runtimeState.pendingGroupCommands.last().requestId as String).toString() ==
-      driver.runtimeState.pendingGroupCommands.last().requestId
+    UUID.fromString(groupRequests().last().requestId as String).toString() ==
+      groupRequests().last().requestId
     driver.runtimeState.pendingRegroup == true
-    driver.runtimeState.pendingGroupCommands.last().command == 'refresh'
+    groupRequests().last().command == 'refresh'
   }
 
   def "refreshing an inactive shared-coordinator group does not copy playback and resets configured attributes"() {
