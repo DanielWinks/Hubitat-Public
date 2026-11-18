@@ -1614,6 +1614,20 @@ class SonosAdvPlayerSpec extends Specification {
     topology.batteryData == [BattTmp: '23', BattPct: '80', BattChg: 'NOT_CHARGING']
   }
 
+  def "unchanged coordinator ID repairs a stale coordinator role flag"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_FOLLOW'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    driver.device.dataValues.isGroupCoordinator = 'true'
+
+    when:
+    driver.setGroupCoordinatorId('RINCON_COORD')
+
+    then:
+    driver.device.dataValues.groupCoordinatorId == 'RINCON_COORD'
+    driver.device.dataValues.isGroupCoordinator == 'false'
+  }
+
   def "topology snapshot includes every household group for the app ZGT source"() {
     given:
     String zoneState = '<ZoneGroupState><ZoneGroups>' +
@@ -2655,6 +2669,37 @@ class SonosAdvPlayerSpec extends Specification {
     pendingCount == 1
     driver.runtimeState.websocketCommandLedger == null
     driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('playerVolume.setVolume') }
+  }
+
+  def "claimed websocket ledger batch is detached from commands registered afterward"() {
+    given:
+    driver.playerSetPlayerVolume(10)
+    Map original = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
+
+    when:
+    List<Map> claimed = driver.takeWebsocketCommandLedgerBatch()
+    driver.playerSetPlayerVolume(20)
+
+    then:
+    claimed.size() == 1
+    claimed[0].entryId == original.entryId
+    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).entryId != original.entryId
+    claimed[0].message.contains('"volume":10')
+    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).message.contains('"volume":20')
+  }
+
+  def "websocket ledger locks are stable per device and distinct across devices"() {
+    given:
+    Object firstDeviceLock = driver.getWebsocketCommandLedgerLock()
+
+    when:
+    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
+    Object secondDeviceLock = driver.getWebsocketCommandLedgerLock()
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+
+    then:
+    firstDeviceLock.is(driver.getWebsocketCommandLedgerLock())
+    !firstDeviceLock.is(secondDeviceLock)
   }
 
   def "explicit websocket command rejection clears the ledger as failure without declaring socket stale"() {

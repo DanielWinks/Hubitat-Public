@@ -411,6 +411,9 @@ Boolean hasLineInCapability() {
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+// Keep lock identities stable while callbacks may still hold a reference, even
+// after a device is removed or its other static runtime state is pruned.
+@Field static ConcurrentHashMap<String, Object> websocketCommandLedgerLocks = new ConcurrentHashMap<String, Object>()
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
 @Field static ConcurrentHashMap<String, String> pendingTopologyXmlByDni = new ConcurrentHashMap<String, String>()
@@ -657,7 +660,7 @@ void clearPendingCommandsForInitialization() {
   ['pendingParentAppTtsRequests', 'pendingParentCoordinatorCommands',
    'activeParentCoordinatorCommand', 'parentCommandSequence',
    TRANSPORT_QUEUE_KEY, TRANSPORT_ACTIVE_KEY,
-   WS_OUTBOUND_QUEUE_STATE_KEY, WS_COMMAND_LEDGER_STATE_KEY,
+   WS_OUTBOUND_QUEUE_STATE_KEY,
    'activeAudioClipCorrelationId', 'activeAudioClipSonosId', 'audioClipPlaying',
    'audioClipCommandSent', 'audioClipHadDisconnectAfterSend',
    'audioClipProgressByCorrelationId', 'audioClipQueueStartTime',
@@ -668,6 +671,9 @@ void clearPendingCommandsForInitialization() {
     state.remove(key)
     atomicState.remove(key)
     runtimeState.remove(key)
+  }
+  synchronized(getWebsocketCommandLedgerLock()) {
+    runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY)
   }
   unschedule('drainParentCoordinatorCommandQueue')
   unschedule('retryParentCoordinatorCommand')
@@ -707,11 +713,13 @@ void clearPendingAudioClipCorrelation(String correlationId) {
   outbound.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
   if(outbound.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
   else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = outbound }
-  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-  ledger.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
-  if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
-  else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
+  synchronized(getWebsocketCommandLedgerLock()) {
+    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+    ledger.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+    if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
+    else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
+  }
   Map active = (Map)getAtomicStateValue('activeAudioClipMessage')
   if(active?.correlationId?.toString() == correlationId) {
     cancelAudioClipWatchdog()
@@ -885,6 +893,16 @@ ConcurrentHashMap<String, Object> getRuntimeState() {
   if(runtime != null) { return runtime }
   ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
   ConcurrentHashMap<String, Object> existing = runtimeStateByDni.putIfAbsent(dni, created)
+  return existing ?: created
+}
+
+Object getWebsocketCommandLedgerLock() {
+  String dni = getDeviceDNI()
+  if(!dni) { return this }
+  Object lock = websocketCommandLedgerLocks.get(dni)
+  if(lock != null) { return lock }
+  Object created = new Object()
+  Object existing = websocketCommandLedgerLocks.putIfAbsent(dni, created)
   return existing ?: created
 }
 
@@ -1120,10 +1138,14 @@ void checkAppMediatedInitializationReady() {
     runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
     return
   }
-  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+  Boolean pendingWebsocketSubscription
+  synchronized(getWebsocketCommandLedgerLock()) {
+    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+    pendingWebsocketSubscription = ledger.any { Map entry -> entry.wireCommand == 'subscribe' }
+  }
   List<Map> outbound = getWebsocketOutboundQueue()
-  Boolean pendingWebsocketSubscription = ledger.any { Map entry -> entry.wireCommand == 'subscribe' } ||
+  pendingWebsocketSubscription = pendingWebsocketSubscription ||
       outbound.any { Map entry -> entry.wireCommand == 'subscribe' }
   Map upnpQueue = getUpnpRequestQueue()
   Boolean pendingUpnpRequest = false
@@ -4169,16 +4191,16 @@ void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash, 
   }
 }
 
-void applyAppHouseholdTopology(String topologyJson) {
-  if(!topologyJson) { return }
+Boolean applyAppHouseholdTopology(String topologyJson) {
+  if(!topologyJson) { return false }
   try {
     Map topology = (Map)new JsonSlurper().parseText(topologyJson)
-    if(!(topology.groups instanceof List)) { return }
+    if(!(topology.groups instanceof List)) { return false }
     String playerId = getId()
     Map ownGroup = ((List<Map>)topology.groups).find { Map group ->
       group.playerIds instanceof List && ((List)group.playerIds).collect { Object id -> id?.toString() }.contains(playerId)
     }
-    if(ownGroup == null) { return }
+    if(ownGroup == null || !ownGroup.groupId || !ownGroup.coordinatorId) { return false }
     Map playerTopology = [playerFound: true, groupId: ownGroup.groupId?.toString(),
       coordinatorId: ownGroup.coordinatorId?.toString(), coordinatorName: ownGroup.coordinatorName?.toString(),
       visibleMemberIds: ((List)ownGroup.playerIds).collect { Object id -> id.toString() },
@@ -4186,9 +4208,10 @@ void applyAppHouseholdTopology(String topologyJson) {
       groupName: ownGroup.groupName?.toString(), batteryData: [:]]
     LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
     setDeviceDataValue('householdTopology', topologyJson)
-    processZoneGroupTopologySnapshot(playerTopology, previousMembers)
+    return processZoneGroupTopologySnapshot(playerTopology, previousMembers)
   } catch(Exception e) {
     logWarn("Could not apply app household topology snapshot: ${e.message}")
+    return false
   }
 }
 
@@ -6471,12 +6494,15 @@ String getGroupCoordinatorId() {
 @CompileStatic
 void setGroupCoordinatorId(String groupCoordinatorId) {
   String previousGroupCoordinator = getGroupCoordinatorId()
-  if(groupCoordinatorId == previousGroupCoordinator) { return }
-  logDebug("setGroupCoordinatorId ${groupCoordinatorId}")
-  setDeviceDataValue('groupCoordinatorId', groupCoordinatorId)
-  queueLocalDeviceEvent('groupCoordinatorId', groupCoordinatorId)
+  Boolean previouslyWasGroupCoordinator = getIsGroupCoordinator()
+  if(groupCoordinatorId != previousGroupCoordinator) {
+    logDebug("setGroupCoordinatorId ${groupCoordinatorId}")
+    setDeviceDataValue('groupCoordinatorId', groupCoordinatorId)
+    queueLocalDeviceEvent('groupCoordinatorId', groupCoordinatorId)
+  }
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
-  Boolean previouslyWasGroupCoordinator = getId() == previousGroupCoordinator
+  // Keep the persisted coordinator role derived from the ID on every topology
+  // update, even when the ID itself did not change.
   setIsGroupCoordinator(isGroupCoordinator)
 
   // Signal setGroupPlayerIds() to re-evaluate group devices even when the
@@ -6487,7 +6513,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
     setDeviceDataValue('coordinatorStatusChanged', 'true')
   }
 
-  if(isGroupCoordinator) {
+  if(isGroupCoordinator && !previouslyWasGroupCoordinator) {
     if(!subValid('sid1')) {
       clearCurrentPlayingStates()
       subscribeToCoordinatorSubs()
@@ -7840,9 +7866,12 @@ void mergeQueuedPlayModeFields(Map prior, Map latest) {
 void finishWebsocketSubscriptionBarrierIfReady() {
   if(runtimeState[WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY] != true) { return }
   Long generation = (runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long
-  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-  Boolean pending = ledger.any { Map entry -> entry.connectionGeneration == generation && entry.wireCommand == 'subscribe' }
+  Boolean pending
+  synchronized(getWebsocketCommandLedgerLock()) {
+    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+    pending = ledger.any { Map entry -> entry.connectionGeneration == generation && entry.wireCommand == 'subscribe' }
+  }
   if(pending) { return }
   runtimeState.remove(WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY)
   List<Map> queue = getWebsocketOutboundQueue()
@@ -7884,7 +7913,7 @@ Map registerWebsocketCommandLedgerEntry(String message, Map outbound, Long creat
   if(entry.namespace == 'groups' && entry.wireCommand == 'modifyGroupMembers') {
     entry.semanticBaseline = getGroupPlayerIds().collect { Object id -> id?.toString() }.findAll { String id -> id }.sort()
   }
-  synchronized(runtimeState) {
+  synchronized(getWebsocketCommandLedgerLock()) {
     List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
         ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
     ledger.add(entry)
@@ -7899,17 +7928,18 @@ Map registerWebsocketCommandLedgerEntry(String message, Map outbound, Long creat
 
 void removeWebsocketCommandLedgerEntryById(String entryId, String reason) {
   if(!entryId) { return }
-  synchronized(runtimeState) {
+  Map removed = null
+  synchronized(getWebsocketCommandLedgerLock()) {
     List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
         ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    Map removed = ledger.find { Map item -> item.entryId?.toString() == entryId }
+    removed = ledger.find { Map item -> item.entryId?.toString() == entryId } as Map
     if(removed != null) {
       ledger.remove(removed)
       if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
       else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
-      logDebug("Removed WebSocket command ledger entry id=${entryId} fingerprint=${removed.namespace}.${removed.wireCommand}; reason=${reason}")
     }
   }
+  if(removed != null) { logDebug("Removed WebSocket command ledger entry id=${entryId} fingerprint=${removed.namespace}.${removed.wireCommand}; reason=${reason}") }
 }
 
 void observeWebsocketCommandResponse(Map eventType, Map eventData) {
@@ -7918,7 +7948,7 @@ void observeWebsocketCommandResponse(Map eventType, Map eventData) {
   if(!response || !namespace) { return }
   Long generation = (runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long
   Map matched = null
-  synchronized(runtimeState) {
+  synchronized(getWebsocketCommandLedgerLock()) {
     List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
         ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
     matched = ledger.find { Map entry ->
@@ -8018,16 +8048,22 @@ void reconcileQueuedTopologyCommands(Map eventData) {
 void websocketCommandLedgerTimeout(Map data = [:]) {
   String entryId = data?.entryId?.toString()
   Long generation = data?.connectionGeneration != null ? (data.connectionGeneration as Long) : -1L
-  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-  Map entry = ledger.find { Map item -> item.entryId?.toString() == entryId }
+  Map entry
+  synchronized(getWebsocketCommandLedgerLock()) {
+    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+    Map pending = ledger.find { Map item -> item.entryId?.toString() == entryId } as Map
+    if(pending != null) { entry = new LinkedHashMap(pending) }
+  }
   if(entry == null || entry.connectionGeneration != generation) { return }
   Long inboundSequence = (runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long
   Boolean socketSilent = inboundSequence <= ((entry.inboundSequenceAtSend ?: 0L) as Long)
   logWarn("WebSocket command received no matching response before ${WS_COMMAND_ACK_TIMEOUT_SECONDS}s: ${entry.namespace}.${entry.wireCommand}, id=${entryId}, inboundSinceSend=${!socketSilent}")
   if(socketSilent || entry.wireCommand == 'subscribe') {
-    requeuePendingWebsocketCommands("no matching response for ${entry.namespace}.${entry.wireCommand}")
-    reconnectWebsocket(socketSilent ? 'no inbound response before command ACK timeout' : 'subscription ACK timeout')
+    Boolean recovered = requeuePendingWebsocketCommands("no matching response for ${entry.namespace}.${entry.wireCommand}")
+    if(recovered) {
+      reconnectWebsocket(socketSilent ? 'no inbound response before command ACK timeout' : 'subscription ACK timeout')
+    }
     return
   }
   removeWebsocketCommandLedgerEntryById(entryId, 'response timeout; socket had unrelated inbound traffic')
@@ -8041,10 +8077,9 @@ Boolean shouldReplayUnacknowledgedCommand(Map entry) {
   return true
 }
 
-void requeuePendingWebsocketCommands(String reason) {
-  List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-  if(ledger.isEmpty()) { return }
+Boolean requeuePendingWebsocketCommands(String reason) {
+  List<Map> ledger = takeWebsocketCommandLedgerBatch()
+  if(ledger.isEmpty()) { return false }
   Long currentTime = now()
   ledger.each { Map entry ->
     cancelExpectedSubscriptionEvents(entry)
@@ -8066,15 +8101,23 @@ void requeuePendingWebsocketCommands(String reason) {
       queueWebsocketMessage(entry.message.toString(), 0, metadata)
     }
   }
-  runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY)
-  unschedule('websocketCommandLedgerTimeout')
+  return true
+}
+
+List<Map> takeWebsocketCommandLedgerBatch() {
+  List<Map> ledger = []
+  synchronized(getWebsocketCommandLedgerLock()) {
+    List<Map> activeLedger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
+        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
+    ledger = activeLedger.collect { Map entry -> new LinkedHashMap(entry) }
+    runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY)
+  }
+  return ledger
 }
 
 void cancelWebsocketCommandLedgerForClosedConnection(String status) {
   if(status == 'open') { return }
   requeuePendingWebsocketCommands("socket status ${status}")
-  runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY)
-  unschedule('websocketCommandLedgerTimeout')
 }
 
 void flushWebsocketOutboundQueue() {
@@ -10878,7 +10921,9 @@ void processWebsocketMessage(String message) {
       String oldGroupId = getGroupId()
       String oldCoordinatorId = getGroupCoordinatorId()
       List<String> oldPlayerIds = getGroupPlayerIds()
-      if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds) {
+      Boolean expectedCoordinatorRole = getId() == coordinatorId
+      if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds &&
+          getIsGroupCoordinator() == expectedCoordinatorRole) {
         logDebug('Groups websocket event received but group data unchanged, skipping processing')
         publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         emitGroupFavoriteOperationEvent('groups', [

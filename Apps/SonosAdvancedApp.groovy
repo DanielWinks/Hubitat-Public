@@ -3020,7 +3020,9 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
   }
   Map topology = payload.topology instanceof Map ? new LinkedHashMap((Map)payload.topology) : [:]
   List<Map> groups = topology.groups instanceof List ? (List<Map>)topology.groups : []
-  if(groups.isEmpty() || groups.any { Map group -> !group.groupId || !(group.playerIds instanceof List) }) {
+  if(groups.isEmpty() || groups.any { Map group ->
+      !group.groupId || !group.coordinatorId || !(group.playerIds instanceof List)
+    }) {
     failZgtInitializationCandidate(playerDni, 'ZGT speaker supplied an incomplete household topology snapshot')
     return
   }
@@ -3035,28 +3037,42 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
   topology.putAll([schemaVersion: 1, sourcePlayerDni: playerDni,
     leaderGeneration: zgt.leaderGeneration, bootGeneration: zgt.bootGeneration, observedAt: observedAt])
   state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = topology
-  zgt.topologyReady = true
-  zgt.status = 'ready'
-  zgt.lastInboundAt = observedAt
   zgt.topologyFingerprint = topology.groups.collect { Map item ->
     "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
   }.sort().join('|')
+  zgt.status = 'applying-topology'
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-  unschedule('playerInitializationZgtWatchdog')
-  unschedule('zgtTopologyWatchdog')
   String json = JsonOutput.toJson(topology)
+  Boolean allPlayerTopologiesApplied = true
   getCurrentPlayerDevices().each { ChildDeviceWrapper child ->
     try {
       child.updateDataValue('householdTopology', json)
-      child.applyAppHouseholdTopology(json)
-    } catch(Exception e) { logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}") }
+      if(child.applyAppHouseholdTopology(json) != true) {
+        allPlayerTopologiesApplied = false
+        logWarn("Player ${child.deviceNetworkId} did not apply the accepted household topology")
+      }
+    } catch(Exception e) {
+      allPlayerTopologiesApplied = false
+      logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}")
+    }
   }
+  if(!allPlayerTopologiesApplied) {
+    failZgtInitializationCandidate(playerDni,
+        'One or more player devices could not apply the accepted household topology')
+    return
+  }
+  unschedule('playerInitializationZgtWatchdog')
+  unschedule('zgtTopologyWatchdog')
   getCurrentGroupDevices().each { ChildDeviceWrapper child ->
     try {
       child.updateDataValue('householdTopology', json)
       child.applyAppHouseholdTopology(json)
     } catch(Exception e) { logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}") }
   }
+  zgt.topologyReady = true
+  zgt.status = 'ready'
+  zgt.lastInboundAt = observedAt
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
   logInfo("Accepted full household topology from ${playerDni}; groups=${groups.size()}")
   runIn(1, 'startNextPlayerInitialization', [overwrite: true])
 }
