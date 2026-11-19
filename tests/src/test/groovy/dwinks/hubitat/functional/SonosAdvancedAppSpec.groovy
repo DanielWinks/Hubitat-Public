@@ -1855,6 +1855,21 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { String message -> message.contains('Ignoring stale state fanout') }
   }
 
+  def "new follower snapshot with coordinator identity is accepted for current membership"() {
+    given:
+    Map batch = [kind: 'followers', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      followerDNIs: [follower.deviceNetworkId], followerAttrs: [
+        status: 'playing', currentFavorite: 'No favorite playing', currentTrackName: 'Not Available'
+      ]]
+
+    when:
+    appScript.playerStateUpdateHandler(batch)
+
+    then:
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentFavorite == 'No favorite playing'
+  }
+
   def "player state drain yields after its fixed item budget"() {
     given:
     (0..<20).each { Integer index ->

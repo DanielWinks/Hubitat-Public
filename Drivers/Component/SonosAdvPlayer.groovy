@@ -7612,7 +7612,8 @@ void sendEventsToNewGroupMembers(List<String> newRincons) {
   List<Map> eventsToSend = getCurrentPlayingStatesForGroup()
   Map<String, Object> attributes = [:]
   eventsToSend.each { Map event -> if(event.name != null && event.value != null) { attributes[event.name.toString()] = event.value } }
-  publishPlayerStateUpdate([kind: 'followers', followerDNIs: groupDNIs, followerAttrs: attributes])
+  publishPlayerStateUpdate([kind: 'followers', coordinatorId: getId(),
+    followerDNIs: groupDNIs, followerAttrs: attributes])
 }
 
 @CompileStatic
