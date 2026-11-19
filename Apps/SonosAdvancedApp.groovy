@@ -5724,6 +5724,14 @@ void playerStateUpdateHandler(Object event) {
             followerAttributes[attributeName] = value
           }
         }
+        // These attributes describe the same transport state. A partial or
+        // coalesced fanout must not leave status and transportStatus split.
+        Object transportState = followerAttributes.containsKey('transportStatus')
+            ? followerAttributes.transportStatus : followerAttributes.status
+        if(transportState != null) {
+          followerAttributes.status = transportState
+          followerAttributes.transportStatus = transportState
+        }
         Boolean followerOutOfSync = followerAttributes.any { String name, Object value ->
           !sameChildStateValue(value, follower.currentValue(name, true))
         }

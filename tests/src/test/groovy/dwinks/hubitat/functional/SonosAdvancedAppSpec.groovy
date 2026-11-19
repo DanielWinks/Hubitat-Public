@@ -1844,6 +1844,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].transportStatus == 'playing'
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
   }
 
