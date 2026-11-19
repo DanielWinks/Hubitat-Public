@@ -209,7 +209,7 @@ Boolean handleAsyncHttpFailureWithRetry(
 
 definition(
   name: 'Sonos Advanced Controller',
-  version: '0.18.6',
+  version: '0.18.7',
   namespace: 'dwinks',
   author: 'Daniel Winks',
   category: 'Audio',
