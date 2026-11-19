@@ -708,6 +708,48 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationZgt.topologyReady == true
   }
 
+  def "unchanged household membership fans out changed group and player names only"() {
+    given:
+    appScript.state.playerInitializationBootGeneration = 'boot-name-refresh'
+    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
+      leaderGeneration: 'leader-name-refresh', bootGeneration: 'boot-name-refresh', topologyReady: false]
+    Map initialPayload = [leaderGeneration: 'leader-name-refresh', topology: [groups: [[
+      groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', coordinatorName: 'Cora’s Room',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['Cora’s Room', 'Sebastian’s Room'],
+      groupName: 'Cora’s Room + 1'
+    ]]]]
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, initialPayload)
+    appScript.applyHouseholdTopologyBatch()
+    appScript.scheduled.clear()
+
+    when:
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
+      leaderGeneration: 'leader-name-refresh', observedAt: appScript.now() + 1000L,
+      topology: [groups: [[
+        groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', coordinatorName: 'Cora’s Room',
+        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['Cora’s Room', 'Sebastian’s Room'],
+        groupName: 'Downstairs'
+      ]]]
+    ])
+
+    then:
+    appScript.state.householdTopologyApply.attributeOnly == true
+    appScript.scheduled.any { List job -> job[1] == 'applyHouseholdTopologyBatch' }
+
+    when:
+    appScript.applyHouseholdTopologyBatch()
+
+    then:
+    [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
+      player.topologyMembershipPublishFlags == [false, false]
+    }
+    new JsonSlurper().parseText(coordinator.currentValues.householdTopology).groups[0].groupName == 'Downstairs'
+    new JsonSlurper().parseText(follower.currentValues.householdTopology).groups[0].coordinatorName == 'Cora’s Room'
+    appScript.state.playerInitializationZgt.topologyReady == true
+    !appScript.scheduled.any { List job -> job[1] == 'startNextPlayerInitialization' }
+    !appScript.state.containsKey('householdTopologyApply')
+  }
+
   def "topology differing from the accepted household snapshot arms the ZGT watchdog"() {
     given:
     appScript.state.sonosHouseholdTopology = [groups: [

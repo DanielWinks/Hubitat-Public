@@ -3164,6 +3164,9 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
     logDebug("Ignoring older household topology snapshot from ${playerDni}")
     return
   }
+  String priorAttributeFingerprint = householdTopologyAttributesFingerprint(prior)
+  String attributeFingerprint = householdTopologyAttributesFingerprint(topology)
+  Boolean attributesChanged = priorAttributeFingerprint != attributeFingerprint
   topology.putAll([schemaVersion: 1, sourcePlayerDni: playerDni,
     leaderGeneration: zgt.leaderGeneration, bootGeneration: zgt.bootGeneration, observedAt: observedAt])
   state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = topology
@@ -3174,21 +3177,54 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
       zgt.bootGeneration?.toString() == (state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString()) &&
       zgt.topologyReady == true
   zgt.topologyFingerprint = topologyFingerprint
+  zgt.topologyAttributeFingerprint = attributeFingerprint
   if(sameAcceptedTopology) {
     zgt.lastInboundAt = observedAt
     state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-    logDebug("Ignoring unchanged household topology fingerprint=${topologyFingerprint}")
+    if(attributesChanged) {
+      state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = [playerDni: playerDni,
+        leaderGeneration: zgt.leaderGeneration?.toString(), bootGeneration: zgt.bootGeneration?.toString(),
+        fingerprint: topologyFingerprint, attributeFingerprint: attributeFingerprint, attributeOnly: true,
+        observedAt: observedAt, playerCursor: 0, groupCursor: 0,
+        playerDnis: getCurrentPlayerDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
+        groupDnis: getCurrentGroupDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
+        playerApplyFailed: false]
+      runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+      logDebug("Refreshing household topology metadata without membership changes; fingerprint=${attributeFingerprint}")
+    } else {
+      logDebug("Ignoring unchanged household topology fingerprint=${topologyFingerprint}")
+    }
     return
   }
   zgt.status = 'applying-topology'
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
   state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = [playerDni: playerDni,
       leaderGeneration: zgt.leaderGeneration?.toString(), bootGeneration: zgt.bootGeneration?.toString(),
-      fingerprint: topologyFingerprint, observedAt: observedAt, playerCursor: 0, groupCursor: 0,
+      fingerprint: topologyFingerprint, attributeFingerprint: attributeFingerprint, attributeOnly: false,
+      observedAt: observedAt, playerCursor: 0, groupCursor: 0,
       playerDnis: getCurrentPlayerDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
       groupDnis: getCurrentGroupDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
       playerApplyFailed: false]
   runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+}
+
+/** Fingerprint names separately so metadata can refresh without changing topology identity. */
+String householdTopologyAttributesFingerprint(Map topology) {
+  List<Map> groups = topology?.groups instanceof List ? (List<Map>)topology.groups : []
+  List<Map> normalized = groups.collect { Map group ->
+    List<String> ids = normalizeGroupPlayerIds(group.playerIds)
+    List<String> names = group.playerNames instanceof List
+        ? ((List)group.playerNames).collect { Object name -> name?.toString() ?: '' } : []
+    List<Map> members = []
+    for(Integer index = 0; index < ids.size(); index++) {
+      members.add([id: ids[index], name: index < names.size() ? names[index] : ''])
+    }
+    members.sort { Map left, Map right -> left.id.toString() <=> right.id.toString() }
+    [groupId: group.groupId?.toString() ?: '', groupName: group.groupName?.toString() ?: '',
+      coordinatorName: group.coordinatorName?.toString() ?: '', members: members]
+  }
+  normalized.sort { Map left, Map right -> left.groupId.toString() <=> right.groupId.toString() }
+  return JsonOutput.toJson(normalized)
 }
 
 /** Apply accepted topology in small continuations; child calls may enqueue app callbacks. */
@@ -3201,7 +3237,8 @@ void applyHouseholdTopologyBatch() {
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
   if(apply.leaderGeneration?.toString() != zgt.leaderGeneration?.toString() ||
       apply.bootGeneration?.toString() != zgt.bootGeneration?.toString() ||
-      apply.fingerprint?.toString() != zgt.topologyFingerprint?.toString()) {
+      apply.fingerprint?.toString() != zgt.topologyFingerprint?.toString() ||
+      apply.attributeFingerprint?.toString() != zgt.topologyAttributeFingerprint?.toString()) {
     state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
     logDebug('Discarding superseded household topology apply continuation')
     return
@@ -3236,6 +3273,10 @@ void applyHouseholdTopologyBatch() {
   if(playerCursor < playerDnis.size()) { runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true]); return }
   if(playerApplyFailed) {
     state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
+    if(apply.attributeOnly == true) {
+      logWarn('Household topology metadata refresh failed while applying player attributes')
+      return
+    }
     failZgtInitializationCandidate(apply.playerDni?.toString(),
         'One or more player devices could not apply the accepted household topology')
     return
@@ -3259,6 +3300,14 @@ void applyHouseholdTopologyBatch() {
     return
   }
   state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
+  if(apply.attributeOnly == true) {
+    zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+    zgt.lastInboundAt = apply.observedAt ?: now()
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    logDebug("Applied household topology metadata refresh; players=${playerDnis.size()}, groups=${groupDnis.size()}")
+    return
+  }
   unschedule('playerInitializationZgtWatchdog')
   unschedule('zgtTopologyWatchdog')
   zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map

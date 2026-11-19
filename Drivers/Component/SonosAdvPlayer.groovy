@@ -4366,9 +4366,11 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
       String groupId = group['@ID'].toString() ?: groupCoordinatorId
       List<String> groupPlayerIds = []
       List<String> groupPlayerNames = []
+      String coordinatorName = null
       for(GPathResult member : group.children()) {
         String memberId = member['@UUID'].toString()
         String memberName = member['@ZoneName'].toString()
+        if(memberId == groupCoordinatorId) { coordinatorName = memberName }
         if(member['@Invisible'].toString() != '1') {
           groupPlayerIds.add(memberId)
           groupPlayerNames.add(memberName)
@@ -4378,9 +4380,12 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
           player = member
         }
       }
+      String resolvedGroupName = group['@ZoneGroupName'].toString()
+      if(!resolvedGroupName && groupPlayerIds.contains(playerId)) { resolvedGroupName = groupName }
+      if(!resolvedGroupName) { resolvedGroupName = coordinatorName }
       householdGroups.add([groupId: groupId, coordinatorId: groupCoordinatorId,
-        playerIds: groupPlayerIds, playerNames: groupPlayerNames,
-        groupName: group['@ZoneGroupName'].toString() ?: groupName])
+        playerIds: groupPlayerIds, playerNames: groupPlayerNames, coordinatorName: coordinatorName,
+        groupName: resolvedGroupName])
     }
     if(playerGroup == null || player == null) {
       List<String> observedMemberIds = []
@@ -4419,10 +4424,12 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
       }
     }
     String playerGroupId = playerGroup['@ID'].toString() ?: coordinatorId
+    Map playerGroupInfo = householdGroups.find { Map item -> item.groupId?.toString() == playerGroupId }
+    String playerGroupName = playerGroupInfo?.groupName?.toString()
     return [playerFound: true, groupId: playerGroupId, coordinatorId: coordinatorId, coordinatorName: coordinatorName,
       memberIds: sortedMemberIds, visibleMemberIds: visibleMemberIdList,
       memberNames: new ArrayList<String>(memberNames),
-      groupName: groupName, batteryData: batteryData, groups: householdGroups]
+      groupName: playerGroupName, batteryData: batteryData, groups: householdGroups]
   } catch(Exception e) {
     logDebug("Could not inspect ZGT topology for ${playerId}: ${e.message}")
     return null
@@ -11154,6 +11161,16 @@ void processWebsocketMessage(String message) {
       ArrayList<String> playerIds = (ArrayList<String>)group?.playerIds
       String coordinatorId = group?.coordinatorId?.toString()
 
+      // Resolve descriptive metadata before the topology identity fast path.
+      // Names can change while group membership remains stable.
+      ArrayList<Map> players = (ArrayList<Map>)eventData?.players
+      Map<String, String> playerNameMap = [:]
+      if(players != null) {
+        players.each { Map p -> playerNameMap[(String)p?.id] = p?.name?.toString() }
+      }
+      String coordinatorName = playerNameMap[coordinatorId]
+      List<String> groupMemberNames = playerIds.collect { String pid -> playerNameMap[pid] }.findAll { it != null }
+
       Map websocketTopology = [
         coordinatorId: coordinatorId,
         memberIds: (playerIds ?: []).toList().sort()
@@ -11178,7 +11195,10 @@ void processWebsocketMessage(String message) {
       Boolean expectedCoordinatorRole = getId() == coordinatorId
       if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds &&
           getIsGroupCoordinator() == expectedCoordinatorRole) {
-        logDebug('Groups websocket event received but group data unchanged, skipping processing')
+        if(groupName) { setGroupName(groupName) }
+        if(coordinatorName) { setGroupCoordinatorName(coordinatorName) }
+        if(groupMemberNames) { setGroupMemberNames(groupMemberNames) }
+        logDebug('Groups websocket topology identity unchanged; descriptive metadata refreshed')
         publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         emitGroupFavoriteOperationEvent('groups', [
           groupId: groupId,
@@ -11193,19 +11213,9 @@ void processWebsocketMessage(String message) {
       if(coordinatorId != null && coordinatorId != '') { setGroupCoordinatorId(coordinatorId) }
       if(playerIds != null && playerIds.size() > 0) { setGroupPlayerIds(playerIds) }
 
-      // Build a lightweight player name lookup from the players array
-      // Only extract id and name — ignore devices, capabilities, versions, etc.
-      ArrayList<Map> players = (ArrayList<Map>)eventData?.players
-      Map<String, String> playerNameMap = [:]
-      if(players != null) {
-        players.each { Map p -> playerNameMap[(String)p?.id] = p?.name?.toString() }
-      }
-
-      String coordinatorName = playerNameMap[coordinatorId]
       if(coordinatorName != null && coordinatorName != '') { setGroupCoordinatorName(coordinatorName) }
 
       try {
-        List<String> groupMemberNames = playerIds.collect { String pid -> playerNameMap[pid] }.findAll { it != null }
         setGroupMemberNames(groupMemberNames)
       } catch (Exception e) { logDebug('Could not get group member names, continuing on...') }
 

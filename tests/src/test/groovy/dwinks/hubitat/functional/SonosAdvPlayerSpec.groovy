@@ -1811,16 +1811,19 @@ class SonosAdvPlayerSpec extends Specification {
   def "topology snapshot includes every household group for the app ZGT source"() {
     given:
     String zoneState = '<ZoneGroupState><ZoneGroups>' +
-      '<ZoneGroup ID="G1" Coordinator="RINCON_A" ZoneGroupName="Downstairs">' +
+      '<ZoneGroup ID="G1" Coordinator="RINCON_A">' +
       '<ZoneGroupMember UUID="RINCON_A" ZoneName="Living Room"/>' +
       '<ZoneGroupMember UUID="RINCON_B" ZoneName="Kitchen"/>' +
       '</ZoneGroup>' +
       '<ZoneGroup ID="G2" Coordinator="RINCON_C" ZoneGroupName="Office">' +
       '<ZoneGroupMember UUID="RINCON_C" ZoneName="Office"/>' +
       '</ZoneGroup>' +
+      '<ZoneGroup ID="G3" Coordinator="RINCON_D">' +
+      '<ZoneGroupMember UUID="RINCON_D" ZoneName="Bedroom"/>' +
+      '</ZoneGroup>' +
       '</ZoneGroups></ZoneGroupState>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-    String xml = '<propertyset><property><ZoneGroupName>Household</ZoneGroupName><ZoneGroupState>' +
+    String xml = '<propertyset><property><ZoneGroupName>Downstairs</ZoneGroupName><ZoneGroupState>' +
       escapedState + '</ZoneGroupState></property></propertyset>'
 
     when:
@@ -1828,11 +1831,40 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     topology.playerFound == true
-    topology.groups.size() == 2
-    topology.groups*.groupId == ['G1', 'G2']
+    topology.groups.size() == 3
+    topology.groups*.groupId == ['G1', 'G2', 'G3']
     topology.groups[0].playerIds == ['RINCON_A', 'RINCON_B']
     topology.groups[1].coordinatorId == 'RINCON_C'
     topology.groups[1].playerIds == ['RINCON_C']
+    topology.groups*.groupName == ['Downstairs', 'Office', 'Bedroom']
+    topology.groupName == 'Downstairs'
+  }
+
+  def "household ZGT reporter name is not reused for other groups"() {
+    given:
+    String zoneState = '<ZoneGroups>' +
+      '<ZoneGroup ID="G-CORA" Coordinator="RINCON_CORA">' +
+      '<ZoneGroupMember UUID="RINCON_CORA" ZoneName="Cora’s Room"/>' +
+      '</ZoneGroup>' +
+      '<ZoneGroup ID="G-ARC" Coordinator="RINCON_ARC">' +
+      '<ZoneGroupMember UUID="RINCON_ARC" ZoneName="Arc"/>' +
+      '</ZoneGroup>' +
+      '<ZoneGroup ID="G-KITCHEN" Coordinator="RINCON_KITCHEN">' +
+      '<ZoneGroupMember UUID="RINCON_KITCHEN" ZoneName="Kitchen"/>' +
+      '</ZoneGroup>' +
+      '</ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String xml = '<propertyset><property><ZoneGroupName>Cora’s Room</ZoneGroupName><ZoneGroupState>' +
+      escapedState + '</ZoneGroupState></property></propertyset>'
+
+    when:
+    Map topology = driver.parseZoneGroupTopologySnapshot(xml, 'RINCON_CORA')
+
+    then:
+    topology.groupName == 'Cora’s Room'
+    topology.groups.collectEntries { Map group -> [(group.groupId): group.groupName] } == [
+      'G-CORA': 'Cora’s Room', 'G-ARC': 'Arc', 'G-KITCHEN': 'Kitchen'
+    ]
   }
 
   def "ZGT notification with unrelated service properties still publishes household topology"() {
@@ -3314,6 +3346,37 @@ class SonosAdvPlayerSpec extends Specification {
     Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
     payload.event == 'favoriteLoadAck'
     payload.data.success == true
+  }
+
+  def "groups websocket refreshes descriptive metadata without republishing unchanged membership"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_ARC'
+    driver.device.dataValues.groupId = 'GROUP_ARC'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_ARC'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_ARC'
+    driver.device.dataValues.isGroupCoordinator = 'true'
+    driver.device.currentValues.groupName = 'Cora’s Room'
+    driver.device.currentValues.groupCoordinatorName = 'Old Name'
+    driver.device.currentValues.groupMemberNames = '[Old Name]'
+    List<Map> parentMembershipUpdates = []
+    driver.metaClass.parentUpdateGroupDevices = { String coordinatorId, List<String> playerIds ->
+      parentMembershipUpdates << [coordinatorId, playerIds]
+    }
+    String message = JsonOutput.toJson([
+      [type: 'groups', name: 'groups'],
+      [groups: [[id: 'GROUP_ARC', name: 'Arc', coordinatorId: 'RINCON_ARC', playerIds: ['RINCON_ARC']]],
+       players: [[id: 'RINCON_ARC', name: 'Arc']]]
+    ])
+
+    when:
+    driver.processWebsocketMessage(message)
+
+    then:
+    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupName == 'Arc'
+    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupCoordinatorName == 'Arc'
+    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupMemberNames == '[Arc]'
+    parentMembershipUpdates.empty
+    driver.logs.any { String log -> log.contains('topology identity unchanged; descriptive metadata refreshed') }
   }
 
   def "empty groups responses emit a negative topology observation"() {
