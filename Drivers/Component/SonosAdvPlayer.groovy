@@ -7727,7 +7727,7 @@ void clearPlaylistsMap() {
 
 @CompileStatic
 List<Map> getCurrentPlayingStatesForGroup() {
-  List currentStates = []
+  List<Map<String, Object>> currentStates = []
   currentStates.add([name: 'albumArtURI',           value: getAlbumArtURI()])
   currentStates.add([name: 'status',                value: getTransportStatus()])
   currentStates.add([name: 'transportStatus',       value: getTransportStatus()])
@@ -7758,7 +7758,7 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'currentTrackNumber',    value: this.device.currentValue('currentTrackNumber')])
   currentStates.add([name: 'groupVolume',           value: getGroupVolumeState()])
   currentStates.add([name: 'groupMute',             value: getGroupMuteState()])
-  Map<String, Object> defaults = [
+  Map<String, Object> defaults = (Map<String, Object>)[
     albumArtURI: 'Not Available', status: 'stopped', transportStatus: 'stopped',
     currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'off',
     currentCrossfadeMode: 'off', currentTrackDuration: '00:00:00',
@@ -7771,7 +7771,7 @@ List<Map> getCurrentPlayingStatesForGroup() {
     albumArtMedium: 'Not Available', albumArtLarge: 'Not Available', audioSource: 'Not Available',
     currentTrackNumber: 0, groupVolume: 0, groupMute: 'unmuted'
   ]
-  currentStates.each { Map item ->
+  currentStates.each { Map<String, Object> item ->
     if(item.value == null) { item.value = defaults[item.name?.toString()] }
   }
   return currentStates
