@@ -276,6 +276,74 @@ class HubitatLogsMCPSpec extends Specification {
     [unexpected: true]                  | 'may have executed'
   }
 
+  def "hub reboot tool is marked destructive and requires explicit authorization"() {
+    given:
+    List<Map> requests = []
+    app.metaClass.httpPost = { Map params, Closure callback -> requests.add(params) }
+
+    when:
+    Map definition = app.hubRebootToolDefinition()
+    Map rejected = app.rebootHub([:])
+
+    then:
+    definition.name == 'hubitat_reboot_hub'
+    definition.annotations.destructiveHint == true
+    definition.inputSchema.required == ['allowSensitive']
+    rejected.isError
+    requests.empty
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "authorized hub reboot uses the fixed endpoint without purging or rebuilding"() {
+    given:
+    List<Map> requests = []
+    app.metaClass.httpPost = { Map params, Closure callback ->
+      requests.add(params)
+      callback.call([status: 200, data: 'Rebooting'])
+    }
+
+    when:
+    Map result = (Map) new JsonSlurper().parseText(app.dispatchTool([
+      name: 'hubitat_reboot_hub', arguments: [allowSensitive: true]
+    ]).content[0].text)
+
+    then:
+    result.success
+    result.outcome == 'accepted'
+    requests.size() == 1
+    requests[0].uri == 'http://127.0.0.1:8080/hub/reboot'
+    requests[0].requestContentType == 'application/json'
+    requests[0].body == [rebuildDataBase: false, purgeLogs: false]
+    requests[0].followRedirects == false
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "hub reboot transport failure is reported as uncertain without retrying"() {
+    given:
+    int requests = 0
+    app.metaClass.httpPost = { Map params, Closure callback ->
+      requests++
+      throw new RuntimeException('connection closed')
+    }
+
+    when:
+    Map result = (Map) new JsonSlurper().parseText(app.rebootHub([allowSensitive: true]).content[0].text)
+
+    then:
+    !result.success
+    result.outcome == 'unknown'
+    result.retryable == false
+    result.message.contains('Check hub connectivity before retrying')
+    requests == 1
+
+    cleanup:
+    app.metaClass = null
+  }
+
   def "device inventory finds children and paginates filtered snapshots without current states"() {
     given:
     List<Map> calls = []

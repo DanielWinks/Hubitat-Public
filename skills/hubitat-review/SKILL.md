@@ -8,6 +8,15 @@ description: Review Hubitat Apps, Drivers, and legacy libraries for correctness,
 Perform a read-only, evidence-based review of the complete changed file and
 relevant history.
 
+For defects reported from another installation, treat the reported software
+versions as the working facts unless the report contradicts itself. Do not
+access the reporter's hub or devices, including for read-only diagnostics. If a
+separate reproduction is requested, keep this review read-only and use only the
+user's own connected test hubs for that reproduction; prefer the user's C-7 for
+timing or resource-sensitive defects and use the C-8 for comparison or fallback.
+Do not block code review on additional diagnostics from the reporter when the
+supplied report and source are enough to assess the defect.
+
 Check:
 
 1. Syntax, metadata, imports, callbacks, capabilities, and sandbox rules.

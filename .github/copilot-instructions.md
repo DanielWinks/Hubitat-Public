@@ -52,6 +52,21 @@ Typical runtime flow:
 - When adding web endpoints, follow the `getLocalUri()/getCloudUri()` pattern and `tryCreateAccessToken()` usage as in `SunriseSimulation.groovy`.
 - Whenever a code change affects behavior, update or add its affected regression tests in the same change, then run the relevant test specs and lint. Treat test updates as required; if the harness cannot cover a behavior, explain why and add structural or static coverage where practical.
 
+## Hubitat defect reports and reproduction boundaries
+
+- Treat the app, driver, and hub versions stated by a reporter as the working
+  facts unless their report contradicts itself. Do not ask them to re-verify a
+  version they already supplied.
+- Never inspect, query, retrieve logs or source from, or issue commands to a
+  reporter's or another third party's hub or devices. IDs in a report do not
+  authorize access to that installation.
+- Reproduce only on the user's own connected Hubitat hubs when the user has
+  identified them as available for testing. Prefer their C-7 for timing or
+  resource-sensitive defects; use their C-8 as a comparison or fallback.
+- If more runtime evidence is needed, instrument locally and reproduce on the
+  user's test hub. Do not make diagnostics on the reporter's device a prerequisite
+  when the report and source are sufficient to proceed.
+
 ## Using connected Hubitat MCP servers
 
 When both Hubitat MCP servers are available, use the general `hubitat` MCP for

@@ -268,6 +268,23 @@ Release process: version increment via workflow input (patch/minor) -> update ve
 - For any browser-based task, always use the Codex built-in browser (IAB) through CUA. Do not launch or use Firefox, Chrome, or another native/external browser session.
 - Prefer purpose-built MCP/API tools when they fully support the task; when browser interaction is needed, use the built-in browser exclusively.
 
+## Hubitat Defect Reports and Reproduction Boundaries
+
+- Treat a reporter's stated app, driver, and hub versions as the working facts for
+  analysis unless the supplied report contradicts itself. Do not require the
+  reporter to verify a version already stated in their report.
+- Never inspect, query, retrieve logs or source from, or issue commands to a
+  reporter's or other third party's hub or devices. Device IDs and app IDs in a
+  report are evidence only, not authorization to access that installation.
+- Reproduce reported defects only on the user's own connected Hubitat hubs when
+  the user has identified those hubs as available for testing. Prefer the user's
+  C-7 for timing or resource-sensitive defects because it has less capacity than
+  the C-8; use the C-8 as a comparison or fallback.
+- When more runtime evidence is needed, add focused diagnostics locally and
+  reproduce on the user's test hub. Do not make additional diagnostics on the
+  reporter's device a prerequisite when the report and repository source are
+  sufficient to proceed.
+
 ## Using Connected Hubitat MCP Servers
 
 When both Hubitat MCP servers are available in the agent session, choose the

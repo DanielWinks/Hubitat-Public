@@ -1,7 +1,7 @@
 # Hubitat Logs MCP Server
 
-This standalone Hubitat app exposes MCP tools for logs, device diagnostics, and
-device commands. Historical entries come from the hub's internal equivalent of
+This standalone Hubitat app exposes MCP tools for logs, device diagnostics,
+device commands, and a guarded hub reboot action. Historical entries come from the hub's internal equivalent of
 `http://192.168.1.4/logs/past/json`; the app fetches through
 `http://127.0.0.1:8080` so the hub does not route back to its LAN address.
 
@@ -15,7 +15,7 @@ device commands. Historical entries come from the hub's internal equivalent of
 5. Copy the displayed local MCP URL, including its `access_token` query parameter,
    into the MCP client's Streamable HTTP server configuration.
 
-The app exposes ten tools:
+The app exposes eleven tools:
 
 - `hubitat_get_logs` filters by app instance ID, device ID, source type (`app`
   or `dev`), severity, keyword, and timestamp;
@@ -56,6 +56,12 @@ The app exposes ten tools:
   request. This tool can change device state; use it only when requested. A
   timeout or malformed response does not establish whether the command ran, so
   check device state before retrying.
+- `hubitat_reboot_hub` immediately reboots the hub through its fixed local
+  `/hub/reboot` endpoint. It requires `allowSensitive: true` and should only be
+  called when the user explicitly requests a reboot. The request always sets
+  `rebuildDataBase` and `purgeLogs` to `false`. If the hub closes the connection
+  before responding, the result is marked unknown and non-retryable; check hub
+  connectivity before issuing another reboot request.
 - `hubitat_list_device_inventory` returns device IDs, names, types, rooms,
   network IDs, status flags, and other inventory metadata, including nested child
   devices flattened with their `parentId`. Filter by `query`, exact `room`, or
@@ -93,5 +99,5 @@ validated numeric ID. Device commands use a second fixed route and are limited
 to commands advertised by the selected device.
 
 The local endpoint uses HTTP. Keep it on a trusted LAN and do not share the OAuth
-URL: its access token grants access to device and app diagnostics and command
-execution.
+URL: its access token grants access to device and app diagnostics, command
+execution, and hub reboot.

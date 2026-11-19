@@ -19,6 +19,8 @@ import java.text.SimpleDateFormat
 @Field static final String DEVICE_DETAILS_URI = "http://127.0.0.1:8080/device/fullJson/"
 @Field static final String DEVICE_COMMAND_TOOL_NAME = "hubitat_invoke_device_command"
 @Field static final String DEVICE_COMMAND_URI = "http://127.0.0.1:8080/device/runmethod"
+@Field static final String HUB_REBOOT_TOOL_NAME = "hubitat_reboot_hub"
+@Field static final String HUB_REBOOT_URI = "http://127.0.0.1:8080/hub/reboot"
 @Field static final String DEVICE_LIST_TOOL_NAME = "hubitat_list_device_inventory"
 @Field static final String DEVICE_LIST_URI = "http://127.0.0.1:8080/hub2/devicesList"
 @Field static final String APP_LIST_TOOL_NAME = "hubitat_list_app_inventory"
@@ -47,7 +49,7 @@ definition(
     name: "Hubitat Logs MCP Server",
     namespace: "dwinks",
     author: "Daniel Winks",
-    description: "Access Hubitat logs, device diagnostics, and device commands through MCP.",
+    description: "Access Hubitat logs, diagnostics, device commands, and guarded hub controls through MCP.",
     category: "Convenience",
     iconUrl: "",
     iconX2Url: "",
@@ -117,8 +119,8 @@ Map mainPage() {
             } else {
                 paragraph("Save this app, then reopen it to view the OAuth-protected MCP URL.")
             }
-            paragraph("This server exposes logs, runtime and app diagnostics, device inventory, device details, and device commands.")
-            paragraph("The MCP URL also permits device commands. Share it only with trusted clients.")
+            paragraph("This server exposes logs, runtime and app diagnostics, device inventory, device details, device commands, and a guarded hub reboot action.")
+            paragraph("The MCP URL permits device commands and a hub reboot. Share it only with trusted clients.")
             paragraph("This reads the same logs route as ${LAN_LOGS_URI} through Hubitat's internal loopback address.")
         }
         section("Logging") {
@@ -170,7 +172,7 @@ Map handleMcpPost() {
                 result = [:]
                 break
             case "tools/list":
-                result = [tools: [logsToolDefinition(), logSummaryToolDefinition(), liveLogsToolDefinition(), timelineToolDefinition(), deviceDetailsToolDefinition(), deviceCommandToolDefinition(), deviceInventoryToolDefinition(), appInventoryToolDefinition(), runtimeDiagnosticsToolDefinition(), appDiagnosticsToolDefinition()]]
+                result = [tools: [logsToolDefinition(), logSummaryToolDefinition(), liveLogsToolDefinition(), timelineToolDefinition(), deviceDetailsToolDefinition(), deviceCommandToolDefinition(), hubRebootToolDefinition(), deviceInventoryToolDefinition(), appInventoryToolDefinition(), runtimeDiagnosticsToolDefinition(), appDiagnosticsToolDefinition()]]
                 break
             case "tools/call":
                 result = dispatchTool(message.params)
@@ -195,8 +197,8 @@ Map initializeResult(Map message) {
     return [
         protocolVersion: version,
         capabilities: [tools: [listChanged: false]],
-        serverInfo: [name: "hubitat-logs-mcp", version: "1.1.0"],
-        instructions: "Use ${MCP_TOOL_NAME} for filtered historical log pages, ${SUMMARY_TOOL_NAME} for compact counts and recurring issues, ${LOG_DIAGNOSTICS_TOOL_NAME} for Hubitat performance counters and jobs, ${APP_STATUS_TOOL_NAME} for app subscriptions and scheduled jobs, ${TIMELINE_TOOL_NAME} for a chronological log timeline, ${LIVE_TOOL_NAME} for the live stream, ${DEVICE_LIST_TOOL_NAME} to find devices, ${APP_LIST_TOOL_NAME} to find apps, and ${DEVICE_DETAILS_TOOL_NAME} for device diagnostics. ${DEVICE_COMMAND_TOOL_NAME} changes device state; invoke it only when the user explicitly requests the command."
+        serverInfo: [name: "hubitat-logs-mcp", version: "1.2.0"],
+        instructions: "Use ${MCP_TOOL_NAME} for filtered historical log pages, ${SUMMARY_TOOL_NAME} for compact counts and recurring issues, ${LOG_DIAGNOSTICS_TOOL_NAME} for Hubitat performance counters and jobs, ${APP_STATUS_TOOL_NAME} for app subscriptions and scheduled jobs, ${TIMELINE_TOOL_NAME} for a chronological log timeline, ${LIVE_TOOL_NAME} for the live stream, ${DEVICE_LIST_TOOL_NAME} to find devices, ${APP_LIST_TOOL_NAME} to find apps, and ${DEVICE_DETAILS_TOOL_NAME} for device diagnostics. ${DEVICE_COMMAND_TOOL_NAME} changes device state; invoke it only when the user explicitly requests the command. ${HUB_REBOOT_TOOL_NAME} immediately reboots the hub; invoke it only when the user explicitly requests a reboot and pass allowSensitive=true."
     ]
 }
 
@@ -296,6 +298,15 @@ Map deviceCommandToolDefinition() {
         ], required: ["deviceId", "command"], additionalProperties: false]]
 }
 
+Map hubRebootToolDefinition() {
+    return [name: HUB_REBOOT_TOOL_NAME,
+        description: "Immediately reboot this Hubitat hub. This interrupts automations and device communication. Use only when the user explicitly requests a reboot; set allowSensitive=true.",
+        annotations: [readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            allowSensitive: [type: "boolean", const: true, description: "Required authorization flag. Set true only after the user explicitly requests a hub reboot."]
+        ], required: ["allowSensitive"], additionalProperties: false]]
+}
+
 Map deviceInventoryToolDefinition() {
     return [name: DEVICE_LIST_TOOL_NAME, description: "Search a paginated device inventory, including child devices. Results contain device names, IDs, types, rooms, and other metadata; current attribute values are omitted.",
         annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
@@ -350,6 +361,8 @@ Map dispatchTool(Object rawParams) {
             return getDeviceDetails(arguments)
         case DEVICE_COMMAND_TOOL_NAME:
             return invokeDeviceCommand(arguments)
+        case HUB_REBOOT_TOOL_NAME:
+            return rebootHub(arguments)
         case DEVICE_LIST_TOOL_NAME:
             return getDeviceInventory(arguments)
         case APP_LIST_TOOL_NAME:
@@ -694,6 +707,29 @@ Map invokeDeviceCommand(Map arguments) {
     } catch (Exception e) {
         logWarn("Device command request failed for device ${deviceId}: ${e.class.simpleName}")
         return mcpError("The command request failed or timed out. The command may have executed; check device state before retrying.")
+    }
+}
+
+Map rebootHub(Map arguments) {
+    if (arguments.allowSensitive != true) {
+        return mcpError("Hub reboot requires allowSensitive=true and an explicit user request.")
+    }
+    try {
+        Integer responseStatus = 0
+        httpPost([uri: HUB_REBOOT_URI, timeout: 15, requestContentType: "application/json",
+            contentType: "application/json", followRedirects: false,
+            body: [rebuildDataBase: false, purgeLogs: false]]) { response ->
+            responseStatus = response.status as Integer
+        }
+        if (responseStatus >= 200 && responseStatus < 300) {
+            return mcpJsonResult([success: true, outcome: "accepted", message: "The hub accepted the reboot request. Its connection may drop while it restarts."])
+        }
+        return mcpJsonResult([success: false, outcome: "unknown", retryable: false, httpStatus: responseStatus,
+            message: "The hub returned an unexpected response. The reboot may have started; check hub connectivity before retrying."])
+    } catch (Exception e) {
+        logWarn("Hub reboot request ended without confirmation: ${e.class.simpleName}")
+        return mcpJsonResult([success: false, outcome: "unknown", requestSent: true, retryable: false,
+            message: "The reboot request may have been accepted before the connection closed. Check hub connectivity before retrying."])
     }
 }
 
