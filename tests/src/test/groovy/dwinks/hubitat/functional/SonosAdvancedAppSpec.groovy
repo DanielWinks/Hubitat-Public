@@ -1838,6 +1838,23 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
   }
 
+  def "delayed coordinator state fanout is dropped after follower leaves topology"() {
+    given:
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
+    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      followerDNIs: [follower.deviceNetworkId], followerAttrs: [currentTrackName: 'Old group track'],
+      playbackAttrs: [currentTrackName: 'Old group track']]
+
+    when:
+    appScript.playerStateUpdateHandler(batch)
+
+    then:
+    appScript.state.pendingChildEvents == null
+    appScript.logs.any { String message -> message.contains('Ignoring stale state fanout') }
+  }
+
   def "player state drain yields after its fixed item budget"() {
     given:
     (0..<20).each { Integer index ->

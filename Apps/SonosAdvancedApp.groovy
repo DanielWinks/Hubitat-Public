@@ -5677,9 +5677,14 @@ void playerStateUpdateHandler(Object event) {
   }
   if(!(kind in ['state', 'followers'])) { return }
   if(payload.followerDNIs instanceof List && payload.followerAttrs instanceof Map) {
+    ChildDeviceWrapper coordinator = coordinatorId ? findPlayerBySonosId(coordinatorId) : null
     ((List)payload.followerDNIs).each { Object dni ->
       ChildDeviceWrapper follower = dni != null ? getChildDevice(dni.toString()) : null
       if(follower != null) {
+        if(!isCurrentGroupFollower(coordinator, follower, coordinatorId)) {
+          logDebug("Ignoring stale ${kind} fanout from coordinator=${coordinatorId ?: 'unknown'} to ${follower.deviceNetworkId}; current membership no longer matches")
+          return
+        }
         Boolean trackPositionEnabled = isPlayerTrackPositionUpdatesEnabled(follower)
         Map<String, Object> followerAttributes = [:]
         ((Map)payload.followerAttrs).each { Object name, Object value ->
@@ -5700,6 +5705,26 @@ void playerStateUpdateHandler(Object event) {
     flushGroupDeviceState(coordinatorId, payload.volumeAttrs instanceof Map ? (Map)payload.volumeAttrs : null,
       payload.playbackAttrs instanceof Map ? (Map)payload.playbackAttrs : null)
   }
+}
+
+/** Reject delayed coordinator snapshots after topology has moved the player. */
+Boolean isCurrentGroupFollower(ChildDeviceWrapper coordinator, ChildDeviceWrapper follower,
+    String coordinatorId) {
+  if(coordinator == null || follower == null || !coordinatorId) { return false }
+  String coordinatorPlayerId = coordinator.getDataValue('id')?.toString()
+  String followerPlayerId = follower.getDataValue('id')?.toString()
+  List<String> currentMembers = coordinator.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+  return coordinatorPlayerId == coordinatorId && followerPlayerId != null &&
+      coordinator.getDataValue('groupCoordinatorId')?.toString() == coordinatorId &&
+      currentMembers.contains(coordinatorId) && currentMembers.contains(followerPlayerId)
+}
+
+ChildDeviceWrapper findPlayerBySonosId(String playerId) {
+  if(!playerId) { return null }
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices().findAll { ChildDeviceWrapper child ->
+    child?.getDataValue('id')?.toString() == playerId
+  } ?: []
+  return players ? players[0] : null
 }
 
 void resetLongBackoffPlayersSeenInHousehold(Object observedPlayers) {

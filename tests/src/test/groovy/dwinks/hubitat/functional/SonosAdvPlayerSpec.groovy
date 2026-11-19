@@ -2712,6 +2712,35 @@ class SonosAdvPlayerSpec extends Specification {
     playerStateMessages()[0].playbackAttrs.trackData == driver.device.currentValues.trackData
   }
 
+  def "new group member snapshot explicitly clears absent coordinator playback values"() {
+    when:
+    List<Map> snapshot = driver.getCurrentPlayingStatesForGroup()
+    Map<String, Object> attributes = [:]
+    snapshot.each { Map item -> attributes[item.name.toString()] = item.value }
+
+    then:
+    attributes.currentFavorite == 'No favorite playing'
+    attributes.currentPlaylist == 'No playlist playing'
+    attributes.currentTrackName == 'Not Available'
+    attributes.currentArtistName == 'Not Available'
+    attributes.audioSource == 'Not Available'
+    attributes.status == 'stopped'
+    attributes.transportStatus == 'stopped'
+    attributes.currentTrackNumber == 0
+    attributes.values().every { Object value -> value != null }
+  }
+
+  def "grouped follower ignores its local AVTransport playback stream"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_TEST'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_COORD'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    driver.device.dataValues.isGroupCoordinator = 'false'
+
+    expect:
+    driver.isGroupedFollowerForPlayback()
+  }
+
   def "group update enqueue re-arms a flush when its scheduled marker is stale"() {
     given:
     driver.scheduled.clear()

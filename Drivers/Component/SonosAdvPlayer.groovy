@@ -4501,6 +4501,15 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
     }
   }
 
+  // A grouped follower's local AVTransport state describes its own queue, not
+  // the currently playing group transport. The coordinator is authoritative
+  // until topology says this player has left the group. Its local subscription
+  // will publish a fresh standalone snapshot after it becomes coordinator.
+  if(isGroupedFollowerForPlayback()) {
+    logTrace("Ignoring follower-local AVTransport playback state while grouped: ${device.getDeviceNetworkId()}")
+    return
+  }
+
   String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
   String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
   String enqueuedTransportURIMetaDataString = instanceId['EnqueuedTransportURIMetaData']['@val']
@@ -7606,6 +7615,11 @@ void sendEventsToNewGroupMembers(List<String> newRincons) {
   publishPlayerStateUpdate([kind: 'followers', followerDNIs: groupDNIs, followerAttrs: attributes])
 }
 
+@CompileStatic
+Boolean isGroupedFollowerForPlayback() {
+  return getGroupPlayerIds().size() > 1 && !getIsGroupCoordinator()
+}
+
 void publishPlayerStateUpdate(Map payload) {
   Map eventData = new LinkedHashMap(payload)
   eventData['playerDni'] = device.getDeviceNetworkId()
@@ -7744,6 +7758,22 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'currentTrackNumber',    value: this.device.currentValue('currentTrackNumber')])
   currentStates.add([name: 'groupVolume',           value: getGroupVolumeState()])
   currentStates.add([name: 'groupMute',             value: getGroupMuteState()])
+  Map<String, Object> defaults = [
+    albumArtURI: 'Not Available', status: 'stopped', transportStatus: 'stopped',
+    currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'off',
+    currentCrossfadeMode: 'off', currentTrackDuration: '00:00:00',
+    currentArtistName: 'Not Available', currentAlbumName: 'Not Available',
+    currentTrackName: 'Not Available', trackDescription: 'Not Available',
+    trackData: JsonOutput.toJson([name: 'Not Available', artist: 'Not Available', album: 'Not Available']),
+    currentFavorite: 'No favorite playing', currentPlaylist: 'No playlist playing',
+    nextArtistName: 'Not Available', nextAlbumName: 'Not Available', nextTrackName: 'Not Available',
+    nextTrackAlbumArtURI: 'Not Available', albumArtSmall: 'Not Available',
+    albumArtMedium: 'Not Available', albumArtLarge: 'Not Available', audioSource: 'Not Available',
+    currentTrackNumber: 0, groupVolume: 0, groupMute: 'unmuted'
+  ]
+  currentStates.each { Map item ->
+    if(item.value == null) { item.value = defaults[item.name?.toString()] }
+  }
   return currentStates
 }
 // =============================================================================
