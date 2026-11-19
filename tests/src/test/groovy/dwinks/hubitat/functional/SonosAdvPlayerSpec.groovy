@@ -2568,6 +2568,43 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
   }
 
+  def "unchanged coordinator metadata is still batched to followers and group devices"() {
+    given:
+    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_FOLLOW'
+    driver.device.currentValues.currentTrackName = 'Peepers On Crane Pond'
+    driver.device.currentValues.currentArtistName = 'Adirondack Environments'
+    driver.device.currentValues.currentAlbumName = 'Peepers On Crane Pond'
+    driver.device.currentValues.currentTrackDuration = '0:41:03'
+    driver.device.currentValues.currentTrackNumber = 1
+    driver.device.currentValues.trackDescription = 'Peepers On Crane Pond by Adirondack Environments'
+    driver.device.currentValues.trackData = JsonOutput.toJson([
+      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
+    ])
+
+    when:
+    driver.setCurrentTrackName('Peepers On Crane Pond')
+    driver.setCurrentArtistName('Adirondack Environments')
+    driver.setCurrentAlbumName('Peepers On Crane Pond')
+    driver.setCurrentTrackDuration('0:41:03')
+    driver.setCurrentTrackNumber(1)
+    driver.setTrackDescription('Peepers On Crane Pond by Adirondack Environments')
+    driver.setTrackDataEvents([
+      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
+    ])
+    driver.flushPendingGroupDeviceUpdates()
+
+    then:
+    playerStateMessages().size() == 1
+    playerStateMessages()[0].followerAttrs.currentTrackName == 'Peepers On Crane Pond'
+    playerStateMessages()[0].followerAttrs.currentArtistName == 'Adirondack Environments'
+    playerStateMessages()[0].followerAttrs.currentAlbumName == 'Peepers On Crane Pond'
+    playerStateMessages()[0].followerAttrs.currentTrackDuration == '0:41:03'
+    playerStateMessages()[0].followerAttrs.currentTrackNumber == 1
+    playerStateMessages()[0].followerAttrs.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
+    playerStateMessages()[0].playbackAttrs.currentTrackName == 'Peepers On Crane Pond'
+    playerStateMessages()[0].playbackAttrs.trackData == driver.device.currentValues.trackData
+  }
+
   def "group update enqueue re-arms a flush when its scheduled marker is stale"() {
     given:
     driver.scheduled.clear()

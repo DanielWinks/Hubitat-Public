@@ -7048,8 +7048,9 @@ String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMod
 
 @CompileStatic
 void setCurrentTrackDuration(String currentTrackDuration){
-  if(!shouldQueueLocalDeviceEvent('currentTrackDuration', currentTrackDuration, getCurrentTrackDuration())) { return }
-  queueLocalDeviceEvent('currentTrackDuration', currentTrackDuration)
+  if(shouldQueueLocalDeviceEvent('currentTrackDuration', currentTrackDuration, getCurrentTrackDuration())) {
+    queueLocalDeviceEvent('currentTrackDuration', currentTrackDuration)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackDuration: currentTrackDuration])
 }
@@ -7110,8 +7111,9 @@ Long getTrackPositionUpdated() { return this.device.currentValue('trackPositionU
 @CompileStatic
 void setCurrentArtistName(String currentArtistName) {
   String value = currentArtistName ?: 'Not Available'
-  if(!shouldQueueLocalDeviceEvent('currentArtistName', value, getCurrentArtistName())) { return }
-  queueLocalDeviceEvent('currentArtistName', value)
+  if(shouldQueueLocalDeviceEvent('currentArtistName', value, getCurrentArtistName())) {
+    queueLocalDeviceEvent('currentArtistName', value)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentArtistName: value])
 }
@@ -7120,8 +7122,9 @@ String getCurrentArtistName() { return this.device.currentValue('currentArtistNa
 @CompileStatic
 void setCurrentAlbumName(String currentAlbumName) {
   String value = currentAlbumName ?: 'Not Available'
-  if(!shouldQueueLocalDeviceEvent('currentAlbumName', value, getCurrentAlbumName())) { return }
-  queueLocalDeviceEvent('currentAlbumName', value)
+  if(shouldQueueLocalDeviceEvent('currentAlbumName', value, getCurrentAlbumName())) {
+    queueLocalDeviceEvent('currentAlbumName', value)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentAlbumName: value])
 }
@@ -7130,8 +7133,9 @@ String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName
 @CompileStatic
 void setCurrentTrackName(String currentTrackName) {
   String value = currentTrackName ?: 'Not Available'
-  if(!shouldQueueLocalDeviceEvent('currentTrackName', value, getCurrentTrackName())) { return }
-  queueLocalDeviceEvent('currentTrackName', value)
+  if(shouldQueueLocalDeviceEvent('currentTrackName', value, getCurrentTrackName())) {
+    queueLocalDeviceEvent('currentTrackName', value)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackName: value])
 }
@@ -7140,8 +7144,9 @@ String getCurrentTrackName() { return this.device.currentValue('currentTrackName
 @CompileStatic
 void setCurrentTrackNumber(Integer currentTrackNumber) {
   Integer value = currentTrackNumber ?: 0
-  if(!shouldQueueLocalDeviceEvent('currentTrackNumber', value, getCurrentTrackNumber())) { return }
-  queueLocalDeviceEvent('currentTrackNumber', value)
+  if(shouldQueueLocalDeviceEvent('currentTrackNumber', value, getCurrentTrackNumber())) {
+    queueLocalDeviceEvent('currentTrackNumber', value)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackNumber: value])
   observeTransportTrackNumber(value)
@@ -7163,20 +7168,23 @@ void observeTransportTrackNumber(Integer currentTrackNumber) {
 @CompileStatic
 void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
-  if(!shouldQueueLocalDeviceEvent('trackDescription', trackDescription, prevTrackDescription)) { return }
-  queueLocalDeviceEvent('trackDescription', trackDescription)
+  Boolean changed = shouldQueueLocalDeviceEvent('trackDescription', trackDescription, prevTrackDescription)
+  if(changed) {
+    queueLocalDeviceEvent('trackDescription', trackDescription)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([trackDescription: trackDescription])
 
-  if(getIsGroupCoordinator()) {getPlaybackMetadataStatusIn()}
+  if(changed && getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
 }
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
 
 @CompileStatic
 void setTrackDataEvents(Map trackData) {
   String trackDataJson = JsonOutput.toJson(trackData)
-  if(!shouldQueueLocalDeviceEvent('trackData', trackDataJson, getTrackDataEvents())) { return }
-  queueLocalDeviceEvent('trackData', trackDataJson)
+  if(shouldQueueLocalDeviceEvent('trackData', trackDataJson, getTrackDataEvents())) {
+    queueLocalDeviceEvent('trackData', trackDataJson)
+  }
   // Queue for batched group device update
   queueGroupDeviceUpdate([trackData: trackDataJson])
 }

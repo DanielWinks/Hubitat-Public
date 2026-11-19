@@ -5100,7 +5100,7 @@ void sendChildEvent(String dni, Map event) {
 }
 
 /** Queue only changed values and coalesce them by child and attribute. */
-void queueChildStateBatch(String dni, Map attributes) {
+void queueChildStateBatch(String dni, Map attributes, Boolean forceSnapshot = false) {
   if(!dni || !attributes) { return }
   Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
@@ -5112,7 +5112,8 @@ void queueChildStateBatch(String dni, Map attributes) {
     String name = rawName?.toString()
     if(name && value != null) {
       Object prior = childEvents.containsKey(name) ? childEvents[name] : sentForChild[name]
-      if((!sentForChild.containsKey(name) && !childEvents.containsKey(name)) || !sameChildStateValue(prior, value)) {
+      if(forceSnapshot || ((!sentForChild.containsKey(name) && !childEvents.containsKey(name)) ||
+          !sameChildStateValue(prior, value))) {
         childEvents[name] = value
       }
     }
@@ -5461,7 +5462,10 @@ void playerStateUpdateHandler(Object event) {
             followerAttributes[attributeName] = value
           }
         }
-        queueChildStateBatch(dni.toString(), followerAttributes)
+        Boolean followerOutOfSync = followerAttributes.any { String name, Object value ->
+          !sameChildStateValue(value, follower.currentValue(name, true))
+        }
+        queueChildStateBatch(dni.toString(), followerAttributes, followerOutOfSync)
       }
     }
   }
@@ -11243,6 +11247,7 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   Boolean isCallerActualCoordinator = callerDevice?.getDataValue('isGroupCoordinator') == 'true'
 
   groupsForCoord.each { ChildDeviceWrapper gd ->
+    Boolean wasActive = gd.currentValue('switch', true) == 'on'
     HashSet<String> configuredPlayers = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
     observedPlayers.add(coordinatorId)
@@ -11273,7 +11278,16 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
         }
       }
     }
-    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes)
+    // Force a complete coordinator snapshot when the group becomes active or
+    // its public playback state is behind the coordinator. The last-sent cache
+    // may contain values from before the group reset its attributes while
+    // inactive, so it cannot establish what the group currently publishes.
+    Boolean playbackStateOutOfSync = attributes.any { String name, Object value ->
+      !(name in ['switch', 'currentlyJoinedPlayers']) && value != null &&
+          !sameChildStateValue(value, gd.currentValue(name, true))
+    }
+    Boolean forceSnapshot = shouldBeActive && (!wasActive || playbackStateOutOfSync)
+    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes, forceSnapshot)
   }
 }
 
@@ -11282,7 +11296,7 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
  * app-to-group boundary: it never calls a group driver while processing a
  * player callback.
  */
-void queueGroupDeviceState(String groupDni, Map attributes) {
+void queueGroupDeviceState(String groupDni, Map attributes, Boolean forceSnapshot = false) {
   if(!groupDni || !attributes || attributes.isEmpty()) {
     return
   }
@@ -11297,7 +11311,8 @@ void queueGroupDeviceState(String groupDni, Map attributes) {
       : [:]
   attributes.each { String name, Object value ->
     Object previous = groupState.containsKey(name) ? groupState[name] : sentForGroup[name]
-    if(value != null && ((!groupState.containsKey(name) && !sentForGroup.containsKey(name)) || !sameChildStateValue(previous, value))) {
+    if(value != null && (forceSnapshot ||
+        ((!groupState.containsKey(name) && !sentForGroup.containsKey(name)) || !sameChildStateValue(previous, value)))) {
       groupState[name] = value
     }
   }
@@ -11410,7 +11425,11 @@ void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAt
 
   List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
   groupsForCoord.each { ChildDeviceWrapper groupDevice ->
-    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), combined)
+    Boolean playbackStateOutOfSync = combined.any { Object rawName, Object value ->
+      String name = rawName?.toString()
+      name != null && value != null && !sameChildStateValue(value, groupDevice.currentValue(name, true))
+    }
+    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), combined, playbackStateOutOfSync)
   }
 }
 

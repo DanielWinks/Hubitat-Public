@@ -1764,6 +1764,35 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
   }
 
+  def "follower metadata batch repairs stale public attributes despite a matching last-sent cache"() {
+    given:
+    follower.currentValues.currentTrackName = 'Not Available'
+    follower.currentValues.currentArtistName = 'Not Available'
+    follower.currentValues.trackDescription = 'Not Available'
+    appScript.state.lastSentChildState = [(follower.deviceNetworkId): [
+      currentTrackName: 'Peepers On Crane Pond',
+      currentArtistName: 'Adirondack Environments',
+      trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
+    ]]
+    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      followerDNIs: [follower.deviceNetworkId], followerAttrs: [
+        currentTrackName: 'Peepers On Crane Pond',
+        currentArtistName: 'Adirondack Environments',
+        trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
+      ]]
+
+    when:
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
+    appScript.drainQueuedChildEvents()
+    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
+      follower.refreshedPlaybackUpdates.last())
+
+    then:
+    attributes.currentTrackName == 'Peepers On Crane Pond'
+    attributes.currentArtistName == 'Adirondack Environments'
+    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
+  }
+
   def "child state drain dispatches a bounded number of children and reschedules the remainder"() {
     given:
     appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
@@ -3107,6 +3136,103 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'on'
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
+  }
+
+  def "group activation batches the coordinator's existing track metadata snapshot"() {
+    given:
+    coordinator.currentValues.currentTrackName = 'Peepers On Crane Pond'
+    coordinator.currentValues.currentArtistName = 'Adirondack Environments'
+    coordinator.currentValues.currentAlbumName = 'Peepers On Crane Pond'
+    coordinator.currentValues.currentTrackDuration = '0:41:03'
+    coordinator.currentValues.currentTrackNumber = 1
+    coordinator.currentValues.trackDescription = 'Peepers On Crane Pond by Adirondack Environments'
+    coordinator.currentValues.trackData = JsonOutput.toJson([
+      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
+    ])
+    group.currentValues.switch = 'off'
+    group.currentValues.currentTrackName = 'n/a'
+    appScript.state.lastSentChildState = ['GROUP-DNI': [
+      currentTrackName: 'Peepers On Crane Pond',
+      currentArtistName: 'Adirondack Environments',
+      currentAlbumName: 'Peepers On Crane Pond',
+      trackDescription: 'Peepers On Crane Pond by Adirondack Environments',
+      trackData: coordinator.currentValues.trackData
+    ]]
+
+    when:
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
+    appScript.drainGroupStateUpdates()
+    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
+      group.refreshedPlaybackUpdates.last())
+
+    then:
+    attributes.switch == 'on'
+    attributes.currentTrackName == 'Peepers On Crane Pond'
+    attributes.currentArtistName == 'Adirondack Environments'
+    attributes.currentAlbumName == 'Peepers On Crane Pond'
+    attributes.currentTrackDuration == '0:41:03'
+    attributes.currentTrackNumber == 1
+    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
+    attributes.trackData == coordinator.currentValues.trackData
+  }
+
+  def "active group metadata mismatch bypasses a stale last-sent snapshot"() {
+    given:
+    coordinator.currentValues.currentTrackName = 'Peepers On Crane Pond'
+    coordinator.currentValues.currentArtistName = 'Adirondack Environments'
+    coordinator.currentValues.trackDescription = 'Peepers On Crane Pond by Adirondack Environments'
+    group.currentValues.switch = 'on'
+    group.currentValues.currentTrackName = 'n/a'
+    group.currentValues.currentArtistName = 'n/a'
+    group.currentValues.trackDescription = 'n/a'
+    appScript.state.lastSentChildState = ['GROUP-DNI': [
+      currentTrackName: 'Peepers On Crane Pond',
+      currentArtistName: 'Adirondack Environments',
+      trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
+    ]]
+
+    when:
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
+    appScript.drainGroupStateUpdates()
+    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
+      group.refreshedPlaybackUpdates.last())
+
+    then:
+    attributes.switch == 'on'
+    attributes.currentTrackName == 'Peepers On Crane Pond'
+    attributes.currentArtistName == 'Adirondack Environments'
+    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
+  }
+
+  def "coordinator metadata batch repairs group attributes despite a matching last-sent cache"() {
+    given:
+    group.currentValues.switch = 'on'
+    group.currentValues.status = 'inactive'
+    group.currentValues.currentTrackName = 'n/a'
+    group.currentValues.currentArtistName = 'n/a'
+    group.currentValues.trackDescription = 'n/a'
+    appScript.state.lastSentChildState = ['GROUP-DNI': [
+      currentTrackName: 'Peepers On Crane Pond',
+      currentArtistName: 'Adirondack Environments',
+      trackDescription: 'Peepers On Crane Pond by Adirondack Environments',
+      status: 'playing'
+    ]]
+
+    when:
+    appScript.flushGroupDeviceState('RINCON_COORD', null, [
+      status: 'playing', currentTrackName: 'Peepers On Crane Pond',
+      currentArtistName: 'Adirondack Environments',
+      trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
+    ])
+    appScript.drainGroupStateUpdates()
+    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
+      group.refreshedPlaybackUpdates.last())
+
+    then:
+    attributes.status == 'playing'
+    attributes.currentTrackName == 'Peepers On Crane Pond'
+    attributes.currentArtistName == 'Adirondack Environments'
+    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
   }
 
   def "ungrouped group refresh reflects only the coordinator when individual control is disabled"() {
