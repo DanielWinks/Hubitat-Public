@@ -7727,7 +7727,7 @@ void clearPlaylistsMap() {
 
 @CompileStatic
 List<Map> getCurrentPlayingStatesForGroup() {
-  List<Map<String, Object>> currentStates = []
+  List<Map> currentStates = []
   currentStates.add([name: 'albumArtURI',           value: getAlbumArtURI()])
   currentStates.add([name: 'status',                value: getTransportStatus()])
   currentStates.add([name: 'transportStatus',       value: getTransportStatus()])
@@ -7758,23 +7758,27 @@ List<Map> getCurrentPlayingStatesForGroup() {
   currentStates.add([name: 'currentTrackNumber',    value: this.device.currentValue('currentTrackNumber')])
   currentStates.add([name: 'groupVolume',           value: getGroupVolumeState()])
   currentStates.add([name: 'groupMute',             value: getGroupMuteState()])
-  Map<String, Object> defaults = (Map<String, Object>)[
-    albumArtURI: 'Not Available', status: 'stopped', transportStatus: 'stopped',
-    currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'off',
-    currentCrossfadeMode: 'off', currentTrackDuration: '00:00:00',
-    currentArtistName: 'Not Available', currentAlbumName: 'Not Available',
-    currentTrackName: 'Not Available', trackDescription: 'Not Available',
-    trackData: JsonOutput.toJson([name: 'Not Available', artist: 'Not Available', album: 'Not Available']),
-    currentFavorite: 'No favorite playing', currentPlaylist: 'No playlist playing',
-    nextArtistName: 'Not Available', nextAlbumName: 'Not Available', nextTrackName: 'Not Available',
-    nextTrackAlbumArtURI: 'Not Available', albumArtSmall: 'Not Available',
-    albumArtMedium: 'Not Available', albumArtLarge: 'Not Available', audioSource: 'Not Available',
-    currentTrackNumber: 0, groupVolume: 0, groupMute: 'unmuted'
-  ]
-  currentStates.each { Map<String, Object> item ->
-    if(item.value == null) { item.value = defaults[item.name?.toString()] }
+  for(Object itemObject : currentStates) {
+    Map item = (Map)itemObject
+    if(item.get('value') == null) { item.put('value', groupSnapshotFallback(item.get('name')?.toString())) }
   }
   return currentStates
+}
+
+@CompileStatic
+Object groupSnapshotFallback(String attributeName) {
+  switch(attributeName) {
+    case 'status': case 'transportStatus': return 'stopped'
+    case 'currentRepeatOneMode': case 'currentRepeatAllMode': case 'currentShuffleMode':
+    case 'currentCrossfadeMode': return 'off'
+    case 'currentTrackDuration': return '00:00:00'
+    case 'currentFavorite': return 'No favorite playing'
+    case 'currentPlaylist': return 'No playlist playing'
+    case 'currentTrackNumber': case 'groupVolume': return 0
+    case 'groupMute': return 'unmuted'
+    case 'trackData': return JsonOutput.toJson([name: 'Not Available', artist: 'Not Available', album: 'Not Available'])
+    default: return 'Not Available'
+  }
 }
 // =============================================================================
 // End Getters and Setters
