@@ -18,13 +18,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up JDK 27
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '27'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Compile lint suite
         working-directory: tests
@@ -243,13 +243,17 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Set up JDK 27
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '27'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # Parallel spec jobs share the same Gradle cache scope. Let the lint
+          # job update it and keep matrix jobs from racing to save entries.
+          cache-read-only: true
 
       - name: Run selected tests
         working-directory: tests
