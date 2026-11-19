@@ -272,6 +272,7 @@ preferences {
 @Field static final String PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY = 'sonosPlayerPlaybackObservations'
 @Field static final String PENDING_PLAYER_STATE_UPDATES_STATE_KEY = 'pendingPlayerStateUpdates'
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerStateUpdateDrainScheduled'
+@Field static final String PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY = 'playerStateUpdateDrainDueAt'
 @Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
@@ -310,6 +311,7 @@ preferences {
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
 @Field static final String LAST_SENT_CHILD_STATE_KEY = 'lastSentChildState'
 @Field static final String CHILD_STATE_DRAIN_SCHEDULED_KEY = 'childStateDrainScheduled'
+@Field static final String CHILD_STATE_DRAIN_DUE_AT_KEY = 'childStateDrainDueAt'
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
 @Field static final String GROUP_STATE_DRAIN_SCHEDULED_KEY = 'groupStateDrainScheduled'
 @Field static final String NEW_UI_GROUP_EDITOR_MODE_KEY = 'newUiGroupEditorMode'
@@ -2640,12 +2642,8 @@ void systemStartHandler(Object event = null) {
 /** A reboot can discard the scheduled drain while persisting its state flag. */
 void rearmPlayerStateUpdateDrainAfterRestart() {
   state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
-  List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
-      ? (List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] : []
-  if(!pending.isEmpty()) {
-    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
-    runInMillis(25, 'drainQueuedPlayerStateUpdates', [overwrite: true])
-  }
+  state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
+  scheduleQueuedPlayerStateUpdateDrain(25)
 }
 
 /** Requeue grants that were active before a hub reboot and invalidate their callbacks. */
@@ -5122,10 +5120,55 @@ void queueChildStateBatch(String dni, Map attributes) {
   if(childEvents.isEmpty()) { return }
   pending[dni] = childEvents
   state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
-  if(state[CHILD_STATE_DRAIN_SCHEDULED_KEY] != true) {
-    state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
-    runInMillis(1000, 'drainQueuedChildEvents', [overwrite: true])
+  scheduleQueuedChildEventDrain(1000)
+}
+
+/** Re-arm pending child delivery even when a persisted marker outlives its job. */
+void scheduleQueuedChildEventDrain(Integer delayMs) {
+  Map pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
+  if(pending.isEmpty()) {
+    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
+    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
+    return
   }
+  Long currentTime = now() as Long
+  Long requestedDueAt = currentTime + Math.max(1, delayMs ?: 1000) as Long
+  Long existingDueAt = state[CHILD_STATE_DRAIN_DUE_AT_KEY] as Long
+  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
+  state[CHILD_STATE_DRAIN_DUE_AT_KEY] = dueAt
+  state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
+  try {
+    runInMillis(scheduleDelay, 'drainQueuedChildEvents', [overwrite: true])
+  } catch(Exception e) {
+    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
+    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
+    logWarn("Could not schedule child state drain: ${e.message}")
+  }
+}
+
+/** Drop only the initializing player's stale child publication and dedupe state. */
+void clearPendingChildStateForPlayer(String dni) {
+  if(!dni) { return }
+  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
+  pending.remove(dni)
+  if(pending.isEmpty()) {
+    state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
+    unschedule('drainQueuedChildEvents')
+    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
+    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
+  } else {
+    state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
+    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
+    scheduleQueuedChildEventDrain(1)
+  }
+  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
+  lastSent.remove(dni)
+  if(lastSent.isEmpty()) { state.remove(LAST_SENT_CHILD_STATE_KEY) }
+  else { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
 }
 
 Boolean sameChildStateValue(Object left, Object right) {
@@ -5138,11 +5181,12 @@ Boolean sameChildStateValue(Object left, Object right) {
  * delivery and never calls back into a player or group command.
  */
 void drainQueuedChildEvents() {
+  state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
+  state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
   Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
       : [:]
   state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
-  state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
   if(pending.isEmpty()) {
     return
   }
@@ -5192,8 +5236,7 @@ void drainQueuedChildEvents() {
       retryAndNew[dni] = combined
     }
     state[PENDING_CHILD_EVENT_QUEUE_KEY] = retryAndNew
-    state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
-    runInMillis(1000, 'drainQueuedChildEvents', [overwrite: true])
+    scheduleQueuedChildEventDrain(1000)
   }
 }
 
@@ -5204,9 +5247,30 @@ void playerStateUpdate(Map payload) {
       ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
   pending.add(new LinkedHashMap(payload))
   state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] = pending
-  if(state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] != true) {
-    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
-    runInMillis(25, 'drainQueuedPlayerStateUpdates', [overwrite: true])
+  scheduleQueuedPlayerStateUpdateDrain(25)
+}
+
+void scheduleQueuedPlayerStateUpdateDrain(Integer delayMs) {
+  List pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
+      ? (List)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] : []
+  if(pending.isEmpty()) {
+    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+    state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
+    return
+  }
+  Long currentTime = now() as Long
+  Long requestedDueAt = currentTime + Math.max(1, delayMs ?: 25) as Long
+  Long existingDueAt = state[PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY] as Long
+  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
+  state[PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY] = dueAt
+  state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
+  try {
+    runInMillis(scheduleDelay, 'drainQueuedPlayerStateUpdates', [overwrite: true])
+  } catch(Exception e) {
+    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+    state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
+    logWarn("Could not schedule player state update drain: ${e.message}")
   }
 }
 
@@ -5215,6 +5279,7 @@ void drainQueuedPlayerStateUpdates() {
       ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
   state.remove(PENDING_PLAYER_STATE_UPDATES_STATE_KEY)
   state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+  state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
   pending.each { Map payload -> playerStateUpdateHandler(payload) }
 }
 
@@ -5242,6 +5307,7 @@ void playerStateUpdateHandler(Object event) {
   Map active = activeByDni[playerDni]
   if(payload.kind == 'initializationRequested') {
     if(payload.clearPendingCommands == true) { clearPendingCommandsForDevice(playerDni) }
+    clearPendingChildStateForPlayer(playerDni)
     enqueuePlayerInitialization(playerDni, payload.reason?.toString() ?: 'child initialization request',
         state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true)
     return

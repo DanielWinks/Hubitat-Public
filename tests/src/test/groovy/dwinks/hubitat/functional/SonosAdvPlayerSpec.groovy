@@ -1684,6 +1684,73 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.isGroupCoordinator == 'false'
   }
 
+  def "unchanged internal coordinator values repair stale public attributes"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_FOLLOW'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    driver.device.dataValues.isGroupCoordinator = 'false'
+    driver.device.currentValues.groupCoordinatorId = 'RINCON_OLD'
+    driver.device.currentValues.isGroupCoordinator = 'on'
+
+    when:
+    driver.setGroupCoordinatorId('RINCON_COORD')
+
+    then:
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].groupCoordinatorId == 'RINCON_COORD'
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].isGroupCoordinator == 'off'
+    driver.scheduled.any { List call -> call[1] == 'flushPendingLocalDeviceEvents' }
+  }
+
+  def "batch event enqueue re-arms a drain when the scheduled marker is stale"() {
+    given:
+    driver.state.pendingBatchEvents = [status: 'playing']
+    driver.state.batchEventsScheduled = true
+
+    when:
+    driver.applyStateBatch('{"transportStatus":"playing"}')
+
+    then:
+    driver.state.batchEventsScheduled == true
+    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
+  }
+
+  def "initialization reset clears only this player's stale publication queues"() {
+    given:
+    String otherDni = 'SONOS-OTHER-DNI'
+    driver.state.pendingBatchEvents = [status: 'stopped']
+    driver.state.batchEventsScheduled = true
+    driver.state.pendingComponentChildEvents = ['child-dni': [switch: 'on']]
+    driver.state.componentChildDrainScheduled = true
+    driver.state.groupDeviceUpdateScheduled = true
+    driver.state.localDeviceEventDrainScheduled = true
+    driver.state.localDeviceEventDrainDueAt = 123L
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'] = [groupCoordinatorId: 'RINCON_OLD']
+    driver.lastLocalDeviceEvents['SONOS-TEST-DNI'] = [isGroupCoordinator: 'on']
+    driver.pendingLocalDeviceEvents[otherDni] = [status: 'playing']
+    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'] = [status: 'stopped']
+    driver.scheduled << [1000, 'drainBatchEvents']
+    driver.scheduled << [1000, 'flushPendingLocalDeviceEvents']
+    driver.scheduled << [1000, 'drainComponentChildEvents']
+    driver.scheduled << [1000, 'flushPendingGroupDeviceUpdates']
+
+    when:
+    driver.resetPendingStatePublicationForInitialization()
+
+    then:
+    !driver.state.containsKey('pendingBatchEvents')
+    !driver.state.containsKey('batchEventsScheduled')
+    !driver.state.containsKey('pendingComponentChildEvents')
+    !driver.state.containsKey('componentChildDrainScheduled')
+    !driver.state.containsKey('groupDeviceUpdateScheduled')
+    !driver.state.containsKey('localDeviceEventDrainScheduled')
+    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
+    !driver.lastLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
+    !driver.pendingGroupDeviceUpdates.containsKey('SONOS-TEST-DNI')
+    driver.pendingLocalDeviceEvents[otherDni].status == 'playing'
+    ['drainBatchEvents', 'flushPendingLocalDeviceEvents', 'drainComponentChildEvents',
+     'flushPendingGroupDeviceUpdates'].every { String method -> driver.unschedules.contains(method) }
+  }
+
   def "topology snapshot includes every household group for the app ZGT source"() {
     given:
     String zoneState = '<ZoneGroupState><ZoneGroups>' +

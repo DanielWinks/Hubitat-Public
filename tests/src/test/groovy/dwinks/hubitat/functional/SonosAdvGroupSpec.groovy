@@ -55,6 +55,36 @@ class SonosAdvGroupSpec extends Specification {
     return ((SonosGroupParentDouble)driver.parent).requests.findAll { Map request -> request.command }
   }
 
+  def "group batch enqueue re-arms a drain when the scheduled marker is stale"() {
+    given:
+    driver.state.pendingBatchEvents = [status: [value: 'playing']]
+    driver.state.batchEventsScheduled = true
+
+    when:
+    driver.queueBatchEvents([transportStatus: 'playing'])
+
+    then:
+    driver.state.batchEventsScheduled == true
+    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
+  }
+
+  def "group initialization clears stale publication events and drain jobs"() {
+    given:
+    driver.state.pendingBatchEvents = [status: [value: 'stopped']]
+    driver.state.batchEventsScheduled = true
+    driver.state.batchEventsDueAt = 100L
+    driver.scheduled << [1000, 'drainBatchEvents']
+
+    when:
+    driver.resetPendingStatePublicationForInitialization()
+
+    then:
+    !driver.state.containsKey('pendingBatchEvents')
+    !driver.state.containsKey('batchEventsScheduled')
+    !driver.state.containsKey('batchEventsDueAt')
+    driver.unschedules.contains('drainBatchEvents')
+  }
+
   def "retargeting a group fade to the reported volume cancels queued steps"() {
     given:
     driver.groupDeviceVolumeFadeState.clear()

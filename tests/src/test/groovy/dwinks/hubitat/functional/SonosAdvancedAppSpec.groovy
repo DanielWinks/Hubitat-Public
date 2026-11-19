@@ -1790,6 +1790,42 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.childStateDrainScheduled == null
   }
 
+  def "child state enqueue re-arms a drain when the scheduled marker is stale"() {
+    given:
+    appScript.state.pendingChildEvents = [(follower.deviceNetworkId): [transportStatus: 'playing']]
+    appScript.state.childStateDrainScheduled = true
+
+    when:
+    appScript.queueChildStateBatch(follower.deviceNetworkId, [status: 'playing'])
+
+    then:
+    appScript.state.childStateDrainScheduled == true
+    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
+  }
+
+  def "initialization request clears only that player's child publication cache"() {
+    given:
+    appScript.state.pendingChildEvents = [
+      (follower.deviceNetworkId): [status: 'stopped'],
+      (extra.deviceNetworkId): [status: 'paused']
+    ]
+    appScript.state.lastSentChildState = [
+      (follower.deviceNetworkId): [status: 'stopped'],
+      (extra.deviceNetworkId): [status: 'paused']
+    ]
+    Map request = [kind: 'initializationRequested', playerDni: follower.deviceNetworkId]
+
+    when:
+    appScript.playerStateUpdateHandler(request)
+
+    then:
+    !appScript.state.pendingChildEvents.containsKey(follower.deviceNetworkId)
+    !appScript.state.lastSentChildState.containsKey(follower.deviceNetworkId)
+    appScript.state.pendingChildEvents[extra.deviceNetworkId].status == 'paused'
+    appScript.state.lastSentChildState[extra.deviceNetworkId].status == 'paused'
+    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
+  }
+
   def "child state drain preserves events queued while a child batch is being delivered"() {
     given:
     follower.metaClass.applyStateBatch = { String json ->

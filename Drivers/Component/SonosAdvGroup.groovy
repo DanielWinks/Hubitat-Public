@@ -74,6 +74,7 @@ void logTrace(String message) {
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
 @Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
 @Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
+@Field static final String BATCH_EVENTS_DUE_AT_KEY = 'batchEventsDueAt'
 @Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
 @Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
@@ -376,12 +377,20 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 void initialize() {
   clearPendingCommandsForInitialization()
   migrateLegacyRuntimeState()
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  schedulePendingBatchEvents()
+  resetPendingStatePublicationForInitialization()
   removeStaleGroupStates()
   applyInitializationDefaults()
   // Initialize volume/mute state from coordinator
   runIn(5, 'refresh')
+}
+
+/** Clear stale group-device publication work; refresh repopulates authoritative state. */
+void resetPendingStatePublicationForInitialization() {
+  unschedule('drainBatchEvents')
+  state.remove(PENDING_BATCH_EVENTS_KEY)
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  state.remove(BATCH_EVENTS_DUE_AT_KEY)
+  logDebug("Cleared stale group state-publication queue and drain job for ${device.getDeviceNetworkId()}")
 }
 
 void applyInitializationDefaults() {
@@ -440,7 +449,6 @@ void uninstalled() {
 
 void configure() {
   migrateLegacyRuntimeState()
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
   removeStaleGroupStates()
   synchronizeTrackPositionPreference()
@@ -1083,15 +1091,31 @@ private void queueBatchEvents(Map attributes) {
 }
 
 private void schedulePendingBatchEvents() {
-  if(state[PENDING_BATCH_EVENTS_KEY] instanceof Map && !((Map)state[PENDING_BATCH_EVENTS_KEY]).isEmpty()
-      && state[BATCH_EVENTS_SCHEDULED_KEY] != true) {
-    state[BATCH_EVENTS_SCHEDULED_KEY] = true
-    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+  Map pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map ? (Map)state[PENDING_BATCH_EVENTS_KEY] : [:]
+  if(pending.isEmpty()) {
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    state.remove(BATCH_EVENTS_DUE_AT_KEY)
+    return
+  }
+  Long currentTime = now() as Long
+  Long requestedDueAt = currentTime + BATCH_EVENTS_INTERVAL_MS
+  Long existingDueAt = state[BATCH_EVENTS_DUE_AT_KEY] as Long
+  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
+  state[BATCH_EVENTS_DUE_AT_KEY] = dueAt
+  state[BATCH_EVENTS_SCHEDULED_KEY] = true
+  try {
+    runInMillis(scheduleDelay, 'drainBatchEvents', [overwrite: true])
+  } catch(Exception e) {
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    state.remove(BATCH_EVENTS_DUE_AT_KEY)
+    logWarn("Could not schedule group state event drain: ${e.message}")
   }
 }
 
 void drainBatchEvents() {
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  state.remove(BATCH_EVENTS_DUE_AT_KEY)
   Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
       ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
   if(pending.isEmpty()) {
@@ -1116,8 +1140,7 @@ void drainBatchEvents() {
     state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   } else {
     state[PENDING_BATCH_EVENTS_KEY] = remaining
-    state[BATCH_EVENTS_SCHEDULED_KEY] = true
-    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+    schedulePendingBatchEvents()
   }
 }
 

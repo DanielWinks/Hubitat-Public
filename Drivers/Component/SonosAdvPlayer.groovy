@@ -565,6 +565,7 @@ Boolean hasLineInCapability() {
 @Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
 @Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
 @Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
+@Field static final String BATCH_EVENTS_DUE_AT_KEY = 'batchEventsDueAt'
 @Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
 @Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final String LOCAL_EVENT_DRAIN_SCHEDULED_KEY = 'localDeviceEventDrainScheduled'
@@ -575,6 +576,7 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Object> localDeviceEventLocks = new ConcurrentHashMap<String, Object>()
 @Field static final String PENDING_COMPONENT_CHILD_EVENTS_KEY = 'pendingComponentChildEvents'
 @Field static final String COMPONENT_CHILD_DRAIN_SCHEDULED_KEY = 'componentChildDrainScheduled'
+@Field static final String COMPONENT_CHILD_DRAIN_DUE_AT_KEY = 'componentChildDrainDueAt'
 @Field static final String COMPONENT_CHILD_RETRY_ATTEMPTS_KEY = 'componentChildRetryAttempts'
 @Field static final String LAST_COMPONENT_CHILD_EVENTS_KEY = 'lastComponentChildEvents'
 @Field static final Integer COMPONENT_CHILD_MAX_WAIT_MS = 500
@@ -750,18 +752,38 @@ void prepareAppMediatedInitialization() {
   Map queueEntry = getUpnpRequestQueue()
   if(queueEntry != null) { synchronized(queueEntry.lock) { queueEntry.retired = false } }
   migrateLegacyRuntimeState()
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  schedulePendingBatchEvents()
-  scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
-  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-  scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
-  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
-  scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS)
+  resetPendingStatePublicationForInitialization()
   cancelAudioClipWatchdog()
   resetSubscriptionMutexesForDevice()
   maybeCleanupStaticDriverState()
   configure()
   scheduleWebsocketHealthCheck()
+}
+
+/** Drop stale publication work at the initialization boundary. A fresh Sonos
+ * topology/playback snapshot repopulates these queues after subscriptions start. */
+void resetPendingStatePublicationForInitialization() {
+  String dni = device.getDeviceNetworkId()
+  unschedule('drainBatchEvents')
+  unschedule('flushPendingLocalDeviceEvents')
+  unschedule('drainComponentChildEvents')
+  unschedule('flushPendingGroupDeviceUpdates')
+  state.remove(PENDING_BATCH_EVENTS_KEY)
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  state.remove(BATCH_EVENTS_DUE_AT_KEY)
+  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+  state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+  state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
+  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+  state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
+  state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
+  state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY)
+  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
+  pendingLocalDeviceEvents.remove(dni)
+  lastLocalDeviceEvents.remove(dni)
+  pendingGroupDeviceUpdates.remove(dni)
+  groupDeviceUpdateRetryAttempts.remove(dni)
+  logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
 }
 
 /** Queue a full subscription recovery. Both lifecycle entry points schedule the
@@ -6153,9 +6175,24 @@ void applyChildStateBatch(ChildDeviceWrapper child, String jsonAttributes) {
 private void scheduleComponentChildEventDrain(Integer delayMs) {
   Map pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  if(!pending.isEmpty() && state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] != true) {
-    state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = true
-    runInMillis(delayMs, 'drainComponentChildEvents', [overwrite: true])
+  if(pending.isEmpty()) {
+    state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+    state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
+    return
+  }
+  Long currentTime = now() as Long
+  Long requestedDueAt = currentTime + Math.max(1, delayMs ?: COMPONENT_CHILD_DRAIN_INTERVAL_MS) as Long
+  Long existingDueAt = state[COMPONENT_CHILD_DRAIN_DUE_AT_KEY] as Long
+  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
+  state[COMPONENT_CHILD_DRAIN_DUE_AT_KEY] = dueAt
+  state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = true
+  try {
+    runInMillis(scheduleDelay, 'drainComponentChildEvents', [overwrite: true])
+  } catch(Exception e) {
+    state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+    state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
+    logWarn("Could not schedule component-child event drain: ${e.message}")
   }
 }
 
@@ -6166,6 +6203,7 @@ private void scheduleComponentChildEventDrainNow(String dni) {
   if(dni && pending.containsKey(dni)) {
     unschedule('drainComponentChildEvents')
     state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+    state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
     scheduleComponentChildEventDrain(1)
   }
 }
@@ -6201,6 +6239,7 @@ private synchronized void queueComponentChildEvent(ChildDeviceWrapper child, Str
 
 synchronized void drainComponentChildEvents() {
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+  state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
   Map<String, Map<String, Object>> pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
   if(pending.isEmpty()) {
@@ -6354,15 +6393,31 @@ synchronized void applyStateBatch(String jsonAttributes) {
 }
 
 private void schedulePendingBatchEvents() {
-  if(state[PENDING_BATCH_EVENTS_KEY] instanceof Map && !((Map)state[PENDING_BATCH_EVENTS_KEY]).isEmpty()
-      && state[BATCH_EVENTS_SCHEDULED_KEY] != true) {
-    state[BATCH_EVENTS_SCHEDULED_KEY] = true
-    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+  Map pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map ? (Map)state[PENDING_BATCH_EVENTS_KEY] : [:]
+  if(pending.isEmpty()) {
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    state.remove(BATCH_EVENTS_DUE_AT_KEY)
+    return
+  }
+  Long currentTime = now() as Long
+  Long requestedDueAt = currentTime + BATCH_EVENTS_INTERVAL_MS
+  Long existingDueAt = state[BATCH_EVENTS_DUE_AT_KEY] as Long
+  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
+  state[BATCH_EVENTS_DUE_AT_KEY] = dueAt
+  state[BATCH_EVENTS_SCHEDULED_KEY] = true
+  try {
+    runInMillis(scheduleDelay, 'drainBatchEvents', [overwrite: true])
+  } catch(Exception e) {
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    state.remove(BATCH_EVENTS_DUE_AT_KEY)
+    logWarn("Could not schedule batched player event drain: ${e.message}")
   }
 }
 
 synchronized void drainBatchEvents() {
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  state.remove(BATCH_EVENTS_DUE_AT_KEY)
   Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
       ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
   if(pending.isEmpty()) {
@@ -6385,8 +6440,7 @@ synchronized void drainBatchEvents() {
     state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   } else {
     state[PENDING_BATCH_EVENTS_KEY] = remaining
-    state[BATCH_EVENTS_SCHEDULED_KEY] = true
-    runInMillis(BATCH_EVENTS_INTERVAL_MS, 'drainBatchEvents', [overwrite: true])
+    schedulePendingBatchEvents()
   }
 }
 
@@ -6522,6 +6576,11 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   if(groupCoordinatorId != previousGroupCoordinator) {
     logDebug("setGroupCoordinatorId ${groupCoordinatorId}")
     setDeviceDataValue('groupCoordinatorId', groupCoordinatorId)
+  }
+  // Internal device data can be correct while Hubitat's published Current
+  // State is stale (for example after a lost local-event drain callback).
+  if(groupCoordinatorId != previousGroupCoordinator ||
+      this.device.currentValue('groupCoordinatorId', true) != groupCoordinatorId) {
     queueLocalDeviceEvent('groupCoordinatorId', groupCoordinatorId)
   }
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
@@ -6569,9 +6628,12 @@ Boolean getIsGroupCoordinator() {
   return getDeviceDataValue('isGroupCoordinator') == 'true'
 }
 void setIsGroupCoordinator(Boolean isGroupCoordinator) {
-  if(isGroupCoordinator != getIsGroupCoordinator()) {
-    setDeviceDataValue('isGroupCoordinator', isGroupCoordinator.toString())
-    queueLocalDeviceEvent('isGroupCoordinator', isGroupCoordinator ? 'on' : 'off')
+  Boolean previouslyWasGroupCoordinator = getIsGroupCoordinator()
+  String publicValue = isGroupCoordinator ? 'on' : 'off'
+  setDeviceDataValue('isGroupCoordinator', isGroupCoordinator.toString())
+  if(isGroupCoordinator != previouslyWasGroupCoordinator ||
+      this.device.currentValue('isGroupCoordinator', true) != publicValue) {
+    queueLocalDeviceEvent('isGroupCoordinator', publicValue)
   }
 }
 
