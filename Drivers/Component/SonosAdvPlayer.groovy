@@ -7616,6 +7616,15 @@ void sendEventsToNewGroupMembers(List<String> newRincons) {
     followerDNIs: groupDNIs, followerAttrs: attributes])
 }
 
+/** Publish a complete coordinator state after the app applies an accepted topology snapshot. */
+Boolean publishCurrentGroupPlaybackSnapshot() {
+  if(!getIsGroupCoordinator()) { return false }
+  List<String> followers = getGroupFollowerRincons()
+  if(followers.isEmpty()) { return true }
+  sendEventsToNewGroupMembers(followers)
+  return true
+}
+
 @CompileStatic
 Boolean isGroupedFollowerForPlayback() {
   return getGroupPlayerIds().size() > 1 && !getIsGroupCoordinator()

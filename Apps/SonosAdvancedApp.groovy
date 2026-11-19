@@ -3281,6 +3281,36 @@ void applyHouseholdTopologyBatch() {
         'One or more player devices could not apply the accepted household topology')
     return
   }
+  if(apply.attributeOnly != true) {
+    Map topology = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
+        ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
+    List<Map> topologyGroups = topology.groups instanceof List ? (List<Map>)topology.groups : []
+    Set<String> activeCoordinatorIds = topologyGroups.findAll { Map group ->
+      normalizeGroupPlayerIds(group.playerIds).size() > 1
+    }.collect { Map group -> group.coordinatorId?.toString() }.findAll { String id -> id } as Set<String>
+    List<String> coordinatorDnis = playerDnis.findAll { String dni ->
+      ChildDeviceWrapper child = getChildDevice(dni)
+      child?.getDataValue('id')?.toString() in activeCoordinatorIds
+    }
+    Integer snapshotCursor = (apply.snapshotCursor ?: 0) as Integer
+    Integer snapshotEnd = Math.min(coordinatorDnis.size(), snapshotCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)
+    while(snapshotCursor < snapshotEnd) {
+      String dni = coordinatorDnis[snapshotCursor++]
+      ChildDeviceWrapper child = getChildDevice(dni)
+      if(child == null) { continue }
+      try {
+        child.publishCurrentGroupPlaybackSnapshot()
+      } catch(Exception e) {
+        logWarn("Could not publish coordinator playback snapshot from ${dni}: ${e.message}")
+      }
+    }
+    apply.snapshotCursor = snapshotCursor
+    if(snapshotCursor < coordinatorDnis.size()) {
+      state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = apply
+      runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+      return
+    }
+  }
   List<String> groupDnis = apply.groupDnis instanceof List ? (List<String>)apply.groupDnis : []
   Integer groupCursor = (apply.groupCursor ?: 0) as Integer
   Integer groupEnd = Math.min(groupDnis.size(), groupCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)

@@ -19,6 +19,7 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
   List<Boolean> topologyMembershipPublishFlags = []
+  List<String> groupPlaybackSnapshotRequests = []
   List<String> initializationRequests = []
   List<Map> initializationRoles = []
   Closure<Boolean> topologyApplyHook
@@ -50,6 +51,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   void playerGetGroupsFull() {
     commands << [name: 'playerGetGroupsFull']
+  }
+
+  Boolean publishCurrentGroupPlaybackSnapshot() {
+    groupPlaybackSnapshotRequests << deviceNetworkId
+    return true
   }
 
   void playerLoadAudioClip(String uri, BigDecimal volume, Integer duration, String correlationId) {
@@ -591,6 +597,9 @@ class SonosAdvancedAppSpec extends Specification {
     extra.initializationRequests.size() == 1
     coordinator.initializationRequests.size() == 1
     coordinator.dataValues.householdTopology.contains('GROUP-2')
+    coordinator.groupPlaybackSnapshotRequests == [coordinator.deviceNetworkId]
+    extra.groupPlaybackSnapshotRequests.empty
+    follower.groupPlaybackSnapshotRequests.empty
   }
 
   def "ZGT init failure after topology acceptance preserves topology and releases ordinary players"() {
