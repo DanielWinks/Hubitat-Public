@@ -2741,6 +2741,20 @@ class SonosAdvPlayerSpec extends Specification {
     driver.isGroupedFollowerForPlayback()
   }
 
+  def "becoming coordinator invalidates cached playback metadata for restored queue"() {
+    given:
+    String dni = driver.device.getDeviceNetworkId()
+    driver.lastMetadataContainerId.put(dni, 'shared-group-container')
+    driver.lastPlaybackState.put(dni, 'PLAYBACK_STATE_PAUSED')
+
+    when:
+    driver.clearCurrentPlayingStates()
+
+    then:
+    !driver.lastMetadataContainerId.containsKey(dni)
+    !driver.lastPlaybackState.containsKey(dni)
+  }
+
   def "group update enqueue re-arms a flush when its scheduled marker is stale"() {
     given:
     driver.scheduled.clear()

@@ -4726,6 +4726,9 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
 
 @CompileStatic
 void clearCurrentPlayingStates() {
+  String playerDni = device.getDeviceNetworkId()
+  lastMetadataContainerId.remove(playerDni)
+  lastPlaybackState.remove(playerDni)
   setCurrentArtistName('Not Available')
   setCurrentAlbumName('Not Available')
   setCurrentTrackName('Not Available')
