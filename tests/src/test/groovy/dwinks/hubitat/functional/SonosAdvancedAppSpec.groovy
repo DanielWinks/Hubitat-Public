@@ -18,6 +18,7 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<String> acknowledgedParentRequests = []
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
+  List<Boolean> topologyMembershipPublishFlags = []
   List<String> initializationRequests = []
   List<Map> initializationRoles = []
   Closure<Boolean> topologyApplyHook
@@ -137,8 +138,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
       attemptId: attemptId, requestId: requestId]
   }
 
-  Boolean applyAppHouseholdTopology(String json) {
+  Boolean applyAppHouseholdTopology(String json, Boolean publishMembership = true) {
     currentValues.householdTopology = json
+    topologyMembershipPublishFlags << publishMembership
     return topologyApplyHook == null || topologyApplyHook.call(json) == true
   }
   void requestAppZgtResubscription() { commands << [name: 'requestAppZgtResubscription'] }
@@ -570,6 +572,7 @@ class SonosAdvancedAppSpec extends Specification {
         [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA'], playerNames: ['RINCON_EXTRA']]
       ]]
     ])
+    appScript.applyHouseholdTopologyBatch()
     appScript.startNextPlayerInitialization()
 
     then:
@@ -577,6 +580,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationZgt.topologyReady == true
     appScript.state.playerInitializationZgt.initializationComplete != true
     topologyReadyDuringApply == [false, false, false]
+    [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
+      player.topologyMembershipPublishFlags == [false]
+    }
     coordinator.currentValues.householdTopology != null
     follower.currentValues.householdTopology != null
     extra.currentValues.householdTopology != null
@@ -607,6 +613,7 @@ class SonosAdvancedAppSpec extends Specification {
       leaderGeneration: zgt.leaderGeneration,
       topology: [groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
     ])
+    appScript.applyHouseholdTopologyBatch()
     String firstRequestId = appScript.state.playerInitializationActive[coordinator.deviceNetworkId].requestId
     appScript.finishPlayerInitialization(firstRequestId, false, 'test timeout after topology acceptance', true)
     appScript.startNextPlayerInitialization()
@@ -648,6 +655,7 @@ class SonosAdvancedAppSpec extends Specification {
         [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
       ]]
     ])
+    appScript.applyHouseholdTopologyBatch()
 
     then:
     appScript.state.playerInitializationZgt.topologyReady == false
@@ -675,6 +683,29 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
     appScript.state.playerInitializationZgt.topologyReady == true
     appScript.logs.any { String log -> log.contains('matches the app household snapshot; ZGT watchdog unchanged') }
+  }
+
+  def "unchanged accepted household topology does not fan out again"() {
+    given:
+    appScript.state.playerInitializationBootGeneration = 'boot-repeat-topology'
+    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
+      leaderGeneration: 'leader-repeat', bootGeneration: 'boot-repeat-topology', topologyReady: false]
+    Map payload = [leaderGeneration: 'leader-repeat', topology: [groups: [[groupId: 'GROUP-1',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      playerNames: ['RINCON_COORD', 'RINCON_FOLLOW']]]]]
+
+    when:
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload)
+    appScript.applyHouseholdTopologyBatch()
+    appScript.scheduled.clear()
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload + [observedAt: appScript.now() + 1000L])
+
+    then:
+    appScript.scheduled.empty
+    coordinator.topologyMembershipPublishFlags == [false]
+    follower.topologyMembershipPublishFlags == [false]
+    extra.topologyMembershipPublishFlags == [false]
+    appScript.state.playerInitializationZgt.topologyReady == true
   }
 
   def "topology differing from the accepted household snapshot arms the ZGT watchdog"() {
@@ -718,6 +749,7 @@ class SonosAdvancedAppSpec extends Specification {
       leaderGeneration: zgt.leaderGeneration,
       topology: [groups: [[groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
     ])
+    appScript.applyHouseholdTopologyBatch()
 
     then:
     coordinator.dataValues.householdTopology != null
@@ -1762,6 +1794,49 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
+  }
+
+  def "player state drain yields after its fixed item budget"() {
+    given:
+    (0..<20).each { Integer index ->
+      appScript.playerStateUpdate([kind: "ignored-${index}", playerDni: coordinator.deviceNetworkId])
+    }
+
+    when:
+    appScript.drainQueuedPlayerStateUpdates()
+
+    then:
+    appScript.state.pendingPlayerStateUpdates.size() == 8
+    appScript.state.playerStateUpdateDrainActive == false
+    appScript.scheduled.any { List job -> job[1] == 'drainQueuedPlayerStateUpdates' }
+
+    when:
+    appScript.drainQueuedPlayerStateUpdates()
+
+    then:
+    !appScript.state.containsKey('pendingPlayerStateUpdates')
+    appScript.state.playerStateUpdateDrainActive == false
+  }
+
+  def "player state arrivals during a drain are deferred to the next invocation"() {
+    given:
+    List<Boolean> activeStates = []
+    appScript.metaClass.playerStateUpdateHandler = { Map payload ->
+      activeStates << (delegate.state.playerStateUpdateDrainActive == true)
+      if(payload.kind == 'seed') {
+        delegate.playerStateUpdate([kind: 'arrived-during-drain', playerDni: coordinator.deviceNetworkId])
+      }
+    }
+    appScript.playerStateUpdate([kind: 'seed', playerDni: coordinator.deviceNetworkId])
+
+    when:
+    appScript.drainQueuedPlayerStateUpdates()
+
+    then:
+    activeStates == [true]
+    appScript.state.pendingPlayerStateUpdates*.kind == ['arrived-during-drain']
+    appScript.state.playerStateUpdateDrainActive == false
+    appScript.scheduled.any { List job -> job[1] == 'drainQueuedPlayerStateUpdates' }
   }
 
   def "follower metadata batch repairs stale public attributes despite a matching last-sent cache"() {
@@ -3138,6 +3213,31 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
   }
 
+  def "group membership fanout yields after its fixed group budget"() {
+    given:
+    List<SonosAppGroupDouble> additional = (0..<10).collect { Integer index ->
+      SonosAppGroupDouble child = new SonosAppGroupDouble(deviceNetworkId: "EXTRA-GROUP-${index}")
+      child.dataValues.groupCoordinatorId = 'RINCON_COORD'
+      child.dataValues.playerIds = 'RINCON_FOLLOW'
+      child
+    }
+    appScript.children.addAll(additional)
+
+    when:
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
+
+    then:
+    appScript.state.pendingGroupStateUpdates.size() == 8
+    appScript.scheduled.any { List job -> job[1] == 'continueGroupDeviceMembershipUpdate' }
+
+    when:
+    List job = appScript.scheduled.find { List item -> item[1] == 'continueGroupDeviceMembershipUpdate' }
+    appScript.continueGroupDeviceMembershipUpdate(job[2].data as Map)
+
+    then:
+    appScript.state.pendingGroupStateUpdates.size() == 11
+  }
+
   def "group activation batches the coordinator's existing track metadata snapshot"() {
     given:
     coordinator.currentValues.currentTrackName = 'Peepers On Crane Pond'
@@ -3174,6 +3274,29 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.currentTrackNumber == 1
     attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
     attributes.trackData == coordinator.currentValues.trackData
+  }
+
+  def "group state drain yields after its fixed group budget"() {
+    given:
+    Map<String, Map<String, Object>> pending = [:]
+    (0..<10).each { Integer index -> pending["GROUP-${index}"] = [status: 'playing'] }
+    appScript.state.pendingGroupStateUpdates = pending
+    (0..<10).each { Integer index ->
+      appScript.children << new SonosAppGroupDouble(deviceNetworkId: "GROUP-${index}")
+    }
+
+    when:
+    appScript.drainGroupStateUpdates()
+
+    then:
+    appScript.state.pendingGroupStateUpdates.size() == 2
+    appScript.scheduled.any { List job -> job[1] == 'drainGroupStateUpdates' }
+
+    when:
+    appScript.drainGroupStateUpdates()
+
+    then:
+    !appScript.state.containsKey('pendingGroupStateUpdates')
   }
 
   def "active group metadata mismatch bypasses a stale last-sent snapshot"() {

@@ -273,6 +273,15 @@ preferences {
 @Field static final String PENDING_PLAYER_STATE_UPDATES_STATE_KEY = 'pendingPlayerStateUpdates'
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerStateUpdateDrainScheduled'
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY = 'playerStateUpdateDrainDueAt'
+@Field static final String PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY = 'playerStateUpdateDrainActive'
+@Field static final Integer PLAYER_STATE_UPDATE_DRAIN_MAX_ITEMS = 12
+@Field static final Long PLAYER_STATE_UPDATE_DRAIN_BUDGET_MS = 200L
+@Field static final Integer PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS = 512
+@Field static final Integer GROUP_STATE_DRAIN_MAX_ITEMS = 8
+@Field static final Integer GROUP_MEMBERSHIP_APPLY_BATCH_SIZE = 8
+@Field static final String GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY = 'groupMembershipApplyGenerations'
+@Field static final String HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY = 'householdTopologyApply'
+@Field static final Integer HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE = 4
 @Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
@@ -2627,6 +2636,7 @@ void configure(Boolean startup = false) {
   schedule('0 5 3 * * ?', 'refreshFavoritesAndPlaylists')
   runIn(3, 'enqueueAllPlayerInitializations', [overwrite: true,
       data: [reason: 'app configuration']])
+  rearmPlayerStateUpdateDrainAfterRestart()
 }
 
 /** Re-seed the serialized player initialization queue after a hub reboot. */
@@ -2641,9 +2651,13 @@ void systemStartHandler(Object event = null) {
 
 /** A reboot can discard the scheduled drain while persisting its state flag. */
 void rearmPlayerStateUpdateDrainAfterRestart() {
+  state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] = false
   state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
   state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
   scheduleQueuedPlayerStateUpdateDrain(25)
+  if(state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] instanceof Map) {
+    runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+  }
 }
 
 /** Requeue grants that were active before a hub reboot and invalidate their callbacks. */
@@ -3153,43 +3167,107 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
   topology.putAll([schemaVersion: 1, sourcePlayerDni: playerDni,
     leaderGeneration: zgt.leaderGeneration, bootGeneration: zgt.bootGeneration, observedAt: observedAt])
   state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = topology
-  zgt.topologyFingerprint = topology.groups.collect { Map item ->
+  String topologyFingerprint = topology.groups.collect { Map item ->
     "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
   }.sort().join('|')
+  Boolean sameAcceptedTopology = zgt.topologyFingerprint?.toString() == topologyFingerprint &&
+      zgt.bootGeneration?.toString() == (state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString()) &&
+      zgt.topologyReady == true
+  zgt.topologyFingerprint = topologyFingerprint
+  if(sameAcceptedTopology) {
+    zgt.lastInboundAt = observedAt
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    logDebug("Ignoring unchanged household topology fingerprint=${topologyFingerprint}")
+    return
+  }
   zgt.status = 'applying-topology'
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-  String json = JsonOutput.toJson(topology)
-  Boolean allPlayerTopologiesApplied = true
-  getCurrentPlayerDevices().each { ChildDeviceWrapper child ->
+  state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = [playerDni: playerDni,
+      leaderGeneration: zgt.leaderGeneration?.toString(), bootGeneration: zgt.bootGeneration?.toString(),
+      fingerprint: topologyFingerprint, observedAt: observedAt, playerCursor: 0, groupCursor: 0,
+      playerDnis: getCurrentPlayerDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
+      groupDnis: getCurrentGroupDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
+      playerApplyFailed: false]
+  runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+}
+
+/** Apply accepted topology in small continuations; child calls may enqueue app callbacks. */
+void applyHouseholdTopologyBatch() {
+  unschedule('applyHouseholdTopologyBatch')
+  Map apply = state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY]) : null
+  if(apply == null) { return }
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  if(apply.leaderGeneration?.toString() != zgt.leaderGeneration?.toString() ||
+      apply.bootGeneration?.toString() != zgt.bootGeneration?.toString() ||
+      apply.fingerprint?.toString() != zgt.topologyFingerprint?.toString()) {
+    state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
+    logDebug('Discarding superseded household topology apply continuation')
+    return
+  }
+  String json = JsonOutput.toJson(state[HOUSEHOLD_TOPOLOGY_STATE_KEY])
+  List<String> playerDnis = apply.playerDnis instanceof List ? (List<String>)apply.playerDnis : []
+  Integer playerCursor = (apply.playerCursor ?: 0) as Integer
+  Integer playerEnd = Math.min(playerDnis.size(), playerCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)
+  Boolean playerApplyFailed = apply.playerApplyFailed == true
+  while(playerCursor < playerEnd) {
+    String dni = playerDnis[playerCursor++]
+    ChildDeviceWrapper child = getChildDevice(dni)
+    if(child == null) {
+      playerApplyFailed = true
+      logWarn("Could not find player ${dni} while applying household topology")
+      continue
+    }
     try {
       child.updateDataValue('householdTopology', json)
-      if(child.applyAppHouseholdTopology(json) != true) {
-        allPlayerTopologiesApplied = false
-        logWarn("Player ${child.deviceNetworkId} did not apply the accepted household topology")
+      if(child.applyAppHouseholdTopology(json, false) != true) {
+        playerApplyFailed = true
+        logWarn("Player ${child.deviceNetworkId} did not apply accepted household topology")
       }
     } catch(Exception e) {
-      allPlayerTopologiesApplied = false
+      playerApplyFailed = true
       logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}")
     }
   }
-  if(!allPlayerTopologiesApplied) {
-    failZgtInitializationCandidate(playerDni,
+  apply.playerCursor = playerCursor
+  apply.playerApplyFailed = playerApplyFailed
+  state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = apply
+  if(playerCursor < playerDnis.size()) { runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true]); return }
+  if(playerApplyFailed) {
+    state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
+    failZgtInitializationCandidate(apply.playerDni?.toString(),
         'One or more player devices could not apply the accepted household topology')
     return
   }
-  unschedule('playerInitializationZgtWatchdog')
-  unschedule('zgtTopologyWatchdog')
-  getCurrentGroupDevices().each { ChildDeviceWrapper child ->
+  List<String> groupDnis = apply.groupDnis instanceof List ? (List<String>)apply.groupDnis : []
+  Integer groupCursor = (apply.groupCursor ?: 0) as Integer
+  Integer groupEnd = Math.min(groupDnis.size(), groupCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)
+  while(groupCursor < groupEnd) {
+    String dni = groupDnis[groupCursor++]
+    ChildDeviceWrapper child = getChildDevice(dni)
+    if(child == null) { logWarn("Could not find group device ${dni} while applying household topology"); continue }
     try {
       child.updateDataValue('householdTopology', json)
       child.applyAppHouseholdTopology(json)
     } catch(Exception e) { logWarn("Could not deliver household topology to ${child.deviceNetworkId}: ${e.message}") }
   }
+  apply.groupCursor = groupCursor
+  if(groupCursor < groupDnis.size()) {
+    state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = apply
+    runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+    return
+  }
+  state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
+  unschedule('playerInitializationZgtWatchdog')
+  unschedule('zgtTopologyWatchdog')
+  zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
   zgt.topologyReady = true
   zgt.status = zgt.initializationComplete == true ? 'ready' : 'awaiting-init-complete'
-  zgt.lastInboundAt = observedAt
+  zgt.lastInboundAt = apply.observedAt ?: now()
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-  logInfo("Accepted full household topology from ${playerDni}; groups=${groups.size()}")
+  logInfo("Accepted full household topology from ${apply.playerDni}; players=${playerDnis.size()}, groups=${groupDnis.size()}")
   runIn(1, 'startNextPlayerInitialization', [overwrite: true])
 }
 
@@ -5246,9 +5324,46 @@ void playerStateUpdate(Map payload) {
   if(!(payload instanceof Map) || payload.isEmpty()) { return }
   List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
-  pending.add(new LinkedHashMap(payload))
+  Map<String, Object> incoming = new LinkedHashMap<String, Object>(payload)
+  String coalesceKey = playerStateUpdateCoalesceKey(incoming)
+  Integer existingIndex = coalesceKey ? pending.findIndexOf { Map queued ->
+    playerStateUpdateCoalesceKey(queued) == coalesceKey
+  } : -1
+  if(existingIndex >= 0) {
+    pending[existingIndex] = incoming
+  } else {
+    if(pending.size() >= PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS) {
+      Integer replaceableIndex = pending.findIndexOf { Map queued -> playerStateUpdateCoalesceKey(queued) != null }
+      if(replaceableIndex >= 0) {
+        pending.remove(replaceableIndex)
+        logWarn("Player state queue reached ${PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS}; evicted oldest replaceable snapshot")
+      } else {
+        logError("Player state queue is full (${PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS}); rejected kind=${incoming.kind ?: 'unknown'} player=${incoming.playerDni ?: 'unknown'}")
+        return
+      }
+    }
+    pending.add(incoming)
+  }
   state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] = pending
-  scheduleQueuedPlayerStateUpdateDrain(25)
+  if(state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] != true) {
+    scheduleQueuedPlayerStateUpdateDrain(25)
+  }
+}
+
+/** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
+String playerStateUpdateCoalesceKey(Map payload) {
+  String kind = payload?.kind?.toString()
+  String playerDni = payload?.playerDni?.toString() ?: ''
+  switch(kind) {
+    case 'zgtTopology': return "${kind}:${playerDni}:${payload.leaderGeneration ?: ''}"
+    case 'topology': case 'playbackObservation': case 'wsConnected': case 'wsRetry':
+    case 'householdPresence':
+      return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
+    case 'membership': return "${kind}:${payload.coordinatorId ?: playerDni}"
+    case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
+    case 'followers': return "${kind}:${playerDni}"
+    default: return null
+  }
 }
 
 void scheduleQueuedPlayerStateUpdateDrain(Integer delayMs) {
@@ -5276,12 +5391,75 @@ void scheduleQueuedPlayerStateUpdateDrain(Integer delayMs) {
 }
 
 void drainQueuedPlayerStateUpdates() {
+  if(state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] == true) {
+    scheduleQueuedPlayerStateUpdateDrain(100)
+    return
+  }
   List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
+  if(pending.isEmpty()) {
+    state.remove(PENDING_PLAYER_STATE_UPDATES_STATE_KEY)
+    state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+    state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
+    return
+  }
   state.remove(PENDING_PLAYER_STATE_UPDATES_STATE_KEY)
+  state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] = true
   state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
   state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
-  pending.each { Map payload -> playerStateUpdateHandler(payload) }
+  Long startedAt = now() as Long
+  Integer processed = 0
+  Integer failed = 0
+  Integer cursor = 0
+  Map<String, Integer> countsByKind = [:]
+  Map<String, Long> maxDurationByKind = [:]
+  try {
+    while(cursor < pending.size() && processed < PLAYER_STATE_UPDATE_DRAIN_MAX_ITEMS &&
+        (now() as Long) - startedAt < PLAYER_STATE_UPDATE_DRAIN_BUDGET_MS) {
+      Map payload = pending[cursor++]
+      String kind = payload?.kind?.toString() ?: 'unknown'
+      Long handlerStartedAt = now() as Long
+      try {
+        playerStateUpdateHandler(payload)
+      } catch(Exception e) {
+        failed++
+        logWarn("Player state update failed for kind=${kind} player=${payload?.playerDni ?: 'unknown'}: ${e.message}")
+      } finally {
+        Long handlerDuration = Math.max(0L, (now() as Long) - handlerStartedAt)
+        countsByKind[kind] = (countsByKind[kind] ?: 0) + 1
+        maxDurationByKind[kind] = Math.max(maxDurationByKind[kind] ?: 0L, handlerDuration)
+      }
+      processed++
+    }
+  } finally {
+    List<Map> deferred = cursor < pending.size() ? pending.subList(cursor, pending.size()) : []
+    List<Map> arrivals = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
+        ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
+    List<Map> merged = mergePlayerStateUpdateQueues(deferred, arrivals)
+    if(merged.isEmpty()) { state.remove(PENDING_PLAYER_STATE_UPDATES_STATE_KEY) }
+    else { state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] = merged }
+    state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] = false
+    Long elapsed = Math.max(0L, (now() as Long) - startedAt)
+    logDebug("Player state drain finished: startedDepth=${pending.size()}, processed=${processed}, failed=${failed}, deferred=${deferred.size()}, arrivals=${arrivals.size()}, remaining=${merged.size()}, elapsedMs=${elapsed}, countsByKind=${countsByKind}, maxHandlerMs=${maxDurationByKind}")
+    if(!merged.isEmpty()) { scheduleQueuedPlayerStateUpdateDrain(100) }
+    else {
+      state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
+      state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
+    }
+  }
+}
+
+/** Merge old deferred entries before reentrant arrivals so newer snapshots win. */
+List<Map> mergePlayerStateUpdateQueues(List<Map> deferred, List<Map> arrivals) {
+  List<Map> merged = []
+  (deferred + arrivals).each { Map payload ->
+    String key = playerStateUpdateCoalesceKey(payload)
+    Integer index = key ? merged.findIndexOf { Map item -> playerStateUpdateCoalesceKey(item) == key } : -1
+    if(index >= 0) { merged[index] = payload }
+    else if(merged.size() < PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS) { merged.add(payload) }
+    else { logError("Player state continuation queue full; rejected kind=${payload?.kind ?: 'unknown'}") }
+  }
+  return merged
 }
 
 void playerStateUpdateHandler(Object event) {
@@ -11222,31 +11400,39 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   Map partitioned = getGroupDevicesAndRinconMap(coordinatorId)
   List<ChildDeviceWrapper> groupsForCoord = (List<ChildDeviceWrapper>)partitioned['groupDevices']
   Map<String, ChildDeviceWrapper> rinconMap = (Map<String, ChildDeviceWrapper>)partitioned['rinconMap']
-
-  // Resolve RINCON IDs to friendly player names for the currentlyJoinedPlayers attribute
-  List<String> joinedPlayerNames = []
-  playersInGroup.each { String rincon ->
-    ChildDeviceWrapper playerDev = rinconMap[rincon]
-    if(playerDev != null) {
-      String name = playerDev.getDataValue('name')
-      joinedPlayerNames.add(name != null && name != '' ? name : rincon)
-    } else {
-      // Preserve the complete live membership even when a player is not
-      // currently represented by a SAC child device.
-      joinedPlayerNames.add(rincon)
-    }
+  List<String> groupDnis = groupsForCoord.collect { ChildDeviceWrapper gd -> gd.getDeviceNetworkId() }
+  Map<String, String> playerNames = [:]
+  rinconMap.each { String id, ChildDeviceWrapper player ->
+    playerNames[id] = player.getDataValue('name')?.toString() ?: id
   }
-  String joinedPlayersValue = joinedPlayerNames.join(', ')
-
-  // Resolve caller once — constant for all group devices in this call.
-  // Verify the calling player is the actual Sonos group coordinator.
-  // Without this, every player in the group whose configured coordinator matches
-  // a group device would incorrectly activate that device when all members are
-  // the same across multiple group devices with different coordinators.
   ChildDeviceWrapper callerDevice = rinconMap[coordinatorId]
   Boolean isCallerActualCoordinator = callerDevice?.getDataValue('isGroupCoordinator') == 'true'
+  Map<String, Long> generations = state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] instanceof Map
+      ? (Map<String, Long>)state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] : [:]
+  Long generation = ((generations[coordinatorId] ?: 0L) as Long) + 1L
+  generations[coordinatorId] = generation
+  state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] = generations
+  applyGroupDeviceMembershipBatch(coordinatorId, new ArrayList<String>(playersInGroup), groupDnis,
+      playerNames, isCallerActualCoordinator, generation, 0)
+}
 
-  groupsForCoord.each { ChildDeviceWrapper gd ->
+/** Apply membership to a bounded number of group devices per invocation. */
+void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersInGroup,
+    List<String> groupDnis, Map<String, String> playerNames, Boolean isCallerActualCoordinator,
+    Long generation, Integer cursor) {
+  Map<String, Long> generations = state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] instanceof Map
+      ? (Map<String, Long>)state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] : [:]
+  if(((generations[coordinatorId] ?: 0L) as Long) != generation) { return }
+  List<String> joinedPlayerNames = playersInGroup.collect { String rincon -> playerNames[rincon] ?: rincon }
+  String joinedPlayersValue = joinedPlayerNames.join(', ')
+  ChildDeviceWrapper callerDevice = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
+    player.getDataValue('id') == coordinatorId
+  }
+  Integer end = Math.min(groupDnis.size(), cursor + GROUP_MEMBERSHIP_APPLY_BATCH_SIZE)
+  while(cursor < end) {
+    String groupDni = groupDnis[cursor++]
+    ChildDeviceWrapper gd = getChildDevice(groupDni)
+    if(gd == null) { continue }
     Boolean wasActive = gd.currentValue('switch', true) == 'on'
     HashSet<String> configuredPlayers = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
@@ -11289,6 +11475,21 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     Boolean forceSnapshot = shouldBeActive && (!wasActive || playbackStateOutOfSync)
     queueGroupDeviceState(gd.getDeviceNetworkId(), attributes, forceSnapshot)
   }
+  if(cursor < groupDnis.size()) {
+    runIn(1, 'continueGroupDeviceMembershipUpdate', [overwrite: false, data: [
+      coordinatorId: coordinatorId, playersInGroup: playersInGroup, groupDnis: groupDnis,
+      playerNames: playerNames, isCallerActualCoordinator: isCallerActualCoordinator,
+      generation: generation, cursor: cursor]])
+  }
+}
+
+void continueGroupDeviceMembershipUpdate(Map data = [:]) {
+  applyGroupDeviceMembershipBatch(data.coordinatorId?.toString(),
+      data.playersInGroup instanceof List ? (List<String>)data.playersInGroup : [],
+      data.groupDnis instanceof List ? (List<String>)data.groupDnis : [],
+      data.playerNames instanceof Map ? (Map<String, String>)data.playerNames : [:],
+      data.isCallerActualCoordinator == true, (data.generation ?: 0L) as Long,
+      (data.cursor ?: 0) as Integer)
 }
 
 /**
@@ -11351,7 +11552,14 @@ void drainGroupStateUpdates() {
       ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
       : [:]
   Map<String, Map<String, Object>> retryQueue = [:]
-  pending.each { String groupDni, Map<String, Object> attributes ->
+  Map<String, Map<String, Object>> deferred = [:]
+  List<String> groupDnis = new ArrayList<String>(pending.keySet())
+  Set<String> selected = new LinkedHashSet<String>(groupDnis.take(GROUP_STATE_DRAIN_MAX_ITEMS))
+  groupDnis.each { String groupDni ->
+    if(!selected.contains(groupDni)) { deferred[groupDni] = pending[groupDni] }
+  }
+  selected.each { String groupDni ->
+    Map<String, Object> attributes = pending[groupDni]
     ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
     if(groupDevice == null) {
       logWarn("drainGroupStateUpdates: no group device found for DNI ${groupDni}")
@@ -11377,25 +11585,22 @@ void drainGroupStateUpdates() {
       logWarn("Group state delivery to ${groupDni} failed (attempt ${attempt}); retaining it for retry: ${e.message}")
     }
   }
-  if(retryQueue.isEmpty()) {
-    Map<String, Map<String, Object>> arrivals = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
-        ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY] : [:]
-    if(!arrivals.isEmpty()) {
-      state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
-      state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
-      runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
-      return
-    }
-    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
-    return
-  }
-  Map<String, Map<String, Object>> retryAndNew = retryQueue
   Map<String, Map<String, Object>> arrivals = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY] : [:]
+  Map<String, Map<String, Object>> retryAndNew = new LinkedHashMap<String, Map<String, Object>>(deferred)
+  retryQueue.each { String dni, Map<String, Object> attrs ->
+    Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
+    combined.putAll(attrs)
+    retryAndNew[dni] = combined
+  }
   arrivals.each { String dni, Map<String, Object> attrs ->
     Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
     combined.putAll(attrs)
     retryAndNew[dni] = combined
+  }
+  if(retryAndNew.isEmpty()) {
+    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
+    return
   }
   state[PENDING_GROUP_STATE_QUEUE_KEY] = retryAndNew
   state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts

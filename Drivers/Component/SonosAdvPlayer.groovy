@@ -4233,7 +4233,7 @@ void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash, 
   }
 }
 
-Boolean applyAppHouseholdTopology(String topologyJson) {
+Boolean applyAppHouseholdTopology(String topologyJson, Boolean publishMembership = true) {
   if(!topologyJson) { return false }
   try {
     Map topology = (Map)new JsonSlurper().parseText(topologyJson)
@@ -4250,7 +4250,7 @@ Boolean applyAppHouseholdTopology(String topologyJson) {
       groupName: ownGroup.groupName?.toString(), batteryData: [:]]
     LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
     setDeviceDataValue('householdTopology', topologyJson)
-    return processZoneGroupTopologySnapshot(playerTopology, previousMembers)
+    return processZoneGroupTopologySnapshot(playerTopology, previousMembers, publishMembership)
   } catch(Exception e) {
     logWarn("Could not apply app household topology snapshot: ${e.message}")
     return false
@@ -4645,7 +4645,8 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
 }
 
 @CompileStatic
-Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
+Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons,
+    Boolean publishMembership = true) {
   if(topology == null) { return false }
   if(topology.playerFound != true) {
     logDebug("Player ${getId()} not found in ZoneGroupTopology!")
@@ -4678,7 +4679,7 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
     logDebug('ZGT message parsed, no group member changes.')
   }
 
-  setGroupPlayerIds(groupedRincons.toList())
+  setGroupPlayerIds(groupedRincons.toList(), publishMembership)
 
   List<String> currentGroupMemberNames = topology.memberNames as List<String>
   Integer currentGroupMemberCount = groupedRincons.size()
@@ -6084,6 +6085,7 @@ private void scheduleLocalDeviceEventDrain(Integer delayMs) {
     Integer scheduleDelay = remainingMs > Integer.MAX_VALUE ? Integer.MAX_VALUE : remainingMs as Integer
     state[LOCAL_EVENT_DRAIN_DUE_AT_KEY] = dueAt
     state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] = true
+    runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
     logDebug("Scheduling or refreshing local event drain; dni=${dni}, delayMs=${scheduleDelay}, dueAt=${dueAt}, pending=${pending.size()}, previousScheduled=${existingDueAt != null}")
     try {
       runInMillis(scheduleDelay, 'flushPendingLocalDeviceEvents', [overwrite: true])
@@ -6187,6 +6189,7 @@ private void scheduleComponentChildEventDrain(Integer delayMs) {
   Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
   state[COMPONENT_CHILD_DRAIN_DUE_AT_KEY] = dueAt
   state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = true
+  runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
   try {
     runInMillis(scheduleDelay, 'drainComponentChildEvents', [overwrite: true])
   } catch(Exception e) {
@@ -6406,6 +6409,7 @@ private void schedulePendingBatchEvents() {
   Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
   state[BATCH_EVENTS_DUE_AT_KEY] = dueAt
   state[BATCH_EVENTS_SCHEDULED_KEY] = true
+  runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
   try {
     runInMillis(scheduleDelay, 'drainBatchEvents', [overwrite: true])
   } catch(Exception e) {
@@ -6420,13 +6424,14 @@ synchronized void drainBatchEvents() {
   state.remove(BATCH_EVENTS_DUE_AT_KEY)
   Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
       ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
+  state.remove(PENDING_BATCH_EVENTS_KEY)
   if(pending.isEmpty()) {
     state.remove(PENDING_BATCH_EVENTS_KEY)
     state.remove(BATCH_EVENTS_SCHEDULED_KEY)
     return
   }
   List<String> names = new ArrayList<String>(pending.keySet()).take(BATCH_EVENTS_PER_DRAIN)
-  Map<String, Object> remaining = new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY])
+  Map<String, Object> remaining = new LinkedHashMap<String, Object>(pending)
   names.each { String name ->
     try {
       device.sendEvent(name: name, value: pending[name])
@@ -6435,12 +6440,42 @@ synchronized void drainBatchEvents() {
       logWarn("Could not emit batched ${name} event; retaining it for retry: ${e.message}")
     }
   }
+  Map<String, Object> arrivals = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
+      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
+  remaining.putAll(arrivals)
   if(remaining.isEmpty()) {
     state.remove(PENDING_BATCH_EVENTS_KEY)
     state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   } else {
     state[PENDING_BATCH_EVENTS_KEY] = remaining
     schedulePendingBatchEvents()
+  }
+}
+
+/** Re-arm publication callbacks if a persisted pending queue outlives its job. */
+void verifyPendingPublicationDrains() {
+  Map batch = state[PENDING_BATCH_EVENTS_KEY] instanceof Map ? (Map)state[PENDING_BATCH_EVENTS_KEY] : [:]
+  String dni = device?.getDeviceNetworkId()
+  ConcurrentHashMap<String, Object> local = dni ? pendingLocalDeviceEvents.get(dni) : null
+  ConcurrentHashMap<String, Object> group = dni ? pendingGroupDeviceUpdates.get(dni) : null
+  Map component = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
+      ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
+  if(batch.isEmpty()) {
+    state.remove(PENDING_BATCH_EVENTS_KEY)
+    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+    state.remove(BATCH_EVENTS_DUE_AT_KEY)
+  }
+  if(local == null || local.isEmpty()) {
+    state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+    state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+  }
+  if(!batch.isEmpty()) { schedulePendingBatchEvents() }
+  if(local != null && !local.isEmpty()) { scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS) }
+  if(group != null && !group.isEmpty()) { scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS) }
+  if(!component.isEmpty()) { scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS) }
+  if(!batch.isEmpty() || (local != null && !local.isEmpty()) ||
+      (group != null && !group.isEmpty()) || !component.isEmpty()) {
+    runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
   }
 }
 
@@ -6648,7 +6683,7 @@ Boolean isGroupedAndNotCoordinator() {
 List<String> getGroupPlayerIds() {
   return getDeviceDataValue('groupPlayerIds')?.tokenize(',') ?: []
 }
-void setGroupPlayerIds(List<String> groupPlayerIds) {
+void setGroupPlayerIds(List<String> groupPlayerIds, Boolean publishMembership = true) {
   String newValue = groupPlayerIds.join(',')
   String oldValue = getDeviceDataValue('groupPlayerIds')
   Boolean coordinatorChanged = getDeviceDataValue('coordinatorStatusChanged') == 'true'
@@ -6668,7 +6703,7 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
     }
   }
   logDebug('Updating group device with new group membership information')
-  parentUpdateGroupDevices(getId(), groupPlayerIds)
+  if(publishMembership) { parentUpdateGroupDevices(getId(), groupPlayerIds) }
 }
 
 List<String> getGroupFollowerRincons() {
@@ -7462,6 +7497,7 @@ private void scheduleGroupDeviceUpdateDrain(Integer delayMs) {
   // driver update or scheduler recovery). Always replace/create the job when
   // new work arrives so a stale true marker cannot strand playback state.
   state[GROUP_DEVICE_UPDATE_SCHEDULED_KEY] = true
+  runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
   runInMillis(delayMs, 'flushPendingGroupDeviceUpdates', [overwrite: true])
 }
 

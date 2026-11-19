@@ -1714,6 +1714,63 @@ class SonosAdvPlayerSpec extends Specification {
     driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
   }
 
+  def "batch drain preserves values re-enqueued while sending the detached batch"() {
+    given:
+    driver.applyStateBatch('{"status":"playing"}')
+    driver.device.metaClass.sendEvent = { Map event ->
+      delegate.events << event
+      delegate.currentValues[event.name as String] = event.value
+      if(event.name == 'status') { driver.applyStateBatch('{"status":"stopped"}') }
+    }
+
+    when:
+    driver.drainBatchEvents()
+
+    then:
+    driver.state.pendingBatchEvents.status == 'stopped'
+    driver.state.batchEventsScheduled == true
+    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
+  }
+
+  def "publication watchdog repairs missing batch and local drain jobs"() {
+    given:
+    driver.scheduled.clear()
+    driver.state.pendingBatchEvents = [status: 'playing']
+    driver.state.batchEventsScheduled = true
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'] = [groupCoordinatorId: 'RINCON_COORD']
+    driver.state.localDeviceEventDrainScheduled = true
+
+    when:
+    driver.verifyPendingPublicationDrains()
+
+    then:
+    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
+    driver.scheduled.any { List call -> call[1] == 'flushPendingLocalDeviceEvents' }
+    driver.scheduled.any { List call -> call[1] == 'verifyPendingPublicationDrains' }
+  }
+
+  def "publication watchdog clears stale drain markers when their queues are empty"() {
+    given:
+    driver.scheduled.clear()
+    driver.state.pendingBatchEvents = [:]
+    driver.state.batchEventsScheduled = true
+    driver.state.batchEventsDueAt = 1L
+    driver.state.localDeviceEventDrainScheduled = true
+    driver.state.localDeviceEventDrainDueAt = 1L
+    driver.pendingLocalDeviceEvents.remove('SONOS-TEST-DNI')
+
+    when:
+    driver.verifyPendingPublicationDrains()
+
+    then:
+    !driver.state.containsKey('pendingBatchEvents')
+    !driver.state.containsKey('batchEventsScheduled')
+    !driver.state.containsKey('batchEventsDueAt')
+    !driver.state.containsKey('localDeviceEventDrainScheduled')
+    !driver.state.containsKey('localDeviceEventDrainDueAt')
+    !driver.scheduled.any { List call -> call[1] == 'verifyPendingPublicationDrains' }
+  }
+
   def "initialization reset clears only this player's stale publication queues"() {
     given:
     String otherDni = 'SONOS-OTHER-DNI'
@@ -2541,6 +2598,24 @@ class SonosAdvPlayerSpec extends Specification {
       'deferredParentUpdateGroupDevices',
       [overwrite: true, data: [coordinatorId: 'RINCON_COORD', playersInGroup: ['RINCON_FOLLOW']]]
     ]]
+  }
+
+  def "app topology application suppresses redundant parent membership feedback"() {
+    given:
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    driver.device.dataValues.isGroupCoordinator = 'false'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_FOLLOW'
+    String topology = JsonOutput.toJson([groups: [[groupId: 'GROUP_TEST',
+      coordinatorId: 'RINCON_TEST', playerIds: ['RINCON_TEST', 'RINCON_FOLLOW'],
+      playerNames: ['Test Player', 'Follower']]]])
+
+    when:
+    Boolean applied = driver.applyAppHouseholdTopology(topology, false)
+
+    then:
+    assert applied : driver.logs.join('\n')
+    driver.device.dataValues.groupPlayerIds == 'RINCON_TEST,RINCON_FOLLOW'
+    !playerStateMessages().any { Map event -> event.kind == 'membership' }
   }
 
   def "deferred membership updates publish a location event"() {
