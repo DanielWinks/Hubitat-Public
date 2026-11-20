@@ -3254,6 +3254,7 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
     return
   }
   Map topology = payload.topology instanceof Map ? new LinkedHashMap((Map)payload.topology) : [:]
+  Long sourceObservedAt = (topology.observedAt ?: payload.observedAt ?: 0L) as Long
   List<Map> groups = topology.groups instanceof List ? (List<Map>)topology.groups : []
   if(groups.isEmpty() || groups.any { Map group ->
       !group.groupId || !group.coordinatorId || !(group.playerIds instanceof List)
@@ -3261,9 +3262,24 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
     failZgtInitializationCandidate(playerDni, 'ZGT speaker supplied an incomplete household topology snapshot')
     return
   }
-  Long sourceObservedAt = (topology.observedAt ?: payload.observedAt ?: 0L) as Long
+  if(sourceObservedAt <= 0L) {
+    failZgtInitializationCandidate(playerDni, 'ZGT speaker supplied a household topology snapshot without a usable source timestamp')
+    return
+  }
   Map prior = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
+  Long priorSourceObservedAt = (prior.sourceObservedAt ?: 0L) as Long
+  String topologyFingerprint = groups.collect { Map item ->
+    "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
+  }.sort().join('|')
+  Boolean sameGeneration = prior.leaderGeneration?.toString() == zgt.leaderGeneration?.toString() &&
+      prior.bootGeneration?.toString() == zgt.bootGeneration?.toString()
+  if(sameGeneration && priorSourceObservedAt > 0L &&
+      (sourceObservedAt < priorSourceObservedAt ||
+        (sourceObservedAt == priorSourceObservedAt && topologyFingerprint != zgt.topologyFingerprint?.toString()))) {
+    logDebug("Ignoring stale household topology snapshot from ${playerDni}; sourceObservedAt=${sourceObservedAt}, acceptedSourceObservedAt=${priorSourceObservedAt}, fingerprint=${topologyFingerprint}")
+    return
+  }
   Long previousInboundAt = (zgt.lastInboundAt ?: 0L) as Long
   Long observedAt = Math.max(now(), previousInboundAt + 1L)
   String priorAttributeFingerprint = householdTopologyAttributesFingerprint(prior)
@@ -3273,9 +3289,6 @@ void acceptHouseholdTopology(String playerDni, Map payload) {
     leaderGeneration: zgt.leaderGeneration, bootGeneration: zgt.bootGeneration,
     sourceObservedAt: sourceObservedAt, observedAt: observedAt])
   state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = topology
-  String topologyFingerprint = topology.groups.collect { Map item ->
-    "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
-  }.sort().join('|')
   Boolean sameAcceptedTopology = zgt.topologyFingerprint?.toString() == topologyFingerprint &&
       zgt.bootGeneration?.toString() == (state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString()) &&
       zgt.topologyReady == true
@@ -9099,7 +9112,7 @@ Map readGroupOperationTopology(Map operation) {
       buildGroupOperationTopologyObservations(operation, householdTopology)
   if(!householdObservations.isEmpty()) {
     // A single elected ZGT subscriber supplies the whole-household snapshot.
-    // Its latest received message is authoritative over per-player caches.
+    // Its latest source-observed message is authoritative over per-player caches.
     operation.topologyObservations = householdObservations
     return readGroupTopologyFromObservations(operation, householdObservations)
   }
@@ -9170,6 +9183,58 @@ Boolean explicitFollowersConfirmGroupWasNotApplied(Map operation, Map topology) 
     observation?.fresh == true && observation.groupId && observation.coordinatorId == playerId &&
         normalizeGroupPlayerIds(observation.playerIds) == [playerId]
   }
+}
+
+Boolean isExplicitCoordinatorSolo(Map topology, String coordinatorId) {
+  if(topology == null || coordinatorId == null) { return false }
+  List<Map> observations = topology?.observations instanceof List ? (List<Map>)topology.observations : []
+  if(observations.isEmpty()) { return false }
+  Map coordinatorObservation = observations.find { Map item -> item.playerId?.toString() == coordinatorId && item.fresh == true }
+  if(coordinatorObservation == null) { return false }
+  if(coordinatorObservation.coordinatorId?.toString() != coordinatorId) { return false }
+  List<String> members = normalizeGroupPlayerIds(coordinatorObservation.playerIds)
+  return members == [coordinatorId]
+}
+
+List<Map> getExplicitAttachedFollowerObservations(Map topology, String coordinatorId, List<String> requiredPlayerIds) {
+  if(topology == null || requiredPlayerIds == null || requiredPlayerIds.isEmpty()) { return [] }
+  List<Map> observations = topology?.observations instanceof List ? (List<Map>)topology.observations : []
+  if(observations.isEmpty()) { return [] }
+  Set<String> requiredSet = new HashSet<String>(normalizeGroupPlayerIds(requiredPlayerIds))
+  List<Map> attached = []
+  requiredPlayerIds.each { String playerId ->
+    if(playerId == coordinatorId) { return }
+    Map observation = observations.find { Map item -> item.playerId?.toString() == playerId && item.fresh == true }
+    if(observation == null) { return }
+    if(!observation.groupId || !observation.coordinatorId) { return }
+    List<String> members = normalizeGroupPlayerIds(observation.playerIds)
+    if(members.isEmpty()) { return }
+    Boolean hasOutside = members.any { String memberId -> !requiredSet.contains(memberId) }
+    if(hasOutside) { attached.add(observation) }
+  }
+  return attached
+}
+
+Boolean isExplicitCoordinatorTransferDetached(Map topology, String coordinatorId, List<String> requiredPlayerIds) {
+  if(topology == null || coordinatorId == null || requiredPlayerIds == null || requiredPlayerIds.isEmpty()) { return false }
+  List<Map> observations = topology?.observations instanceof List ? (List<Map>)topology.observations : []
+  if(observations.isEmpty()) { return false }
+  Set<String> requiredSet = new HashSet<String>(normalizeGroupPlayerIds(requiredPlayerIds))
+  if(requiredSet.isEmpty() || !requiredSet.contains(coordinatorId)) { return false }
+  Boolean allDetached = requiredPlayerIds.every { String playerId ->
+    Map observation = observations.find { Map item -> item.playerId?.toString() == playerId && item.fresh == true }
+    if(observation == null) { return false }
+    if(!observation.groupId || !observation.coordinatorId) { return false }
+    List<String> members = normalizeGroupPlayerIds(observation.playerIds)
+    if(members.isEmpty()) { return false }
+    return requiredSet.containsAll(new HashSet<String>(members))
+  }
+  if(!allDetached) { return false }
+  Map coordinatorObservation = observations.find { Map item -> item.playerId?.toString() == coordinatorId && item.fresh == true }
+  if(coordinatorObservation == null) { return false }
+  if(coordinatorObservation.coordinatorId?.toString() != coordinatorId) { return false }
+  List<String> coordinatorMembers = normalizeGroupPlayerIds(coordinatorObservation.playerIds)
+  return coordinatorMembers == [coordinatorId]
 }
 
 String summarizeGroupOperationTopology(Map topology) {
@@ -9500,10 +9565,58 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       return
     }
     if(operation.coordinatorTransferStarted == true) {
-      if(topology?.fresh == true && topology.coordinatorId == coordinatorId) {
+      Boolean aggregateDetached = topology?.fresh == true && topology.coordinatorId == coordinatorId
+      Boolean perPlayerDetached = isExplicitCoordinatorTransferDetached(topology, coordinatorId, requiredPlayerIds)
+      if(aggregateDetached || perPlayerDetached) {
         // The configured coordinator has left the old group. It can now
         // create the requested group without Sonos retaining the old leader.
+        // Fresh per-player reports can disagree with each other during the
+        // handoff, so an inconsistent aggregate still confirms the split.
+        if(perPlayerDetached && !aggregateDetached) {
+          logDebug("Explicit coordinator transfer confirmed from fresh per-player observations (coordinator=${coordinatorId})")
+        }
         operation.coordinatorTransferStarted = false
+      } else if(isExplicitCoordinatorSolo(topology, coordinatorId)) {
+        List<Map> attachedFollowers = getExplicitAttachedFollowerObservations(topology, coordinatorId, requiredPlayerIds)
+        if(!attachedFollowers.isEmpty()) {
+          Map<String, List<String>> followersByCoordinator = [:].withDefault { [] as List<String> }
+          attachedFollowers.each { Map observation ->
+            String currentCoordinatorId = observation.coordinatorId.toString()
+            followersByCoordinator[currentCoordinatorId] << observation.playerId.toString()
+          }
+          String detachCoordinatorId = followersByCoordinator.keySet().first()
+          List<String> followersToDetach = followersByCoordinator[detachCoordinatorId].unique()
+          ChildDeviceWrapper detachCoordinator = rinconMap[detachCoordinatorId]
+          if(detachCoordinator != null && followersToDetach) {
+            operation.lastCommand = 'detachFollowerFromOldGroup'
+            operation.topologyRequestId = UUID.randomUUID().toString()
+            logInfo("Detaching requested followers ${followersToDetach} from old group ${detachCoordinatorId} before creating exact group with ${coordinatorId} for group operation ${operation.operationId}")
+            logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
+            prepareExpectedTopologyForMutation(detachCoordinator, [], followersToDetach)
+            detachCoordinator.playerModifyGroupMembers([], followersToDetach)
+            operation.topologyMutationSent = true
+            operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+            operation.lastCommandAt = now()
+            saveActiveGroupOperation(operation)
+            runIn(1, 'refreshGroupOperationTopology', [
+              overwrite: true,
+              data: [operationId: operation.operationId]
+            ])
+            return
+          }
+        }
+        operation.lastCommand = 'refreshGroupTopology'
+        operation.lastCommandAt = now()
+        operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
+        saveActiveGroupOperation(operation)
+        requestGroupOperationTopology(operation, coordinator)
+        ChildDeviceWrapper previousCoordinator = topology?.coordinatorId
+            ? rinconMap[topology.coordinatorId as String]
+            : null
+        if(previousCoordinator != null && previousCoordinator != coordinator) {
+          requestGroupOperationTopology(operation, previousCoordinator)
+        }
+        return
       } else {
         // Wait for Sonos to publish the split before issuing the second step.
         // Repeating createGroup against the still-joined players preserves the

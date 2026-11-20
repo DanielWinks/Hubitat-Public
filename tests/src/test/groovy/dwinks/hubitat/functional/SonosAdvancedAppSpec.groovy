@@ -603,6 +603,7 @@ class SonosAdvancedAppSpec extends Specification {
     }
     appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
       leaderGeneration: zgt.leaderGeneration,
+      observedAt: appScript.now(),
       topology: [groups: [
         [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['RINCON_COORD', 'RINCON_FOLLOW']],
         [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA'], playerNames: ['RINCON_EXTRA']]
@@ -650,6 +651,7 @@ class SonosAdvancedAppSpec extends Specification {
     Map zgt = appScript.state.playerInitializationZgt as Map
     appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
       leaderGeneration: zgt.leaderGeneration,
+      observedAt: appScript.now(),
       topology: [groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
     ])
     appScript.applyHouseholdTopologyBatch()
@@ -689,6 +691,7 @@ class SonosAdvancedAppSpec extends Specification {
     Map zgt = appScript.state.playerInitializationZgt as Map
     appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
       leaderGeneration: zgt.leaderGeneration,
+      observedAt: appScript.now(),
       topology: [groups: [
         [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
         [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
@@ -729,7 +732,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationBootGeneration = 'boot-repeat-topology'
     appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
       leaderGeneration: 'leader-repeat', bootGeneration: 'boot-repeat-topology', topologyReady: false]
-    Map payload = [leaderGeneration: 'leader-repeat', topology: [groups: [[groupId: 'GROUP-1',
+    Map payload = [leaderGeneration: 'leader-repeat', observedAt: appScript.now(), topology: [groups: [[groupId: 'GROUP-1',
       coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
       playerNames: ['RINCON_COORD', 'RINCON_FOLLOW']]]]]
 
@@ -747,7 +750,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationZgt.topologyReady == true
   }
 
-  def "latest received ZGT replaces the accepted snapshot regardless of source timestamp"() {
+  def "stale ZGT snapshot with an older source timestamp is ignored"() {
     given:
     Long firstSourceTimestamp = appScript.now() + 10000L
     acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', firstSourceTimestamp)
@@ -763,19 +766,116 @@ class SonosAdvancedAppSpec extends Specification {
           playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], observedAt: firstReceivedTimestamp]
       ]
     ]
+    appScript.scheduled.clear()
 
     when:
-    Long secondSourceTimestamp = appScript.now() + 1000L
-    acceptZgtTopology('GROUP-2', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', secondSourceTimestamp)
+    Long staleSourceTimestamp = appScript.now() + 1000L
+    acceptZgtTopology('GROUP-2', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', staleSourceTimestamp)
     Map topology = appScript.readGroupOperationTopology(operation)
 
     then:
-    secondSourceTimestamp < firstSourceTimestamp
+    staleSourceTimestamp < firstSourceTimestamp
+    appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-1'
+    appScript.state.sonosHouseholdTopology.sourceObservedAt == firstSourceTimestamp
+    appScript.state.sonosHouseholdTopology.observedAt == firstReceivedTimestamp
+    topology.groupId == 'GROUP-1'
+    operation.topologyObservations.values().every { Map observation -> observation.groupId == 'GROUP-1' }
+    !appScript.scheduled.any { List job -> job[1] == 'applyHouseholdTopologyBatch' }
+  }
+
+  def "newer ZGT snapshot showing ungrouped players is accepted and fanned out"() {
+    given:
+    Long groupedSourceTimestamp = appScript.now() + 1000L
+    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', groupedSourceTimestamp)
+    Map zgt = appScript.state.playerInitializationZgt as Map
+
+    when:
+    Long soloSourceTimestamp = appScript.now() + 2000L
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
+      leaderGeneration: zgt.leaderGeneration,
+      observedAt: soloSourceTimestamp,
+      topology: [groups: [
+        [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
+        [groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW', playerIds: ['RINCON_FOLLOW']]
+      ]]
+    ])
+    appScript.applyHouseholdTopologyBatch()
+
+    then:
+    appScript.state.sonosHouseholdTopology.sourceObservedAt == soloSourceTimestamp
+    (appScript.state.sonosHouseholdTopology.groups as List<Map>).every { Map item ->
+      (item.playerIds as List).size() == 1
+    }
+    [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
+      player.topologyMembershipPublishFlags == [false]
+    }
+    group.refreshedPlaybackUpdates.size() == 1
+    (new JsonSlurper().parseText(group.refreshedPlaybackUpdates[0]).groups as List<Map>).every { Map item ->
+      (item.playerIds as List).size() == 1
+    }
+    appScript.state.playerInitializationZgt.topologyReady == true
+  }
+
+  def "first snapshot from a new ZGT leader generation is accepted despite an older timestamp"() {
+    given:
+    Long futureSourceTimestamp = appScript.now() + 10000L
+    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', futureSourceTimestamp)
+
+    when:
+    appScript.state.playerInitializationZgt['leaderGeneration'] = 'new-leader'
+    Long olderSourceTimestamp = appScript.now() + 1000L
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
+      leaderGeneration: 'new-leader',
+      observedAt: olderSourceTimestamp,
+      topology: [groups: [[groupId: 'GROUP-2', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]]]
+    ])
+
+    then:
     appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-2'
-    appScript.state.sonosHouseholdTopology.sourceObservedAt == secondSourceTimestamp
-    appScript.state.sonosHouseholdTopology.observedAt > firstReceivedTimestamp
-    topology.groupId == 'GROUP-2'
-    operation.topologyObservations.values().every { Map observation -> observation.groupId == 'GROUP-2' }
+    appScript.state.sonosHouseholdTopology.sourceObservedAt == olderSourceTimestamp
+  }
+
+  def "ZGT payload without a source timestamp is rejected and fails the candidate"() {
+    given:
+    appScript.state.playerInitializationBootGeneration = 'boot-zgt-no-timestamp'
+    appScript.state.playerInitializationBootPending = true
+    appScript.state.playerInitializationQueue = []
+    appScript.state.playerInitializationActive = [:]
+    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-no-timestamp', failedCandidates: [], topologyReady: false]
+    appScript.state.playerInitializationNotBefore = appScript.now()
+
+    when:
+    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
+    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
+    appScript.startNextPlayerInitialization()
+    Map zgt = appScript.state.playerInitializationZgt as Map
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
+      leaderGeneration: zgt.leaderGeneration,
+      topology: [groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
+    ])
+
+    then:
+    appScript.state.sonosHouseholdTopology == null
+    appScript.state.playerInitializationZgt.failedCandidates.contains(coordinator.deviceNetworkId)
+    appScript.state.playerInitializationZgt.lastFailure.reason.contains('without a usable source timestamp')
+    appScript.state.playerInitializationZgt.candidateDni == follower.deviceNetworkId
+  }
+
+  def "stale ZGT snapshot does not advance watchdog state or fail the candidate"() {
+    given:
+    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', appScript.now() + 10000L)
+    Long lastInboundBefore = appScript.state.playerInitializationZgt.lastInboundAt as Long
+    Boolean topologyReadyBefore = appScript.state.playerInitializationZgt.topologyReady == true
+    List failedBefore = appScript.state.playerInitializationZgt.failedCandidates as List
+
+    when:
+    acceptZgtTopology('GROUP-2', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', appScript.now() + 1000L)
+
+    then:
+    appScript.state.playerInitializationZgt.lastInboundAt == lastInboundBefore
+    appScript.state.playerInitializationZgt.topologyReady == topologyReadyBefore
+    appScript.state.playerInitializationZgt.failedCandidates == failedBefore
+    appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-1'
   }
 
   def "unchanged household membership fans out changed group and player names only"() {
@@ -783,7 +883,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationBootGeneration = 'boot-name-refresh'
     appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
       leaderGeneration: 'leader-name-refresh', bootGeneration: 'boot-name-refresh', topologyReady: false]
-    Map initialPayload = [leaderGeneration: 'leader-name-refresh', topology: [groups: [[
+    Map initialPayload = [leaderGeneration: 'leader-name-refresh', observedAt: appScript.now(), topology: [groups: [[
       groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', coordinatorName: 'Cora’s Room',
       playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['Cora’s Room', 'Sebastian’s Room'],
       groupName: 'Cora’s Room + 1'
@@ -859,6 +959,7 @@ class SonosAdvancedAppSpec extends Specification {
     Map zgt = appScript.state.playerInitializationZgt as Map
     appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
       leaderGeneration: zgt.leaderGeneration,
+      observedAt: appScript.now(),
       topology: [groups: [[groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
     ])
     appScript.applyHouseholdTopologyBatch()
@@ -1479,6 +1580,71 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
         ['RINCON_Z_COORD', 'RINCON_A_FOLLOW']
     operation.coordinatorTransferStarted == false
+  }
+
+  def "explicit coordinator transfer creates group from fresh conflicting singleton reports"() {
+    given:
+    coordinator.dataValues.id = 'RINCON_Z_COORD'
+    follower.dataValues.id = 'RINCON_A_FOLLOW'
+    Map operation = [
+      operationId: 'explicit-transfer-conflicting-singletons', groupingMode: 'EXPLICIT',
+      desiredCoordinatorId: 'RINCON_Z_COORD', resolvedCoordinatorId: 'RINCON_Z_COORD',
+      requiredPlayerIds: ['RINCON_A_FOLLOW', 'RINCON_Z_COORD'],
+      coordinatorTransferStarted: true, topologyAttempt: 0
+    ]
+    Map topology = [
+      fresh: true, consistent: false, groupId: null, coordinatorId: null, playerIds: [],
+      observations: [
+        [playerId: 'RINCON_Z_COORD', fresh: true, groupId: 'GROUP-SOLO-Z',
+          coordinatorId: 'RINCON_Z_COORD', playerIds: ['RINCON_Z_COORD']],
+        [playerId: 'RINCON_A_FOLLOW', fresh: true, groupId: 'GROUP-SOLO-A',
+          coordinatorId: 'RINCON_A_FOLLOW', playerIds: ['RINCON_A_FOLLOW']]
+      ]
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
+        ['RINCON_Z_COORD', 'RINCON_A_FOLLOW']
+    operation.coordinatorTransferStarted == false
+    operation.lastCommand == 'createExactGroup'
+  }
+
+  def "explicit coordinator transfer detaches follower still grouped with outside speaker"() {
+    given:
+    coordinator.dataValues.id = 'RINCON_COORD'
+    follower.dataValues.id = 'RINCON_A_FOLLOW'
+    extra.dataValues.id = 'RINCON_BEDROOM'
+    Map operation = [
+      operationId: 'explicit-transfer-detach-follower', groupingMode: 'EXPLICIT',
+      desiredCoordinatorId: 'RINCON_COORD', resolvedCoordinatorId: 'RINCON_COORD',
+      requiredPlayerIds: ['RINCON_COORD', 'RINCON_A_FOLLOW'],
+      coordinatorTransferStarted: true, topologyAttempt: 0,
+      coordinatorTransferPreviousCoordinatorId: 'RINCON_BEDROOM'
+    ]
+    Map topology = [
+      fresh: true, consistent: false, groupId: null, coordinatorId: null, playerIds: [],
+      observations: [
+        [playerId: 'RINCON_COORD', fresh: true, groupId: 'GROUP-SOLO-COORD',
+          coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
+        [playerId: 'RINCON_A_FOLLOW', fresh: true, groupId: 'GROUP-OLD',
+          coordinatorId: 'RINCON_BEDROOM', playerIds: ['RINCON_BEDROOM', 'RINCON_A_FOLLOW']]
+      ]
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    extra.commands.find { it.name == 'playerModifyGroupMembers' } == [
+      name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_A_FOLLOW']
+    ] || extra.commands.find { it.name == 'playerModifyGroupMembers' }?.remove == ['RINCON_A_FOLLOW']
+    coordinator.commands.every { it.name != 'playerCreateGroup' }
+    operation.coordinatorTransferStarted == true
+    operation.lastCommand == 'detachFollowerFromOldGroup'
+    operation.topologyMutationSent == true
   }
 
   def "additive grouping transfers coordination to the configured coordinator and preserves extras"() {
