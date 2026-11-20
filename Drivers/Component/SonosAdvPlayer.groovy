@@ -10393,11 +10393,6 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
   sendWsMessage(json)
 }
 
-@CompileStatic
-void playerEvictUnlistedPlayers(List<String> playerIdsToKeep) {
-  List<String> playerIdsToRemove = getGroupPlayerIds() - playerIdsToKeep
-  playerModifyGroupMembers(playerIdsToKeep, playerIdsToRemove)
-}
 // =============================================================================
 // End Grouping and Ungrouping
 // =============================================================================
