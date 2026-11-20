@@ -2544,6 +2544,19 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'COORDINATOR_STREAM'
   }
 
+  def "group announcement watchdog doubles the playback allowance and uses a bounded unknown-duration fallback"() {
+    expect:
+    appScript.getGroupAnnouncementWatchdogTimeoutSeconds(item) == timeoutSeconds
+
+    where:
+    item                 | timeoutSeconds
+    [duration: 0]         | 360
+    [:]                   | 360
+    [duration: 10]        | 120
+    [duration: 42]        | 132
+    [duration: 200]       | 290
+  }
+
   def "automatic topology disabled uses synchronized clips for an ungrouped target roster"() {
     given:
     appScript.settings.groupAnnouncementMode = 'automatic'
@@ -2901,7 +2914,7 @@ class SonosAdvancedAppSpec extends Specification {
     !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
   }
 
-  def "queued announcement stays on coordinator stream while previous announcement is playing"() {
+  def "queued announcement stays on coordinator stream after the previous restore reports completion"() {
     given:
     makeAnnouncementRosterExact()
     coordinator.currentValues.playbackState = 'PLAYBACK_STATE_IDLE'
@@ -2921,7 +2934,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.handleGroupAnnouncementProgress(coordinator, [groupDni: 'GROUP-DNI',
       correlationId: 'first-announcement', phase: 'DONE'])
     appScript.handleGroupAnnouncementProgress(coordinator, [groupDni: 'GROUP-DNI',
-      correlationId: 'first-announcement', phase: 'PLAYBACK_RESTORED', restored: true])
+      correlationId: 'first-announcement', phase: 'PLAYBACK_RESTORED', restored: restored,
+      reason: restored ? null : 'set-uri-failed-500'])
     appScript.startNextGroupAnnouncement('GROUP-DNI')
 
     then:
@@ -2933,6 +2947,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'COORDINATOR_STREAM'
     appScript.logs.any { it.contains('treating the group as otherwise idle') }
     coordinator.commands.any { it.name == 'restoreGroupAnnouncementPlayback' && it.correlationId == 'first-announcement' }
+
+    where:
+    restored << [true, false]
   }
 
   def "expired queued announcements are discarded before dispatch"() {

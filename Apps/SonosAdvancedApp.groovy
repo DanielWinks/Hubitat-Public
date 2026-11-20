@@ -307,8 +307,8 @@ preferences {
 @Field static final String SONOS_ALARM_CONTROL_URL = '/AlarmClock/Control'
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
-@Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 60
-@Field static final Integer GROUP_OPERATION_HARD_DEADLINE_SECONDS = 180
+@Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 240
+@Field static final Integer GROUP_OPERATION_HARD_DEADLINE_SECONDS = 480
 @Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS = 4
 @Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
@@ -6120,7 +6120,7 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
         queues[groupDni] = queue
         state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
         dispatchGroupAnnouncementClip(item, players, true)
-        Integer timeoutSeconds = (item.duration ?: 0) > 0 ? Math.max((item.duration as Integer) + 30, 38) : 188
+        Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(item)
         runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
           correlationId: correlationId], overwrite: false])
         return
@@ -6440,8 +6440,7 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
   }
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-  Integer duration = (item.duration ?: 0) as Integer
-  Integer timeoutSeconds = duration > 0 ? Math.max(duration + 20, 30) : 180
+  Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(item)
   runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
     correlationId: item.correlationId], overwrite: false])
 }
@@ -6765,10 +6764,10 @@ void beginGroupAnnouncementTopologySnapshot(String groupDni, Map queue, Map item
     }
   }
   requestAnnouncementTopologyObservations(transaction, requiredIds)
-  Integer timeoutSeconds = 12
+  Integer timeoutSeconds = 60
   runIn(timeoutSeconds, 'groupAnnouncementTopologySnapshotTimeout', [overwrite: true,
     data: [correlationId: item.correlationId]])
-  logDebug("Collecting fresh topology for group announcement ${item.correlationId}; players=${requiredIds.sort()}")
+  logInfo("Topology snapshot started for announcement ${item.correlationId}: group=${groupDni}, coordinator=${item.coordinatorId}, targets=${normalizeGroupPlayerIds(item.playerIds).sort()}, requested=${requiredIds.sort()}, source=${announcementAudioSource ?: 'unavailable'}, sourceObservedAt=${item.coordinatorAudioSourceObservedAt ?: 'unknown'}, priorPlaybackState=${item.coordinatorPlaybackState ?: 'unknown'}, timeout=${timeoutSeconds}s")
 }
 
 void retryGroupAnnouncementTopologySnapshot(Map data = null) {
@@ -6838,6 +6837,7 @@ Boolean handleGroupAnnouncementTopologyEvent(ChildDeviceWrapper player, Map payl
   List<String> playerIds = normalizeGroupPlayerIds(payload.playerIds)
   observations[playerId] = [groupId: payload.groupId?.toString(),
     coordinatorId: payload.coordinatorId?.toString(), playerIds: playerIds, observedAt: observedAt]
+  logInfo("Topology snapshot observation for announcement ${transaction.correlationId}: player=${playerId}, groupId=${payload.groupId}, coordinator=${payload.coordinatorId}, members=${playerIds.sort()}, observedAt=${observedAt}, requested=${normalizeGroupPlayerIds(transaction.requestedPlayerIds).sort()}, captured=${observations.keySet().toList().sort()}")
   transaction.observations = observations
   Set<String> additionalIds = new LinkedHashSet<String>()
   normalizeGroupPlayerIds(transaction.targetPlayerIds).each { String targetId ->
@@ -6898,6 +6898,7 @@ void completeGroupAnnouncementTopologySnapshot(Map transaction, Boolean timedOut
   Map snapshot = [observations: transaction.observations ?: [:], refreshAt: transaction.refreshAt,
     coordinatorAudioSource: transaction.coordinatorAudioSource,
     requestedPlayerIds: transaction.requestedPlayerIds ?: [], timedOut: timedOut]
+  logInfo("Topology snapshot completed for announcement ${correlationId}: timedOut=${timedOut}, requested=${normalizeGroupPlayerIds(transaction.requestedPlayerIds).sort()}, captured=${((Map)snapshot.observations).keySet().toList().sort()}, observations=${JsonOutput.toJson(snapshot.observations)}")
   transaction.phase = 'ROUTING'
   Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
@@ -7428,10 +7429,15 @@ void restoreStreamHolderMuteState(Map transaction) {
 }
 
 void scheduleGroupAnnouncementWatchdog(String groupDni, Map item) {
-  Integer duration = (item.duration ?: 0) as Integer
-  Integer timeoutSeconds = duration > 0 ? Math.max(duration + 20, 30) : 180
+  Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(item)
   runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
     correlationId: item.correlationId], overwrite: false])
+}
+
+/** Allow extra time for synchronized stream startup and delayed completion callbacks. */
+Integer getGroupAnnouncementWatchdogTimeoutSeconds(Map item) {
+  Integer duration = (item?.duration ?: 0) as Integer
+  return duration > 0 ? Math.max(duration + 90, 120) : 360
 }
 
 /** Resolve the shared announcement policy for an individual player. */
@@ -7551,8 +7557,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   if(playerId) { statuses[playerId] = phase; active.playerStatuses = statuses }
   logDebug("Group announcement ${correlationId} callback from ${playerId}: ${phase}; observed=${statuses}")
   if(phase == 'ACTIVE') {
-    Integer duration = (active.duration ?: 0) as Integer
-    Integer timeoutSeconds = duration > 0 ? Math.max(duration + 20, 30) : 180
+    Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(active)
     runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
       correlationId: correlationId], overwrite: false])
   }

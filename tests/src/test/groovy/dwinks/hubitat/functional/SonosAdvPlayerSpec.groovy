@@ -320,8 +320,177 @@ class SonosAdvPlayerSpec extends Specification {
     playRequest.params.headers.SOAPAction.endsWith('#Play')
     driver.runtimeState.announcementPlaybackSnapshot == null
     playerStateMessages().any { Map event ->
-      event.phase == 'PLAYBACK_RESTORED' && event.correlationId == 'restore-guid'
+      event.phase == 'PLAYBACK_RESTORED' && event.correlationId == 'restore-guid' && event.restored == true
     }
+  }
+
+  def "idle high priority TTS retries a rejected TuneIn restore without touching audio clips"() {
+    given:
+    driver.device.dataValues.capabilities = ''
+    driver.metaClass.textToSpeech = { String text, String voice ->
+      [uri: 'http://example.test/tts.mp3', duration: 2] as LinkedHashMap
+    }
+    driver.runtimeState.lastTransportPlaybackSnapshot = [
+      currentUri: 'x-sonosapi-stream:s123?sid=254&flags=32',
+      currentUriMetaData: '<DIDL-Lite><title>Jazz &amp; Blues</title></DIDL-Lite>',
+      transportState: 'STOPPED', track: '1', positionMillis: 1000L, playMode: 'NORMAL'
+    ]
+    driver.runtimeState.audioClipPlaying = true
+    driver.runtimeState.audioClipWatchdogRequestId = 'regular-watchdog'
+    driver.getDeviceAudioClipQueue().add([correlationId: 'regular-head'])
+    driver.playHighPriorityTTS('restore test', 10, null)
+    Map timer = driver.scheduled.find { List job -> job[1] == 'restoreDirectStreamTts' }[2].data
+    driver.restoreDirectStreamTts(timer)
+    Map first = driver.asyncCalls.last()
+
+    when:
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 500), first.data)
+    Map retry = driver.scheduled.find { List job -> job[1] == 'retryAnnouncementPlaybackUri' }[2].data
+
+    then:
+    driver.runtimeState.announcementPlaybackSnapshot.currentUri == 'x-sonosapi-stream:s123?sid=254&flags=32'
+    !playerStateMessages().any { it.phase == 'PLAYBACK_RESTORED' }
+
+    when:
+    driver.retryAnnouncementPlaybackUri(retry)
+    Map second = driver.asyncCalls.last()
+    Integer callCount = driver.asyncCalls.size()
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 200), first.data)
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 200), second.data)
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 200), second.data)
+
+    then:
+    first.params.body == second.params.body
+    first.params.body.contains('<CurrentURI>x-sonosapi-stream:s123?sid=254&amp;flags=32</CurrentURI>')
+    first.params.body.contains('<CurrentURIMetaData>&lt;DIDL-Lite&gt;&lt;title&gt;Jazz &amp;amp; Blues&lt;/title&gt;&lt;/DIDL-Lite&gt;</CurrentURIMetaData>')
+    first.data.attempt == 1
+    second.data.attempt == 2
+    driver.asyncCalls.size() == callCount
+    driver.getDeviceAudioClipQueue()*.correlationId == ['regular-head']
+    driver.runtimeState.audioClipPlaying == true
+    driver.runtimeState.audioClipWatchdogRequestId == 'regular-watchdog'
+    !driver.unschedules.contains('audioClipWatchdog')
+    driver.runtimeState.announcementPlaybackSnapshot == null
+    playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.restored == [true]
+  }
+
+  def "URI restore reports terminal HTTP failure once and keeps the original snapshot"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [correlationId: 'failure', currentUri: 'x-rincon-queue:RINCON_TEST#0']
+    driver.restoreGroupAnnouncementPlayback('failure')
+
+    when:
+    attempts.times { Integer index ->
+      Map request = driver.asyncCalls.last()
+      driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: status), request.data)
+      if(index + 1 < attempts) {
+        Map retry = driver.scheduled.findAll { List job -> job[1] == 'retryAnnouncementPlaybackUri' }.last()[2].data
+        driver.retryAnnouncementPlaybackUri(retry)
+      }
+    }
+
+    then:
+    driver.asyncCalls.count { it.cb == 'announcementPlaybackUriRestored' } == attempts
+    driver.runtimeState.announcementPlaybackRestore == null
+    driver.runtimeState.announcementPlaybackSnapshot == null
+    driver.runtimeState.lastAnnouncementPlaybackRestoreFailure.snapshot.currentUri == 'x-rincon-queue:RINCON_TEST#0'
+    driver.runtimeState.lastAnnouncementPlaybackRestoreFailure.attempt == attempts
+    driver.runtimeState.lastAnnouncementPlaybackRestoreFailure.status == status
+    playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.restored == [false]
+    playerStateMessages().find { it.phase == 'PLAYBACK_RESTORED' }.reason == "set-uri-failed-${status}"
+
+    where:
+    status | attempts
+    500    | 3
+    404    | 1
+  }
+
+  def "URI retry leaves an external takeover or newer snapshot alone"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [
+      correlationId: 'old', currentUri: 'x-rincon-queue:RINCON_TEST#0', announcementUri: 'http://example.test/tts.mp3'
+    ]
+    driver.restoreGroupAnnouncementPlayback('old')
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 500), driver.asyncCalls.last().data)
+    Map retry = driver.scheduled.find { List job -> job[1] == 'retryAnnouncementPlaybackUri' }[2].data
+    Integer callCount = driver.asyncCalls.size()
+
+    when:
+    if(newAnnouncement) {
+      driver.runtimeState.announcementPlaybackSnapshot = [correlationId: 'new', currentUri: 'new-source']
+    } else {
+      driver.device.currentValues.audioSource = 'new-source'
+      driver.state.playbackState = 'PLAYBACK_STATE_PLAYING'
+    }
+    driver.retryAnnouncementPlaybackUri(retry)
+
+    then:
+    driver.asyncCalls.size() == callCount
+    driver.runtimeState.announcementPlaybackSnapshot?.correlationId == (newAnnouncement ? 'new' : null)
+    playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.skipped ==
+        (newAnnouncement ? [] : ['external-playback'])
+
+    where:
+    newAnnouncement << [true, false]
+  }
+
+  def "confirmed local stream replacement cancels pending restore before playback attributes change"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [
+      correlationId: 'replaced', currentUri: 'radio', announcementUri: 'http://example.test/tts.mp3'
+    ]
+    driver.restoreGroupAnnouncementPlayback('replaced')
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 500), driver.asyncCalls.last().data)
+    Map retry = driver.scheduled.find { List job -> job[1] == 'retryAnnouncementPlaybackUri' }[2].data
+
+    when:
+    driver.setAVTransportURIAndPlay('http://example.test/replacement.mp3')
+    driver.setAVTransportURIAndPlayCallback(new hubitat.scheduling.AsyncResponse(status: 200), driver.asyncCalls.last().data)
+    driver.retryAnnouncementPlaybackUri(retry)
+
+    then:
+    driver.asyncCalls.count { it.cb == 'announcementPlaybackUriRestored' } == 1
+    playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.skipped == ['external-playback']
+  }
+
+  def "synchronous URI restore dispatch failure completes the transaction"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [correlationId: 'dispatch', currentUri: 'radio']
+    MetaClass originalMetaClass = driver.getMetaClass()
+    driver.setMetaClass(new ExpandoMetaClass(driver.class, false, true))
+    driver.getMetaClass().initialize()
+    driver.metaClass.getParent = { -> new Expando(playerStateUpdate: { Map payload -> parentPlayerUpdates << payload }) }
+    driver.metaClass.postSonosSoapAsync = { String callback, Map params, Map data ->
+      throw new IllegalStateException('HTTP dispatch failed')
+    }
+
+    when:
+    driver.restoreGroupAnnouncementPlayback('dispatch')
+
+    then:
+    driver.runtimeState.announcementPlaybackRestore == null
+    driver.runtimeState.lastAnnouncementPlaybackRestoreFailure.reason == 'uri-dispatch-failed'
+    playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.restored == [false]
+
+    cleanup:
+    driver.setMetaClass(originalMetaClass)
+  }
+
+  def "a failed seek leaves playback restore incomplete after successful resume"() {
+    given:
+    driver.runtimeState.announcementPlaybackSnapshot = [
+      correlationId: 'seek-failure', currentUri: 'x-rincon-queue:RINCON_TEST#0', track: 3, transportState: 'PLAYING'
+    ]
+
+    when:
+    driver.restoreGroupAnnouncementPlayback('seek-failure')
+    driver.announcementPlaybackUriRestored(new hubitat.scheduling.AsyncResponse(status: 200), driver.asyncCalls.last().data)
+    driver.announcementPlaybackSeekRestored(new hubitat.scheduling.AsyncResponse(status: 500), driver.asyncCalls.last().data)
+    driver.announcementPlaybackTransportRestored(new hubitat.scheduling.AsyncResponse(status: 200), driver.asyncCalls.last().data)
+
+    then:
+    driver.runtimeState.lastAnnouncementPlaybackRestoreFailure.stage == 'track'
+    playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.restored == [false]
   }
 
   def "group stream captures the pre-TTS transport and keeps it across stream replacement"() {
