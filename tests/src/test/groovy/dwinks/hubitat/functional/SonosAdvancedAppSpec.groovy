@@ -3322,8 +3322,21 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.subscriptions.count { it == [coordinator, 'playerCommandRequest', 'playerCommandRequestHandler'] } == 1
     appScript.subscriptions.count { it == [coordinator, 'groupFavoriteOperation', 'groupFavoriteOperationEventHandler'] } == 1
+    appScript.subscriptions.count { it == [group, 'zgtInProgress', 'zgtInProgressHandler'] } == 1
     !appScript.subscriptions.any { it[1] == 'sonosGroupCommandRequest' }
     !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
+  }
+
+  def "zgtInProgress handler accepts parent clear without error"() {
+    given:
+    group.dataValues.zgtInProgress = 'on'
+
+    when:
+    appScript.zgtInProgressHandler([value: 'off', deviceId: 'GROUP-DNI'] as Event)
+
+    then:
+    noExceptionThrown()
+    appScript.logs.any { String entry -> entry.contains('ZGT In Progress') }
   }
 
   def "Favorite with full options dispatches directly without topology checks"() {

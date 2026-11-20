@@ -70,6 +70,42 @@ class SonosAdvGroupSpec extends Specification {
     ]]])
   }
 
+  def "on and join set zgtInProgress on at initiation"() {
+    when:
+    driver.on()
+
+    then:
+    driver.events.find { Map event -> event.name == 'zgtInProgress' }?.value == 'on'
+    groupRequests()[0].command == 'on'
+
+    when:
+    driver.events.clear()
+    driver.joinPlayersToCoordinator()
+
+    then:
+    driver.events.find { Map event -> event.name == 'zgtInProgress' }?.value == 'on'
+  }
+
+  def "playback commands do not set zgtInProgress and setZgtInProgress clears to off"() {
+    when:
+    driver.play()
+
+    then:
+    driver.events.find { Map event -> event.name == 'zgtInProgress' } == null
+
+    when:
+    driver.setZgtInProgress(false)
+
+    then:
+    driver.events.find { Map event -> event.name == 'zgtInProgress' }?.value == 'off'
+
+    when:
+    driver.setZgtInProgress('yes')
+
+    then:
+    driver.events.findAll { Map event -> event.name == 'zgtInProgress' }.last()?.value == 'on'
+  }
+
   def "group batch enqueue re-arms a drain when the scheduled marker is stale"() {
     given:
     driver.state.pendingBatchEvents = [status: [value: 'playing']]

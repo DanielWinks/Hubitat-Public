@@ -288,6 +288,7 @@ preferences {
 @Field static final String PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY = 'receivedPlayerCommandRequestIds'
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
+@Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -4177,6 +4178,10 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     subscribedPlayers++
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    unsubscribe(groupDevice, ZGT_IN_PROGRESS_ATTRIBUTE, 'zgtInProgressHandler')
+    subscribe(groupDevice, ZGT_IN_PROGRESS_ATTRIBUTE, 'zgtInProgressHandler')
   }
   logDebug("Child request subscriptions configured; players=${subscribedPlayers}")
 }
@@ -10705,6 +10710,10 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     overwrite: true,
     data: [operationId: operation.operationId]
   ])
+}
+
+void zgtInProgressHandler(Event event) {
+  logDebug("ZGT In Progress ${event?.value?.toString() ?: ''} from ${event?.device?.deviceNetworkId?.toString() ?: ''}")
 }
 
 void groupFavoriteOperationEventHandler(Event event) {

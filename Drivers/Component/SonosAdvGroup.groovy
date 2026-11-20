@@ -170,6 +170,7 @@ metadata {
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
+    attribute 'zgtInProgress', 'enum', ['on', 'off']
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
@@ -301,9 +302,17 @@ Map getGroupCommandSettings() {
  * after the device gate is released so playHighPriorityTTS never blocks
  * on the app gate from inside parse/command execution.
  */
+void setZgtInProgress(Object inProgress) {
+  String normalized = (inProgress == true || inProgress?.toString()?.trim()?.toLowerCase() in ['true', 'on', 'yes']) ? 'on' : 'off'
+  sendEvent(name: 'zgtInProgress', value: normalized)
+}
+
 void requestGroupCommand(String command, Map args = [:]) {
   if(!command) {
     return
+  }
+  if(command in ['on', 'groupPlayers', 'joinPlayersToCoordinator', 'evictUnlistedPlayers', 'addPlayerToGroup', 'removePlayersFromCoordinator', 'ungroupPlayers', 'off']) {
+    setZgtInProgress(true)
   }
   Integer sequence = ((runtimeState.groupCommandSequence ?: 0) as Integer) + 1
   runtimeState.groupCommandSequence = sequence
