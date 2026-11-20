@@ -1417,18 +1417,16 @@ class SonosAdvancedAppSpec extends Specification {
   def "explicit grouping evicts extras without using the additive join operation"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
-    appScript.processGroupCommandRequest([request: request('on')])
-    emitRequiredTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
 
     when:
-    appScript.advanceGroupFavoriteOperation([operationId: appScript.getActiveGroupOperation().operationId])
+    appScript.processGroupCommandRequest([request: request('on')])
 
     then:
     coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
       name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_EXTRA']
     ]
-    coordinator.commands.every { it.name != 'playerCreateGroup' || it.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW'] }
-    appScript.getActiveGroupOperation().groupingMode == 'EXPLICIT'
+    coordinator.commands.every { it.name != 'playerCreateGroup' }
+    appScript.getActiveGroupOperation() == null
   }
 
   def "explicit grouping transfers coordination before rebuilding an already joined group"() {
@@ -1535,27 +1533,18 @@ class SonosAdvancedAppSpec extends Specification {
     operation.lastCommand == 'addMissingPlayers'
   }
 
-  def "play queued during explicit grouping runs once after the operation completes"() {
+  def "play after on() runs immediately without an operation"() {
     given:
     appScript.processGroupCommandRequest([request: request('on')])
-    Map operation = appScript.getActiveGroupOperation()
     coordinator.commands.clear()
 
     when:
     appScript.processGroupCommandRequest([request: request('play', [:], 2)])
 
     then:
-    appScript.getActiveGroupOperation()?.operationId == operation.operationId
-    coordinator.commands.every { it.name != 'play' }
-    appScript.state.deferredGroupOperationCommands.size() == 1
-
-    when:
-    appScript.completeGroupOperation(operation)
-    appScript.drainDeferredGroupOperationCommands()
-
-    then:
-    coordinator.commands.findAll { it.name == 'play' }.size() == 1
-    appScript.state.deferredGroupOperationCommands == null
+    appScript.getActiveGroupOperation() == null
+    coordinator.commands.find { it.name == 'play' } != null
+    !appScript.state.containsKey('deferredGroupOperationCommands')
   }
 
   def "explicit group creation puts the desired coordinator first after transfer"() {
@@ -1678,17 +1667,19 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "additive grouping transfers coordination to the configured coordinator and preserves extras"() {
     given:
+    coordinator.dataValues.groupId = 'GROUP-2'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA'
+    coordinator.dataValues.isGroupCoordinator = 'false'
     follower.dataValues.groupId = 'GROUP-2'
     follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
-    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
+    follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA'
     follower.dataValues.isGroupCoordinator = 'true'
-    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
-    emitTopologyObservation('RINCON_COORD', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
-    emitTopologyObservation('RINCON_FOLLOW', 'GROUP-2', 'RINCON_FOLLOW', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
-    Map operation = appScript.getActiveGroupOperation()
+    coordinator.commands.clear()
+    follower.commands.clear()
 
     when:
-    appScript.advanceGroupFavoriteOperation([operationId: appScript.getActiveGroupOperation().operationId])
+    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
 
     then:
     follower.commands.find { it.name == 'playerModifyGroupMembers' } == [
@@ -1699,33 +1690,29 @@ class SonosAdvancedAppSpec extends Specification {
         RINCON_EXTRA: [coordinatorId: 'RINCON_COORD', memberIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']]
       ]
     ]
-    operation.coordinatorTransferStarted == true
-    operation.coordinatorTransferPlayerIds == ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
     follower.commands.every { it.name != 'playerCreateGroup' }
-    appScript.getActiveGroupOperation().groupingMode == 'ADDITIVE'
+    appScript.getActiveGroupOperation() == null
+    appScript.scheduled.any { List job -> job[1] == 'joinAssemblyAfterDetach' }
   }
 
   def "additive coordinator transfer recreates the preserved roster with configured coordinator first"() {
     given:
-    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
-    Map operation = appScript.getActiveGroupOperation()
-    operation.coordinatorTransferStarted = true
-    operation.coordinatorTransferGroupCreated = false
-    operation.coordinatorTransferPlayerIds = ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']
-    operation.coordinatorTransferPreviousCoordinatorId = 'RINCON_FOLLOW'
-    Map<String, Map> topology = [
-      fresh: true,
-      observations: [[playerId: 'RINCON_COORD', fresh: true, coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]
-    ]
+    group.dataValues.playerIds = 'RINCON_FOLLOW,RINCON_EXTRA'
+    group.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupId = 'GROUP-COORD'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    coordinator.dataValues.isGroupCoordinator = 'true'
+    coordinator.commands.clear()
+    follower.commands.clear()
+    extra.commands.clear()
 
     when:
-    appScript.sendGroupTopologyCommand(operation, topology)
+    appScript.handleJoinAdditiveGroupImmediate(group)
 
     then:
     coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds ==
         ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_FOLLOW']
-    operation.coordinatorTransferGroupCreated == true
-    operation.resolvedCoordinatorId == 'RINCON_COORD'
   }
 
   def "additive grouping sends the join when fresh topology responses are unavailable"() {
@@ -1733,21 +1720,20 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.groupId = 'GROUP-COORD'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    coordinator.dataValues.isGroupCoordinator = 'true'
     follower.dataValues.groupId = 'GROUP-FOLLOW'
     follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
-    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
-    Map operation = appScript.getActiveGroupOperation()
-    operation.lastCommandAt = appScript.now() - 4000L
+    follower.dataValues.isGroupCoordinator = 'true'
 
     when:
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
 
     then:
-    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
-      name: 'playerModifyGroupMembers', add: ['RINCON_FOLLOW'], remove: []
-    ]
-    coordinator.commands.every { it.name != 'playerCreateGroup' }
+    def joined = coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW'] ||
+      coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_FOLLOW']
+    joined
+    appScript.getActiveGroupOperation() == null
   }
 
   def "addPlayerToGroup resolves a case-insensitive player name and adds only that player through the configured coordinator"() {
@@ -2065,16 +2051,28 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   def "queued group requests preserve grouping-before-Favorite order"() {
+    given:
+    coordinator.dataValues.groupId = 'GROUP-COORD'
+    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
+    coordinator.dataValues.isGroupCoordinator = 'true'
+    follower.dataValues.groupId = 'GROUP-FOLLOW'
+    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
+    follower.dataValues.isGroupCoordinator = 'true'
+
     when:
     appScript.enqueueGroupCommandRequest(request('loadFavorite', [favoriteId: '42'], 2))
     appScript.enqueueGroupCommandRequest(request('on', [:], 1))
     appScript.drainGroupCommandRequests()
 
     then:
-    appScript.getActiveGroupOperation().groupingMode == 'EXPLICIT'
-    appScript.getActiveGroupOperation().favoriteId == null
-    appScript.getActiveGroupOperation().registeredPlayerIds.containsAll(['RINCON_COORD', 'RINCON_FOLLOW'])
-    appScript.state.deferredGroupOperationCommands*.command == ['loadFavorite']
+    appScript.getActiveGroupOperation() == null
+    // on() now executes an immediate exact write; loadFavorite runs directly and is not deferred
+    coordinator.commands.find { it.name == 'loadFavoriteFull' }?.favoriteId == '42'
+    coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW'] ||
+      coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_FOLLOW']
+    !appScript.state.containsKey('deferredGroupOperationCommands')
   }
 
   def "direct group requests from another app instance are rejected"() {
@@ -3349,14 +3347,12 @@ class SonosAdvancedAppSpec extends Specification {
   def "Favorite waits for a separate grouping operation, then loads directly"() {
     given:
     appScript.processGroupCommandRequest([request: request('on', [:], 1)])
-    Map operation = appScript.getActiveGroupOperation()
     appScript.processGroupCommandRequest([request: request('loadFavoriteFull', [
       favoriteId: '42', repeatMode: 'repeat all', queueMode: 'replace',
       shuffleMode: 'off', autoPlay: 'true', crossfadeMode: 'on'
     ], 2)])
 
     when:
-    appScript.completeGroupOperation(operation)
     appScript.drainDeferredGroupOperationCommands()
 
     then:

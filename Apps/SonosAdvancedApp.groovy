@@ -8131,7 +8131,7 @@ void processGroupCommandRequest(Map data) {
     switch(command) {
       case 'on':
       case 'groupPlayers':
-        startGroupTopologyOperation(groupDevice, GROUPING_MODE_EXPLICIT, args)
+        handleOnExactGroupImmediate(groupDevice)
         break
 
       case 'evictUnlistedPlayers':
@@ -8155,7 +8155,7 @@ void processGroupCommandRequest(Map data) {
         break
 
       case 'joinPlayersToCoordinator':
-        startGroupTopologyOperation(groupDevice, GROUPING_MODE_ADDITIVE, args)
+        handleJoinAdditiveGroupImmediate(groupDevice)
         break
 
       case 'addPlayerToGroup':
@@ -8589,6 +8589,250 @@ Object getGroupOperationChildValue(ChildDeviceWrapper player, String name) {
     }
   }
   return value
+}
+
+Boolean isCachedSonosCoordinator(ChildDeviceWrapper player) {
+  if(player == null) { return false }
+  Object v = player.getDataValue('isGroupCoordinator')
+  if(v != null && v.toString().trim() != '') {
+    return v.toString() == 'true'
+  }
+  try {
+    return player.currentValue('isGroupCoordinator', true) == 'on'
+  } catch(Exception ignored) {
+    return false
+  }
+}
+
+List<String> getDeviceDataFollowerIds(DeviceWrapper groupDevice) {
+  String raw = groupDevice.getDataValue('playerIds') as String
+  if(!raw) { return [] }
+  return raw.split(',').collect { String s -> s?.trim() }.findAll { String s -> s }
+}
+
+Map getDeviceDataExactTarget(DeviceWrapper groupDevice) {
+  String coordinatorId = groupDevice.getDataValue('groupCoordinatorId') as String
+  if(coordinatorId != null) { coordinatorId = coordinatorId.trim() }
+  List<String> followers = getDeviceDataFollowerIds(groupDevice)
+  followers = followers.findAll { String id -> id != coordinatorId }.unique().sort()
+  List<String> required = coordinatorId ? ([coordinatorId] + followers) : followers
+  return [coordinatorId: coordinatorId, requiredPlayerIds: required, followerIds: followers]
+}
+
+void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  Map<String, Object> target = getDeviceDataExactTarget(groupDevice)
+  String coordinatorId = target.coordinatorId as String
+  List<String> requiredIds = (List<String>)target.requiredPlayerIds
+  if(!coordinatorId) {
+    logWarn("on() ignored for ${groupDevice.getDeviceNetworkId()}: no groupCoordinatorId in device data")
+    return
+  }
+  ChildDeviceWrapper desiredDevice = rinconMap[coordinatorId]
+  if(desiredDevice == null) {
+    logWarn("on() ignored for ${groupDevice.getDeviceNetworkId()}: could not resolve coordinator ${coordinatorId}")
+    return
+  }
+  logDebug("on() exact target coordinator=${coordinatorId} required=${requiredIds} for ${groupDevice.getDeviceNetworkId()}")
+  String groupId = getGroupOperationChildValue(desiredDevice, 'groupId')?.toString()
+  String coordinatorOfDesired = getGroupOperationChildValue(desiredDevice, 'groupCoordinatorId')?.toString()
+  List<String> membersOfDesired = normalizeGroupPlayerIds(getGroupOperationChildValue(desiredDevice, 'groupPlayerIds'))
+  Boolean desiredIsCoordinator = isCachedSonosCoordinator(desiredDevice)
+  if(coordinatorOfDesired != coordinatorId && groupId && membersOfDesired.contains(coordinatorId) && !desiredIsCoordinator) {
+    ChildDeviceWrapper prevCoordinator = coordinatorOfDesired ? rinconMap[coordinatorOfDesired] : null
+    if(prevCoordinator != null) {
+      Map<String, Map> finalExpectation = [:]
+      requiredIds.each { String pid ->
+        finalExpectation[pid] = [coordinatorId: coordinatorId, memberIds: requiredIds]
+      }
+      logInfo("on() removing coordinator ${coordinatorId} from ${coordinatorOfDesired} before exact assembly for ${groupDevice.getDeviceNetworkId()}")
+      prepareExpectedTopologyForMutation(prevCoordinator, [], [coordinatorId], finalExpectation)
+      prevCoordinator.playerModifyGroupMembers([], [coordinatorId], finalExpectation)
+      runInMillis(1, 'onAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: 0]])
+      return
+    }
+    logWarn("on() could not resolve previous coordinator ${coordinatorOfDesired} to detach ${coordinatorId}")
+    return
+  }
+  List<String> requiredSet = normalizeGroupPlayerIds(requiredIds)
+  List<String> attachedFollowerIds = []
+  Map<String, List<String>> followersByOldCoordinator = [:].withDefault { [] as List<String> }
+  requiredIds.each { String pid ->
+    if(pid == coordinatorId) { return }
+    ChildDeviceWrapper f = rinconMap[pid]
+    if(f == null) { return }
+    List<String> fMembers = normalizeGroupPlayerIds(getGroupOperationChildValue(f, 'groupPlayerIds'))
+    if(fMembers.isEmpty()) { return }
+    String fGroupId = getGroupOperationChildValue(f, 'groupId')?.toString()
+    String fCoord = getGroupOperationChildValue(f, 'groupCoordinatorId')?.toString()
+    if(fGroupId == groupId && fCoord == coordinatorId) { return }
+    Boolean hasOutside = fMembers.any { String m -> !requiredSet.contains(m) }
+    if(hasOutside) {
+      if(fCoord) {
+        followersByOldCoordinator[fCoord] << pid
+        attachedFollowerIds << pid
+      }
+    }
+  }
+  if(!followersByOldCoordinator.isEmpty()) {
+    String oldCoordId = followersByOldCoordinator.keySet().first()
+    List<String> toDetach = followersByOldCoordinator[oldCoordId].unique()
+    ChildDeviceWrapper detachDevice = rinconMap[oldCoordId]
+    if(detachDevice != null) {
+      logInfo("on() detaching requested followers ${toDetach} from old group ${oldCoordId} before exact assembly for ${groupDevice.getDeviceNetworkId()}")
+      prepareExpectedTopologyForMutation(detachDevice, [], toDetach)
+      detachDevice.playerModifyGroupMembers([], toDetach)
+      runInMillis(1, 'onAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: retries+1]])
+      return
+    }
+  }
+  Boolean isSolo = !groupId || membersOfDesired.isEmpty() || (membersOfDesired.size() == 1 && membersOfDesired[0] == coordinatorId)
+  if(isSolo) {
+    List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
+    if(ordered.size() > 1) {
+      logInfo("on() creating exact group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
+      prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
+      desiredDevice.playerCreateGroup(ordered, null)
+    } else {
+      logDebug("on() already exact singleton for ${groupDevice.getDeviceNetworkId()}")
+    }
+    return
+  }
+  if(!desiredIsCoordinator) {
+    // coordinator claims coordinatorId but isGroupCoordinator still off — treat as detached, assemble by create
+    List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
+    logInfo("on() creating exact group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
+    prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
+    desiredDevice.playerCreateGroup(ordered, null)
+    return
+  }
+  List<String> extras = membersOfDesired.findAll { String m -> !requiredSet.contains(m) }
+  List<String> missing = requiredIds.findAll { String pid -> !membersOfDesired.contains(pid) }
+  if(extras.isEmpty() && missing.isEmpty()) {
+    return
+  }
+  if(extras && missing) {
+    logInfo("on() evicting ${extras} and adding ${missing} in one step for ${groupDevice.getDeviceNetworkId()}")
+    prepareExpectedTopologyForMutation(desiredDevice, missing, extras)
+    desiredDevice.playerModifyGroupMembers(missing, extras)
+  } else if(extras) {
+    logInfo("on() evicting extras ${extras} for ${groupDevice.getDeviceNetworkId()}")
+    prepareExpectedTopologyForMutation(desiredDevice, [], extras)
+    desiredDevice.playerModifyGroupMembers([], extras)
+  } else if(missing) {
+    logInfo("on() adding missing ${missing} for ${groupDevice.getDeviceNetworkId()}")
+    prepareExpectedTopologyForMutation(desiredDevice, missing, [])
+    desiredDevice.playerModifyGroupMembers(missing, [])
+  }
+}
+
+void onAssemblyAfterDetach(Map data = [:]) {
+  ChildDeviceWrapper groupDevice = getChildDevice(data?.groupDni as String)
+  if(groupDevice == null) { return }
+  Integer retry = (data?.retry ?: 0) as Integer
+  if(retry > 10) {
+    logWarn("on() assembly exceeded detach retries for ${groupDevice.getDeviceNetworkId()}, forcing exact create")
+    Map<String, Object> target = getDeviceDataExactTarget(groupDevice)
+    String coordinatorId = target.coordinatorId as String
+    List<String> requiredIds = (List<String>)target.requiredPlayerIds
+    Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+    ChildDeviceWrapper desiredDevice = coordinatorId ? rinconMap[coordinatorId] : null
+    if(desiredDevice != null && requiredIds.size() > 1) {
+      List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
+      prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
+      desiredDevice.playerCreateGroup(ordered, null)
+    }
+    return
+  }
+  handleOnExactGroupImmediate(groupDevice)
+}
+
+void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
+  Map<String, Object> target = getDeviceDataExactTarget(groupDevice)
+  String coordinatorId = target.coordinatorId as String
+  List<String> requiredIds = (List<String>)target.requiredPlayerIds
+  List<String> followerIds = (List<String>)target.followerIds
+  if(!coordinatorId) {
+    logWarn("joinPlayersToCoordinator() ignored for ${groupDevice.getDeviceNetworkId()}: no groupCoordinatorId in device data")
+    return
+  }
+  if(followerIds.isEmpty()) {
+    logDebug("joinPlayersToCoordinator() no followers for ${groupDevice.getDeviceNetworkId()}")
+    return
+  }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  ChildDeviceWrapper desiredDevice = rinconMap[coordinatorId]
+  if(desiredDevice == null) {
+    logWarn("joinPlayersToCoordinator() ignored for ${groupDevice.getDeviceNetworkId()}: could not resolve coordinator ${coordinatorId}")
+    return
+  }
+  logDebug("joinPlayersToCoordinator() adaptive target coordinator=${coordinatorId} required=${requiredIds} for ${groupDevice.getDeviceNetworkId()}")
+  String groupId = getGroupOperationChildValue(desiredDevice, 'groupId')?.toString()
+  String coordinatorOfDesired = getGroupOperationChildValue(desiredDevice, 'groupCoordinatorId')?.toString()
+  List<String> membersOfDesired = normalizeGroupPlayerIds(getGroupOperationChildValue(desiredDevice, 'groupPlayerIds'))
+  Boolean desiredIsCoordinator = isCachedSonosCoordinator(desiredDevice)
+  if(coordinatorOfDesired != coordinatorId && groupId && membersOfDesired.contains(coordinatorId) && !desiredIsCoordinator) {
+    ChildDeviceWrapper prevCoordinator = coordinatorOfDesired ? rinconMap[coordinatorOfDesired] : null
+    if(prevCoordinator != null) {
+      List<String> preservedMembers = normalizeGroupPlayerIds(membersOfDesired)
+      if(preservedMembers.isEmpty()) { preservedMembers = requiredIds }
+      preservedMembers = (preservedMembers + requiredIds).unique().sort()
+      Map<String, Map> finalExpectation = [:]
+      preservedMembers.each { String pid ->
+        finalExpectation[pid] = [coordinatorId: coordinatorId, memberIds: preservedMembers]
+      }
+      logInfo("joinPlayersToCoordinator() removing coordinator ${coordinatorId} from ${coordinatorOfDesired} before join for ${groupDevice.getDeviceNetworkId()}")
+      prepareExpectedTopologyForMutation(prevCoordinator, [], [coordinatorId], finalExpectation)
+      prevCoordinator.playerModifyGroupMembers([], [coordinatorId], finalExpectation)
+      runInMillis(1, 'joinAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: 0]])
+      return
+    }
+    logWarn("joinPlayersToCoordinator() could not resolve previous coordinator ${coordinatorOfDesired}")
+    return
+  }
+  List<String> missing = requiredIds.findAll { String pid -> pid != coordinatorId && !membersOfDesired.contains(pid) }
+  if(missing.isEmpty()) {
+    return
+  }
+  Boolean isSolo = !groupId || membersOfDesired.isEmpty() || (membersOfDesired.size() == 1 && membersOfDesired[0] == coordinatorId)
+  if(isSolo) {
+    List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
+    logInfo("joinPlayersToCoordinator() creating group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
+    prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
+    desiredDevice.playerCreateGroup(ordered, null)
+    return
+  }
+  if(!desiredIsCoordinator) {
+    List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
+    logInfo("joinPlayersToCoordinator() creating group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
+    prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
+    desiredDevice.playerCreateGroup(ordered, null)
+    return
+  }
+  logInfo("joinPlayersToCoordinator() adding ${missing} to coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
+  prepareExpectedTopologyForMutation(desiredDevice, missing, [])
+  desiredDevice.playerModifyGroupMembers(missing, [])
+}
+
+void joinAssemblyAfterDetach(Map data = [:]) {
+  ChildDeviceWrapper groupDevice = getChildDevice(data?.groupDni as String)
+  if(groupDevice == null) { return }
+  Integer retry = (data?.retry ?: 0) as Integer
+  if(retry > 10) {
+    logWarn("joinPlayersToCoordinator() assembly exceeded detach retries for ${groupDevice.getDeviceNetworkId()}, forcing create")
+    Map<String, Object> target = getDeviceDataExactTarget(groupDevice)
+    String coordinatorId = target.coordinatorId as String
+    List<String> requiredIds = (List<String>)target.requiredPlayerIds
+    Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+    ChildDeviceWrapper desiredDevice = coordinatorId ? rinconMap[coordinatorId] : null
+    if(desiredDevice != null && requiredIds.size() > 1) {
+      List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
+      prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
+      desiredDevice.playerCreateGroup(ordered, null)
+    }
+    return
+  }
+  handleJoinAdditiveGroupImmediate(groupDevice)
 }
 
 Map buildGroupOperationTarget(ChildDeviceWrapper groupDevice, String groupingMode) {
