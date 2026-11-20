@@ -419,6 +419,20 @@ void clearPendingCommandsForInitialization() {
   String dni = device.getDeviceNetworkId()
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
+  runInMillis(1, 'purgeParentGroupCommandsAfterInitialization', [
+    overwrite: true,
+    data: [deviceDni: dni]
+  ])
+  logInfo("Cleared pending group commands for initialization (${dni}); parent purge scheduled")
+}
+
+/** Notify the parent after the driver lifecycle callback releases its device gate. */
+void purgeParentGroupCommandsAfterInitialization(Map data = [:]) {
+  String dni = data?.deviceDni?.toString()
+  if(!dni || dni != device.getDeviceNetworkId()?.toString()) {
+    logDebug("Ignoring stale parent command purge for ${dni ?: '(unknown device)'}")
+    return
+  }
   try {
     Boolean accepted = parent != null ? (Boolean)parent.groupAppRequest([
       version: 1, channel: 'groupAppRequest', action: 'initializationPurge',
@@ -428,7 +442,6 @@ void clearPendingCommandsForInitialization() {
   } catch(Exception e) {
     logWarn("Parent app initialization purge callback failed for ${dni}: ${e.message}")
   }
-  logInfo("Cleared pending group commands for initialization (${dni})")
 }
 
 void installed() { initialize() }

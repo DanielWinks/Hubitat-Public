@@ -2525,6 +2525,9 @@ void initialize() { configure(true) }
 
 @Field static final String STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY = 'staticDriverActivePlayerRoster'
 @Field static final Integer STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION = 1
+@Field static final String ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY = 'pendingAnnouncementPolicyRefreshes'
+@Field static final String ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY = 'announcementPolicySettings'
+@Field static final String ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY = 'announcementPolicyTopologies'
 
 /** Return the player roster published during app lifecycle/device changes. */
 Map<String, Object> getStaticDriverActivePlayerRoster() {
@@ -2534,8 +2537,9 @@ Map<String, Object> getStaticDriverActivePlayerRoster() {
 }
 
 /** Refresh the driver cleanup snapshot after child-device changes. */
-void refreshStaticDriverActivePlayerRoster() {
+void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChanges = true) {
   try {
+    Map<String, Object> previousRoster = getStaticDriverActivePlayerRoster()
     List<Map<String, String>> roster = []
     List<ChildDeviceWrapper> children = app.getChildDevices()
     if(children == null) {
@@ -2555,13 +2559,23 @@ void refreshStaticDriverActivePlayerRoster() {
       refreshedAt: refreshedAt,
       players: roster
     ]
+    Boolean rosterChanged = previousRoster?.players != roster
     String serializedRoster = JsonOutput.toJson(state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY])
     children.each { ChildDeviceWrapper child ->
       if(child.getDeviceNetworkId() && child.getDataValue('id')) {
         child.updateDataValue('staticDriverActivePlayerRoster', serializedRoster)
       }
     }
-    refreshPlayerAnnouncementPolicySnapshots()
+    if(rosterChanged && refreshPoliciesWhenRosterChanges) {
+      Set<String> previousDnis = ((List<Map>)previousRoster?.players ?: []).collect { Map row ->
+        row?.dni?.toString()
+      }.findAll { String dni -> dni } as Set<String>
+      roster.findAll { Map<String, String> row -> !previousDnis.contains(row.dni) }.each { Map<String, String> row ->
+        ChildDeviceWrapper addedPlayer = getChildDevice(row.dni)
+        refreshPlayerAnnouncementPolicySnapshot(addedPlayer)
+        rememberAnnouncementPolicyTopology(addedPlayer)
+      }
+    }
   } catch(Exception e) {
     logWarn("Could not refresh active player roster cache: ${e.message}")
   }
@@ -2603,7 +2617,8 @@ void configure(Boolean startup = false) {
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
   try { configureAlarmManagement() }
   catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
-  refreshStaticDriverActivePlayerRoster()
+  refreshStaticDriverActivePlayerRoster(false)
+  refreshPlayerAnnouncementPolicySnapshots(startup)
   unschedule('refreshStaticDriverActivePlayerRoster')
   schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
   subscribeToGroupCommandRequests()
@@ -4062,15 +4077,148 @@ void subscribeToGroupCommandRequests() {
   logDebug("Child request subscriptions configured; players=${subscribedPlayers}")
 }
 
-/** Keep player driver policy caches aligned with app settings and observations. */
-void refreshPlayerAnnouncementPolicySnapshots() {
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    String dni = player.getDeviceNetworkId()?.toString()
-    if(!dni) { return }
-    player.updateDataValue('useAudioClipForPlayer', shouldUseAudioClipForPlayer(dni, false).toString())
-    player.updateDataValue('useAudioClipForHighPriorityTts', shouldUseAudioClipForPlayer(dni, true).toString())
-    player.updateDataValue('useAudioClipForAirPlay', shouldUseAudioClipForAirPlay().toString())
+/** Refresh cached policies only when settings changed, initialization requires it, or a cache is missing. */
+void refreshPlayerAnnouncementPolicySnapshots(Boolean force = false) {
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  Map<String, String> policySettings = [
+    normal: getAnnouncementMode(false),
+    highPriority: getAnnouncementMode(true)
+  ]
+  Map<String, String> previousSettings = state[ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY] : null
+  Boolean missingPolicy = players.any { ChildDeviceWrapper player ->
+    !player.getDataValue('useAudioClipForPlayer') ||
+      !player.getDataValue('useAudioClipForHighPriorityTts') ||
+      !player.getDataValue('useAudioClipForAirPlay')
   }
+  if(force || previousSettings != policySettings || missingPolicy) {
+    players.each { ChildDeviceWrapper player -> refreshPlayerAnnouncementPolicySnapshot(player) }
+    state[ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY] = policySettings
+    rememberCurrentAnnouncementPolicyTopologies(players)
+  }
+}
+
+/** Coalesce playback changes and refresh only players sharing the changed coordinator. */
+void queueAnnouncementPolicyRefreshForPlayer(String playerDni) {
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  String playerId = player?.getDataValue('id')?.toString()
+  if(!playerId) { return }
+  String coordinatorId = player.getDataValue('groupCoordinatorId')?.toString() ?: playerId
+  Map<String, Boolean> pending = state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Boolean>((Map<String, Boolean>)state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY]) : [:]
+  pending[coordinatorId] = true
+  state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY] = pending
+  runIn(1, 'drainAnnouncementPolicyRefreshQueue', [overwrite: false])
+}
+
+/** Queue a roster-wide refresh after topology changes that may move several players. */
+void queueAllAnnouncementPolicyRefreshes() {
+  Map<String, Boolean> pending = state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Boolean>((Map<String, Boolean>)state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY]) : [:]
+  pending['*'] = true
+  state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY] = pending
+  runIn(1, 'drainAnnouncementPolicyRefreshQueue', [overwrite: false])
+}
+
+void drainAnnouncementPolicyRefreshQueue() {
+  Map<String, Boolean> pending = state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Boolean>((Map<String, Boolean>)state[ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY]) : [:]
+  state.remove(ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY)
+  if(pending.isEmpty()) { return }
+  if(pending.containsKey('*')) {
+    refreshPlayerAnnouncementPolicySnapshots(true)
+    return
+  }
+  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
+  Set<String> affectedDnis = [] as Set<String>
+  pending.keySet().each { String coordinatorId ->
+    players.each { ChildDeviceWrapper player ->
+      String playerId = player.getDataValue('id')?.toString()
+      String currentCoordinatorId = player.getDataValue('groupCoordinatorId')?.toString()
+      if(playerId == coordinatorId || currentCoordinatorId == coordinatorId) {
+        String dni = player.getDeviceNetworkId()?.toString()
+        if(dni) { affectedDnis.add(dni) }
+      }
+    }
+  }
+  affectedDnis.each { String dni ->
+    ChildDeviceWrapper player = getChildDevice(dni)
+    refreshPlayerAnnouncementPolicySnapshot(player)
+    rememberAnnouncementPolicyTopology(player)
+  }
+}
+
+void refreshPlayerAnnouncementPolicySnapshot(ChildDeviceWrapper player) {
+  String dni = player?.getDeviceNetworkId()?.toString()
+  if(!dni || !player.getDataValue('id')) { return }
+  updatePlayerPolicySnapshotValue(player, 'useAudioClipForPlayer', shouldUseAudioClipForPlayer(dni, false))
+  updatePlayerPolicySnapshotValue(player, 'useAudioClipForHighPriorityTts', shouldUseAudioClipForPlayer(dni, true))
+  updatePlayerPolicySnapshotValue(player, 'useAudioClipForAirPlay', shouldUseAudioClipForAirPlay())
+}
+
+Boolean hasAutomaticAnnouncementPolicy() {
+  return getAnnouncementMode(false) == 'automatic' || getAnnouncementMode(true) == 'automatic'
+}
+
+String announcementAudioSourceClass(String audioSource) {
+  if(isAirPlayAudioSource(audioSource)) { return 'airplay' }
+  if(audioSource?.startsWith('x-sonos-htastream:') == true) { return 'hdmi' }
+  return 'other'
+}
+
+Boolean playbackObservationAffectsAnnouncementPolicy(ChildDeviceWrapper player, Map previous, Map current) {
+  String playerId = player?.getDataValue('id')?.toString()
+  String coordinatorId = player?.getDataValue('groupCoordinatorId')?.toString() ?: playerId
+  if(!playerId || coordinatorId != playerId || !hasAutomaticAnnouncementPolicy()) { return false }
+  Boolean previousHasAudioSource = previous?.containsKey('audioSource') == true
+  Boolean currentHasAudioSource = current?.containsKey('audioSource') == true
+  if(previousHasAudioSource != currentHasAudioSource) { return true }
+  if(previousHasAudioSource && announcementAudioSourceClass(previous.audioSource?.toString()) !=
+      announcementAudioSourceClass(current.audioSource?.toString())) { return true }
+  String playerDni = player.getDeviceNetworkId()?.toString()
+  return shouldUseAudioClipForPlayer(playerDni, false, previous) !=
+          shouldUseAudioClipForPlayer(playerDni, false, current) ||
+      shouldUseAudioClipForPlayer(playerDni, true, previous) !=
+          shouldUseAudioClipForPlayer(playerDni, true, current)
+}
+
+void rememberCurrentAnnouncementPolicyTopologies(List<ChildDeviceWrapper> players = null) {
+  Map<String, String> topologies = [:]
+  (players ?: getCurrentPlayerDevices()).each { ChildDeviceWrapper player ->
+    String dni = player?.getDeviceNetworkId()?.toString()
+    String coordinatorId = player?.getDataValue('groupCoordinatorId')?.toString() ?:
+        player?.getDataValue('id')?.toString()
+    if(dni && coordinatorId) { topologies[dni] = coordinatorId }
+  }
+  state[ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY] = topologies
+}
+
+void rememberAnnouncementPolicyTopology(ChildDeviceWrapper player) {
+  String dni = player?.getDeviceNetworkId()?.toString()
+  String coordinatorId = player?.getDataValue('groupCoordinatorId')?.toString() ?:
+      player?.getDataValue('id')?.toString()
+  if(!dni || !coordinatorId) { return }
+  Map<String, String> topologies = state[ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, String>((Map<String, String>)state[ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY]) : [:]
+  topologies[dni] = coordinatorId
+  state[ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY] = topologies
+}
+
+Boolean announcementPolicyTopologyChanged(ChildDeviceWrapper player) {
+  if(!hasAutomaticAnnouncementPolicy()) { return false }
+  String dni = player?.getDeviceNetworkId()?.toString()
+  String coordinatorId = player?.getDataValue('groupCoordinatorId')?.toString() ?:
+      player?.getDataValue('id')?.toString()
+  if(!dni || !coordinatorId) { return false }
+  Map<String, String> topologies = state[ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, String>((Map<String, String>)state[ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY]) : [:]
+  String previousCoordinatorId = topologies[dni]
+  return previousCoordinatorId != coordinatorId
+}
+
+void updatePlayerPolicySnapshotValue(ChildDeviceWrapper player, String key, Boolean value) {
+  String normalized = value.toString()
+  if(player.getDataValue(key)?.toString() != normalized) { player.updateDataValue(key, normalized) }
 }
 
 void createPlayerDevicesWithFeedback() {
@@ -5023,7 +5171,11 @@ void handleNewUiSettingChange(String buttonName) {
     }
     logInfo("Applying custom setting '${settingName}'=${requestedEnumValue}")
     app.updateSetting(settingName, [type: 'enum', value: requestedEnumValue])
+    settings[settingName] = requestedEnumValue
     if(settingName == 'logLevel') { applyLogLevelChange() }
+    if(settingName in ['groupAnnouncementMode', 'highPriorityAnnouncementMode']) {
+      refreshPlayerAnnouncementPolicySnapshots()
+    }
     app.sendEvent(name: 'newUiSettings', value: 'updated')
     return
   }
@@ -5609,7 +5761,6 @@ void playerStateUpdateHandler(Object event) {
     acceptHouseholdTopology(playerDni, payload)
     return
   }
-  runIn(1, 'refreshPlayerAnnouncementPolicySnapshots', [overwrite: true])
   if(payload.kind == 'wsRetry') {
     Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
         ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
@@ -5651,7 +5802,9 @@ void playerStateUpdateHandler(Object event) {
     if(playerId) {
       Map<String, Map> observations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
           ? (Map<String, Map>)state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] : [:]
-      Map observation = observations[playerId] instanceof Map ? new LinkedHashMap(observations[playerId]) : [:]
+      Map previousObservation = observations[playerId] instanceof Map
+          ? new LinkedHashMap((Map)observations[playerId]) : [:]
+      Map observation = new LinkedHashMap(previousObservation)
       if(payload.playbackState != null) { observation.playbackState = payload.playbackState.toString() }
       if(payload.playbackObservedAt != null) { observation.playbackObservedAt = payload.playbackObservedAt }
       if(payload.audioSource != null) { observation.audioSource = payload.audioSource.toString() }
@@ -5660,6 +5813,9 @@ void playerStateUpdateHandler(Object event) {
       observations[playerId] = observation
       state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] = observations
       logDebug("Cached playback observation for ${playerId}: state=${payload.playbackState}, signal=${payload.signalStatus}")
+      if(playbackObservationAffectsAnnouncementPolicy(player, previousObservation, observation)) {
+        queueAnnouncementPolicyRefreshForPlayer(playerDni)
+      }
     }
     return
   }
@@ -5670,6 +5826,7 @@ void playerStateUpdateHandler(Object event) {
     return
   }
   if(kind == 'topology') {
+    if(announcementPolicyTopologyChanged(player)) { queueAllAnnouncementPolicyRefreshes() }
     if(topologyUpdateMatchesHouseholdSnapshot(player, payload)) {
       logDebug("Topology update from ${playerDni} matches the app household snapshot; ZGT watchdog unchanged")
     } else {
@@ -5701,6 +5858,13 @@ void playerStateUpdateHandler(Object event) {
     return
   }
   if(!(kind in ['state', 'followers'])) { return }
+  if(kind == 'state' && hasAutomaticAnnouncementPolicy() && coordinatorId == player.getDataValue('id')?.toString() &&
+      payload.playbackAttrs instanceof Map &&
+      ((Map)payload.playbackAttrs).keySet().any { Object name ->
+        name?.toString() in ['audioSource', 'status', 'transportStatus']
+      }) {
+    queueAnnouncementPolicyRefreshForPlayer(playerDni)
+  }
   if(payload.followerDNIs instanceof List && payload.followerAttrs instanceof Map) {
     ChildDeviceWrapper coordinator = coordinatorId ? findPlayerBySonosId(coordinatorId) : null
     ((List)payload.followerDNIs).each { Object dni ->
@@ -5869,9 +6033,8 @@ Boolean playerAppRequestHandler(Object event) {
       refreshStaticDriverActivePlayerRoster()
       break
     case 'refreshPolicy':
-      player.updateDataValue('useAudioClipForPlayer', shouldUseAudioClipForPlayer(playerDni, false).toString())
-      player.updateDataValue('useAudioClipForHighPriorityTts', shouldUseAudioClipForPlayer(playerDni, true).toString())
-      player.updateDataValue('useAudioClipForAirPlay', shouldUseAudioClipForAirPlay().toString())
+      refreshPlayerAnnouncementPolicySnapshot(player)
+      rememberAnnouncementPolicyTopology(player)
       break
     case 'activeStreamTts':
       String requestId = args.requestId?.toString()
@@ -6516,6 +6679,11 @@ Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = nu
   Map<String, Map> observations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] : [:]
   Map observation = playerId ? observations[playerId] : null
+  return getPlayerPlaybackActivityForObservation(player, observation, audioSource)
+}
+
+Map getPlayerPlaybackActivityForObservation(ChildDeviceWrapper player, Map observation, String audioSource = null) {
+  if(player == null) { return [active: false, signal: 'no-player'] }
   String playbackState = observation?.playbackState?.toString()
   String transportStatus = player.currentValue('transportStatus', true)?.toString()?.toLowerCase()
   String resolvedAudioSource = audioSource ?: observation?.audioSource?.toString()
@@ -7271,7 +7439,7 @@ Boolean shouldUseAudioClipForAirPlay() {
   return getAnnouncementMode(false) != 'alwaysCoordinatorStream'
 }
 
-Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = false) {
+Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = false, Map playbackObservation = null) {
   String mode = getAnnouncementMode(highPriority)
   if(mode == 'alwaysNonInterrupting') { return true }
   if(mode == 'alwaysCoordinatorStream') { return false }
@@ -7283,15 +7451,16 @@ Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = fal
       ?: player.getDataValue('id')?.toString()
   ChildDeviceWrapper coordinator = coordinatorId ? rinconMap[coordinatorId] : player
   if(coordinator == null) { coordinator = player }
-  if(isAirPlayAudioSource(coordinator.currentValue('audioSource', true)?.toString())) {
-    logDebug("Player announcement route check player=${playerDni}, coordinator=${coordinatorId}, mode=${mode}, audioSource=AirPlay, useAudioClip=true")
+  String audioSource = playbackObservation instanceof Map && playbackObservation.containsKey('audioSource')
+      ? playbackObservation.audioSource?.toString()
+      : coordinator.currentValue('audioSource', true)?.toString()
+  if(isAirPlayAudioSource(audioSource)) {
     return true
   }
-  String transportStatus = coordinator.currentValue('transportStatus', true)?.toString()?.toLowerCase()
-  Map playbackActivity = getPlayerPlaybackActivity(coordinator)
-  String playbackState = playbackActivity.playbackState?.toString()
+  Map playbackActivity = playbackObservation instanceof Map
+      ? getPlayerPlaybackActivityForObservation(coordinator, playbackObservation, audioSource)
+      : getPlayerPlaybackActivity(coordinator, audioSource)
   Boolean active = playbackActivity.active == true
-  logDebug("Player announcement route check player=${playerDni}, coordinator=${coordinatorId}, priority=${highPriority ? 'high' : 'normal'}, mode=${mode}, playbackState=${playbackState}, playbackObservedAt=${playbackActivity.observedAt}, playbackSignal=${playbackActivity.signal}, transportStatus=${transportStatus}, useAudioClip=${active}")
   return active
 }
 

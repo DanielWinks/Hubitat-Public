@@ -138,7 +138,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.isEmpty()
   }
 
-  def "initialize clears pending and active group command work before recovery"() {
+  def "initialize clears pending work and defers parent purge until after the lifecycle callback"() {
     given:
     driver.runtimeState.pendingGroupCommands = [[command: 'on']]
     driver.runtimeState.activeGroupCommandRequest = [requestId: 'stale', command: 'off']
@@ -163,8 +163,19 @@ class SonosAdvGroupSpec extends Specification {
     driver.unschedules.contains('drainGroupCommandQueue')
     driver.unschedules.contains('retryActiveGroupCommandRequest')
     driver.unschedules.contains('regroupSafetyTimeout')
-    driver.parent.requests.any { Map request -> request.action == 'initializationPurge' }
+    driver.parent.requests.empty
+    driver.scheduled.any { List item ->
+      item[1] == 'purgeParentGroupCommandsAfterInitialization' &&
+        item[2].data.deviceDni == 'SONOS-GROUP-TEST-DNI'
+    }
     driver.scheduled.any { List item -> item[1] == 'refresh' }
+
+    when:
+    driver.purgeParentGroupCommandsAfterInitialization([deviceDni: 'SONOS-GROUP-TEST-DNI'])
+
+    then:
+    driver.parent.requests.size() == 1
+    driver.parent.requests[0].action == 'initializationPurge'
   }
 
   def "track position preference controls updates received by the group device"() {

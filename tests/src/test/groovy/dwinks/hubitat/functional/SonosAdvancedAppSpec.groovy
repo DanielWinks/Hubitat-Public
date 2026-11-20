@@ -2293,6 +2293,91 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.useAudioClipForAirPlay == 'true'
   }
 
+  def "unrelated player state updates do not refresh announcement policies"() {
+    given:
+    appScript.metaClass.flushGroupDeviceState = { String coordinatorId, Map volumeAttrs, Map playbackAttrs -> }
+
+    when:
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
+      kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      playbackAttrs: [volume: 10]
+    ])] as Event)
+
+    then:
+    !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
+    !coordinator.dataValues.containsKey('useAudioClipForPlayer')
+    !appScript.logs.any { String message -> message.contains('Player announcement policy evaluated') }
+  }
+
+  def "playback policy refresh coalesces and updates only the affected coordinator group"() {
+    given:
+    appScript.settings.groupAnnouncementMode = 'automatic'
+    appScript.settings.highPriorityAnnouncementMode = 'alwaysCoordinatorStream'
+    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
+    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
+
+    when:
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
+      kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
+      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()
+    ])] as Event)
+    appScript.drainAnnouncementPolicyRefreshQueue()
+
+    then:
+    appScript.scheduled.count { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' } == 1
+    coordinator.dataValues.useAudioClipForPlayer == 'true'
+    follower.dataValues.useAudioClipForPlayer == 'true'
+    coordinator.dataValues.useAudioClipForHighPriorityTts == 'false'
+    follower.dataValues.useAudioClipForHighPriorityTts == 'false'
+    !extra.dataValues.containsKey('useAudioClipForPlayer')
+    !appScript.logs.any { String message -> message.contains('Player announcement route check') }
+
+    when:
+    appScript.scheduled.clear()
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
+      kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
+      playbackState: 'PLAYBACK_STATE_BUFFERING', playbackObservedAt: appScript.now() + 1000L
+    ])] as Event)
+
+    then:
+    !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
+  }
+
+  def "changing one announcement priority refreshes its policy without changing the other"() {
+    given:
+    appScript.settings.groupAnnouncementMode = 'alwaysNonInterrupting'
+    appScript.settings.highPriorityAnnouncementMode = 'alwaysNonInterrupting'
+    appScript.refreshPlayerAnnouncementPolicySnapshots(true)
+
+    when:
+    appScript.handleNewUiSettingChange('newUiSetting|highPriorityAnnouncementMode|alwaysCoordinatorStream')
+
+    then:
+    coordinator.dataValues.useAudioClipForPlayer == 'true'
+    coordinator.dataValues.useAudioClipForHighPriorityTts == 'false'
+    follower.dataValues.useAudioClipForPlayer == 'true'
+    follower.dataValues.useAudioClipForHighPriorityTts == 'false'
+  }
+
+  def "unchanged topology reports do not recalculate announcement policies"() {
+    given:
+    appScript.settings.groupAnnouncementMode = 'automatic'
+    appScript.settings.highPriorityAnnouncementMode = 'automatic'
+    appScript.refreshPlayerAnnouncementPolicySnapshots(true)
+    appScript.scheduled.clear()
+    appScript.logs.clear()
+
+    when:
+    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
+      kind: 'topology', playerDni: coordinator.deviceNetworkId, groupId: 'GROUP-1',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
+    ])] as Event)
+
+    then:
+    !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
+    !appScript.logs.any { String message -> message.contains('Player announcement policy evaluated') }
+  }
+
   def "player position preference suppresses position fanout to disabled followers"() {
     given:
     follower.dataValues.enableTrackPositionUpdates = 'false'
