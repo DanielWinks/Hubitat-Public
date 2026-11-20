@@ -28,6 +28,14 @@ Use for new features and refactors in `Apps/` and `Drivers/`.
   callback protection, and explicit online/offline state where useful.
 - Organize larger files with comment sections for imports/constants, logging,
   metadata/preferences, lifecycle, events, device commands, HTTP, and helpers.
+- Never synchronously call `parent.*` from `parse()`/hot paths or child commands
+  inline under the app gate (both hold the `singleThreaded:true` gate — 120 s
+  lock-order inversion). Defer via private queue + `runIn`/`runInMillis` flush/poll.
+  Keep bridge data in private queues, never in attributes (`sendEvent` always
+  clutters; `displayed:false` is a no-op). Hot driver queues use `@Field static
+  ConcurrentHashMap` + `synchronized` claim-and-swap drains (`singleThreaded:false`
+  makes `state` maps lose updates); app queues in `state` are safe (serialized).
+  See `AGENTS.md` Parent/Child Async section for the full findings.
 
 Inspect nearby examples and test stubs for exact Hubitat API shapes. Run
 targeted lint and relevant tests after coding.
