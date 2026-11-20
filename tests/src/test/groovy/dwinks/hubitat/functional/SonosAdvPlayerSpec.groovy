@@ -24,6 +24,91 @@ class SonosAdvPlayerSpec extends Specification {
     parentPlayerUpdates.collect { Map event -> new LinkedHashMap(event) }
   }
 
+  void appendAudioClipAdmissionSchedules(Integer regularRemaining, Integer highRemaining,
+      List<String> prefix, List<List<String>> schedules) {
+    if(regularRemaining == 0 && highRemaining == 0) {
+      schedules.add(new ArrayList<String>(prefix))
+      return
+    }
+    if(regularRemaining > 0) {
+      prefix.add('R')
+      appendAudioClipAdmissionSchedules(regularRemaining - 1, highRemaining, prefix, schedules)
+      prefix.remove(prefix.size() - 1)
+    }
+    if(highRemaining > 0) {
+      prefix.add('H')
+      appendAudioClipAdmissionSchedules(regularRemaining, highRemaining - 1, prefix, schedules)
+      prefix.remove(prefix.size() - 1)
+    }
+  }
+
+  List<String> expectedAudioClipDispatches(List<Map> operations) {
+    List<Map> regularQueue = []
+    List<Map> highQueue = []
+    List<String> dispatches = []
+    Map active = null
+
+    Closure dispatchNext = { ->
+      if(!highQueue.isEmpty()) {
+        active = highQueue.remove(0)
+      } else if(!regularQueue.isEmpty()) {
+        active = regularQueue[0]
+      } else {
+        active = null
+      }
+      if(active != null) { dispatches.add(active.uri as String) }
+    }
+
+    operations.each { Map operation ->
+      if(operation.kind == 'regular') {
+        regularQueue.add(operation)
+        if(active == null) { dispatchNext.call() }
+      } else if(operation.kind == 'high') {
+        highQueue.add(operation)
+        if(active == null || active.priority != 'HIGH') { dispatchNext.call() }
+      } else if(operation.kind == 'complete' && active != null) {
+        if(active.priority != 'HIGH' && !regularQueue.isEmpty()) { regularQueue.remove(0) }
+        active = null
+        dispatchNext.call()
+      }
+    }
+    return dispatches
+  }
+
+  void resetAudioClipQueueModel() {
+    driver.metaClass.getParent = { -> null }
+    driver.runtimeState.clear()
+    driver.state.clear()
+    driver.binding.setVariable('atomicState', [:])
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.getDeviceAudioClipQueueTimers().clear()
+    driver.scheduled.clear()
+    driver.unschedules.clear()
+    driver.asyncCalls.clear()
+    driver.events.clear()
+    driver.logs.clear()
+    driver.settings.chimeBeforeTTS = false
+    driver.settings.ttsBoostAmount = 0
+    driver.device.currentValues.mute = 'unmuted'
+    driver.device.currentValues.volume = 10
+    driver.device.currentValues.level = 10
+  }
+
+  void captureActiveAudioClipDispatch(List<String> dispatches, List<String> lastCorrelationId) {
+    Map active = driver.runtimeState.activeAudioClipMessage instanceof Map
+        ? (Map)driver.runtimeState.activeAudioClipMessage : null
+    String correlationId = active?.correlationId?.toString()
+    if(!correlationId) {
+      lastCorrelationId[0] = null
+      return
+    }
+    if(correlationId != lastCorrelationId[0]) {
+      dispatches.add(active.uri?.toString() ?: active.origin?.toString() ?: correlationId)
+      lastCorrelationId[0] = correlationId
+    }
+  }
+
   def "delayed stream callback cannot supersede a newer transport command"() {
     given:
     driver.asyncCalls.clear()
@@ -49,7 +134,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.audioClipQueueInitialization()
     driver.getDeviceAudioClipQueue().add([correlationId: 'regular'])
     driver.getDeviceAudioClipQueueHighPriority().add([correlationId: 'high'])
-    driver.getDeviceAudioClipQueueSaved().add([correlationId: 'saved'])
     driver.getDeviceAudioClipQueueTimers().put('clip-uri', 123L)
     driver.state.pendingParentAppTtsRequests = [tts: [uri: 'http://example.test/tts.mp3']]
     driver.runtimeState.pendingParentCoordinatorCommands = [[command: 'play']]
@@ -70,7 +154,6 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.getDeviceAudioClipQueue().isEmpty()
     driver.getDeviceAudioClipQueueHighPriority().isEmpty()
-    driver.getDeviceAudioClipQueueSaved().isEmpty()
     driver.getDeviceAudioClipQueueTimers().isEmpty()
     !driver.state.containsKey('pendingParentAppTtsRequests')
     !driver.runtimeState.containsKey('pendingParentCoordinatorCommands')
@@ -2128,28 +2211,29 @@ class SonosAdvPlayerSpec extends Specification {
       .every { String entry -> entry.length() < 1400 }
   }
 
-  def "second priority clip waits for active priority playback and preserves suspended regular clips"() {
+  def "second priority clip waits while unfinished regular clips stay in FIFO order"() {
     given:
     driver.metaClass.getParent = { -> null }
     driver.getDeviceAudioClipQueue().clear()
     driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.getDeviceAudioClipQueueSaved().clear()
     driver.settings.ttsBoostAmount = 10
     driver.playerLoadAudioClip('http://example.test/a.mp3', 15G, 30, 'A')
     driver.playerLoadAudioClip('http://example.test/b.mp3', 15G, 10, 'B')
     driver.playerLoadAudioClipHighPriority('http://example.test/h1.mp3', 15G, 'H1', 20)
-    List<Map> suspended = new ArrayList<Map>(driver.getDeviceAudioClipQueueSaved())
     List<Map> watchdogs = new ArrayList<Map>(driver.scheduled)
 
     when:
     driver.playerLoadAudioClipHighPriority('http://example.test/h2.mp3', 15G, 'H2', 10)
+    driver.dequeueAudioClip()
 
     then:
     driver.runtimeState.activeAudioClipCorrelationId == 'H1'
     driver.runtimeState.audioClipPlaying == true
     driver.getDeviceAudioClipQueueHighPriority()*.correlationId == ['H2']
-    driver.getDeviceAudioClipQueueSaved().toList() == suspended
-    suspended*.correlationId == ['A', 'B']
+    driver.getDeviceAudioClipQueue()*.correlationId == ['A', 'B']
+    driver.runtimeState.currentlyPlayingClip.correlationId == 'A'
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/h1.mp3'
+    driver.logs.any { String entry -> entry.contains('Ignoring redundant audio clip dequeue while high-priority clip H1 is active') }
     driver.scheduled == watchdogs
 
     when:
@@ -2157,7 +2241,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.runtimeState.activeAudioClipCorrelationId == 'H2'
-    driver.getDeviceAudioClipQueueSaved()*.correlationId == ['A', 'B']
+    driver.getDeviceAudioClipQueue()*.correlationId == ['A', 'B']
+    driver.runtimeState.currentlyPlayingClip.correlationId == 'A'
 
     when:
     driver.setAudioClipPlaying(false)
@@ -2166,14 +2251,167 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/a.mp3'
     driver.runtimeState.activeAudioClipMessage.dispatchCount == 2
     driver.runtimeState.activeAudioClipCorrelationId != 'A'
-    driver.getDeviceAudioClipQueue()*.correlationId == ['B']
-    driver.getDeviceAudioClipQueueSaved().empty
+    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3', 'http://example.test/b.mp3']
+    driver.getDeviceAudioClipQueue().peek().correlationId == driver.runtimeState.activeAudioClipCorrelationId
 
     when:
     driver.setAudioClipPlaying(false)
 
     then:
-    driver.runtimeState.activeAudioClipCorrelationId == 'B'
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/b.mp3'
+    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/b.mp3']
+
+    when:
+    driver.setAudioClipPlaying(false)
+
+    then:
+    driver.getDeviceAudioClipQueue().empty
+    driver.runtimeState.audioClipPlaying == null
+  }
+
+  def "regular clip interrupted by high priority resumes before regular clips enqueued during interruption"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.settings.ttsBoostAmount = 0
+    driver.playerLoadAudioClip('http://example.test/a.mp3', 10G, 5, 'A')
+    driver.playerLoadAudioClipHighPriority('http://example.test/h.mp3', 10G, 'H', 2)
+
+    when:
+    driver.playerLoadAudioClip('http://example.test/b.mp3', 10G, 5, 'B')
+
+    then:
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/h.mp3'
+    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3', 'http://example.test/b.mp3']
+
+    when: 'the high-priority clip finishes'
+    driver.setAudioClipPlaying(false)
+
+    then: 'the interrupted regular head resumes first'
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/a.mp3'
+    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3', 'http://example.test/b.mp3']
+
+    when: 'the resumed regular clip finishes'
+    driver.setAudioClipPlaying(false)
+
+    then: 'the newer regular clip plays next'
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/b.mp3'
+    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/b.mp3']
+
+    when:
+    driver.setAudioClipPlaying(false)
+
+    then:
+    driver.getDeviceAudioClipQueue().empty
+  }
+
+  def "final regular clip failure drops only the active queue head and leaves the tail queued"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.playerLoadAudioClip('http://example.test/a.mp3', 10G, 5, 'A')
+    driver.playerLoadAudioClip('http://example.test/b.mp3', 10G, 5, 'B')
+
+    when:
+    driver.markAudioClipWatchdogFailure('A', 'FAILED_ACTIVE_TIMEOUT', 'regression test')
+
+    then:
+    driver.getDeviceAudioClipQueue()*.correlationId == ['B']
+    driver.runtimeState.audioClipPlaying == false
+    !driver.runtimeState.containsKey('activeAudioClipCorrelationId')
+    !driver.runtimeState.containsKey('currentlyPlayingClip')
+  }
+
+  def "final high-priority failure preserves the unfinished regular queue head"() {
+    given:
+    driver.metaClass.getParent = { -> null }
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.playerLoadAudioClip('http://example.test/a.mp3', 10G, 5, 'A')
+    driver.playerLoadAudioClipHighPriority('http://example.test/h1.mp3', 10G, 'H1', 2)
+    driver.playerLoadAudioClipHighPriority('http://example.test/h2.mp3', 10G, 'H2', 2)
+
+    when:
+    driver.markAudioClipWatchdogFailure('H1', 'FAILED_ACTIVE_TIMEOUT', 'regression test')
+    driver.dequeueAudioClip()
+
+    then:
+    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/h2.mp3'
+    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3']
+    driver.runtimeState.currentlyPlayingClip.correlationId == 'A'
+  }
+
+  def "bounded standard and high-priority admission schedules preserve dispatch order at varied completion times"() {
+    given:
+    List<String> timingModes = ['drain-after-admission', 'complete-each-admission', 'complete-at-midpoint']
+    Integer scenarioCount = 0
+
+    when:
+    for(Integer regularCount = 0; regularCount <= 3; regularCount++) {
+      for(Integer highCount = 0; highCount <= 3; highCount++) {
+        if(regularCount + highCount == 0) { continue }
+        List<List<String>> admissionSchedules = []
+        appendAudioClipAdmissionSchedules(regularCount, highCount, [], admissionSchedules)
+        admissionSchedules.each { List<String> admissionSchedule ->
+          timingModes.each { String timingMode ->
+            resetAudioClipQueueModel()
+            List<Map> operations = []
+            List<String> actualDispatches = []
+            List<String> lastCorrelationId = [null]
+            Integer regularIndex = 0
+            Integer highIndex = 0
+
+            admissionSchedule.eachWithIndex { String kind, Integer index ->
+              String prefix = kind == 'R' ? 'R' : 'H'
+              Integer messageIndex = kind == 'R' ? regularIndex++ : highIndex++
+              String correlationId = "${prefix}${messageIndex}"
+              String uri = "http://example.test/${correlationId}.mp3"
+              Map operation = [kind: kind == 'R' ? 'regular' : 'high', priority: kind == 'H' ? 'HIGH' : 'REGULAR',
+                correlationId: correlationId, uri: uri]
+              operations.add(operation)
+
+              if(kind == 'R') {
+                driver.playerLoadAudioClip(uri, 1G, 1, correlationId)
+              } else {
+                driver.playerLoadAudioClipHighPriority(uri, 1G, correlationId, 1)
+              }
+              captureActiveAudioClipDispatch(actualDispatches, lastCorrelationId)
+
+              Boolean completeNow = timingMode == 'complete-each-admission' ||
+                (timingMode == 'complete-at-midpoint' && index == Math.floor(admissionSchedule.size() / 2.0d) as Integer)
+              if(completeNow) {
+                operations.add([kind: 'complete'])
+                driver.setAudioClipPlaying(false)
+                captureActiveAudioClipDispatch(actualDispatches, lastCorrelationId)
+              }
+            }
+
+            Integer drainCount = 0
+            Integer maxDrainCount = (regularCount + (highCount * 2) + 1) * 2
+            while(driver.runtimeState.audioClipPlaying == true && drainCount < maxDrainCount) {
+              operations.add([kind: 'complete'])
+              driver.setAudioClipPlaying(false)
+              captureActiveAudioClipDispatch(actualDispatches, lastCorrelationId)
+              drainCount++
+            }
+
+            List<String> expectedDispatches = expectedAudioClipDispatches(operations)
+            assert actualDispatches == expectedDispatches:
+              "regularDepth=${regularCount}, highDepth=${highCount}, arrivals=${admissionSchedule}, timing=${timingMode}, expected=${expectedDispatches}, actual=${actualDispatches}"
+            assert driver.getDeviceAudioClipQueue().isEmpty():
+              "regular queue not drained: arrivals=${admissionSchedule}, timing=${timingMode}, queue=${driver.getDeviceAudioClipQueue()*.correlationId}"
+            assert driver.getDeviceAudioClipQueueHighPriority().isEmpty():
+              "high queue not drained: arrivals=${admissionSchedule}, timing=${timingMode}, queue=${driver.getDeviceAudioClipQueueHighPriority()*.correlationId}"
+            scenarioCount++
+          }
+        }
+      }
+    }
+
+    then:
+    scenarioCount == 204
   }
 
   def "stale audio clip watchdog does not reset active playback state"() {
@@ -3462,7 +3700,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
     driver.getDeviceAudioClipQueue().clear()
     driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.getDeviceAudioClipQueueSaved().clear()
     driver.runtimeState.audioClipPlaying = true
 
     when:
@@ -3492,7 +3729,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
     driver.getDeviceAudioClipQueue().clear()
     driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.getDeviceAudioClipQueueSaved().clear()
     driver.runtimeState.audioClipPlaying = true
 
     when:
@@ -3514,13 +3750,44 @@ class SonosAdvPlayerSpec extends Specification {
     [synchronizedClip, volume] << [[false, true], [null, 0G, 1G]].combinations()
   }
 
+  def "retained active regular head does not count as waiting work for synchronized chime readiness"() {
+    given:
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueueHighPriority().clear()
+    driver.getDeviceAudioClipQueue().add([correlationId: 'A'])
+    driver.runtimeState.currentlyPlayingClip = [correlationId: 'A']
+    driver.runtimeState.audioClipPlaying = true
+    driver.runtimeState.activeAudioClipMessage = [correlationId: 'A', priority: 'REGULAR']
+
+    expect:
+    driver.getAudioClipQueueIsEmpty() == false
+    driver.hasQueuedRegularAudioClip() == false
+    driver.canPrepareSynchronizedGroupChime(false) == true
+
+    when: 'another regular clip is waiting behind the retained active head'
+    driver.getDeviceAudioClipQueue().add([correlationId: 'B'])
+
+    then:
+    driver.hasQueuedRegularAudioClip() == true
+    driver.canPrepareSynchronizedGroupChime(false) == false
+
+    when: 'the active head is interrupted by a high-priority clip'
+    driver.runtimeState.activeAudioClipMessage = [correlationId: 'H', priority: 'HIGH']
+    driver.getDeviceAudioClipQueue().clear()
+    driver.getDeviceAudioClipQueue().add([correlationId: 'A'])
+
+    then: 'the suspended head remains unfinished but does not count as newly waiting work'
+    driver.getAudioClipQueueIsEmpty() == false
+    driver.hasQueuedRegularAudioClip() == false
+    driver.canPrepareSynchronizedGroupChime(false) == true
+  }
+
   def "muted synchronized group member reports terminal progress"() {
     given:
     driver.events.clear()
     driver.device.currentValues.mute = 'muted'
     driver.getDeviceAudioClipQueue().clear()
     driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.getDeviceAudioClipQueueSaved().clear()
 
     when:
     driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/muted.mp3', 10G,

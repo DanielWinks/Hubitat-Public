@@ -422,7 +422,6 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
-@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
 @Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
@@ -650,7 +649,6 @@ void clearPendingCommandsForInitialization() {
     audioClipQueueInitialization()
     getDeviceAudioClipQueue().clear()
     getDeviceAudioClipQueueHighPriority().clear()
-    getDeviceAudioClipQueueSaved().clear()
     getDeviceAudioClipQueueTimers().clear()
     pendingGroupedPlayerVolumes.remove(playerId)
   }
@@ -711,7 +709,11 @@ void clearPendingAudioClipCorrelation(String correlationId) {
   audioClipQueueInitialization()
   getDeviceAudioClipQueue().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
   getDeviceAudioClipQueueHighPriority().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
-  getDeviceAudioClipQueueSaved().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
+  Map currentRegular = runtimeState.currentlyPlayingClip instanceof Map
+      ? (Map)runtimeState.currentlyPlayingClip : null
+  if(currentRegular?.correlationId?.toString() == correlationId) {
+    removeHiddenJsonRuntimeState('currentlyPlayingClip')
+  }
   List<Map> outbound = getWebsocketOutboundQueue()
   outbound.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
   if(outbound.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
@@ -1391,7 +1393,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     Integer clearedEntries = clearStaticMap(audioClipQueue)
     clearedEntries += clearStaticMap(runtimeStateByDni)
     clearedEntries += clearStaticMap(audioClipQueueHighPriority)
-    clearedEntries += clearStaticMap(audioClipQueueSaved)
     clearedEntries += clearStaticMap(audioClipQueueTimers)
     clearedEntries += clearStaticMap(groupsRegistry)
     clearedEntries += clearStaticMap(statesRegistry)
@@ -1433,7 +1434,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(audioClipQueue, activePlayerIds)
   removedEntries += pruneStaticMapKeys(runtimeStateByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(audioClipQueueHighPriority, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(audioClipQueueSaved, activePlayerIds)
   removedEntries += pruneStaticMapKeys(audioClipQueueTimers, activePlayerIds)
   removedEntries += pruneStaticMapKeys(groupsRegistry, activePlayerIds)
   removedEntries += pruneStaticMapKeys(statesRegistry, activePlayerIds)
@@ -1582,7 +1582,6 @@ void clearStaticDriverStateForCurrentDevice() {
     if(playerId != null && playerId != '') {
       audioClipQueue?.remove(playerId)
       audioClipQueueHighPriority?.remove(playerId)
-      audioClipQueueSaved?.remove(playerId)
       audioClipQueueTimers?.remove(playerId)
       groupsRegistry?.remove(playerId)
       statesRegistry?.remove(playerId)
@@ -1641,10 +1640,6 @@ void audioClipQueueInitialization() {
   if(!(audioClipQueueHighPriority instanceof ConcurrentHashMap)) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
   if(!audioClipQueueHighPriority.containsKey(getId())) {
     audioClipQueueHighPriority[getId()] = new ConcurrentLinkedQueue<Map>()
-  }
-  if(!(audioClipQueueSaved instanceof ConcurrentHashMap)) { audioClipQueueSaved = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
-  if(!audioClipQueueSaved.containsKey(getId())) {
-    audioClipQueueSaved[getId()] = new ConcurrentLinkedQueue<Map>()
   }
   if(!(audioClipQueueTimers instanceof ConcurrentHashMap)) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
   if(!audioClipQueueTimers.containsKey(getId())) {
@@ -7295,12 +7290,6 @@ ConcurrentLinkedQueue<Map> getDeviceAudioClipQueueHighPriority() {
 }
 
 @CompileStatic
-ConcurrentLinkedQueue<Map> getDeviceAudioClipQueueSaved() {
-  audioClipQueueInitialization()
-  return audioClipQueueSaved[getId()]
-}
-
-@CompileStatic
 LinkedHashMap getDeviceAudioClipQueueTimers() {
   audioClipQueueInitialization()
   return audioClipQueueTimers[getId()]
@@ -7325,54 +7314,37 @@ Boolean getAudioClipQueueIsEmpty() {
   return getDeviceAudioClipQueue().size() == 0
 }
 
+/** Does the regular queue contain work that has not started yet? */
+Boolean hasQueuedRegularAudioClip() {
+  ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
+  Map currentRegular = runtimeState.currentlyPlayingClip instanceof Map
+      ? (Map)runtimeState.currentlyPlayingClip : null
+  Map head = queue.peek()
+  Boolean retainedActiveHead = currentRegular?.correlationId != null &&
+      currentRegular.correlationId.toString() == head?.correlationId?.toString()
+  return retainedActiveHead ? queue.size() > 1 : !queue.isEmpty()
+}
+
 // Correlation IDs capture queue ownership without logging clip URLs or speech text.
 void traceAudioClipQueues(String stage) {
   if(!loggingEnabled('trace')) { return }
   Map active = runtimeState.activeAudioClipMessage as Map
-  logDebug("AudioClipQueue ${stage}: playing=${runtimeState.audioClipPlaying}, active=${runtimeState.activeAudioClipCorrelationId}, activePriority=${active?.priority ?: 'REGULAR'}, currentRegular=${(runtimeState.currentlyPlayingClip as Map)?.correlationId}, regular=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, high=${getDeviceAudioClipQueueHighPriority().collect { Map clip -> clip.correlationId }}, saved=${getDeviceAudioClipQueueSaved().collect { Map clip -> clip.correlationId }}")
+  logDebug("AudioClipQueue ${stage}: playing=${runtimeState.audioClipPlaying}, active=${runtimeState.activeAudioClipCorrelationId}, activePriority=${active?.priority ?: 'REGULAR'}, currentRegular=${(runtimeState.currentlyPlayingClip as Map)?.correlationId}, regular=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, high=${getDeviceAudioClipQueueHighPriority().collect { Map clip -> clip.correlationId }}")
 }
 
-void saveRegularAudioClipQueue() {
-  traceAudioClipQueues('save-before-clear')
-  logDebug('saveRegularAudioClipQueue')
+Boolean removeActiveRegularAudioClipFromQueue(String correlationId, String outcome) {
+  if(!correlationId) { return false }
   ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
-  ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
-
-  // Save all queued regular priority clips
-  savedQueue.clear()
-
-  // First, save the currently playing clip if there is one
-  Map currentlyPlayingClip = runtimeState.currentlyPlayingClip as Map
-  if(currentlyPlayingClip) {
-    savedQueue.add(currentlyPlayingClip)
-    logDebug('Saved currently playing clip to be restarted')
+  Map head = regularQueue.peek()
+  if(head?.correlationId?.toString() != correlationId) {
+    logWarn("Cannot remove ${outcome} regular audio clip ${correlationId}; queue head is ${head?.correlationId ?: 'empty'}")
+    return false
   }
-
-  // Then save all queued clips
-  List<Map> queueList = new ArrayList<Map>(regularQueue)
-  queueList.each { clip ->
-    savedQueue.add(clip)
+  Boolean removed = regularQueue.remove(head)
+  if(removed) {
+    logDebug("Removed ${outcome} regular audio clip ${correlationId} from queue; remaining=${regularQueue.collect { Map clip -> clip.correlationId }}")
   }
-
-  traceAudioClipQueues('save-after-copy')
-  logDebug("Saved ${savedQueue.size()} total clips (including currently playing)")
-}
-
-void restoreRegularAudioClipQueue() {
-  traceAudioClipQueues('restore-before')
-  logDebug('restoreRegularAudioClipQueue')
-  ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
-  ConcurrentLinkedQueue<Map> savedQueue = getDeviceAudioClipQueueSaved()
-
-  // Restore saved clips to regular queue
-  List<Map> savedList = new ArrayList<Map>(savedQueue)
-  savedList.each { clip ->
-    regularQueue.add(clip)
-  }
-
-  savedQueue.clear()
-  traceAudioClipQueues('restore-after')
-  logDebug("Restored ${savedList.size()} regular priority clips to queue")
+  return removed
 }
 
 void rotateAudioClipCorrelationId(Map clipMessage) {
@@ -9578,10 +9550,8 @@ void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null
 
   traceAudioClipQueues("priority-admission incoming=${clipCorrelationId}, first=${isFirstHighPriority}, volume=${args.volume}")
   if(isFirstHighPriority) {
-    // Save currently playing + all queued regular priority clips
-    saveRegularAudioClipQueue()
-    // Clear regular queue
-    getDeviceAudioClipQueue().clear()
+    // Leave the unfinished regular queue intact. Its head may be the active
+    // clip, which must resume ahead of regular clips submitted during priority playback.
     interruptActiveAudioClipForHighPriority()
     // Cancel the regular clip timer and release the dispatcher for priority audio.
     cancelAudioClipWatchdog()
@@ -9657,7 +9627,7 @@ void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer du
     command.playerId = "${getRightChannelId()}".toString()
     audioClip.rightChannel = JsonOutput.toJson([command,args])
   }
-  if(getAudioClipQueueIsEmpty() && getChimeBeforeStandardPriorityTTS()) {playerLoadAudioClipChime(volume)}
+  if(!hasQueuedRegularAudioClip() && getChimeBeforeStandardPriorityTTS()) {playerLoadAudioClipChime(volume)}
   if(duration > 0) { audioClip.duration = duration }
   audioClip.uri = uri
   audioClip.origin = 'player-tts'
@@ -9681,7 +9651,7 @@ void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal vo
   String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
   ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
   Boolean shouldChime = chimeBeforeTTS != null ? chimeBeforeTTS : getChimeBeforeStandardPriorityTTS()
-  if(queue.isEmpty() && shouldChime) {
+  if(!hasQueuedRegularAudioClip() && shouldChime) {
     String chimeCorrelationId = UUID.randomUUID().toString()
     Map<String,String> chimeCommand = [
       'namespace':'audioClip',
@@ -9740,7 +9710,7 @@ void prepareAudioClipForDispatch() {
 }
 
 Boolean canPrepareSynchronizedGroupChime(Boolean highPriority) {
-  return highPriority ? getDeviceAudioClipQueueHighPriority().isEmpty() : getDeviceAudioClipQueue().isEmpty()
+  return highPriority ? getDeviceAudioClipQueueHighPriority().isEmpty() : !hasQueuedRegularAudioClip()
 }
 
 void prepareAndStartAudioClip() {
@@ -9935,13 +9905,22 @@ void enqueueAudioClip(Map clipMessage) {
 }
 
 void dequeueAudioClip() {
-  prepareNextAudioClipForDispatch()
+  if(!prepareNextAudioClipForDispatch()) { return }
   dispatchPreparedAudioClip()
 }
 
-void prepareNextAudioClipForDispatch() {
+Boolean prepareNextAudioClipForDispatch() {
   traceAudioClipQueues('dequeue-entry')
   logDebug('dequeueAudioClip')
+
+  Boolean alreadyPlaying = runtimeState.audioClipPlaying == true
+  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
+  ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
+  Boolean preemptingRegularClip = alreadyPlaying && activeClip?.priority != 'HIGH' && !highPriorityQueue.isEmpty()
+  if(alreadyPlaying && !preemptingRegularClip) {
+    logDebug("Ignoring redundant audio clip dequeue while ${activeClip?.priority == 'HIGH' ? 'high-priority' : 'regular'} clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'} is active")
+    return false
+  }
 
   Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
       ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
@@ -9951,22 +9930,20 @@ void prepareNextAudioClipForDispatch() {
       runtimeState.groupSynchronizedAudioClipHold = synchronizedHold
     } else {
       logDebug("Holding queued audioClip for synchronized group TTS ${synchronizedHold.correlationId}")
-      return
+      return false
     }
   }
 
   // Check high-priority queue first
-  ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
   Map clipMessage = highPriorityQueue.poll()
+  if(preemptingRegularClip && !clipMessage) {
+    logDebug('High-priority audio clip was removed before dispatch; leaving the active regular clip unchanged')
+    return false
+  }
 
-  // If no high-priority clips, check if we should restore saved queue
+  // Keep regular clips in the FIFO until their playback reaches a terminal state.
   if(!clipMessage) {
-    // If high-priority queue is empty and saved queue has items, restore them
-    if(!getDeviceAudioClipQueueSaved().isEmpty()) {
-      restoreRegularAudioClipQueue()
-    }
-    // Now get from regular queue
-    clipMessage = getDeviceAudioClipQueue().poll()
+    clipMessage = getDeviceAudioClipQueue().peek()
   }
 
   if(!clipMessage) {
@@ -9980,7 +9957,7 @@ void prepareNextAudioClipForDispatch() {
     runtimeState.remove('audioClipHadDisconnectAfterSend')
     runtimeState.remove('audioClipSentAt')
     removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
-    return
+    return false
   }
 
   Integer previousDispatchCount = (clipMessage.dispatchCount ?: 0) as Integer
@@ -9989,12 +9966,10 @@ void prepareNextAudioClipForDispatch() {
   }
   clipMessage.dispatchCount = previousDispatchCount + 1
 
-  // Save currently playing clip (only if it's NOT high priority)
-  // High priority clips shouldn't be saved for replay
+  // The regular queue head owns any unfinished regular clip. Keep this marker
+  // through high-priority playback so diagnostics and interruption state remain clear.
   if(clipMessage?.priority != 'HIGH') {
     setHiddenJsonRuntimeState('currentlyPlayingClip', clipMessage)
-  } else {
-    removeHiddenJsonRuntimeState('currentlyPlayingClip')
   }
 
   runtimeState.activeAudioClipCorrelationId = clipMessage.correlationId
@@ -10025,9 +10000,11 @@ void prepareNextAudioClipForDispatch() {
   setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
   publishAudioClipProgressEvent(clipProgress[clipMessage.correlationId as String], null)
   logInfo("Prepared audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, preparedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
+  logDebug("Audio clip dispatch selected correlation=${clipMessage.correlationId}, priority=${clipMessage.priority ?: 'REGULAR'}, dispatchCount=${clipMessage.dispatchCount}, regularQueue=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, highQueue=${highPriorityQueue.collect { Map clip -> clip.correlationId }}")
   runtimeState.audioClipPlaying = true
   traceAudioClipQueues('dispatch-prepared')
   if(!isCurrentlySubcribedToAudioClipWS()) { subscribeToAudioClip() }
+  return true
 }
 
 /** Release the queued TTS clip after every group member's separate chime has completed. */
@@ -12037,12 +12014,18 @@ void setChildPlaylists(String html) {
 void setAudioClipPlaying(Boolean s) {
   runtimeState.audioClipPlaying = s
   if(s == false) {
-    logDebug("Audio clip completion/reset for ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'} at ${now()}")
+    String completedCorrelationId = runtimeState.activeAudioClipCorrelationId as String
+    Map completedClip = (Map)getAtomicStateValue('activeAudioClipMessage')
+    Boolean completedHighPriority = completedClip?.priority == 'HIGH'
+    logDebug("Audio clip completion/reset for ${completedCorrelationId ?: 'unknown'} priority=${completedHighPriority ? 'HIGH' : 'REGULAR'} at ${now()}")
     pauseAudioClipWatchdog()
-    // The regular queue and saved replay queue own any clip that still needs
-    // to be played. Drop the runtime payload and completed progress history so
-    // large Sonos command JSON does not remain in the hub's State Variables.
-    removeHiddenJsonRuntimeState('currentlyPlayingClip')
+    // A regular clip remains at the queue head while it plays; remove only the
+    // matching completed regular clip. A high-priority completion must leave
+    // the suspended regular head in place for replay.
+    if(completedHighPriority != true && completedCorrelationId) {
+      removeActiveRegularAudioClipFromQueue(completedCorrelationId, 'completed')
+      removeHiddenJsonRuntimeState('currentlyPlayingClip')
+    }
     runtimeState.remove('activeAudioClipCorrelationId')
     runtimeState.remove('activeAudioClipSonosId')
     removeHiddenJsonRuntimeState('activeAudioClipMessage')
@@ -12228,6 +12211,7 @@ void audioClipWatchdog(Map data = [:]) {
 }
 
 void markAudioClipWatchdogFailure(String correlationId, String phase, String detail) {
+  Map failedClip = (Map)getAtomicStateValue('activeAudioClipMessage')
   Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
       ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
       : new LinkedHashMap<String, Map>()
@@ -12243,10 +12227,13 @@ void markAudioClipWatchdogFailure(String correlationId, String phase, String det
   runtimeState.audioClipPlaying = false
   runtimeState.audioClipCommandSent = false
   runtimeState.remove('audioClipHadDisconnectAfterSend')
+  if(failedClip?.priority != 'HIGH') {
+    removeActiveRegularAudioClipFromQueue(correlationId, 'failed')
+    removeHiddenJsonRuntimeState('currentlyPlayingClip')
+  }
   runtimeState.remove('activeAudioClipCorrelationId')
   runtimeState.remove('activeAudioClipSonosId')
   removeHiddenJsonRuntimeState('activeAudioClipMessage')
-  removeHiddenJsonRuntimeState('currentlyPlayingClip')
 }
 
 void retryAudioClipAfterCommandFailure(String correlationId, String detail) {
