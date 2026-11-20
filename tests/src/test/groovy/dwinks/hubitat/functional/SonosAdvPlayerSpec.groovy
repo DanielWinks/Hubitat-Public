@@ -20,8 +20,26 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
+  void drainParentBridge() {
+    List<Map> updates = driver.flushPendingParentUpdates() ?: []
+    updates.each { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) }
+    List<Map> requests = driver.flushPendingParentRequests() ?: []
+    requests.each { Map request ->
+      parentPlayerRequests << new LinkedHashMap(request)
+      if(request?.action == 'activeStreamTts' && request?.args?.requestId) {
+        driver.completeParentAppActiveStreamTts(request.args.requestId.toString(), 'false')
+      }
+    }
+  }
+
   List<Map> playerStateMessages() {
+    drainParentBridge()
     parentPlayerUpdates.collect { Map event -> new LinkedHashMap(event) }
+  }
+
+  List<Map> playerRequestMessages() {
+    drainParentBridge()
+    parentPlayerRequests.collect { Map event -> new LinkedHashMap(event) }
   }
 
   void appendAudioClipAdmissionSchedules(Integer regularRemaining, Integer highRemaining,
@@ -1355,6 +1373,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
+    driver.pendingParentUpdates.clear()
+    driver.pendingParentOrdered.clear()
+    driver.pendingParentRequests.clear()
+    driver.parentUpdateLocks.clear()
   }
 
   def "websocket connect requests the parent initialization turn when not granted"() {
@@ -1397,6 +1419,55 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.getDataValue('websocketStatus') == 'connecting'
     driver.runtimeState.websocketConnectPending == true
     !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
+  def "parse enqueues parent updates without calling the parent directly"() {
+    when:
+    driver.processWebsocketMessage(JsonOutput.toJson([
+      [namespace: 'playback', type: 'playbackStatus'],
+      [playbackState: 'PLAYBACK_STATE_PLAYING', itemId: 'track-1']
+    ]))
+
+    then:
+    parentPlayerUpdates.empty
+    !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
+
+    when:
+    drainParentBridge()
+
+    then:
+    parentPlayerUpdates.size() >= 1
+    playerStateMessages().any { Map event -> event.kind == 'playbackObservation' }
+  }
+
+  def "polled parent updates never call the parent and only require the poll"() {
+    given:
+    driver.metaClass.getParent = { -> new Expando(
+      playerStateUpdate: { Map payload -> throw new AssertionError('poll must not call parent') },
+      playerAppRequest: { Map payload -> throw new AssertionError('poll must not call parent') }
+    ) }
+
+    when:
+    driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_PLAYING'])
+    List<Map> batch = driver.flushPendingParentUpdates()
+
+    then:
+    batch.size() == 1
+    batch[0].playbackState == 'PLAYBACK_STATE_PLAYING'
+    !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
+  }
+
+  def "coalesced parent updates overwrite same key and preserve ordered topology"() {
+    when:
+    driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_IDLE'])
+    driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_PLAYING'])
+    driver.publishPlayerStateUpdate([kind: 'zgtTopology', topology: [groups: []]])
+    drainParentBridge()
+
+    then:
+    parentPlayerUpdates.count { Map event -> event.kind == 'playbackObservation' } == 1
+    parentPlayerUpdates.find { Map event -> event.kind == 'playbackObservation' }.playbackState == 'PLAYBACK_STATE_PLAYING'
+    parentPlayerUpdates.any { Map event -> event.kind == 'zgtTopology' }
   }
 
   def "driver initialize only asks the parent app for an initialization turn"() {
@@ -2142,6 +2213,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.parse(raw)
+    drainParentBridge()
 
     then:
     parentPlayerUpdates.any { Map event ->

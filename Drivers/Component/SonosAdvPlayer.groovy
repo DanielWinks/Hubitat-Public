@@ -596,6 +596,19 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Integer> groupDeviceUpdateRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> lastLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+@Field static final String PARENT_UPDATE_DRAIN_SCHEDULED_KEY = 'parentUpdateDrainScheduled'
+@Field static final String PARENT_UPDATE_DRAIN_DUE_AT_KEY = 'parentUpdateDrainDueAt'
+@Field static final Integer PARENT_UPDATE_MAX_ITEMS = 64
+@Field static final Integer PARENT_UPDATE_DRAIN_INTERVAL_MS = 25
+@Field static final Integer PARENT_UPDATE_RETRY_MS = 1000
+@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Map>> pendingParentUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Map>>()
+@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingParentOrdered = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static ConcurrentHashMap<String, Object> parentUpdateLocks = new ConcurrentHashMap<String, Object>()
+@Field static ConcurrentHashMap<String, Long> pendingParentUpdateDropped = new ConcurrentHashMap<String, Long>()
+@Field static final String PARENT_REQUEST_DRAIN_SCHEDULED_KEY = 'parentRequestDrainScheduled'
+@Field static final Integer PARENT_REQUEST_DRAIN_MS = 1
+@Field static final Integer PARENT_REQUEST_MAX_ITEMS = 16
+@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingParentRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -615,6 +628,17 @@ void uninstalled() {
   unschedule('flushPendingLocalDeviceEvents')
   state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+  unschedule('flushPendingParentUpdates')
+  unschedule('flushPendingParentRequests')
+  state.remove(PARENT_UPDATE_DRAIN_SCHEDULED_KEY)
+  state.remove(PARENT_UPDATE_DRAIN_DUE_AT_KEY)
+  state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
+  String dni = device.getDeviceNetworkId()
+  if(dni) {
+    pendingParentUpdates.remove(dni)
+    pendingParentOrdered.remove(dni)
+    pendingParentRequests.remove(dni)
+  }
   unschedule('drainComponentChildEvents')
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
@@ -679,6 +703,16 @@ void clearPendingCommandsForInitialization() {
   }
   unschedule('drainParentCoordinatorCommandQueue')
   unschedule('retryParentCoordinatorCommand')
+  unschedule('flushPendingParentUpdates')
+  unschedule('flushPendingParentRequests')
+  state.remove(PARENT_UPDATE_DRAIN_SCHEDULED_KEY)
+  state.remove(PARENT_UPDATE_DRAIN_DUE_AT_KEY)
+  state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
+  if(dni) {
+    pendingParentUpdates.remove(dni)
+    pendingParentOrdered.remove(dni)
+    pendingParentRequests.remove(dni)
+  }
 
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
@@ -1823,10 +1857,10 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
         correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip, createdAt: requestCreatedAt]
       state.pendingParentAppTtsRequests = pending
       logDebug("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
-      Boolean accepted = sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
+      sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
         volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId,
         createdAt: requestCreatedAt])
-      completeParentAppActiveStreamTts(requestId, (accepted == true).toString())
+      logDebug("Parent active-stream TTS decision deferred to drain; request will complete when flush returns")
       return
     } else {
       logDebug("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
@@ -1896,16 +1930,72 @@ Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
 Boolean sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'playerAppRequest', action: action,
     sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
-  logDebug("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
-  Boolean response = null
-  try {
-    response = parent != null ? (Boolean)parent.playerAppRequest(payload) : null
-  } catch(Exception e) {
-    logWarn("Parent app request callback failed action=${action}, requestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}: ${e.message}")
-    throw e
+  logDebug("Queued parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
+  enqueueParentAppRequest(payload)
+  return true
+}
+
+void enqueueParentAppRequest(Map payload) {
+  String dni = device.getDeviceNetworkId()
+  if(!dni || payload == null) { return }
+  Object lock = getParentUpdateLock(dni)
+  synchronized(lock) {
+    ConcurrentLinkedQueue<Map> queue = pendingParentRequests.get(dni)
+    if(queue == null) {
+      ConcurrentLinkedQueue<Map> created = new ConcurrentLinkedQueue<Map>()
+      ConcurrentLinkedQueue<Map> existing = pendingParentRequests.putIfAbsent(dni, created)
+      queue = existing ?: created
+    }
+    queue.add(new LinkedHashMap(payload))
+    if(queue.size() > PARENT_REQUEST_MAX_ITEMS) {
+      queue.poll()
+      logWarn("Parent request queue overflow for dni=${dni}; dropped oldest request")
+    }
   }
-  logDebug("Parent app request callback returned action=${action}, requestId=${payload.requestId}, accepted=${response}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
-  return response
+}
+
+private void scheduleParentRequestDrain(Integer delayMs) {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  Object lock = getParentUpdateLock(dni)
+  synchronized(lock) {
+    ConcurrentLinkedQueue<Map> queue = pendingParentRequests.get(dni)
+    if(queue == null || queue.isEmpty()) {
+      state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
+      return
+    }
+    state[PARENT_REQUEST_DRAIN_SCHEDULED_KEY] = true
+    try {
+      runInMillis(Math.max(1, delayMs ?: PARENT_REQUEST_DRAIN_MS), 'flushPendingParentRequests', [overwrite: true])
+    } catch(Exception e) {
+      state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
+      logWarn("Could not schedule parent request drain for dni=${dni}: ${e.message}")
+    }
+  }
+}
+
+List<Map> drainPendingParentRequestsForPoll() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return [] }
+  Object lock = getParentUpdateLock(dni)
+  List<Map> batch = []
+  synchronized(lock) {
+    ConcurrentLinkedQueue<Map> queue = pendingParentRequests.get(dni)
+    if(queue == null || queue.isEmpty()) { return [] }
+    Integer count = 0
+    while(queue.peek() != null && count < PARENT_REQUEST_MAX_ITEMS) {
+      Map item = queue.poll()
+      if(item != null) { batch.add(new LinkedHashMap(item)) }
+      count++
+    }
+    if(queue.isEmpty()) { pendingParentRequests.remove(dni) }
+  }
+  return batch
+}
+
+/** Back-compat poll alias for tests and the app poller. */
+List<Map> flushPendingParentRequests() {
+  return drainPendingParentRequestsForPoll()
 }
 
 /** Complete the asynchronous parent-app decision for an active-stream TTS request. */
@@ -7681,9 +7771,125 @@ Boolean isGroupedFollowerForPlayback() {
 }
 
 void publishPlayerStateUpdate(Map payload) {
+  if(payload == null || payload.isEmpty()) { return }
   Map eventData = new LinkedHashMap(payload)
   eventData['playerDni'] = device.getDeviceNetworkId()
-  if(parent != null) { parent.playerStateUpdate(eventData) }
+  enqueueParentStateUpdate(eventData)
+}
+
+private Object getParentUpdateLock(String dni) {
+  Object lock = parentUpdateLocks.get(dni)
+  if(lock == null) {
+    Object created = new Object()
+    Object existing = parentUpdateLocks.putIfAbsent(dni, created)
+    lock = existing ?: created
+  }
+  return lock
+}
+
+private String parentStateUpdateCoalesceKey(Map payload) {
+  String kind = payload?.kind?.toString()
+  String playerDni = payload?.playerDni?.toString() ?: ''
+  switch(kind) {
+    case 'topology': case 'playbackObservation': case 'wsConnected': case 'wsRetry':
+    case 'householdPresence':
+      return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
+    case 'membership': return "${kind}:${payload.coordinatorId ?: playerDni}"
+    case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
+    case 'followers': return "${kind}:${playerDni}"
+    default: return null
+  }
+}
+
+void enqueueParentStateUpdate(Map payload) {
+  String dni = device.getDeviceNetworkId()
+  if(!dni || payload == null || payload.isEmpty()) { return }
+  Object lock = getParentUpdateLock(dni)
+  synchronized(lock) {
+    String key = parentStateUpdateCoalesceKey(payload)
+    if(key != null) {
+      pendingParentUpdates.putIfAbsent(dni, new ConcurrentHashMap<String, Map>())
+      ConcurrentHashMap<String, Map> outbox = pendingParentUpdates.get(dni)
+      outbox.put(key, new LinkedHashMap(payload))
+    } else {
+      ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
+      if(ordered == null) {
+        ConcurrentLinkedQueue<Map> created = new ConcurrentLinkedQueue<Map>()
+        ConcurrentLinkedQueue<Map> existing = pendingParentOrdered.putIfAbsent(dni, created)
+        ordered = existing ?: created
+      }
+      if(ordered.size() >= PARENT_UPDATE_MAX_ITEMS) {
+        ordered.poll()
+        Long dropped = (pendingParentUpdateDropped.get(dni) ?: 0L) + 1L
+        pendingParentUpdateDropped.put(dni, dropped)
+        logWarn("Parent update ordered queue overflow for dni=${dni}; dropped oldest zgtTopology payload (totalDropped=${dropped})")
+      }
+      ordered.add(new LinkedHashMap(payload))
+    }
+  }
+}
+
+private void scheduleParentUpdateDrain(Integer delayMs) {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  Object lock = getParentUpdateLock(dni)
+  synchronized(lock) {
+    ConcurrentHashMap<String, Map> outbox = pendingParentUpdates.get(dni)
+    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
+    if((outbox == null || outbox.isEmpty()) && (ordered == null || ordered.isEmpty())) {
+      state.remove(PARENT_UPDATE_DRAIN_SCHEDULED_KEY)
+      state.remove(PARENT_UPDATE_DRAIN_DUE_AT_KEY)
+      return
+    }
+    Long currentTime = now() as Long
+    Long requestedDueAt = currentTime + Math.max(1, delayMs ?: PARENT_UPDATE_DRAIN_INTERVAL_MS) as Long
+    Long existingDueAt = state[PARENT_UPDATE_DRAIN_DUE_AT_KEY] as Long
+    Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
+    Long remainingMs = Math.max(1L, dueAt - currentTime)
+    Integer scheduleDelay = remainingMs > Integer.MAX_VALUE ? Integer.MAX_VALUE : remainingMs as Integer
+    state[PARENT_UPDATE_DRAIN_DUE_AT_KEY] = dueAt
+    state[PARENT_UPDATE_DRAIN_SCHEDULED_KEY] = true
+    try {
+      runInMillis(scheduleDelay, 'flushPendingParentUpdates', [overwrite: true])
+    } catch(Exception e) {
+      state.remove(PARENT_UPDATE_DRAIN_SCHEDULED_KEY)
+      state.remove(PARENT_UPDATE_DRAIN_DUE_AT_KEY)
+      logWarn("Could not schedule parent update drain for dni=${dni}: ${e.message}")
+    }
+  }
+}
+
+List<Map> drainPendingParentUpdatesForPoll() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return [] }
+  Object lock = getParentUpdateLock(dni)
+  List<Map> batch = []
+  synchronized(lock) {
+    ConcurrentHashMap<String, Map> outbox = pendingParentUpdates.get(dni)
+    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
+    if(outbox != null && !outbox.isEmpty()) {
+      List<Map> claimed = new ArrayList<Map>(outbox.values())
+      outbox.clear()
+      batch.addAll(claimed)
+      pendingParentUpdates.remove(dni)
+    }
+    if(ordered != null && !ordered.isEmpty()) {
+      while(ordered.peek() != null && batch.size() < PARENT_UPDATE_MAX_ITEMS) {
+        Map item = ordered.poll()
+        if(item != null) { batch.add(item) }
+      }
+      if(ordered.isEmpty()) { pendingParentOrdered.remove(dni) }
+    }
+  }
+  if(!batch.isEmpty()) {
+    logDebug("Parent update poll claimed ${batch.size()} update(s); dni=${dni}")
+  }
+  return batch
+}
+
+/** Back-compat poll alias for tests and the app poller. */
+List<Map> flushPendingParentUpdates() {
+  return drainPendingParentUpdatesForPoll()
 }
 
 void publishGroupTopologyUpdate(String groupId, String coordinatorId, List<String> playerIds) {

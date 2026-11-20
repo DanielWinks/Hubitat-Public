@@ -36,6 +36,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.locationEvents.clear()
     driver.runtimeState.clear()
     driver.state.clear()
+    driver.pendingGroupRequests.clear()
+    driver.parentRequestLocks.clear()
     driver.device.deviceNetworkId = 'SONOS-GROUP-TEST-DNI'
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
@@ -51,7 +53,13 @@ class SonosAdvGroupSpec extends Specification {
     }
   }
 
+  private void drainGroupRequests() {
+    List<Map> batch = driver.flushPendingGroupRequests() ?: []
+    batch.each { Map request -> ((SonosGroupParentDouble)driver.parent).requests << new LinkedHashMap(request) }
+  }
+
   private List<Map> groupRequests() {
+    drainGroupRequests()
     return ((SonosGroupParentDouble)driver.parent).requests.findAll { Map request -> request.command }
   }
 
@@ -115,16 +123,23 @@ class SonosAdvGroupSpec extends Specification {
     driver.groupDeviceVolumeFadeState.isEmpty()
     driver.unschedules.contains('groupDeviceVolumeFadeStep')
     groupRequests().size() == existingRequestCount
-    driver.scheduled.isEmpty()
+    !driver.scheduled.any { List call -> call[1] == 'groupDeviceVolumeFadeStep' }
 
     cleanup:
     GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
     driver.metaClass = null
   }
 
-  def "group commands call the parent directly and log whether the request was accepted"() {
+  def "group commands are queued for poll with no parent call until polled"() {
     when:
     driver.on()
+
+    then:
+    driver.parent.requests.empty
+    !driver.scheduled.any { List call -> call[1] == 'flushPendingGroupRequests' }
+
+    when:
+    drainGroupRequests()
 
     then:
     driver.parent.requests.size() == 1
@@ -134,8 +149,19 @@ class SonosAdvGroupSpec extends Specification {
     driver.parent.requests[0].channel == 'groupAppRequest'
     UUID.fromString(driver.parent.requests[0].requestId as String)
     driver.parent.requests[0].sequence == 1
-    driver.logs.any { String entry -> entry.contains('accepted=true') }
-    driver.scheduled.isEmpty()
+  }
+
+  def "group commands survive concurrent enqueue without lost updates"() {
+    given:
+    driver.parent = new SonosGroupParentDouble()
+
+    when:
+    driver.requestGroupCommand('refresh')
+    driver.requestGroupCommand('play')
+    drainGroupRequests()
+
+    then:
+    groupRequests()*.command == ['refresh', 'play']
   }
 
   def "initialize clears pending work and defers parent purge until after the lifecycle callback"() {
@@ -324,6 +350,25 @@ class SonosAdvGroupSpec extends Specification {
     ]
   }
 
+  def "polled group requests never call the parent and only require the poll"() {
+    given:
+    driver.parent = new SonosGroupParentDouble() {
+      Boolean groupAppRequest(Map request) {
+        throw new AssertionError('poll must not call parent')
+      }
+    }
+
+    when:
+    driver.refresh()
+    List<Map> batch = driver.flushPendingGroupRequests()
+
+    then:
+    batch.size() == 1
+    batch[0].command == 'refresh'
+    ((SonosGroupParentDouble)driver.parent).requests.empty
+    !driver.scheduled.any { List call -> call[1] == 'flushPendingGroupRequests' }
+  }
+
   def "group refresh is also deferred through the request boundary"() {
     when:
     driver.refresh()
@@ -333,17 +378,20 @@ class SonosAdvGroupSpec extends Specification {
     driver.events.empty
   }
 
-  def "group command callback reports rejection without scheduling a retry or creating an event"() {
+  def "polled group commands never call the parent synchronously"() {
     given:
-    ((SonosGroupParentDouble)driver.parent).accepted = false
+    driver.parent = new SonosGroupParentDouble() {
+      Boolean groupAppRequest(Map request) {
+        throw new AssertionError('poll must not call parent')
+      }
+    }
 
     when:
     driver.refresh()
 
     then:
     groupRequests().size() == 1
-    driver.logs.any { String line -> line.contains('accepted=false') }
-    driver.scheduled.isEmpty()
+    !driver.scheduled.any { List call -> call[1] == 'retryActiveGroupCommandRequest' }
     driver.events.empty
   }
 
@@ -452,7 +500,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.refresh()
 
     then:
-    driver.state.isEmpty()
+    !driver.state.containsKey('groupCommandSequence')
+    !driver.state.containsKey('pendingRegroup')
     driver.runtimeState.groupCommandSequence == 9
     UUID.fromString(groupRequests().last().requestId as String).toString() ==
       groupRequests().last().requestId

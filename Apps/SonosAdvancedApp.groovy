@@ -2538,6 +2538,7 @@ Map<String, Object> getStaticDriverActivePlayerRoster() {
 
 /** Refresh the driver cleanup snapshot after child-device changes. */
 void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChanges = true) {
+  scheduleDriverParentPoll()
   try {
     Map<String, Object> previousRoster = getStaticDriverActivePlayerRoster()
     List<Map<String, String>> roster = []
@@ -2669,8 +2670,98 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
   state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
   state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
   scheduleQueuedPlayerStateUpdateDrain(25)
+  scheduleDriverParentPoll()
   if(state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] instanceof Map) {
     runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+  }
+}
+
+@Field static final Integer DRIVER_PARENT_POLL_INTERVAL_MS = 100
+
+/** Re-arm the driver outbox poll after a reboot discards its job. */
+void scheduleDriverParentPoll() {
+  runInMillis(DRIVER_PARENT_POLL_INTERVAL_MS, 'pollDriverParentQueues', [overwrite: true])
+}
+
+/**
+ * Poll child driver outboxes for parent-bound work without any synchronous
+ * driver→parent call: drivers only enqueue (ConcurrentHashMap, no gate wait)
+ * and this app-side poll claims their batches via pure getters. Driver
+ * executions never wait for the app gate and app executions never wait for a
+ * driver gate held by a blocked parent call, so the 120 s cycle cannot form.
+ */
+void pollDriverParentQueues() {
+  Integer polled = 0
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String dni = player.getDeviceNetworkId()?.toString()
+    if(!dni) { return }
+    List<Map> updates = []
+    try { updates = (List<Map>)player.drainPendingParentUpdatesForPoll() ?: [] } catch(Exception e) {
+      logWarn("Could not poll parent updates from ${dni}: ${e.message}")
+      updates = []
+    }
+    updates.each { Map payload ->
+      polled++
+      playerStateUpdate(new LinkedHashMap(payload))
+    }
+    List<Map> requests = []
+    try { requests = (List<Map>)player.drainPendingParentRequestsForPoll() ?: [] } catch(Exception e) {
+      logWarn("Could not poll parent requests from ${dni}: ${e.message}")
+      requests = []
+    }
+    requests.each { Map request -> handlePolledPlayerRequest(player, new LinkedHashMap(request)) }
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper group ->
+    String dni = group.getDeviceNetworkId()?.toString()
+    if(!dni) { return }
+    List<Map> requests = []
+    try { requests = (List<Map>)group.drainPendingGroupRequestsForPoll() ?: [] } catch(Exception e) {
+      logWarn("Could not poll group requests from ${dni}: ${e.message}")
+      requests = []
+    }
+    requests.each { Map request ->
+      polled++
+      enqueueGroupCommandRequest(new LinkedHashMap(request))
+    }
+  }
+  if(polled > 0) {
+    logDebug("Driver parent poll delivered ${polled} item(s)")
+  }
+  scheduleDriverParentPoll()
+}
+
+void handlePolledPlayerRequest(ChildDeviceWrapper player, Map request) {
+  String dni = player.getDeviceNetworkId()?.toString()
+  String action = request?.action?.toString()
+  Map args = request?.args instanceof Map ? (Map)request.args : [:]
+  try {
+    switch(action) {
+      case 'refreshRoster':
+        refreshStaticDriverActivePlayerRoster()
+        break
+      case 'refreshPolicy':
+        refreshPlayerAnnouncementPolicySnapshot(player)
+        rememberAnnouncementPolicyTopology(player)
+        break
+      case 'activeStreamTts':
+        String requestId = args.requestId?.toString()
+        Integer duration = args.duration != null ? args.duration.toString().toInteger() : 0
+        BigDecimal volume = null
+        try { volume = args.volume != null ? new BigDecimal(args.volume.toString()) : null }
+        catch(Exception e) { logWarn("Ignoring invalid volume in polled player TTS request ${requestId}") }
+        Boolean accepted = handlePlayerActiveStreamTts(dni, args.uri?.toString(), volume, duration,
+            args.correlationId?.toString())
+        logDebug("Polled player active-stream TTS decision requestId=${requestId ?: 'unknown'}, accepted=${accepted}")
+        if(requestId) {
+          try { player.completeParentAppActiveStreamTts(requestId, (accepted == true).toString()) }
+          catch(Exception e) { logWarn("Could not complete polled player TTS ${requestId} on ${dni}: ${e.message}") }
+        }
+        break
+      default:
+        logWarn("Ignoring unsupported polled player app request action '${action}' from ${dni ?: 'unknown'}")
+    }
+  } catch(Exception e) {
+    logWarn("Polled player app request failed action=${action} from ${dni ?: 'unknown'}: ${e.message}")
   }
 }
 
@@ -5552,6 +5643,7 @@ void drainQueuedChildEvents() {
 
 /** Handle driver-reported player state batches. */
 void playerStateUpdate(Map payload) {
+  scheduleDriverParentPoll()
   if(!(payload instanceof Map) || payload.isEmpty()) { return }
   List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
@@ -5623,6 +5715,7 @@ void scheduleQueuedPlayerStateUpdateDrain(Integer delayMs) {
 }
 
 void drainQueuedPlayerStateUpdates() {
+  scheduleDriverParentPoll()
   if(state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] == true) {
     scheduleQueuedPlayerStateUpdateDrain(100)
     return
@@ -5998,6 +6091,7 @@ void alarmRequestHandler(Event event) {
 
 /** Handle player requests sent directly by the child player driver. */
 Boolean playerAppRequest(Map request) {
+  scheduleDriverParentPoll()
   return playerAppRequestHandler(request)
 }
 
@@ -7743,6 +7837,7 @@ void startNextGroupAnnouncementCallback(Map data = null) {
 
 /** Handle requests sent directly by a child group driver. */
 Boolean groupAppRequest(Map request) {
+  scheduleDriverParentPoll()
   if(!(request instanceof Map) || request.channel != 'groupAppRequest') {
     logDebug("Ignoring invalid group app request channel=${request?.channel ?: 'unknown'}")
     return false
@@ -7796,20 +7891,11 @@ Boolean enqueueGroupCommandRequest(Map request) {
     return true
   }
 
-  // Audio clips are time-sensitive. Dispatch them from the callback so
-  // scheduler latency cannot strand an announcement in the delayed command
-  // queue; each clip is already prepared on all players before release.
-  if(command in ['playAudioClip', 'playHighPriorityTrack', 'enqueueLowPriorityTrack']) {
-    logDebug("Dispatching time-sensitive group audio command ${command} immediately for ${groupDni}, request=${requestId ?: 'none'}")
-    if(requestId) {
-      receivedForGroup.add(requestId)
-      if(receivedForGroup.size() > 200) { receivedForGroup = receivedForGroup.takeRight(200) }
-      receivedRequests[groupDni] = receivedForGroup
-      state.receivedGroupCommandRequestIds = receivedRequests
-    }
-    processGroupCommandRequest([request: request])
-    return true
-  }
+  // All group commands — including audio clips — are queued and drained in
+  // request-sequence order. Inline dispatch under the app gate held the gate
+  // while calling player/group devices, which deadlocks against child
+  // executions waiting for the same gate (120 s timeout). The 1 s drain hop
+  // keeps announcement timing within budget via chime/watchdog releases.
 
   // Requests from a group device can arrive in the same scheduler tick as a
   // Favorite request. Drain them in request-sequence order so an explicit or

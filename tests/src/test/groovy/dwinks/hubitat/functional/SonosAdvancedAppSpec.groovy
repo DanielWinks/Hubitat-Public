@@ -13,6 +13,22 @@ import spock.lang.Specification
 class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Long id = 101L
   List<Map> commands = []
+  List<Map> pendingParentUpdatePoll = []
+  List<Map> pendingParentRequestPoll = []
+
+  List<Map> drainPendingParentUpdatesForPoll() {
+    List<Map> batch = []
+    batch.addAll(pendingParentUpdatePoll)
+    pendingParentUpdatePoll.clear()
+    return batch
+  }
+
+  List<Map> drainPendingParentRequestsForPoll() {
+    List<Map> batch = []
+    batch.addAll(pendingParentRequestPoll)
+    pendingParentRequestPoll.clear()
+    return batch
+  }
   Map favoritesMap = [:]
   Map playlistsMap = [:]
   List<String> acknowledgedParentRequests = []
@@ -161,6 +177,14 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 class SonosAppGroupDouble extends ChildDeviceWrapper {
   Long id = 201L
   List<Map> statuses = []
+  List<Map> pendingGroupRequestPoll = []
+
+  List<Map> drainPendingGroupRequestsForPoll() {
+    List<Map> batch = []
+    batch.addAll(pendingGroupRequestPoll)
+    pendingGroupRequestPoll.clear()
+    return batch
+  }
   List<String> refreshedPlaybackUpdates = []
   List<Map> voiceUpdates = []
   List<String> acknowledgedGroupRequests = []
@@ -1886,6 +1910,21 @@ class SonosAdvancedAppSpec extends Specification {
     } == 1
   }
 
+  def "poll pulls driver outboxes without any synchronous parent call"() {
+    given:
+    coordinator.pendingParentUpdatePoll = [[kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId, playbackState: 'PLAYBACK_STATE_PLAYING']]
+    group.pendingGroupRequestPoll = [request('refresh', [:], 1)]
+
+    when:
+    appScript.pollDriverParentQueues()
+
+    then:
+    appScript.state['pendingPlayerStateUpdates'].any { Map item -> item.kind == 'playbackObservation' }
+    appScript.scheduled.any { it[1] == 'drainQueuedPlayerStateUpdates' }
+    appScript.scheduled.any { it[1] == 'drainGroupCommandRequests' }
+    appScript.scheduled.any { it[1] == 'pollDriverParentQueues' }
+  }
+
   def "player location state batches queue follower and group updates"() {
     given:
     Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
@@ -2503,7 +2542,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { it.contains('Suppressing chime for successive TTS announcement successive-tts') }
   }
 
-  def "direct group audio requests dispatch immediately to every player"() {
+  def "group audio requests queue then drain to every player"() {
     given:
     makeAnnouncementRosterExact()
     coordinator.currentValues.isGrouped = 'on'
@@ -2517,11 +2556,17 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.enqueueGroupCommandRequest(groupRequest)
 
     then:
+    [coordinator, follower].every { SonosAppPlayerDouble player -> player.commands.empty }
+    appScript.scheduled.any { it[1] == 'drainGroupCommandRequests' }
+
+    when:
+    appScript.drainGroupCommandRequests()
+
+    then:
     [coordinator, follower].every { SonosAppPlayerDouble player ->
       player.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' } &&
         player.commands.any { it.name == 'startPreparedAudioClip' }
     }
-    !appScript.scheduled.any { it[1] == 'drainGroupCommandRequests' }
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.command == 'playAudioClip'
   }
 
