@@ -952,24 +952,64 @@ void applyAppHouseholdTopology(String topologyJson) {
     Map topology = (Map)parseJson(topologyJson)
     if(!(topology.groups instanceof List)) { return }
     device.updateDataValue('householdTopology', topologyJson)
-    String configuredCoordinator = device.getDataValue('groupCoordinatorId')?.toString()
+    String configuredCoordinator = device.getDataValue('groupCoordinatorId')?.toString()?.trim()
     List<String> configuredPlayers = configuredCoordinator ? [configuredCoordinator] : []
     String configuredFollowerIds = device.getDataValue('playerIds')?.toString()
-    if(configuredFollowerIds) { configuredPlayers.addAll(configuredFollowerIds.tokenize(',')) }
-    Map activeGroup = ((List<Map>)topology.groups).find { Map item ->
-      List<String> memberIds = item.playerIds instanceof List
-          ? ((List)item.playerIds).collect { Object id -> id?.toString() } : []
-      configuredPlayers && configuredPlayers.every { String id -> memberIds.contains(id) }
+    configuredPlayers.addAll(normalizeGroupTopologyPlayerIds(configuredFollowerIds))
+    Set<String> configuredPlayerIds = new LinkedHashSet<String>(configuredPlayers)
+    String groupingMode = getGroupTopologyGroupingMode()
+    Map coordinatorGroup = ((List<Map>)topology.groups).find { Map item ->
+      normalizeGroupTopologyPlayerIds(item.playerIds).contains(configuredCoordinator)
     }
-    List<String> activeNames = activeGroup?.playerNames instanceof List
-        ? ((List)activeGroup.playerNames).collect { Object name -> name?.toString() } : []
+    List<String> actualPlayerIds = normalizeGroupTopologyPlayerIds(coordinatorGroup?.playerIds)
+    Boolean coordinatorMatches = coordinatorGroup?.coordinatorId?.toString()?.trim() == configuredCoordinator
+    Boolean rosterMatches = groupingMode == GROUPING_MODE_ADDITIVE
+        ? actualPlayerIds.containsAll(configuredPlayerIds)
+        : new HashSet<String>(actualPlayerIds) == new HashSet<String>(configuredPlayerIds)
+    Boolean shouldBeActive = coordinatorGroup != null && configuredPlayerIds && coordinatorMatches && rosterMatches
+    List<String> joinedNames = coordinatorGroup?.playerNames instanceof List
+        ? ((List)coordinatorGroup.playerNames).collect { Object name -> name?.toString() } : []
     updateBatchPlaybackState(JsonOutput.toJson([
-      switch: activeGroup != null ? 'on' : 'off',
-      currentlyJoinedPlayers: activeNames.join(', ')
+      switch: shouldBeActive ? 'on' : 'off',
+      currentlyJoinedPlayers: joinedNames.join(', ')
     ]))
   } catch(Exception e) {
     logWarn("Could not apply app household topology snapshot: ${e.message}")
   }
+}
+
+/** Normalize player identifiers from either a topology list or a stored CSV value. */
+@CompileStatic
+private List<String> normalizeGroupTopologyPlayerIds(Object rawIds) {
+  List<String> playerIds = new ArrayList<String>()
+  if(rawIds instanceof Collection) {
+    for(Object rawId : (Collection)rawIds) {
+      String playerId = rawId?.toString()?.trim()
+      if(playerId) { playerIds.add(playerId) }
+    }
+  } else if(rawIds != null) {
+    String[] rawValues = rawIds.toString().split(',')
+    for(String rawId : rawValues) {
+      String playerId = rawId?.trim()
+      if(playerId) { playerIds.add(playerId) }
+    }
+  }
+  return new ArrayList<String>(new LinkedHashSet<String>(playerIds))
+}
+
+/** Resolve the stored grouping intent, defaulting legacy or unknown values to exact grouping. */
+private String getGroupTopologyGroupingMode() {
+  Object rawMode = device.getDataValue('lastGroupingMode')
+  if(rawMode == null || rawMode.toString().trim().isEmpty()) {
+    rawMode = device.currentValue('groupingMode', true)
+  }
+  return normalizeGroupTopologyGroupingMode(rawMode)
+}
+
+@CompileStatic
+private String normalizeGroupTopologyGroupingMode(Object rawMode) {
+  String groupingMode = rawMode?.toString()?.trim()?.toUpperCase()
+  return groupingMode == GROUPING_MODE_ADDITIVE ? GROUPING_MODE_ADDITIVE : GROUPING_MODE_EXPLICIT
 }
 
 /**

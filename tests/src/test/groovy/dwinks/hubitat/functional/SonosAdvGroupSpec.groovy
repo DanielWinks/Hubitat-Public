@@ -55,6 +55,13 @@ class SonosAdvGroupSpec extends Specification {
     return ((SonosGroupParentDouble)driver.parent).requests.findAll { Map request -> request.command }
   }
 
+  private String householdTopology(String coordinatorId, List<String> playerIds, List<String> playerNames) {
+    return JsonOutput.toJson([groups: [[
+      groupId: 'GROUP-1', coordinatorId: coordinatorId,
+      playerIds: playerIds, playerNames: playerNames
+    ]]])
+  }
+
   def "group batch enqueue re-arms a drain when the scheduled marker is stale"() {
     given:
     driver.state.pendingBatchEvents = [status: [value: 'playing']]
@@ -347,6 +354,68 @@ class SonosAdvGroupSpec extends Specification {
     driver.device.dataValues.lastGroupingMode == 'ADDITIVE'
     driver.events.find { Map event -> event.name == 'groupingMode' } == null
     driver.events.find { Map event -> event.name == 'groupOperationStatus' } == null
+  }
+
+  def "explicit topology requires an exact roster and still reports extra members"() {
+    given:
+    driver.device.dataValues.lastGroupingMode = 'EXPLICIT'
+    String topology = householdTopology('RINCON_COORD',
+      ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'],
+      ['Living Room', 'Dining Room', 'Play'])
+
+    when:
+    driver.applyAppHouseholdTopology(topology)
+    drainBatchEvents()
+
+    then:
+    driver.events.find { Map event -> event.name == 'switch' }?.value == 'off'
+    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room, Play'
+  }
+
+  def "explicit topology remains active when the actual roster exactly matches"() {
+    given:
+    driver.device.dataValues.lastGroupingMode = 'EXPLICIT'
+    String topology = householdTopology('RINCON_COORD',
+      ['RINCON_COORD', 'RINCON_FOLLOW'], ['Living Room', 'Dining Room'])
+
+    when:
+    driver.applyAppHouseholdTopology(topology)
+    drainBatchEvents()
+
+    then:
+    driver.events.find { Map event -> event.name == 'switch' }?.value == 'on'
+    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room'
+  }
+
+  def "additive topology permits extra members while retaining configured players"() {
+    given:
+    driver.device.dataValues.lastGroupingMode = 'ADDITIVE'
+    String topology = householdTopology('RINCON_COORD',
+      ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'],
+      ['Living Room', 'Dining Room', 'Play'])
+
+    when:
+    driver.applyAppHouseholdTopology(topology)
+    drainBatchEvents()
+
+    then:
+    driver.events.find { Map event -> event.name == 'switch' }?.value == 'on'
+    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room, Play'
+  }
+
+  def "topology is inactive when the configured roster has a different coordinator"() {
+    given:
+    driver.device.dataValues.lastGroupingMode = 'EXPLICIT'
+    String topology = householdTopology('RINCON_FOLLOW',
+      ['RINCON_COORD', 'RINCON_FOLLOW'], ['Living Room', 'Dining Room'])
+
+    when:
+    driver.applyAppHouseholdTopology(topology)
+    drainBatchEvents()
+
+    then:
+    driver.events.find { Map event -> event.name == 'switch' }?.value == 'off'
+    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room'
   }
 
   def "legacy group state migrates to the DNI runtime map and is cleared from Hubitat state"() {
