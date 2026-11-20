@@ -599,7 +599,6 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, Integer> lastZgtXmlHash = new ConcurrentHashMap<String, Integer>()
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
 
@@ -1413,7 +1412,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
-    clearedEntries += clearStaticMap(lastZgtXmlHash)
     clearedEntries += clearStaticMap(pendingTopologyXmlByDni)
     clearedEntries += clearStaticMap(pendingTopologySnapshotByDni)
     clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
@@ -1456,7 +1454,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(lastZgtXmlHash, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyXmlByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologySnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
@@ -1610,7 +1607,6 @@ void clearStaticDriverStateForCurrentDevice() {
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
-      lastZgtXmlHash?.remove(dni)
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
@@ -4171,10 +4167,7 @@ void parse(String raw) {
         }
         String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
         logZgtXmlAtTrace(zgtDni, xmlBody)
-        // Compare against the last successfully parsed payload. Invalid XML must
-        // not become the dedup baseline or count as a healthy inbound event.
-        Integer xmlHash = xmlBody.hashCode()
-        deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, xmlHash)
+        deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody)
       } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
     }
     else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
@@ -4191,38 +4184,21 @@ void parse(String raw) {
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
 
-void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash = null) {
+void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
   if(!deviceDni || !xmlBody) { return }
-  Integer payloadHash = xmlHash != null ? xmlHash : xmlBody.hashCode()
-  Integer previousHash = lastZgtXmlHash.get(deviceDni)
-  if(previousHash != null && previousHash == payloadHash) { return }
 
   Map topology = parseZoneGroupTopologySnapshot(xmlBody, getId())
-  if(shouldHoldTopologyUpdate(topology)) {
-    String previousPendingXml = pendingTopologyXmlByDni.put(deviceDni, xmlBody)
-    if(topology != null) { pendingTopologySnapshotByDni.put(deviceDni, topology) }
-    else { pendingTopologySnapshotByDni.remove(deviceDni) }
-    pendingTopologyKindByDni.put(deviceDni, 'zgt')
-    if(previousPendingXml != xmlBody) {
-      logDebug('Holding topology update until the affected player reaches its expected topology')
-    }
-    scheduleTopologyTimeoutFlush()
-    return
-  }
-
-  applyZoneGroupTopologyPayload(deviceDni, xmlBody, payloadHash, topology)
+  // The elected ZGT subscriber receives ordered whole-household snapshots.
+  // Apply every notification in receipt order; local mutation expectations
+  // must not hold or replace the topology Sonos most recently reported.
+  recordExpectedTopologyObservation(topology)
+  applyZoneGroupTopologyPayload(deviceDni, xmlBody, topology)
 }
 
-void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash) {
-  Map topology = parseZoneGroupTopologySnapshot(xmlBody, getId())
-  applyZoneGroupTopologyPayload(dni, xmlBody, xmlHash, topology)
-}
-
-void applyZoneGroupTopologyPayload(String dni, String xmlBody, Integer xmlHash, Map topology) {
+void applyZoneGroupTopologyPayload(String dni, String xmlBody, Map topology) {
   LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
   if(processZoneGroupTopologySnapshot(topology, previousMembers)) {
-    lastZgtXmlHash.put(dni, xmlHash)
     setLastInboundZgtEvent()
     if(isAppZgtSubscriber() && topology?.playerFound == true && topology?.groups instanceof List) {
       Map householdTopology = [householdId: device.getDataValue('householdId'),
@@ -4285,9 +4261,10 @@ void flushPendingTopologyUpdates() {
     logDebug('Published the latest groups websocket topology snapshot after its hold window elapsed')
   } else if(pendingKind == 'zgt' && pendingXml) {
     if(pendingTopology != null) {
-      applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode(), pendingTopology)
+      applyZoneGroupTopologyPayload(dni, pendingXml, pendingTopology)
     } else {
-      applyZoneGroupTopologyPayload(dni, pendingXml, pendingXml.hashCode())
+      applyZoneGroupTopologyPayload(dni, pendingXml,
+          parseZoneGroupTopologySnapshot(pendingXml, getId()))
     }
     logDebug('Published the latest ZoneGroupTopology snapshot after its hold window elapsed')
   } else {
@@ -4296,6 +4273,14 @@ void flushPendingTopologyUpdates() {
 }
 
 Boolean shouldHoldTopologyUpdate(Map topology) {
+  return evaluateExpectedTopology(topology, true)
+}
+
+void recordExpectedTopologyObservation(Map topology) {
+  evaluateExpectedTopology(topology, false)
+}
+
+Boolean evaluateExpectedTopology(Map topology, Boolean holdOnMismatch) {
   String expectedJson = getDeviceDataValue('expectedGroupTopology')
   if(!expectedJson) { return false }
   Map expected
@@ -4319,7 +4304,7 @@ Boolean shouldHoldTopologyUpdate(Map topology) {
     logDebug('Observed expected topology for this player; releasing the update')
     return false
   }
-  return true
+  return holdOnMismatch == true
 }
 
 void clearPendingTopologyForDevice() {

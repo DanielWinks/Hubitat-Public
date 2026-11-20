@@ -1614,7 +1614,7 @@ class SonosAdvPlayerSpec extends Specification {
     )
   }
 
-  def "changed topology payload is snapshotted once and applied from that snapshot"() {
+  def "each received ZGT payload is parsed and applied in arrival order"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     Integer parseCalls = 0
@@ -1636,13 +1636,13 @@ class SonosAdvPlayerSpec extends Specification {
     parseCalls == 1
     driver.runtimeState.appliedTopologySnapshot.coordinatorId == 'RINCON_TEST'
     driver.runtimeState.appliedTopologySnapshot.memberNames == ['Living Room', 'Kitchen']
-    driver.lastZgtXmlHash['SONOS-TEST-DNI'] == '<topology>changed</topology>'.hashCode()
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>changed</topology>')
 
     then:
-    parseCalls == 1
+    parseCalls == 2
+    driver.runtimeState.appliedTopologySnapshot.coordinatorId == 'RINCON_TEST'
   }
 
   def "topology snapshot extracts visible roster names coordinator group and battery once"() {
@@ -1917,36 +1917,48 @@ class SonosAdvPlayerSpec extends Specification {
     zgtCalls == ['unsubscribe', 'subscribe']
   }
 
-  def "topology change holds only affected player until its expected topology arrives"() {
+  def "every ZGT snapshot applies in order while a topology mutation is pending"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.device.dataValues.appZgtSubscribe = 'true'
+    driver.device.dataValues.appZgtLeaderGeneration = 'leader-1'
     // The parent app stamps expectations before dispatching the mutation.
     driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson([
       coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: driver.now() + 30000L
     ])
+    List<String> appliedTopologies = []
+    List<Map> publishedSnapshots = []
     driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
       xml == '<topology>final</topology>'
-        ? [playerFound: true, coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], visibleMemberIds: ['RINCON_TEST'], memberNames: []]
-        : [playerFound: true, coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER'], visibleMemberIds: ['RINCON_OTHER'], memberNames: []]
+        ? [playerFound: true, coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'],
+            visibleMemberIds: ['RINCON_TEST'], memberNames: [],
+            groups: [[groupId: 'GROUP-FINAL', coordinatorId: 'RINCON_TEST', playerIds: ['RINCON_TEST']]]]
+        : [playerFound: true, coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER'],
+            visibleMemberIds: ['RINCON_OTHER'], memberNames: [],
+            groups: [[groupId: 'GROUP-INTERMEDIATE', coordinatorId: 'RINCON_OTHER', playerIds: ['RINCON_OTHER']]]]
     }
     driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
       String xml = topology.coordinatorId == 'RINCON_TEST' ? '<topology>final</topology>' : '<topology>intermediate</topology>'
-      driver.runtimeState.appliedTopologyXml = xml
+      appliedTopologies << xml
       true
     }
+    driver.metaClass.publishPlayerStateUpdate = { Map payload -> publishedSnapshots << payload }
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>intermediate</topology>')
 
     then:
-    driver.runtimeState.appliedTopologyXml == null
-    driver.pendingTopologyXmlByDni['SONOS-TEST-DNI'] == '<topology>intermediate</topology>'
+    appliedTopologies == ['<topology>intermediate</topology>']
+    publishedSnapshots*.topology*.groups*.groupId == [['GROUP-INTERMEDIATE']]
+    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+    new JsonSlurper().parseText(driver.device.dataValues.expectedGroupTopology).coordinatorId == 'RINCON_TEST'
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>final</topology>')
 
     then:
-    driver.runtimeState.appliedTopologyXml == '<topology>final</topology>'
+    appliedTopologies == ['<topology>intermediate</topology>', '<topology>final</topology>']
+    publishedSnapshots*.topology*.groups*.groupId == [['GROUP-INTERMEDIATE'], ['GROUP-FINAL']]
     !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
     driver.device.dataValues.expectedGroupTopology == ''
   }
