@@ -170,7 +170,6 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.activeGroupCommandRequest = [requestId: 'stale', command: 'off']
     driver.state.pendingGroupCommands = [[command: 'legacy-on']]
     driver.state.activeGroupCommandRequest = [requestId: 'legacy', command: 'legacy-off']
-    driver.state.pendingRegroup = true
     driver.groupDeviceVolumeFadeState.put('SONOS-GROUP-TEST-DNI', [target: 20])
     driver.lastGroupDeviceVolumeFadeCallTime.put('SONOS-GROUP-TEST-DNI', 123L)
 
@@ -182,13 +181,10 @@ class SonosAdvGroupSpec extends Specification {
     !driver.runtimeState.containsKey('activeGroupCommandRequest')
     !driver.state.containsKey('pendingGroupCommands')
     !driver.state.containsKey('activeGroupCommandRequest')
-    !driver.state.containsKey('pendingRegroup')
-    !driver.runtimeState.containsKey('pendingRegroup')
     driver.groupDeviceVolumeFadeState.isEmpty()
     driver.lastGroupDeviceVolumeFadeCallTime.isEmpty()
     driver.unschedules.contains('drainGroupCommandQueue')
     driver.unschedules.contains('retryActiveGroupCommandRequest')
-    driver.unschedules.contains('regroupSafetyTimeout')
     driver.parent.requests.empty
     driver.scheduled.any { List item ->
       item[1] == 'purgeParentGroupCommandsAfterInitialization' &&
@@ -329,14 +325,13 @@ class SonosAdvGroupSpec extends Specification {
     groupRequests()[0].args == [playerIdentifier: 'Bedroom']
   }
 
-  def "groupPlayers publishes an explicit request without the legacy ungroup delay"() {
+  def "groupPlayers publishes an explicit request"() {
     when:
     driver.groupPlayers()
 
     then:
     groupRequests()[0].command == 'groupPlayers'
     groupRequests()[0].args.groupingMode == 'EXPLICIT'
-    driver.scheduled.every { List call -> call[1] != 'regroupSafetyTimeout' }
   }
 
   def "evictUnlistedPlayers marks the request as removal-only"() {
@@ -480,32 +475,27 @@ class SonosAdvGroupSpec extends Specification {
   def "legacy group state migrates to the DNI runtime map and is cleared from Hubitat state"() {
     given:
     driver.state.groupCommandSequence = 7
-    driver.state.pendingRegroup = true
 
     when:
     driver.migrateLegacyRuntimeState()
 
     then:
     driver.runtimeState.groupCommandSequence == 7
-    driver.runtimeState.pendingRegroup == true
     driver.state.isEmpty()
   }
 
   def "refresh migrates legacy group variables before queuing its parent request"() {
     given:
     driver.state.groupCommandSequence = 8
-    driver.state.pendingRegroup = true
 
     when:
     driver.refresh()
 
     then:
     !driver.state.containsKey('groupCommandSequence')
-    !driver.state.containsKey('pendingRegroup')
     driver.runtimeState.groupCommandSequence == 9
     UUID.fromString(groupRequests().last().requestId as String).toString() ==
       groupRequests().last().requestId
-    driver.runtimeState.pendingRegroup == true
     groupRequests().last().command == 'refresh'
   }
 

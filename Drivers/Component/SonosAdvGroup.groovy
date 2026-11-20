@@ -482,12 +482,10 @@ void applyInitializationDefaults() {
 void clearPendingCommandsForInitialization() {
   // The command queue used to live in state. Clear that persisted form before
   // migrateLegacyRuntimeState() copies old keys into runtimeState.
-  ['pendingGroupCommands', 'activeGroupCommandRequest', 'groupCommandSequence',
-   'pendingRegroup'].each { String key ->
+  ['pendingGroupCommands', 'activeGroupCommandRequest', 'groupCommandSequence'].each { String key ->
     state.remove(key)
     runtimeState.remove(key)
   }
-  unschedule('regroupSafetyTimeout')
   unschedule('drainGroupCommandQueue')
   unschedule('retryActiveGroupCommandRequest')
   unschedule('groupDeviceVolumeFadeStep')
@@ -773,23 +771,6 @@ void groupPlayers() {
   // additive join path when the current group contains extra players.
   setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   requestGroupCommand('groupPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
-}
-
-void createGroupAfterUngroup() {
-  List<String> allPlayers = getAllPlayersInGroupDevice()
-  if(!allPlayers) {
-    logWarn('Cannot create group after ungroup - no players found')
-    return
-  }
-  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
-  requestGroupCommand('regroupAfterUngroup', [groupingMode: GROUPING_MODE_EXPLICIT])
-}
-
-void regroupSafetyTimeout() {
-  if(!runtimeState.pendingRegroup) { return }
-  runtimeState.remove('pendingRegroup')
-  logWarn('Regroup safety timeout reached — WebSocket group event did not arrive within 10 seconds. Attempting regroup anyway.')
-  createGroupAfterUngroup()
 }
 
 void ungroupPlayers() {
@@ -1162,7 +1143,6 @@ private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlayb
 
   // If group just became inactive, reset playback attributes and hold new ones
   if(wasActive && !isActive) {
-    handleLocalGroupDeactivation()
     if(getResetAttributesWhenInactiveSetting()) {
       resetPlaybackAttributes()
     }
@@ -1351,14 +1331,6 @@ private void resetPlaybackAttributes() {
   applyPlaybackAttributes(resetAttrs)
 }
 
-private void handleLocalGroupDeactivation() {
-  if(runtimeState.pendingRegroup) {
-    runtimeState.remove('pendingRegroup')
-    unschedule('regroupSafetyTimeout')
-    createGroupAfterUngroup()
-  }
-}
-
 /**
  * Retained as a local compatibility hook for callers that explicitly invoke
  * it when this group device transitions from active to inactive.
@@ -1368,7 +1340,6 @@ private void handleLocalGroupDeactivation() {
  * resetting would cause a brief flash of empty data immediately overwritten.
  */
 void onGroupDeactivated() {
-  handleLocalGroupDeactivation()
   if(getResetAttributesWhenInactiveSetting() && getOnlyUpdateWhenActiveSetting()) {
     resetPlaybackAttributes()
   }

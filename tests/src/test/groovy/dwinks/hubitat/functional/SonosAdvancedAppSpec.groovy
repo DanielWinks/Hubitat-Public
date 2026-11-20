@@ -1647,6 +1647,35 @@ class SonosAdvancedAppSpec extends Specification {
     operation.topologyMutationSent == true
   }
 
+  def "sendGroupTopologyCommand does not mutate topology for legacy CURRENT operation"() {
+    given:
+    coordinator.dataValues.id = 'RINCON_COORD'
+    follower.dataValues.id = 'RINCON_A_FOLLOW'
+    Map operation = [
+      operationId: 'legacy-current-no-mutate', groupingMode: 'CURRENT',
+      desiredCoordinatorId: 'RINCON_COORD', resolvedCoordinatorId: 'RINCON_COORD',
+      requiredPlayerIds: ['RINCON_COORD', 'RINCON_A_FOLLOW'],
+      coordinatorTransferStarted: false, topologyAttempt: 0
+    ]
+    Map topology = [
+      fresh: true, consistent: true, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_A_FOLLOW'], observations: [
+        [playerId: 'RINCON_COORD', fresh: true, groupId: 'GROUP-1',
+          coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_A_FOLLOW']],
+        [playerId: 'RINCON_A_FOLLOW', fresh: true, groupId: 'GROUP-1',
+          coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_A_FOLLOW']]
+      ]
+    ]
+
+    when:
+    appScript.sendGroupTopologyCommand(operation, topology)
+
+    then:
+    coordinator.commands.every { it.name != 'playerCreateGroup' && it.name != 'playerModifyGroupMembers' }
+    follower.commands.every { it.name != 'playerCreateGroup' && it.name != 'playerModifyGroupMembers' }
+    extra.commands.every { it.name != 'playerCreateGroup' && it.name != 'playerModifyGroupMembers' }
+  }
+
   def "additive grouping transfers coordination to the configured coordinator and preserves extras"() {
     given:
     follower.dataValues.groupId = 'GROUP-2'

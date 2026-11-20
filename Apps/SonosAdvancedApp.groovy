@@ -8130,8 +8130,6 @@ void processGroupCommandRequest(Map data) {
 
     switch(command) {
       case 'on':
-      case 'regroupAfterUngroup':
-      case 'createGroup':
       case 'groupPlayers':
         startGroupTopologyOperation(groupDevice, GROUPING_MODE_EXPLICIT, args)
         break
@@ -8340,7 +8338,7 @@ void processGroupCommandRequest(Map data) {
 
 Boolean isGroupOperationCommand(String command) {
   return command in [
-    'on', 'groupPlayers', 'createGroup', 'regroupAfterUngroup',
+    'on', 'groupPlayers',
     'evictUnlistedPlayers', 'joinPlayersToCoordinator',
     'loadFavorite', 'loadFavoriteFull',
     'off', 'removePlayersFromCoordinator', 'ungroupPlayers'
@@ -9801,68 +9799,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
   } else if(operation.groupingMode == GROUPING_MODE_ADDITIVE) {
     sendAdditiveGroupTopologyCommand(operation, topology, rinconMap, requiredPlayerIds)
     return
-  } else {
-    if(operation.groupingMode == GROUPING_MODE_CURRENT && topology?.fresh != true) {
-      // CURRENT is explicitly read-only. It may wait for a fresh snapshot,
-      // but it must never mutate membership from cached data.
-      operation.lastCommand = 'refreshGroupTopology'
-      operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
-      operation.lastCommandAt = now()
-      saveActiveGroupOperation(operation)
-      refreshGroupOperationTopology([operationId: operation.operationId])
-      return
-    }
-    if(topology?.fresh != true && operation.topologyMutationSent == true) {
-      // Do not send the same join repeatedly while Sonos is still applying the
-      // previous mutation and its topology response is delayed.
-      operation.lastCommand = 'refreshGroupTopology'
-      operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
-      operation.lastCommandAt = now()
-      saveActiveGroupOperation(operation)
-      refreshGroupOperationTopology([operationId: operation.operationId])
-      return
-    }
-    // A fresh, consistent snapshot is preferred. If a speaker's WebSocket
-    // response is delayed or unavailable, use the selected coordinator's
-    // cached membership instead of refusing to send the join command. Using
-    // only that coordinator's view is important: Arc and Kitchen can each
-    // report a valid standalone group, and unioning those views would hide the
-    // missing join.
-    List<String> coordinatorObservedPlayerIds = getAdditiveObservedPlayerIds(operation, topology)
-    if(topology?.consistent == true && topology.coordinatorId) {
-      operation.resolvedCoordinatorId = topology.coordinatorId as String
-      coordinatorId = operation.resolvedCoordinatorId as String
-      coordinator = rinconMap[coordinatorId]
-      coordinatorObservedPlayerIds = normalizeGroupPlayerIds(topology.playerIds)
-      if(operation.favoriteId) {
-        registerGroupOperationOnPlayers(operation, [coordinatorId])
-      }
-    }
-    if(topology?.fresh == true) {
-      operation.topologyMutationSent = false
-    }
-    if(coordinator == null) {
-      logWarn("Could not resolve additive coordinator for group operation ${operation.operationId}")
-      return
-    }
-    List<String> followersToAdd = requiredPlayerIds.findAll { String id ->
-      id != coordinatorId && !coordinatorObservedPlayerIds.contains(id)
-    }
-    operation.lastCommand = 'addMissingPlayers'
-    logDebug("Sending additive group mutation for ${operation.operationId}: coordinator=${coordinatorId}, group=${coordinator.getDataValue('groupId')}, add=${followersToAdd}")
-    if(followersToAdd) {
-      operation.topologyMutationSent = true
-      operation.topologyRequestId = UUID.randomUUID().toString()
-      logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-      prepareExpectedTopologyForMutation(coordinator, followersToAdd, [])
-      coordinator.playerModifyGroupMembers(followersToAdd, [])
-    } else {
-      // The topology may be mid-transition or the player cache may be stale.
-      // Refresh group data without changing membership; extras are preserved.
-      operation.topologyRequestId = UUID.randomUUID().toString()
-      logDebug("Dispatching topology check ${operation.topologyRequestId} for group operation ${operation.operationId}")
-      requestGroupOperationTopology(operation, coordinator)
-    }
   }
   operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
   operation.lastCommandAt = now()
