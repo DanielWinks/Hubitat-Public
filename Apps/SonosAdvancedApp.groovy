@@ -257,6 +257,7 @@ preferences {
 @Field static final String PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY = 'playerInitializationBootAttempts'
 @Field static final String PLAYER_INITIALIZATION_ZGT_STATE_KEY = 'playerInitializationZgt'
 @Field static final String HOUSEHOLD_TOPOLOGY_STATE_KEY = 'sonosHouseholdTopology'
+@Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final String PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY = 'playerInitializationNotBefore'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY = 'playerInitializationOffturnBurstStartedAt'
 @Field static final String PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY = 'playerInitializationOffturnProbeReleaseAt'
@@ -4180,6 +4181,14 @@ void subscribeToGroupCommandRequests() {
     unsubscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     unsubscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     unsubscribe(playerDevice, ZGT_CURRENT_TOPOLOGY_EVENT, 'zgtCurrentTopologyHandler')
+    unsubscribe(playerDevice, 'groupCoordinatorId', 'topologyAttributeHandler')
+    unsubscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
+    unsubscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
+    unsubscribe(playerDevice, 'groupPlayerIds', 'topologyAttributeHandler')
+    subscribe(playerDevice, 'groupCoordinatorId', 'topologyAttributeHandler')
+    subscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
+    subscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
+    subscribe(playerDevice, 'groupPlayerIds', 'topologyAttributeHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     subscribe(playerDevice, ZGT_CURRENT_TOPOLOGY_EVENT, 'zgtCurrentTopologyHandler')
@@ -5715,7 +5724,7 @@ String playerStateUpdateCoalesceKey(Map payload) {
   String kind = payload?.kind?.toString()
   String playerDni = payload?.playerDni?.toString() ?: ''
   switch(kind) {
-    case 'topology': case 'playbackObservation': case 'wsConnected': case 'wsRetry':
+    case 'playbackObservation': case 'wsConnected': case 'wsRetry':
     case 'householdPresence':
       return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
     case 'membership': return "${kind}:${payload.coordinatorId ?: playerDni}"
@@ -5953,38 +5962,6 @@ void playerStateUpdateHandler(Object event) {
     }
     return
   }
-  if(kind == 'topology') {
-    if(announcementPolicyTopologyChanged(player)) { queueAllAnnouncementPolicyRefreshes() }
-    if(topologyUpdateMatchesHouseholdSnapshot(player, payload)) {
-      logDebug("Topology update from ${playerDni} matches the app household snapshot; ZGT watchdog unchanged")
-    } else {
-      scheduleZgtTopologyWatchdog()
-    }
-    if(handleGroupAnnouncementTopologyEvent(player, payload)) { return }
-    Map operation = getActiveGroupOperation()
-    String playerId = player.getDataValue('id')?.toString()
-    if(operation != null && playerId && normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(playerId)) {
-      Long observedAt = (payload.observedAt ?: now()) as Long
-      Map<String, Map> observations = operation.topologyObservations instanceof Map
-          ? (Map<String, Map>)operation.topologyObservations
-          : [:]
-      observations[playerId] = [
-        groupId: payload.groupId?.toString(),
-        coordinatorId: payload.coordinatorId?.toString(),
-        playerIds: normalizeGroupPlayerIds(payload.playerIds),
-        observedAt: observedAt
-      ]
-      operation.topologyObservations = observations
-
-      logDebug("Received topology report from ${playerId} for operation ${operation.operationId} at ${observedAt}")
-      saveActiveGroupOperation(operation)
-      runIn(1, 'advanceGroupFavoriteOperation', [
-        overwrite: true,
-        data: [operationId: operation.operationId]
-      ])
-    }
-    return
-  }
   if(!(kind in ['state', 'followers'])) { return }
   if(kind == 'state' && hasAutomaticAnnouncementPolicy() && coordinatorId == player.getDataValue('id')?.toString() &&
       payload.playbackAttrs instanceof Map &&
@@ -6029,6 +6006,78 @@ void playerStateUpdateHandler(Object event) {
   if(kind == 'state' && coordinatorId == player.getDataValue('id')) {
     flushGroupDeviceState(coordinatorId, payload.volumeAttrs instanceof Map ? (Map)payload.volumeAttrs : null,
       payload.playbackAttrs instanceof Map ? (Map)payload.playbackAttrs : null)
+  }
+}
+
+/** Rebuild one player's topology from its current attribute values. A single
+ * WebSocket update queues up to four attribute events; the last-processed
+ * snapshot dedupes the burst so downstream work runs once per change. */
+void topologyAttributeHandler(Event event) {
+  ChildDeviceWrapper player = resolveTopologyEventPlayer(event)
+  if(player == null) { return }
+  String playerDni = player.getDeviceNetworkId()?.toString()
+  String coordinatorId = player.currentValue('groupCoordinatorId', true)?.toString()
+      ?: player.getDataValue('groupCoordinatorId')?.toString()
+  String groupPlayerIdsRaw = player.currentValue('groupPlayerIds', true)?.toString()
+      ?: player.getDataValue('groupPlayerIds')?.toString()
+  List<String> playerIds = normalizeGroupPlayerIds(groupPlayerIdsRaw)
+  Map<String, Map> lastProcessed = state[LAST_PROCESSED_TOPOLOGY_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[LAST_PROCESSED_TOPOLOGY_STATE_KEY]) : [:]
+  Map previous = lastProcessed[playerDni]
+  if(previous != null && previous.coordinatorId?.toString() == coordinatorId &&
+      normalizeGroupPlayerIds(previous.playerIds) == playerIds) {
+    return
+  }
+  lastProcessed[playerDni] = [coordinatorId: coordinatorId, playerIds: playerIds]
+  state[LAST_PROCESSED_TOPOLOGY_STATE_KEY] = lastProcessed
+  Map payload = [groupId: player.currentValue('groupId', true)?.toString(),
+    coordinatorId: coordinatorId, playerIds: playerIds, observedAt: now(), playerDni: playerDni]
+  processTopologyPayload(player, payload)
+}
+
+ChildDeviceWrapper resolveTopologyEventPlayer(Event event) {
+  String dni = event?.device?.getDeviceNetworkId()?.toString() ?: event?.deviceId?.toString()
+  ChildDeviceWrapper player = dni ? getChildDevice(dni) : null
+  if(player == null && event?.device instanceof ChildDeviceWrapper) {
+    player = (ChildDeviceWrapper)event.device
+  }
+  if(player == null || !player.getDataValue('id')) { return null }
+  return player
+}
+
+/** Apply one rebuilt topology payload to policy refresh, ZGT watchdog, and
+ * in-flight group/announcement operations. */
+void processTopologyPayload(ChildDeviceWrapper player, Map payload) {
+  String playerDni = player?.getDeviceNetworkId()?.toString()
+  if(player == null || !(payload instanceof Map)) { return }
+  if(announcementPolicyTopologyChanged(player)) { queueAllAnnouncementPolicyRefreshes() }
+  if(topologyUpdateMatchesHouseholdSnapshot(player, payload)) {
+    logDebug("Topology update from ${playerDni} matches the app household snapshot; ZGT watchdog unchanged")
+  } else {
+    scheduleZgtTopologyWatchdog()
+  }
+  if(handleGroupAnnouncementTopologyEvent(player, payload)) { return }
+  Map operation = getActiveGroupOperation()
+  String playerId = player.getDataValue('id')?.toString()
+  if(operation != null && playerId && normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(playerId)) {
+    Long observedAt = (payload.observedAt ?: now()) as Long
+    Map<String, Map> observations = operation.topologyObservations instanceof Map
+        ? (Map<String, Map>)operation.topologyObservations
+        : [:]
+    observations[playerId] = [
+      groupId: payload.groupId?.toString(),
+      coordinatorId: payload.coordinatorId?.toString(),
+      playerIds: normalizeGroupPlayerIds(payload.playerIds),
+      observedAt: observedAt
+    ]
+    operation.topologyObservations = observations
+
+    logDebug("Received topology report from ${playerId} for operation ${operation.operationId} at ${observedAt}")
+    saveActiveGroupOperation(operation)
+    runIn(1, 'advanceGroupFavoriteOperation', [
+      overwrite: true,
+      data: [operationId: operation.operationId]
+    ])
   }
 }
 

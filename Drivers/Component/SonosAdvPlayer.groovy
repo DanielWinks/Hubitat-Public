@@ -530,6 +530,7 @@ metadata {
   attribute 'groupCoordinatorId', 'string'
   attribute 'isGrouped', 'enum', [ 'on', 'off' ]
   attribute 'groupMemberCount', 'number'
+  attribute 'groupPlayerIds', 'string'
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
@@ -7962,6 +7963,7 @@ void setGroupPlayerIds(List<String> groupPlayerIds, Boolean publishMembership = 
     setDeviceDataValue('groupPlayerIds', newValue)
     queueLocalDeviceEvent('isGrouped', isNowGrouped ? 'on' : 'off')
     queueLocalDeviceEvent('groupMemberCount', groupPlayerIds.size())
+    queueLocalDeviceEvent('groupPlayerIds', newValue)
     // Subscribe/unsubscribe sid4 (GroupRenderingControl) on group transitions
     if(isNowGrouped && !wasGrouped) {
       subscribeToMrGrcEvents()
@@ -8879,7 +8881,7 @@ private String parentStateUpdateCoalesceKey(Map payload) {
   String kind = payload?.kind?.toString()
   String playerDni = payload?.playerDni?.toString() ?: ''
   switch(kind) {
-    case 'topology': case 'playbackObservation': case 'wsConnected': case 'wsRetry':
+    case 'playbackObservation': case 'wsConnected': case 'wsRetry':
     case 'householdPresence':
       return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
     case 'membership': return "${kind}:${payload.coordinatorId ?: playerDni}"
@@ -8978,16 +8980,6 @@ List<Map> drainPendingParentUpdatesForPoll() {
 /** Back-compat poll alias for tests and the app poller. */
 List<Map> flushPendingParentUpdates() {
   return drainPendingParentUpdatesForPoll()
-}
-
-void publishGroupTopologyUpdate(String groupId, String coordinatorId, List<String> playerIds) {
-  publishPlayerStateUpdate([
-    kind: 'topology',
-    groupId: groupId,
-    coordinatorId: coordinatorId,
-    playerIds: playerIds ?: [],
-    observedAt: now()
-  ])
 }
 
 
@@ -12545,13 +12537,11 @@ void processWebsocketMessage(String message) {
         if(shouldHoldTopologyUpdate([coordinatorId: null, memberIds: []])) {
           pendingTopologyWebsocketByDni.put(dni, message)
           pendingTopologyKindByDni.put(dni, 'ws')
-          publishGroupTopologyUpdate(null, null, [])
           scheduleTopologyTimeoutFlush()
           logDebug('Holding groups websocket topology update until the affected player reaches its expected topology')
           return
         }
         logDebug("Player ${getId()} not found in any group")
-        publishGroupTopologyUpdate(null, null, [])
         emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
         return
       }
@@ -12579,11 +12569,6 @@ void processWebsocketMessage(String message) {
       if(shouldHoldTopologyUpdate(websocketTopology)) {
         pendingTopologyWebsocketByDni.put(dni, message)
         pendingTopologyKindByDni.put(dni, 'ws')
-        // Publish this topology snapshot for the app's player-state
-        // subscription. It does not modify playback attributes or publish
-        // membership to group devices while topology is between the requested
-        // start and end.
-        publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         scheduleTopologyTimeoutFlush()
         logDebug('Holding groups websocket topology update until the affected player reaches its expected topology')
         return
@@ -12600,7 +12585,6 @@ void processWebsocketMessage(String message) {
         if(coordinatorName) { setGroupCoordinatorName(coordinatorName) }
         if(groupMemberNames) { setGroupMemberNames(groupMemberNames) }
         logDebug('Groups websocket topology identity unchanged; descriptive metadata refreshed')
-        publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
         emitGroupFavoriteOperationEvent('groups', [
           groupId: groupId,
           coordinatorId: coordinatorId,
@@ -12634,18 +12618,13 @@ void processWebsocketMessage(String message) {
           }
         }
       }
-      publishGroupTopologyUpdate(groupId, coordinatorId, playerIds ?: [])
       emitGroupFavoriteOperationEvent('groups', [
         groupId: groupId,
         coordinatorId: coordinatorId,
         playerIds: playerIds ?: []
       ])
     } else {
-      // A successful groups response can contain no groups while a player is
-      // leaving or joining a topology. Publish that negative observation so a
-      // parent operation cannot continue using stale cached group data.
       logDebug('Groups websocket response contained no group for player ' + getId())
-      publishGroupTopologyUpdate(null, null, [])
       emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
     }
     logDebug('WebSocket groups response processing completed')

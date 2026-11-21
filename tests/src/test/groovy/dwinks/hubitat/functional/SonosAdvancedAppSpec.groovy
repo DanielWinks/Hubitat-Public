@@ -716,10 +716,9 @@ class SonosAdvancedAppSpec extends Specification {
       leaderGeneration: 'leader-1', topologyReady: true, lastInboundAt: appScript.now()]
 
     when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
-      kind: 'topology', playerDni: coordinator.deviceNetworkId, groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW', 'RINCON_COORD'], observedAt: appScript.now()
-    ])] as Event)
+    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW', 'RINCON_COORD'],
+      observedAt: appScript.now(), playerDni: coordinator.deviceNetworkId])
 
     then:
     !appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
@@ -929,10 +928,9 @@ class SonosAdvancedAppSpec extends Specification {
       leaderGeneration: 'leader-1', topologyReady: true, lastInboundAt: appScript.now()]
 
     when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
-      kind: 'topology', playerDni: coordinator.deviceNetworkId, groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD'], observedAt: appScript.now()
-    ])] as Event)
+    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD'],
+      observedAt: appScript.now(), playerDni: coordinator.deviceNetworkId])
 
     then:
     appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' && job[0] == 30 }
@@ -2976,15 +2974,12 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.processGroupCommandRequest([request: groupRequest])
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([kind: 'topology',
-      playerDni: coordinator.deviceNetworkId, groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
-      playerIds: ['RINCON_COORD'], observedAt: observedAt])] as Event)
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([kind: 'topology',
-      playerDni: follower.deviceNetworkId, groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW',
-      playerIds: ['RINCON_FOLLOW'], observedAt: observedAt + 1L])] as Event)
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([kind: 'topology',
-      playerDni: extra.deviceNetworkId, groupId: 'GROUP-3', coordinatorId: 'RINCON_EXTRA',
-      playerIds: ['RINCON_EXTRA'], observedAt: observedAt + 2L])] as Event)
+    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD'], observedAt: observedAt, playerDni: coordinator.deviceNetworkId])
+    appScript.processTopologyPayload(follower, [groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW',
+      playerIds: ['RINCON_FOLLOW'], observedAt: observedAt + 1L, playerDni: follower.deviceNetworkId])
+    appScript.processTopologyPayload(extra, [groupId: 'GROUP-3', coordinatorId: 'RINCON_EXTRA',
+      playerIds: ['RINCON_EXTRA'], observedAt: observedAt + 2L, playerDni: extra.deviceNetworkId])
 
     then:
     appScript.state.groupAnnouncementTopologyTransactions['fresh-topology'].phase == 'GROUPING_TARGET'
@@ -3334,17 +3329,16 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'AUDIO_CLIP'
   }
 
-  def "fresh topology reports from player location events satisfy group observations"() {
+  def "fresh topology reports satisfy group observations"() {
     given:
     appScript.startGroupTopologyOperation(group, 'EXPLICIT')
     Map operation = appScript.getActiveGroupOperation()
     Long observedAt = appScript.now() + 1000L
-    Map report = [kind: 'topology', playerDni: coordinator.deviceNetworkId,
-      groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
-      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], observedAt: observedAt]
 
     when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(report)] as Event)
+    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], observedAt: observedAt,
+      playerDni: coordinator.deviceNetworkId])
     Map topology = appScript.readGroupOperationTopology(appScript.getActiveGroupOperation())
 
     then:
@@ -3365,6 +3359,42 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.subscriptions.count { it == [group, 'zgtInProgress', 'zgtInProgressHandler'] } == 1
     !appScript.subscriptions.any { it[1] == 'sonosGroupCommandRequest' }
     !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
+  }
+
+  def "player topology attributes subscribe once per player"() {
+    when:
+    appScript.subscribeToGroupCommandRequests()
+    appScript.subscribeToGroupCommandRequests()
+
+    then:
+    ['groupCoordinatorId', 'groupMemberCount', 'isGroupCoordinator', 'groupPlayerIds'].every { String attr ->
+      appScript.subscriptions.count { it == [coordinator, attr, 'topologyAttributeHandler'] } == 1 &&
+      appScript.subscriptions.count { it == [follower, attr, 'topologyAttributeHandler'] } == 1
+    }
+  }
+
+  def "topology attribute handler rebuilds topology from attributes once per change"() {
+    given:
+    coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.currentValues.groupPlayerIds = 'RINCON_FOLLOW,RINCON_COORD'
+    coordinator.currentValues.groupId = 'GROUP-1'
+
+    when:
+    appScript.topologyAttributeHandler([device: coordinator, name: 'groupPlayerIds',
+      value: 'RINCON_FOLLOW,RINCON_COORD'] as Event)
+
+    then:
+    appScript.state.lastProcessedTopologyByDni[coordinator.deviceNetworkId] ==
+      [coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
+    appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
+
+    when:
+    appScript.scheduled.clear()
+    appScript.topologyAttributeHandler([device: coordinator, name: 'isGroupCoordinator',
+      value: 'on'] as Event)
+
+    then:
+    !appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
   }
 
   def "zgtInProgress handler accepts parent clear without error"() {

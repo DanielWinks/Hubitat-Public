@@ -2868,7 +2868,7 @@ class SonosAdvPlayerSpec extends Specification {
     parseCalls == 0
   }
 
-  def "held groups websocket topology is reported to the parent without publishing player states"() {
+  def "held groups websocket topology is not published to the parent outbox"() {
     given:
     driver.device.currentValues.groupCoordinatorId = 'RINCON_OLD_COORD'
     driver.device.currentValues.isGrouped = 'on'
@@ -2888,11 +2888,32 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.device.currentValues.groupCoordinatorId == 'RINCON_OLD_COORD'
     driver.device.currentValues.isGrouped == 'on'
-    Map topologyReport = playerStateMessages().find { Map event -> event.kind == 'topology' }
-    topologyReport.groupId == 'RINCON_TEST:100'
-    topologyReport.coordinatorId == 'RINCON_TEST'
-    topologyReport.playerIds == ['RINCON_TEST']
+    !playerStateMessages().any { Map event -> event.kind == 'topology' }
     driver.device.events.every { Map event -> event.name != 'groupCoordinatorId' }
+  }
+
+  def "groups websocket change queues groupPlayerIds attribute and skips the outbox"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_ARC'
+    driver.device.dataValues.groupId = 'GROUP_ARC'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_ARC'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_ARC'
+    driver.device.dataValues.isGroupCoordinator = 'true'
+    driver.pendingLocalDeviceEvents.remove(driver.device.deviceNetworkId)
+    String message = JsonOutput.toJson([
+      [type: 'groups', name: 'groups'],
+      [groups: [[id: 'GROUP_ARC', name: 'Arc', coordinatorId: 'RINCON_ARC',
+        playerIds: ['RINCON_ARC', 'RINCON_B']]],
+       players: [[id: 'RINCON_ARC', name: 'Arc'], [id: 'RINCON_B', name: 'Bedroom']]]
+    ])
+
+    when:
+    driver.processWebsocketMessage(message)
+
+    then:
+    driver.device.dataValues.groupPlayerIds == 'RINCON_ARC,RINCON_B'
+    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupPlayerIds == 'RINCON_ARC,RINCON_B'
+    !playerStateMessages().any { Map event -> event.kind == 'topology' }
   }
 
   def "logging level controls player log output"() {
