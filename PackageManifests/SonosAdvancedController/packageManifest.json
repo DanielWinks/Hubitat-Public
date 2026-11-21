@@ -11,16 +11,6 @@
     }
   ],
   "author": "Daniel Winks",
-  "bundles": [
-    {
-      "id": "ed76ee46-18a8-466e-a28a-db50355f3529",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.18.9/SonosAdvancedController.zip",
-      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Bundles/SonosAdvancedController.zip",
-      "name": "Sonos Advanced Controller",
-      "namespace": "dwinks",
-      "required": true
-    }
-  ],
   "dateReleased": "2026-11-19",
   "drivers": [
     {
@@ -113,13 +103,6 @@
     }
   ],
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
-  "libraries": [
-    {
-      "id": "utilities-logging-library",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/dwinks.UtilitiesAndLoggingLibrary.groovy",
-      "name": "dwinks.UtilitiesAndLoggingLibrary.groovy"
-    }
-  ],
   "minimumHEVersion": "2.3.7.114",
   "packageName": "Sonos Advanced Controller",
   "payPalUrl": "https://paypal.me/winksd?country.x=US&locale.x=en_US",

@@ -6,7 +6,6 @@ on:
     paths:
       - Apps/SonosAdvancedApp.groovy
       - Drivers/Component/SonosAdv*.groovy
-      - Libraries/UtilitiesAndLoggingLibrary.groovy
       - tests/**
       - .github/workflows/sonos-advanced-beta.yml
   workflow_dispatch:

@@ -155,9 +155,6 @@ jobs:
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvSecondaries.groovy
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvPlaylist.groovy
 
-          # Update Library versions
-          sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Libraries/UtilitiesAndLoggingLibrary.groovy
-
           echo "Version update complete"
 
       - name: Update packageManifest.json
@@ -280,117 +277,10 @@ jobs:
             Drivers/Component/SonosAdvSleepTimer.groovy
             Drivers/Component/SonosAdvAlarmSwitch.groovy
             Drivers/Component/SonosAdvAlarmManager.groovy
-            Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
           message: "Release Sonos Advanced Controller ${{ steps.version.outputs.new_version }}"
           tag: "v${{ steps.version.outputs.new_version }}"
           push: true
-
-      - name: Trigger and wait for UtilitiesAndLoggingLibrary workflow
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Trigger the workflow
-            const utilWorkflow = await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'UtilitiesAndLoggingLibrary.yml',
-              ref: 'main'
-            });
-            console.log('Triggered UtilitiesAndLoggingLibrary workflow');
-
-            // Wait for it to start and complete
-            let attempts = 0;
-            const maxAttempts = 60; // 5 minutes max
-
-            while (attempts < maxAttempts) {
-              await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-
-              const runs = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'UtilitiesAndLoggingLibrary.yml',
-                branch: 'main',
-                per_page: 5
-              });
-
-              // Find the most recent run
-              const latestRun = runs.data.workflow_runs[0];
-
-              if (latestRun && latestRun.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('UtilitiesAndLoggingLibrary workflow completed successfully');
-                  break;
-                } else {
-                  throw new Error(`UtilitiesAndLoggingLibrary workflow failed with conclusion: ${latestRun.conclusion}`);
-                }
-              }
-
-              attempts++;
-              console.log(`Waiting for UtilitiesAndLoggingLibrary workflow... (attempt ${attempts}/${maxAttempts})`);
-            }
-
-            if (attempts >= maxAttempts) {
-              throw new Error('UtilitiesAndLoggingLibrary workflow did not complete in time');
-            }
-
-      - name: Trigger and wait for SonosAdvancedBundles workflow
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Trigger the workflow
-            const bundleWorkflow = await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'SonosAdvancedBundles.yml',
-              ref: 'main'
-            });
-            console.log('Triggered SonosAdvancedBundles workflow');
-
-            // Wait for it to start and complete
-            let attempts = 0;
-            const maxAttempts = 60; // 5 minutes max
-
-            while (attempts < maxAttempts) {
-              await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-
-              const runs = await github.rest.actions.listWorkflowRuns({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'SonosAdvancedBundles.yml',
-                branch: 'main',
-                per_page: 5
-              });
-
-              // Find the most recent run
-              const latestRun = runs.data.workflow_runs[0];
-
-              if (latestRun && latestRun.status === 'completed') {
-                if (latestRun.conclusion === 'success') {
-                  console.log('SonosAdvancedBundles workflow completed successfully');
-                  break;
-                } else {
-                  throw new Error(`SonosAdvancedBundles workflow failed with conclusion: ${latestRun.conclusion}`);
-                }
-              }
-
-              attempts++;
-              console.log(`Waiting for SonosAdvancedBundles workflow... (attempt ${attempts}/${maxAttempts})`);
-            }
-
-            if (attempts >= maxAttempts) {
-              throw new Error('SonosAdvancedBundles workflow did not complete in time');
-            }
-
-      - name: Pull latest changes from sub-workflows
-        run: |
-          # The UtilitiesAndLoggingLibrary and SonosAdvancedBundles workflows
-          # each committed updated bundle files to main. Our local checkout is
-          # stale and still has the OLD bundles/libraries from before those
-          # workflows ran. We must pull so the release uploads the freshly-built
-          # bundle zips and library files.
-          git pull --rebase --autostash origin main
-          echo "Local checkout updated with latest bundle artifacts"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
@@ -401,8 +291,6 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            Bundles/SonosAdvancedController.zip
-            Bundles/UtilitiesAndLoggingLibrary.zip
             Apps/SonosAdvancedApp.groovy
             Drivers/Component/SonosAdvPlayer.groovy
             Drivers/Component/SonosAdvGroup.groovy
@@ -415,7 +303,6 @@ jobs:
             Drivers/Component/SonosAdvSleepTimer.groovy
             Drivers/Component/SonosAdvAlarmSwitch.groovy
             Drivers/Component/SonosAdvAlarmManager.groovy
-            Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -491,15 +378,13 @@ jobs:
 
           ## What was done
           1. ✅ Updated version numbers in all Sonos Advanced files
-          2. ✅ Triggered UtilitiesAndLoggingLibrary workflow
-          3. ✅ Triggered SonosAdvancedBundles workflow
-          4. ✅ Updated packageManifest.json with new version and release notes
-          5. ✅ Created git tag: v${{ steps.version.outputs.new_version }}
-          6. ✅ Created GitHub Release with bundles
-          7. ✅ Created discussion announcement
+          2. ✅ Updated packageManifest.json with new version and release notes
+          3. ✅ Created git tag: v${{ steps.version.outputs.new_version }}
+          4. ✅ Created GitHub Release
+          5. ✅ Created discussion announcement
 
           ## Next Steps
           - Verify the release at: https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.new_version }}
-          - Check that bundles were generated correctly
+          - Check that app and driver files were published correctly
           - Announce the release to the Hubitat community if desired
           EOF

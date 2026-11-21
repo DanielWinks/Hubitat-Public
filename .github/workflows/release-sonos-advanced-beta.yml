@@ -67,7 +67,6 @@ jobs:
               "Drivers/Component/SonosAdvFavorites.groovy",
               "Drivers/Component/SonosAdvSecondaries.groovy",
               "Drivers/Component/SonosAdvPlaylist.groovy",
-              "Libraries/UtilitiesAndLoggingLibrary.groovy",
           ]
 
           for source_name in source_files:
@@ -86,16 +85,7 @@ jobs:
               output.write(f"new_version={new_version}\n")
           PY
 
-      - name: Build beta bundle
-        run: |
-          mkdir -p Bundles/SonosAdvancedController
-          cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosAdvancedController/dwinks.UtilitiesAndLoggingLibrary.groovy
-          printf '%s\n' "dwinks" "Sonos Advanced Controller" "library dwinks.UtilitiesAndLoggingLibrary.groovy" > Bundles/SonosAdvancedController/install.txt
-          cp Bundles/SonosAdvancedController/install.txt Bundles/SonosAdvancedController/update.txt
-          rm -f Bundles/SonosAdvancedController.zip
-          (cd Bundles/SonosAdvancedController && zip -q -r ../SonosAdvancedController.zip .)
-
-      - name: Commit beta sources and bundle
+      - name: Commit beta sources
         uses: EndBug/add-and-commit@v10
         with:
           add: |
@@ -107,10 +97,7 @@ jobs:
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
             Drivers/Component/SonosAdvPlaylist.groovy
-            Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
-            Bundles/SonosAdvancedController.zip
-            Bundles/SonosAdvancedController/
           message: "Release Sonos Advanced beta ${{ steps.version.outputs.new_version }}"
           push: true
 
