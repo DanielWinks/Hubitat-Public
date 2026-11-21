@@ -20,6 +20,28 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
 
+  def "local SOAP helpers build requests without mutating service defaults"() {
+    given:
+    java.lang.reflect.Field serviceField = driver.getClass().getDeclaredField('RenderingControl')
+    serviceField.setAccessible(true)
+    Map service = (Map)serviceField.get(driver)
+    Map originalArguments = new LinkedHashMap(service.actions.SetVolume.arguments)
+
+    when:
+    Map first = driver.getSoapActionParams('192.168.1.50:1400', service, 'SetVolume', [DesiredVolume: 37, InstanceID: 0, Channel: 'Master'])
+    Map second = driver.getSoapActionParams('192.168.1.50:1400', service, 'SetVolume', [DesiredVolume: 82, InstanceID: 0, Channel: 'Master'])
+
+    then:
+    first.uri == 'http://192.168.1.50:1400/MediaRenderer/RenderingControl/Control'
+    first.headers.SOAPAction == 'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume'
+    first.contentType == 'text/xml'
+    first.body.contains('<DesiredVolume>37</DesiredVolume>')
+    second.body.contains('<DesiredVolume>82</DesiredVolume>')
+    !second.body.contains('<DesiredVolume>37</DesiredVolume>')
+    service.actions.SetVolume.arguments == originalArguments
+    driver.parseSonosMessageXML('<Event><title>A &amp; B</title></Event>').Event.title.text() == 'A & B'
+  }
+
   void drainParentBridge() {
     List<Map> updates = driver.flushPendingParentUpdates() ?: []
     updates.each { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) }
