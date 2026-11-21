@@ -708,6 +708,9 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentGrcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, String> currentGrcSidByDni = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, Map> currentRcSnapshotByDni = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, AtomicInteger> currentRcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+@Field static ConcurrentHashMap<String, String> currentRcSidByDni = new ConcurrentHashMap<String, String>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -1743,6 +1746,9 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(currentGrcSnapshotByCoordinator)
     clearedEntries += clearStaticMap(currentGrcSeqByDni)
     clearedEntries += clearStaticMap(currentGrcSidByDni)
+    clearedEntries += clearStaticMap(currentRcSnapshotByDni)
+    clearedEntries += clearStaticMap(currentRcSeqByDni)
+    clearedEntries += clearStaticMap(currentRcSidByDni)
     clearedEntries += clearStaticMap(wsSubscriptionStatus)
     clearedEntries += clearStaticMap(jsonSlurpers)
     clearedEntries += clearStaticMap(eventTimestamps)
@@ -1787,6 +1793,9 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(currentGrcSnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSidByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentRcSnapshotByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentRcSeqByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentRcSidByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
   removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
   removedEntries += pruneEventTimestampKeys(activePlayerDnis)
@@ -1939,6 +1948,9 @@ void clearStaticDriverStateForCurrentDevice() {
       currentGrcSnapshotByDni?.remove(dni)
       currentGrcSeqByDni?.remove(dni)
       currentGrcSidByDni?.remove(dni)
+      currentRcSnapshotByDni?.remove(dni)
+      currentRcSeqByDni?.remove(dni)
+      currentRcSidByDni?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
       Map upnpEntry = upnpRequestQueues?.get(dni)
@@ -4648,7 +4660,10 @@ void parse(String raw) {
             logDebug('RenderingControl event processing beginning')
             observeExpectedUpnpSubscriptionEvent('sid2')
             setLastInboundMrRcEvent()
-            processRenderingControlMessages(xmlBody)
+            String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+            logZgtXmlAtTrace(rcDni, xmlBody)
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML RC event payload'); return }
+            deferOrProcessRenderingControlPayload(rcDni, xmlBody, seq, sid)
             logDebug('RenderingControl event processing completed')
           } catch (Exception e) { logException('RenderingControl event processing failed', e) }
           return
@@ -4673,7 +4688,10 @@ void parse(String raw) {
         logDebug('RenderingControl event processing beginning')
         observeExpectedUpnpSubscriptionEvent('sid2')
         setLastInboundMrRcEvent()
-        processRenderingControlMessages(xmlBody)
+        String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+        logZgtXmlAtTrace(rcDni, xmlBody)
+        if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML RC event payload'); return }
+        deferOrProcessRenderingControlPayload(rcDni, xmlBody, seq, sid)
         logDebug('RenderingControl event processing completed')
       } catch (Exception e) { logException('RenderingControl event processing failed', e) }
       return
@@ -5386,6 +5404,282 @@ Boolean applyGrcSnapshotIfDifferent(Map snap) {
 }
 
 @CompileStatic
+Map parseRcFullSnapshot(String xmlString) {
+  if(!isPlausibleXmlPayload(xmlString)) { return null }
+  try {
+    XmlSlurper parser = new XmlSlurper()
+    GPathResult propertyset = parser.parseText(xmlString)
+    String lastChange = ((GPathResult)propertyset['property']['LastChange']).text()?.toString()
+    if(!lastChange) { return null }
+    String unescaped = unEscapeLastChangeXML(lastChange)
+    if(!isPlausibleXmlPayload(unescaped)) { return null }
+    GPathResult event = parser.parseText(unescaped)
+    GPathResult iid = (GPathResult)event['InstanceID']
+    if(iid.size() == 0) { return null }
+    String volumeMasterText = ''
+    String volumeLFText = ''
+    String volumeRFText = ''
+    String muteMasterText = ''
+    String muteLFText = ''
+    String muteRFText = ''
+    String loudnessText = ''
+    for(Object childObject : iid.children()) {
+      GPathResult child = (GPathResult)childObject
+      String elementName = child.name()?.toString()
+      if(elementName == 'Volume' || elementName == 'Mute' || elementName == 'Loudness') {
+        String channel = child['@channel']?.toString()
+        String value = child['@val']?.toString()
+        if(elementName == 'Volume') {
+          if(channel == 'Master') { volumeMasterText = value }
+          else if(channel == 'LF') { volumeLFText = value }
+          else if(channel == 'RF') { volumeRFText = value }
+        } else if(elementName == 'Mute') {
+          if(channel == 'Master') { muteMasterText = value }
+          else if(channel == 'LF') { muteLFText = value }
+          else if(channel == 'RF') { muteRFText = value }
+        } else if(elementName == 'Loudness' && channel == 'Master') {
+          loudnessText = value
+        }
+      }
+    }
+    String bassText = iid['Bass']['@val']?.toString()
+    String trebleText = iid['Treble']['@val']?.toString()
+    String nightModeText = iid['NightMode']['@val']?.toString()
+    String dialogLevelText = iid['DialogLevel']['@val']?.toString()
+    Integer volumeMaster = null
+    if(volumeMasterText) {
+      try {
+        Integer parsed = Integer.parseInt(volumeMasterText.trim())
+        if(parsed >= 0 && parsed <= 100) { volumeMaster = parsed }
+        else { logDebug("Ignoring out-of-range RC Volume Master value=${volumeMasterText}") }
+      } catch(Exception ignored) { logDebug("Ignoring non-numeric RC Volume Master value=${volumeMasterText}") }
+    }
+    Integer volumeLF = null
+    if(volumeLFText) {
+      try {
+        Integer parsed = Integer.parseInt(volumeLFText.trim())
+        if(parsed >= 0 && parsed <= 100) { volumeLF = parsed }
+        else { logDebug("Ignoring out-of-range RC Volume LF value=${volumeLFText}") }
+      } catch(Exception ignored) { logDebug("Ignoring non-numeric RC Volume LF value=${volumeLFText}") }
+    }
+    Integer volumeRF = null
+    if(volumeRFText) {
+      try {
+        Integer parsed = Integer.parseInt(volumeRFText.trim())
+        if(parsed >= 0 && parsed <= 100) { volumeRF = parsed }
+        else { logDebug("Ignoring out-of-range RC Volume RF value=${volumeRFText}") }
+      } catch(Exception ignored) { logDebug("Ignoring non-numeric RC Volume RF value=${volumeRFText}") }
+    }
+    String muteMaster = null
+    if(muteMasterText) {
+      if(muteMasterText == '1') { muteMaster = 'muted' }
+      else if(muteMasterText == '0') { muteMaster = 'unmuted' }
+      else { logDebug("Ignoring unexpected RC Mute Master value=${muteMasterText}") }
+    }
+    String muteLF = null
+    if(muteLFText) {
+      if(muteLFText == '1') { muteLF = 'muted' }
+      else if(muteLFText == '0') { muteLF = 'unmuted' }
+      else { logDebug("Ignoring unexpected RC Mute LF value=${muteLFText}") }
+    }
+    String muteRF = null
+    if(muteRFText) {
+      if(muteRFText == '1') { muteRF = 'muted' }
+      else if(muteRFText == '0') { muteRF = 'unmuted' }
+      else { logDebug("Ignoring unexpected RC Mute RF value=${muteRFText}") }
+    }
+    Integer bass = null
+    if(bassText) {
+      try { bass = Integer.parseInt(bassText.trim()) }
+      catch(Exception ignored) { logDebug("Ignoring non-numeric RC Bass value=${bassText}") }
+    }
+    Integer treble = null
+    if(trebleText) {
+      try { treble = Integer.parseInt(trebleText.trim()) }
+      catch(Exception ignored) { logDebug("Ignoring non-numeric RC Treble value=${trebleText}") }
+    }
+    String loudness = null
+    if(loudnessText) {
+      if(loudnessText == '1') { loudness = 'on' }
+      else if(loudnessText == '0') { loudness = 'off' }
+      else { logDebug("Ignoring unexpected RC Loudness value=${loudnessText}") }
+    }
+    String nightMode = null
+    if(nightModeText) {
+      if(nightModeText == '1') { nightMode = 'on' }
+      else if(nightModeText == '0') { nightMode = 'off' }
+      else { logDebug("Ignoring unexpected RC NightMode value=${nightModeText}") }
+    }
+    String dialogLevel = null
+    if(dialogLevelText) {
+      if(dialogLevelText == '1') { dialogLevel = 'on' }
+      else if(dialogLevelText == '0') { dialogLevel = 'off' }
+      else { logDebug("Ignoring unexpected RC DialogLevel value=${dialogLevelText}") }
+    }
+    String outputFixed = iid['OutputFixed']['@val']?.toString()?.trim() ?: null
+    String speakerSize = iid['SpeakerSize']['@val']?.toString()?.trim() ?: null
+    String subGain = iid['SubGain']['@val']?.toString()?.trim() ?: null
+    String subCrossover = iid['SubCrossover']['@val']?.toString()?.trim() ?: null
+    String subPolarity = iid['SubPolarity']['@val']?.toString()?.trim() ?: null
+    String subEnabled = iid['SubEnabled']['@val']?.toString()?.trim() ?: null
+    String sonarEnabled = iid['SonarEnabled']['@val']?.toString()?.trim() ?: null
+    String sonarCalibrationAvailable = iid['SonarCalibrationAvailable']['@val']?.toString()?.trim() ?: null
+    String presetNameList = iid['PresetNameList']['@val']?.toString()?.trim() ?: null
+    if(volumeMaster == null && volumeLF == null && volumeRF == null && muteMaster == null &&
+      muteLF == null && muteRF == null && bass == null && treble == null && loudness == null &&
+      nightMode == null && dialogLevel == null && outputFixed == null && speakerSize == null &&
+      subGain == null && subCrossover == null && subPolarity == null && subEnabled == null &&
+      sonarEnabled == null && sonarCalibrationAvailable == null && presetNameList == null) { return null }
+    return [volumeMaster: volumeMaster, volumeLF: volumeLF, volumeRF: volumeRF,
+      muteMaster: muteMaster, muteLF: muteLF, muteRF: muteRF, bass: bass, treble: treble,
+      loudness: loudness, nightMode: nightMode, dialogLevel: dialogLevel,
+      outputFixed: outputFixed, speakerSize: speakerSize, subGain: subGain,
+      subCrossover: subCrossover, subPolarity: subPolarity, subEnabled: subEnabled,
+      sonarEnabled: sonarEnabled, sonarCalibrationAvailable: sonarCalibrationAvailable,
+      presetNameList: presetNameList, observedAt: now()]
+  } catch(Exception e) {
+    logDebug("Could not parse RC snapshot: ${e.message}")
+    return null
+  }
+}
+
+Map getCurrentRcSnapshot() {
+  String dni = device.getDeviceNetworkId()?.toString()
+  return [snapshot: currentRcSnapshotByDni[dni], seq: currentRcSeqByDni[dni]?.get(), sid: currentRcSidByDni[dni]]
+}
+
+Map getCurrentRc() { return getCurrentRcSnapshot() }
+
+void deferOrProcessRenderingControlPayload(String dni, String xmlBody) {
+  deferOrProcessRenderingControlPayload(dni, xmlBody, null, null)
+}
+
+void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq) {
+  deferOrProcessRenderingControlPayload(dni, xmlBody, incomingSeq, null)
+}
+
+void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
+  handleRcFull(dni, xmlBody, incomingSeq, incomingSid)
+}
+
+void handleRcFull(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
+  String deviceDni = dni ?: device.getDeviceNetworkId()
+  if(!deviceDni || !xmlBody) { return }
+  if(!isPlausibleXmlPayload(xmlBody)) { return }
+  String sidKey = incomingSid?.toString()?.trim() ?: null
+  if(sidKey == '') { sidKey = null }
+  String storedSid = currentRcSidByDni.get(deviceDni)
+  Boolean sidChanged = sidKey != null && storedSid != null && storedSid != sidKey
+  Boolean isReset = (incomingSeq != null && incomingSeq == 0) || sidChanged
+  if(incomingSeq != null) {
+    AtomicInteger ref = currentRcSeqByDni.get(deviceDni)
+    if(ref == null) {
+      AtomicInteger created = new AtomicInteger(incomingSeq)
+      currentRcSeqByDni.putIfAbsent(deviceDni, created)
+      ref = currentRcSeqByDni.get(deviceDni)
+    }
+    if(isReset) {
+      ref.set(incomingSeq)
+    } else {
+      if(ref.get() > incomingSeq) {
+        logDebug("Ignoring stale RC SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
+        return
+      }
+      Integer prevVal = ref.get()
+      while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
+        prevVal = ref.get()
+        if(incomingSeq <= prevVal) { logDebug("Ignoring stale RC SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}"); return }
+      }
+    }
+  }
+  Map newSnapshot = parseRcFullSnapshot(xmlBody)
+  if(newSnapshot == null) { return }
+  if(incomingSeq != null && !isReset) {
+    AtomicInteger ref2 = currentRcSeqByDni.get(deviceDni)
+    if(ref2 != null && incomingSeq < ref2.get()) {
+      logDebug("Ignoring RC that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
+      return
+    }
+  }
+  Map prior = currentRcSnapshotByDni.get(deviceDni)
+  Map merged = new LinkedHashMap()
+  if(prior != null) { merged.putAll(prior) }
+  newSnapshot.each { Object key, Object value -> if(value != null) { merged[key] = value } }
+  currentRcSnapshotByDni[deviceDni] = new LinkedHashMap(merged)
+  if(incomingSeq != null) {
+    AtomicInteger ref2 = currentRcSeqByDni.get(deviceDni)
+    if(ref2 != null) { ref2.set(incomingSeq) } else { currentRcSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
+  }
+  if(sidKey != null) { currentRcSidByDni[deviceDni] = sidKey }
+  applyRcSnapshotIfDifferent(merged)
+  sendDeviceEvent('rcDeviceControl', JsonOutput.toJson(merged))
+}
+
+Integer deriveBalanceFromStereo(Integer lf, Integer rf) {
+  if(lf == null && rf == null) { return null }
+  Integer effectiveLF = lf != null ? lf : 100
+  Integer effectiveRF = rf != null ? rf : 100
+  if(effectiveLF < 100) { return ((100 - effectiveLF) / 5) as Integer }
+  else if(effectiveRF < 100) { return -((100 - effectiveRF) / 5) as Integer }
+  return 0
+}
+
+Boolean applyRcSnapshotIfDifferent(Map snap) {
+  if(snap == null) { return false }
+  Map prior = null
+  try {
+    String json = device.getDataValue('rcSnapshotJson')?.toString()
+    if(json) { prior = (Map)new JsonSlurper().parseText(json) }
+  } catch(Exception ignored) { prior = null }
+  Integer newVolume = snap.volumeMaster != null ? (snap.volumeMaster as Integer) : null
+  Integer priorVolume = prior?.volumeMaster != null ? (prior.volumeMaster as Integer) : null
+  Integer newLF = snap.volumeLF != null ? (snap.volumeLF as Integer) : null
+  Integer newRF = snap.volumeRF != null ? (snap.volumeRF as Integer) : null
+  Integer priorLF = prior?.volumeLF != null ? (prior.volumeLF as Integer) : null
+  Integer priorRF = prior?.volumeRF != null ? (prior.volumeRF as Integer) : null
+  Integer newBalance = deriveBalanceFromStereo(newLF, newRF)
+  Integer priorBalance = deriveBalanceFromStereo(priorLF, priorRF)
+  String newMute = snap.muteMaster?.toString()
+  String priorMute = prior?.muteMaster?.toString()
+  Integer newBass = snap.bass != null ? (snap.bass as Integer) : null
+  Integer priorBass = prior?.bass != null ? (prior.bass as Integer) : null
+  Integer newTreble = snap.treble != null ? (snap.treble as Integer) : null
+  Integer priorTreble = prior?.treble != null ? (prior.treble as Integer) : null
+  String newLoudness = snap.loudness?.toString()
+  String priorLoudness = prior?.loudness?.toString()
+  String newNightMode = snap.nightMode?.toString()
+  String priorNightMode = prior?.nightMode?.toString()
+  String newDialogLevel = snap.dialogLevel?.toString()
+  String priorDialogLevel = prior?.dialogLevel?.toString()
+  Boolean volumeChanged = newVolume != null && newVolume != priorVolume
+  Boolean balanceChanged = newBalance != null && newBalance != priorBalance
+  Boolean muteChanged = newMute != null && newMute != priorMute
+  Boolean bassChanged = newBass != null && newBass != priorBass
+  Boolean trebleChanged = newTreble != null && newTreble != priorTreble
+  Boolean loudnessChanged = newLoudness != null && newLoudness != priorLoudness
+  Boolean nightModeChanged = newNightMode != null && newNightMode != priorNightMode
+  Boolean dialogLevelChanged = newDialogLevel != null && newDialogLevel != priorDialogLevel
+  Boolean captureChanged = false
+  List<String> captureKeys = ['muteLF', 'muteRF', 'outputFixed', 'speakerSize', 'subGain',
+    'subCrossover', 'subPolarity', 'subEnabled', 'sonarEnabled', 'sonarCalibrationAvailable', 'presetNameList']
+  for(String key : captureKeys) {
+    if(!captureChanged && snap[key] != null && snap[key].toString() != (prior?.get(key)?.toString())) { captureChanged = true }
+  }
+  try { device.updateDataValue('rcSnapshotJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
+  if(!volumeChanged && !balanceChanged && !muteChanged && !bassChanged && !trebleChanged &&
+    !loudnessChanged && !nightModeChanged && !dialogLevelChanged && !captureChanged) { return false }
+  if(volumeChanged) { setPlayerVolume(newVolume) }
+  if(balanceChanged) { setBalanceState(newBalance) }
+  if(muteChanged) { setMuteState(newMute) }
+  if(bassChanged) { setBassState(newBass) }
+  if(trebleChanged) { setTrebleState(newTreble) }
+  if(loudnessChanged) { setLoudnessState(newLoudness) }
+  if(nightModeChanged) { setNightModeState(newNightMode) }
+  if(dialogLevelChanged) { setDialogLevelState(newDialogLevel) }
+  return true
+}
+
+@CompileStatic
 Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
   if(!playerId || !isPlausibleXmlPayload(xmlString)) { return null }
   try {
@@ -5903,95 +6197,7 @@ void setDialogLevelState(String value) {
 
 @CompileStatic
 void processRenderingControlMessages(String xmlString) {
-  logDebug("RenderingControl processor entered; xmlLength=${xmlString?.length() ?: 0}")
-  GPathResult propertyset = parseSonosMessageXML(xmlString)
-  logDebug('RenderingControl XML parsed')
-  GPathResult instanceId = (GPathResult)propertyset['property']['LastChange']['Event']['InstanceID']
-  logDebug("RenderingControl InstanceID located; childCount=${instanceId.children().size()}")
-
-  String volume = ''
-  String lfString = ''
-  String rfString = ''
-  String mute = ''
-  String loudness = ''
-  for(Object childObject : instanceId.children()) {
-    GPathResult child = (GPathResult)childObject
-    String elementName = child.name()
-    if(elementName == 'Volume' || elementName == 'Mute' || elementName == 'Loudness') {
-      String channel = child['@channel'].toString()
-      String value = child['@val'].toString()
-      logDebug("RenderingControl value extracted; element=${elementName}, channel=${channel ?: 'unset'}, value=${value ?: 'unset'}")
-      if(elementName == 'Volume') {
-        if(channel == 'Master') { volume = value }
-        else if(channel == 'LF') { lfString = value }
-        else if(channel == 'RF') { rfString = value }
-      } else if(channel == 'Master' && elementName == 'Mute') {
-        mute = value
-      } else if(channel == 'Master' && elementName == 'Loudness') {
-        loudness = value
-      }
-    }
-  }
-  if(volume) {
-    logDebug("RenderingControl Master volume conversion beginning; value=${volume}")
-    setPlayerVolume(volume as Integer)
-    logDebug('RenderingControl Master volume update completed')
-  }
-
-  lfString = lfString ?: '0'
-  rfString = rfString ?: '0'
-  logDebug("RenderingControl balance conversion beginning; left=${lfString}, right=${rfString}")
-  Integer lf = Integer.parseInt(lfString)
-  Integer rf = Integer.parseInt(rfString)
-  Integer balance = 0
-  if(lf < 100) {
-    balance = ((100 - lf) / 5) as Integer
-  } else if(rf < 100) {
-    balance = -((100 - rf) / 5) as Integer
-  }
-  setBalanceState(balance)
-  logDebug("RenderingControl balance update completed; balance=${balance}")
-
-  if(mute) {
-    logDebug("RenderingControl mute update beginning; value=${mute}")
-    setMuteState(mute == '1' ? 'muted' : 'unmuted')
-    logDebug('RenderingControl mute update completed')
-  }
-
-  String bass = instanceId['Bass']['@val']
-  if(bass) {
-    logDebug("RenderingControl bass conversion beginning; value=${bass}")
-    setBassState(bass as Integer)
-    logDebug('RenderingControl bass update completed')
-  }
-
-  String treble = instanceId['Treble']['@val']
-  if(treble) {
-    logDebug("RenderingControl treble conversion beginning; value=${treble}")
-    setTrebleState(treble as Integer)
-    logDebug('RenderingControl treble update completed')
-  }
-
-  if(loudness) {
-    logDebug("RenderingControl loudness update beginning; value=${loudness}")
-    setLoudnessState(loudness == '1' ? 'on' : 'off')
-    logDebug('RenderingControl loudness update completed')
-  }
-
-  String nightMode = instanceId['NightMode']['@val']
-  if(nightMode) {
-    logDebug("RenderingControl night mode update beginning; value=${nightMode}")
-    setNightModeState(nightMode == '1' ? 'on' : 'off')
-    logDebug('RenderingControl night mode update completed')
-  }
-
-  String dialogLevel = instanceId['DialogLevel']['@val']
-  if(dialogLevel) {
-    logDebug("RenderingControl dialog level update beginning; value=${dialogLevel}")
-    setDialogLevelState(dialogLevel == '1' ? 'on' : 'off')
-    logDebug('RenderingControl dialog level update completed')
-  }
-  logDebug('RenderingControl processor completed')
+  deferOrProcessRenderingControlPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString)
 }
 // =============================================================================
 // Parse Helper Methods
@@ -6395,6 +6601,13 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
           if(grcDni) {
             currentGrcSeqByDni.remove(grcDni)
             currentGrcSidByDni.remove(grcDni)
+          }
+        }
+        if(request.sidKey == 'sid2' && request.operation == 'subscribe') {
+          String rcDni = device.getDeviceNetworkId()?.toString()
+          if(rcDni) {
+            currentRcSeqByDni.remove(rcDni)
+            currentRcSidByDni.remove(rcDni)
           }
         }
         if(request.sidKey == 'sid3' && isAppZgtSubscriber()) {

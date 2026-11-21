@@ -865,7 +865,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [4]
   }
 
-  def "rendering control event with absent stereo channels keeps zero fallback balance"() {
+  def "rendering control event with absent stereo channels leaves balance untouched"() {
     given:
     String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
       '&lt;Mute channel="Master" val="0"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>' +
@@ -876,8 +876,170 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingLocalDeviceEvents()
 
     then:
-    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [20]
+    // Mute-only payloads carry no stereo channels, so no balance is derived.
+    driver.device.events.findAll { Map item -> item.name == 'balance' }.empty
     driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['unmuted']
+  }
+
+  def "RC initial subscription snapshot captures full control state and emits bridged snapshot"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String sub = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Volume channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Volume channel=&quot;LF&quot; val=&quot;100&quot;/&gt;&lt;Volume channel=&quot;RF&quot; val=&quot;100&quot;/&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Mute channel=&quot;LF&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;RF&quot; val=&quot;0&quot;/&gt;&lt;Bass val=&quot;0&quot;/&gt;&lt;Treble val=&quot;0&quot;/&gt;&lt;Loudness channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;OutputFixed val=&quot;0&quot;/&gt;&lt;SpeakerSize val=&quot;5&quot;/&gt;&lt;SubGain val=&quot;0&quot;/&gt;&lt;SubCrossover val=&quot;0&quot;/&gt;&lt;SubPolarity val=&quot;0&quot;/&gt;&lt;SubEnabled val=&quot;1&quot;/&gt;&lt;SonarEnabled val=&quot;0&quot;/&gt;&lt;SonarCalibrationAvailable val=&quot;0&quot;/&gt;&lt;PresetNameList val=&quot;FactoryDefaults&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', sub, 0, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 1
+    driver.getCurrentRcSnapshot().snapshot.volumeLF == 100
+    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'muted'
+    driver.getCurrentRcSnapshot().snapshot.loudness == 'on'
+    driver.getCurrentRcSnapshot().snapshot.outputFixed == '0'
+    driver.getCurrentRcSnapshot().snapshot.speakerSize == '5'
+    driver.getCurrentRcSnapshot().snapshot.presetNameList == 'FactoryDefaults'
+    driver.getCurrentRcSnapshot().seq == 0
+    driver.getCurrentRcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000105'
+    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [1]
+    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [0]
+    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
+    driver.device.events.findAll { Map item -> item.name == 'loudness' }*.value == ['on']
+    driver.device.events.find { Map e -> e.name == 'rcDeviceControl' }?.value?.contains('"volumeMaster"')
+    driver.device.getDataValue('rcSnapshotJson')?.contains('"volumeMaster":1')
+  }
+
+  def "RC mute-only update merges without clobbering volume or balance"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String sub = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Volume channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Volume channel=&quot;LF&quot; val=&quot;100&quot;/&gt;&lt;Volume channel=&quot;RF&quot; val=&quot;100&quot;/&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Mute channel=&quot;LF&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;RF&quot; val=&quot;0&quot;/&gt;&lt;Bass val=&quot;0&quot;/&gt;&lt;Treble val=&quot;0&quot;/&gt;&lt;Loudness channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
+    String normal = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;LF&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;RF&quot; val=&quot;0&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', sub, 0, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', normal, 1, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 1
+    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'unmuted'
+    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [1]
+    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [0]
+    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted', 'unmuted']
+  }
+
+  def "RC SEQ header drops stale payloads without applying"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="10"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
+      20, 'uuid:RINCON_TEST_sub0000000105')
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="99"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
+      19, 'uuid:RINCON_TEST_sub0000000105')
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 10
+    driver.getCurrentRcSnapshot().seq == 20
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="30"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
+      21, 'uuid:RINCON_TEST_sub0000000105')
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 30
+    driver.getCurrentRcSnapshot().seq == 21
+  }
+
+  def "RC SEQ zero and SID change rebaseline after resubscribe"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="10"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
+      20, 'uuid:RINCON_TEST_sub0000000105')
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="77"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
+      0, 'uuid:RINCON_TEST_sub0000000106')
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 77
+    driver.getCurrentRcSnapshot().seq == 0
+    driver.getCurrentRcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000106'
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="88"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
+      5, 'uuid:RINCON_TEST_sub0000000107')
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 88
+    driver.getCurrentRcSnapshot().seq == 5
+    driver.getCurrentRcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000107'
+  }
+
+  def "RC invalid field is ignored without dropping sibling value"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
+      '&lt;Volume channel="Master" val="notanumber"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
+      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', event, 0, null)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == null
+    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'muted'
+    driver.device.events.findAll { Map item -> item.name == 'volume' }.empty
+    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
+  }
+
+  def "RC blank and duplicate payloads do not requeue local events"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
+      '&lt;Volume channel="Master" val="40"/&gt;&lt;Mute channel="Master" val="0"/&gt;' +
+      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', '   ', 0, null)
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot == null
+    driver.device.events.empty
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', event, 1, null)
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', event, 2, null)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [40]
+    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['unmuted']
+  }
+
+  def "legacy RC shim without SEQ still applies the current snapshot"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
+      '&lt;Volume channel="Master" val="55"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
+      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+
+    when:
+    driver.processRenderingControlMessages(event)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 55
+    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'muted'
+    driver.getCurrentRcSnapshot().seq == null
+    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [55]
   }
 
   def "unmute skips AirPlay volume restore when saved level is missing or invalid"() {
@@ -1398,6 +1560,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.currentGrcSnapshotByCoordinator.clear()
     driver.currentGrcSeqByDni.clear()
     driver.currentGrcSidByDni.clear()
+    driver.currentRcSnapshotByDni.clear()
+    driver.currentRcSeqByDni.clear()
+    driver.currentRcSidByDni.clear()
     driver.pendingLocalDeviceEvents.clear()
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
