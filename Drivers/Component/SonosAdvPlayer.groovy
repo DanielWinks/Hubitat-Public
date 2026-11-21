@@ -899,6 +899,13 @@ Boolean hasLineInCapability() {
 @Field static final Integer PARENT_REQUEST_DRAIN_MS = 1
 @Field static final Integer PARENT_REQUEST_MAX_ITEMS = 16
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingParentRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+@Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
+@Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
+@Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
+@Field static final String IS_ZGT_SUBSCRIBER_DEVICE_KEY = 'isZgtSubscriber'
+@Field static final String ZGT_LEADER_GEN_DEVICE_KEY = 'zgtLeaderGeneration'
+@Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
+@Field static final Integer DEFERRED_INIT_DELAY_SECONDS = 1
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -947,13 +954,145 @@ void updated() {
 }
 
 void initialize() {
-  if(runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) != true) {
+  Boolean skipPurge = runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) == true
+  performImmediateInitialization(skipPurge)
+  if(skipPurge) {
+    requestAppMediatedInitialization('driver initialize')
+  }
+}
+
+void performImmediateInitialization(Boolean skipPurge = false) {
+  if(!skipPurge) {
     clearPendingCommandsForInitialization()
     publishPlayerStateUpdate([kind: 'initializationRequested', reason: 'driver initialize',
       clearPendingCommands: true])
-    return
+    clearZgtSubscriptionForInitialization()
+  } else {
+    clearZgtSubscriptionForInitialization()
   }
-  requestAppMediatedInitialization('driver initialize')
+  migrateLegacyRuntimeState()
+  resetPendingStatePublicationForInitialization()
+  cancelAudioClipWatchdog()
+  maybeCleanupStaticDriverState()
+  cacheBatteryCapability()
+}
+
+void clearZgtSubscriptionForInitialization() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  String sid = device.getDataValue(ZGT_SUB_DEVICE_KEY) ?: getSid('sid3')
+  Boolean hadValid = subValid('sid3') || sid
+  invalidateUpnpRequestsForDevice()
+  // Synchronous local delete after generation bump — stale callbacks are guarded by generation
+  deleteSid('sid3')
+  device.removeDataValue(ZGT_SUB_DEVICE_KEY)
+  device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
+  device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
+  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'false')
+  device.removeDataValue(ZGT_LEADER_GEN_DEVICE_KEY)
+  deleteSid('sid1')
+  deleteSid('sid2')
+  deleteSid('sid4')
+  device.removeDataValue('sid1-expires')
+  device.removeDataValue('sid2-expires')
+  device.removeDataValue('sid3-expires')
+  device.removeDataValue('sid4-expires')
+  if(hadValid) {
+    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'sid3', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
+  }
+}
+
+void cacheBatteryCapability() {
+  if(device.getDataValue(HAS_BATTERY_DEVICE_KEY) != null) { return }
+  try {
+    Boolean hasBatt = deviceHasBattery()
+    device.updateDataValue(HAS_BATTERY_DEVICE_KEY, hasBatt.toString())
+  } catch(Exception e) {
+    logDebug("cacheBatteryCapability failed: ${e.message}")
+  }
+}
+
+void performAppMediatedInitialization() {
+  signalZgtReadyForElection()
+  // Preserve original scheduling for parent-initiated turn so existing tests and
+  // startup ordering still see initializeWebsocketConnection scheduled. Deferred
+  // also runs for per-device always-subscribe work.
+  runIn(2, 'initializeWebsocketConnection', [overwrite: true])
+  scheduleDeferredInitialization()
+}
+
+void scheduleDeferredInitialization() {
+  runIn(DEFERRED_INIT_DELAY_SECONDS, 'deferredInitCallback', [overwrite: true])
+}
+
+void deferredInitCallback() {
+  performDeferredInitialization()
+}
+
+void performDeferredInitialization() {
+  // Per-device always-subscribe steps — not app-mediated, run on every device even followers
+  subscribeToMrRcEvents()
+  if(getIsGrouped() == true) { subscribeToMrGrcEvents() }
+  if(getIsGroupCoordinator() == true) {
+    subscribeToAVTransport()
+    getPlaybackMetadataStatus()
+    String groupId = getGroupId()
+    if(groupId) {
+      subscribeToPlayback(groupId)
+      subscribeToPlaybackMetadata(groupId)
+    }
+  }
+  // ZGT remains conditional — only elected holder subscribes
+  if(isZgtSubscriber()) {
+    subscribeToZgtEvents()
+  } else {
+    unsubscribeFromZgtEvents()
+  }
+  subscribeToWsEvents()
+  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
+    runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = true
+    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
+  }
+}
+
+void signalZgtReadyForElection() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  if(cacheBatteryCapability() == null) { }
+  // Cluster pointer for parent election
+  try {
+    parent.zgtReadyForElection(dni)
+  } catch(Exception e) {
+    logWarn("parent.zgtReadyForElection failed for ${dni}: ${e.message}")
+  }
+}
+
+void zgtSubscriberElected(String leaderGeneration) {
+  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'true')
+  device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
+  device.updateDataValue('appZgtSubscribe', 'true')
+  device.updateDataValue('appZgtLeaderGeneration', leaderGeneration ?: '')
+  runtimeState['appZgtSubscribe'] = true
+  runtimeState['appZgtLeaderGeneration'] = leaderGeneration ?: ''
+  subscribeToZgtEvents()
+}
+
+Boolean isZgtSubscriber() {
+  return device.getDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY) == 'true' ||
+         isAppZgtSubscriber()
+}
+
+void revokeZgtSubscription() {
+  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'false')
+  device.updateDataValue('appZgtSubscribe', 'false')
+  device.updateDataValue('appZgtLeaderGeneration', '')
+  device.removeDataValue(ZGT_LEADER_GEN_DEVICE_KEY)
+  invalidateUpnpRequestsForDevice()
+  deleteSid('sid3')
+  device.removeDataValue(ZGT_SUB_DEVICE_KEY)
+  device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
+  device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
+  unsubscribeFromZgtEvents()
 }
 
 /** Clear work owned by this player only at an explicit device initialization. */
@@ -1140,6 +1279,8 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
   runtimeState['appZgtLeaderGeneration'] = leaderGeneration ?: ''
   device.updateDataValue('appZgtSubscribe', (subscribeZgt == true).toString())
   device.updateDataValue('appZgtLeaderGeneration', leaderGeneration ?: '')
+  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, (subscribeZgt == true).toString())
+  device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
   runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = now()
   runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = false
   runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = false
@@ -1147,7 +1288,7 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
   runtimeState.remove('appMediatedInitializationFailure')
   try {
     prepareAppMediatedInitialization()
-    performFullSubscriptionRenewal()
+    performAppMediatedInitialization()
   } catch(Exception e) {
     logWarn("App-mediated initialization setup failed before subscription recovery: ${e.message}")
     finishAppMediatedInitialization(false, "driver setup failed: ${e.message}")
@@ -1357,39 +1498,21 @@ void fullRenewSubscriptions() {
 }
 
 void performFullSubscriptionRenewal() {
+  // Immediate stage already unsubscribed all sids; delegate to deferred for subscribes
   releaseFavPlaylistDelegate()
   clearWsSubscriptionStatus()
-  unsubscribeFromAVTransport()
-  unsubscribeFromMrRcEvents()
-  unsubscribeFromZgtEvents()
-  unsubscribeFromMrGrcEvents()
-
-  // Check if essential device data values exist before attempting subscriptions
-  // On fresh install, these won't be set yet - they're configured by the parent app
   String localUpnpHost = device.getDataValue('localUpnpHost')
   String websocketUrl = device.getDataValue('websocketUrl')
-
   if(!localUpnpHost || !websocketUrl) {
     logInfo('Device data not yet configured (fresh install). Subscriptions will be established after configuration by parent app.')
     finishAppMediatedInitialization(false, 'local Sonos or WebSocket connection data is missing')
     return
   }
-
-  // Driver updates and hub restarts can invalidate the actual WebSocket while
-  // leaving the persisted status as "open". Always retire the old transport and
-  // clear its subscription markers before reconnecting, regardless of that status.
   logDebug('Closing existing WebSocket before full subscription renewal')
   try { wsClose() }
   catch(Exception e) { logDebug("Could not close existing WebSocket during renewal: ${e.message}") }
   setWebSocketStatus('closed')
-
-  runIn(2, 'initializeWebsocketConnection', [overwrite: true])
-  runIn(7, 'subscribeToEvents', [overwrite: true])
-  // Re-establish WebSocket and coordinator-specific subscriptions directly.
-  // The normal event-driven chain (setGroupCoordinatorId/setGroupId) won't trigger
-  // re-subscription because deduplication guards skip processing when the coordinator
-  // and group data haven't changed — which is the common case after renewal.
-  runIn(9, 'resubscribeAfterRenewal', [overwrite: true])
+  scheduleDeferredInitialization()
 }
 
 void scheduleWebsocketHealthCheck() {
@@ -3256,7 +3379,7 @@ void previousTrack() {
 }
 @CompileStatic
 void subscribeToEvents() {
-  if(isAppZgtSubscriber()) {
+  if(isZgtSubscriber()) {
     subscribeToZgtEvents()
   } else {
     unsubscribeFromZgtEvents()
@@ -3272,7 +3395,7 @@ Boolean isAppZgtSubscriber() {
 }
 
 void requestAppZgtResubscription() {
-  if(!isAppZgtSubscriber()) { return }
+  if(!isZgtSubscriber()) { return }
   if(subValid('sid3')) { resubscribeToZgtEvents() }
   else { subscribeToZgtEvents() }
 }
@@ -6175,6 +6298,11 @@ void deleteSid(String sid) {
   // Clean up in-memory expiry
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   eventTimestamps.remove(expiryKey)
+  if(sid == 'sid3') {
+    device.removeDataValue(ZGT_SUB_DEVICE_KEY)
+    device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
+    device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
+  }
 }
 @CompileStatic
 Boolean subValid(String sid) {
@@ -6202,6 +6330,12 @@ void updateSid(String sid, Map headers, Long grantedTimeout = null) {
   setDeviceDataValue("${sid}-expires", formatted)
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
+  if(sid == 'sid3') {
+    String sidValue = headers["SID"]?.toString() ?: headers["sid"]?.toString() ?: getSid('sid3')
+    if(sidValue) { setDeviceDataValue(ZGT_SUB_DEVICE_KEY, sidValue) }
+    setDeviceDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY, formatted)
+    setDeviceDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY, expiresEpoch.toString())
+  }
 }
 
 void scheduleResubscriptionToEvents(String eventsToResub, Long grantedTimeout = null) {
@@ -6549,8 +6683,8 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
             currentRcSidByDni.remove(rcDni)
           }
         }
-        if(request.sidKey == 'sid3' && isAppZgtSubscriber()) {
-          publishZgtSubscriptionStatus('accepted', "${request.operation} accepted with SID")
+        if(request.sidKey == 'sid3' && isZgtSubscriber()) {
+          logDebug("ZGT subscription ${request.operation} accepted with SID, device-data zgtSub updated")
         }
         removeResub(request.subscribeMethod as String)
         if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
@@ -6568,8 +6702,8 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
     } else {
       logDebug("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
-      if(request.sidKey == 'sid3' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS && isAppZgtSubscriber()) {
-        publishZgtSubscriptionStatus('failed', "${request.operation} exhausted retries (status=${status ?: 'none'}, error=${error ?: 'none'})")
+      if(request.sidKey == 'sid3' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS && isZgtSubscriber()) {
+        logWarn("ZGT subscription ${request.operation} exhausted retries (status=${status ?: 'none'}, error=${error ?: 'none'})")
       }
     }
     socket = detachOwnedUpnpSocketLocked(entry, request)
@@ -6604,16 +6738,6 @@ void completeUpnpWithoutResponse(Map entry, Map request, String reason) {
     completed = true
   }
   if(completed) { dispatchNextUpnpRequest(entry) }
-  if(completed && request.sidKey == 'sid3' && request.operation == 'subscribe' &&
-      reason == 'already-valid' && isAppZgtSubscriber()) {
-    publishZgtSubscriptionStatus('accepted', 'existing ZGT SID is still valid')
-  }
-}
-
-void publishZgtSubscriptionStatus(String status, String detail) {
-  publishPlayerStateUpdate([kind: 'zgtSubscription', status: status,
-    leaderGeneration: device.getDataValue('appZgtLeaderGeneration')?.toString(),
-    detail: detail, observedAt: now()])
 }
 void completeUpnpFailure(Map entry, Map request, String reason) {
   completeUpnpCurrent(entry, request, null, reason)
@@ -6897,7 +7021,7 @@ void unsubscribeFromMrRcEventsCallback(HubResponse response) {
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToZgtEvents() {
-  if(!isAppZgtSubscriber()) { return }
+  if(!isZgtSubscriber()) { return }
   String sub = 'subscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'
@@ -6912,14 +7036,14 @@ void subscribeToZgtEvents() {
 // coordinator changed. Otherwise we batch burst-y callers into a single 2s
 // delayed subscribe so storms of 499s coalesce into one network request.
 void requestZgtResub() {
-  if(!isAppZgtSubscriber()) { return }
+  if(!isZgtSubscriber()) { return }
   if(subValid('sid3')) { return }
   runIn(2, 'subscribeToZgtEvents', [overwrite: true])
 }
 
 @CompileStatic
 void resubscribeToZgtEvents() {
-  if(!isAppZgtSubscriber()) { return }
+  if(!isZgtSubscriber()) { return }
   String resub = 'resubscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'

@@ -269,6 +269,9 @@ preferences {
 @Field static final Integer PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS = 5
 @Field static final Integer PLAYER_INITIALIZATION_MAX_IN_PROGRESS = 3
 @Field static final Integer PLAYER_INITIALIZATION_HOURLY_RETRY_SECONDS = 3600
+@Field static final Integer HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS = 300
+@Field static final Integer ZGT_HEALTH_VERIFY_DELAY_SECONDS = 15
+@Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtReadyByDni = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final String PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY = 'sonosPlayerPlaybackObservations'
 @Field static final String PENDING_PLAYER_STATE_UPDATES_STATE_KEY = 'pendingPlayerStateUpdates'
@@ -2677,6 +2680,7 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
   state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
   scheduleQueuedPlayerStateUpdateDrain(25)
   scheduleDriverParentPoll()
+  scheduleHouseholdHealthCheck()
   if(state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] instanceof Map) {
     runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
   }
@@ -2734,6 +2738,165 @@ void pollDriverParentQueues() {
     logDebug("Driver parent poll delivered ${polled} item(s)")
   }
   scheduleDriverParentPoll()
+}
+
+void scheduleHouseholdHealthCheck() {
+  runIn(HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS, 'householdHealthCheck', [overwrite: true])
+}
+
+void householdHealthCheck() {
+  checkZgtSubscriptionHealth()
+  scheduleHouseholdHealthCheck()
+}
+
+void zgtReadyForElection(String dni) {
+  if(!dni) { return }
+  zgtReadyByDni.put(dni, now())
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  String candidate = zgt.candidateDni?.toString()
+  if(candidate && isZgtElectionStillValid(candidate)) { return }
+  String elected = electZgtFromReady()
+  if(elected) {
+    zgt.candidateDni = elected
+    zgt.leaderGeneration = UUID.randomUUID().toString()
+    zgt.status = 'selected'
+    zgt.selectedAt = now()
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    runInMillis(1, 'notifyElectedZgtSubscriber', [overwrite: true, data: [dni: elected, leaderGeneration: zgt.leaderGeneration]])
+    logInfo("Elected ${elected} as ZGT subscriber via ready map")
+  }
+}
+
+void notifyElectedZgtSubscriber(Map data = [:]) {
+  String dni = data?.dni?.toString()
+  String leaderGeneration = data?.leaderGeneration?.toString()
+  ChildDeviceWrapper player = getChildDevice(dni)
+  if(!player) {
+    player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == dni }
+  }
+  if(!player) { logWarn("notifyElectedZgtSubscriber: player ${dni} not found"); return }
+  try {
+    player.updateDataValue('isZgtSubscriber', 'true')
+    player.updateDataValue('zgtLeaderGeneration', leaderGeneration ?: '')
+    player.zgtSubscriberElected(leaderGeneration)
+  } catch(Exception e) {
+    logWarn("notifyElectedZgtSubscriber failed for ${dni}: ${e.message}")
+  }
+}
+
+String electZgtFromReady() {
+  List<Map> ready = zgtReadyByDni.collect { String dni, Long at -> [dni: dni, at: at] }.sort { Map a, Map b -> (a.at as Long) <=> (b.at as Long) }
+  for(Map entry : ready) {
+    String dni = entry.dni?.toString()
+    if(!dni) { continue }
+    if(!isZgtCandidateBattery(dni)) { return dni }
+  }
+  return null
+}
+
+Boolean isZgtCandidateBattery(String dni) {
+  ChildDeviceWrapper player = getChildDevice(dni)
+  if(!player) { player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == dni } }
+  if(!player) { return false }
+  String hasBatt = player.getDataValue('hasBattery')?.toString()?.toLowerCase()
+  if(hasBatt == 'true') { return true }
+  if(hasBatt == 'false') { return false }
+  try {
+    logDebug("hasBattery not cached for ${dni}, checking via deviceHasBattery")
+    return player.deviceHasBattery() == true
+  } catch(Exception e) {
+    logWarn("isZgtCandidateBattery check failed for ${dni}: ${e.message}")
+    return false
+  }
+}
+
+Boolean isZgtElectionStillValid(String candidateDni) {
+  ChildDeviceWrapper player = getChildDevice(candidateDni)
+  if(!player) { player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == candidateDni } }
+  if(!player) { return false }
+  String zgtSub = player.getDataValue('zgtSub')?.toString()
+  String expiresEpoch = player.getDataValue('zgtSubExpiresEpoch')?.toString()
+  Long exp = null
+  try { exp = expiresEpoch ? Long.parseLong(expiresEpoch) * 1000L : null } catch(Exception ignored) { exp = null }
+  Boolean subOk = zgtSub && zgtSub != '' && exp != null && exp > now()
+  Boolean lastOk = false
+  try {
+    Long last = player.getLastInboundZgtEventEpoch() as Long
+    lastOk = last != null && last > 0 && (now() / 1000L - last) < 300
+  } catch(Exception ignored) { }
+  return subOk || lastOk
+}
+
+void checkZgtSubscriptionHealth() {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  String candidateDni = zgt.candidateDni?.toString()
+  if(!candidateDni) { return }
+  ChildDeviceWrapper player = getChildDevice(candidateDni)
+  if(!player) { player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == candidateDni } }
+  if(!player) {
+    logWarn("checkZgtSubscriptionHealth: elected player ${candidateDni} not found")
+    zgtReadyByDni.remove(candidateDni)
+    zgt.candidateDni = null
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    return
+  }
+  String zgtSub = player.getDataValue('zgtSub')?.toString()
+  String expiresEpochStr = player.getDataValue('zgtSubExpiresEpoch')?.toString()
+  Long expMs = null
+  try { expMs = expiresEpochStr ? Long.parseLong(expiresEpochStr) * 1000L : null } catch(Exception ignored) { expMs = null }
+  Long lastEpoch = 0L
+  try { lastEpoch = player.getLastInboundZgtEventEpoch() as Long ?: 0L } catch(Exception ignored) { }
+  Long nowSec = now() / 1000L
+  Boolean subOk = zgtSub && zgtSub != '' && expMs != null && expMs > now()
+  Boolean lastOk = lastEpoch > 0 && (nowSec - lastEpoch) < 300
+  if(subOk && lastOk) { return }
+  if(subOk && !lastOk) { logDebug("ZGT health: sub valid but lastZgtEvent stale for ${candidateDni}"); return }
+  logDebug("ZGT health fail for ${candidateDni}: sub=${zgtSub ? 'present' : 'missing'}, expires=${expMs ?: 'none'}, last=${lastEpoch}")
+  if(zgt.recoveryAttempt == null || (zgt.recoveryAttempt as Integer) == 0) {
+    try { player.requestAppZgtResubscription() } catch(Exception e) { logWarn("checkZgt requestAppZgtResubscription failed: ${e.message}") }
+    zgt.recoveryAttempt = 1
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    runIn(ZGT_HEALTH_VERIFY_DELAY_SECONDS, 'verifyZgtResubscription', [overwrite: true, data: [dni: candidateDni]])
+    return
+  }
+}
+
+void verifyZgtResubscription(Map data = [:]) {
+  String dni = data?.dni?.toString()
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(zgt.candidateDni?.toString() != dni) { return }
+  ChildDeviceWrapper player = getChildDevice(dni)
+  if(!player) { player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == dni } }
+  if(!player) { return }
+  String zgtSub = player.getDataValue('zgtSub')?.toString()
+  String expStr = player.getDataValue('zgtSubExpiresEpoch')?.toString()
+  Long expMs = null
+  try { expMs = expStr ? Long.parseLong(expStr) * 1000L : null } catch(Exception ignored) { }
+  Boolean ok = zgtSub && zgtSub != '' && expMs != null && expMs > now()
+  if(ok) {
+    zgt.recoveryAttempt = 0
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    logDebug("ZGT resubscription verified for ${dni}")
+    return
+  }
+  logWarn("ZGT resubscription failed for ${dni}; revoking and re-electing")
+  try { player.revokeZgtSubscription() } catch(Exception e) { logWarn("revokeZgtSubscription failed: ${e.message}") }
+  zgtReadyByDni.remove(dni)
+  zgt.candidateDni = null
+  zgt.leaderGeneration = null
+  zgt.recoveryAttempt = 0
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  String next = electZgtFromReady()
+  if(next) {
+    zgt.candidateDni = next
+    zgt.leaderGeneration = UUID.randomUUID().toString()
+    zgt.status = 'selected'
+    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+    runInMillis(1, 'notifyElectedZgtSubscriber', [overwrite: true, data: [dni: next, leaderGeneration: zgt.leaderGeneration]])
+  }
 }
 
 void handlePolledPlayerRequest(ChildDeviceWrapper player, Map request) {
@@ -5804,20 +5967,6 @@ void playerStateUpdateHandler(Object event) {
   }
   if(payload.kind == 'initializationFailed') {
     finishPlayerInitialization(requestId, false, payload.detail?.toString() ?: 'child reported initialization failure')
-    return
-  }
-  if(payload.kind == 'zgtSubscription') {
-    Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
-        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
-    if(zgt.candidateDni?.toString() == playerDni &&
-        zgt.leaderGeneration?.toString() == payload.leaderGeneration?.toString()) {
-      zgt.subscriptionStatus = payload.status?.toString()
-      zgt.subscriptionObservedAt = payload.observedAt ?: now()
-      state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-      if(payload.status == 'failed') {
-        failZgtInitializationCandidate(playerDni, payload.detail?.toString() ?: 'ZGT subscription failed')
-      }
-    }
     return
   }
   if(payload.kind == 'wsRetry') {
