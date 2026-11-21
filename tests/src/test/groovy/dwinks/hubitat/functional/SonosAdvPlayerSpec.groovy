@@ -2049,6 +2049,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:zgt-test') && entry.contains('X-SONOS-SERVICETYPE=ZoneGroupTopology') }
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') && entry.contains('seq=0') }
   }
 
   def "ZGT notification logs header values with SEQ greater than 0"() {
@@ -2088,6 +2089,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:avt-test') && entry.contains('X-SONOS-SERVICETYPE=AVTransport') }
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') && entry.contains('seq=0') }
   }
 
   def "legacy ZGT fallback logs header values without service type header"() {

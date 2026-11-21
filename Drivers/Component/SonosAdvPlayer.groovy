@@ -4616,11 +4616,12 @@ void parse(String raw) {
     if(seqRaw != null) {
       try { seq = Integer.parseInt(seqRaw.toString().trim()) } catch(Exception ignored) { seq = null }
     }
+    String seqDisplay = seq == null ? 'unset' : seq.toString()
     String sid = messageHeaders["SID"]?.toString()?.trim() ?: null
     if(sid == '') { sid = null }
-    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seq ?: 'unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
+    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
     if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1') || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
-      logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seq ?: 'unset'}, headerValues=${renderHeaderValues(messageHeaders)}")
+      logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, headerValues=${renderHeaderValues(messageHeaders)}")
     }
     // Header switch: serviceType is authoritative; request-line keys are fallback-only for old firmware
     if(serviceType != null) {
