@@ -1681,7 +1681,9 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.device.currentValues.containsKey('sonosPlayerStateUpdate')
     !driver.device.currentValues.containsKey('sonosPlayerAppRequest')
     !driver.events.any { Map event -> event.name in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
-    driver.scheduled.empty
+    // RC early subscribe via runIn(1) falls out of sync init
+    driver.scheduled.any { List job -> job[1] == 'subscribeToMrRcEventsImmediate' }
+    !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
     websocketConnections.empty
   }
 

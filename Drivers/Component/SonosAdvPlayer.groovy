@@ -976,6 +976,23 @@ void performImmediateInitialization(Boolean skipPurge = false) {
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
   cacheBatteryCapability()
+  scheduleEarlyRenderingControlSubscribe()
+}
+
+void scheduleEarlyRenderingControlSubscribe() {
+  String localUpnpHost = device.getDataValue('localUpnpHost')
+  String websocketUrl = device.getDataValue('websocketUrl')
+  if(!localUpnpHost || !websocketUrl) {
+    logDebug('RC early subscribe skipped — device data not yet configured')
+    return
+  }
+  runIn(1, 'subscribeToMrRcEventsImmediate', [overwrite: true])
+}
+
+void subscribeToMrRcEventsImmediate() {
+  // Unconditional per-device RC — falls out of sync initialize() processing
+  subscribeToMrRcEvents()
+  markAppMediatedUpnpSubscriptionsStarted()
 }
 
 void clearZgtSubscriptionForInitialization() {
@@ -1031,8 +1048,7 @@ void deferredInitCallback() {
 }
 
 void performDeferredInitialization() {
-  // Per-device always-subscribe steps — not app-mediated, run on every device even followers
-  subscribeToMrRcEvents()
+  // RC already scheduled early via scheduleEarlyRenderingControlSubscribe(); do not duplicate sid2 here
   if(getIsGrouped() == true) { subscribeToMrGrcEvents() }
   if(getIsGroupCoordinator() == true) {
     subscribeToAVTransport()
@@ -3386,7 +3402,7 @@ void subscribeToEvents() {
     unsubscribeFromZgtEvents()
   }
   if(getIsGrouped()) { subscribeToMrGrcEvents() } // sid4 only needed when grouped; setGroupPlayerIds() handles transitions
-  subscribeToMrRcEvents()
+  // RC handled early via scheduleEarlyRenderingControlSubscribe(); do not duplicate sid2 here
   markAppMediatedUpnpSubscriptionsStarted()
 }
 
