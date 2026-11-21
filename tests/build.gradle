@@ -48,12 +48,14 @@ compileGroovy {
 
 test {
   useJUnitPlatform()
-  // Local suite is dominated by small fast specs plus two huge Sonos specs
-  // (14k-line sources). Run one spec class per worker and parallelize so
-  // small specs finish alongside the Sonos giants instead of behind them.
-  // Matches CI's one-spec-per-job shape locally.
-  forkEvery = 1
-  maxParallelForks = Math.min(6, Math.max(2, Runtime.getRuntime().availableProcessors()))
+  // Workers are reused across spec classes (forkEvery = 0, the default).
+  // forkEvery = 1 turns JUnit class detection into hundreds of one-shot
+  // Test Executor JVM startups per build, which dominated local runtime
+  // (~90s even for a 2-test filtered run). Reusing JVMs also lets
+  // ScriptLoader's per-JVM compile cache hit across specs loading the
+  // same large Sonos source. The Sonos giants still run in parallel
+  // workers, so small specs finish alongside them.
+  maxParallelForks = Math.min(8, Math.max(2, Runtime.getRuntime().availableProcessors()))
   maxHeapSize = '768m'
   testLogging {
     events 'passed', 'skipped', 'failed'
