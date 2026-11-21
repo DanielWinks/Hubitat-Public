@@ -588,10 +588,8 @@ class SonosAdvPlayerSpec extends Specification {
     (driver.state.playbackStateObservedAt as Long) > 0L
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackState') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackStateObservedAt') != true
-    playerStateMessages().any { Map event ->
-      event.kind == 'playbackObservation' && event.playbackState == 'PLAYBACK_STATE_IDLE' &&
-        event.playbackObservedAt == driver.state.playbackStateObservedAt
-    }
+    driver.events.any { Map e -> e.name == 'lastUpdated' }
+    playerStateMessages().isEmpty()
   }
 
   def "track position publishes on playback changes and seek but ignores normal progress heartbeats"() {
@@ -706,9 +704,8 @@ class SonosAdvPlayerSpec extends Specification {
     (driver.state.audioSourceSignalObservedAt as Long) > 0L
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalStatus') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalObservedAt') != true
-    playerStateMessages().any { Map event ->
-      event.kind == 'playbackObservation' && event.signalStatus == 'no-signal'
-    }
+    driver.events.any { Map e -> e.name == 'lastUpdated' }
+    playerStateMessages().isEmpty()
   }
 
   def "empty metadata status preserves the last valid HDMI signal observation"() {
@@ -1626,13 +1623,15 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     parentPlayerUpdates.empty
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
+    driver.events.any { Map e -> e.name == 'lastUpdated' }
 
     when:
     drainParentBridge()
 
     then:
-    parentPlayerUpdates.size() >= 1
-    playerStateMessages().any { Map event -> event.kind == 'playbackObservation' }
+    // playbackObservation now via lastUpdated + attribute subscription, not outbox
+    parentPlayerUpdates.isEmpty()
+    driver.events.any { Map e -> e.name == 'lastUpdated' }
   }
 
   def "polled parent updates never call the parent and only require the poll"() {
@@ -1643,26 +1642,27 @@ class SonosAdvPlayerSpec extends Specification {
     ) }
 
     when:
-    driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_PLAYING'])
+    driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-poll'])
     List<Map> batch = driver.flushPendingParentUpdates()
 
     then:
     batch.size() == 1
-    batch[0].playbackState == 'PLAYBACK_STATE_PLAYING'
+    batch[0].requestId == 'req-poll'
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
   }
 
   def "coalesced parent updates overwrite same key and preserve ordered lifecycle"() {
     when:
-    driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_IDLE'])
-    driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_PLAYING'])
+    // playbackObservation coalescing removed — parent now reads attributes; use ordered lifecycle to verify still ordered
     driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-1'])
+    driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-2'])
     drainParentBridge()
 
     then:
-    parentPlayerUpdates.count { Map event -> event.kind == 'playbackObservation' } == 1
-    parentPlayerUpdates.find { Map event -> event.kind == 'playbackObservation' }.playbackState == 'PLAYBACK_STATE_PLAYING'
-    parentPlayerUpdates.any { Map event -> event.kind == 'initializationStarted' }
+    // ordered queue preserves both lifecycle events in order
+    parentPlayerUpdates.size() == 2
+    parentPlayerUpdates[0].requestId == 'req-1'
+    parentPlayerUpdates[1].requestId == 'req-2'
   }
 
   def "driver initialize only asks the parent app for an initialization turn"() {
@@ -3662,12 +3662,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingGroupDeviceUpdates()
 
     then:
-    playerStateMessages().size() == 1
-    playerStateMessages()[0].kind == 'state'
-    playerStateMessages()[0].followerAttrs == [status: 'playing', groupVolume: 25, groupMute: 'unmuted']
-    playerStateMessages()[0].volumeAttrs == [volume: 25, mute: 'unmuted']
-    playerStateMessages()[0].playbackAttrs == [status: 'playing']
+    // state now via attribute subscription, not outbox
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
+    playerStateMessages().isEmpty()
   }
 
   def "unchanged coordinator metadata is still batched to followers and group devices"() {
@@ -3696,15 +3693,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingGroupDeviceUpdates()
 
     then:
-    playerStateMessages().size() == 1
-    playerStateMessages()[0].followerAttrs.currentTrackName == 'Peepers On Crane Pond'
-    playerStateMessages()[0].followerAttrs.currentArtistName == 'Adirondack Environments'
-    playerStateMessages()[0].followerAttrs.currentAlbumName == 'Peepers On Crane Pond'
-    playerStateMessages()[0].followerAttrs.currentTrackDuration == '0:41:03'
-    playerStateMessages()[0].followerAttrs.currentTrackNumber == 1
-    playerStateMessages()[0].followerAttrs.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
-    playerStateMessages()[0].playbackAttrs.currentTrackName == 'Peepers On Crane Pond'
-    playerStateMessages()[0].playbackAttrs.trackData == driver.device.currentValues.trackData
+    // state now via attribute subscription, not outbox
+    playerStateMessages().isEmpty()
+    driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
   }
 
   def "new group member snapshot explicitly clears absent coordinator playback values"() {

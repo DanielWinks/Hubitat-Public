@@ -533,6 +533,7 @@ metadata {
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
+  attribute 'lastUpdated', 'number'
   }
 
   preferences {
@@ -4708,6 +4709,7 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
 // =============================================================================
 @CompileStatic
 void parse(String raw) {
+  try { sendEvent(name: 'lastUpdated', value: now()) } catch(Exception ignored) { }
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
     logDebug("UPnP response parse entered; payloadLength=${raw.length()}")
@@ -8906,9 +8908,8 @@ void flushPendingGroupDeviceUpdates() {
       logWarn("Error preparing volume state for group devices: ${e.message}")
     }
 
-    Map playbackAttrsForParent = playbackAttrs.isEmpty() ? null : playbackAttrs
-    publishPlayerStateUpdate([kind: 'state', coordinatorId: coordinatorId, followerDNIs: followerDNIs,
-      followerAttrs: followerAttrs, volumeAttrs: volumeAttrs, playbackAttrs: playbackAttrsForParent])
+    // Group snapshot now sourced by parent via attribute subscriptions (groupVolume/groupMute/status etc.)
+    // No outbox publish — keep local flush accounting only
     clearFlushedGroupDeviceUpdates(dni, pendingSnapshot)
     groupDeviceUpdateRetryAttempts.remove(dni)
     ConcurrentHashMap<String, Object> remaining = pendingGroupDeviceUpdates[dni]
@@ -8946,14 +8947,8 @@ private Object getParentUpdateLock(String dni) {
 }
 
 private String parentStateUpdateCoalesceKey(Map payload) {
-  String kind = payload?.kind?.toString()
-  String playerDni = payload?.playerDni?.toString() ?: ''
-  switch(kind) {
-    case 'playbackObservation': case 'wsConnected': case 'wsRetry':
-      return "${kind}:${playerDni}"
-    case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
-    default: return null
-  }
+  // playbackObservation/state/wsConnected/wsRetry removed — parent now subscribes to attributes + lastUpdated
+  return null
 }
 
 void enqueueParentStateUpdate(Map payload) {
@@ -9221,7 +9216,7 @@ void webSocketStatus(String message) {
     runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
     setWebSocketStatus('open')
     runtimeState.wsRetryCount = 0 // Reset retry counter on successful connection
-    publishPlayerStateUpdate([kind: 'wsConnected'])
+    // wsConnected now signaled via lastUpdated heartbeat (parse() sends lastUpdated)
   }
   else if(message == 'status: closing') {
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
@@ -9255,7 +9250,7 @@ void scheduleWebSocketReconnect() {
   runtimeState[WS_RETRY_SCHEDULED_KEY] = true
 
   logInfo("WebSocket connection failed. Retry ${retryCount + 1} in ${delaySeconds} seconds...")
-  publishPlayerStateUpdate([kind: 'wsRetry', retryDelay: delaySeconds])
+  // wsRetry now signaled via lastUpdated heartbeat (absent parse() = offline)
   runIn(delaySeconds, 'retryWebSocketConnection', [overwrite: true])
 }
 
@@ -12517,6 +12512,7 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 // Websocket Incoming Data Processing
 // =============================================================================
 void processWebsocketMessage(String message) {
+  try { sendEvent(name: 'lastUpdated', value: now()) } catch(Exception ignored) { }
   if(message == null || message == '') {return}
   String dni
   ArrayList json
@@ -13372,13 +13368,9 @@ void observeAudioSourceSignalStatus(Map eventData) {
   logDebug("Home theater input observation player=${getId()}, containerType=${containerType}, streamDescription=${streamDescription}, signalStatus=${signalStatus}")
 }
 
+/** No longer published via outbox — parent reads status/audioSource attributes directly. Kept as no-op for compatibility. */
 void publishPlaybackObservation() {
-  publishPlayerStateUpdate([kind: 'playbackObservation',
-    playbackState: state.playbackState?.toString(),
-    playbackObservedAt: state.playbackStateObservedAt,
-    audioSource: device.currentValue('audioSource')?.toString(),
-    signalStatus: state.audioSourceSignalStatus?.toString(),
-    signalObservedAt: state.audioSourceSignalObservedAt])
+  // Parent now constructs playbackObservation from status/audioSource attributes via subscription/poll
 }
 
 void getPlaybackMetadataStatusIn(Integer time = 2) {

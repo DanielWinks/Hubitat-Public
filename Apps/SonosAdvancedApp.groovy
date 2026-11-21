@@ -272,6 +272,8 @@ preferences {
 @Field static final Integer HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS = 300
 @Field static final Integer ZGT_HEALTH_VERIFY_DELAY_SECONDS = 15
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtReadyByDni = new java.util.concurrent.ConcurrentHashMap<String, Long>()
+@Field static final List<String> PLAYER_STATE_ATTRIBUTES = ['groupVolume','groupMute','groupPlayerIds','groupCoordinatorId','isGroupCoordinator','isGrouped','status','transportStatus','audioSource','currentTrackName','currentArtistName']
+@Field static final Integer LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS = 300
 @Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final String PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY = 'sonosPlayerPlaybackObservations'
 @Field static final String PENDING_PLAYER_STATE_UPDATES_STATE_KEY = 'pendingPlayerStateUpdates'
@@ -2631,6 +2633,7 @@ void configure(Boolean startup = false) {
   refreshPlayerAnnouncementPolicySnapshots(startup)
   unschedule('refreshStaticDriverActivePlayerRoster')
   schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
+  subscribeToPlayerStateAttributes()
   subscribeToGroupCommandRequests()
   Map activeGroupOperation = getActiveGroupOperation()
   if(activeGroupOperation != null) {
@@ -2746,7 +2749,153 @@ void scheduleHouseholdHealthCheck() {
 
 void householdHealthCheck() {
   checkZgtSubscriptionHealth()
+  pollLastUpdatedHealth()
+  pollPlayerAttributesForState()
   scheduleHouseholdHealthCheck()
+}
+
+void subscribeToPlayerStateAttributes() {
+  getCurrentPlayerDevices().each { ChildDeviceWrapper d ->
+    PLAYER_STATE_ATTRIBUTES.each { String attr ->
+      try { subscribe(d, attr, 'handleGroupStateAttribute') } catch(Exception e) { logDebug("subscribe to ${d} ${attr} failed: ${e.message}") }
+    }
+    try { subscribe(d, 'lastUpdated', 'handleLastUpdatedAttribute') } catch(Exception ignored) { }
+  }
+}
+
+void handleGroupStateAttribute(Event event) {
+  ChildDeviceWrapper player = event?.device instanceof ChildDeviceWrapper ? (ChildDeviceWrapper)event.device : null
+  if(!player) {
+    String dni = event?.deviceId?.toString() ?: event?.device?.getDeviceNetworkId()?.toString()
+    player = dni ? getChildDevice(dni) : null
+  }
+  if(!player) { return }
+  updateGroupDevicesFromAttributes(player)
+  updatePlaybackObservationsFromAttributes(player)
+}
+
+void handleLastUpdatedAttribute(Event event) {
+  // lastUpdated heartbeat already advances offline detection via pollLastUpdatedHealth; subscription wakes poll early
+  pollLastUpdatedHealth()
+}
+
+void pollLastUpdatedHealth() {
+  Long nowMs = now()
+  Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String dni = player.getDeviceNetworkId()?.toString()
+    if(!dni) { return }
+    Long lastUpdated = null
+    try { lastUpdated = player.currentValue('lastUpdated', true) as Long } catch(Exception ignored) { }
+    if(lastUpdated == null) {
+      try { 
+        String v = player.getDataValue('lastUpdated')?.toString()
+        lastUpdated = v ? Long.parseLong(v) : null
+      } catch(Exception ignored) { }
+    }
+    Boolean offline = lastUpdated == null || (nowMs - lastUpdated) > (LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS * 1000L)
+    if(offline) {
+      if(!offlinePlayers.containsKey(dni)) {
+        offlinePlayers[dni] = [id: player.getDataValue('id'), name: player.displayName, retryDelay: 300]
+        state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+        Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+        if(zgt.candidateDni?.toString() == dni) {
+          zgt.topologyReady = false
+          state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+          failZgtInitializationCandidate(dni, 'ZGT speaker lastUpdated stale')
+        }
+      }
+    } else {
+      if(offlinePlayers.containsKey(dni)) {
+        offlinePlayers.remove(dni)
+        state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
+        resumeAnnouncementsForPlayer(dni)
+      }
+    }
+  }
+}
+
+void pollPlayerAttributesForState() {
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    updateGroupDevicesFromAttributes(player)
+    updatePlaybackObservationsFromAttributes(player)
+  }
+}
+
+void updateGroupDevicesFromAttributes(ChildDeviceWrapper player) {
+  if(!player) { return }
+  String coordinatorId = player.currentValue('groupCoordinatorId', true)?.toString() ?: player.getDataValue('groupCoordinatorId')?.toString()
+  String playerId = player.getDataValue('id')?.toString()
+  if(!coordinatorId || !playerId) { return }
+  String groupPlayerIdsRaw = player.currentValue('groupPlayerIds', true)?.toString()
+  List<String> playerIds = normalizeGroupPlayerIds(groupPlayerIdsRaw)
+  Map<String, Object> volumeAttrs = null
+  Integer vol = player.currentValue('groupVolume', true) as Integer
+  String mute = player.currentValue('groupMute', true)?.toString()
+  if(vol != null || mute != null) {
+    volumeAttrs = [volume: vol ?: 0, mute: mute ?: 'unmuted']
+  }
+  Map<String, Object> playbackAttrs = [:]
+  ['status','transportStatus','audioSource','currentTrackName','currentArtistName','currentAlbumName','albumArtURI'].each { String attr ->
+    Object v = player.currentValue(attr, true)
+    if(v != null) { playbackAttrs[attr] = v }
+  }
+  if(!playbackAttrs.isEmpty()) {
+    flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrs.isEmpty() ? null : playbackAttrs)
+  }
+  if(playerIds.size() > 0) {
+    ChildDeviceWrapper coordinator = findPlayerBySonosId(coordinatorId) ?: player
+    List<String> followerDNIs = getGroupFollowerDNIsForCoordinator(coordinatorId)
+    Map<String, Object> followerAttrs = [:]
+    followerAttrs['groupVolume'] = vol
+    followerAttrs['groupMute'] = mute
+    followerDNIs.each { String dni ->
+      ChildDeviceWrapper follower = getChildDevice(dni)
+      if(follower && dni != player.getDeviceNetworkId()?.toString()) {
+        queueFollowerStateBatch(coordinator, follower, coordinatorId, followerAttrs)
+      }
+    }
+  }
+}
+
+void updatePlaybackObservationsFromAttributes(ChildDeviceWrapper player) {
+  if(!player) { return }
+  String playerId = player.getDataValue('id')?.toString()
+  if(!playerId) { return }
+  Map<String, Map> observations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] : [:]
+  Map previous = observations[playerId] instanceof Map ? new LinkedHashMap((Map)observations[playerId]) : [:]
+  Map observation = new LinkedHashMap(previous)
+  String statusAttr = player.currentValue('status', true)?.toString()
+  String transportAttr = player.currentValue('transportStatus', true)?.toString()
+  String derivedState = statusAttr?.toUpperCase() ?: transportAttr?.toUpperCase() ?: null
+  if(derivedState) {
+    if(derivedState == 'PLAYING') { observation.playbackState = 'PLAYBACK_STATE_PLAYING' }
+    else if(derivedState == 'PAUSED') { observation.playbackState = 'PLAYBACK_STATE_PAUSED' }
+    else if(derivedState == 'STOPPED') { observation.playbackState = 'PLAYBACK_STATE_IDLE' }
+    else { observation.playbackState = "PLAYBACK_STATE_${derivedState}" }
+  }
+  observation.playbackObservedAt = now()
+  String audioSource = player.currentValue('audioSource', true)?.toString()
+  if(audioSource != null) { observation.audioSource = audioSource }
+  // signalStatus derived from audioSource freshness; keep prior if available
+  observations[playerId] = observation
+  state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] = observations
+  if(playbackObservationAffectsAnnouncementPolicy(player, previous, observation)) {
+    queueAnnouncementPolicyRefreshForPlayer(player.getDeviceNetworkId()?.toString())
+  }
+}
+
+List<String> getGroupFollowerDNIsForCoordinator(String coordinatorId) {
+  if(!coordinatorId) { return [] }
+  List<String> out = []
+  getCurrentPlayerDevices().each { ChildDeviceWrapper p ->
+    String dni = p.getDeviceNetworkId()?.toString()
+    String coord = p.currentValue('groupCoordinatorId', true)?.toString()
+    if(coord == coordinatorId && dni) { out.add(dni) }
+  }
+  return out
 }
 
 void zgtReadyForElection(String dni) {
@@ -5812,14 +5961,8 @@ void playerStateUpdate(Map payload) {
 
 /** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
 String playerStateUpdateCoalesceKey(Map payload) {
-  String kind = payload?.kind?.toString()
-  String playerDni = payload?.playerDni?.toString() ?: ''
-  switch(kind) {
-    case 'playbackObservation': case 'wsConnected': case 'wsRetry':
-      return "${kind}:${playerDni}"
-    case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
-    default: return null
-  }
+  // playbackObservation/state/wsConnected/wsRetry removed — parent now reads attributes + lastUpdated
+  return null
 }
 
 void scheduleQueuedPlayerStateUpdateDrain(Integer delayMs) {

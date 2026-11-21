@@ -201,6 +201,7 @@ metadata {
     attribute 'currentRepeatAllMode', 'enum', ['on', 'off']
     attribute 'currentCrossfadeMode', 'enum', ['on', 'off']
     attribute 'currentShuffleMode', 'enum', ['on', 'off']
+    attribute 'lastUpdated', 'number'
   }
   preferences {
     section('Device Settings') {
@@ -1025,6 +1026,7 @@ void updateBatchPlaybackState(String jsonAttributes) {
 
 /** Accept one coalesced parent batch through the normal group-state guard. */
 void applyStateBatch(String jsonAttributes) {
+  try { sendEvent(name: 'lastUpdated', value: now()) } catch(Exception ignored) { }
   processBatchPlaybackState(jsonAttributes, false)
 }
 
