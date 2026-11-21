@@ -4620,10 +4620,10 @@ void parse(String raw) {
     String sid = messageHeaders["SID"]?.toString()?.trim() ?: null
     if(sid == '') { sid = null }
     logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
-    if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1') || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
+    if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport') {
       logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, headerValues=${renderHeaderValues(messageHeaders)}")
     }
-    // Header switch: serviceType is authoritative; request-line keys are fallback-only for old firmware
+    // Header switch: serviceType is the sole ZGT/AVT dispatch; request-line keys remain fallback-only for RRC/GRC old firmware
     if(serviceType != null) {
       switch(serviceType) {
         case 'ZoneGroupTopology':
@@ -4667,23 +4667,6 @@ void parse(String raw) {
               "Could not determine service type for message: ${message}")
           return
       }
-    }
-    if(messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
-      try {
-        observeExpectedUpnpSubscriptionEvent('sid3')
-        if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
-        String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-        logZgtXmlAtTrace(zgtDni, xmlBody)
-        deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, seq)
-      } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
-      return
-    }
-    if(messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
-      try {
-        String avtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-        deferOrProcessAvTransportPayload(avtDni, xmlBody, seq)
-      } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
-      return
     }
     if(messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
       try {
