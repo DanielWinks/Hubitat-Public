@@ -39,8 +39,8 @@ class SonosAdvPlayerSpec extends Specification {
     second.body.contains('<DesiredVolume>82</DesiredVolume>')
     !second.body.contains('<DesiredVolume>37</DesiredVolume>')
     service.actions.SetVolume.arguments == originalArguments
-    driver.parseSonosMessageXML('<Event><title>A &amp; B</title></Event>').Event.title.text() == 'A & B'
-    driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').Event.title.text() == 'A < B > C "D" \'E\''
+    driver.parseSonosMessageXML('<Event><title>A &amp; B</title></Event>').getAt('title').text() == 'A & B'
+    driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').getAt('title').text() == 'A < B > C "D" \'E\''
   }
 
   void drainParentBridge() {
