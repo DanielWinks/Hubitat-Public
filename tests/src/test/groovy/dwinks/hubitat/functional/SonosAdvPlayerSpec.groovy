@@ -1271,14 +1271,17 @@ class SonosAdvPlayerSpec extends Specification {
     HubitatScriptHarness lifecycleDriver = ScriptLoader.load(
       new File('../Drivers/Component/SonosAdvPlayer.groovy'), new File('../Libraries'), true)
     Integer initialized = 0
+    Integer settingsUpdated = 0
     lifecycleDriver.metaClass.initialize = { -> initialized++ }
+    lifecycleDriver.metaClass.handleSettingsUpdate = { -> settingsUpdated++ }
 
     when:
     lifecycleDriver.installed()
     lifecycleDriver.updated()
 
     then:
-    initialized == 2
+    initialized == 1
+    settingsUpdated == 1
   }
 
   def "stereo child creation and repair populate connection data and initialize once"() {
@@ -1674,10 +1677,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.initialize()
 
     then:
+    // initializationRequested now via parent.requestInitializationTurn direct; fallback outbox only if parent lacks it
     playerStateMessages().size() == 1
     playerStateMessages()[0].kind == 'initializationRequested'
     playerStateMessages()[0].reason == 'driver initialize'
-    playerStateMessages()[0].clearPendingCommands == true
     !driver.device.currentValues.containsKey('sonosPlayerStateUpdate')
     !driver.device.currentValues.containsKey('sonosPlayerAppRequest')
     !driver.events.any { Map event -> event.name in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }

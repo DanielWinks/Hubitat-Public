@@ -948,34 +948,54 @@ void uninstalled() {
   clearStaticDriverStateForCurrentDevice()
 }
 void installed() { initialize() }
-void updated() {
-  runtimeState[SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY] = true
-  try { initialize() }
-  finally { runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) }
-}
+void updated() { handleSettingsUpdate() }
 
 void initialize() {
-  Boolean skipPurge = runtimeState.remove(SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY) == true
-  performImmediateInitialization(skipPurge)
-  if(skipPurge) {
-    requestAppMediatedInitialization('driver initialize')
+  performImmediateInitialization()
+  signalInitializationTurn('driver initialize')
+}
+
+void handleSettingsUpdate() {
+  // Pure settings-save path — no purge, no ZGT clear, no parent turn, no UPnP invalidate
+  reconcileChildDevices()
+  synchronizeTrackPositionPreference()
+  migrationCleanup()
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  schedulePendingBatchEvents()
+  scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
+  resetComponentChildEventRetries()
+  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+  scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
+  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
+  scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS)
+  cancelAudioClipWatchdog()
+  if(getId()) {
+    audioClipQueueInitialization()
+    groupsRegistryInitialization()
+    favoritesMapInitialization()
   }
 }
 
-void performImmediateInitialization(Boolean skipPurge = false) {
-  if(!skipPurge) {
-    clearPendingCommandsForInitialization()
-    publishPlayerStateUpdate([kind: 'initializationRequested', reason: 'driver initialize',
-      clearPendingCommands: true])
-    clearZgtSubscriptionForInitialization()
-  } else {
-    clearZgtSubscriptionForInitialization()
+void signalInitializationTurn(String reason) {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  try {
+    parent.requestInitializationTurn(dni, reason)
+  } catch(Exception e) {
+    logWarn("parent.requestInitializationTurn failed for ${dni}: ${e.message}; queuing via outbox fallback")
+    publishPlayerStateUpdate([kind: 'initializationRequested', reason: reason ?: 'device request'])
   }
+}
+
+void performImmediateInitialization() {
+  clearPendingCommandsForInitialization()
+  clearZgtSubscriptionForInitialization()
   migrateLegacyRuntimeState()
   resetPendingStatePublicationForInitialization()
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
   cacheBatteryCapability()
+  reconcileChildDevices()
   scheduleEarlyRenderingControlSubscribe()
 }
 
@@ -1342,6 +1362,10 @@ void configure() {
   runtimeState.wsRetryCount = 0
   migrationCleanup()
   synchronizeTrackPositionPreference()
+  reconcileChildDevices()
+}
+
+void reconcileChildDevices() {
   // Remove transient parent-app bridge attributes from existing devices.
   device.deleteCurrentState('sonosPlayerStateUpdate')
   device.deleteCurrentState('sonosPlayerAppRequest')
