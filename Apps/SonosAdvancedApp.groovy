@@ -5286,6 +5286,10 @@ void handleNewUiSettingChange(String buttonName) {
       logWarn("Ignored unsupported value '${requestedEnumValue}' for custom setting '${settingName}'")
       return
     }
+    if(settings[settingName]?.toString() == requestedEnumValue) {
+      logDebug("Ignoring duplicate custom setting '${settingName}'=${requestedEnumValue} (already applied)")
+      return
+    }
     logInfo("Applying custom setting '${settingName}'=${requestedEnumValue}")
     app.updateSetting(settingName, [type: 'enum', value: requestedEnumValue])
     settings[settingName] = requestedEnumValue
@@ -5304,9 +5308,14 @@ void handleNewUiSettingChange(String buttonName) {
     logWarn("Ignored unsupported boolean value '${value}' for custom setting '${settingName}'")
     return
   }
+  if(settings[settingName]?.toString() == value) {
+    logDebug("Ignoring duplicate custom setting '${settingName}'=${value} (already applied)")
+    return
+  }
   Boolean booleanValue = value == 'true'
   logInfo("Applying custom setting '${settingName}'=${booleanValue}")
   app.updateSetting(settingName, [type: 'bool', value: booleanValue])
+  settings[settingName] = booleanValue
   if(settingName == 'enableAlarmManagement' || settingName == 'enableAlarmSwitches') {
     configureAlarmManagement()
   }

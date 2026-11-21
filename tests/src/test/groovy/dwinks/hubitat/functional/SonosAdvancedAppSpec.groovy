@@ -2591,6 +2591,46 @@ class SonosAdvancedAppSpec extends Specification {
     follower.dataValues.useAudioClipForHighPriorityTts == 'false'
   }
 
+  def "duplicate enum setting selection is ignored without updating or firing an event"() {
+    given:
+    appScript.settings.highPriorityAnnouncementMode = 'alwaysCoordinatorStream'
+
+    when:
+    appScript.handleNewUiSettingChange('newUiSetting|highPriorityAnnouncementMode|alwaysCoordinatorStream')
+
+    then:
+    appScript.app.updatedSettings.isEmpty()
+    appScript.app.events.isEmpty()
+    appScript.logs.any { String message -> message.contains('Ignoring duplicate custom setting') }
+
+    when:
+    appScript.handleNewUiSettingChange('newUiSetting|highPriorityAnnouncementMode|alwaysNonInterrupting')
+
+    then:
+    appScript.app.updatedSettings['highPriorityAnnouncementMode'] == 'alwaysNonInterrupting'
+    appScript.app.events.count { Map event -> event.name == 'newUiSettings' } == 1
+  }
+
+  def "duplicate boolean setting toggle is ignored without updating or firing an event"() {
+    given:
+    appScript.settings.automaticTtsTopologyChanges = true
+
+    when:
+    appScript.handleNewUiSettingChange('newUiSetting|automaticTtsTopologyChanges|true')
+
+    then:
+    appScript.app.updatedSettings.isEmpty()
+    appScript.app.events.isEmpty()
+    appScript.logs.any { String message -> message.contains('Ignoring duplicate custom setting') }
+
+    when:
+    appScript.handleNewUiSettingChange('newUiSetting|automaticTtsTopologyChanges|false')
+
+    then:
+    appScript.app.updatedSettings['automaticTtsTopologyChanges'] == false
+    appScript.app.events.count { Map event -> event.name == 'newUiSettings' } == 1
+  }
+
   def "unchanged topology reports do not recalculate announcement policies"() {
     given:
     appScript.settings.groupAnnouncementMode = 'automatic'
