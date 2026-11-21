@@ -2048,7 +2048,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getCurrentGrcSnapshot().seq == 0
     driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000105'
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted']
+    // Fresh device reports groupMute as 'unmuted' by default, so the first
+    // 'unmuted' is vetoed as already-current; the snapshot still records it.
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
     driver.device.events.find { Map e -> e.name == 'grcGroupControl' }?.value?.contains('"groupVolume"')
     driver.device.getDataValue('grcSnapshotJson')?.contains('"groupVolume":25')
   }
@@ -2072,7 +2074,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.getCurrentGrcSnapshot().snapshot.groupVolume == 25
     driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted', 'muted']
+    // First 'unmuted' is vetoed as the fresh-device default; only the change to 'muted' emits.
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
   }
 
@@ -2101,7 +2104,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted', 'muted']
+    // First 'unmuted' is vetoed as the fresh-device default; only the change to 'muted' emits.
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
   }
 
   def "GRC SEQ header drops stale payloads without applying"() {
@@ -2197,7 +2201,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [40]
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted']
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'unmuted'
   }
 
   def "legacy GRC shim without SEQ still applies the current snapshot"() {
