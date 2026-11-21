@@ -40,6 +40,7 @@ class SonosAdvPlayerSpec extends Specification {
     !second.body.contains('<DesiredVolume>37</DesiredVolume>')
     service.actions.SetVolume.arguments == originalArguments
     driver.parseSonosMessageXML('<Event><title>A &amp; B</title></Event>').Event.title.text() == 'A & B'
+    driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').Event.title.text() == 'A < B > C "D" \'E\''
   }
 
   void drainParentBridge() {
@@ -1651,17 +1652,17 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
   }
 
-  def "coalesced parent updates overwrite same key and preserve ordered topology"() {
+  def "coalesced parent updates overwrite same key and preserve ordered lifecycle"() {
     when:
     driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_IDLE'])
     driver.publishPlayerStateUpdate([kind: 'playbackObservation', playbackState: 'PLAYBACK_STATE_PLAYING'])
-    driver.publishPlayerStateUpdate([kind: 'zgtTopology', topology: [groups: []]])
+    driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-1'])
     drainParentBridge()
 
     then:
     parentPlayerUpdates.count { Map event -> event.kind == 'playbackObservation' } == 1
     parentPlayerUpdates.find { Map event -> event.kind == 'playbackObservation' }.playbackState == 'PLAYBACK_STATE_PLAYING'
-    parentPlayerUpdates.any { Map event -> event.kind == 'zgtTopology' }
+    parentPlayerUpdates.any { Map event -> event.kind == 'initializationStarted' }
   }
 
   def "driver initialize only asks the parent app for an initialization turn"() {
@@ -3635,19 +3636,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
   }
 
-  def "topology membership updates are deferred until the player callback returns"() {
-    when:
-    driver.parentUpdateGroupDevices('RINCON_COORD', ['RINCON_FOLLOW'])
-
-    then:
-    driver.scheduled == [[
-      1,
-      'deferredParentUpdateGroupDevices',
-      [overwrite: true, data: [coordinatorId: 'RINCON_COORD', playersInGroup: ['RINCON_FOLLOW']]]
-    ]]
-  }
-
-  def "app topology application suppresses redundant parent membership feedback"() {
+  def "app topology application publishes no membership outbox message"() {
     given:
     driver.device.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     driver.device.dataValues.isGroupCoordinator = 'false'
@@ -3657,21 +3646,12 @@ class SonosAdvPlayerSpec extends Specification {
       playerNames: ['Test Player', 'Follower']]]])
 
     when:
-    Boolean applied = driver.applyAppHouseholdTopology(topology, false)
+    Boolean applied = driver.applyAppHouseholdTopology(topology)
 
     then:
     assert applied : driver.logs.join('\n')
     driver.device.dataValues.groupPlayerIds == 'RINCON_TEST,RINCON_FOLLOW'
     !playerStateMessages().any { Map event -> event.kind == 'membership' }
-  }
-
-  def "deferred membership updates publish a location event"() {
-    when:
-    driver.deferredParentUpdateGroupDevices([coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST']])
-
-    then:
-    playerStateMessages().size() == 1
-    playerStateMessages()[0] == [kind: 'membership', coordinatorId: 'RINCON_TEST', playersInGroup: ['RINCON_TEST'], playerDni: 'SONOS-TEST-DNI']
   }
 
   def "group state flush publishes one batched location event"() {

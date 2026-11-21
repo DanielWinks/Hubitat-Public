@@ -375,8 +375,7 @@ String formatEpoch(Long epochSeconds) {
 
 @CompileStatic
 GPathResult parseSonosMessageXML(String xml) {
-  String body = xml.replace('&quot;', '"').replace('&apos;', "'").replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-  return new XmlSlurper().parseText(body)
+  return new XmlSlurper().parseText(xml)
 }
 
 @CompileStatic
@@ -4748,16 +4747,10 @@ void applyZoneGroupTopologyPayload(String dni, String xmlBody, Map topology) {
   LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
   if(processZoneGroupTopologySnapshot(topology, previousMembers)) {
     setLastInboundZgtEvent()
-    if(isAppZgtSubscriber() && topology?.playerFound == true && topology?.groups instanceof List) {
-      Map householdTopology = [householdId: device.getDataValue('householdId'),
-        groups: topology.groups, observedAt: now()]
-      publishPlayerStateUpdate([kind: 'zgtTopology', topology: householdTopology,
-        leaderGeneration: device.getDataValue('appZgtLeaderGeneration')?.toString(), observedAt: now()])
-    }
   }
 }
 
-Boolean applyAppHouseholdTopology(String topologyJson, Boolean publishMembership = true) {
+Boolean applyAppHouseholdTopology(String topologyJson) {
   if(!topologyJson) { return false }
   try {
     Map topology = (Map)new JsonSlurper().parseText(topologyJson)
@@ -4774,7 +4767,7 @@ Boolean applyAppHouseholdTopology(String topologyJson, Boolean publishMembership
       groupName: ownGroup.groupName?.toString(), batteryData: [:]]
     LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
     setDeviceDataValue('householdTopology', topologyJson)
-    return processZoneGroupTopologySnapshot(playerTopology, previousMembers, publishMembership)
+    return processZoneGroupTopologySnapshot(playerTopology, previousMembers)
   } catch(Exception e) {
     logWarn("Could not apply app household topology snapshot: ${e.message}")
     return false
@@ -5998,8 +5991,7 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
 }
 
 @CompileStatic
-Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons,
-    Boolean publishMembership = true) {
+Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
   if(topology == null) { return false }
   if(topology.playerFound != true) {
     logDebug("Player ${getId()} not found in ZoneGroupTopology!")
@@ -6021,18 +6013,12 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   Boolean isGroupCoordinator = currentGroupCoordinatorRincon == getId()
 
   if(groupedRincons != oldGroupedRincons) {
-    List<String> newRincons = new ArrayList<String>()
-    newRincons.addAll(groupedRincons - oldGroupedRincons)
-    if(newRincons.size() > 0 && isGroupCoordinator == true) {
-      logDebug("Sending events to newly joined member(s): ${newRincons}")
-      sendEventsToNewGroupMembers(newRincons)
-    }
     logDebug('ZGT message parsed, group member changes found.')
   } else {
     logDebug('ZGT message parsed, no group member changes.')
   }
 
-  setGroupPlayerIds(groupedRincons.toList(), publishMembership)
+  setGroupPlayerIds(groupedRincons.toList())
 
   List<String> currentGroupMemberNames = topology.memberNames as List<String>
   Integer currentGroupMemberCount = groupedRincons.size()
@@ -6098,26 +6084,6 @@ void clearCurrentPlayingStates() {
   }
   if(shouldQueueLocalDeviceEvent('trackDescription', 'Not Available', this.device.currentValue('trackDescription'))) {
     queueLocalDeviceEvent('trackDescription', 'Not Available')
-  }
-}
-
-void parentUpdateGroupDevices(String coordinatorId, List<String> playersInGroup) {
-  if(coordinatorId == null || coordinatorId == '') {return}
-  if(playersInGroup == null || playersInGroup.size() == 0) {return}
-  // Let the topology callback return before entering the parent app. This
-  // prevents an app->player state read from waiting on the same player method
-  // that is trying to publish the membership change.
-  runIn(1, 'deferredParentUpdateGroupDevices', [
-    overwrite: true,
-    data: [coordinatorId: coordinatorId, playersInGroup: new ArrayList<String>(playersInGroup)]
-  ])
-}
-
-void deferredParentUpdateGroupDevices(Map data) {
-  String coordinatorId = data?.coordinatorId as String
-  List<String> playersInGroup = data?.playersInGroup as List<String>
-  if(coordinatorId && playersInGroup) {
-    publishPlayerStateUpdate([kind: 'membership', coordinatorId: coordinatorId, playersInGroup: playersInGroup])
   }
 }
 
@@ -7892,9 +7858,8 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   setIsGroupCoordinator(isGroupCoordinator)
 
   // Signal setGroupPlayerIds() to re-evaluate group devices even when the
-  // player list is unchanged. Avoids calling parentUpdateGroupDevices() here
-  // directly, which would use potentially stale player data if both coordinator
-  // and membership change in the same event.
+  // player list is unchanged, so the parent observes the coordinator change
+  // through the topology attribute events in the same update.
   if(isGroupCoordinator != previouslyWasGroupCoordinator) {
     setDeviceDataValue('coordinatorStatusChanged', 'true')
   }
@@ -7951,7 +7916,7 @@ Boolean isGroupedAndNotCoordinator() {
 List<String> getGroupPlayerIds() {
   return getDeviceDataValue('groupPlayerIds')?.tokenize(',') ?: []
 }
-void setGroupPlayerIds(List<String> groupPlayerIds, Boolean publishMembership = true) {
+void setGroupPlayerIds(List<String> groupPlayerIds) {
   String newValue = groupPlayerIds.join(',')
   String oldValue = getDeviceDataValue('groupPlayerIds')
   Boolean coordinatorChanged = getDeviceDataValue('coordinatorStatusChanged') == 'true'
@@ -7972,7 +7937,6 @@ void setGroupPlayerIds(List<String> groupPlayerIds, Boolean publishMembership = 
     }
   }
   logDebug('Updating group device with new group membership information')
-  if(publishMembership) { parentUpdateGroupDevices(getId(), groupPlayerIds) }
 }
 
 List<String> getGroupFollowerRincons() {
@@ -8836,26 +8800,6 @@ void flushPendingGroupDeviceUpdates() {
 }
 
 @CompileStatic
-void sendEventsToNewGroupMembers(List<String> newRincons) {
-  List<String> groupDNIs = newRincons.collect{getDNIFromRincon(it)}
-  logDebug("GroupDNIs ${groupDNIs}")
-  List<Map> eventsToSend = getCurrentPlayingStatesForGroup()
-  Map<String, Object> attributes = [:]
-  eventsToSend.each { Map event -> if(event.name != null && event.value != null) { attributes[event.name.toString()] = event.value } }
-  publishPlayerStateUpdate([kind: 'followers', coordinatorId: getId(),
-    followerDNIs: groupDNIs, followerAttrs: attributes])
-}
-
-/** Publish a complete coordinator state after the app applies an accepted topology snapshot. */
-Boolean publishCurrentGroupPlaybackSnapshot() {
-  if(!getIsGroupCoordinator()) { return false }
-  List<String> followers = getGroupFollowerRincons()
-  if(followers.isEmpty()) { return true }
-  sendEventsToNewGroupMembers(followers)
-  return true
-}
-
-@CompileStatic
 Boolean isGroupedFollowerForPlayback() {
   return getGroupPlayerIds().size() > 1 && !getIsGroupCoordinator()
 }
@@ -8884,9 +8828,7 @@ private String parentStateUpdateCoalesceKey(Map payload) {
     case 'playbackObservation': case 'wsConnected': case 'wsRetry':
     case 'householdPresence':
       return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
-    case 'membership': return "${kind}:${payload.coordinatorId ?: playerDni}"
     case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
-    case 'followers': return "${kind}:${playerDni}"
     default: return null
   }
 }

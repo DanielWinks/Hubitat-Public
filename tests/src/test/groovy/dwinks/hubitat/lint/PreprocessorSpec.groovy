@@ -25,7 +25,7 @@ definition(name: 'X', namespace: 'dwinks', author: 'Foo')
     given:
     String src = '''\
 #include dwinks.UtilitiesAndLoggingLibrary
-#include dwinks.SMAPILibrary
+#include dwinks.SunPositionLibrary
 
 import groovy.transform.Field
 
@@ -35,7 +35,7 @@ library(name: 'X', namespace: 'dwinks', author: 'Foo')
     Preprocessor.Result result = Preprocessor.process(src)
 
     then:
-    result.includes == ['dwinks.UtilitiesAndLoggingLibrary', 'dwinks.SMAPILibrary']
+    result.includes == ['dwinks.UtilitiesAndLoggingLibrary', 'dwinks.SunPositionLibrary']
   }
 
   def "ignores commented-out includes"() {

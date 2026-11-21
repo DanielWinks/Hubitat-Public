@@ -3251,105 +3251,46 @@ void retryZgtInitializationElection() {
   startNextPlayerInitialization()
 }
 
-void acceptHouseholdTopology(String playerDni, Map payload) {
+void acceptHouseholdTopology(String playerDni, Map topology) {
   Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
-  if(!playerDni || zgt.candidateDni?.toString() != playerDni ||
-      zgt.leaderGeneration?.toString() != payload?.leaderGeneration?.toString()) {
+  if(!playerDni || zgt.candidateDni?.toString() != playerDni) {
     logDebug("Ignoring household topology from non-current ZGT speaker ${playerDni ?: 'unknown'}")
     return
   }
-  Map topology = payload.topology instanceof Map ? new LinkedHashMap((Map)payload.topology) : [:]
-  Long sourceObservedAt = (topology.observedAt ?: payload.observedAt ?: 0L) as Long
-  List<Map> groups = topology.groups instanceof List ? (List<Map>)topology.groups : []
+  Map accepted = topology instanceof Map ? new LinkedHashMap((Map)topology) : [:]
+  List<Map> groups = accepted.groups instanceof List ? (List<Map>)accepted.groups : []
   if(groups.isEmpty() || groups.any { Map group ->
       !group.groupId || !group.coordinatorId || !(group.playerIds instanceof List)
     }) {
     failZgtInitializationCandidate(playerDni, 'ZGT speaker supplied an incomplete household topology snapshot')
     return
   }
-  if(sourceObservedAt <= 0L) {
-    failZgtInitializationCandidate(playerDni, 'ZGT speaker supplied a household topology snapshot without a usable source timestamp')
-    return
-  }
-  Map prior = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
-      ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
-  Long priorSourceObservedAt = (prior.sourceObservedAt ?: 0L) as Long
   String topologyFingerprint = groups.collect { Map item ->
     "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
   }.sort().join('|')
-  Boolean sameGeneration = prior.leaderGeneration?.toString() == zgt.leaderGeneration?.toString() &&
-      prior.bootGeneration?.toString() == zgt.bootGeneration?.toString()
-  if(sameGeneration && priorSourceObservedAt > 0L &&
-      (sourceObservedAt < priorSourceObservedAt ||
-        (sourceObservedAt == priorSourceObservedAt && topologyFingerprint != zgt.topologyFingerprint?.toString()))) {
-    logDebug("Ignoring stale household topology snapshot from ${playerDni}; sourceObservedAt=${sourceObservedAt}, acceptedSourceObservedAt=${priorSourceObservedAt}, fingerprint=${topologyFingerprint}")
-    return
-  }
-  Long previousInboundAt = (zgt.lastInboundAt ?: 0L) as Long
-  Long observedAt = Math.max(now(), previousInboundAt + 1L)
-  String priorAttributeFingerprint = householdTopologyAttributesFingerprint(prior)
-  String attributeFingerprint = householdTopologyAttributesFingerprint(topology)
-  Boolean attributesChanged = priorAttributeFingerprint != attributeFingerprint
-  topology.putAll([schemaVersion: 1, sourcePlayerDni: playerDni,
-    leaderGeneration: zgt.leaderGeneration, bootGeneration: zgt.bootGeneration,
-    sourceObservedAt: sourceObservedAt, observedAt: observedAt])
-  state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = topology
   Boolean sameAcceptedTopology = zgt.topologyFingerprint?.toString() == topologyFingerprint &&
-      zgt.bootGeneration?.toString() == (state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString()) &&
       zgt.topologyReady == true
+  Long observedAt = now()
+  accepted.putAll([schemaVersion: 1, sourcePlayerDni: playerDni, observedAt: observedAt])
+  state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = accepted
   zgt.topologyFingerprint = topologyFingerprint
-  zgt.topologyAttributeFingerprint = attributeFingerprint
   zgt.lastInboundAt = observedAt
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-  updateActiveGroupOperationFromHouseholdTopology(topology)
+  updateActiveGroupOperationFromHouseholdTopology(accepted)
   if(sameAcceptedTopology) {
-    zgt.lastInboundAt = observedAt
-    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-    if(attributesChanged) {
-      state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = [playerDni: playerDni,
-        leaderGeneration: zgt.leaderGeneration?.toString(), bootGeneration: zgt.bootGeneration?.toString(),
-        fingerprint: topologyFingerprint, attributeFingerprint: attributeFingerprint, attributeOnly: true,
-        observedAt: observedAt, playerCursor: 0, groupCursor: 0,
-        playerDnis: getCurrentPlayerDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
-        groupDnis: getCurrentGroupDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
-        playerApplyFailed: false]
-      runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
-      logDebug("Refreshing household topology metadata without membership changes; fingerprint=${attributeFingerprint}")
-    } else {
-      logDebug("Ignoring unchanged household topology fingerprint=${topologyFingerprint}")
-    }
+    logDebug("Ignoring unchanged household topology fingerprint=${topologyFingerprint}")
     return
   }
   zgt.status = 'applying-topology'
   state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
   state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = [playerDni: playerDni,
-      leaderGeneration: zgt.leaderGeneration?.toString(), bootGeneration: zgt.bootGeneration?.toString(),
-      fingerprint: topologyFingerprint, attributeFingerprint: attributeFingerprint, attributeOnly: false,
+      fingerprint: topologyFingerprint,
       observedAt: observedAt, playerCursor: 0, groupCursor: 0,
       playerDnis: getCurrentPlayerDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
       groupDnis: getCurrentGroupDevices().collect { ChildDeviceWrapper child -> child.deviceNetworkId.toString() },
       playerApplyFailed: false]
   runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
-}
-
-/** Fingerprint names separately so metadata can refresh without changing topology identity. */
-String householdTopologyAttributesFingerprint(Map topology) {
-  List<Map> groups = topology?.groups instanceof List ? (List<Map>)topology.groups : []
-  List<Map> normalized = groups.collect { Map group ->
-    List<String> ids = normalizeGroupPlayerIds(group.playerIds)
-    List<String> names = group.playerNames instanceof List
-        ? ((List)group.playerNames).collect { Object name -> name?.toString() ?: '' } : []
-    List<Map> members = []
-    for(Integer index = 0; index < ids.size(); index++) {
-      members.add([id: ids[index], name: index < names.size() ? names[index] : ''])
-    }
-    members.sort { Map left, Map right -> left.id.toString() <=> right.id.toString() }
-    [groupId: group.groupId?.toString() ?: '', groupName: group.groupName?.toString() ?: '',
-      coordinatorName: group.coordinatorName?.toString() ?: '', members: members]
-  }
-  normalized.sort { Map left, Map right -> left.groupId.toString() <=> right.groupId.toString() }
-  return JsonOutput.toJson(normalized)
 }
 
 /** Apply accepted topology in small continuations; child calls may enqueue app callbacks. */
@@ -3360,10 +3301,7 @@ void applyHouseholdTopologyBatch() {
   if(apply == null) { return }
   Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
-  if(apply.leaderGeneration?.toString() != zgt.leaderGeneration?.toString() ||
-      apply.bootGeneration?.toString() != zgt.bootGeneration?.toString() ||
-      apply.fingerprint?.toString() != zgt.topologyFingerprint?.toString() ||
-      apply.attributeFingerprint?.toString() != zgt.topologyAttributeFingerprint?.toString()) {
+  if(apply.fingerprint?.toString() != zgt.topologyFingerprint?.toString()) {
     state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
     logDebug('Discarding superseded household topology apply continuation')
     return
@@ -3383,7 +3321,7 @@ void applyHouseholdTopologyBatch() {
     }
     try {
       child.updateDataValue('householdTopology', json)
-      if(child.applyAppHouseholdTopology(json, false) != true) {
+      if(child.applyAppHouseholdTopology(json) != true) {
         playerApplyFailed = true
         logWarn("Player ${child.deviceNetworkId} did not apply accepted household topology")
       }
@@ -3398,43 +3336,43 @@ void applyHouseholdTopologyBatch() {
   if(playerCursor < playerDnis.size()) { runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true]); return }
   if(playerApplyFailed) {
     state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
-    if(apply.attributeOnly == true) {
-      logWarn('Household topology metadata refresh failed while applying player attributes')
-      return
-    }
     failZgtInitializationCandidate(apply.playerDni?.toString(),
         'One or more player devices could not apply the accepted household topology')
     return
   }
-  if(apply.attributeOnly != true) {
-    Map topology = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
-        ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
-    List<Map> topologyGroups = topology.groups instanceof List ? (List<Map>)topology.groups : []
-    Set<String> activeCoordinatorIds = topologyGroups.findAll { Map group ->
-      normalizeGroupPlayerIds(group.playerIds).size() > 1
-    }.collect { Map group -> group.coordinatorId?.toString() }.findAll { String id -> id } as Set<String>
-    List<String> coordinatorDnis = playerDnis.findAll { String dni ->
-      ChildDeviceWrapper child = getChildDevice(dni)
-      child?.getDataValue('id')?.toString() in activeCoordinatorIds
+  Map topology = state[HOUSEHOLD_TOPOLOGY_STATE_KEY] instanceof Map
+      ? (Map)state[HOUSEHOLD_TOPOLOGY_STATE_KEY] : [:]
+  List<Map> topologyGroups = topology.groups instanceof List ? (List<Map>)topology.groups : []
+  Set<String> activeCoordinatorIds = topologyGroups.findAll { Map group ->
+    normalizeGroupPlayerIds(group.playerIds).size() > 1
+  }.collect { Map group -> group.coordinatorId?.toString() }.findAll { String id -> id } as Set<String>
+  List<String> coordinatorDnis = playerDnis.findAll { String dni ->
+    ChildDeviceWrapper child = getChildDevice(dni)
+    child?.getDataValue('id')?.toString() in activeCoordinatorIds
+  }
+  Integer snapshotCursor = (apply.snapshotCursor ?: 0) as Integer
+  Integer snapshotEnd = Math.min(coordinatorDnis.size(), snapshotCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)
+  while(snapshotCursor < snapshotEnd) {
+    String dni = coordinatorDnis[snapshotCursor++]
+    ChildDeviceWrapper child = getChildDevice(dni)
+    if(child == null) { continue }
+    try {
+      String coordinatorId = child.getDataValue('id')?.toString()
+      List<ChildDeviceWrapper> snapshotFollowers = normalizeGroupPlayerIds(
+          child.getDataValue('groupPlayerIds'))
+        .findAll { String memberId -> memberId != coordinatorId }
+        .collect { String memberId -> findPlayerBySonosId(memberId) }
+        .findAll { ChildDeviceWrapper follower -> follower != null }
+      queueCoordinatorPlaybackSnapshot(child, snapshotFollowers)
+    } catch(Exception e) {
+      logWarn("Could not publish coordinator playback snapshot from ${dni}: ${e.message}")
     }
-    Integer snapshotCursor = (apply.snapshotCursor ?: 0) as Integer
-    Integer snapshotEnd = Math.min(coordinatorDnis.size(), snapshotCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)
-    while(snapshotCursor < snapshotEnd) {
-      String dni = coordinatorDnis[snapshotCursor++]
-      ChildDeviceWrapper child = getChildDevice(dni)
-      if(child == null) { continue }
-      try {
-        child.publishCurrentGroupPlaybackSnapshot()
-      } catch(Exception e) {
-        logWarn("Could not publish coordinator playback snapshot from ${dni}: ${e.message}")
-      }
-    }
-    apply.snapshotCursor = snapshotCursor
-    if(snapshotCursor < coordinatorDnis.size()) {
-      state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = apply
-      runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
-      return
-    }
+  }
+  apply.snapshotCursor = snapshotCursor
+  if(snapshotCursor < coordinatorDnis.size()) {
+    state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] = apply
+    runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
+    return
   }
   List<String> groupDnis = apply.groupDnis instanceof List ? (List<String>)apply.groupDnis : []
   Integer groupCursor = (apply.groupCursor ?: 0) as Integer
@@ -3455,14 +3393,6 @@ void applyHouseholdTopologyBatch() {
     return
   }
   state.remove(HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY)
-  if(apply.attributeOnly == true) {
-    zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
-        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
-    zgt.lastInboundAt = apply.observedAt ?: now()
-    state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
-    logDebug("Applied household topology metadata refresh; players=${playerDnis.size()}, groups=${groupDnis.size()}")
-    return
-  }
   unschedule('playerInitializationZgtWatchdog')
   unschedule('zgtTopologyWatchdog')
   zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
@@ -5704,8 +5634,6 @@ void playerStateUpdate(Map payload) {
       if(replaceableIndex >= 0) {
         pending.remove(replaceableIndex)
         logWarn("Player state queue reached ${PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS}; evicted oldest replaceable snapshot")
-      } else if(incoming.kind?.toString() == 'zgtTopology') {
-        logWarn("Player state queue reached ${PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS}; preserving ordered ZGT snapshot")
       } else {
         logError("Player state queue is full (${PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS}); rejected kind=${incoming.kind ?: 'unknown'} player=${incoming.playerDni ?: 'unknown'}")
         return
@@ -5727,9 +5655,7 @@ String playerStateUpdateCoalesceKey(Map payload) {
     case 'playbackObservation': case 'wsConnected': case 'wsRetry':
     case 'householdPresence':
       return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
-    case 'membership': return "${kind}:${payload.coordinatorId ?: playerDni}"
     case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
-    case 'followers': return "${kind}:${playerDni}"
     default: return null
   }
 }
@@ -5825,7 +5751,7 @@ List<Map> mergePlayerStateUpdateQueues(List<Map> deferred, List<Map> arrivals) {
     String key = playerStateUpdateCoalesceKey(payload)
     Integer index = key ? merged.findIndexOf { Map item -> playerStateUpdateCoalesceKey(item) == key } : -1
     if(index >= 0) { merged[index] = payload }
-    else if(merged.size() < PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS || payload?.kind?.toString() == 'zgtTopology') {
+    else if(merged.size() < PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS) {
       merged.add(payload)
     }
     else { logError("Player state continuation queue full; rejected kind=${payload?.kind ?: 'unknown'}") }
@@ -5894,10 +5820,6 @@ void playerStateUpdateHandler(Object event) {
     }
     return
   }
-  if(payload.kind == 'zgtTopology') {
-    acceptHouseholdTopology(playerDni, payload)
-    return
-  }
   if(payload.kind == 'wsRetry') {
     Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
         ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
@@ -5956,13 +5878,7 @@ void playerStateUpdateHandler(Object event) {
     }
     return
   }
-  if(kind == 'membership') {
-    if(coordinatorId && payload.playersInGroup instanceof List) {
-      updateGroupDevices(coordinatorId, (List<String>)payload.playersInGroup)
-    }
-    return
-  }
-  if(!(kind in ['state', 'followers'])) { return }
+  if(kind != 'state') { return }
   if(kind == 'state' && hasAutomaticAnnouncementPolicy() && coordinatorId == player.getDataValue('id')?.toString() &&
       payload.playbackAttrs instanceof Map &&
       ((Map)payload.playbackAttrs).keySet().any { Object name ->
@@ -5975,31 +5891,7 @@ void playerStateUpdateHandler(Object event) {
     ((List)payload.followerDNIs).each { Object dni ->
       ChildDeviceWrapper follower = dni != null ? getChildDevice(dni.toString()) : null
       if(follower != null) {
-        if(!isCurrentGroupFollower(coordinator, follower, coordinatorId)) {
-          logDebug("Ignoring stale ${kind} fanout from coordinator=${coordinatorId ?: 'unknown'} to ${follower.deviceNetworkId}; current membership no longer matches")
-          return
-        }
-        Boolean trackPositionEnabled = isPlayerTrackPositionUpdatesEnabled(follower)
-        Map<String, Object> followerAttributes = [:]
-        ((Map)payload.followerAttrs).each { Object name, Object value ->
-          String attributeName = name?.toString()
-          Boolean isTrackPositionAttribute = attributeName in ['trackPosition', 'trackPositionUpdated']
-          if(name != null && value != null && (!isTrackPositionAttribute || trackPositionEnabled)) {
-            followerAttributes[attributeName] = value
-          }
-        }
-        // These attributes describe the same transport state. A partial or
-        // coalesced fanout must not leave status and transportStatus split.
-        Object transportState = followerAttributes.containsKey('transportStatus')
-            ? followerAttributes.transportStatus : followerAttributes.status
-        if(transportState != null) {
-          followerAttributes.status = transportState
-          followerAttributes.transportStatus = transportState
-        }
-        Boolean followerOutOfSync = followerAttributes.any { String name, Object value ->
-          !sameChildStateValue(value, follower.currentValue(name, true))
-        }
-        queueChildStateBatch(dni.toString(), followerAttributes, followerOutOfSync)
+        queueFollowerStateBatch(coordinator, follower, coordinatorId, (Map)payload.followerAttrs)
       }
     }
   }
@@ -6033,6 +5925,7 @@ void topologyAttributeHandler(Event event) {
   Map payload = [groupId: player.currentValue('groupId', true)?.toString(),
     coordinatorId: coordinatorId, playerIds: playerIds, observedAt: now(), playerDni: playerDni]
   processTopologyPayload(player, payload)
+  queueNewMemberPlaybackSnapshot(player, previous, coordinatorId, playerIds)
 }
 
 ChildDeviceWrapper resolveTopologyEventPlayer(Event event) {
@@ -6050,6 +5943,7 @@ ChildDeviceWrapper resolveTopologyEventPlayer(Event event) {
 void processTopologyPayload(ChildDeviceWrapper player, Map payload) {
   String playerDni = player?.getDeviceNetworkId()?.toString()
   if(player == null || !(payload instanceof Map)) { return }
+  updateGroupDevices(payload.coordinatorId?.toString(), normalizeGroupPlayerIds(payload.playerIds))
   if(announcementPolicyTopologyChanged(player)) { queueAllAnnouncementPolicyRefreshes() }
   if(topologyUpdateMatchesHouseholdSnapshot(player, payload)) {
     logDebug("Topology update from ${playerDni} matches the app household snapshot; ZGT watchdog unchanged")
@@ -6079,6 +5973,72 @@ void processTopologyPayload(ChildDeviceWrapper player, Map payload) {
       data: [operationId: operation.operationId]
     ])
   }
+}
+
+/** Queue one coordinator attribute batch to a follower (join snapshot or
+ * incremental fanout), dropping stale membership and disabled track data. */
+void queueFollowerStateBatch(ChildDeviceWrapper coordinator, ChildDeviceWrapper follower,
+    String coordinatorId, Map followerAttrs) {
+  if(coordinator == null || follower == null || !(followerAttrs instanceof Map)) { return }
+  if(!isCurrentGroupFollower(coordinator, follower, coordinatorId)) {
+    logDebug("Ignoring stale fanout from coordinator=${coordinatorId ?: 'unknown'} to ${follower.deviceNetworkId}; current membership no longer matches")
+    return
+  }
+  Boolean trackPositionEnabled = isPlayerTrackPositionUpdatesEnabled(follower)
+  Map<String, Object> followerAttributes = [:]
+  ((Map)followerAttrs).each { Object name, Object value ->
+    String attributeName = name?.toString()
+    Boolean isTrackPositionAttribute = attributeName in ['trackPosition', 'trackPositionUpdated']
+    if(name != null && value != null && (!isTrackPositionAttribute || trackPositionEnabled)) {
+      followerAttributes[attributeName] = value
+    }
+  }
+  // These attributes describe the same transport state. A partial or
+  // coalesced fanout must not leave status and transportStatus split.
+  Object transportState = followerAttributes.containsKey('transportStatus')
+      ? followerAttributes.transportStatus : followerAttributes.status
+  if(transportState != null) {
+    followerAttributes.status = transportState
+    followerAttributes.transportStatus = transportState
+  }
+  Boolean followerOutOfSync = followerAttributes.any { String name, Object value ->
+    !sameChildStateValue(value, follower.currentValue(name, true))
+  }
+  queueChildStateBatch(follower.getDeviceNetworkId()?.toString(), followerAttributes, followerOutOfSync)
+}
+
+/** Send the coordinator's current playback snapshot to newly joined followers. */
+void queueNewMemberPlaybackSnapshot(ChildDeviceWrapper player, Map previous,
+    String coordinatorId, List<String> playerIds) {
+  String playerId = player?.getDataValue('id')?.toString()
+  if(!playerId || playerId != coordinatorId || playerIds == null) { return }
+  List<String> previousIds = previous?.playerIds ? normalizeGroupPlayerIds(previous.playerIds) : []
+  List<String> newIds = playerIds.findAll { String id -> !previousIds.contains(id) && id != playerId }
+  if(newIds.isEmpty()) { return }
+  List<ChildDeviceWrapper> followers = newIds.collect { String id -> findPlayerBySonosId(id) }
+      .findAll { ChildDeviceWrapper follower -> follower != null }
+  if(!followers.isEmpty()) { queueCoordinatorPlaybackSnapshot(player, followers) }
+}
+
+/** Build the coordinator snapshot from the driver and queue it to followers. */
+void queueCoordinatorPlaybackSnapshot(ChildDeviceWrapper coordinator,
+    List<ChildDeviceWrapper> followerDevices) {
+  if(coordinator == null || !followerDevices) { return }
+  String coordinatorId = coordinator.getDataValue('id')?.toString()
+  if(!coordinatorId) { return }
+  List<Map> snapshot
+  try {
+    snapshot = (List<Map>)coordinator.getCurrentPlayingStatesForGroup() ?: []
+  } catch(Exception e) {
+    logWarn("Could not read coordinator playback snapshot from ${coordinator.deviceNetworkId}: ${e.message}")
+    return
+  }
+  Map<String, Object> attributes = [:]
+  snapshot.each { Map event -> if(event?.name != null && event?.value != null) {
+      attributes[event.name.toString()] = event.value } }
+  if(attributes.isEmpty()) { return }
+  followerDevices.each { ChildDeviceWrapper follower ->
+      queueFollowerStateBatch(coordinator, follower, coordinatorId, attributes) }
 }
 
 /** Reject delayed coordinator snapshots after topology has moved the player. */
@@ -9298,9 +9258,7 @@ Map getCurrentAcceptedHouseholdTopology() {
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]
       : [:]
   if(topology.isEmpty() || !zgt.candidateDni ||
-      topology.sourcePlayerDni?.toString() != zgt.candidateDni?.toString() ||
-      topology.leaderGeneration?.toString() != zgt.leaderGeneration?.toString() ||
-      topology.bootGeneration?.toString() != zgt.bootGeneration?.toString()) {
+      topology.sourcePlayerDni?.toString() != zgt.candidateDni?.toString()) {
     return [:]
   }
   return topology
@@ -10786,7 +10744,43 @@ void zgtInProgressHandler(Event event) {
 }
 
 void zgtCurrentTopologyHandler(Event event) {
-  logDebug("ZGT Current Topology received from ${event?.device?.deviceNetworkId?.toString() ?: ''}, value length=${event?.value?.toString()?.length() ?: 0}")
+  ChildDeviceWrapper player = resolveTopologyEventPlayer(event)
+  String playerDni = event?.device?.getDeviceNetworkId()?.toString() ?: event?.deviceId?.toString()
+      ?: player?.getDeviceNetworkId()?.toString()
+  String raw = stripHiddenBridgeValue(event?.value?.toString())
+  if(!playerDni || !raw) { return }
+  Map rawTopology
+  try {
+    rawTopology = (Map)parseJson(raw)
+  } catch(Exception e) {
+    logWarn("Ignoring malformed ZGT current topology event: ${e.message}")
+    return
+  }
+  List<Map> groups = []
+  if(rawTopology?.groups instanceof List) {
+    ((List)rawTopology.groups).each { Object item ->
+      Map m = (Map)item
+      List<String> visibleIds = []
+      List<String> allIds = []
+      if(m?.members instanceof List) {
+        ((List)m.members).each { Object mem ->
+          Map mm = (Map)mem
+          String pid = mm?.playerId?.toString()
+          if(pid) {
+            allIds << pid
+            if(mm?.invisible != true && mm?.invisible?.toString() != '1') { visibleIds << pid }
+          }
+        }
+      }
+      if(visibleIds.isEmpty() && allIds.isEmpty() && m?.playerIds instanceof List) {
+        visibleIds = normalizeGroupPlayerIds(m.playerIds)
+        allIds = visibleIds
+      }
+      groups << [groupId: m?.groupId?.toString(), coordinatorId: m?.coordinatorId?.toString(),
+        playerIds: normalizeGroupPlayerIds(visibleIds.isEmpty() ? allIds : visibleIds)]
+    }
+  }
+  acceptHouseholdTopology(playerDni, [groups: groups])
 }
 
 void onAvtReceived(Map payload) {

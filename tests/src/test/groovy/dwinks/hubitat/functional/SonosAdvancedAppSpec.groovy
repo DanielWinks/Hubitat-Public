@@ -34,7 +34,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<String> acknowledgedParentRequests = []
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
-  List<Boolean> topologyMembershipPublishFlags = []
   List<String> groupPlaybackSnapshotRequests = []
   List<String> initializationRequests = []
   List<Map> initializationRoles = []
@@ -69,9 +68,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
     commands << [name: 'playerGetGroupsFull']
   }
 
-  Boolean publishCurrentGroupPlaybackSnapshot() {
+  List<Map> getCurrentPlayingStatesForGroup() {
     groupPlaybackSnapshotRequests << deviceNetworkId
-    return true
+    return [[name: 'status', value: 'playing'], [name: 'transportStatus', value: 'playing']]
   }
 
   void playerLoadAudioClip(String uri, BigDecimal volume, Integer duration, String correlationId) {
@@ -166,9 +165,8 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
       attemptId: attemptId, requestId: requestId]
   }
 
-  Boolean applyAppHouseholdTopology(String json, Boolean publishMembership = true) {
+  Boolean applyAppHouseholdTopology(String json) {
     currentValues.householdTopology = json
-    topologyMembershipPublishFlags << publishMembership
     return topologyApplyHook == null || topologyApplyHook.call(json) == true
   }
   void requestAppZgtResubscription() { commands << [name: 'requestAppZgtResubscription'] }
@@ -514,9 +512,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: firstRequest.leaderGeneration,
-      topology: [groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
-    ])
+      groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]])
 
     then:
     appScript.state.sonosHouseholdTopology == null
@@ -601,14 +597,10 @@ class SonosAdvancedAppSpec extends Specification {
         return true
       }
     }
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: zgt.leaderGeneration,
-      observedAt: appScript.now(),
-      topology: [groups: [
-        [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['RINCON_COORD', 'RINCON_FOLLOW']],
-        [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA'], playerNames: ['RINCON_EXTRA']]
-      ]]
-    ])
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [
+        [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
+        [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
+      ]])
     appScript.applyHouseholdTopologyBatch()
     appScript.startNextPlayerInitialization()
 
@@ -617,9 +609,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.playerInitializationZgt.topologyReady == true
     appScript.state.playerInitializationZgt.initializationComplete != true
     topologyReadyDuringApply == [false, false, false]
-    [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
-      player.topologyMembershipPublishFlags == [false]
-    }
     coordinator.currentValues.householdTopology != null
     follower.currentValues.householdTopology != null
     extra.currentValues.householdTopology != null
@@ -649,11 +638,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
     appScript.startNextPlayerInitialization()
     Map zgt = appScript.state.playerInitializationZgt as Map
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: zgt.leaderGeneration,
-      observedAt: appScript.now(),
-      topology: [groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
-    ])
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [[groupId: 'GROUP',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]])
     appScript.applyHouseholdTopologyBatch()
     String firstRequestId = appScript.state.playerInitializationActive[coordinator.deviceNetworkId].requestId
     appScript.finishPlayerInitialization(firstRequestId, false, 'test timeout after topology acceptance', true)
@@ -689,14 +675,10 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
     appScript.startNextPlayerInitialization()
     Map zgt = appScript.state.playerInitializationZgt as Map
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: zgt.leaderGeneration,
-      observedAt: appScript.now(),
-      topology: [groups: [
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [
         [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
         [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
-      ]]
-    ])
+      ]])
     appScript.applyHouseholdTopologyBatch()
 
     then:
@@ -728,195 +710,56 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "unchanged accepted household topology does not fan out again"() {
     given:
-    appScript.state.playerInitializationBootGeneration = 'boot-repeat-topology'
     appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-repeat', bootGeneration: 'boot-repeat-topology', topologyReady: false]
-    Map payload = [leaderGeneration: 'leader-repeat', observedAt: appScript.now(), topology: [groups: [[groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
-      playerNames: ['RINCON_COORD', 'RINCON_FOLLOW']]]]]
+      topologyReady: false]
+    Map payload = [groups: [[groupId: 'GROUP-1',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]]]
 
     when:
     appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload)
     appScript.applyHouseholdTopologyBatch()
     appScript.scheduled.clear()
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload + [observedAt: appScript.now() + 1000L])
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload)
 
     then:
     appScript.scheduled.empty
-    coordinator.topologyMembershipPublishFlags == [false]
-    follower.topologyMembershipPublishFlags == [false]
-    extra.topologyMembershipPublishFlags == [false]
     appScript.state.playerInitializationZgt.topologyReady == true
   }
 
-  def "stale ZGT snapshot with an older source timestamp is ignored"() {
+  def "repeated identical ZGT snapshot is ignored without reapplying"() {
     given:
-    Long firstSourceTimestamp = appScript.now() + 10000L
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', firstSourceTimestamp)
-    Long firstReceivedTimestamp = appScript.state.sonosHouseholdTopology.observedAt as Long
-    Map operation = [
-      groupingMode: 'EXPLICIT',
-      requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
-      desiredCoordinatorId: 'RINCON_COORD',
-      topologyObservations: [
-        RINCON_COORD: [groupId: 'OLD-CACHE', coordinatorId: 'RINCON_COORD',
-          playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], observedAt: firstReceivedTimestamp],
-        RINCON_FOLLOW: [groupId: 'OLD-CACHE', coordinatorId: 'RINCON_COORD',
-          playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], observedAt: firstReceivedTimestamp]
-      ]
-    ]
+    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
+    appScript.state.playerInitializationZgt.topologyReady = true
     appScript.scheduled.clear()
 
     when:
-    Long staleSourceTimestamp = appScript.now() + 1000L
-    acceptZgtTopology('GROUP-2', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', staleSourceTimestamp)
-    Map topology = appScript.readGroupOperationTopology(operation)
+    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
 
     then:
-    staleSourceTimestamp < firstSourceTimestamp
     appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-1'
-    appScript.state.sonosHouseholdTopology.sourceObservedAt == firstSourceTimestamp
-    appScript.state.sonosHouseholdTopology.observedAt == firstReceivedTimestamp
-    topology.groupId == 'GROUP-1'
-    operation.topologyObservations.values().every { Map observation -> observation.groupId == 'GROUP-1' }
     !appScript.scheduled.any { List job -> job[1] == 'applyHouseholdTopologyBatch' }
   }
 
-  def "newer ZGT snapshot showing ungrouped players is accepted and fanned out"() {
+  def "ZGT snapshot showing ungrouped players is accepted and fanned out"() {
     given:
-    Long groupedSourceTimestamp = appScript.now() + 1000L
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', groupedSourceTimestamp)
-    Map zgt = appScript.state.playerInitializationZgt as Map
+    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
 
     when:
-    Long soloSourceTimestamp = appScript.now() + 2000L
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: zgt.leaderGeneration,
-      observedAt: soloSourceTimestamp,
-      topology: [groups: [
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [
         [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
         [groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW', playerIds: ['RINCON_FOLLOW']]
-      ]]
-    ])
+      ]])
     appScript.applyHouseholdTopologyBatch()
 
     then:
-    appScript.state.sonosHouseholdTopology.sourceObservedAt == soloSourceTimestamp
     (appScript.state.sonosHouseholdTopology.groups as List<Map>).every { Map item ->
       (item.playerIds as List).size() == 1
-    }
-    [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
-      player.topologyMembershipPublishFlags == [false]
     }
     group.refreshedPlaybackUpdates.size() == 1
     (new JsonSlurper().parseText(group.refreshedPlaybackUpdates[0]).groups as List<Map>).every { Map item ->
       (item.playerIds as List).size() == 1
     }
     appScript.state.playerInitializationZgt.topologyReady == true
-  }
-
-  def "first snapshot from a new ZGT leader generation is accepted despite an older timestamp"() {
-    given:
-    Long futureSourceTimestamp = appScript.now() + 10000L
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', futureSourceTimestamp)
-
-    when:
-    appScript.state.playerInitializationZgt['leaderGeneration'] = 'new-leader'
-    Long olderSourceTimestamp = appScript.now() + 1000L
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: 'new-leader',
-      observedAt: olderSourceTimestamp,
-      topology: [groups: [[groupId: 'GROUP-2', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]]]
-    ])
-
-    then:
-    appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-2'
-    appScript.state.sonosHouseholdTopology.sourceObservedAt == olderSourceTimestamp
-  }
-
-  def "ZGT payload without a source timestamp is rejected and fails the candidate"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-no-timestamp'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-no-timestamp', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    Map zgt = appScript.state.playerInitializationZgt as Map
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: zgt.leaderGeneration,
-      topology: [groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
-    ])
-
-    then:
-    appScript.state.sonosHouseholdTopology == null
-    appScript.state.playerInitializationZgt.failedCandidates.contains(coordinator.deviceNetworkId)
-    appScript.state.playerInitializationZgt.lastFailure.reason.contains('without a usable source timestamp')
-    appScript.state.playerInitializationZgt.candidateDni == follower.deviceNetworkId
-  }
-
-  def "stale ZGT snapshot does not advance watchdog state or fail the candidate"() {
-    given:
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', appScript.now() + 10000L)
-    Long lastInboundBefore = appScript.state.playerInitializationZgt.lastInboundAt as Long
-    Boolean topologyReadyBefore = appScript.state.playerInitializationZgt.topologyReady == true
-    List failedBefore = appScript.state.playerInitializationZgt.failedCandidates as List
-
-    when:
-    acceptZgtTopology('GROUP-2', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW', appScript.now() + 1000L)
-
-    then:
-    appScript.state.playerInitializationZgt.lastInboundAt == lastInboundBefore
-    appScript.state.playerInitializationZgt.topologyReady == topologyReadyBefore
-    appScript.state.playerInitializationZgt.failedCandidates == failedBefore
-    appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-1'
-  }
-
-  def "unchanged household membership fans out changed group and player names only"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-name-refresh'
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-name-refresh', bootGeneration: 'boot-name-refresh', topologyReady: false]
-    Map initialPayload = [leaderGeneration: 'leader-name-refresh', observedAt: appScript.now(), topology: [groups: [[
-      groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', coordinatorName: 'Cora’s Room',
-      playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['Cora’s Room', 'Sebastian’s Room'],
-      groupName: 'Cora’s Room + 1'
-    ]]]]
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, initialPayload)
-    appScript.applyHouseholdTopologyBatch()
-    appScript.scheduled.clear()
-
-    when:
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: 'leader-name-refresh', observedAt: appScript.now() + 1000L,
-      topology: [groups: [[
-        groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', coordinatorName: 'Cora’s Room',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], playerNames: ['Cora’s Room', 'Sebastian’s Room'],
-        groupName: 'Downstairs'
-      ]]]
-    ])
-
-    then:
-    appScript.state.householdTopologyApply.attributeOnly == true
-    appScript.scheduled.any { List job -> job[1] == 'applyHouseholdTopologyBatch' }
-
-    when:
-    appScript.applyHouseholdTopologyBatch()
-
-    then:
-    [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
-      player.topologyMembershipPublishFlags == [false, false]
-    }
-    new JsonSlurper().parseText(coordinator.currentValues.householdTopology).groups[0].groupName == 'Downstairs'
-    new JsonSlurper().parseText(follower.currentValues.householdTopology).groups[0].coordinatorName == 'Cora’s Room'
-    appScript.state.playerInitializationZgt.topologyReady == true
-    !appScript.scheduled.any { List job -> job[1] == 'startNextPlayerInitialization' }
-    !appScript.state.containsKey('householdTopologyApply')
   }
 
   def "topology differing from the accepted household snapshot arms the ZGT watchdog"() {
@@ -954,12 +797,8 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
     appScript.startNextPlayerInitialization()
-    Map zgt = appScript.state.playerInitializationZgt as Map
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: zgt.leaderGeneration,
-      observedAt: appScript.now(),
-      topology: [groups: [[groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]]
-    ])
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [[groupId: 'GROUP-1',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]])
     appScript.applyHouseholdTopologyBatch()
 
     then:
@@ -1227,28 +1066,18 @@ class SonosAdvancedAppSpec extends Specification {
     emitTopologyObservation('RINCON_FOLLOW', groupId, coordinatorId, playerIds)
   }
 
-  void acceptZgtTopology(String groupId, String coordinatorId, String playerIds, Long observedAt = null) {
-    String bootGeneration = 'test-favorite-zgt-boot'
-    String leaderGeneration = 'test-favorite-zgt-leader'
+  void acceptZgtTopology(String groupId, String coordinatorId, String playerIds) {
     if(!(appScript.state.playerInitializationZgt instanceof Map)) {
-      appScript.state.playerInitializationBootGeneration = bootGeneration
       appScript.state.playerInitializationZgt = [
         candidateDni: coordinator.deviceNetworkId,
-        leaderGeneration: leaderGeneration,
-        bootGeneration: bootGeneration,
         topologyReady: true
       ]
     }
-    Long eventObservedAt = observedAt ?: appScript.now() + (++topologyObservationSequence * 1000L)
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      leaderGeneration: leaderGeneration,
-      observedAt: eventObservedAt,
-      topology: [groups: [[
+    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [[
         groupId: groupId,
         coordinatorId: coordinatorId,
         playerIds: playerIds.split(',') as List
-      ]]]
-    ])
+      ]]])
   }
 
   void emitPlayback(String playerId, String playbackState, Long observedAt = null, String groupId = 'GROUP-1') {
@@ -2146,64 +1975,22 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.state.pendingChildEvents == null
-    appScript.logs.any { String message -> message.contains('Ignoring stale state fanout') }
+    appScript.logs.any { String message -> message.contains('Ignoring stale fanout') }
   }
 
-  def "new follower snapshot with coordinator identity is accepted for current membership"() {
+  def "coordinator roster growth queues the playback snapshot to the new follower"() {
     given:
-    Map batch = [kind: 'followers', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
-      followerDNIs: [follower.deviceNetworkId], followerAttrs: [
-        status: 'playing', currentFavorite: 'No favorite playing', currentTrackName: 'Not Available'
-      ]]
+    coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
+    coordinator.currentValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
+    coordinator.currentValues.groupId = 'GROUP-1'
 
     when:
-    appScript.playerStateUpdateHandler(batch)
+    appScript.topologyAttributeHandler([device: coordinator, name: 'groupPlayerIds',
+      value: 'RINCON_COORD,RINCON_FOLLOW'] as Event)
 
     then:
     appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentFavorite == 'No favorite playing'
-  }
-
-  def "queued ZGT snapshots are not coalesced and drain in arrival order"() {
-    given:
-    List<String> receivedGroupIds = []
-    appScript.metaClass.acceptHouseholdTopology = { String playerDni, Map payload ->
-      receivedGroupIds << payload.topology.groups[0].groupId.toString()
-    }
-    Map first = [kind: 'zgtTopology', playerDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-1', topology: [groups: [[groupId: 'GROUP-FIRST']]]]
-    Map second = [kind: 'zgtTopology', playerDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-1', topology: [groups: [[groupId: 'GROUP-SECOND']]]]
-
-    when:
-    appScript.playerStateUpdate(first)
-    appScript.playerStateUpdate(second)
-
-    then:
-    appScript.state.pendingPlayerStateUpdates*.topology*.groups*.groupId ==
-      [['GROUP-FIRST'], ['GROUP-SECOND']]
-
-    when:
-    appScript.drainQueuedPlayerStateUpdates()
-
-    then:
-    receivedGroupIds == ['GROUP-FIRST', 'GROUP-SECOND']
-  }
-
-  def "ZGT snapshots remain queued when the event queue reaches capacity"() {
-    given:
-    appScript.state.pendingPlayerStateUpdates = (0..<512).collect { Integer index ->
-      [kind: "lifecycle-${index}", playerDni: coordinator.deviceNetworkId]
-    }
-
-    when:
-    appScript.playerStateUpdate([kind: 'zgtTopology', playerDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-1', topology: [groups: [[groupId: 'GROUP-LATEST']]]])
-
-    then:
-    appScript.state.pendingPlayerStateUpdates.size() == 513
-    appScript.state.pendingPlayerStateUpdates.last().topology.groups[0].groupId == 'GROUP-LATEST'
-    appScript.logs.any { String entry -> entry.contains('preserving ordered ZGT snapshot') }
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].transportStatus == 'playing'
   }
 
   def "player state drain yields after its fixed item budget"() {
