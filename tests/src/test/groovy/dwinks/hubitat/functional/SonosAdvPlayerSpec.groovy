@@ -1394,6 +1394,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingTopologySnapshotByDni.clear()
     driver.pendingTopologyWebsocketByDni.clear()
     driver.pendingTopologyKindByDni.clear()
+    driver.currentGrcSnapshotByDni.clear()
+    driver.currentGrcSnapshotByCoordinator.clear()
+    driver.currentGrcSeqByDni.clear()
+    driver.currentGrcSidByDni.clear()
     driver.pendingLocalDeviceEvents.clear()
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
@@ -2023,6 +2027,195 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.currentZgtByGroupId.containsKey('G2:2')
     driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 21
+  }
+
+  def "GRC full property set applies volume mute changeable and emits bridged snapshot"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>25</GroupVolume></e:property>' +
+      '<e:property><GroupMute>0</GroupMute></e:property>' +
+      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 0, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 25
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'unmuted'
+    driver.getCurrentGrcSnapshot().snapshot.groupVolumeChangeable == true
+    driver.getCurrentGrcSnapshot().seq == 0
+    driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000105'
+    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted']
+    driver.device.events.find { Map e -> e.name == 'grcGroupControl' }?.value?.contains('"groupVolume"')
+    driver.device.getDataValue('grcSnapshotJson')?.contains('"groupVolume":25')
+  }
+
+  def "GRC single-key update merges without clobbering sibling value"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String full = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>25</GroupVolume></e:property>' +
+      '<e:property><GroupMute>0</GroupMute></e:property>' +
+      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
+    String muteOnly = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupMute>1</GroupMute></e:property></e:propertyset>'
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', full, 0, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', muteOnly, 1, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 25
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted', 'muted']
+    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
+  }
+
+  def "GRC captured normal and initial subscription bodies map to unmuted and muted"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String normal = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>1</GroupVolume></e:property>' +
+      '<e:property><GroupMute>0</GroupMute></e:property>' +
+      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
+    String initial = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>1</GroupVolume></e:property>' +
+      '<e:property><GroupMute>1</GroupMute></e:property>' +
+      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', normal, 0, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'unmuted'
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', initial, 1, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted', 'muted']
+  }
+
+  def "GRC SEQ header drops stale payloads without applying"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
+      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>10</GroupVolume></e:property></e:propertyset>',
+      20, 'uuid:RINCON_TEST_sub0000000105')
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
+      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>99</GroupVolume></e:property></e:propertyset>',
+      19, 'uuid:RINCON_TEST_sub0000000105')
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 10
+    driver.getCurrentGrcSnapshot().seq == 20
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
+      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>30</GroupVolume></e:property></e:propertyset>',
+      21, 'uuid:RINCON_TEST_sub0000000105')
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 30
+    driver.getCurrentGrcSnapshot().seq == 21
+  }
+
+  def "GRC SEQ zero and SID change rebaseline after resubscribe"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
+      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>10</GroupVolume></e:property></e:propertyset>',
+      20, 'uuid:RINCON_TEST_sub0000000105')
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
+      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>77</GroupVolume></e:property></e:propertyset>',
+      0, 'uuid:RINCON_TEST_sub0000000106')
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 77
+    driver.getCurrentGrcSnapshot().seq == 0
+    driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000106'
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
+      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>88</GroupVolume></e:property></e:propertyset>',
+      5, 'uuid:RINCON_TEST_sub0000000107')
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 88
+    driver.getCurrentGrcSnapshot().seq == 5
+    driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000107'
+  }
+
+  def "GRC invalid field is ignored without dropping sibling value"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>notanumber</GroupVolume></e:property>' +
+      '<e:property><GroupMute>1</GroupMute></e:property></e:propertyset>'
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 0, null)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == null
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }.empty
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
+  }
+
+  def "GRC blank and duplicate payloads do not requeue local events"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>40</GroupVolume></e:property>' +
+      '<e:property><GroupMute>0</GroupMute></e:property></e:propertyset>'
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', '   ', 0, null)
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot == null
+    driver.device.events.empty
+
+    when:
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 1, null)
+    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 2, null)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [40]
+    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['unmuted']
+  }
+
+  def "legacy GRC shim without SEQ still applies the current snapshot"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><GroupVolume>55</GroupVolume></e:property>' +
+      '<e:property><GroupMute>1</GroupMute></e:property></e:propertyset>'
+
+    when:
+    driver.processGroupRenderingControlMessages(xml)
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 55
+    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    driver.getCurrentGrcSnapshot().seq == null
+    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [55]
   }
 
   def "topology snapshot extracts visible roster names coordinator group and battery once"() {

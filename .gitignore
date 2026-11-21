@@ -4,3 +4,4 @@
 *.DS_Store
 xml.xml
 .hubitat/oldmetadata.json
+SonosXML/*

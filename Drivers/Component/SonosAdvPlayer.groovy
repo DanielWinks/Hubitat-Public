@@ -703,6 +703,10 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+@Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByDni = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, AtomicInteger> currentGrcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+@Field static ConcurrentHashMap<String, String> currentGrcSidByDni = new ConcurrentHashMap<String, String>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -1734,6 +1738,10 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(pendingTopologySnapshotByDni)
     clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
     clearedEntries += clearStaticMap(pendingTopologyKindByDni)
+    clearedEntries += clearStaticMap(currentGrcSnapshotByDni)
+    clearedEntries += clearStaticMap(currentGrcSnapshotByCoordinator)
+    clearedEntries += clearStaticMap(currentGrcSeqByDni)
+    clearedEntries += clearStaticMap(currentGrcSidByDni)
     clearedEntries += clearStaticMap(wsSubscriptionStatus)
     clearedEntries += clearStaticMap(jsonSlurpers)
     clearedEntries += clearStaticMap(eventTimestamps)
@@ -1775,6 +1783,9 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(pendingTopologySnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentGrcSnapshotByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentGrcSidByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
   removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
   removedEntries += pruneEventTimestampKeys(activePlayerDnis)
@@ -1924,6 +1935,9 @@ void clearStaticDriverStateForCurrentDevice() {
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
+      currentGrcSnapshotByDni?.remove(dni)
+      currentGrcSeqByDni?.remove(dni)
+      currentGrcSidByDni?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
       Map upnpEntry = upnpRequestQueues?.get(dni)
@@ -4601,6 +4615,8 @@ void parse(String raw) {
     if(seqRaw != null) {
       try { seq = Integer.parseInt(seqRaw.toString().trim()) } catch(Exception ignored) { seq = null }
     }
+    String sid = messageHeaders["SID"]?.toString()?.trim() ?: null
+    if(sid == '') { sid = null }
     logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seq ?: 'unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
     // Header switch: serviceType is authoritative; request-line keys are fallback-only for old firmware
     if(serviceType != null) {
@@ -4635,7 +4651,10 @@ void parse(String raw) {
           try {
             observeExpectedUpnpSubscriptionEvent('sid4')
             setLastInboundMrGrcEvent()
-            processGroupRenderingControlMessages(xmlBody)
+            String grcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+            logZgtXmlAtTrace(grcDni, xmlBody)
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
+            deferOrProcessGroupRenderingControlPayload(grcDni, xmlBody, seq, sid)
           } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
           return
         default:
@@ -4675,7 +4694,10 @@ void parse(String raw) {
       try {
         observeExpectedUpnpSubscriptionEvent('sid4')
         setLastInboundMrGrcEvent()
-        processGroupRenderingControlMessages(xmlBody)
+        String grcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+        logZgtXmlAtTrace(grcDni, xmlBody)
+        if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
+        deferOrProcessGroupRenderingControlPayload(grcDni, xmlBody, seq, sid)
       } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
       return
     }
@@ -5230,6 +5252,145 @@ Boolean applyAvtSnapshotIfDifferent(Map snap) {
 }
 
 @CompileStatic
+Map parseGrcFullSnapshot(String xmlString) {
+  if(!isPlausibleXmlPayload(xmlString)) { return null }
+  try {
+    XmlSlurper parser = new XmlSlurper()
+    GPathResult propertyset = parser.parseText(xmlString)
+    String volumeText = ((GPathResult)propertyset['property']['GroupVolume']).text()?.toString()?.trim()
+    String muteText = ((GPathResult)propertyset['property']['GroupMute']).text()?.toString()?.trim()
+    String changeableText = ((GPathResult)propertyset['property']['GroupVolumeChangeable']).text()?.toString()?.trim()
+    Integer groupVolume = null
+    if(volumeText) {
+      try {
+        Integer parsed = Integer.parseInt(volumeText)
+        if(parsed >= 0 && parsed <= 100) { groupVolume = parsed }
+        else { logDebug("Ignoring out-of-range GRC GroupVolume value=${volumeText}") }
+      } catch(Exception ignored) { logDebug("Ignoring non-numeric GRC GroupVolume value=${volumeText}") }
+    }
+    String groupMute = null
+    if(muteText) {
+      if(muteText == '1') { groupMute = 'muted' }
+      else if(muteText == '0') { groupMute = 'unmuted' }
+      else { logDebug("Ignoring unexpected GRC GroupMute value=${muteText}") }
+    }
+    Boolean changeable = null
+    if(changeableText) {
+      if(changeableText == '1') { changeable = true }
+      else if(changeableText == '0') { changeable = false }
+      else { logDebug("Ignoring unexpected GRC GroupVolumeChangeable value=${changeableText}") }
+    }
+    if(groupVolume == null && groupMute == null && changeable == null) { return null }
+    return [groupVolume: groupVolume, groupMute: groupMute, groupVolumeChangeable: changeable, observedAt: now()]
+  } catch(Exception e) {
+    logDebug("Could not parse GRC snapshot: ${e.message}")
+    return null
+  }
+}
+
+Map getCurrentGrcSnapshot() {
+  String dni = device.getDeviceNetworkId()?.toString()
+  return [snapshot: currentGrcSnapshotByDni[dni], seq: currentGrcSeqByDni[dni]?.get(), sid: currentGrcSidByDni[dni]]
+}
+
+Map getCurrentGrc() { return getCurrentGrcSnapshot() }
+
+void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody) {
+  deferOrProcessGroupRenderingControlPayload(dni, xmlBody, null, null)
+}
+
+void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq) {
+  deferOrProcessGroupRenderingControlPayload(dni, xmlBody, incomingSeq, null)
+}
+
+void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
+  handleGrcFull(dni, xmlBody, incomingSeq, incomingSid)
+}
+
+void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
+  String deviceDni = dni ?: device.getDeviceNetworkId()
+  if(!deviceDni || !xmlBody) { return }
+  if(!isPlausibleXmlPayload(xmlBody)) { return }
+  String sidKey = incomingSid?.toString()?.trim() ?: null
+  if(sidKey == '') { sidKey = null }
+  String storedSid = currentGrcSidByDni.get(deviceDni)
+  Boolean sidChanged = sidKey != null && storedSid != null && storedSid != sidKey
+  Boolean isReset = (incomingSeq != null && incomingSeq == 0) || sidChanged
+  if(incomingSeq != null) {
+    AtomicInteger ref = currentGrcSeqByDni.get(deviceDni)
+    if(ref == null) {
+      AtomicInteger created = new AtomicInteger(incomingSeq)
+      currentGrcSeqByDni.putIfAbsent(deviceDni, created)
+      ref = currentGrcSeqByDni.get(deviceDni)
+    }
+    if(isReset) {
+      ref.set(incomingSeq)
+    } else {
+      if(ref.get() > incomingSeq) {
+        logDebug("Ignoring stale GRC SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
+        return
+      }
+      Integer prevVal = ref.get()
+      while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
+        prevVal = ref.get()
+        if(incomingSeq <= prevVal) { logDebug("Ignoring stale GRC SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}"); return }
+      }
+    }
+  }
+  Map newSnapshot = parseGrcFullSnapshot(xmlBody)
+  if(newSnapshot == null) { return }
+  if(incomingSeq != null && !isReset) {
+    AtomicInteger ref2 = currentGrcSeqByDni.get(deviceDni)
+    if(ref2 != null && incomingSeq < ref2.get()) {
+      logDebug("Ignoring GRC that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
+      return
+    }
+  }
+  Map prior = currentGrcSnapshotByDni.get(deviceDni)
+  Map merged = new LinkedHashMap()
+  if(prior != null) { merged.putAll(prior) }
+  newSnapshot.each { Object key, Object value -> if(value != null) { merged[key] = value } }
+  currentGrcSnapshotByDni[deviceDni] = new LinkedHashMap(merged)
+  String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
+  if(coordRincon) { currentGrcSnapshotByCoordinator[coordRincon] = new LinkedHashMap(merged) }
+  if(incomingSeq != null) {
+    AtomicInteger ref2 = currentGrcSeqByDni.get(deviceDni)
+    if(ref2 != null) { ref2.set(incomingSeq) } else { currentGrcSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
+  }
+  if(sidKey != null) { currentGrcSidByDni[deviceDni] = sidKey }
+  applyGrcSnapshotIfDifferent(merged)
+  sendDeviceEvent('grcGroupControl', JsonOutput.toJson(merged))
+}
+
+Boolean applyGrcSnapshotIfDifferent(Map snap) {
+  if(snap == null) { return false }
+  Map prior = null
+  try {
+    String json = device.getDataValue('grcSnapshotJson')?.toString()
+    if(json) { prior = (Map)new JsonSlurper().parseText(json) }
+  } catch(Exception ignored) { prior = null }
+  Integer newVolume = snap.groupVolume as Integer
+  Integer priorVolume = prior?.groupVolume != null ? (prior.groupVolume as Integer) : null
+  String newMute = snap.groupMute?.toString()
+  String priorMute = prior?.groupMute?.toString()
+  Boolean changeableChanged = snap.groupVolumeChangeable != null &&
+      (snap.groupVolumeChangeable as Boolean) != (prior?.groupVolumeChangeable != null ? (prior.groupVolumeChangeable as Boolean) : null)
+  Boolean volumeChanged = newVolume != null && newVolume != priorVolume
+  Boolean muteChanged = newMute != null && newMute != priorMute
+  try { device.updateDataValue('grcSnapshotJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
+  if(!volumeChanged && !muteChanged && !changeableChanged) { return false }
+  if(volumeChanged) {
+    setGroupVolumeState(newVolume)
+    queueGroupDeviceUpdate([_groupVolume: newVolume])
+  }
+  if(muteChanged) {
+    setGroupMuteState(newMute)
+    queueGroupDeviceUpdate([_groupMute: newMute])
+  }
+  return true
+}
+
+@CompileStatic
 Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
   if(!playerId || !isPlausibleXmlPayload(xmlString)) { return null }
   try {
@@ -5677,22 +5838,8 @@ void updateZoneGroupName(String groupName) {
   queueLocalDeviceEvent('groupName', groupName)
 }
 
-@CompileStatic
 void processGroupRenderingControlMessages(String xmlString) {
-  GPathResult propertyset = new XmlSlurper().parseText(xmlString)
-  GPathResult gVol = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupVolume'}
-  GPathResult gMute = ((GPathResult)propertyset.children().children()).find{GPathResult it -> it.name() == 'GroupMute'}
-
-  if(gVol != null && gVol.size() > 0) {
-    Integer groupVolume = Integer.parseInt(gVol.text())
-    setGroupVolumeState(groupVolume)
-    queueGroupDeviceUpdate([_groupVolume: groupVolume])
-  }
-  if(gMute != null && gMute.size() > 0) {
-    String groupMute = Integer.parseInt(gMute.text()) == 1 ? 'muted' : 'unmuted'
-    setGroupMuteState(groupMute)
-    queueGroupDeviceUpdate([_groupMute: groupMute])
-  }
+  deferOrProcessGroupRenderingControlPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString)
 }
 
 @CompileStatic
@@ -6222,6 +6369,13 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
         logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
+        if(request.sidKey == 'sid4' && request.operation == 'subscribe') {
+          String grcDni = device.getDeviceNetworkId()?.toString()
+          if(grcDni) {
+            currentGrcSeqByDni.remove(grcDni)
+            currentGrcSidByDni.remove(grcDni)
+          }
+        }
         if(request.sidKey == 'sid3' && isAppZgtSubscriber()) {
           publishZgtSubscriptionStatus('accepted', "${request.operation} accepted with SID")
         }
