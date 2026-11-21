@@ -4964,9 +4964,16 @@ Map parseZgtFullSnapshot(String xmlString) {
     List<Map> vanished = []
     try {
       GPathResult vanEl = (GPathResult)stateXmlParsed['VanishedDevices']
-      if(vanEl.size() > 0) { vanished = vanEl.children().collect{ [uuid: it['@UUID'].toString()] } }
-    } catch(Exception ignored) { vanished = [] }
-    return [observedAt: System.currentTimeMillis(), groups: groups, vanishedDevices: vanished]
+      if(vanEl.size() > 0) {
+        for(Object childObject : vanEl.children()) {
+          GPathResult child = (GPathResult)childObject
+          Map vanishedDevice = new LinkedHashMap()
+          vanishedDevice.put('uuid', child['@UUID'].toString())
+          vanished.add(vanishedDevice)
+        }
+      }
+    } catch(Exception ignored) { vanished.clear() }
+    return [observedAt: Instant.now().toEpochMilli(), groups: groups, vanishedDevices: vanished]
   } catch(Exception e) {
     logDebug("Could not inspect ZGT topology: ${e.message}")
     return null
@@ -4974,7 +4981,7 @@ Map parseZgtFullSnapshot(String xmlString) {
 }
 
 Map getCurrentZgtTopology() {
-  return [ groups: new ArrayList(currentZgtByGroupId.values()), observedAt: System.currentTimeMillis() ]
+  return [ groups: new ArrayList(currentZgtByGroupId.values()), observedAt: Instant.now().toEpochMilli() ]
 }
 
 Map<String, Object> parseAvtMetaData(String rawDidl) {
@@ -5285,7 +5292,7 @@ Map parseGrcFullSnapshot(String xmlString) {
       else { logDebug("Ignoring unexpected GRC GroupVolumeChangeable value=${changeableText}") }
     }
     if(groupVolume == null && groupMute == null && changeable == null) { return null }
-    return [groupVolume: groupVolume, groupMute: groupMute, groupVolumeChangeable: changeable, observedAt: System.currentTimeMillis()]
+    return [groupVolume: groupVolume, groupMute: groupMute, groupVolumeChangeable: changeable, observedAt: Instant.now().toEpochMilli()]
   } catch(Exception e) {
     logDebug("Could not parse GRC snapshot: ${e.message}")
     return null
