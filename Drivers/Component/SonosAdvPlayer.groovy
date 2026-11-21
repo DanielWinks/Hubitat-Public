@@ -4677,10 +4677,6 @@ void parse(String raw) {
             deferOrProcessGroupRenderingControlPayload(grcDni, xmlBody, seq, sid)
           } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
           return
-        default:
-          logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
-              "Could not determine service type for message: ${message}")
-          return
       }
     }
     logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
