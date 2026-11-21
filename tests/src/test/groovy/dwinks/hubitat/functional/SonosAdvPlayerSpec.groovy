@@ -1234,6 +1234,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
 
     then:
+    println 'PENDING-DUMP: ' + driver.pendingLocalDeviceEvents
+    println 'LOGS-DUMP: ' + driver.logs
     driver.pendingLocalDeviceEvents[dni].status == expectedStatus
     driver.pendingLocalDeviceEvents[dni].transportStatus == expectedStatus
     driver.pendingGroupDeviceUpdates[dni].status == expectedStatus
@@ -1257,6 +1259,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
+    println 'DBG TRANS pending=' + driver.pendingLocalDeviceEvents + ' snap=' + driver.currentAvtSnapshotByDni[dni] + ' logs=' + driver.logs
 
     then:
     driver.device.currentValue('status') == 'paused'
@@ -1963,6 +1966,41 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.currentZgtByGroupId['G1:1'].members*.playerId == ['RINCON_TEST', 'RINCON_MEMBER']
+  }
+
+  def "ZGT SEQ header drops stale payloads without applying"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.currentZgtByGroupId.clear()
+    driver.currentZgtSeqByDni.clear()
+    String zs = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST"><ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
+    String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body = '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
+    String zs2 = '<ZoneGroups><ZoneGroup ID="G2:2" Coordinator="RINCON_OTHER"><ZoneGroupMember UUID="RINCON_OTHER" ZoneName="Other"/></ZoneGroup></ZoneGroups>'
+    String esc2 = zs2.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body2 = '<propertyset><property><ZoneGroupState>' + esc2 + '</ZoneGroupState></property></propertyset>'
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body, 20)
+
+    then:
+    driver.currentZgtByGroupId.containsKey('G1:1')
+    driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 20
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body2, 19)
+
+    then:
+    !driver.currentZgtByGroupId.containsKey('G2:2')
+    driver.currentZgtByGroupId.containsKey('G1:1')
+    driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 20
+
+    when:
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body2, 21)
+
+    then:
+    driver.currentZgtByGroupId.containsKey('G2:2')
+    driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 21
   }
 
   def "topology snapshot extracts visible roster names coordinator group and battery once"() {

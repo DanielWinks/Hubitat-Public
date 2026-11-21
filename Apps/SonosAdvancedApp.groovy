@@ -291,6 +291,8 @@ preferences {
 @Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
 @Field static final String ZGT_CURRENT_TOPOLOGY_EVENT = 'zgtCurrentTopology'
 @Field static final String PARENT_APP_REQUEST_ATTRIBUTE = 'parentAppRequest'
+@Field static java.util.concurrent.ConcurrentHashMap<String, Map> avzStoreByRincon = new java.util.concurrent.ConcurrentHashMap<String, Map>()
+@Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -10727,6 +10729,36 @@ void zgtInProgressHandler(Event event) {
 
 void zgtCurrentTopologyHandler(Event event) {
   logDebug("ZGT Current Topology received from ${event?.device?.deviceNetworkId?.toString() ?: ''}, value length=${event?.value?.toString()?.length() ?: 0}")
+}
+
+void onAvtReceived(Map payload) {
+  String rincon = payload?.rincon?.toString()
+  if(rincon == null) { return }
+  List<String> followers = normalizeGroupPlayerIds(payload?.followers)
+  avzStoreByRincon[rincon] = new LinkedHashMap([rincon: rincon, followers: followers, receivedAt: now()])
+  runInMillis(1, 'forwardAvtToGroup', [data: [rincon: rincon, followers: followers], overwrite: false])
+}
+
+void forwardAvtToGroup(Map data = [:]) {
+  String rincon = data?.rincon?.toString()
+  if(rincon == null) { return }
+  Map zgt = getCurrentReceivedZgtTopology()
+  List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
+  Map group = groups.find { Map g -> (g.coordinatorId?.toString() == rincon) || ((List<?>)g.members).any { Map m -> m.playerId?.toString() == rincon } }
+  List<String> followerIds = []
+  if(group != null) {
+    String coord = group.coordinatorId?.toString()
+    followerIds = ((List<?>)group.members).collect { Map m -> m.playerId?.toString() }.findAll { String id -> id && id != coord }
+  } else {
+    followerIds = normalizeGroupPlayerIds(data?.followers)
+  }
+  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  followerIds.unique().each { String fid ->
+    ChildDeviceWrapper f = rinconMap[fid]
+    if(f != null) {
+      try { f.onAvtUpdated() } catch(Exception e) { logDebug("forwardAvtToGroup onAvtUpdated failed for ${fid}: ${e.message}") }
+    }
+  }
 }
 
 Map getCurrentReceivedZgtTopology() {

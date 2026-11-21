@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @Field static final List<Integer> ANNOUNCEMENT_RESTORE_RETRY_DELAYS = [1, 2].asImmutable()
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
@@ -133,7 +134,7 @@ metadata {
     version: '0.18.9',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    singleThreaded: true,
+    singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
@@ -423,6 +424,10 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, String> pendingTopologyWebsocketByDni = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Map> currentZgtByGroupId = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, AtomicInteger> currentZgtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+@Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByDni = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -4315,18 +4320,73 @@ void parse(String raw) {
       logDebug('Ignoring UPnP NOTIFY with an empty body')
       return
     }
-    String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]
-    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
-    if(serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
-      try {
-        logDebug('AVTransport event processing beginning')
-        setLastInboundAVTransportEvent()
-        observeExpectedUpnpSubscriptionEvent('sid1')
-        processAVTransportMessages(xmlBody, getLocalUpnpUrl())
-        logDebug('AVTransport event processing completed')
-      } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
+    String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]?.toString()
+    String seqRaw = messageHeaders["SEQ"] ?: messageHeaders["X-SONOS-SEQ"]
+    Integer seq = null
+    if(seqRaw != null) {
+      try { seq = Integer.parseInt(seqRaw.toString().trim()) } catch(Exception ignored) { seq = null }
     }
-    else if(serviceType == 'RenderingControl' || messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
+    logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seq ?: 'unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
+    // Header switch: serviceType is authoritative; request-line keys are fallback-only for old firmware
+    if(serviceType != null) {
+      switch(serviceType) {
+        case 'ZoneGroupTopology':
+          try {
+            observeExpectedUpnpSubscriptionEvent('sid3')
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
+            String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+            logZgtXmlAtTrace(zgtDni, xmlBody)
+            deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, seq)
+          } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
+          return
+        case 'AVTransport':
+          try {
+            String avtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+            logZgtXmlAtTrace(avtDni, xmlBody)
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AVT event payload'); return }
+            deferOrProcessAvTransportPayload(avtDni, xmlBody, seq)
+          } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
+          return
+        case 'RenderingControl':
+          try {
+            logDebug('RenderingControl event processing beginning')
+            observeExpectedUpnpSubscriptionEvent('sid2')
+            setLastInboundMrRcEvent()
+            processRenderingControlMessages(xmlBody)
+            logDebug('RenderingControl event processing completed')
+          } catch (Exception e) { logException('RenderingControl event processing failed', e) }
+          return
+        case 'GroupRenderingControl':
+          try {
+            observeExpectedUpnpSubscriptionEvent('sid4')
+            setLastInboundMrGrcEvent()
+            processGroupRenderingControlMessages(xmlBody)
+          } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
+          return
+        default:
+          logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
+              "Could not determine service type for message: ${message}")
+          return
+      }
+    }
+    if(messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
+      try {
+        observeExpectedUpnpSubscriptionEvent('sid3')
+        if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
+        String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+        logZgtXmlAtTrace(zgtDni, xmlBody)
+        deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, seq)
+      } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
+      return
+    }
+    if(messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
+      try {
+        String avtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+        deferOrProcessAvTransportPayload(avtDni, xmlBody, seq)
+      } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
+      return
+    }
+    if(messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
       try {
         logDebug('RenderingControl event processing beginning')
         observeExpectedUpnpSubscriptionEvent('sid2')
@@ -4334,39 +4394,75 @@ void parse(String raw) {
         processRenderingControlMessages(xmlBody)
         logDebug('RenderingControl event processing completed')
       } catch (Exception e) { logException('RenderingControl event processing failed', e) }
+      return
     }
-    else if(serviceType == 'ZoneGroupTopology' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1')) {
-      try {
-        observeExpectedUpnpSubscriptionEvent('sid3')
-        if(!isPlausibleXmlPayload(xmlBody)) {
-          logDebug('Ignoring blank or non-XML ZGT event payload')
-          return
-        }
-        String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-        logZgtXmlAtTrace(zgtDni, xmlBody)
-        deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody)
-      } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
-    }
-    else if(serviceType == 'GroupRenderingControl' || messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
+    if(messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
       try {
         observeExpectedUpnpSubscriptionEvent('sid4')
         setLastInboundMrGrcEvent()
         processGroupRenderingControlMessages(xmlBody)
       } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
+      return
     }
-    else {
-      logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
-          "Could not determine service type for message: ${message}")
-    }
+    logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
+        "Could not determine service type for message: ${message}")
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
 
 void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody) {
+  deferOrProcessZoneGroupTopologyPayload(dni, xmlBody, null)
+}
+
+void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer incomingSeq) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
   if(!deviceDni || !xmlBody) { return }
   if(!isPlausibleXmlPayload(xmlBody)) { return }
+  if(incomingSeq != null) {
+    AtomicInteger ref = currentZgtSeqByDni.get(deviceDni)
+    if(ref == null) {
+      AtomicInteger created = new AtomicInteger(incomingSeq)
+      currentZgtSeqByDni.putIfAbsent(deviceDni, created)
+      ref = currentZgtSeqByDni.get(deviceDni)
+      if(ref.get() > incomingSeq) {
+        // another thread stored a newer value while we raced to insert
+        // re-evaluate below
+      } else if(ref.get() == incomingSeq) {
+        // we are the first for this SEQ
+        ref.set(incomingSeq)
+      }
+    }
+    if(ref.get() > incomingSeq) {
+      logDebug("Ignoring stale ZGT SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
+      return
+    }
+    if(ref.get() == incomingSeq) {
+      // already stored (early-insert) — ok, continue to parse
+    } else {
+      // No early insert succeeded — try to CAS to incoming
+      Integer prevVal = ref.get()
+      while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
+        prevVal = ref.get()
+        if(incomingSeq <= prevVal) {
+          logDebug("Ignoring stale ZGT SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}")
+          return
+        }
+      }
+    }
+  }
   Map newSnapshot = parseZgtFullSnapshot(xmlBody)
   if(newSnapshot == null) { return }
+  if(incomingSeq != null) {
+    AtomicInteger ref2 = currentZgtSeqByDni.get(deviceDni)
+    if(ref2 != null && incomingSeq < ref2.get()) {
+      logDebug("Ignoring ZGT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
+      return
+    }
+    List<Map> groups = (List<Map>)newSnapshot.groups
+    currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
+    if(ref2 != null) { ref2.set(incomingSeq) } else { currentZgtSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
+    sendDeviceEvent('zgtCurrentTopology', JsonOutput.toJson(newSnapshot))
+    return
+  }
   List<Map> groups = (List<Map>)newSnapshot.groups
   currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
   sendDeviceEvent('zgtCurrentTopology', JsonOutput.toJson(newSnapshot))
@@ -4580,6 +4676,284 @@ Map getCurrentZgtTopology() {
   return [ groups: new ArrayList(currentZgtByGroupId.values()), observedAt: now() ]
 }
 
+Map<String, Object> parseAvtMetaData(String rawDidl) {
+  if(!rawDidl) { return [:] }
+  String unescaped = null
+  try { unescaped = unEscapeMetaData(rawDidl) } catch(Exception ignored) { unescaped = rawDidl }
+  if(!unescaped || !isPlausibleXmlPayload(unescaped)) { return [:] }
+  try {
+    GPathResult meta = new XmlSlurper().parseText(unescaped)
+    GPathResult item = (GPathResult)meta['item']
+    if(item.size() == 0) { return [:] }
+    Map<String, String> streamInfo = [:]
+    String si = item['streamInfo']?.text()?.toString()
+    if(si) { si.split(',').each { String kv -> if(kv.contains(':')) { def ab = kv.split(':', 2); streamInfo[ab[0].trim()] = ab[1].trim() } } }
+    String albumArt = item['albumArtURI']?.text()?.toString() ?: ''
+    while(albumArt.contains('&amp;')) { albumArt = albumArt.replace('&amp;','&') }
+    return [
+      title: item['title']?.text()?.toString(),
+      creator: item['creator']?.text()?.toString(),
+      album: item['album']?.text()?.toString(),
+      albumArtURI: albumArt,
+      class: item['class']?.text()?.toString(),
+      res: item['res']?.text()?.toString(),
+      streamInfo: streamInfo,
+      streamContent: item['streamContent']?.text()?.toString(),
+      description: item['description']?.text()?.toString()
+    ]
+  } catch(Exception e) {
+    logDebug("Could not parse AVT DIDL: ${e.message}")
+    return [:]
+  }
+}
+
+Map parseAvtFullSnapshot(String xmlString) {
+  if(!isPlausibleXmlPayload(xmlString)) { return null }
+  try {
+    XmlSlurper parser = new XmlSlurper()
+    GPathResult propertyset = parser.parseText(xmlString)
+    String lastChange = ((GPathResult)propertyset['property']['LastChange']).text().toString()
+    if(!lastChange) { return null }
+    String unescaped = unEscapeLastChangeXML(lastChange)
+    if(!isPlausibleXmlPayload(unescaped)) { return null }
+    GPathResult event = parser.parseText(unescaped)
+    GPathResult iid = (GPathResult)event['InstanceID']
+    if(iid.size() == 0) { return null }
+    def normalizeUri = { Object v -> v != null && v.toString() != '' ? v.toString().replace('&amp;','&').replace('&amp;','&') : null }
+    String curUriRaw = iid['CurrentTrackURI']['@val']?.toString()
+    return [
+      transportState: iid['TransportState']['@val']?.toString(),
+      playMode: iid['CurrentPlayMode']['@val']?.toString(),
+      crossfadeMode: iid['CurrentCrossfadeMode']['@val']?.toString(),
+      numberOfTracks: iid['NumberOfTracks']['@val']?.toString(),
+      track: iid['CurrentTrack']['@val']?.toString(),
+      section: iid['CurrentSection']['@val']?.toString(),
+      currentTrackURI: normalizeUri(curUriRaw),
+      currentTrackDuration: iid['CurrentTrackDuration']['@val']?.toString(),
+      currentTrackMetaDataRaw: iid['CurrentTrackMetaData']['@val']?.toString(),
+      currentTrackMetaData: parseAvtMetaData(iid['CurrentTrackMetaData']['@val']?.toString()),
+      nextTrackURI: iid['NextTrackURI']['@val']?.toString(),
+      nextTrackMetaData: parseAvtMetaData(iid['NextTrackMetaData']['@val']?.toString()),
+      enqueuedTransportURI: normalizeUri(iid['EnqueuedTransportURI']['@val']?.toString()),
+      enqueuedTransportURIMetaData: parseAvtMetaData(iid['EnqueuedTransportURIMetaData']['@val']?.toString()),
+      avTransportURI: iid['AVTransportURI']['@val']?.toString(),
+      avTransportURIMetaDataRaw: iid['AVTransportURIMetaData']['@val']?.toString(),
+      playbackStorageMedium: iid['PlaybackStorageMedium']['@val']?.toString(),
+      currentTransportActions: iid['CurrentTransportActions']['@val']?.toString(),
+      currentValidPlayModes: iid['r:CurrentValidPlayModes']['@val']?.toString()?.split(',')?.collect { it.trim() }?.findAll { it } ?: [],
+      directControlClientID: iid['r:DirectControlClientID']['@val']?.toString(),
+      directControlIsSuspended: iid['r:DirectControlIsSuspended']['@val']?.toString(),
+      directControlAccountID: iid['r:DirectControlAccountID']['@val']?.toString(),
+      transportStatus: iid['TransportStatus']['@val']?.toString(),
+      sleepTimerGeneration: iid['SleepTimerGeneration']['@val']?.toString(),
+      sleepTimerState: iid['SleepTimerState']['@val']?.toString(),
+      alarmRunning: iid['AlarmRunning']['@val']?.toString(),
+      snoozeRunning: iid['SnoozeRunning']['@val']?.toString(),
+      restartPending: iid['RestartPending']['@val']?.toString(),
+      transportPlaySpeed: iid['TransportPlaySpeed']['@val']?.toString(),
+      currentMediaDuration: iid['CurrentMediaDuration']['@val']?.toString(),
+      observedAt: now()
+    ]
+  } catch(Exception e) {
+    logDebug("Could not parse AVT snapshot: ${e.message}")
+    return null
+  }
+}
+
+String unescapeIfNeeded(String s) {
+  if(s == null) return s
+  if(s.contains('&lt;') || s.contains('&quot;')) {
+    return s.replace('&lt;','<').replace('&gt;','>').replace('&quot;','"')
+  }
+  return s
+}
+
+Map getCurrentAvtSnapshot() {
+  String dni = device.getDeviceNetworkId()?.toString()
+  return [ snapshot: currentAvtSnapshotByDni[dni], seq: currentAvtSeqByDni[dni]?.get() ]
+}
+
+Map getCurrentAvt() { return getCurrentAvtSnapshot() }
+
+void onAvtUpdated() {
+  String myRincon = getId()
+  Map zgt = getCurrentZgtTopology()
+  List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
+  Map myGroup = groups.find { Map g -> (g.coordinatorId?.toString() == myRincon) || ((List<?>)g.members).any { Map m -> m.playerId?.toString() == myRincon } }
+  if(!myGroup) { return }
+  String coordId = myGroup.coordinatorId?.toString()
+  Boolean isFollower = coordId != myRincon
+  if(!isFollower) { return }
+  Map snap = currentAvtSnapshotByCoordinator[coordId]
+  if(!snap) { return }
+  applyAvtSnapshotIfDifferent(snap)
+}
+
+void deferOrProcessAvTransportPayload(String dni, String xmlBody) {
+  deferOrProcessAvTransportPayload(dni, xmlBody, null)
+}
+
+void deferOrProcessAvTransportPayload(String dni, String xmlBody, Integer incomingSeq) {
+  handleAvtFull(dni, xmlBody, incomingSeq)
+}
+
+void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
+  String deviceDni = dni ?: device.getDeviceNetworkId()
+  if(!deviceDni || !xmlBody) { return }
+  if(!isPlausibleXmlPayload(xmlBody)) { return }
+  if(incomingSeq != null) {
+    AtomicInteger ref = currentAvtSeqByDni.get(deviceDni)
+    if(ref == null) {
+      AtomicInteger created = new AtomicInteger(incomingSeq)
+      currentAvtSeqByDni.putIfAbsent(deviceDni, created)
+      ref = currentAvtSeqByDni.get(deviceDni)
+    }
+    if(ref.get() > incomingSeq) {
+      logDebug("Ignoring stale AVT SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
+      return
+    }
+    Integer prevVal = ref.get()
+    while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
+      prevVal = ref.get()
+      if(incomingSeq <= prevVal) { logDebug("Ignoring stale AVT SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}"); return }
+    }
+  }
+  Map newSnapshot = parseAvtFullSnapshot(xmlBody)
+  if(newSnapshot == null) { return }
+  if(incomingSeq != null) {
+    AtomicInteger ref2 = currentAvtSeqByDni.get(deviceDni)
+    if(ref2 != null && incomingSeq < ref2.get()) {
+      logDebug("Ignoring AVT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
+      return
+    }
+    String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
+    if(coordRincon) { currentAvtSnapshotByCoordinator[coordRincon] = new LinkedHashMap(newSnapshot) }
+    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(newSnapshot)
+    if(ref2 != null) { ref2.set(incomingSeq) } else { currentAvtSeqByDni[deviceDni] = new AtomicInteger(incomingSeq) }
+  } else {
+    String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
+    if(coordRincon) { currentAvtSnapshotByCoordinator[coordRincon] = new LinkedHashMap(newSnapshot) }
+    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(newSnapshot)
+  }
+  String myRincon = getId()
+  String coordForNotify = resolveCurrentCoordinatorRinconForAvt(deviceDni) ?: myRincon
+  List<String> followers = resolveFollowersRinconsForAvt(coordForNotify)
+  String coordinatorNow = coordForNotify
+  if(coordinatorNow == myRincon || myRincon == null || !coordForNotify) {
+    applyAvtSnapshotIfDifferent(newSnapshot)
+  }
+  try {
+    if(parent != null) {
+      parent.onAvtReceived([rincon: myRincon, followers: followers])
+    } else {
+      // No parent (standalone/test harness) — still sendEvent for observability
+      sendDeviceEvent('avtTransport', JsonOutput.toJson(newSnapshot))
+    }
+  } catch(Exception e) {
+    logWarn("parent.onAvtReceived failed: ${e.message}")
+    sendDeviceEvent('avtTransport', JsonOutput.toJson(newSnapshot))
+  }
+}
+
+String resolveCurrentCoordinatorRinconForAvt(String dni) {
+  String myRincon = getId()
+  try {
+    Map zgt = getCurrentZgtTopology()
+    List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
+    Map g = groups.find { Map gg ->
+      (gg.coordinatorId?.toString() == myRincon) || ((List<?>)gg.members).any { Map m -> m.playerId?.toString() == myRincon }
+    }
+    if(g != null) { return g.coordinatorId?.toString() ?: myRincon }
+  } catch(Exception ignored) {}
+  String cur = device.getDataValue('groupCoordinatorId')?.toString()
+  return cur ?: myRincon
+}
+
+List<String> resolveFollowersRinconsForAvt(String coordinatorRincon) {
+  try {
+    Map zgt = getCurrentZgtTopology()
+    List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
+    Map g = groups.find { Map gg -> gg.coordinatorId?.toString() == coordinatorRincon }
+    if(g != null) {
+      return ((List<?>)g.members).collect { Map m -> m.playerId?.toString() }.findAll { String id -> id && id != coordinatorRincon }
+    }
+    // fallback: group device data followers for coordinator device
+    String dni = device.getDeviceNetworkId()
+    return []
+  } catch(Exception e) { return [] }
+}
+
+Boolean applyAvtSnapshotIfDifferent(Map snap) {
+  logDebug("applyAvtSnapshotIfDifferent called: snapshot=${snap ? snap.transportState : 'null'} currentAvtMapSize=${currentAvtSnapshotByDni?.size()}")
+  if(snap == null) { return false }
+  Map prior = null
+  try {
+    String json = device.getDataValue('avtTransportJson')?.toString()
+    if(json) { prior = (Map)new JsonSlurper().parseText(json) }
+  } catch(Exception ignored) { prior = null }
+  // Shallow diff on key transport fields
+  if(prior != null && prior.transportState?.toString() == snap.transportState?.toString() &&
+     prior.currentTrackURI?.toString() == snap.currentTrackURI?.toString() &&
+     prior.currentTrackMetaData?.toString() == snap.currentTrackMetaData?.toString() &&
+     prior.observedAt?.toString() == snap.observedAt?.toString()) {
+    return false
+  }
+  // Discard transient TRANSITIONING like legacy process (preserve last valid)
+  if(snap.transportState?.toString()?.trim()?.equalsIgnoreCase('TRANSITIONING')) {
+    try { device.updateDataValue('avtTransportJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
+    return false
+  }
+  try { device.updateDataValue('avtTransportJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
+  // Apply minimal presentation fields from snapshot (status/track)
+  // Sleep timer (still presentation — parse is pure, apply may fan to child)
+  try {
+    String sleepTimerState = snap.sleepTimerState?.toString()
+    String sleepTimerGeneration = snap.sleepTimerGeneration?.toString()
+    ChildDeviceWrapper sleepTimerChild = getSleepTimerChild()
+    if(sleepTimerChild) {
+      Map<String, Object> sleepTimerAttributes = [:]
+      if(sleepTimerState) {
+        String normalizedSleepTimerState = sleepTimerState.toUpperCase()
+        Boolean sleepTimerActive = normalizedSleepTimerState in ['ACTIVE', 'RUNNING', 'SLEEP_TIMER_RUNNING']
+        sleepTimerAttributes.sleepTimerState = sleepTimerActive ? 'active' : 'inactive'
+      }
+      if(sleepTimerGeneration) {
+        sleepTimerAttributes.generation = sleepTimerGeneration
+        getSleepTimer()
+      }
+      if(!sleepTimerAttributes.isEmpty()) {
+        applyChildStateBatch(sleepTimerChild, JsonOutput.toJson(sleepTimerAttributes))
+      }
+    }
+  } catch(Exception ignored) {}
+  try {
+    String ts = snap.transportState?.toString()
+    if(ts) { setStatusTransportStatus(ts, 'AVT event') }
+    String pm = snap.playMode?.toString()
+    if(pm) { setPlayMode(pm) }
+    if(snap.currentTrackDuration) { setCurrentTrackDuration(snap.currentTrackDuration.toString()) }
+    String cf = snap.crossfadeMode?.toString()?.trim()
+    if(cf) { setCrossfadeMode(cf == '1' ? 'on' : 'off') }
+    Map meta = snap.currentTrackMetaData instanceof Map ? (Map)snap.currentTrackMetaData : [:]
+    if(snap?.currentTrackURI) { /* setAudioSource/trackDescription handled by presentation layer */
+      String trackName = meta.title?.toString()
+      String artist = meta.creator?.toString()
+      String album = meta.album?.toString()
+      if(trackName) { setCurrentTrackName(trackName) }
+      if(artist) { setCurrentArtistName(artist) }
+      if(album) { setCurrentAlbumName(album) }
+      String art = meta.albumArtURI?.toString()
+      if(art) { setAlbumArtURI(art, false) }
+      String desc = trackName && artist ? "${trackName} by ${artist}" : (meta.streamContent?.toString() ?: trackName)
+      if(desc) { setTrackDescription(desc) }
+    }
+    String num = snap.track?.toString()
+    if(num?.isInteger()) { setCurrentTrackNumber(Integer.parseInt(num)) }
+  } catch(Exception e) { logDebug("applyAvtSnapshotIfDifferent failed: ${e.message}") }
+  runtimeState.lastTransportPlaybackSnapshot = new LinkedHashMap(snap)
+  return true
+}
+
 @CompileStatic
 Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
   if(!playerId || !isPlausibleXmlPayload(xmlString)) { return null }
@@ -4703,6 +5077,9 @@ String unEscapeLastChangeXML(String text) {
 
 @CompileStatic
 void processAVTransportMessages(String xmlString, String localUpnpUrl) {
+  handleAvtFull(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString, null)
+  return
+  // LEGACY: below kept for reference — unreachable after return due to new pure path
   if(xmlString.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
 
   XmlSlurper xmlParser = new XmlSlurper()
