@@ -2029,6 +2029,88 @@ class SonosAdvPlayerSpec extends Specification {
     driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 21
   }
 
+  def "ZGT notification logs header values with SEQ 0"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.currentZgtByGroupId.clear()
+    driver.currentZgtSeqByDni.clear()
+    String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
+      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
+      'X-SONOS-SERVICETYPE: ZoneGroupTopology\r\nSEQ: 0\r\nSID: uuid:zgt-test\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'SEQ': '0', 'SID': 'uuid:zgt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange', 'NOTIFY /zgt HTTP/1.1': ''], body: body]
+    }
+
+    when:
+    driver.parse(raw)
+
+    then:
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:zgt-test') && entry.contains('X-SONOS-SERVICETYPE=ZoneGroupTopology') }
+  }
+
+  def "ZGT notification logs header values with SEQ greater than 0"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.currentZgtByGroupId.clear()
+    driver.currentZgtSeqByDni.clear()
+    String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
+      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
+      'X-SONOS-SERVICETYPE: ZoneGroupTopology\r\nSEQ: 5\r\nSID: uuid:zgt-test\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'SEQ': '5', 'SID': 'uuid:zgt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange', 'NOTIFY /zgt HTTP/1.1': ''], body: body]
+    }
+
+    when:
+    driver.parse(raw)
+
+    then:
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=5') && entry.contains('SID=uuid:zgt-test') }
+  }
+
+  def "AVT notification logs header values with SEQ 0"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String body = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="PLAYING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\n' +
+      'X-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 0\r\nSID: uuid:avt-test\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '0', 'SID': 'uuid:avt-test', 'NT': 'upnp:event', 'NTS': 'upnp:propchange', 'NOTIFY /avt HTTP/1.1': ''], body: body]
+    }
+
+    when:
+    driver.parse(raw)
+
+    then:
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:avt-test') && entry.contains('X-SONOS-SERVICETYPE=AVTransport') }
+  }
+
+  def "legacy ZGT fallback logs header values without service type header"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.currentZgtByGroupId.clear()
+    driver.currentZgtSeqByDni.clear()
+    String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
+      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:zgt-legacy\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['SEQ': '3', 'SID': 'uuid:zgt-legacy', 'NOTIFY /zgt HTTP/1.1': ''], body: body]
+    }
+
+    when:
+    driver.parse(raw)
+
+    then:
+    driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=3') && entry.contains('SID=uuid:zgt-legacy') }
+  }
+
   def "GRC full property set applies volume mute changeable and emits bridged snapshot"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'

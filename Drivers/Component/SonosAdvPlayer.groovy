@@ -4618,6 +4618,9 @@ void parse(String raw) {
     String sid = messageHeaders["SID"]?.toString()?.trim() ?: null
     if(sid == '') { sid = null }
     logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seq ?: 'unset'}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
+    if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport' || messageHeaders.containsKey('NOTIFY /zgt HTTP/1.1') || messageHeaders.containsKey('NOTIFY /avt HTTP/1.1')) {
+      logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seq ?: 'unset'}, headerValues=${renderHeaderValues(messageHeaders)}")
+    }
     // Header switch: serviceType is authoritative; request-line keys are fallback-only for old firmware
     if(serviceType != null) {
       switch(serviceType) {
@@ -5509,6 +5512,32 @@ String unEscapeMetaData(String text) {
 @CompileStatic
 String unEscapeLastChangeXML(String text) {
   return text.replace('&lt;','<').replace('&gt;','>').replace('&quot;','\"').replace('&apos;',"'").replace('&amp;','&')
+}
+
+@CompileStatic
+String renderHeaderValues(Map headers) {
+  if(headers == null || headers.isEmpty()) {
+    return 'none'
+  }
+  List<String> names = new ArrayList<String>()
+  for(Object key : headers.keySet()) {
+    names.add(key == null ? 'null' : key.toString())
+  }
+  Collections.sort(names)
+  List<String> pairs = new ArrayList<String>()
+  for(String name : names) {
+    Object rawValue = headers[name]
+    String value = rawValue == null ? 'null' : rawValue.toString()
+    if(value.length() > 200) {
+      value = value.substring(0, 200) + '...'
+    }
+    pairs.add(name + '=' + value)
+  }
+  String rendered = pairs.join(',')
+  if(rendered.length() > 1000) {
+    rendered = rendered.substring(0, 1000) + '...'
+  }
+  return rendered
 }
 
 @CompileStatic
