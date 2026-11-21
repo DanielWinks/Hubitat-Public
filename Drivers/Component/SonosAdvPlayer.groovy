@@ -4635,7 +4635,7 @@ void parse(String raw) {
     if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport') {
       logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, headerValues=${renderHeaderValues(messageHeaders)}")
     }
-    // Header switch: serviceType is the sole ZGT/AVT dispatch; request-line keys remain fallback-only for RRC/GRC old firmware
+    // Header switch: serviceType is the sole dispatch for all UPnP services
     if(serviceType != null) {
       switch(serviceType) {
         case 'ZoneGroupTopology':
@@ -4682,30 +4682,6 @@ void parse(String raw) {
               "Could not determine service type for message: ${message}")
           return
       }
-    }
-    if(messageHeaders.containsKey('NOTIFY /mrc HTTP/1.1')) {
-      try {
-        logDebug('RenderingControl event processing beginning')
-        observeExpectedUpnpSubscriptionEvent('sid2')
-        setLastInboundMrRcEvent()
-        String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-        logZgtXmlAtTrace(rcDni, xmlBody)
-        if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML RC event payload'); return }
-        deferOrProcessRenderingControlPayload(rcDni, xmlBody, seq, sid)
-        logDebug('RenderingControl event processing completed')
-      } catch (Exception e) { logException('RenderingControl event processing failed', e) }
-      return
-    }
-    if(messageHeaders.containsKey('NOTIFY /mgrc HTTP/1.1')) {
-      try {
-        observeExpectedUpnpSubscriptionEvent('sid4')
-        setLastInboundMrGrcEvent()
-        String grcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-        logZgtXmlAtTrace(grcDni, xmlBody)
-        if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
-        deferOrProcessGroupRenderingControlPayload(grcDni, xmlBody, seq, sid)
-      } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
-      return
     }
     logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
         "Could not determine service type for message: ${message}")
