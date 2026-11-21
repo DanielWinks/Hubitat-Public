@@ -3375,6 +3375,11 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "topology attribute handler rebuilds topology from attributes once per change"() {
     given:
+    appScript.state.sonosHouseholdTopology = [groups: [
+      [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_OTHER']]
+    ]]
+    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
+      leaderGeneration: 'leader-1', topologyReady: true, lastInboundAt: appScript.now()]
     coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.currentValues.groupPlayerIds = 'RINCON_FOLLOW,RINCON_COORD'
     coordinator.currentValues.groupId = 'GROUP-1'
