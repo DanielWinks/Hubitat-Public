@@ -48,6 +48,13 @@ compileGroovy {
 
 test {
   useJUnitPlatform()
+  // Local suite is dominated by small fast specs plus two huge Sonos specs
+  // (14k-line sources). Run one spec class per worker and parallelize so
+  // small specs finish alongside the Sonos giants instead of behind them.
+  // Matches CI's one-spec-per-job shape locally.
+  forkEvery = 1
+  maxParallelForks = Math.min(6, Math.max(2, Runtime.getRuntime().availableProcessors()))
+  maxHeapSize = '768m'
   testLogging {
     events 'passed', 'skipped', 'failed'
     exceptionFormat 'full'

@@ -1,6 +1,7 @@
 package dwinks.hubitat.stubs
 
 import dwinks.hubitat.lint.Preprocessor
+import java.util.concurrent.ConcurrentHashMap
 import org.codehaus.groovy.control.CompilerConfiguration
 import org.codehaus.groovy.control.customizers.ImportCustomizer
 
@@ -19,6 +20,14 @@ import org.codehaus.groovy.control.customizers.ImportCustomizer
  */
 class ScriptLoader {
 
+  // Groovy parse of the large Sonos sources (14k+ lines each) costs seconds,
+  // and specs call load() in setup() for every test method. Cache compiled
+  // classes per test JVM so a repeat load is instantiate-only. Files are
+  // assumed stable during a test run; the key still carries host file mtime
+  // and length so an edit on disk cannot serve a stale class mid-run.
+  private static final ConcurrentHashMap<String, Class<? extends HubitatScriptHarness>> COMPILE_CACHE =
+      new ConcurrentHashMap<>()
+
   /** Load a single file. Includes resolved against `libraryDir` if given. */
   static HubitatScriptHarness load(File file, File libraryDir = null, Boolean relaxCompileStatic = false) {
     instantiate(compile(file, libraryDir, relaxCompileStatic))
@@ -27,6 +36,29 @@ class ScriptLoader {
   /** Compile a single file and return its reusable script class. */
   static Class<? extends HubitatScriptHarness> compile(File file, File libraryDir = null,
       Boolean relaxCompileStatic = false) {
+    String cacheKey = cacheKeyFor(file, libraryDir, relaxCompileStatic)
+    Class<? extends HubitatScriptHarness> cached = COMPILE_CACHE.get(cacheKey)
+    if (cached != null) {
+      return cached
+    }
+    synchronized (COMPILE_CACHE) {
+      cached = COMPILE_CACHE.get(cacheKey)
+      if (cached != null) {
+        return cached
+      }
+      Class<? extends HubitatScriptHarness> compiled = compileUncached(file, libraryDir, relaxCompileStatic)
+      COMPILE_CACHE.put(cacheKey, compiled)
+      return compiled
+    }
+  }
+
+  private static String cacheKeyFor(File file, File libraryDir, Boolean relaxCompileStatic) {
+    String libPart = libraryDir == null ? 'nolib' : libraryDir.canonicalPath
+    return "${file.canonicalPath}|${file.lastModified()}|${file.length()}|${libPart}|${relaxCompileStatic}"
+  }
+
+  private static Class<? extends HubitatScriptHarness> compileUncached(File file, File libraryDir,
+      Boolean relaxCompileStatic) {
     String src = file.text
     Preprocessor.Result pp = Preprocessor.process(src)
 
