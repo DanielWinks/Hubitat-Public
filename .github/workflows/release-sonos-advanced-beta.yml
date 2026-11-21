@@ -67,7 +67,6 @@ jobs:
               "Drivers/Component/SonosAdvFavorites.groovy",
               "Drivers/Component/SonosAdvSecondaries.groovy",
               "Drivers/Component/SonosAdvPlaylist.groovy",
-              "Libraries/SMAPILibrary.groovy",
               "Libraries/UtilitiesAndLoggingLibrary.groovy",
           ]
 
@@ -91,8 +90,7 @@ jobs:
         run: |
           mkdir -p Bundles/SonosAdvancedController
           cp Libraries/UtilitiesAndLoggingLibrary.groovy Bundles/SonosAdvancedController/dwinks.UtilitiesAndLoggingLibrary.groovy
-          cp Libraries/SMAPILibrary.groovy Bundles/SonosAdvancedController/dwinks.SMAPILibrary.groovy
-          printf '%s\n' "dwinks" "Sonos Advanced Controller" "library dwinks.UtilitiesAndLoggingLibrary.groovy" "library dwinks.SMAPILibrary.groovy" > Bundles/SonosAdvancedController/install.txt
+          printf '%s\n' "dwinks" "Sonos Advanced Controller" "library dwinks.UtilitiesAndLoggingLibrary.groovy" > Bundles/SonosAdvancedController/install.txt
           cp Bundles/SonosAdvancedController/install.txt Bundles/SonosAdvancedController/update.txt
           rm -f Bundles/SonosAdvancedController.zip
           (cd Bundles/SonosAdvancedController && zip -q -r ../SonosAdvancedController.zip .)
@@ -109,7 +107,6 @@ jobs:
             Drivers/Component/SonosAdvFavorites.groovy
             Drivers/Component/SonosAdvSecondaries.groovy
             Drivers/Component/SonosAdvPlaylist.groovy
-            Libraries/SMAPILibrary.groovy
             Libraries/UtilitiesAndLoggingLibrary.groovy
             PackageManifests/SonosAdvancedController/packageManifest.json
             Bundles/SonosAdvancedController.zip

@@ -115,11 +115,6 @@
   "gitHubUrl": "https://github.com/DanielWinks/Hubitat-Public",
   "libraries": [
     {
-      "id": "smapi-library",
-      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/dwinks.SMAPILibrary.groovy",
-      "name": "dwinks.SMAPILibrary.groovy"
-    },
-    {
       "id": "utilities-logging-library",
       "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.7.11/dwinks.UtilitiesAndLoggingLibrary.groovy",
       "name": "dwinks.UtilitiesAndLoggingLibrary.groovy"
