@@ -8950,8 +8950,7 @@ private String parentStateUpdateCoalesceKey(Map payload) {
   String playerDni = payload?.playerDni?.toString() ?: ''
   switch(kind) {
     case 'playbackObservation': case 'wsConnected': case 'wsRetry':
-    case 'householdPresence':
-      return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
+      return "${kind}:${playerDni}"
     case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
     default: return null
   }
@@ -12595,7 +12594,6 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'groups' && (eventType?.name == 'groups' || eventType?.response == 'getGroups')) {
     Integer groupCount = eventData?.groups instanceof Collection ? ((Collection)eventData.groups).size() : 0
     logDebug("WebSocket groups response processing beginning; groupCount=${groupCount}")
-    publishHouseholdPlayerPresence(eventData)
     ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
     if(groups != null && groups.size() > 0) {
       Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
@@ -13381,19 +13379,6 @@ void publishPlaybackObservation() {
     audioSource: device.currentValue('audioSource')?.toString(),
     signalStatus: state.audioSourceSignalStatus?.toString(),
     signalObservedAt: state.audioSourceSignalObservedAt])
-}
-
-@CompileStatic
-void publishHouseholdPlayerPresence(Map eventData) {
-  ArrayList<Map> players = eventData?.players instanceof ArrayList ? (ArrayList<Map>)eventData.players : null
-  if(players == null || players.isEmpty()) { return }
-  List<Map<String, String>> presence = []
-  players.each { Map player ->
-    String id = player?.id?.toString()
-    String name = player?.name?.toString()
-    if(id && name) { presence.add([id: id, name: name]) }
-  }
-  if(!presence.isEmpty()) { publishPlayerStateUpdate([kind: 'householdPresence', players: presence]) }
 }
 
 void getPlaybackMetadataStatusIn(Integer time = 2) {

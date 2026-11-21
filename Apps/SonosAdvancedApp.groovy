@@ -5816,8 +5816,7 @@ String playerStateUpdateCoalesceKey(Map payload) {
   String playerDni = payload?.playerDni?.toString() ?: ''
   switch(kind) {
     case 'playbackObservation': case 'wsConnected': case 'wsRetry':
-    case 'householdPresence':
-      return "${kind}:${kind == 'householdPresence' ? 'household' : playerDni}"
+      return "${kind}:${playerDni}"
     case 'state': return "${kind}:${payload.coordinatorId ?: playerDni}"
     default: return null
   }
@@ -5993,10 +5992,6 @@ void playerStateUpdateHandler(Object event) {
     if(state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true) {
       runIn(1, 'startNextPlayerInitialization', [overwrite: true])
     }
-    return
-  }
-  if(payload.kind == 'householdPresence') {
-    resetLongBackoffPlayersSeenInHousehold(payload.players)
     return
   }
   if(payload.kind == 'groupAnnouncementProgress') {
@@ -6208,30 +6203,6 @@ ChildDeviceWrapper findPlayerBySonosId(String playerId) {
     child?.getDataValue('id')?.toString() == playerId
   } ?: []
   return players ? players[0] : null
-}
-
-void resetLongBackoffPlayersSeenInHousehold(Object observedPlayers) {
-  if(!(observedPlayers instanceof Collection)) { return }
-  Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
-  if(offlinePlayers.isEmpty()) { return }
-
-  Set<String> observedIds = ((Collection)observedPlayers).findAll { Object item -> item instanceof Map }
-      .collect { Object item -> ((Map)item).id?.toString() }.findAll { String id -> id } as Set<String>
-  offlinePlayers.each { String dni, Map offlineInfo ->
-    Integer retryDelay = (offlineInfo.retryDelay ?: 30) as Integer
-    String rinconId = offlineInfo.id?.toString()
-    if(retryDelay > 30 && rinconId && observedIds.contains(rinconId)) {
-      ChildDeviceWrapper offlinePlayer = getChildDevice(dni)
-      if(offlinePlayer != null) {
-        if(offlinePlayer.restartWebSocketBackoff() == true) {
-          logInfo("Household update shows offline player ${offlineInfo.name} (${rinconId}); restarting its WebSocket retry interval at 30 seconds")
-          offlineInfo.retryDelay = 30
-        }
-      }
-    }
-  }
-  state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
 }
 
 /** Receive asynchronous requests from app-owned alarm child drivers. */
