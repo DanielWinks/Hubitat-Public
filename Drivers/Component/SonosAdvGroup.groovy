@@ -171,6 +171,7 @@ metadata {
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
     attribute 'zgtInProgress', 'enum', ['on', 'off']
+    attribute 'parentAppRequest', 'string'
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
@@ -519,13 +520,13 @@ void purgeParentGroupCommandsAfterInitialization(Map data = [:]) {
     return
   }
   try {
-    Boolean accepted = parent != null ? (Boolean)parent.groupAppRequest([
-      version: 1, channel: 'groupAppRequest', action: 'initializationPurge',
-      groupDni: dni, createdAt: now(), requestId: UUID.randomUUID().toString()
-    ]) : false
-    logDebug("Parent app initialization purge callback returned accepted=${accepted}, sourceDni=${dni}")
+    Map payload = [version: 1, channel: 'groupAppRequest', action: 'initializationPurge',
+      groupDni: dni, createdAt: now(), requestId: UUID.randomUUID().toString()]
+    // Event-only parent communication (child never calls parent.methodName())
+    sendEvent(name: 'parentAppRequest', value: JsonOutput.toJson(payload))
+    logDebug("Parent app initialization purge sent via event, sourceDni=${dni}, requestId=${payload.requestId}")
   } catch(Exception e) {
-    logWarn("Parent app initialization purge callback failed for ${dni}: ${e.message}")
+    logWarn("Parent app initialization purge event failed for ${dni}: ${e.message}")
   }
 }
 

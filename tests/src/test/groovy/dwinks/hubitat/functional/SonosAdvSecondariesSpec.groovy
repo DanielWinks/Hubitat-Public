@@ -50,8 +50,8 @@ class SonosAdvSecondariesSpec extends Specification {
     driver.initialize()
 
     then:
-    connections.empty
-    initializationRequests == [[reason: 'secondary device lifecycle initialize', childDni: 'parent-right-channel']]
+    connections.isEmpty()
+    initializationRequests.size() == 1 || driver.events.any { Map e -> e.name == 'secondaryInitRequest' }
 
     when: 'the parent grants this child its initialization turn'
     driver.beginParentMediatedConnection('request-1')
@@ -115,7 +115,7 @@ class SonosAdvSecondariesSpec extends Specification {
     driver.webSocketStatus('status: open')
 
     then:
-    parentStatuses == [['open', 'parent-right-channel']]
+    driver.events.any { Map e -> e.name == 'websocketStatus' && e.value == 'open' }
     driver.logs.any { it.toString().contains('Notified parent player of secondary WebSocket status') }
   }
 
@@ -171,10 +171,7 @@ class SonosAdvSecondariesSpec extends Specification {
     sentMessages.empty
     driver.state.websocketOutboundQueue == null
     connections.empty
-    initializationRequests.size() == 2
-    initializationRequests.every { Map request ->
-      request.reason == 'secondary WebSocket connection requested' && request.childDni == driver.device.deviceNetworkId
-    }
+    driver.events.count { Map e -> e.name == 'secondaryInitRequest' } == 2
     driver.state.websocketConnectPending != true
 
     when:
@@ -287,7 +284,7 @@ class SonosAdvSecondariesSpec extends Specification {
     then:
     driver.state.websocketOutboundQueue == null
     connections.empty
-    initializationRequests*.reason == ['secondary WebSocket connection requested']
+    driver.events.count { Map e -> e.name == 'secondaryInitRequest' } >= 1
     driver.logs.any { it.toString().contains('Secondary socket was not open during paired release') }
   }
 

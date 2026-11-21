@@ -133,7 +133,7 @@ metadata {
     version: '0.18.9',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    singleThreaded: false,
+    singleThreaded: true,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
   capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
@@ -247,6 +247,7 @@ metadata {
   attribute 'groupMute', 'string'
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
+  attribute 'zgtCurrentTopology', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'groupId', 'string'
   attribute 'groupCoordinatorId', 'string'
@@ -421,6 +422,7 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Map> pendingTopologySnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyWebsocketByDni = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
+@Field static ConcurrentHashMap<String, Map> currentZgtByGroupId = new ConcurrentHashMap<String, Map>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -4362,13 +4364,12 @@ void parse(String raw) {
 void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
   if(!deviceDni || !xmlBody) { return }
-
-  Map topology = parseZoneGroupTopologySnapshot(xmlBody, getId())
-  // The elected ZGT subscriber receives ordered whole-household snapshots.
-  // Apply every notification in receipt order; local mutation expectations
-  // must not hold or replace the topology Sonos most recently reported.
-  recordExpectedTopologyObservation(topology)
-  applyZoneGroupTopologyPayload(deviceDni, xmlBody, topology)
+  if(!isPlausibleXmlPayload(xmlBody)) { return }
+  Map newSnapshot = parseZgtFullSnapshot(xmlBody)
+  if(newSnapshot == null) { return }
+  List<Map> groups = (List<Map>)newSnapshot.groups
+  currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
+  sendDeviceEvent('zgtCurrentTopology', JsonOutput.toJson(newSnapshot))
 }
 
 void applyZoneGroupTopologyPayload(String dni, String xmlBody, Map topology) {
@@ -4502,6 +4503,81 @@ void scheduleTopologyTimeoutFlush() {
   } catch(Exception e) {
     runIn(1, 'flushPendingTopologyUpdates', [overwrite: true])
   }
+}
+
+Map<String, List<String>> parseChannelMap(String raw) {
+  Map<String, List<String>> out = [:]
+  if(!raw) { return out }
+  raw.split(';').each { String pair ->
+    if(!pair.contains(':')) { return }
+    List<String> ab = pair.split(':', 2)
+    String rid = ab[0].trim()
+    if(!rid) { return }
+    out[rid] = ab[1].split(',').collect { String c -> c.trim() }.findAll { String c -> c }
+  }
+  return out
+}
+
+@CompileStatic
+Map parseZgtFullSnapshot(String xmlString) {
+  if(!isPlausibleXmlPayload(xmlString)) { return null }
+  try {
+    XmlSlurper parser = new XmlSlurper()
+    GPathResult propertyset = parser.parseText(xmlString)
+    String stateXml = ((GPathResult)propertyset['property']['ZoneGroupState']).text()
+    String unescaped = unEscapeLastChangeXML(stateXml)
+    if(!isPlausibleXmlPayload(unescaped)) { return null }
+    GPathResult stateXmlParsed = parser.parseText(unescaped)
+    GPathResult wrapped = (GPathResult)stateXmlParsed['ZoneGroups']
+    GPathResult zoneGroups = wrapped.size() > 0 ? wrapped : stateXmlParsed
+    String outerName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
+    List<Map> groups = []
+    for(GPathResult group : (GPathResult)zoneGroups.children()) {
+      String coordId = group['@Coordinator'].toString()
+      String gid = group['@ID'].toString() ?: coordId
+      List<Map> members = []
+      List<Map> secondariesFlat = []
+      for(GPathResult member : (GPathResult)group.children()) {
+        String memberId = member['@UUID'].toString()
+        String memberName = member['@ZoneName'].toString()
+        String invisible = member['@Invisible'].toString()
+        List<Map> secs = []
+        for(GPathResult sat : (GPathResult)member.children()) {
+          if(sat.name().toString() != 'Satellite') { continue }
+          secs << [ playerId: sat['@UUID'].toString(), zoneName: sat['@ZoneName'].toString(),
+            invisible: sat['@Invisible'].toString() == '1',
+            location: sat['@Location'].toString(), configuration: sat['@Configuration'].toString(),
+            swGen: sat['@SWGen'].toString(), channelMap: parseChannelMap(sat['@ChannelMapSet'].toString()),
+            channelMapSet: sat['@ChannelMapSet'].toString(), htSatChannelMapSet: sat['@HTSatChanMapSet'].toString() ]
+          secondariesFlat.addAll(secs)
+        }
+        members << [ playerId: memberId, zoneName: memberName, invisible: invisible == '1',
+          location: member['@Location'].toString(), configuration: member['@Configuration'].toString(),
+          swGen: member['@SWGen'].toString(), bootSeq: member['@BootSeq'].toString(),
+          channelMap: parseChannelMap(member['@ChannelMapSet'].toString()),
+          channelMapSet: member['@ChannelMapSet'].toString(),
+          htSatChannelMapSet: member['@HTSatChanMapSet'].toString(),
+          moreInfo: member['@MoreInfo'].toString(), secondaries: secs ]
+      }
+      String coordinatorName = members.find { Map it -> it.playerId == coordId }?.zoneName
+      String gname = group['@ZoneGroupName'].toString() ?: (outerName && members.any { Map it -> it.playerId } ? outerName : coordinatorName)
+      if(!gname) { gname = coordinatorName }
+      groups << [ groupId: gid, coordinatorId: coordId, coordinatorName: coordinatorName, groupName: gname, members: members ]
+    }
+    def vanished = []
+    try {
+      def vanEl = stateXmlParsed['VanishedDevices']
+      if(vanEl.size() > 0) { vanished = vanEl.children().collect{ [uuid: it['@UUID'].toString()] } }
+    } catch(Exception ignored) { vanished = [] }
+    return [observedAt: now(), groups: groups, vanishedDevices: vanished]
+  } catch(Exception e) {
+    logDebug("Could not inspect ZGT topology: ${e.message}")
+    return null
+  }
+}
+
+Map getCurrentZgtTopology() {
+  return [ groups: new ArrayList(currentZgtByGroupId.values()), observedAt: now() ]
 }
 
 @CompileStatic

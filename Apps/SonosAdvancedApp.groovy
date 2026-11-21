@@ -289,6 +289,8 @@ preferences {
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
+@Field static final String ZGT_CURRENT_TOPOLOGY_EVENT = 'zgtCurrentTopology'
+@Field static final String PARENT_APP_REQUEST_ATTRIBUTE = 'parentAppRequest'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -4175,13 +4177,17 @@ void subscribeToGroupCommandRequests() {
     unsubscribe(playerDevice, 'sonosPlayerAppRequest', 'playerAppRequestHandler')
     unsubscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     unsubscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
+    unsubscribe(playerDevice, ZGT_CURRENT_TOPOLOGY_EVENT, 'zgtCurrentTopologyHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
+    subscribe(playerDevice, ZGT_CURRENT_TOPOLOGY_EVENT, 'zgtCurrentTopologyHandler')
     subscribedPlayers++
   }
   getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
     unsubscribe(groupDevice, ZGT_IN_PROGRESS_ATTRIBUTE, 'zgtInProgressHandler')
+    unsubscribe(groupDevice, PARENT_APP_REQUEST_ATTRIBUTE, 'parentAppRequestHandler')
     subscribe(groupDevice, ZGT_IN_PROGRESS_ATTRIBUTE, 'zgtInProgressHandler')
+    subscribe(groupDevice, PARENT_APP_REQUEST_ATTRIBUTE, 'parentAppRequestHandler')
   }
   logDebug("Child request subscriptions configured; players=${subscribedPlayers}")
 }
@@ -9355,6 +9361,9 @@ Map readGroupTopologyFromObservations(Map operation, Map recordedObservations) {
 
 Map readGroupOperationTopology(Map operation) {
   Map householdTopology = getCurrentAcceptedHouseholdTopology()
+  if(!householdTopology || householdTopology.isEmpty()) {
+    householdTopology = getCurrentReceivedZgtTopology()
+  }
   Map<String, Map> householdObservations =
       buildGroupOperationTopologyObservations(operation, householdTopology)
   if(!householdObservations.isEmpty()) {
@@ -10714,6 +10723,69 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
 
 void zgtInProgressHandler(Event event) {
   logDebug("ZGT In Progress ${event?.value?.toString() ?: ''} from ${event?.device?.deviceNetworkId?.toString() ?: ''}")
+}
+
+void zgtCurrentTopologyHandler(Event event) {
+  logDebug("ZGT Current Topology received from ${event?.device?.deviceNetworkId?.toString() ?: ''}, value length=${event?.value?.toString()?.length() ?: 0}")
+}
+
+Map getCurrentReceivedZgtTopology() {
+  Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
+  String candidateDni = zgtState.candidateDni?.toString()
+  if(!candidateDni) { return [:] }
+  ChildDeviceWrapper elected = null
+  try { elected = getChildDevice(candidateDni) } catch(Exception ignored) { elected = null }
+  if(elected == null) {
+    elected = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == candidateDni }
+  }
+  if(elected == null) { return [:] }
+  try {
+    Map raw = (Map)elected.getCurrentZgtTopology()
+    if(raw == null || !(raw.groups instanceof List)) { return [:] }
+    List<Map> converted = ((List<?>)raw.groups).collect { Object g ->
+      Map m = (Map)g
+      List<String> visibleIds = []
+      List<String> allIds = []
+      if(m.members instanceof List) {
+        ((List<?>)m.members).each { Object mem ->
+          Map mm = (Map)mem
+          String pid = mm.playerId?.toString()
+          if(pid) {
+            allIds << pid
+            if(mm.invisible != true && mm.invisible?.toString() != '1') { visibleIds << pid }
+          }
+        }
+      }
+      if(visibleIds.isEmpty() && allIds.isEmpty() && m.playerIds instanceof List) {
+        visibleIds = normalizeGroupPlayerIds(m.playerIds)
+        allIds = visibleIds
+      }
+      [ groupId: m.groupId?.toString(), coordinatorId: m.coordinatorId?.toString(),
+        playerIds: normalizeGroupPlayerIds(visibleIds.isEmpty() ? allIds : visibleIds),
+        memberIds: normalizeGroupPlayerIds(allIds),
+        coordinatorName: m.coordinatorName?.toString(), groupName: m.groupName?.toString(),
+        satellites: m.secondaries ?: [], channelMap: m.channelMap ?: [:] ]
+    }
+    return [groups: converted, observedAt: (raw.observedAt ?: now()) as Long]
+  } catch(Exception e) {
+    logDebug("getCurrentReceivedZgtTopology failed: ${e.message}")
+    return [:]
+  }
+}
+
+void parentAppRequestHandler(Event event) {
+  String raw = stripHiddenBridgeValue(event?.value?.toString())
+  if(!raw) { return }
+  try {
+    Map payload = (Map)parseJson(raw)
+    if(payload?.action == 'initializationPurge' && payload?.groupDni) {
+      purgeParentCommandMap((payload.groupDni as String), 'initialization')
+    }
+    logDebug("Parent app request handled: action=${payload?.action ?: 'unknown'}")
+  } catch(Exception e) {
+    logWarn("Ignoring malformed parentAppRequest event: ${e.message}")
+  }
 }
 
 void groupFavoriteOperationEventHandler(Event event) {

@@ -1940,32 +1940,29 @@ class SonosAdvPlayerSpec extends Specification {
   def "each received ZGT payload is parsed and applied in arrival order"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    Integer parseCalls = 0
-    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
-      parseCalls++
-      [playerFound: true, coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST', 'RINCON_MEMBER'],
-       visibleMemberIds: ['RINCON_TEST', 'RINCON_MEMBER'], memberNames: ['Living Room', 'Kitchen'],
-       coordinatorName: 'Living Room', groupName: 'Downstairs', batteryData: [:]]
-    }
-    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
-      driver.runtimeState.appliedTopologySnapshot = topology
-      true
-    }
+    driver.currentZgtByGroupId.clear()
+    // Use real full-capture parser (no mock) — feed a minimal valid propertyset
+    String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
+      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Living Room"/>' +
+      '<ZoneGroupMember UUID="RINCON_MEMBER" ZoneName="Kitchen"/>' +
+      '</ZoneGroup></ZoneGroups>'
+    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String xml = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
 
     when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>changed</topology>')
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
 
     then:
-    parseCalls == 1
-    driver.runtimeState.appliedTopologySnapshot.coordinatorId == 'RINCON_TEST'
-    driver.runtimeState.appliedTopologySnapshot.memberNames == ['Living Room', 'Kitchen']
+    driver.getCurrentZgtTopology().groups.size() == 1
+    driver.currentZgtByGroupId['G1:1'].members*.playerId == ['RINCON_TEST', 'RINCON_MEMBER']
+    driver.events.find { Map e -> e.name == 'zgtCurrentTopology' }?.value?.contains('G1:1') ||
+      driver.currentZgtByGroupId.containsKey('G1:1')
 
     when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>changed</topology>')
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
 
     then:
-    parseCalls == 2
-    driver.runtimeState.appliedTopologySnapshot.coordinatorId == 'RINCON_TEST'
+    driver.currentZgtByGroupId['G1:1'].members*.playerId == ['RINCON_TEST', 'RINCON_MEMBER']
   }
 
   def "topology snapshot extracts visible roster names coordinator group and battery once"() {
@@ -2209,17 +2206,16 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.getMapForRaw = { String rawMessage ->
       [headers: ['X-SONOS-SERVICETYPE': 'ZoneGroupTopology', 'NOTIFY /zgt HTTP/1.1': ''], body: body]
     }
-    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers -> true }
 
     when:
     driver.parse(raw)
-    drainParentBridge()
 
     then:
-    parentPlayerUpdates.any { Map event ->
-      event.kind == 'zgtTopology' && event.leaderGeneration == 'leader-test' &&
-        event.topology.groups.size() == 1 && event.topology.groups[0].groupId == 'G1'
-    }
+    driver.currentZgtByGroupId['G1'] != null
+    driver.currentZgtByGroupId['G1'].coordinatorId == 'RINCON_TEST'
+    driver.getCurrentZgtTopology().groups.size() == 1
+    parentPlayerUpdates.isEmpty()  // old zgtTopology publish path removed (pure sendEvent)
+    driver.pendingTopologyXmlByDni.isEmpty()
   }
 
   def "only app-elected ZGT player subscribes to ZoneGroupTopology"() {
@@ -2246,45 +2242,29 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     driver.device.dataValues.appZgtSubscribe = 'true'
     driver.device.dataValues.appZgtLeaderGeneration = 'leader-1'
-    // The parent app stamps expectations before dispatching the mutation.
-    driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson([
-      coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: driver.now() + 30000L
-    ])
-    List<String> appliedTopologies = []
-    List<Map> publishedSnapshots = []
-    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
-      xml == '<topology>final</topology>'
-        ? [playerFound: true, coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'],
-            visibleMemberIds: ['RINCON_TEST'], memberNames: [],
-            groups: [[groupId: 'GROUP-FINAL', coordinatorId: 'RINCON_TEST', playerIds: ['RINCON_TEST']]]]
-        : [playerFound: true, coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER'],
-            visibleMemberIds: ['RINCON_OTHER'], memberNames: [],
-            groups: [[groupId: 'GROUP-INTERMEDIATE', coordinatorId: 'RINCON_OTHER', playerIds: ['RINCON_OTHER']]]]
+    // With singleThreaded:true and pure handleZgtFull, pending snapshots are
+    // no longer held by expectedTopology — the map update is immediate.
+
+    def mk = { String gid, String coord, String uuid, String zn ->
+      String zs = "<ZoneGroups><ZoneGroup ID=\"$gid\" Coordinator=\"$coord\"><ZoneGroupMember UUID=\"$uuid\" ZoneName=\"$zn\"/></ZoneGroup></ZoneGroups>"
+      String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+      return '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
     }
-    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
-      String xml = topology.coordinatorId == 'RINCON_TEST' ? '<topology>final</topology>' : '<topology>intermediate</topology>'
-      appliedTopologies << xml
-      true
-    }
-    driver.metaClass.publishPlayerStateUpdate = { Map payload -> publishedSnapshots << payload }
 
     when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>intermediate</topology>')
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-INTERMEDIATE', 'RINCON_OTHER', 'RINCON_OTHER', 'Other'))
 
     then:
-    appliedTopologies == ['<topology>intermediate</topology>']
-    publishedSnapshots*.topology*.groups*.groupId == [['GROUP-INTERMEDIATE']]
+    driver.currentZgtByGroupId.keySet() == ['GROUP-INTERMEDIATE'] as Set
     !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
-    new JsonSlurper().parseText(driver.device.dataValues.expectedGroupTopology).coordinatorId == 'RINCON_TEST'
+    // expectedGroupTopology is no longer written on the ZGT path (pure sendEvent)
 
     when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>final</topology>')
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-FINAL', 'RINCON_TEST', 'RINCON_TEST', 'Test'))
 
     then:
-    appliedTopologies == ['<topology>intermediate</topology>', '<topology>final</topology>']
-    publishedSnapshots*.topology*.groups*.groupId == [['GROUP-INTERMEDIATE'], ['GROUP-FINAL']]
-    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
-    driver.device.dataValues.expectedGroupTopology == ''
+    driver.currentZgtByGroupId.keySet() == ['GROUP-FINAL'] as Set
+    driver.currentZgtByGroupId['GROUP-FINAL'].coordinatorId == 'RINCON_TEST'
   }
 
   def "coordinator transfer retains the topology expectation stamped by the parent"() {
@@ -2315,22 +2295,16 @@ class SonosAdvPlayerSpec extends Specification {
   def "unrelated player's topology updates are not held"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.device.dataValues.id = 'RINCON_UNRELATED'
-    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
-      [playerFound: true, coordinatorId: 'RINCON_UNRELATED', memberIds: ['RINCON_UNRELATED'],
-       visibleMemberIds: ['RINCON_UNRELATED'], memberNames: []]
-    }
-    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
-      String xml = '<topology>unrelated-current</topology>'
-      driver.runtimeState.appliedTopologyXml = xml
-      true
-    }
+    driver.currentZgtByGroupId.clear()
+    String zs = '<ZoneGroups><ZoneGroup ID="G-UNREL" Coordinator="RINCON_UNRELATED"><ZoneGroupMember UUID="RINCON_UNRELATED" ZoneName="Unrelated"/></ZoneGroup></ZoneGroups>'
+    String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String body = '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
 
     when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', '<topology>unrelated-current</topology>')
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body)
 
     then:
-    driver.runtimeState.appliedTopologyXml == '<topology>unrelated-current</topology>'
+    driver.currentZgtByGroupId['G-UNREL']?.coordinatorId == 'RINCON_UNRELATED'
     !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
   }
 

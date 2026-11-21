@@ -67,6 +67,8 @@ metadata {
   ) {
       capability 'Initialize'
       attribute 'websocketStatus', 'string'
+      attribute 'websocketCommandResponse', 'string'
+      attribute 'secondaryInitRequest', 'string'
     }
 }
 // =============================================================================
@@ -87,8 +89,7 @@ metadata {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
-  try { parent?.requestSecondaryWebsocketInitialization('secondary device lifecycle initialize', this.device.getDeviceNetworkId()) }
-  catch(Exception e) { logDebug("Could not request parent-mediated secondary initialization: ${e.message}") }
+  sendEvent(name: 'secondaryInitRequest', value: groovy.json.JsonOutput.toJson([reason: 'secondary device lifecycle initialize', dni: this.device.getDeviceNetworkId()]))
 }
 // =============================================================================
 // End Initialize And Configure
@@ -153,13 +154,11 @@ void webSocketStatus(String message) {
   logDebug("WebSocket status callback: ${message}; storedStatus=${this.device.getDataValue('websocketStatus')}")
 }
 
-/** Notify the owning player directly; Hubitat drivers do not expose app-style subscribe(). */
+/** Notify the owning player via device event (event-only parent communication). */
 void notifyParentWebsocketStatus(String status) {
   try {
-    if(parent != null) {
-      parent.rightChannelWebsocketStatusChanged(status, this.device.getDeviceNetworkId())
-      logDebug("Notified parent player of secondary WebSocket status: status=${status}")
-    }
+    sendEvent(name: 'websocketStatus', value: status, isStateChange: true)
+    logDebug("Notified parent player of secondary WebSocket status via event: status=${status}")
   } catch(Exception e) {
     logDebug("Could not notify parent player of secondary WebSocket status ${status}: ${e.message}")
   }
@@ -171,8 +170,10 @@ void wsConnect() {
     return
   }
   if(state.parentInitializationGranted != true) {
-    try { parent?.requestSecondaryWebsocketInitialization('secondary WebSocket connection requested', this.device.getDeviceNetworkId()) }
-    catch(Exception e) { logDebug("Could not request parent-mediated secondary reconnect: ${e.message}") }
+    try {
+      sendEvent(name: 'secondaryInitRequest', value: groovy.json.JsonOutput.toJson([reason: 'secondary WebSocket connection requested', dni: this.device.getDeviceNetworkId()]))
+      logDebug("Requested parent-mediated secondary reconnect via event")
+    } catch(Exception e) { logDebug("Could not request parent-mediated secondary reconnect: ${e.message}") }
     return
   }
   try {
@@ -498,7 +499,7 @@ void failPendingAudioClipLedger(String reason) {
 
 void notifyParentWebsocketCommandResponse(String result, String correlationId, String errorCode) {
   try {
-    if(parent != null) { parent.rightChannelWebsocketCommandResponse(result, correlationId, errorCode, this.device.getDeviceNetworkId()) }
+    sendEvent(name: 'websocketCommandResponse', value: groovy.json.JsonOutput.toJson([result: result, correlationId: correlationId, errorCode: errorCode, dni: this.device.getDeviceNetworkId()]))
   } catch(Exception e) { logDebug("Could not notify parent of secondary command response: ${e.message}") }
 }
 // =============================================================================

@@ -221,7 +221,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.lastGroupDeviceVolumeFadeCallTime.isEmpty()
     driver.unschedules.contains('drainGroupCommandQueue')
     driver.unschedules.contains('retryActiveGroupCommandRequest')
-    driver.parent.requests.empty
+    driver.events.find { Map e -> e.name == 'parentAppRequest' } == null
     driver.scheduled.any { List item ->
       item[1] == 'purgeParentGroupCommandsAfterInitialization' &&
         item[2].data.deviceDni == 'SONOS-GROUP-TEST-DNI'
@@ -229,11 +229,12 @@ class SonosAdvGroupSpec extends Specification {
     driver.scheduled.any { List item -> item[1] == 'refresh' }
 
     when:
+    driver.events.clear()
     driver.purgeParentGroupCommandsAfterInitialization([deviceDni: 'SONOS-GROUP-TEST-DNI'])
 
     then:
-    driver.parent.requests.size() == 1
-    driver.parent.requests[0].action == 'initializationPurge'
+    driver.events.count { Map e -> e.name == 'parentAppRequest' } == 1
+    new JsonSlurper().parseText(driver.events.find { Map e -> e.name == 'parentAppRequest' }.value as String).action == 'initializationPurge'
   }
 
   def "track position preference controls updates received by the group device"() {
