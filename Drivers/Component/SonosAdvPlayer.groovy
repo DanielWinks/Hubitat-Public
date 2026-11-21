@@ -31,6 +31,7 @@ import groovy.transform.CompileStatic
 import groovy.transform.Field
 import groovy.util.slurpersupport.GPathResult
 import hubitat.scheduling.AsyncResponse
+import hubitat.device.HubResponse
 import java.io.InputStream
 import java.time.Instant
 import java.util.Random
