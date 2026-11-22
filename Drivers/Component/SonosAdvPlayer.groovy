@@ -790,12 +790,12 @@ Boolean hasLineInCapability() {
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, Map> pendingZgtNotifyByDni = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, List<Map>> pendingZgtNotifyByDni = new ConcurrentHashMap<String, List<Map>>()
 // Transient presence transition baseline (per originating DNI): visible playerId -> zoneName,
 // plus vanished-already-notified dedup set. Used only to diff arrived/departed; pruned like SEQ counters.
 @Field static ConcurrentHashMap<String, Map> lastZgtPresenceByDni = new ConcurrentHashMap<String, Map>()
 // Transient in-flight hand-off for arrived/departed notifications; claimed on flush like pendingZgtNotifyByDni.
-@Field static ConcurrentHashMap<String, Map> pendingZgtPresenceByDni = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, List<Map>> pendingZgtPresenceByDni = new ConcurrentHashMap<String, List<Map>>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, Map> pendingCoordinatorAvtUpdatesByDni = new ConcurrentHashMap<String, Map>()
 @Field static final Striped<java.util.concurrent.locks.Lock> coordinatorAvtUpdateStripes = Striped.lock(64)
@@ -995,8 +995,6 @@ Boolean hasLineInCapability() {
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
-@Field static final String IS_ZGT_SUBSCRIBER_DEVICE_KEY = 'isZgtSubscriber'
-@Field static final String ZGT_LEADER_GEN_DEVICE_KEY = 'zgtLeaderGeneration'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static final Integer DEFERRED_INIT_DELAY_SECONDS = 1
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
@@ -1062,7 +1060,6 @@ Boolean hasLineInCapability() {
   'groupPlayerIds',
   'isGroupCoordinator',
   'coordinatorStatusChanged',
-  'householdTopology',
   'expectedGroupTopology',
   'deviceIp',
   'secondaryIds',
@@ -1071,13 +1068,9 @@ Boolean hasLineInCapability() {
   'rightChannelDeviceIp',
   'enableTrackPositionUpdates',
   'appInitializationRequestId',
-  'zgtSubscribe',
-  'zgtLeaderGeneration',
-  IS_ZGT_SUBSCRIBER_DEVICE_KEY,
   ZGT_SUB_DEVICE_KEY,
   ZGT_SUB_EXPIRES_DEVICE_KEY,
   ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY,
-  ZGT_LEADER_GEN_DEVICE_KEY,
   HAS_BATTERY_DEVICE_KEY,
   'rcSnapshotJson',
   'staticDriverActivePlayerRoster',
@@ -1347,7 +1340,7 @@ void recordPlayerInitializationStatus(String status, String requestId = null, Ma
 
 void performImmediateInitialization() {
   clearPendingCommandsForInitialization()
-  clearZgtSubscriptionForInitialization()
+  clearPlayerSubscriptionsForInitialization()
   migrateLegacyRuntimeState()
   // Copy-then-prune: whitelist prune now deletes orphans including legacy state keys.
   pruneOrphanedDriverPersistence()
@@ -1357,6 +1350,7 @@ void performImmediateInitialization() {
   cacheBatteryCapability()
   reconcileChildDevices()
   scheduleEarlyRenderingControlSubscribe()
+  scheduleEarlyZgtSubscribe()
 }
 
 void scheduleEarlyRenderingControlSubscribe() {
@@ -1366,6 +1360,15 @@ void scheduleEarlyRenderingControlSubscribe() {
     return
   }
   runIn(1, 'subscribeToRenderingControlEventsImmediate', [overwrite: true])
+}
+
+void scheduleEarlyZgtSubscribe() {
+  String localUpnpHost = device.getDataValue('localUpnpHost')
+  if(!localUpnpHost) {
+    logDebug('ZGT early subscribe skipped — device data not yet configured')
+    return
+  }
+  runIn(1, 'subscribeToZgtEvents', [overwrite: true])
 }
 
 void subscribeToRenderingControlEventsImmediate() {
@@ -1378,7 +1381,7 @@ void subscribeToRenderingControlEventsImmediate() {
   markAppMediatedUpnpSubscriptionsStarted()
 }
 
-void clearZgtSubscriptionForInitialization() {
+void clearPlayerSubscriptionsForInitialization() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
   String sid = device.getDataValue(ZGT_SUB_DEVICE_KEY) ?: getSid('sid3')
@@ -1394,8 +1397,6 @@ void clearZgtSubscriptionForInitialization() {
   device.removeDataValue(ZGT_SUB_DEVICE_KEY)
   device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
   device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
-  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'false')
-  device.removeDataValue(ZGT_LEADER_GEN_DEVICE_KEY)
   deleteSid('sid1')
   deleteSid('sid2')
   deleteSid('sid4')
@@ -1423,7 +1424,6 @@ void cacheBatteryCapability() {
 }
 
 void performAppMediatedInitialization() {
-  signalZgtReadyForElection()
   // Preserve original scheduling for parent-initiated turn so existing tests and
   // startup ordering still see initializeWebsocketConnection scheduled. Deferred
   // also runs for per-device always-subscribe work.
@@ -1448,52 +1448,12 @@ void performDeferredInitialization() {
   }
   subscribeToContentDirectory()
   refreshUpnpMediaCatalogs()
-  // ZGT remains conditional — only elected holder subscribes
-  if(isZgtSubscriber()) {
-    subscribeToZgtEvents()
-  } else {
-    unsubscribeFromZgtEvents()
-  }
+  subscribeToZgtEvents()
   subscribeToWsEvents()
   if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
     runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = true
     runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
   }
-}
-
-void signalZgtReadyForElection() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  if(cacheBatteryCapability() == null) { }
-  // Cluster pointer for parent election
-  try {
-    parent.zgtReadyForElection(dni)
-  } catch(Exception e) {
-    logWarn("parent.zgtReadyForElection failed for ${dni}: ${e.message}")
-  }
-}
-
-void zgtSubscriberElected(String leaderGeneration) {
-  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'true')
-  device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
-  device.updateDataValue('zgtLeaderGeneration', leaderGeneration ?: '')
-  runtimeState['zgtLeaderGeneration'] = leaderGeneration ?: ''
-  subscribeToZgtEvents()
-}
-
-Boolean isZgtSubscriber() {
-  return device.getDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY) == 'true'
-}
-
-void revokeZgtSubscription() {
-  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'false')
-  device.removeDataValue(ZGT_LEADER_GEN_DEVICE_KEY)
-  invalidateUpnpRequestsForDevice()
-  deleteSid('sid3')
-  device.removeDataValue(ZGT_SUB_DEVICE_KEY)
-  device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
-  device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
-  unsubscribeFromZgtEvents()
 }
 
 /** Clear work owned by this player only at an explicit device initialization. */
@@ -1659,8 +1619,7 @@ void requestAppMediatedInitialization(String reason) {
 }
 
 /** Called only by the parent app after it grants this player the initialization turn. */
-void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false,
-    String leaderGeneration = null, Integer attemptNumber = 1) {
+void beginAppMediatedInitialization(String requestId, Integer attemptNumber = 1) {
   logDebug("Starting app-mediated initialization; request=${requestId}")
   if(!requestId) {
     recordPlayerInitializationStatus('failed', null, [detail: 'missing parent request ID', finishedAt: now()])
@@ -1676,12 +1635,6 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
       ? (Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY] : [:]
   String initializationReason = previousInitialization.status == 'requested'
       ? previousInitialization.reason?.toString() : null
-  runtimeState['zgtSubscribe'] = subscribeZgt == true
-  runtimeState['zgtLeaderGeneration'] = leaderGeneration ?: ''
-  device.updateDataValue('zgtSubscribe', (subscribeZgt == true).toString())
-  device.updateDataValue('zgtLeaderGeneration', leaderGeneration ?: '')
-  device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, (subscribeZgt == true).toString())
-  device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
   runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = startedAt
   runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = false
   runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = false
@@ -1692,7 +1645,7 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
     // prepare migrates legacy state and clears state.*; record this after it
     // completes so the per-player diagnostic survives initialization.
     recordPlayerInitializationStatus('initializing', requestId, [startedAt: startedAt,
-        attempt: attemptNumber ?: 1, zgtRole: subscribeZgt == true,
+        attempt: attemptNumber ?: 1,
         reason: initializationReason])
     performAppMediatedInitialization()
   } catch(Exception e) {
@@ -3758,21 +3711,12 @@ void previousTrack() {
 }
 @CompileStatic
 void subscribeToEvents() {
-  if(isZgtSubscriber()) {
-    subscribeToZgtEvents()
-  } else {
-    unsubscribeFromZgtEvents()
-  }
+  subscribeToZgtEvents()
   subscribeToMrGrcEvents()
   // Rendering subscriptions are handled by the early initialization callback.
   markAppMediatedUpnpSubscriptionsStarted()
 }
 
-void requestAppZgtResubscription() {
-  if(!isZgtSubscriber()) { return }
-  if(subValid('sid3')) { resubscribeToZgtEvents() }
-  else { subscribeToZgtEvents() }
-}
 
 void markAppMediatedUpnpSubscriptionsStarted() {
   if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
@@ -5256,7 +5200,6 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
   cacheZgtMemberHosts(groups)
   queueZgtPresenceTransitions(deviceDni, groups, (List<Map>)newSnapshot.vanishedDevices)
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
-  if(eventsByGroupId.isEmpty()) { return }
   queueZgtTopologyNotification(deviceDni, eventsByGroupId)
 }
 
@@ -5324,11 +5267,19 @@ Map<String, List<Map>> projectZgtEventsByGroupId(List<Map> groups) {
   return eventsByGroupId
 }
 
-// Transient in-flight hand-off only, not storage: the pending entry lives until the flush claims it.
-// Deferred so parse() returns before the app gate runs; latest put coalesces floods to one setter call.
+// Transient ordered hand-off only, not storage. Preserve each notification until
+// the deferred flush calls the app so concurrent parse executions do not coalesce reports.
 void queueZgtTopologyNotification(String deviceDni, Map<String, List<Map>> eventsByGroupId) {
-  if(!deviceDni || eventsByGroupId == null || eventsByGroupId.isEmpty()) { return }
-  pendingZgtNotifyByDni.put(deviceDni, new LinkedHashMap<String, List<Map>>(eventsByGroupId))
+  if(!deviceDni || eventsByGroupId == null) { return }
+  Map<String, List<Map>> snapshot = new LinkedHashMap<String, List<Map>>()
+  eventsByGroupId.each { String groupId, List<Map> events ->
+    snapshot[groupId] = events.collect { Map event -> new LinkedHashMap(event) }
+  }
+  synchronized(pendingZgtNotifyByDni) {
+    List<Map> pending = pendingZgtNotifyByDni.get(deviceDni) ?: []
+    pending.add(snapshot)
+    pendingZgtNotifyByDni.put(deviceDni, pending)
+  }
   try {
     runInMillis(1, 'flushPendingZgtNotify', [overwrite: false])
   } catch(Exception e) {
@@ -5337,7 +5288,7 @@ void queueZgtTopologyNotification(String deviceDni, Map<String, List<Map>> event
   }
 }
 
-// Presence transitions are a parallel deferred notification alongside putZgtTopology (which is unchanged).
+// Presence transitions are reported for each player's own notification stream.
 void queueZgtPresenceTransitions(String deviceDni, List<Map> groups, List<Map> vanishedDevices) {
   if(!deviceDni) { return }
   List<Map> groupList = (groups instanceof List) ? groups : []
@@ -5402,7 +5353,11 @@ void queueZgtPresenceTransitions(String deviceDni, List<Map> groups, List<Map> v
   lastZgtPresenceByDni.put(deviceDni, [initialized: true, visible: new LinkedHashMap<String, String>(currentVisible), vanishedNotified: nextVanishedNotified])
   if(arrived.isEmpty() && departed.isEmpty()) { return }
   Map pending = [arrived: new ArrayList<Map>(arrived), departed: new ArrayList<Map>(departed)]
-  pendingZgtPresenceByDni.put(deviceDni, pending)
+  synchronized(pendingZgtPresenceByDni) {
+    List<Map> pendingReports = pendingZgtPresenceByDni.get(deviceDni) ?: []
+    pendingReports.add(pending)
+    pendingZgtPresenceByDni.put(deviceDni, pendingReports)
+  }
   try {
     runInMillis(1, 'flushPendingZgtPresence', [overwrite: false])
   } catch(Exception e) {
@@ -5414,17 +5369,19 @@ void queueZgtPresenceTransitions(String deviceDni, List<Map> groups, List<Map> v
 // Deferred so parse() returns before the app gate runs; mirrors flushPendingZgtNotify.
 void flushPendingZgtPresence() {
   if(pendingZgtPresenceByDni.isEmpty()) { return }
-  Map<String, Map> drained = [:]
+  Map<String, List<Map>> drained = [:]
   synchronized(pendingZgtPresenceByDni) {
     drained.putAll(pendingZgtPresenceByDni)
     pendingZgtPresenceByDni.clear()
   }
-  drained.each { String dni, Map transitions ->
-    if(!(transitions instanceof Map)) { return }
-    List<Map> departed = (transitions['departed'] instanceof List) ? (List<Map>)transitions['departed'] : []
-    List<Map> arrived = (transitions['arrived'] instanceof List) ? (List<Map>)transitions['arrived'] : []
-    departed.each { Map d -> notifyParentPresence('departed', dni, d) }
-    arrived.each { Map a -> notifyParentPresence('arrived', dni, a) }
+  drained.each { String dni, List<Map> reports ->
+    reports.each { Map transitions ->
+      if(!(transitions instanceof Map)) { return }
+      List<Map> departed = (transitions['departed'] instanceof List) ? (List<Map>)transitions['departed'] : []
+      List<Map> arrived = (transitions['arrived'] instanceof List) ? (List<Map>)transitions['arrived'] : []
+      departed.each { Map d -> notifyParentPresence('departed', dni, d) }
+      arrived.each { Map a -> notifyParentPresence('arrived', dni, a) }
+    }
   }
 }
 
@@ -5448,49 +5405,28 @@ void notifyParentPresence(String kind, String sourceDni, Map entry) {
 // One contract: the flush calls the pure parent setter directly (no fallback chain).
 void flushPendingZgtNotify() {
   if(pendingZgtNotifyByDni.isEmpty()) { return }
-  Map<String, Map> drained = [:]
+  Map<String, List<Map>> drained = [:]
   synchronized(pendingZgtNotifyByDni) {
     drained.putAll(pendingZgtNotifyByDni)
     pendingZgtNotifyByDni.clear()
   }
-  drained.each { String dni, Map topo ->
-    if(!(topo instanceof Map) || topo.isEmpty()) { return }
-    try {
-      if(parent != null) {
-        parent.putZgtTopology(dni, topo)
-      } else {
-        logDebug("Standalone ZGT topology (no parent) dni=${dni} groups=${topo.size()}")
+  drained.each { String dni, List<Map> reports ->
+    reports.each { Map topo ->
+      if(!(topo instanceof Map)) { return }
+      try {
+        if(parent != null) {
+          parent.putZgtTopology(dni, topo)
+        } else {
+          logDebug("Standalone ZGT topology (no parent) dni=${dni} groups=${topo.size()}")
+        }
+      } catch(Exception e) {
+        logWarn("parent ZGT notification failed for ${dni}: ${e.message}")
+        try { logDebug("ZGT notify failure detail: ${e}") } catch(Exception ignored) { }
       }
-    } catch(Exception e) {
-      logWarn("parent ZGT notification failed for ${dni}: ${e.message}")
-      try { logDebug("ZGT notify failure detail: ${e}") } catch(Exception ignored) { }
     }
   }
 }
 
-Boolean applyAppHouseholdTopology(String topologyJson) {
-  if(!topologyJson) { return false }
-  try {
-    Map topology = (Map)getSharedJsonSlurper().parseText(topologyJson)
-    if(!(topology.groups instanceof List)) { return false }
-    String playerId = getId()
-    Map ownGroup = ((List<Map>)topology.groups).find { Map group ->
-      group.playerIds instanceof List && ((List)group.playerIds).collect { Object id -> id?.toString() }.contains(playerId)
-    }
-    if(ownGroup == null || !ownGroup.groupId || !ownGroup.coordinatorId) { return false }
-    Map playerTopology = [playerFound: true, groupId: ownGroup.groupId?.toString(),
-      coordinatorId: ownGroup.coordinatorId?.toString(), coordinatorName: ownGroup.coordinatorName?.toString(),
-      visibleMemberIds: ((List)ownGroup.playerIds).collect { Object id -> id.toString() },
-      memberNames: ownGroup.playerNames instanceof List ? ownGroup.playerNames : [],
-      groupName: ownGroup.groupName?.toString(), batteryData: [:]]
-    LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
-    setDeviceDataValue('householdTopology', topologyJson)
-    return processZoneGroupTopologySnapshot(playerTopology, previousMembers)
-  } catch(Exception e) {
-    logWarn("Could not apply app household topology snapshot: ${e.message}")
-    return false
-  }
-}
 
 void flushPendingZoneGroupTopology() {
   flushPendingTopologyUpdates()
@@ -7394,7 +7330,7 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
             currentRcSidByDni.remove(rcDni)
           }
         }
-        if(request.sidKey == 'sid3' && isZgtSubscriber()) {
+        if(request.sidKey == 'sid3') {
           logDebug("ZGT subscription ${request.operation} accepted with SID, device-data zgtSub updated")
         }
         removeResub(request.subscribeMethod as String)
@@ -7413,7 +7349,7 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
     } else {
       logDebug("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
-      if(request.sidKey == 'sid3' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS && isZgtSubscriber()) {
+      if(request.sidKey == 'sid3' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS) {
         logWarn("ZGT subscription ${request.operation} exhausted retries (status=${status ?: 'none'}, error=${error ?: 'none'})")
       }
     }
@@ -7740,7 +7676,7 @@ void unsubscribeFromMrRcEventsCallback(HubResponse response) {
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToZgtEvents() {
-  if(!isZgtSubscriber()) { return }
+  if(subValid('sid3')) { return }
   String sub = 'subscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'
@@ -7750,19 +7686,9 @@ void subscribeToZgtEvents() {
 }
 
 // Entry point used by the parent app when a GROUP_STATUS_MOVED 499 arrives.
-// Skips the subscribe entirely when the ZGT subscription is still valid --
-// GROUP_STATUS_MOVED does not invalidate the UPnP SID, it only means the
-// coordinator changed. Otherwise we batch burst-y callers into a single 2s
-// delayed subscribe so storms of 499s coalesce into one network request.
-void requestZgtResub() {
-  if(!isZgtSubscriber()) { return }
-  if(subValid('sid3')) { return }
-  runIn(2, 'subscribeToZgtEvents', [overwrite: true])
-}
 
 @CompileStatic
 void resubscribeToZgtEvents() {
-  if(!isZgtSubscriber()) { return }
   String resub = 'resubscribeToZgtEvents'
   String subId = 'sid3'
   String subPath = '/zgt'

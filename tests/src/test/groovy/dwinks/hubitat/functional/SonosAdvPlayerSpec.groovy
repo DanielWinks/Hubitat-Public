@@ -282,6 +282,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "initialize clears all local pending command queues before requesting parent initialization"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
     driver.audioClipQueueInitialization()
     driver.getDeviceAudioClipQueue().add([correlationId: 'regular'])
     driver.getDeviceAudioClipQueueHighPriority().add([correlationId: 'high'])
@@ -1849,6 +1850,7 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.events.any { Map event -> event.name in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
     // Rendering subscriptions start via one shared runIn(1) during immediate init.
     driver.scheduled.any { List job -> job[1] == 'subscribeToRenderingControlEventsImmediate' }
+    driver.scheduled.any { List job -> job[1] == 'subscribeToZgtEvents' }
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
     websocketConnections.empty
   }
@@ -2324,9 +2326,13 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
+    Integer queuedReports = driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].size()
     driver.flushPendingZgtNotify()
 
     then:
+    queuedReports == 2
+    parentPlayerUpdates.count { Map item -> item.kind == 'zgtTopology' } == 2
     Map record = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
     record != null
     record.eventsByGroupId.size() == 1
@@ -3116,8 +3122,6 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "ZGT notification with unrelated service properties still publishes household topology"() {
     given:
-    driver.device.dataValues.appZgtSubscribe = 'true'
-    driver.device.dataValues.appZgtLeaderGeneration = 'leader-test'
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/>' +
       '</ZoneGroup></ZoneGroups>'
@@ -3138,38 +3142,30 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parse(raw)
 
     then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.containsKey('G1') == true
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']['G1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.containsKey('G1') == true
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].last()['G1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
     parentPlayerUpdates.isEmpty()  // hand-off is queued; parent is called on flush only
   }
 
-  def "only app-elected ZGT player subscribes to ZoneGroupTopology"() {
+  def "every player subscribes to ZGT without app election state"() {
     given:
     List<String> zgtCalls = []
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
-    driver.metaClass.unsubscribeFromZgtEvents = { -> zgtCalls << 'unsubscribe' }
-    driver.metaClass.subscribeToMrRcEvents = { -> }
-    List<String> grcCalls = []
-    driver.metaClass.subscribeToMrGrcEvents = { -> grcCalls << 'subscribe' }
+    driver.metaClass.subscribeToMrGrcEvents = { -> }
     driver.metaClass.markAppMediatedUpnpSubscriptionsStarted = { -> }
-    driver.device.dataValues.isZgtSubscriber = 'false'
 
     when:
     driver.subscribeToEvents()
-    driver.device.dataValues.isZgtSubscriber = 'true'
-    driver.device.dataValues.zgtLeaderGeneration = 'leader-1'
-    driver.subscribeToEvents()
 
     then:
-    zgtCalls == ['unsubscribe', 'subscribe']
-    grcCalls == ['subscribe', 'subscribe']
+    zgtCalls == ['subscribe']
+    !driver.device.dataValues.containsKey('isZgtSubscriber')
+    !driver.device.dataValues.containsKey('zgtLeaderGeneration')
   }
 
   def "every ZGT snapshot applies in order while a topology mutation is pending"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.device.dataValues.appZgtSubscribe = 'true'
-    driver.device.dataValues.appZgtLeaderGeneration = 'leader-1'
     // With singleThreaded:true and pure handleZgtFull, pending snapshots are
     // no longer held by expectedTopology — the map update is immediate.
 
@@ -3183,7 +3179,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-INTERMEDIATE', 'RINCON_OTHER', 'RINCON_OTHER', 'Other'))
 
     then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.keySet() == ['GROUP-INTERMEDIATE'] as Set
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.keySet() == ['GROUP-INTERMEDIATE'] as Set
     // expectedGroupTopology is no longer written on the ZGT path (pure sendEvent)
 
     when:
@@ -3197,7 +3193,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-FINAL', 'RINCON_TEST', 'RINCON_TEST', 'Test'))
 
     then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.keySet() == ['GROUP-FINAL'] as Set
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.keySet() == ['GROUP-FINAL'] as Set
 
     when:
     driver.flushPendingZgtNotify()
@@ -3251,8 +3247,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     request.params.headers.SOAPAction == 'urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState'
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']['GROUP-TEST'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']['GROUP-TEST'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_B'
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].last()['GROUP-TEST'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].last()['GROUP-TEST'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_B'
     driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 
@@ -3299,7 +3295,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body)
 
     then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.containsKey('G-UNREL') == true
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.containsKey('G-UNREL') == true
     !driver.pendingTopologyWebsocketByDni.containsKey('SONOS-TEST-DNI')
     !driver.pendingTopologyKindByDni.containsKey('SONOS-TEST-DNI')
   }
@@ -4119,24 +4115,6 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.empty
     driver.scheduled.empty
     driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
-  }
-
-  def "app topology application publishes no membership outbox message"() {
-    given:
-    driver.device.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
-    driver.device.dataValues.isGroupCoordinator = 'false'
-    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_FOLLOW'
-    String topology = JsonOutput.toJson([groups: [[groupId: 'GROUP_TEST',
-      coordinatorId: 'RINCON_TEST', playerIds: ['RINCON_TEST', 'RINCON_FOLLOW'],
-      playerNames: ['Test Player', 'Follower']]]])
-
-    when:
-    Boolean applied = driver.applyAppHouseholdTopology(topology)
-
-    then:
-    assert applied : driver.logs.join('\n')
-    driver.device.dataValues.groupPlayerIds == 'RINCON_TEST,RINCON_FOLLOW'
-    !playerStateMessages().any { Map event -> event.kind == 'membership' }
   }
 
   def "group state flush publishes one batched location event"() {

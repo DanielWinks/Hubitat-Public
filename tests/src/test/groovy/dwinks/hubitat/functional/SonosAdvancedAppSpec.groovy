@@ -37,14 +37,10 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<String> refreshedPlaybackUpdates = []
   List<String> groupPlaybackSnapshotRequests = []
   List<String> initializationRequests = []
-  List<Map> initializationRoles = []
   Closure<Boolean> topologyApplyHook
 
-  void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false,
-      String leaderGeneration = null, Integer attemptNumber = 1) {
+  void beginAppMediatedInitialization(String requestId, Integer attemptNumber = 1) {
     initializationRequests << requestId
-    initializationRoles << [subscribeZgt: subscribeZgt, leaderGeneration: leaderGeneration,
-      attemptNumber: attemptNumber]
   }
   void cancelAppMediatedInitialization(String requestId) { commands << [name: 'cancelAppMediatedInitialization', requestId: requestId] }
 
@@ -172,7 +168,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
     currentValues.householdTopology = json
     return topologyApplyHook == null || topologyApplyHook.call(json) == true
   }
-  void requestAppZgtResubscription() { commands << [name: 'requestAppZgtResubscription'] }
 }
 
 class SonosAppGroupDouble extends ChildDeviceWrapper {
@@ -238,7 +233,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript = ScriptLoader.instantiate(appScriptClass)
     appScript.discoveredSonoses.clear()
     appScript.discoveredSonosSecondaries.clear()
-    appScript.zgtResubRequestAt.clear()
     appScript.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     appScript.logs.clear()
     appScript.events.clear()
@@ -468,357 +462,39 @@ class SonosAdvancedAppSpec extends Specification {
     }
   }
 
-  def "boot releases only the first eligible mains player for ZGT initialization"() {
+  def "boot initialization queue proceeds without waiting for ZGT election or topology"() {
     given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-1'
+    appScript.state.playerInitializationNotBefore = 0L
     appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
+    appScript.state.playerInitializationQueue = [
+      [dni: coordinator.deviceNetworkId, reason: 'hub boot', bootAttempt: 0],
+      [dni: follower.deviceNetworkId, reason: 'hub boot', bootAttempt: 0]
+    ]
     appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-1', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-    follower.dataValues.modelName = 'Sonos Move'
 
     when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
     appScript.startNextPlayerInitialization()
 
     then:
-    coordinator.initializationRequests.size() == 1
-    coordinator.initializationRoles[0].subscribeZgt == true
-    follower.initializationRequests.empty
-    extra.initializationRequests.empty
-    appScript.state.playerInitializationActive.size() == 1
-    appScript.state.playerInitializationZgt.candidateDni == coordinator.deviceNetworkId
-    appScript.state.playerInitializationQueue*.dni as Set ==
-      ([follower.deviceNetworkId, extra.deviceNetworkId] as Set)
-    appScript.scheduled.any { List job -> job[1] == 'playerInitializationHardWatchdog' &&
-      job[0] <= 180000 && job[2]?.overwrite == true }
-  }
-
-  def "ZGT candidate timeout promotes a different mains player and ignores late topology"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-timeout'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-timeout', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    Map firstRequest = appScript.state.playerInitializationActive[coordinator.deviceNetworkId]
-    appScript.failZgtInitializationCandidate(coordinator.deviceNetworkId, 'test timeout')
-    appScript.startNextPlayerInitialization()
-
-    then:
-    appScript.state.playerInitializationZgt.failedCandidates.contains(coordinator.deviceNetworkId)
-    appScript.state.playerInitializationZgt.candidateDni == follower.deviceNetworkId
-    follower.initializationRequests.size() == 1
-    follower.initializationRoles[0].subscribeZgt == true
-    appScript.state.playerInitializationActive.containsKey(follower.deviceNetworkId)
-    appScript.state.playerInitializationQueue*.dni.contains(coordinator.deviceNetworkId)
-
-    when:
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [
-      groups: [[groupId: 'GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]])
-
-    then:
-    appScript.state.sonosHouseholdTopology == null
-    appScript.state.playerInitializationZgt.candidateDni == follower.deviceNetworkId
-  }
-
-  def "manual initialize immediately retries an exhausted boot ZGT election"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-exhausted-retry'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-exhausted-retry', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-    follower.dataValues.modelName = 'Sonos Move'
-    extra.dataValues.powerSource = 'battery'
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    appScript.failZgtInitializationCandidate(coordinator.deviceNetworkId, 'test timeout')
-
-    then:
-    appScript.state.playerInitializationZgt.status == 'exhausted'
-    appScript.state.playerInitializationZgt.candidateDni == null
-    appScript.scheduled.any { List job -> job[1] == 'retryZgtInitializationElection' }
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'driver initialize', false)
-
-    then:
-    appScript.state.playerInitializationZgt.status != 'exhausted'
-    appScript.state.playerInitializationZgt.failedCandidates.empty
-    appScript.state.playerInitializationZgt.candidateDni == coordinator.deviceNetworkId
-    coordinator.initializationRequests.size() == 2
-    coordinator.initializationRoles[1].subscribeZgt == true
-  }
-
-  def "ZGT candidate completed initialization still loses its role when its topology times out"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-completed-timeout'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = [[dni: follower.deviceNetworkId, reason: 'hub boot', bootGeneration: 'boot-zgt-completed-timeout']]
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-completed-timeout',
-      failedCandidates: [], topologyReady: false, candidateDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'old-leader']
-    coordinator.dataValues.appZgtSubscribe = 'true'
-    coordinator.dataValues.appZgtLeaderGeneration = 'old-leader'
-
-    when:
-    appScript.failZgtInitializationCandidate(coordinator.deviceNetworkId, 'topology timeout after initialization completed')
-
-    then:
-    coordinator.dataValues.appZgtSubscribe == 'false'
-    coordinator.dataValues.appZgtLeaderGeneration == ''
-    appScript.state.playerInitializationZgt.candidateDni == follower.deviceNetworkId
-    appScript.state.playerInitializationZgt.leaderGeneration != 'old-leader'
-  }
-
-  def "valid full household topology opens queue before ZGT player init completion"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-ready'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-ready', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    Map zgt = appScript.state.playerInitializationZgt as Map
-    List<Boolean> topologyReadyDuringApply = []
-    [coordinator, follower, extra].each { SonosAppPlayerDouble player ->
-      player.topologyApplyHook = { String json ->
-        topologyReadyDuringApply << (appScript.state.playerInitializationZgt.topologyReady == true)
-        return true
-      }
-    }
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [
-        [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-        [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
-      ]])
-    appScript.applyHouseholdTopologyBatch()
-    appScript.startNextPlayerInitialization()
-
-    then:
-    appScript.state.sonosHouseholdTopology.groups.size() == 2
-    appScript.state.playerInitializationZgt.topologyReady == true
-    appScript.state.playerInitializationZgt.initializationComplete != true
-    topologyReadyDuringApply == [false, false, false]
-    coordinator.currentValues.householdTopology != null
-    follower.currentValues.householdTopology != null
-    extra.currentValues.householdTopology != null
-    appScript.state.playerInitializationActive.size() == 3
-    follower.initializationRequests.size() == 1
-    extra.initializationRequests.size() == 1
-    coordinator.initializationRequests.size() == 1
-    coordinator.dataValues.householdTopology.contains('GROUP-2')
-    coordinator.groupPlaybackSnapshotRequests == [coordinator.deviceNetworkId]
-    extra.groupPlaybackSnapshotRequests.empty
-    follower.groupPlaybackSnapshotRequests.empty
-  }
-
-  def "ZGT init failure after topology acceptance preserves topology and releases ordinary players"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-timeout-after-topology'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-timeout-after-topology',
-      failedCandidates: [], topologyReady: false, initializationComplete: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    Map zgt = appScript.state.playerInitializationZgt as Map
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [[groupId: 'GROUP',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]])
-    appScript.applyHouseholdTopologyBatch()
-    String firstRequestId = appScript.state.playerInitializationActive[coordinator.deviceNetworkId].requestId
-    appScript.finishPlayerInitialization(firstRequestId, false, 'test timeout after topology acceptance', true)
-    appScript.startNextPlayerInitialization()
-
-    then:
-    appScript.state.playerInitializationZgt.failedCandidates.empty
-    appScript.state.playerInitializationZgt.candidateDni == coordinator.deviceNetworkId
-    appScript.state.playerInitializationZgt.topologyReady == true
-    follower.initializationRequests.size() == 1
-    follower.initializationRoles[0].subscribeZgt == false
-    extra.initializationRequests.size() == 1
     appScript.state.playerInitializationActive.size() == 2
-    appScript.state.playerInitializationActive.keySet().containsAll([follower.deviceNetworkId, extra.deviceNetworkId])
-    appScript.state.playerInitializationQueue.any { Map request ->
-      request.dni == coordinator.deviceNetworkId && request.bootAttempt == 1
-    }
+    coordinator.initializationRequests.size() == 1
+    follower.initializationRequests.size() == 1
+    !appScript.state.containsKey('playerInitializationZgt')
   }
 
-  def "boot queue stays held if any player cannot apply household topology"() {
+  def "ZGT reports from every player replace the stored snapshot latest wins"() {
     given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-apply-failure'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-apply-failure', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-    follower.topologyApplyHook = { String json -> false }
+    List<Map> first = [[name: 'groupCoordinatorId', value: 'RINCON_COORD']]
+    List<Map> latest = [[name: 'groupCoordinatorId', value: 'RINCON_FOLLOW']]
 
     when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', true)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    Map zgt = appScript.state.playerInitializationZgt as Map
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [
-        [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-        [groupId: 'GROUP-2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
-      ]])
-    appScript.applyHouseholdTopologyBatch()
+    appScript.putZgtTopology(coordinator.deviceNetworkId, ['G1': first])
+    Map stored = appScript.putZgtTopology(follower.deviceNetworkId, ['G2': latest])
 
     then:
-    appScript.state.playerInitializationZgt.topologyReady == false
-    appScript.state.playerInitializationZgt.failedCandidates.contains(coordinator.deviceNetworkId)
-    follower.initializationRequests.empty
-    extra.initializationRequests.empty
-  }
-
-  def "topology matching the accepted household snapshot does not arm the ZGT failure watchdog"() {
-    given:
-    appScript.state.sonosHouseholdTopology = [groups: [
-      [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-      [groupId: 'GROUP-3', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
-    ]]
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-1', topologyReady: true, lastInboundAt: appScript.now()]
-
-    when:
-    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW', 'RINCON_COORD'],
-      observedAt: appScript.now(), playerDni: coordinator.deviceNetworkId])
-
-    then:
-    !appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
-    appScript.state.playerInitializationZgt.topologyReady == true
-    appScript.logs.any { String log -> log.contains('matches the app household snapshot; ZGT watchdog unchanged') }
-  }
-
-  def "unchanged accepted household topology does not fan out again"() {
-    given:
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      topologyReady: false]
-    Map payload = [groups: [[groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]]]
-
-    when:
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload)
-    appScript.applyHouseholdTopologyBatch()
-    appScript.scheduled.clear()
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, payload)
-
-    then:
-    appScript.scheduled.empty
-    appScript.state.playerInitializationZgt.topologyReady == true
-  }
-
-  def "repeated identical ZGT snapshot is ignored without reapplying"() {
-    given:
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
-    appScript.state.playerInitializationZgt.topologyReady = true
-    appScript.scheduled.clear()
-
-    when:
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
-
-    then:
-    appScript.state.sonosHouseholdTopology.groups[0].groupId == 'GROUP-1'
-    !appScript.scheduled.any { List job -> job[1] == 'applyHouseholdTopologyBatch' }
-  }
-
-  def "ZGT snapshot showing ungrouped players is accepted and fanned out"() {
-    given:
-    acceptZgtTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW')
-
-    when:
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [
-        [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
-        [groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW', playerIds: ['RINCON_FOLLOW']]
-      ]])
-    appScript.applyHouseholdTopologyBatch()
-
-    then:
-    (appScript.state.sonosHouseholdTopology.groups as List<Map>).every { Map item ->
-      (item.playerIds as List).size() == 1
-    }
-    group.refreshedPlaybackUpdates.size() == 1
-    (new JsonSlurper().parseText(group.refreshedPlaybackUpdates[0]).groups as List<Map>).every { Map item ->
-      (item.playerIds as List).size() == 1
-    }
-    appScript.state.playerInitializationZgt.topologyReady == true
-  }
-
-  def "topology differing from the accepted household snapshot arms the ZGT watchdog"() {
-    given:
-    appScript.state.sonosHouseholdTopology = [groups: [
-      [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    ]]
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-1', topologyReady: true, lastInboundAt: appScript.now()]
-
-    when:
-    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD'],
-      observedAt: appScript.now(), playerDni: coordinator.deviceNetworkId])
-
-    then:
-    appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' && job[0] == 30 }
-    appScript.state.playerInitializationZgt.topologyChangedAt != null
-  }
-
-  def "household topology is not delivered to alarm manager without an id data value"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-zgt-child-filter'
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = []
-    appScript.state.playerInitializationActive = [:]
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-zgt-child-filter', failedCandidates: [], topologyReady: false]
-    appScript.state.playerInitializationNotBefore = appScript.now()
-    SonosAppPlayerDouble alarmManager = new SonosAppPlayerDouble(
-      deviceNetworkId: '283-SonosAlarmManager-HOUSEHOLD', displayName: 'Sonos Alarm Manager', label: 'Sonos Alarm Manager'
-    )
-    appScript.children = [group, coordinator, follower, extra, alarmManager]
-    appScript.app.children = appScript.children
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [[groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]]])
-    appScript.applyHouseholdTopologyBatch()
-
-    then:
-    coordinator.dataValues.householdTopology != null
-    alarmManager.dataValues.householdTopology == null
-    !(alarmManager in appScript.getCurrentGroupDevices())
-    !appScript.logs.any { String log -> log.contains('Could not deliver household topology') }
+    stored.keySet() == ['G2'] as Set
+    appScript.getStoredZgtEventsMap().keySet() == ['G2'] as Set
+    appScript.state.zgtLastReport.sourcePlayerDni == follower.deviceNetworkId
   }
 
   def "burst of off-turn WebSocket requests arms a delayed boot batch"() {
@@ -843,9 +519,6 @@ class SonosAdvancedAppSpec extends Specification {
     given:
     appScript.state.playerInitializationBootGeneration = 'boot-generation-1'
     appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationZgt = [bootGeneration: 'boot-generation-1',
-      failedCandidates: [], topologyReady: true, initializationComplete: true,
-      candidateDni: coordinator.deviceNetworkId]
 
     when:
     appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
@@ -1079,19 +752,7 @@ class SonosAdvancedAppSpec extends Specification {
     emitTopologyObservation('RINCON_FOLLOW', groupId, coordinatorId, playerIds)
   }
 
-  void acceptZgtTopology(String groupId, String coordinatorId, String playerIds) {
-    if(!(appScript.state.playerInitializationZgt instanceof Map)) {
-      appScript.state.playerInitializationZgt = [
-        candidateDni: coordinator.deviceNetworkId,
-        topologyReady: true
-      ]
-    }
-    appScript.acceptHouseholdTopology(coordinator.deviceNetworkId, [groups: [[
-        groupId: groupId,
-        coordinatorId: coordinatorId,
-        playerIds: playerIds.split(',') as List
-      ]]])
-  }
+
 
   void emitPlayback(String playerId, String playbackState, Long observedAt = null, String groupId = 'GROUP-1') {
     Map operation = appScript.getActiveGroupOperation()
@@ -2298,8 +1959,6 @@ class SonosAdvancedAppSpec extends Specification {
     follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
     coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
     follower.currentValues.groupCoordinatorId = 'RINCON_COORD'
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      topologyReady: false, initializationComplete: false]
     List<Map> zgtEvents = []
     zgtEvents << [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
     zgtEvents << [name: 'groupCoordinatorId', value: 'RINCON_COORD']
@@ -3221,11 +2880,6 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "topology attribute handler rebuilds topology from attributes once per change"() {
     given:
-    appScript.state.sonosHouseholdTopology = [groups: [
-      [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_OTHER']]
-    ]]
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      leaderGeneration: 'leader-1', topologyReady: true, lastInboundAt: appScript.now()]
     coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.currentValues.groupPlayerIds = 'RINCON_FOLLOW,RINCON_COORD'
     coordinator.currentValues.groupId = 'GROUP-1'
@@ -3237,7 +2891,7 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.lastProcessedTopologyByDni[coordinator.deviceNetworkId] ==
       [coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
+    !appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
 
     when:
     appScript.scheduled.clear()
@@ -3904,29 +3558,21 @@ class SonosAdvancedAppSpec extends Specification {
     follower.events.isEmpty()
   }
 
-  def "pure ZGT setter stores latest-only event lists and gates non-current speaker"() {
+  def "pure ZGT setter stores every reporter latest wins without child calls"() {
     given:
-    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
-      topologyReady: false, initializationComplete: false]
-    List<Map> events = []
-    events << [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
-    events << [name: 'groupCoordinatorId', value: 'RINCON_COORD']
-    events << [name: 'isGrouped', value: 'on']
-    events << [name: 'groupMemberCount', value: 2]
-
+    List<Map> coordinatorEvents = [[name: 'groupCoordinatorId', value: 'RINCON_COORD']]
+    List<Map> followerEvents = [[name: 'groupCoordinatorId', value: 'RINCON_FOLLOW']]
     when:
-    Map stored = appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': events])
+    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': coordinatorEvents])
+    Map stored = appScript.putZgtTopology(follower.deviceNetworkId, ['GROUP-2': followerEvents])
 
     then:
-    appScript.getStoredZgtEvents('GROUP-1') == events
-    appScript.state.playerInitializationZgt.topologyReady == true
-    !appScript.scheduled.any { List item -> item[1] == 'applyHouseholdTopologyBatch' }
-
-    when:
-    Map ignored = appScript.putZgtTopology(follower.deviceNetworkId, ['GROUP-1': events])
-
-    then:
-    ignored.isEmpty()
-    appScript.getStoredZgtEvents('GROUP-1') == events
+    stored.keySet() == ['GROUP-2'] as Set
+    appScript.getStoredZgtEventsMap().keySet() == ['GROUP-2'] as Set
+    appScript.state.zgtLastReport.sourcePlayerDni == follower.deviceNetworkId
+    appScript.state.zgtLastReport.observedAt > 0L
+    coordinator.events.isEmpty()
+    follower.events.isEmpty()
   }
+
 }
