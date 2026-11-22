@@ -1568,7 +1568,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
-    driver.pendingParentUpdates.clear()
     driver.pendingParentOrdered.clear()
     driver.pendingParentRequests.clear()
     driver.parentUpdateLocks.clear()

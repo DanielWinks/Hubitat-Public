@@ -892,7 +892,6 @@ Boolean hasLineInCapability() {
 @Field static final Integer PARENT_UPDATE_MAX_ITEMS = 64
 @Field static final Integer PARENT_UPDATE_DRAIN_INTERVAL_MS = 25
 @Field static final Integer PARENT_UPDATE_RETRY_MS = 1000
-@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Map>> pendingParentUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingParentOrdered = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, Object> parentUpdateLocks = new ConcurrentHashMap<String, Object>()
 @Field static ConcurrentHashMap<String, Long> pendingParentUpdateDropped = new ConcurrentHashMap<String, Long>()
@@ -933,7 +932,6 @@ void uninstalled() {
   state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
   String dni = device.getDeviceNetworkId()
   if(dni) {
-    pendingParentUpdates.remove(dni)
     pendingParentOrdered.remove(dni)
     pendingParentRequests.remove(dni)
   }
@@ -1175,7 +1173,6 @@ void clearPendingCommandsForInitialization() {
   state.remove(PARENT_UPDATE_DRAIN_DUE_AT_KEY)
   state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
   if(dni) {
-    pendingParentUpdates.remove(dni)
     pendingParentOrdered.remove(dni)
     pendingParentRequests.remove(dni)
   }
@@ -8986,36 +8983,24 @@ private Object getParentUpdateLock(String dni) {
   return lock
 }
 
-private String parentStateUpdateCoalesceKey(Map payload) {
-  // playbackObservation/state/wsConnected/wsRetry removed — parent now subscribes to attributes + lastUpdated
-  return null
-}
-
 void enqueueParentStateUpdate(Map payload) {
   String dni = device.getDeviceNetworkId()
   if(!dni || payload == null || payload.isEmpty()) { return }
   Object lock = getParentUpdateLock(dni)
   synchronized(lock) {
-    String key = parentStateUpdateCoalesceKey(payload)
-    if(key != null) {
-      pendingParentUpdates.putIfAbsent(dni, new ConcurrentHashMap<String, Map>())
-      ConcurrentHashMap<String, Map> outbox = pendingParentUpdates.get(dni)
-      outbox.put(key, new LinkedHashMap(payload))
-    } else {
-      ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
-      if(ordered == null) {
-        ConcurrentLinkedQueue<Map> created = new ConcurrentLinkedQueue<Map>()
-        ConcurrentLinkedQueue<Map> existing = pendingParentOrdered.putIfAbsent(dni, created)
-        ordered = existing ?: created
-      }
-      if(ordered.size() >= PARENT_UPDATE_MAX_ITEMS) {
-        ordered.poll()
-        Long dropped = (pendingParentUpdateDropped.get(dni) ?: 0L) + 1L
-        pendingParentUpdateDropped.put(dni, dropped)
-        logWarn("Parent update ordered queue overflow for dni=${dni}; dropped oldest zgtTopology payload (totalDropped=${dropped})")
-      }
-      ordered.add(new LinkedHashMap(payload))
+    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
+    if(ordered == null) {
+      ConcurrentLinkedQueue<Map> created = new ConcurrentLinkedQueue<Map>()
+      ConcurrentLinkedQueue<Map> existing = pendingParentOrdered.putIfAbsent(dni, created)
+      ordered = existing ?: created
     }
+    if(ordered.size() >= PARENT_UPDATE_MAX_ITEMS) {
+      ordered.poll()
+      Long dropped = (pendingParentUpdateDropped.get(dni) ?: 0L) + 1L
+      pendingParentUpdateDropped.put(dni, dropped)
+      logWarn("Parent update ordered queue overflow for dni=${dni}; dropped oldest update (totalDropped=${dropped})")
+    }
+    ordered.add(new LinkedHashMap(payload))
   }
 }
 
@@ -9024,9 +9009,8 @@ private void scheduleParentUpdateDrain(Integer delayMs) {
   if(!dni) { return }
   Object lock = getParentUpdateLock(dni)
   synchronized(lock) {
-    ConcurrentHashMap<String, Map> outbox = pendingParentUpdates.get(dni)
     ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
-    if((outbox == null || outbox.isEmpty()) && (ordered == null || ordered.isEmpty())) {
+    if(ordered == null || ordered.isEmpty()) {
       state.remove(PARENT_UPDATE_DRAIN_SCHEDULED_KEY)
       state.remove(PARENT_UPDATE_DRAIN_DUE_AT_KEY)
       return
@@ -9055,14 +9039,7 @@ List<Map> drainPendingParentUpdatesForPoll() {
   Object lock = getParentUpdateLock(dni)
   List<Map> batch = []
   synchronized(lock) {
-    ConcurrentHashMap<String, Map> outbox = pendingParentUpdates.get(dni)
     ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
-    if(outbox != null && !outbox.isEmpty()) {
-      List<Map> claimed = new ArrayList<Map>(outbox.values())
-      outbox.clear()
-      batch.addAll(claimed)
-      pendingParentUpdates.remove(dni)
-    }
     if(ordered != null && !ordered.isEmpty()) {
       while(ordered.peek() != null && batch.size() < PARENT_UPDATE_MAX_ITEMS) {
         Map item = ordered.poll()
