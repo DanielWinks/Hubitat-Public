@@ -49,7 +49,6 @@ import java.net.URLDecoder
 import java.util.Collections
 import java.util.TreeSet
 import java.util.UUID
-import java.nio.charset.StandardCharsets
 import java.time.Clock
 import org.apache.commons.codec.binary.Base64
 import java.util.Random
@@ -431,7 +430,6 @@ GPathResult parseSonosMessageXML(String xml) {
   return new XmlSlurper().parseText(xml)
 }
 
-@CompileStatic
 String getBaseControlXML(Map service, String action, Map controlValues = null) {
   Map actionArgs = service.actions[action] as Map
   Map args = new LinkedHashMap(actionArgs.arguments as Map)
@@ -479,15 +477,15 @@ void postAsyncHttp(String callback, Map params, Map data = null) {
 }
 
 void setDriverStateValue(String key, Object value) {
-  state[key] = value
+  runtimeState[key] = value
 }
 
 Object getDriverStateValue(String key) {
-  return state[key]
+  return runtimeState[key]
 }
 
 Object removeDriverStateValue(String key) {
-  return state.remove(key)
+  return runtimeState.remove(key)
 }
 
 metadata {
@@ -777,6 +775,7 @@ Boolean hasLineInCapability() {
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
+@Field static ConcurrentHashMap<String, Map<String, Map>> audioClipProgressByCorrelationIdByDni = new ConcurrentHashMap<String, Map<String, Map>>()
 // Fixed stripes bound lock storage while preserving per-DNI mutual exclusion.
 @Field static final Striped<java.util.concurrent.locks.Lock> websocketCommandLedgerStripes = Striped.lock(64)
 // Expected topology is stored as a device data value on each affected player,
@@ -989,24 +988,18 @@ Boolean hasLineInCapability() {
 // Whitelisted persistence — pruning helper surfaces (standalone copy, no #include)
 // =============================================================================
 @Field static final Set<String> ACTIVE_PLAYER_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  PENDING_BATCH_EVENTS_KEY,
-  BATCH_EVENTS_SCHEDULED_KEY,
-  BATCH_EVENTS_DUE_AT_KEY,
-  LOCAL_EVENT_DRAIN_SCHEDULED_KEY,
-  LOCAL_EVENT_DRAIN_DUE_AT_KEY,
-  PENDING_COMPONENT_CHILD_EVENTS_KEY,
-  COMPONENT_CHILD_DRAIN_SCHEDULED_KEY,
-  COMPONENT_CHILD_DRAIN_DUE_AT_KEY,
-  COMPONENT_CHILD_RETRY_ATTEMPTS_KEY,
-  LAST_COMPONENT_CHILD_EVENTS_KEY,
-  GROUP_DEVICE_UPDATE_SCHEDULED_KEY,
+  'pendingBatchEvents',
+  'batchEventsScheduled',
+  'batchEventsDueAt',
+  'localDeviceEventDrainScheduled',
+  'localDeviceEventDrainDueAt',
+  'pendingComponentChildEvents',
+  'componentChildDrainScheduled',
+  'componentChildDrainDueAt',
+  'componentChildRetryAttempts',
+  'lastComponentChildEvents',
+  'groupDeviceUpdateScheduled',
   'pendingParentAppTtsRequests',
-  'favoritesBrowseVersion',
-  'favoritesBrowseRequestId',
-  'favoritesBrowseItems',
-  'playlistsBrowseVersion',
-  'playlistsBrowseRequestId',
-  'playlistsBrowseItems',
   'favoriteLoadRequestId',
   'playlistLoadRequestId',
   'playlistAddRequestId',
@@ -1024,7 +1017,6 @@ Boolean hasLineInCapability() {
   'lastErrorObservedAt',
   'currentlyPlayingClip',
   'activeAudioClipMessage',
-  'audioClipProgressByCorrelationId',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -1048,10 +1040,10 @@ Boolean hasLineInCapability() {
   'rightChannelId',
   'rightChannelDeviceIp',
   'enableTrackPositionUpdates',
-  ZGT_SUB_DEVICE_KEY,
-  ZGT_SUB_EXPIRES_DEVICE_KEY,
-  ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY,
-  HAS_BATTERY_DEVICE_KEY,
+  'zgtSub',
+  'zgtSubExpires',
+  'zgtSubExpiresEpoch',
+  'hasBattery',
   'rcSnapshotJson',
   'staticDriverActivePlayerRoster',
   'sid1',
@@ -1637,14 +1629,10 @@ void migrateLegacyRuntimeState() {
   if(pendingComponentChildEvents != null) { state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pendingComponentChildEvents }
   if(componentChildDrainScheduled != null) { state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = componentChildDrainScheduled }
   if(lastComponentChildEvents != null) { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastComponentChildEvents }
-  ['currentlyPlayingClip', 'activeAudioClipMessage', 'audioClipProgressByCorrelationId'].each { String key ->
-    Object value = runtime.get(key)
-    if(value != null) { storeHiddenJsonState(key, summarizeHiddenJsonState(key, value), value) }
-  }
 }
 
 Boolean isHiddenJsonStateKey(String name) {
-  return name in ['currentlyPlayingClip', 'activeAudioClipMessage', 'audioClipProgressByCorrelationId']
+  return name in ['currentlyPlayingClip', 'activeAudioClipMessage']
 }
 
 String summarizeHiddenJsonState(String name, Object value) {
@@ -1667,7 +1655,7 @@ void storeHiddenJsonState(String name, String visibleText, Object value) {
     state.remove(name)
     return
   }
-  String encoded = Base64.encodeBase64String(JsonOutput.toJson(value).getBytes(StandardCharsets.UTF_8))
+  String encoded = Base64.encodeBase64String(JsonOutput.toJson(value).getBytes('UTF-8'))
   state[name] = "<root><span class=\"visible-data\">${escapeHiddenStateHtml(visibleText)}</span><span class=\"hidden-data\" style=\"display:none\">${encoded}</span></root>"
 }
 
@@ -1677,7 +1665,7 @@ Object fetchHiddenJsonStateValue(Object storedValue) {
     GPathResult xml = new XmlSlurper().parseText(storedValue.toString())
     String encoded = xml.span.find { GPathResult span -> span.@class.toString() == 'hidden-data' }?.text()
     if(!encoded) { return null }
-    return getSharedJsonSlurper().parseText(new String(Base64.decodeBase64(encoded), StandardCharsets.UTF_8))
+    return getSharedJsonSlurper().parseText(new String(Base64.decodeBase64(encoded), 'UTF-8'))
   } catch(Exception e) {
     logWarn("Could not decode hidden JSON state: ${e.message}")
     return null
@@ -1685,18 +1673,42 @@ Object fetchHiddenJsonStateValue(Object storedValue) {
 }
 
 void setHiddenJsonRuntimeState(String name, Object value) {
+  if(name == 'audioClipProgressByCorrelationId') {
+    String dni = getDeviceDNI()
+    if(dni) {
+      if(value instanceof Map && !((Map)value).isEmpty()) {
+        audioClipProgressByCorrelationIdByDni.put(dni, new LinkedHashMap<String, Map>((Map<String, Map>)value))
+      } else {
+        audioClipProgressByCorrelationIdByDni.remove(dni)
+      }
+    }
+    state.remove(name)
+    runtimeState.remove(name)
+    return
+  }
   if(value == null) {
     runtimeState.remove(name)
     state.remove(name)
     return
   }
   runtimeState[name] = value
-  storeHiddenJsonState(name, summarizeHiddenJsonState(name, value), value)
+  state.remove(name)
 }
 
 void removeHiddenJsonRuntimeState(String name) {
+  if(name == 'audioClipProgressByCorrelationId') {
+    String dni = getDeviceDNI()
+    if(dni) { audioClipProgressByCorrelationIdByDni.remove(dni) }
+  }
   runtimeState.remove(name)
   state.remove(name)
+}
+
+Map<String, Map> getAudioClipProgressByCorrelationId() {
+  String dni = getDeviceDNI()
+  if(!dni) { return [:] }
+  Map<String, Map> progress = audioClipProgressByCorrelationIdByDni.get(dni)
+  return progress ?: [:]
 }
 
 void registerRinconId() {
@@ -1918,6 +1930,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   if(activePlayerIds.isEmpty() && activePlayerDnis.isEmpty()) {
     Integer clearedEntries = clearStaticMap(audioClipQueue)
     clearedEntries += clearStaticMap(runtimeStateByDni)
+    clearedEntries += clearStaticMap(audioClipProgressByCorrelationIdByDni)
     clearedEntries += clearStaticMap(audioClipQueueHighPriority)
     clearedEntries += clearStaticMap(audioClipQueueTimers)
     clearedEntries += clearStaticMap(groupsRegistry)
@@ -1968,6 +1981,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   Integer removedEntries = 0
   removedEntries += pruneStaticMapKeys(audioClipQueue, activePlayerIds)
   removedEntries += pruneStaticMapKeys(runtimeStateByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(audioClipProgressByCorrelationIdByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(audioClipQueueHighPriority, activePlayerIds)
   removedEntries += pruneStaticMapKeys(audioClipQueueTimers, activePlayerIds)
   removedEntries += pruneStaticMapKeys(groupsRegistry, activePlayerIds)
@@ -2141,6 +2155,7 @@ void clearStaticDriverStateForCurrentDevice() {
 
     if(dni != null && dni != '') {
       runtimeStateByDni?.remove(dni)
+      audioClipProgressByCorrelationIdByDni?.remove(dni)
       favoriteRetryState?.remove(dni)
       playlistRetryState?.remove(dni)
       pendingGroupDeviceUpdates?.remove(dni)
@@ -5666,7 +5681,7 @@ String normalizeFavoriteUri(String uri) {
   if(!uri) { return null }
   String normalized = StringEscapeUtils.unescapeXml(uri.trim())
   if(normalized.contains('%')) {
-    try { normalized = URLDecoder.decode(normalized, StandardCharsets.UTF_8.name()) } catch(Exception ignored) { }
+    try { normalized = URLDecoder.decode(normalized, 'UTF-8') } catch(Exception ignored) { }
   }
   Integer query = normalized.indexOf('?')
   if(query >= 0) { normalized = normalized.substring(0, query) }
@@ -5676,10 +5691,10 @@ String normalizeFavoriteUri(String uri) {
 }
 
 void updateCurrentFavoriteFromUpnp(Map snapshot) {
-  if(getFavoritesChild() != null && getFavoritesMap().isEmpty() && !state.favoritesBrowseVersion && !state.favoritesBrowseRequestId) {
+  if(getFavoritesChild() != null && getFavoritesMap().isEmpty() && !getDriverStateValue('favoritesBrowseRequestId')) {
     getFavorites()
   }
-  if(getPlaylistChild() != null && getPlaylistsMap().isEmpty() && !state.playlistsBrowseVersion && !state.playlistsBrowseRequestId) {
+  if(getPlaylistChild() != null && getPlaylistsMap().isEmpty() && !getDriverStateValue('playlistsBrowseRequestId')) {
     getPlaylists()
   }
   String currentUri = normalizeFavoriteUri(snapshot?.currentTrackURI?.toString())
@@ -5740,7 +5755,7 @@ String normalizeFavoriteResourceId(String resourceId) {
   if(resourceId == null) { return null }
   String normalized = StringEscapeUtils.unescapeXml(resourceId.trim())
   if(normalized.contains('%')) {
-    try { normalized = URLDecoder.decode(normalized, StandardCharsets.UTF_8.name()) } catch(Exception ignored) { }
+    try { normalized = URLDecoder.decode(normalized, 'UTF-8') } catch(Exception ignored) { }
   }
   return normalized
 }
@@ -9105,8 +9120,8 @@ void interruptActiveAudioClipForHighPriority() {
   String activeGuid = runtimeState.activeAudioClipCorrelationId as String
   if(!activeGuid) { return }
   removeQueuedAudioClipCommand(activeGuid)
-  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[activeGuid]
   if(progress instanceof Map) {
@@ -10510,10 +10525,10 @@ void getFavorites() {
 }
 
 void favoritesBrowseCallback(AsyncResponse response, Map data = null) {
-  if(data?.requestId?.toString() != state.favoritesBrowseRequestId?.toString()) { return }
+  if(data?.requestId?.toString() != getDriverStateValue('favoritesBrowseRequestId')?.toString()) { return }
   if(response?.status != 200 || response.hasError()) {
-    state.remove('favoritesBrowseRequestId')
-    state.remove('favoritesBrowseItems')
+    removeDriverStateValue('favoritesBrowseRequestId')
+    removeDriverStateValue('favoritesBrowseItems')
     logWarn("Sonos favorites UPnP Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
   }
@@ -10563,10 +10578,10 @@ void favoritesBrowseCallback(AsyncResponse response, Map data = null) {
               upnpUri: uri, upnpMetadata: resMetadata]])
       }
     }
-    List<Map> accumulated = state.favoritesBrowseItems instanceof List
-        ? (List<Map>)state.favoritesBrowseItems : []
+    List<Map> accumulated = getDriverStateValue('favoritesBrowseItems') instanceof List
+        ? (List<Map>)getDriverStateValue('favoritesBrowseItems') : []
     accumulated.addAll(favorites)
-    state.favoritesBrowseItems = accumulated
+    setDriverStateValue('favoritesBrowseItems', accumulated)
     Integer startingIndex = data?.startingIndex != null ? (data.startingIndex as Integer) : 0
     if(returned > 0 && total > startingIndex + returned) {
       Integer nextIndex = startingIndex + returned
@@ -10578,14 +10593,13 @@ void favoritesBrowseCallback(AsyncResponse response, Map data = null) {
       return
     }
     cacheUpnpFavorites(accumulated)
-    state.favoritesBrowseVersion = findSoapBodyField(envelope, 'UpdateID')
-    state.remove('favoritesBrowseRequestId')
-    state.remove('favoritesBrowseItems')
-    logInfo("Loaded ${accumulated.size()} Sonos favorites through UPnP (total=${total}, updateId=${state.favoritesBrowseVersion ?: 'unknown'})")
+    removeDriverStateValue('favoritesBrowseRequestId')
+    removeDriverStateValue('favoritesBrowseItems')
+    logInfo("Loaded ${accumulated.size()} Sonos favorites through UPnP (total=${total}, updateId=${findSoapBodyField(envelope, 'UpdateID') ?: 'unknown'})")
     completePendingRandomMediaLoads('favorite')
   } catch(Exception e) {
-    state.remove('favoritesBrowseRequestId')
-    state.remove('favoritesBrowseItems')
+    removeDriverStateValue('favoritesBrowseRequestId')
+    removeDriverStateValue('favoritesBrowseItems')
     logWarn("Could not parse Sonos favorites UPnP Browse response: ${e.message}")
   }
 }
@@ -10634,10 +10648,10 @@ void getPlaylists() {
 }
 
 void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
-  if(data?.requestId?.toString() != state.playlistsBrowseRequestId?.toString()) { return }
+  if(data?.requestId?.toString() != getDriverStateValue('playlistsBrowseRequestId')?.toString()) { return }
   if(response?.status != 200 || response.hasError()) {
-    state.remove('playlistsBrowseRequestId')
-    state.remove('playlistsBrowseItems')
+    removeDriverStateValue('playlistsBrowseRequestId')
+    removeDriverStateValue('playlistsBrowseItems')
     logWarn("Sonos Playlists UPnP Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
   }
@@ -10666,10 +10680,10 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
               upnpUri: uri, upnpMetadata: metadata]])
       }
     }
-    List<Map> accumulated = state.playlistsBrowseItems instanceof List
-        ? (List<Map>)state.playlistsBrowseItems : []
+    List<Map> accumulated = getDriverStateValue('playlistsBrowseItems') instanceof List
+        ? (List<Map>)getDriverStateValue('playlistsBrowseItems') : []
     accumulated.addAll(page)
-    state.playlistsBrowseItems = accumulated
+    setDriverStateValue('playlistsBrowseItems', accumulated)
     Integer startingIndex = data?.startingIndex != null ? (data.startingIndex as Integer) : 0
     if(returned > 0 && total > startingIndex + returned) {
       Integer nextIndex = startingIndex + returned
@@ -10690,15 +10704,14 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
     }
     html += '</div></body></html>'
     setChildPlaylists(html)
-    state.playlistsBrowseVersion = findSoapBodyField(envelope, 'UpdateID')
-    state.remove('playlistsBrowseRequestId')
-    state.remove('playlistsBrowseItems')
-    logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${state.playlistsBrowseVersion ?: 'unknown'})")
+    removeDriverStateValue('playlistsBrowseRequestId')
+    removeDriverStateValue('playlistsBrowseItems')
+    logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${findSoapBodyField(envelope, 'UpdateID') ?: 'unknown'})")
     rematchLatestUpnpPlaybackSnapshot()
     completePendingRandomMediaLoads('playlist')
   } catch(Exception e) {
-    state.remove('playlistsBrowseRequestId')
-    state.remove('playlistsBrowseItems')
+    removeDriverStateValue('playlistsBrowseRequestId')
+    removeDriverStateValue('playlistsBrowseItems')
     logWarn("Could not parse Sonos Playlists UPnP Browse response: ${e.message}")
   }
 }
@@ -11403,8 +11416,8 @@ Boolean prepareNextAudioClipForDispatch() {
   runtimeState.remove('activeAudioClipSonosId')
   runtimeState.audioClipCommandSent = false
   runtimeState.audioClipHadDisconnectAfterSend = false
-  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
       : new LinkedHashMap<String, Map>()
   clipProgress[clipMessage.correlationId as String] = [
     correlationId: clipMessage.correlationId,
@@ -12713,7 +12726,7 @@ void processWebsocketMessage(String message) {
 
       stage = 'copy correlation progress state'
       clipProgress = new LinkedHashMap<String, Map>()
-      Object rawClipProgress = runtimeState.audioClipProgressByCorrelationId
+      Object rawClipProgress = getAudioClipProgressByCorrelationId()
       if(rawClipProgress instanceof Map) {
         ((Map)rawClipProgress).each { Object rawGuid, Object rawProgress ->
           String guid = rawGuid?.toString()
@@ -12794,7 +12807,7 @@ void processWebsocketMessage(String message) {
         clipProgress.remove(oldestGuid)
       }
 
-      stage = 'persist correlation progress state'
+      stage = 'update in-memory correlation progress'
       setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
 
       stage = 'apply ACTIVE status transition'
@@ -12993,8 +13006,8 @@ void audioClipCommandSent(String correlationId) {
   runtimeState.audioClipCommandSent = true
   runtimeState.audioClipSentAt = sentAt
   runtimeState.audioClipQueueStartTime = sentAt
-  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId]
   if(progress == null) { progress = [correlationId: correlationId] }
@@ -13037,8 +13050,8 @@ void resumeAudioClipAfterSubscription() {
   Long connectedAt = now()
   Boolean wasDisconnectedAfterSend = runtimeState.audioClipHadDisconnectAfterSend == true
   runtimeState.audioClipHadDisconnectAfterSend = false
-  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId] ?: [:]
   Integer duration = coerceClipDuration(progress.duration)
@@ -13081,8 +13094,8 @@ void audioClipWatchdog(Map data = [:]) {
     return
   }
   if(phase == 'WAITING_FOR_ACTIVE') {
-    Map<String, Map> progressMap = runtimeState.audioClipProgressByCorrelationId instanceof Map
-        ? (Map<String, Map>)runtimeState.audioClipProgressByCorrelationId : [:]
+    Map<String, Map> progressMap = getAudioClipProgressByCorrelationId() instanceof Map
+        ? (Map<String, Map>)getAudioClipProgressByCorrelationId() : [:]
     Map progress = progressMap[correlationId]
     if(progress?.phase in ['ACTIVE', 'DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) { return }
     markAudioClipWatchdogFailure(correlationId, 'FAILED_ACTIVE_TIMEOUT',
@@ -13090,8 +13103,8 @@ void audioClipWatchdog(Map data = [:]) {
     return
   }
   if(phase == 'WAITING_FOR_DONE') {
-    Map<String, Map> progressMap = runtimeState.audioClipProgressByCorrelationId instanceof Map
-        ? (Map<String, Map>)runtimeState.audioClipProgressByCorrelationId : [:]
+    Map<String, Map> progressMap = getAudioClipProgressByCorrelationId() instanceof Map
+        ? (Map<String, Map>)getAudioClipProgressByCorrelationId() : [:]
     Map progress = progressMap[correlationId]
     if(progress?.phase in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) { return }
     markAudioClipWatchdogFailure(correlationId, 'FAILED_DONE_TIMEOUT', 'No matching DONE status before the expected-duration deadline')
@@ -13100,8 +13113,8 @@ void audioClipWatchdog(Map data = [:]) {
 
 void markAudioClipWatchdogFailure(String correlationId, String phase, String detail) {
   Map failedClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId] ?: [correlationId: correlationId]
   progress.phase = phase
@@ -13126,8 +13139,8 @@ void markAudioClipWatchdogFailure(String correlationId, String phase, String det
 
 void retryAudioClipAfterCommandFailure(String correlationId, String detail) {
   if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
-  Map<String, Map> clipProgress = runtimeState.audioClipProgressByCorrelationId instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)runtimeState.audioClipProgressByCorrelationId)
+  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
       : new LinkedHashMap<String, Map>()
   Map progress = clipProgress[correlationId] ?: [correlationId: correlationId]
   Integer retryCount = (progress.commandRetryCount ?: 0) as Integer
