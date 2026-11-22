@@ -46,6 +46,7 @@ groovy.xml.StreamingMarkupBuilder
 # --- java.util ---
 java.util.ArrayList
 java.util.Calendar
+java.util.Collections
 java.util.Date
 java.util.GregorianCalendar
 java.util.HashMap
@@ -61,6 +62,7 @@ java.util.Set
 java.util.SortedMap
 java.util.TimeZone
 java.util.TreeMap
+java.util.TreeSet
 java.util.UUID
 java.util.concurrent.*
 
@@ -98,8 +100,13 @@ java.util.regex.Pattern
 org.apache.commons.lang3.StringEscapeUtils
 org.apache.commons.lang3.StringUtils
 org.apache.commons.lang3.math.NumberUtils
+org.apache.commons.codec.binary.Base64
 java.nio.charset.StandardCharsets
 java.io.ByteArrayInputStream
 java.io.ByteArrayOutputStream
+java.io.StringWriter
 # Confirmed by Sonos Advanced Player compilation on Hubitat 2.5.3.111.
 java.io.InputStream
+
+# --- scheduling ---
+org.quartz.CronExpression

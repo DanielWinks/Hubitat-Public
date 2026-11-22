@@ -22,6 +22,8 @@ dependencies {
   implementation "org.apache.groovy:groovy-dateutil:${groovyVersion}"
   implementation 'commons-cli:commons-cli:1.8.0'
   implementation 'org.apache.commons:commons-lang3:3.18.0'
+  implementation 'commons-codec:commons-codec:1.16.0'
+  implementation 'org.quartz-scheduler:quartz:2.3.2'
   // Required so the Groovy parser can read @Grab-annotated source without
   // throwing NoClassDefFoundError when GrabAnnotationTransformation loads.
   // We never actually fetch dependencies - SandboxRule reports @Grab as a
