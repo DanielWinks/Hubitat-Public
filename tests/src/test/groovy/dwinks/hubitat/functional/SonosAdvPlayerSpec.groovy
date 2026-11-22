@@ -763,18 +763,21 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPositionUpdated == 123456L
   }
 
-  def "HDMI metadata reports no signal separately from the playback state"() {
+  def "AVTransport and HTControl UPnP report home theater source and input connection"() {
     given:
     String dni = driver.device.getDeviceNetworkId()
     driver.pendingLocalDeviceEvents.remove(dni)
+    String metadata = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><dc:title>RINCON_TEST</dc:title><upnp:class>object.item.audioItem.linein.homeTheater</upnp:class></item></DIDL-Lite>'
+    Map snapshot = [avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
+      avTransportURIMetaData: driver.parseAvtMetaData(metadata), transportState: 'PLAYING']
+    driver.runtimeState.lastTransportPlaybackSnapshot = snapshot
 
     when:
-    driver.processWebsocketMessage(JsonOutput.toJson([
-      [namespace: 'playbackMetadata', type: 'metadataStatus'],
-      [container: [type: 'linein.homeTheater.hdmi', htInputFormat: [streamDescription: 'No Signal']]]
-    ]))
+    driver.observeUpnpPlaybackSource(snapshot)
+    driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>0</TOSLinkConnected></property></propertyset>')
 
     then:
+    driver.state.audioSourceMetadataType == 'linein.homeTheater'
     driver.state.audioSourceSignalStatus == 'no-signal'
     (driver.state.audioSourceSignalObservedAt as Long) > 0L
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalStatus') != true
@@ -783,7 +786,25 @@ class SonosAdvPlayerSpec extends Specification {
     playerStateMessages().isEmpty()
   }
 
-  def "empty metadata status preserves the last valid HDMI signal observation"() {
+  def "UPnP HTControl connection event updates source signal without WebSocket metadata"() {
+    given:
+    driver.state.audioSourceMetadataType = 'linein.homeTheater'
+    driver.state.audioSourceSignalStatus = 'no-signal'
+    driver.state.audioSourceSignalObservedAt = driver.now() - 1000L
+    String metadata = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><upnp:class>object.item.audioItem.linein.homeTheater</upnp:class></item></DIDL-Lite>'
+    driver.observeUpnpPlaybackSource([avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
+      avTransportURIMetaData: driver.parseAvtMetaData(metadata)])
+    driver.runtimeState.lastTransportPlaybackSnapshot = [avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
+      avTransportURIMetaData: driver.parseAvtMetaData(metadata)]
+
+    when:
+    driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>1</TOSLinkConnected></property></propertyset>')
+
+    then:
+    driver.state.audioSourceSignalStatus == 'signal'
+  }
+
+  def "WebSocket playback metadata no longer drives home theater signal observations"() {
     given:
     driver.state.audioSourceSignalStatus = 'no-signal'
     Long observedAt = driver.now() - 1000L
@@ -792,7 +813,7 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.processWebsocketMessage(JsonOutput.toJson([
       [namespace: 'playbackMetadata', type: 'metadataStatus'],
-      [container: [:]]
+      [container: [type: 'linein.homeTheater.hdmi', htInputFormat: [streamDescription: 'Signal']]]
     ]))
 
     then:

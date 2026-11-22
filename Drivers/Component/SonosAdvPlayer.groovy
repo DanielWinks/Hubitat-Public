@@ -868,6 +868,10 @@ Boolean hasLineInCapability() {
 @Field private final String MRGRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromMrGrcEventsCallback'
 @Field private final String MRGRC_EVENTS_DOMAIN  =  'MediaRenderer/GroupRenderingControl'
 
+@Field private final String HTCONTROL_EVENTS = '/MediaRenderer/HTControl/Event'
+@Field private final String HTCONTROL_EVENTS_CALLBACK = 'subscribeResubscribeToHtControlCallback'
+@Field private final String HTCONTROL_EVENTS_UNSUB_CALLBACK = 'unsubscribeFromHtControlEventsCallback'
+
 @Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [5, 15, 30]
 @Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> playlistRetryState = new ConcurrentHashMap<String, Map>()
@@ -1046,9 +1050,12 @@ void scheduleEarlyRenderingControlSubscribe() {
 }
 
 void subscribeToRenderingControlEventsImmediate() {
-  // Subscribe each device to both per-player and group rendering events early.
+  // Subscribe each device to rendering and home theater input events early.
   subscribeToMrRcEvents()
   subscribeToMrGrcEvents()
+  if(hasHTPlaybackCapability()) {
+    subscribeToHtControlEvents()
+  }
   markAppMediatedUpnpSubscriptionsStarted()
 }
 
@@ -1068,10 +1075,12 @@ void clearZgtSubscriptionForInitialization() {
   deleteSid('sid1')
   deleteSid('sid2')
   deleteSid('sid4')
+  deleteSid('sid5')
   device.removeDataValue('sid1-expires')
   device.removeDataValue('sid2-expires')
   device.removeDataValue('sid3-expires')
   device.removeDataValue('sid4-expires')
+  device.removeDataValue('sid5-expires')
   if(hadValid) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'sid3', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
   }
@@ -1844,7 +1853,7 @@ void migrationCleanup() {
     removeEventTimestampDeviceDataKeys()
   }
   // Remove stale sid-expiresFormatted keys (replaced by human-readable sid-expires)
-  ['sid1', 'sid2', 'sid3', 'sid4'].each { String sid ->
+  ['sid1', 'sid2', 'sid3', 'sid4', 'sid5'].each { String sid ->
     if(device.getDataValue("${sid}-expiresFormatted") != null) { device.removeDataValue("${sid}-expiresFormatted") }
   }
 }
@@ -4848,6 +4857,13 @@ void parse(String raw) {
             deferOrProcessGroupRenderingControlPayload(grcDni, xmlBody, seq, sid)
           } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
           return
+        case 'HTControl':
+          try {
+            setLastInboundHtControlEvent()
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML HTControl event payload'); return }
+            handleHtControlPayload(xmlBody)
+          } catch(Exception e) { logWarn("Ran into an issue parsing HTControl: ${e}") }
+          return
       }
     }
     logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
@@ -5287,6 +5303,7 @@ Map parseAvtFullSnapshot(String xmlString) {
       restartPending: iid['RestartPending']['@val']?.toString(),
       transportPlaySpeed: iid['TransportPlaySpeed']['@val']?.toString(),
       currentMediaDuration: iid['CurrentMediaDuration']['@val']?.toString(),
+      avTransportURIMetaData: parseAvtMetaData(iid['AVTransportURIMetaData']['@val']?.toString()),
       observedAt: getHubitatCurrentTime()
     ]
   } catch(Exception e) {
@@ -5536,6 +5553,7 @@ List<String> resolveFollowersRinconsForAvt(String coordinatorRincon) {
 Boolean applyAvtSnapshotIfDifferent(Map snap) {
   logDebug("applyAvtSnapshotIfDifferent called: snapshot=${snap ? snap.transportState : 'null'} currentAvtMapSize=${currentAvtSnapshotByDni?.size()}")
   if(snap == null) { return false }
+  observeUpnpPlaybackSource(snap)
   Map prior = null
   try {
     String json = device.getDataValue('avtTransportJson')?.toString()
@@ -6791,7 +6809,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','sid3','sid4'].contains(sidKey)) { return }
+  if(entry == null || !['sid1','sid2','sid3','sid4','sid5'].contains(sidKey)) { return }
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
@@ -6826,6 +6844,7 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
         case 'sid2': unschedule('retryUpnpSid2'); break
         case 'sid3': unschedule('retryUpnpSid3'); break
         case 'sid4': unschedule('retryUpnpSid4'); break
+        case 'sid5': unschedule('retryUpnpSid5'); break
       }
     }
   }
@@ -6838,10 +6857,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', sid3: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents'][sidKey]
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', sid3: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', sid3: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents'][sidKey]
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', sid3: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -7158,12 +7177,14 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
     case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
     case 'sid3': runIn(delay, 'retryUpnpSid3', options); break
     case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
+    case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
   }
 }
 void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid3(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
+void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
 
 void retryUpnpRequest(Map data) {
   Map retry = data?.request as Map
@@ -7241,6 +7262,7 @@ void invalidateUpnpRequestsForDevice() {
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpSid3')
     unschedule('retryUpnpSid4')
+    unschedule('retryUpnpSid5')
     active = entry.active as Map
     if(active != null) {
       active.phase = 'expired'
@@ -7271,6 +7293,7 @@ void retireUpnpRequestsForDevice() {
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpSid3')
     unschedule('retryUpnpSid4')
+    unschedule('retryUpnpSid5')
     active = entry.active as Map
     if(active != null) { active.phase = 'expired'; socket = detachOwnedUpnpSocketLocked(entry, active) }
     (entry.queue as List<Map>).clear()
@@ -7520,6 +7543,37 @@ void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
   String domain = MRGRC_EVENTS_DOMAIN
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
+// /////////////////////////////////////////////////////////////////////////////
+// '/MediaRenderer/HTControl/Event' //sid5
+// /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
+void subscribeToHtControlEvents() {
+  upnpSubscribeGeneric('subscribeToHtControlEvents', 'sid5', '/htcontrol',
+      HTCONTROL_EVENTS_CALLBACK, HTCONTROL_EVENTS)
+}
+
+@CompileStatic
+void resubscribeToHtControlEvents() {
+  upnpResubscribeGeneric('resubscribeToHtControlEvents', 'sid5', '/htcontrol',
+      HTCONTROL_EVENTS_CALLBACK, HTCONTROL_EVENTS)
+}
+
+@CompileStatic
+void subscribeResubscribeToHtControlCallback(HubResponse response) {
+  subscribeResubscribeGenericCallback('subscribeToHtControlEvents', 'resubscribeToHtControlEvents',
+      'sid5', 'MediaRenderer/HTControl', response)
+}
+
+@CompileStatic
+void unsubscribeFromHtControlEvents() {
+  upnpUnsubscribeGeneric('unsubscribeFromHtControlEvents', 'sid5', 'resubscribeToHtControlEvents',
+      HTCONTROL_EVENTS, HTCONTROL_EVENTS_UNSUB_CALLBACK)
+}
+
+@CompileStatic
+void unsubscribeFromHtControlEventsCallback(HubResponse response) {
+  upnpUnsubscribeCallbackGeneric('sid5', 'MediaRenderer/HTControl', response)
+}
 // =============================================================================
 // End UPnP Subscriptions and Resubscriptions
 // =============================================================================
@@ -7711,6 +7765,16 @@ Long getLastInboundMrGrcEventEpoch() {
 void setLastInboundMrGrcEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastMrGrcEvent" as String, Instant.now().getEpochSecond())
   updateEventTimestampDeviceData('lastMrGrcEvent')
+}
+@CompileStatic
+Long getLastInboundHtControlEventEpoch() {
+  Long ts = eventTimestamps.get("${getDeviceDNI()}-lastHtControlEvent" as String)
+  return ts != null ? ts : 0L
+}
+@CompileStatic
+void setLastInboundHtControlEvent() {
+  eventTimestamps.put("${getDeviceDNI()}-lastHtControlEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastHtControlEvent')
 }
 @CompileStatic
 Boolean lastMrGrcEventWithin(Integer seconds) {
@@ -8099,7 +8163,7 @@ Boolean isDebugLoggingEnabled() {
 // Retain WS namespace bookkeeping for compatibility with legacy responses and
 // the remaining groups/audioClip commands; only audioClip and HT metadata are subscribed.
 @Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastWebsocketEvent']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
@@ -12436,6 +12500,7 @@ Long getLastInboundUpnpEventEpoch(String sidKey) {
     case 'sid2': return getLastInboundMrRcEventEpoch()
     case 'sid3': return getLastInboundZgtEventEpoch()
     case 'sid4': return getLastInboundMrGrcEventEpoch()
+    case 'sid5': return getLastInboundHtControlEventEpoch()
     default: return 0L
   }
 }
@@ -12446,6 +12511,7 @@ void resubscribeUpnpSid(String sidKey) {
     case 'sid2': resubscribeToMrRcEvents(); break
     case 'sid3': resubscribeToZgtEvents(); break
     case 'sid4': resubscribeToMrGrcEvents(); break
+    case 'sid5': resubscribeToHtControlEvents(); break
     default: logWarn("No UPnP resubscribe handler for ${sidKey}")
   }
 }
@@ -14032,7 +14098,6 @@ void processWebsocketMessage(String message) {
 
   if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
     logDebug("WebSocket metadata-status processing beginning; dataKeys=${eventData.keySet().join(',')}")
-    observeAudioSourceSignalStatus(eventData)
     String containerKey = extractContainerKey(eventData)
     String lastKey = lastMetadataContainerId.get(dni)
     Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
@@ -14077,29 +14142,50 @@ void processWebsocketMessage(String message) {
   logDebug('WebSocket message dispatch completed all matching handlers')
 }
 
-void observeAudioSourceSignalStatus(Map eventData) {
-  Map container = eventData?.container instanceof Map ? (Map)eventData.container : [:]
-  String containerType = container.type?.toString()
-  if(!containerType) {
-    logDebug("Ignoring metadata status without a container for ${getId()}; retaining last source signal observation")
-    return
-  }
+void observeUpnpPlaybackSource(Map snapshot) {
+  if(!(snapshot instanceof Map)) { return }
+  String uri = snapshot.avTransportURI?.toString() ?: snapshot.currentTrackURI?.toString()
+  Map transportMetadata = snapshot.avTransportURIMetaData instanceof Map
+      ? (Map)snapshot.avTransportURIMetaData : [:]
+  String itemClass = transportMetadata.class?.toString()
+  Boolean isHomeTheater = uri?.startsWith('x-sonos-htastream:') == true ||
+      itemClass?.contains('linein.homeTheater') == true
+  Boolean isAirPlay = isAirPlayAudioSource(uri) || itemClass?.contains('linein.airplay') == true
+  String containerType = isHomeTheater ? 'linein.homeTheater' : (isAirPlay ? 'linein.airplay' : itemClass)
+  if(!containerType) { return }
   state.audioSourceMetadataType = containerType
   state.audioSourceMetadataObservedAt = now()
-  Map inputFormat = container.htInputFormat instanceof Map ? (Map)container.htInputFormat : [:]
-  String streamDescription = inputFormat.streamDescription?.toString()?.trim()
-  String signalStatus = 'unknown'
-  if(containerType?.startsWith('linein.homeTheater')) {
-    signalStatus = streamDescription?.equalsIgnoreCase('No Signal') ? 'no-signal' :
-        (streamDescription ? 'signal' : 'unknown')
-  } else {
-    signalStatus = 'not-hdmi'
+  String signalStatus = 'not-ht'
+  if(isHomeTheater) {
+    Object connected = state.htControlTosLinkConnected
+    signalStatus = connected == null ? 'unknown' : (connected.toString() == '1' ? 'signal' : 'no-signal')
   }
-  Long observedAt = now()
   state.audioSourceSignalStatus = signalStatus
-  state.audioSourceSignalObservedAt = observedAt
+  state.audioSourceSignalObservedAt = now()
   publishPlaybackObservation()
-  logDebug("Home theater input observation player=${getId()}, containerType=${containerType}, streamDescription=${streamDescription}, signalStatus=${signalStatus}")
+  logDebug("UPnP playback-source observation player=${getId()}, uri=${uri}, itemClass=${itemClass}, signalStatus=${signalStatus}")
+}
+
+void handleHtControlPayload(String xmlBody) {
+  if(!isPlausibleXmlPayload(xmlBody)) { return }
+  GPathResult propertyset = new XmlSlurper().parseText(xmlBody)
+  GPathResult connectedNode = null
+  for(Object child : propertyset.children()) {
+    if(child instanceof GPathResult) {
+      connectedNode = findDirectXmlChild((GPathResult)child, 'TOSLinkConnected')
+      if(connectedNode != null) { break }
+    }
+  }
+  if(connectedNode == null) { return }
+  String connected = connectedNode.text()?.toString()?.trim()
+  if(!(connected in ['0', '1'])) { return }
+  state.htControlTosLinkConnected = connected
+  state.htControlObservedAt = now()
+  Map currentSnapshot = currentAvtSnapshotByDni[device.getDeviceNetworkId()?.toString()] instanceof Map
+      ? (Map)currentAvtSnapshotByDni[device.getDeviceNetworkId()?.toString()]
+      : (runtimeState.lastTransportPlaybackSnapshot instanceof Map ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:])
+  observeUpnpPlaybackSource(currentSnapshot)
+  logDebug("UPnP HTControl TOSLinkConnected=${connected} player=${getId()}")
 }
 
 /** No longer published via outbox — parent reads status/audioSource attributes directly. Kept as no-op for compatibility. */
