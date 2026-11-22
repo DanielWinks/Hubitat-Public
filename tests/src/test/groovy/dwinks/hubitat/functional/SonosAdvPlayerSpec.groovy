@@ -36,6 +36,16 @@ class SonosAdvPlayerSpec extends Specification {
     driver.sendWsMessage(JsonOutput.toJson([[namespace: 'groups', command: 'getGroups', householdId: 'HOUSE_TEST'], [marker: marker]]))
   }
 
+  void seedGroupTopology(String coordinatorId, Map<String, String> hostByPlayer) {
+    List<Map> members = hostByPlayer.collect { String playerId, String host ->
+      [playerId: playerId, zoneName: playerId, invisible: false,
+       location: "http://${host}:1400/xml/device_description.xml", secondaries: []]
+    }
+    driver.currentZgtByGroupId.clear()
+    driver.currentZgtByGroupId['GROUP-TEST'] = [groupId: 'GROUP-TEST', coordinatorId: coordinatorId,
+      groupName: 'Test Group', coordinatorName: coordinatorId, members: members]
+  }
+
   @Shared HubitatScriptHarness driver
   @Shared List<String> websocketMessages = []
   @Shared List<Map> rawConnections = []
@@ -3036,6 +3046,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson(
       finalTopology.RINCON_OLD_COORD + [expiresAt: driver.now() + 30000L]
     )
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    seedGroupTopology('RINCON_OLD_COORD', [RINCON_OLD_COORD: '192.168.1.50', RINCON_NEW_COORD: '192.168.1.51'])
 
     when:
     driver.playerModifyGroupMembers([], ['RINCON_NEW_COORD'], finalTopology)
@@ -3045,7 +3057,59 @@ class SonosAdvPlayerSpec extends Specification {
     expected.coordinatorId == 'RINCON_NEW_COORD'
     expected.memberIds == ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']
     expected.expiresAt > driver.now()
-    websocketMessages.any { String message -> message.contains('modifyGroupMembers') }
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#DelegateGroupCoordinationTo') &&
+      it.params.body.contains('<NewCoordinator>RINCON_NEW_COORD</NewCoordinator>') &&
+      it.params.body.contains('<RejoinGroup>true</RejoinGroup>') }
+  }
+
+  def "group topology is queried through ZoneGroupTopology UPnP"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    String zones = '<ZoneGroups><ZoneGroup ID="GROUP-TEST" Coordinator="RINCON_TEST"><ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test" Location="http://192.168.1.50:1400/xml/device_description.xml"/><ZoneGroupMember UUID="RINCON_B" ZoneName="Bedroom" Location="http://192.168.1.51:1400/xml/device_description.xml"/></ZoneGroup></ZoneGroups>'
+
+    when:
+    driver.playerGetGroupsFull()
+    Map request = driver.asyncCalls.last()
+    String soap = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>' +
+      StringEscapeUtils.escapeXml10(zones) + '</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>'
+    driver.zoneGroupTopologySoapCallback(new hubitat.scheduling.AsyncResponse(status: 200, data: soap), request.data)
+
+    then:
+    request.params.headers.SOAPAction == 'urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState'
+    driver.currentZgtByGroupId['GROUP-TEST'].coordinatorId == 'RINCON_TEST'
+    driver.currentZgtByGroupId['GROUP-TEST'].members*.playerId == ['RINCON_TEST', 'RINCON_B']
+  }
+
+  def "group creation adds members with UPnP SetAVTransportURI"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST'
+    seedGroupTopology('RINCON_TEST', [RINCON_TEST: '192.168.1.50', RINCON_B: '192.168.1.51'])
+
+    when:
+    driver.playerCreateGroup(['RINCON_TEST', 'RINCON_B'])
+
+    then:
+    driver.asyncCalls.size() == 1
+    driver.asyncCalls[0].params.uri == 'http://192.168.1.51:1400/MediaRenderer/AVTransport/Control'
+    driver.asyncCalls[0].params.headers.SOAPAction.endsWith('#SetAVTransportURI')
+    driver.asyncCalls[0].params.body.contains('<CurrentURI>x-rincon:RINCON_TEST</CurrentURI>')
+  }
+
+  def "group removal makes a follower a standalone coordinator over UPnP"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_B'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
+    seedGroupTopology('RINCON_TEST', [RINCON_TEST: '192.168.1.50', RINCON_B: '192.168.1.51'])
+
+    when:
+    driver.playerModifyGroupMembers([], ['RINCON_B'])
+
+    then:
+    driver.asyncCalls.size() == 1
+    driver.asyncCalls[0].params.uri == 'http://192.168.1.51:1400/MediaRenderer/AVTransport/Control'
+    driver.asyncCalls[0].params.headers.SOAPAction.endsWith('#BecomeCoordinatorOfStandaloneGroup')
   }
 
   def "unrelated player's topology updates are not held"() {

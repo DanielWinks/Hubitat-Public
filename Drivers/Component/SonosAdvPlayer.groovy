@@ -344,6 +344,17 @@ String formatEpoch(Long epochSeconds) {
   ]
 ]
 
+@Field private final Map ZoneGroupTopology = [
+  service: 'ZoneGroupTopology',
+  serviceType: 'urn:schemas-upnp-org:service:ZoneGroupTopology:1',
+  serviceId: 'urn:upnp-org:serviceId:ZoneGroupTopology',
+  controlURL: '/ZoneGroupTopology/Control',
+  eventSubURL: '/ZoneGroupTopology/Event',
+  actions: [
+    GetZoneGroupState: [arguments: [:], outputs: [ZoneGroupState: '']]
+  ]
+]
+
 @Field private final Map RenderingControl = [
   service: 'RenderingControl',
   serviceType: 'urn:schemas-upnp-org:service:RenderingControl:1',
@@ -409,6 +420,29 @@ Map getSoapActionParams(String deviceIp, Map service, String action, Map control
   String uri = "http://${deviceIp}${service.controlURL}"
   String soapAction = "${service.serviceType}#${action}"
   return [uri: uri, headers: [SOAPAction: soapAction], contentType: 'text/xml', body: body]
+}
+
+// Hubitat exposes asynchttpPost and state as script bindings rather than
+// statically declared methods/properties. Keep that dynamic boundary narrow so
+// callers can retain CompileStatic checking for their data transformations.
+void postAsyncHttp(String callback, Map params, Map data = null) {
+  if(data == null) {
+    asynchttpPost(callback, params)
+  } else {
+    asynchttpPost(callback, params, data)
+  }
+}
+
+void setDriverStateValue(String key, Object value) {
+  state[key] = value
+}
+
+Object getDriverStateValue(String key) {
+  return state[key]
+}
+
+Object removeDriverStateValue(String key) {
+  return state.remove(key)
 }
 
 metadata {
@@ -10646,7 +10680,7 @@ void getPlaybackMetadataStatus() {
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) { logWarn('Cannot query playback metadata: local UPnP host is unavailable'); return }
   Map params = getSoapActionParams(host, AVTransport, 'GetPositionInfo')
-  asynchttpPost('playbackMetadataSoapCallback', params)
+  postAsyncHttp('playbackMetadataSoapCallback', params)
 }
 
 void playbackMetadataSoapCallback(AsyncResponse response, Map data = null) {
@@ -10679,7 +10713,7 @@ void getPlaybackStatus() {
   Map params = getSoapActionParams(host, AVTransport, 'GetTransportInfo')
   Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  asynchttpPost('transportStatusSoapCallback', params,
+  postAsyncHttp('transportStatusSoapCallback', params,
       active != null && active.statusQueryPending == true ? [transportCommandId: active.id] : [:])
 }
 
@@ -11110,14 +11144,14 @@ void getFavorites() {
       BrowseFlag: 'BrowseDirectChildren', Filter: '*', StartingIndex: 0, RequestedCount: 100,
       SortCriteria: ''])
   String requestId = UUID.randomUUID().toString()
-  state.favoritesBrowseRequestId = requestId
-  state.favoritesBrowseItems = []
+  setDriverStateValue('favoritesBrowseRequestId', requestId)
+  setDriverStateValue('favoritesBrowseItems', [])
   logDebug("Requesting Sonos favorites through ContentDirectory Browse; requestId=${requestId}")
   try {
-    asynchttpPost('favoritesBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
+    postAsyncHttp('favoritesBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
   } catch(Exception e) {
-    state.remove('favoritesBrowseRequestId')
-    state.remove('favoritesBrowseItems')
+    removeDriverStateValue('favoritesBrowseRequestId')
+    removeDriverStateValue('favoritesBrowseItems')
     logWarn("Could not request Sonos favorites through UPnP: ${e.message}")
   }
 }
@@ -11233,13 +11267,13 @@ void getPlaylists() {
       BrowseFlag: 'BrowseDirectChildren', Filter: '*', StartingIndex: 0, RequestedCount: 100,
       SortCriteria: ''])
   String requestId = UUID.randomUUID().toString()
-  state.playlistsBrowseRequestId = requestId
-  state.playlistsBrowseItems = []
+  setDriverStateValue('playlistsBrowseRequestId', requestId)
+  setDriverStateValue('playlistsBrowseItems', [])
   try {
-    asynchttpPost('playlistsBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
+    postAsyncHttp('playlistsBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
   } catch(Exception e) {
-    state.remove('playlistsBrowseRequestId')
-    state.remove('playlistsBrowseItems')
+    removeDriverStateValue('playlistsBrowseRequestId')
+    removeDriverStateValue('playlistsBrowseItems')
     logWarn("Could not request Sonos Playlists through UPnP: ${e.message}")
   }
 }
@@ -12057,43 +12091,86 @@ void dispatchPreparedAudioClip() {
 // =============================================================================
 @CompileStatic
 void playerGetGroupsFull() {
-  Map command = [
-    'namespace':'groups',
-    'command':'getGroups',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = ['includeDeviceInfo': true]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('Cannot query Sonos groups: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, ZoneGroupTopology, 'GetZoneGroupState')
+  logDebug('Querying Sonos group topology through ZoneGroupTopology.GetZoneGroupState')
+  postAsyncHttp('zoneGroupTopologySoapCallback', params)
+}
+
+void zoneGroupTopologySoapCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("UPnP group topology query failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    String zoneGroupState = findSoapBodyField(envelope, 'ZoneGroupState')
+    if(!isPlausibleXmlPayload(zoneGroupState)) {
+      logWarn('UPnP group topology response did not contain ZoneGroupState XML')
+      return
+    }
+    String propertyset = '<propertyset><property><ZoneGroupState>' +
+        StringEscapeUtils.escapeXml10(zoneGroupState) + '</ZoneGroupState></property></propertyset>'
+    Map topology = parseZgtFullSnapshot(propertyset)
+    if(!(topology?.groups instanceof List)) {
+      logWarn('Could not parse groups from UPnP ZoneGroupState response')
+      return
+    }
+    deferOrProcessZoneGroupTopologyPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', propertyset)
+    List<Map> groups = (List<Map>)topology.groups
+    List<Map> ledgerGroups = groups.collect { Map group ->
+      List<Map> members = group.members instanceof List ? (List<Map>)group.members : []
+      [id: group.groupId, name: group.groupName, coordinatorId: group.coordinatorId,
+       playerIds: members.findAll { Map member -> member.invisible != true }.collect { Map member -> member.playerId?.toString() }]
+    }
+    if(runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] == true) {
+      reconcileQueuedTopologyCommands([groups: ledgerGroups])
+    }
+    Map current = ledgerGroups.find { Map group -> (group.playerIds as List).contains(getId()) }
+    if(current != null) {
+      emitGroupFavoriteOperationEvent('groups', [groupId: current.id, coordinatorId: current.coordinatorId,
+        playerIds: current.playerIds ?: []])
+    }
+    logInfo("Loaded ${groups.size()} Sonos groups through UPnP ZoneGroupTopology")
+  } catch(Exception e) {
+    logWarn("Could not parse UPnP group topology response: ${e.message}")
+  }
 }
 
 @CompileStatic
 void playerCreateNewGroup() {
-  List<String> playerIds = [getId()]
-  sendCreateGroupRequest(playerIds)
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('Cannot create a standalone Sonos group: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
+  logInfo("Creating a standalone Sonos group for ${getId()} through AVTransport")
+  postSonosSoapAsync('groupControlSoapCallback', params, [operation: 'createStandalone', playerId: getId()])
 }
 
 @CompileStatic
 void playerCreateGroup(List<String> playerIds, String musicContextGroupId = null) {
   List<String> requestedPlayers = (playerIds ?: []).findAll { String id -> id }.unique()
-  sendCreateGroupRequest(requestedPlayers, musicContextGroupId)
+  String coordinatorId = requestedPlayers ? requestedPlayers[0] : getId()
+  if(coordinatorId != getId()) {
+    logWarn("Cannot create group with coordinator ${coordinatorId} from player ${getId()}; invoke the selected coordinator")
+    return
+  }
+  if(requestedPlayers.size() <= 1) {
+    playerCreateNewGroup()
+    return
+  }
+  if(musicContextGroupId) {
+    logDebug("UPnP group formation uses the selected coordinator playback context; musicContextGroupId=${musicContextGroupId}")
+  }
+  List<String> currentMembers = getGroupPlayerIds()
+  List<String> toRemove = currentMembers.findAll { String id -> !requestedPlayers.contains(id) }
+  List<String> toAdd = requestedPlayers.findAll { String id -> id != coordinatorId && !currentMembers.contains(id) }
+  playerModifyGroupMembers(toAdd, toRemove)
 }
 
 @CompileStatic
 void sendCreateGroupRequest(List<String> playerIds, String musicContextGroupId = null) {
-  Map command = [
-    'namespace':'groups',
-    'command':'createGroup',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = [
-    'musicContextGroupId': musicContextGroupId,
-    'playerIds': playerIds
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  playerCreateGroup(playerIds, musicContextGroupId)
 }
 
 @CompileStatic
@@ -12101,18 +12178,99 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
     Map<String, Map> expectedTopology = null) {
   List<String> playersToAdd = playerIdsToAdd != null ? playerIdsToAdd : new ArrayList<String>()
   List<String> playersToRemove = playerIdsToRemove != null ? playerIdsToRemove : new ArrayList<String>()
-  Map command = [
-    'namespace':'groups',
-    'command':'modifyGroupMembers',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [
-    'playerIdsToAdd': playerIdsToAdd,
-    'playerIdsToRemove': playerIdsToRemove
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String coordinatorId = getGroupCoordinatorId() ?: getId()
+  String coordinatorHost = getLocalUpnpHostForGroupOperation()
+  if(!coordinatorHost) { logWarn('Cannot modify Sonos group: local UPnP host is unavailable'); return }
+
+  playersToRemove.each { String playerId ->
+    if(playerId == coordinatorId) {
+      String delegatedCoordinator = expectedTopology?.values()?.find { Map expected ->
+        expected?.coordinatorId?.toString() && expected.coordinatorId.toString() != coordinatorId
+      }?.coordinatorId?.toString()
+      if(!delegatedCoordinator) {
+        delegatedCoordinator = playersToAdd.find { String id -> id != coordinatorId }
+      }
+      if(!delegatedCoordinator) {
+        logWarn("Cannot remove current group coordinator ${coordinatorId} without a target coordinator")
+        return
+      }
+      Map expectedGroup = expectedTopology?.get(delegatedCoordinator) instanceof Map
+          ? (Map)expectedTopology[delegatedCoordinator]
+          : (expectedTopology?.values()?.find { Map expected -> expected?.coordinatorId?.toString() == delegatedCoordinator } as Map ?: [:])
+      List<String> expectedMembers = expectedGroup.memberIds instanceof List
+          ? ((List)expectedGroup.memberIds).collect { Object id -> id?.toString() } : []
+      Boolean rejoin = expectedMembers.contains(coordinatorId)
+      Map params = getSoapActionParams(coordinatorHost, AVTransport, 'DelegateGroupCoordinationTo',
+          [NewCoordinator: delegatedCoordinator, RejoinGroup: rejoin])
+      logInfo("Delegating Sonos group coordination from ${coordinatorId} to ${delegatedCoordinator}; rejoin=${rejoin}")
+      postSonosSoapAsync('groupControlSoapCallback', params, [operation: 'delegateCoordinator',
+          playerId: coordinatorId, coordinatorId: delegatedCoordinator, rejoinGroup: rejoin])
+      return
+    }
+    Map expectedGroup = expectedTopology?.get(playerId) instanceof Map
+        ? (Map)expectedTopology[playerId]
+        : (expectedTopology?.values()?.find { Map expected -> expected?.coordinatorId?.toString() == playerId } as Map ?: [:])
+    if(expectedGroup.coordinatorId?.toString() == playerId && playerId != coordinatorId) {
+      List<String> expectedMembers = expectedGroup.memberIds instanceof List
+          ? ((List)expectedGroup.memberIds).collect { Object id -> id?.toString() } : []
+      Boolean rejoin = expectedMembers.contains(coordinatorId)
+      Map params = getSoapActionParams(coordinatorHost, AVTransport, 'DelegateGroupCoordinationTo',
+          [NewCoordinator: playerId, RejoinGroup: rejoin])
+      postSonosSoapAsync('groupControlSoapCallback', params, [operation: 'delegateCoordinator',
+          playerId: coordinatorId, coordinatorId: playerId, rejoinGroup: rejoin])
+      return
+    }
+    String targetHost = getTopologyMemberHost(playerId)
+    if(!targetHost) {
+      logWarn("Cannot detach ${playerId} from the Sonos group because its UPnP location is not in the topology cache")
+      playerGetGroupsFull()
+      return
+    }
+    Map params = getSoapActionParams(targetHost, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
+    logInfo("Detaching ${playerId} into a standalone Sonos group through AVTransport")
+    postSonosSoapAsync('groupControlSoapCallback', params, [operation: 'detachMember', playerId: playerId])
+  }
+
+  playersToAdd.findAll { String playerId -> playerId != coordinatorId }.each { String playerId ->
+    String targetHost = getTopologyMemberHost(playerId)
+    if(!targetHost) {
+      logWarn("Cannot add ${playerId} to ${coordinatorId}: its UPnP location is not in the topology cache")
+      playerGetGroupsFull()
+      return
+    }
+    Map params = getSoapActionParams(targetHost, AVTransport, 'SetAVTransportURI',
+        [CurrentURI: "x-rincon:${coordinatorId}", CurrentURIMetaData: ''])
+    logInfo("Adding ${playerId} to Sonos group ${getGroupId()} through UPnP SetAVTransportURI")
+    postSonosSoapAsync('groupControlSoapCallback', params, [operation: 'addMember',
+        playerId: playerId, coordinatorId: coordinatorId])
+  }
+}
+
+@CompileStatic
+String getTopologyMemberHost(String playerId) {
+  if(!playerId) { return null }
+  if(playerId == getId()) { return getLocalUpnpHostForGroupOperation() }
+  for(Map group : currentZgtByGroupId.values()) {
+    List<Map> members = group?.members instanceof List ? (List<Map>)group.members : []
+    Map member = members.find { Map candidate -> candidate?.playerId?.toString() == playerId }
+    String location = member?.location?.toString()
+    if(location) {
+      Integer schemeEnd = location.indexOf('://')
+      Integer hostStart = schemeEnd >= 0 ? schemeEnd + 3 : 0
+      Integer hostEnd = location.indexOf('/', hostStart)
+      return hostEnd >= 0 ? location.substring(hostStart, hostEnd) : location.substring(hostStart)
+    }
+  }
+  return null
+}
+
+@CompileStatic
+void groupControlSoapCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("UPnP group operation ${data?.operation ?: 'unknown'} failed for ${data?.playerId ?: 'unknown player'} (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  logDebug("UPnP group operation ${data?.operation ?: 'unknown'} was accepted for ${data?.playerId ?: 'unknown player'}")
 }
 
 // =============================================================================
