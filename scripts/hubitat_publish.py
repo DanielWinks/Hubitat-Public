@@ -11,15 +11,28 @@ Usage:
     python3 scripts/hubitat_publish.py
 
 Per-file results are printed as each file completes, followed by a
-summary. Exit code is 0 only when every file published successfully.
-Failures distinguish timeouts, connection errors, and hub-rejected
-saves (compile errors), with the fullest error detail available from
-the hub.
+summary. Every result is also appended to hubitat_publish.log next to
+this script (git-ignored), one JSON line per file per run.
+
+On startup the log is read back to decide what to push:
+
+- If the last recorded result for every SAC file is a success (or
+  there is no usable log yet), all 12 files are pushed.
+- If any file's last result is a failure (or is missing from the log),
+  only those files are attempted, so a failed run can be retried
+  quickly. Once that retry makes every file successful, the following
+  run goes back to a full push.
+
+Exit code is 0 only when every file attempted in this run published
+successfully. Failures distinguish timeouts, connection errors, and
+hub-rejected saves (compile errors), with the fullest error detail
+available from the hub.
 """
 
 import json
 import re
 import socket
+from datetime import datetime, timezone
 import sys
 import urllib.error
 import urllib.parse
@@ -51,6 +64,10 @@ SAC_FILES = [
 # Compile of the large app/driver files takes a while on the hub.
 SAVE_TIMEOUT_SECONDS = 180
 LIST_TIMEOUT_SECONDS = 15
+
+# Append-only result log (JSON lines), next to this script, git-ignored.
+# The next run reads it back to decide full push vs retry-only-failures.
+LOG_FILENAME = "hubitat_publish.log"
 
 # Hubitat API endpoints for listing user code
 HUB_LIST_ENDPOINTS = {
@@ -332,11 +349,19 @@ def update_existing_code(host, code_type, code_id, version, source):
 # Per-file publish (unconditional, non-interactive)
 # ---------------------------------------------------------------------------
 def publish_one(host, code_type, filepath, hub_lists):
-    """Publish one SAC file. Returns (ok_bool, report_line, detail_str)."""
+    """Publish one SAC file. Returns a result dict:
+    {"ok": bool, "kind": str, "message": str} where kind is one of
+    "success", "timeout", "connection", "save", "read", "unexpected",
+    and message is the human-readable report line (with full error
+    detail on failures)."""
     try:
         source = Path(filepath).read_text(encoding="utf-8")
     except (IOError, OSError) as e:
-        return False, f"FAILED: {filepath} — cannot read file: {e}", ""
+        return {
+            "ok": False,
+            "kind": "read",
+            "message": f"FAILED: {filepath} — cannot read file: {e}",
+        }
 
     code_name, code_namespace = extract_name_and_namespace(source)
     label = f"{Path(filepath).name} ({code_type}: {code_name or '?'})"
@@ -354,23 +379,109 @@ def publish_one(host, code_type, filepath, hub_lists):
                 host, code_type, code_id, hub_version, source
             )
             note = "" if match_kind == "exact" else " (name-only match)"
-            return (
-                True,
-                f"OK: {label} → updated ID {code_id}, version {new_version}{note}",
-                "",
-            )
+            return {
+                "ok": True,
+                "kind": "success",
+                "message": f"OK: {label} → updated ID {code_id}, version {new_version}{note}",
+            }
 
         code_id = create_new_code(host, code_type, source)
-        return True, f"OK: {label} → created ID {code_id}", ""
+        return {
+            "ok": True,
+            "kind": "success",
+            "message": f"OK: {label} → created ID {code_id}",
+        }
 
     except HubTimeoutError as e:
-        return False, f"FAILED: {label} — TIMED OUT: {e}", str(e)
+        return {
+            "ok": False,
+            "kind": "timeout",
+            "message": f"FAILED: {label} — TIMED OUT: {e}",
+        }
     except HubConnectionError as e:
-        return False, f"FAILED: {label} — CONNECTION ERROR: {e}", str(e)
+        return {
+            "ok": False,
+            "kind": "connection",
+            "message": f"FAILED: {label} — CONNECTION ERROR: {e}",
+        }
     except HubSaveError as e:
-        return False, f"FAILED: {label} — COMPILE/SAVE ERROR:\n{e}", str(e)
+        return {
+            "ok": False,
+            "kind": "save",
+            "message": f"FAILED: {label} — COMPILE/SAVE ERROR:\n{e}",
+        }
     except Exception as e:  # keep publishing the rest no matter what
-        return False, f"FAILED: {label} — UNEXPECTED ERROR: {type(e).__name__}: {e}", str(e)
+        return {
+            "ok": False,
+            "kind": "unexpected",
+            "message": f"FAILED: {label} — UNEXPECTED ERROR: {type(e).__name__}: {e}",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Result log (JSON lines, append-only)
+# ---------------------------------------------------------------------------
+def log_path():
+    """Path to the result log: next to this script."""
+    return Path(__file__).resolve().parent / LOG_FILENAME
+
+
+def read_last_statuses(path):
+    """Return {relpath: status} from the most recent log entry per file.
+
+    "status" is "success" or "failed". Non-result lines (run/summary
+    markers, blank lines, corrupt JSON) are skipped. Returns an empty
+    dict when the log is missing or unreadable — the caller then does
+    a full push."""
+    statuses = {}
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (IOError, OSError):
+        return {}
+
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        relpath = entry.get("file")
+        status = entry.get("status")
+        if relpath and status in ("success", "failed"):
+            statuses[relpath] = status  # later lines win
+    return statuses
+
+
+def append_log(path, entry):
+    """Append one JSON line to the log. Logging must never break a publish."""
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), **entry}
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except (IOError, OSError) as e:
+        print(f"    WARNING: could not write to log file {path}: {e}")
+
+
+def select_targets(last_statuses):
+    """Decide what to publish given the last recorded statuses.
+
+    Returns (targets, mode_line) where targets is a list of
+    (relpath, code_type) to attempt this run and mode_line describes
+    the decision for the terminal:
+
+    - No failures/missing in the log (or no log): full push.
+    - Otherwise: retry only the files whose last result was a failure
+      or that never appear in the log.
+    """
+    retry = [(r, t) for (r, t) in SAC_FILES if last_statuses.get(r) != "success"]
+
+    if not last_statuses:
+        return list(SAC_FILES), "Full publish (no prior log)"
+    if not retry:
+        return list(SAC_FILES), f"Full publish (last log shows {len(SAC_FILES)}/{len(SAC_FILES)} success)"
+    return retry, f"Retry {len(retry)} file(s) from last run (skipping {len(SAC_FILES) - len(retry)} already successful)"
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +494,12 @@ def repo_root():
 
 def main():
     root = repo_root()
-    print(f"Publishing {len(SAC_FILES)} SAC files to C7 ({HUB_HOST})...")
+    log = log_path()
+
+    last_statuses = read_last_statuses(log)
+    targets, mode_line = select_targets(last_statuses)
+    print(f"C7 ({HUB_HOST}) — {mode_line}.")
+    print(f"Log: {log}")
     print()
 
     # One code list per type, fetched once up front.
@@ -394,21 +510,54 @@ def main():
         print(f"Hub list for {code_type}s: {n} code file(s)" + ("" if n else " — NOT FETCHED (will try create; may duplicate)"))
     print()
 
+    append_log(
+        log,
+        {"event": "run-start", "mode": mode_line, "files": [r for r, _ in targets]},
+    )
+
     successes, failures = [], []
-    for i, (relpath, code_type) in enumerate(SAC_FILES, 1):
+    run_statuses = dict(last_statuses)
+    total = len(targets)
+    for i, (relpath, code_type) in enumerate(targets, 1):
         filepath = root / relpath
-        print(f"[{i}/{len(SAC_FILES)}] Publishing {relpath} ...", flush=True)
-        ok, report, detail = publish_one(HUB_HOST, code_type, filepath, hub_lists)
-        # Print the per-file verdict; on failure the report already
+        print(f"[{i}/{total}] Publishing {relpath} ...", flush=True)
+        result = publish_one(HUB_HOST, code_type, filepath, hub_lists)
+        # Print the per-file verdict; on failure the message already
         # carries the full compile-error detail.
-        for line in report.split("\n"):
+        for line in result["message"].split("\n"):
             print(f"    {line}" if line else "")
-        (successes if ok else failures).append(relpath)
+        append_log(
+            log,
+            {
+                "file": relpath,
+                "codeType": code_type,
+                "status": "success" if result["ok"] else "failed",
+                "kind": result["kind"],
+                "message": result["message"],
+            },
+        )
+        run_statuses[relpath] = "success" if result["ok"] else "failed"
+        (successes if result["ok"] else failures).append(relpath)
         print(flush=True)
 
-    print(f"Summary: {len(successes)} published, {len(failures)} failed")
+    ok_total = sum(1 for r, _ in SAC_FILES if run_statuses.get(r) == "success")
+    append_log(
+        log,
+        {
+            "event": "summary",
+            "attempted": len(successes) + len(failures),
+            "succeeded": len(successes),
+            "failed": len(failures),
+            "totalSuccess": f"{ok_total}/{len(SAC_FILES)}",
+        },
+    )
+
+    print(f"Summary: {len(successes)}/{total} published this run, {len(failures)} failed")
     for relpath in failures:
         print(f"  FAILED: {relpath}")
+    print(f"Overall log state: {ok_total}/{len(SAC_FILES)} successful"
+          + (" — next run will be a full publish" if ok_total == len(SAC_FILES)
+             else " — next run will retry only the failed files"))
     sys.exit(0 if not failures else 1)
 
 

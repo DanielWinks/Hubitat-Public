@@ -6,3 +6,4 @@ xml.xml
 .hubitat/oldmetadata.json
 SonosXML/*
 logs
+scripts/hubitat_publish.log
