@@ -13522,7 +13522,7 @@ private Integer parseSonosDurationSeconds(String rawDuration) {
   if(!rawDuration || !(rawDuration ==~ /\d{1,}:\d{2}:\d{2}/)) { return null }
   try {
     List<String> parts = rawDuration.split(':') as List<String>
-    return (parts[0].toInteger() * 3600) + (parts[1].toInteger() * 60) + parts[2].toInteger()
+    return (NumberUtils.toInt(parts[0]) * 3600) + (NumberUtils.toInt(parts[1]) * 60) + NumberUtils.toInt(parts[2])
   } catch(Exception ignored) { return null }
 }
 

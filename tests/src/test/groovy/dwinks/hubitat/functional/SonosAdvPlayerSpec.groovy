@@ -1584,6 +1584,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.unEscapeMetaData('&amp;lt;title&amp;gt;A&amp;lt;/title&amp;gt;') == '<title>A</title>'
     driver.unescapeIfNeeded('&lt;x&gt;') == '<x>'
     driver.normalizeLogLevel('INFO') == 'info'
+    driver.parseSonosDurationSeconds('1:02:03') == 3723
+    driver.parseSonosDurationSeconds('invalid') == null
   }
 
   def "websocket connect requests the parent initialization turn when not granted"() {
