@@ -887,8 +887,6 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Integer> groupDeviceUpdateRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> lastLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
-@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingParentOrdered = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
-@Field static ConcurrentHashMap<String, Object> parentUpdateLocks = new ConcurrentHashMap<String, Object>()
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
@@ -2381,6 +2379,8 @@ void sendParentAppRequestDirect(String action, Map args) {
   Map payload = [version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action, args: args ?: [:], requestId: UUID.randomUUID().toString()]
   try { parent.playerAppRequest(payload) } catch(Exception e) { logWarn("parent.playerAppRequest failed for ${action}: ${e.message}") }
 }
+List<Map> drainPendingParentUpdatesForPoll() { return [] }
+List<Map> flushPendingParentUpdates() { return [] }
 List<Map> drainPendingParentRequestsForPoll() { return [] }
 List<Map> flushPendingParentRequests() { return [] }
 
@@ -8891,47 +8891,9 @@ void publishPlayerStateUpdate(Map payload) {
 }
 
 void enqueueParentStateUpdate(Map payload) {
-  if(payload == null || payload.isEmpty()) { return }
-  Boolean directOk = dispatchParentStateUpdateDirect(payload)
-  if(directOk) { return }
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = parentUpdateLocks.get(dni)
-  if(lock == null) {
-    Object created = new Object()
-    Object existing = parentUpdateLocks.putIfAbsent(dni, created)
-    lock = existing ?: created
-  }
-  synchronized(lock) {
-    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
-    if(ordered == null) {
-      ConcurrentLinkedQueue<Map> created = new ConcurrentLinkedQueue<Map>()
-      ConcurrentLinkedQueue<Map> existing = pendingParentOrdered.putIfAbsent(dni, created)
-      ordered = existing ?: created
-    }
-    if(ordered.size() >= 64) { ordered.poll() }
-    ordered.add(new LinkedHashMap(payload))
-  }
+  dispatchParentStateUpdateDirect(payload)
 }
-List<Map> drainPendingParentUpdatesForPoll() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return [] }
-  Object lock = parentUpdateLocks.get(dni)
-  if(lock == null) { return [] }
-  List<Map> batch = []
-  synchronized(lock) {
-    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
-    if(ordered != null && !ordered.isEmpty()) {
-      while(ordered.peek() != null && batch.size() < 64) {
-        Map item = ordered.poll()
-        if(item != null) { batch.add(item) }
-      }
-      if(ordered.isEmpty()) { pendingParentOrdered.remove(dni) }
-    }
-  }
-  return batch
-}
-List<Map> flushPendingParentUpdates() { return drainPendingParentUpdatesForPoll() }
+
 Boolean dispatchParentStateUpdateDirect(Map payload) {
   if(payload == null || payload.isEmpty()) { return true }
   String kind = payload?.kind?.toString()

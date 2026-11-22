@@ -1536,7 +1536,12 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.metaClass.getParent = { -> new Expando(
       playerStateUpdate: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
-      playerAppRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload) }
+      playerAppRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload) },
+      requestInitializationTurn: { String dni, String reason -> parentPlayerUpdates << [kind:'initializationRequested', reason:reason, playerDni:dni] },
+      initializationStarted: { String reqId -> parentPlayerUpdates << [kind:'initializationStarted', requestId:reqId] },
+      initializationComplete: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationComplete', requestId:reqId, detail:detail] },
+      initializationFailed: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationFailed', requestId:reqId, detail:detail] },
+      groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
     driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
@@ -1568,8 +1573,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
-    driver.pendingParentOrdered.clear()
-    driver.parentUpdateLocks.clear()
   }
 
   def "websocket connect requests the parent initialization turn when not granted"() {
