@@ -2231,7 +2231,7 @@ void groupsRegistryInitialization() {
 
 void favoritesMapInitialization() {
   if(!(favoritesMap instanceof ConcurrentHashMap)) { favoritesMap = new ConcurrentHashMap<String, LinkedHashMap>() }
-  // getFavorites() is now triggered by subscribeToWsEvents() after WebSocket connects
+  // Favorite and playlist catalogs are populated through UPnP ContentDirectory Browse.
 }
 
 @CompileStatic
@@ -5652,7 +5652,12 @@ String normalizeFavoriteUri(String uri) {
 }
 
 void updateCurrentFavoriteFromUpnp(Map snapshot) {
-  if(getFavoritesMap().isEmpty() && getPlaylistsMap().isEmpty()) { return }
+  if(getFavoritesMap().isEmpty() && !state.favoritesBrowseVersion && !state.favoritesBrowseRequestId) {
+    getFavorites()
+  }
+  if(getPlaylistsMap().isEmpty() && !state.playlistsBrowseVersion && !state.playlistsBrowseRequestId) {
+    getPlaylists()
+  }
   String currentUri = normalizeFavoriteUri(snapshot?.currentTrackURI?.toString())
   String enqueuedUri = normalizeFavoriteUri(snapshot?.enqueuedTransportURI?.toString())
   Map currentMetadata = snapshot?.currentTrackMetaData instanceof Map ? (Map)snapshot.currentTrackMetaData : [:]
@@ -8159,9 +8164,8 @@ Boolean isDebugLoggingEnabled() {
   return loggingEnabled('debug')
 }
 
-// Retain WS namespace bookkeeping for compatibility with legacy responses and
-// the remaining groups/audioClip commands; only audioClip and HT metadata are subscribed.
-@Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
+// Retain WS namespace bookkeeping for the commands and event streams still in use.
+@Field static final List<String> WS_NAMESPACES = ['playback', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
 @Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
@@ -8370,14 +8374,13 @@ void subscribeToPlaybackDebounce(Map data = null) {
   String groupId = data?.groupId
   if(groupId != null && groupId != '') {
     subscribeToAVTransport()
-    subscribeToPlaybackMetadata(groupId)
     getPlaybackStatus()
     getPlaybackMetadataStatus()
   }
 }
 @CompileStatic
 Boolean isCurrentlySubcribedToCoodinatorWS() {
-  return getWsSubscriptionValue('playback') == 'Subscribed' && getWsSubscriptionValue('playbackMetadata') == 'Subscribed' && getWsSubscriptionValue('groupVolume') == 'Subscribed'
+  return getWsSubscriptionValue('playback') == 'Subscribed' && getWsSubscriptionValue('groupVolume') == 'Subscribed'
 }
 @CompileStatic
 Boolean isCurrentlySubcribedToPlaylistWS() { return getWsSubscriptionValue('playlists') == 'Subscribed' }
@@ -9020,7 +9023,6 @@ void setTrackDescription(String trackDescription) {
   // Queue for batched group device update
   queueGroupDeviceUpdate([trackDescription: trackDescription])
 
-  if(changed && getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
 }
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
 
@@ -9843,17 +9845,14 @@ Map describeWebSocketCommand(String message) {
 
 String expectedWebsocketResponseType(String namespace, String wireCommand) {
   if(wireCommand == 'subscribe' && namespace in ['groups', 'favorites', 'playlists', 'audioClip',
-      'playback', 'playbackMetadata', 'playerVolume', 'groupVolume']) { return 'none' }
+      'playback', 'playerVolume', 'groupVolume']) { return 'none' }
   if(namespace == 'playback' && wireCommand in ['play', 'pause', 'stop', 'skipToNextTrack',
       'skipToPreviousTrack', 'setPlayModes']) { return 'none' }
   if(namespace in ['playerVolume', 'groupVolume'] && wireCommand in ['setVolume', 'setMute', 'setRelativeVolume']) { return 'none' }
   if(namespace == 'favorites' && wireCommand == 'loadFavorite') { return 'none' }
   if(namespace == 'playlists' && wireCommand == 'loadPlaylist') { return 'none' }
-  if(namespace == 'favorites' && wireCommand == 'getFavorites') { return 'favoritesList' }
-  if(namespace == 'playlists' && wireCommand == 'getPlaylists') { return 'playlistsList' }
   if(namespace == 'groups' && wireCommand == 'getGroups') { return 'groups' }
   if(namespace == 'playback' && wireCommand == 'getPlaybackStatus') { return 'playbackStatus' }
-  if(namespace == 'playbackMetadata' && wireCommand == 'getMetadataStatus') { return 'metadataStatus' }
   if(namespace == 'groups' && wireCommand in ['createGroup', 'modifyGroupMembers']) { return 'groupInfo' }
   if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'loadAudioClip') { return 'audioClip' }
   if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'cancelAudioClip') { return 'none' }
@@ -10439,8 +10438,7 @@ List<Map> expectedSubscriptionEventsForWsCommand(String message) {
     String namespace = command.namespace?.toString()
     String name = command.command?.toString()
     if(namespace in ['favorites', 'playlists'] && name in ['loadFavorite', 'loadPlaylist']) {
-      return [[namespace: 'playbackMetadata', type: 'metadataStatus'],
-          [namespace: 'playback', type: 'playbackStatus']]
+      return [[namespace: 'playback', type: 'playbackStatus']]
     }
     if(namespace == 'playback' && name in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack', 'seek']) {
       return [[namespace: 'playback', type: 'playbackStatus']]
@@ -10575,23 +10573,20 @@ void watchExpectedSubscriptionEvents() {
 }
 
 void resubscribeWebsocketNamespace(String namespace) {
-  if(namespace in ['playback', 'playbackMetadata', 'groupVolume'] && getIsGroupCoordinator() != true) {
+  if(namespace in ['playback', 'groupVolume'] && getIsGroupCoordinator() != true) {
     logDebug("Skipping ${namespace} resubscription because this player is not the group coordinator")
     return
   }
   String groupId = getGroupId()
-  if(namespace in ['playback', 'playbackMetadata', 'groupVolume'] && !groupId) {
+  if(namespace in ['playback', 'groupVolume'] && !groupId) {
     logWarn("Cannot resubscribe to ${namespace}: no current group ID")
     return
   }
   switch(namespace) {
     case 'playback': subscribeToPlayback(groupId); break
-    case 'playbackMetadata': subscribeToPlaybackMetadata(groupId); break
     case 'groups': subscribeToGroups(); break
     case 'playerVolume': subscribeToPlayerVolume(); break
     case 'groupVolume': subscribeToGroupVolume(groupId); break
-    case 'favorites': subscribeToFavorites(); break
-    case 'playlists': subscribeToPlaylists(); break
     default: logWarn("No resubscribe handler for WebSocket namespace ${namespace}")
   }
 }
@@ -10611,11 +10606,6 @@ void renewWebsocketConnection() {
 // =============================================================================
 void subscribeToWsEvents() {
   if(hasAudioClipCapability() && isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
-  if(getIsGroupCoordinator() == true && hasHTPlaybackCapability() == true &&
-      getWsSubscriptionValue('playbackMetadata') != 'Subscribed') {
-    String groupId = getGroupId()
-    if(groupId) { subscribeToPlaybackMetadata(groupId) }
-  }
 }
 
 void refreshUpnpMediaCatalogs() {
@@ -10630,32 +10620,6 @@ void refreshUpnpMediaCatalogs() {
 void subscribeToGroups() {
   Map command = [
     'namespace':'groups',
-    'command':'subscribe',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
-
-@CompileStatic
-void subscribeToFavorites() {
-  Map command = [
-    'namespace':'favorites',
-    'command':'subscribe',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
-
-@CompileStatic
-void subscribeToPlaylists() {
-  Map command = [
-    'namespace':'playlists',
     'command':'subscribe',
     'householdId':"${getHouseholdId()}"
   ]
@@ -10690,19 +10654,6 @@ void retryAudioClipSubscription() {
 void subscribeToPlayback(String groupId) {
   Map command = [
     'namespace':'playback',
-    'command':'subscribe',
-    'groupId':"${groupId}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
-
-@CompileStatic
-void subscribeToPlaybackMetadata(String groupId) {
-  Map command = [
-    'namespace':'playbackMetadata',
     'command':'subscribe',
     'groupId':"${groupId}"
   ]
@@ -10807,18 +10758,6 @@ void transportStatusSoapCallback(AsyncResponse response, Map data = null) {
   }
 }
 
-@CompileStatic
-void subscribeToFavorites(String groupId) {
-  Map command = [
-    'namespace':'favorites',
-    'command':'subscribe',
-    'groupId':"${groupId}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
 // =============================================================================
 // End Websocket Subscriptions and polling
 // =============================================================================
@@ -11198,6 +11137,7 @@ void playerSetGroupRelativeVolume(Integer volumeDelta) {
 
 @CompileStatic
 void getFavorites() {
+  if(state.favoritesBrowseRequestId) { return }
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) {
     logWarn('Cannot retrieve Sonos favorites: local UPnP host is unavailable')
@@ -11320,10 +11260,12 @@ void cacheUpnpFavorites(List<Map> favorites) {
   }
   html += '</div></body></html>'
   setChildFavs(html)
+  rematchLatestUpnpPlaybackSnapshot()
 }
 
 @CompileStatic
 void getPlaylists() {
+  if(state.playlistsBrowseRequestId) { return }
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) { logWarn('Cannot retrieve Sonos Playlists: local UPnP host is unavailable'); return }
   Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: 'SQ:',
@@ -11402,11 +11344,31 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
     state.remove('playlistsBrowseRequestId')
     state.remove('playlistsBrowseItems')
     logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${state.playlistsBrowseVersion ?: 'unknown'})")
+    rematchLatestUpnpPlaybackSnapshot()
     completePendingRandomMediaLoads('playlist')
   } catch(Exception e) {
     state.remove('playlistsBrowseRequestId')
     state.remove('playlistsBrowseItems')
     logWarn("Could not parse Sonos Playlists UPnP Browse response: ${e.message}")
+  }
+}
+
+void rematchLatestUpnpPlaybackSnapshot() {
+  String dni = device.getDeviceNetworkId()?.toString()
+  Map snapshot = null
+  try {
+    String snapshotJson = device.getDataValue('avtTransportJson')?.toString()
+    if(snapshotJson) { snapshot = (Map)new JsonSlurper().parseText(snapshotJson) }
+  } catch(Exception ignored) { snapshot = null }
+  if(snapshot == null && dni && currentAvtSnapshotByDni.get(dni) instanceof Map) {
+    snapshot = (Map)currentAvtSnapshotByDni.get(dni)
+  }
+  if(snapshot == null && runtimeState.lastTransportPlaybackSnapshot instanceof Map) {
+    snapshot = (Map)runtimeState.lastTransportPlaybackSnapshot
+  }
+  if(snapshot != null) {
+    logDebug("Rechecking favorite/playlist match from cached UPnP playback snapshot for ${dni}")
+    updateCurrentFavoriteFromUpnp(snapshot)
   }
 }
 
@@ -13501,326 +13463,6 @@ void processWebsocketMessage(String message) {
     // }
   }
 
-  if(eventType?.type == 'versionChanged' && eventType?.name == 'favoritesVersionChange') {
-    logDebug('WebSocket favorites-version change processing beginning')
-    if(checkIsFavPlaylistDelegate()) {
-      getFavorites()
-      getPlaylists()
-    }
-  }
-
-  if(eventType?.type == 'favoritesList' && eventType?.response == 'getFavorites' && eventType?.success == true) {
-    Integer favoriteItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
-    logDebug("WebSocket favorites-list processing beginning; itemCount=${favoriteItemCount}")
-    ArrayList<Map> respData = (ArrayList<Map>)eventData?.items
-    if(respData == null || respData.isEmpty()) { clearFavoritesMap() }
-    if(respData != null && respData.size() > 0) {
-      Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
-
-      // Get device ID for command URLs
-      Long deviceId = device.getIdAsLong()
-      String hubIp = device.hub.localIP
-
-      // Build HTML with modern styling and click handlers
-      String html = """<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background-color: #f5f5f5;
-      margin: 0;
-      padding: 20px;
-    }
-    .favorites-container {
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      max-width: 400px;
-      margin: 0 auto;
-    }
-    .favorite-card {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-      padding: 15px;
-      text-align: center;
-      transition: transform 0.2s, box-shadow 0.2s;
-      cursor: pointer;
-    }
-    .favorite-card:hover {
-      transform: translateY(-4px);
-      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-    }
-    .favorite-image {
-      width: 100%;
-      aspect-ratio: 1;
-      object-fit: cover;
-      border-radius: 8px;
-      transition: opacity 0.2s;
-    }
-    .favorite-image:hover {
-      opacity: 0.85;
-    }
-    .favorite-image:active {
-      opacity: 0.7;
-    }
-    .favorite-number {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 5px;
-      font-weight: 500;
-    }
-    .favorite-name {
-      font-size: 14px;
-      color: #333;
-      margin-top: 10px;
-      font-weight: 600;
-      line-height: 1.3;
-      min-height: 36px;
-    }
-    .no-image {
-      width: 100%;
-      height: 200px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      border-radius: 8px;
-      color: white;
-      font-size: 16px;
-      cursor: pointer;
-    }
-    .no-image:hover {
-      opacity: 0.9;
-    }
-  </style>
-</head>
-<body>
-  <div class="favorites-container">
-"""
-
-      formatted.each(){fav ->
-        String albumArtURI = fav?.value?.imageUrl
-        String favId = fav?.key
-        String favName = fav?.value?.name
-
-        if(albumArtURI == null) {
-          html += """    <div class="favorite-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadFavorite', [favId])}">
-      <div class="favorite-number">Favorite #${favId}</div>
-      <div class="no-image">
-        <span>♪ ${favName}</span>
-      </div>
-"""
-        } else if(albumArtURI.startsWith('/')) {
-          html += """    <div class="favorite-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadFavorite', [favId])}">
-      <div class="favorite-number">Favorite #${favId}</div>
-      <img class="favorite-image"
-           src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
-           alt="${favName}" />
-"""
-        } else {
-          html += """    <div class="favorite-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadFavorite', [favId])}">
-      <div class="favorite-number">Favorite #${favId}</div>
-      <img class="favorite-image"
-           src="${albumArtURI}"
-           alt="${favName}" />
-"""
-        }
-
-        html += """      <div class="favorite-name">${favName}</div>
-    </div>
-"""
-      }
-
-      html += """  </div>
-</body>
-</html>"""
-
-      setChildFavs(html)
-
-
-      clearFavoritesMap()
-      respData.each{
-        Map item = (Map)it
-        if(item != null && item.size() > 0) {
-          Map resource = (Map)item?.resource
-          if(resource != null && resource.size() > 0) {
-            Map id = (Map)resource?.id
-            if(id != null) {
-              String objectId = id?.objectId
-              String serviceId = id?.serviceId
-              String accountId = id?.accountId
-              if(objectId != null) {
-                List tok = splitTokens(objectId, ':')
-                if(tok.size() >= 2) { objectId = tok[1] }
-              }
-              String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-              getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name, details:new LinkedHashMap(item)]
-            }
-          } else if(item?.imageUrl != null) {
-            String universalMusicObjectId = ("${item?.imageUrl}".toString()).split('&v=')[0]
-            getFavoritesMap()[universalMusicObjectId] = [id:(String)item?.id, name:(String)item?.name, imageUrl:(String)item?.imageUrl, service:(String)((Map)item?.service)?.name, details:new LinkedHashMap(item)]
-          }
-        }
-      }
-    }
-    completePendingRandomMediaLoads('favorite')
-  }
-  if(eventType?.response == 'getFavorites' && eventType?.success != true) {
-    failPendingRandomMediaLoads('favorite')
-  }
-
-  if(eventType?.type == 'playlistsList' && eventType?.response == 'getPlaylists' && eventType?.success == true) {
-    Integer playlistItemCount = eventData?.items instanceof Collection ? ((Collection)eventData.items).size() : 0
-    logDebug("WebSocket playlists-list processing beginning; itemCount=${playlistItemCount}")
-    ArrayList<Map> respData = (ArrayList<Map>)eventData?.playlists
-    if(respData == null || respData.isEmpty()) { clearPlaylistsMap() }
-    if(respData != null && respData.size() > 0) {
-      Map<String, Map> formatted = (Map<String, Map>)respData.collectEntries() { [(String)it?.id, [name:it?.name, imageUrl:it?.imageUrl]] }
-
-      // Get device ID for command URLs
-      Long deviceId = device.getIdAsLong()
-      String hubIp = device.hub.localIP
-
-      // Build HTML with modern styling and click handlers
-      String html = """<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    body {
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background-color: #f5f5f5;
-      margin: 0;
-      padding: 20px;
-    }
-    .playlists-container {
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      max-width: 400px;
-      margin: 0 auto;
-    }
-    .playlist-card {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-      padding: 15px;
-      text-align: center;
-      transition: transform 0.2s, box-shadow 0.2s;
-      cursor: pointer;
-    }
-    .playlist-card:hover {
-      transform: translateY(-4px);
-      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-    }
-    .playlist-image {
-      width: 100%;
-      aspect-ratio: 1;
-      object-fit: cover;
-      border-radius: 8px;
-      transition: opacity 0.2s;
-    }
-    .playlist-image:hover {
-      opacity: 0.85;
-    }
-    .playlist-image:active {
-      opacity: 0.7;
-    }
-    .playlist-number {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 5px;
-      font-weight: 500;
-    }
-    .playlist-name {
-      font-size: 14px;
-      color: #333;
-      margin-top: 10px;
-      font-weight: 600;
-      line-height: 1.3;
-      min-height: 36px;
-    }
-    .no-image {
-      width: 100%;
-      height: 200px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-      border-radius: 8px;
-      color: white;
-      font-size: 16px;
-      cursor: pointer;
-    }
-    .no-image:hover {
-      opacity: 0.9;
-    }
-  </style>
-</head>
-<body>
-  <div class="playlists-container">
-"""
-
-      formatted.each(){playlist ->
-        String albumArtURI = playlist?.value?.imageUrl
-        String playlistId = playlist?.key
-        String playlistName = playlist?.value?.name
-
-        if(albumArtURI == null) {
-          html += """    <div class="playlist-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadPlaylist', [playlistId])}">
-      <div class="playlist-number">Playlist #${playlistId}</div>
-      <div class="no-image">
-        <span>♪ ${playlistName}</span>
-      </div>
-"""
-        } else if(albumArtURI.startsWith('/')) {
-          html += """    <div class="playlist-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadPlaylist', [playlistId])}">
-      <div class="playlist-number">Playlist #${playlistId}</div>
-      <img class="playlist-image"
-           src="${getDeviceDataValue('localUpnpUrl')}${albumArtURI}"
-           alt="${playlistName}" />
-"""
-        } else {
-          html += """    <div class="playlist-card" onclick="${buildHubitatRunMethodOnclick(deviceId, 'loadPlaylist', [playlistId])}">
-      <div class="playlist-number">Playlist #${playlistId}</div>
-      <img class="playlist-image"
-           src="${albumArtURI}"
-           alt="${playlistName}" />
-"""
-        }
-
-        html += """      <div class="playlist-name">${playlistName}</div>
-    </div>
-"""
-      }
-
-      html += """  </div>
-</body>
-</html>"""
-
-      setChildPlaylists(html)
-
-
-      clearPlaylistsMap()
-      respData.each{
-        Map item = (Map)it
-        if(item != null && item.size() > 0) {
-          String playlistId = (String)item?.id
-          String playlistName = (String)item?.name
-          if(playlistId != null) {
-            getPlaylistsMap()[playlistId] = [id: playlistId, name: playlistName, service: 'Sonos', details:new LinkedHashMap(item)]
-          }
-        }
-      }
-    }
-    completePendingRandomMediaLoads('playlist')
-  }
-  if(eventType?.response == 'getPlaylists' && eventType?.success != true) {
-    failPendingRandomMediaLoads('playlist')
-  }
-
-
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
     logDebug("WebSocket audio-clip status processing beginning; dataKeys=${eventData.keySet().join(',')}")
     String stage = 'read audioClips payload'
@@ -14088,27 +13730,9 @@ void processWebsocketMessage(String message) {
     // Retry observation is updated before this return so an explicit playback
     // poll can still confirm an unchanged PLAYING state.
     if(currentState == previousState) { return }
-    if(currentState == 'PLAYBACK_STATE_PLAYING') {
-      if(getIsGroupCoordinator()) { getPlaybackMetadataStatusIn() }
-    } else if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
+    if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
       lastMetadataContainerId.remove(dni)
     }
-  }
-
-  if(eventType?.type == 'metadataStatus' && eventType?.namespace == 'playbackMetadata') {
-    logDebug("WebSocket metadata-status processing beginning; dataKeys=${eventData.keySet().join(',')}")
-    String containerKey = extractContainerKey(eventData)
-    String lastKey = lastMetadataContainerId.get(dni)
-    Boolean retryPending = favoriteRetryState.containsKey(dni) || playlistRetryState.containsKey(dni)
-    Boolean groupFavoritePending = runtimeState.groupFavoriteOperationId as String ||
-        runtimeState.groupTopologyOperationId as String
-    if(containerKey == lastKey && !retryPending && !groupFavoritePending) { return }
-    lastMetadataContainerId.put(dni, containerKey)
-    checkFavAndPlaylist(eventData)
-    emitGroupFavoriteOperationEvent('metadataStatus', [
-      container: eventData?.container,
-      groupId: getGroupId()
-    ])
   }
 
   //Process playerVolume events
@@ -14190,44 +13814,6 @@ void handleHtControlPayload(String xmlBody) {
 /** No longer published via outbox — parent reads status/audioSource attributes directly. Kept as no-op for compatibility. */
 void publishPlaybackObservation() {
   // Parent now constructs playbackObservation from status/audioSource attributes via subscription/poll
-}
-
-void getPlaybackMetadataStatusIn(Integer time = 2) {
-  runIn(time, 'getPlaybackMetadataStatus', [overwrite: true])
-}
-
-@CompileStatic
-static String extractContainerKey(Map eventData) {
-  if(!eventData) { return '' }
-  Map container = (Map)eventData.container
-  if(!container) { return '' }
-  Map id = (Map)container.id
-  if(!id) { return '' }
-  return "${id.objectId}:${id.serviceId}:${id.accountId}".toString()
-}
-
-void checkFavAndPlaylist(Map data) {
-  logDebug('Checking currently playing favorite and playlist...')
-  Boolean mapsPopulated = true
-  if(favoritesMap == null || favoritesMap.size() < 1) {
-    logDebug('Favorites map is empty, requesting favorites...')
-    getFavorites()
-    mapsPopulated = false
-  }
-  if(playlistsMap == null || playlistsMap.size() < 1) {
-    logDebug('Playlists map is empty, requesting playlists...')
-    getPlaylists()
-    mapsPopulated = false
-  }
-  if(mapsPopulated) {
-    // Maps are already populated — check immediately
-    isFavoritePlaying(data)
-    isPlaylistPlaying(data)
-  } else {
-    // Cold start: wait for async map population
-    runIn(12, 'isFavoritePlaying', [overwrite: true, data: data])
-    runIn(12, 'isPlaylistPlaying', [overwrite: true, data: data])
-  }
 }
 
 void setChildFavs(String html) {
@@ -14501,98 +14087,6 @@ void retryAudioClipAfterCommandFailure(String correlationId, String detail) {
   setWebSocketStatus('closed')
   logWarn("Audio clip ${correlationId} failed; queued one retry after WebSocket reconnect: ${detail}")
   scheduleWebSocketReconnect()
-}
-
-void isFavoritePlaying(Map json) {
-  LinkedHashMap container = (LinkedHashMap)json?.container
-  LinkedHashMap id = (LinkedHashMap)container?.id
-  String objectId = id?.objectId
-  if(objectId != null && objectId != '') {
-    List tok = splitTokens(objectId, ':')
-    if(tok.size() >= 2) { objectId = tok[1] }
-  }
-  String serviceId = id?.serviceId
-  String accountId = id?.accountId
-  String imageUrl = container?.imageUrl
-
-  String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
-  String universalMusicObjectIdAlt = "${imageUrl}".toString().split('&v=')[0]
-  Boolean isFav = favoritesMap.containsKey(universalMusicObjectId)
-  Boolean isFavAlt = favoritesMap.containsKey(universalMusicObjectIdAlt)
-
-  String k = isFav ? universalMusicObjectId : universalMusicObjectIdAlt
-  String foundFavId = favoritesMap[k]?.id
-  String foundFavImageUrl = favoritesMap[k]?.imageUrl
-  String foundFavName = favoritesMap[k]?.name
-
-  Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
-  if(retryState != null) {
-    retryState.metadataConfirmed = (isFav || isFavAlt) && foundFavId == retryState.favoriteId?.toString()
-  }
-
-  String groupOperationId = runtimeState.groupFavoriteOperationId as String
-  if(groupOperationId && runtimeState.groupFavoriteOperationFavoriteId && getIsGroupCoordinator() == true) {
-    emitGroupFavoriteOperationEvent('metadataConfirmed', [
-      favoriteId: foundFavId,
-      confirmed: (isFav || isFavAlt) && foundFavId == runtimeState.groupFavoriteOperationFavoriteId?.toString(),
-      groupId: runtimeState.groupFavoriteOperationGroupId as String
-    ])
-  }
-
-  setCurrentFavorite(foundFavImageUrl, foundFavId, foundFavName, (isFav||isFavAlt))
-}
-
-@CompileStatic
-List<String> getPlaylistObjectIdCandidates(String objectId) {
-  List<String> candidates = []
-  if(objectId == null || objectId == '') { return candidates }
-  candidates.add(objectId)
-  List<String> tokens = splitTokens(objectId, ':')
-  if(tokens.size() >= 2) { candidates.add(tokens.get(1)) }
-  if(tokens.size() >= 3) { candidates.add(tokens.get(tokens.size() - 1)) }
-  return candidates
-}
-
-void isPlaylistPlaying(Map json) {
-  LinkedHashMap container = (LinkedHashMap)json?.container
-  LinkedHashMap id = (LinkedHashMap)container?.id
-  String objectId = id?.objectId?.toString()
-  List<String> objectIdCandidates = getPlaylistObjectIdCandidates(objectId)
-
-  // For playlists, check container type and name
-  String containerType = container?.type
-  String containerName = container?.name
-
-  // Playlists use simple ID matching since they don't have complex service IDs
-  LinkedHashMap matchedById = null
-  LinkedHashMap matchedByName = null
-  Integer matchingNameCount = 0
-
-  if(containerType == 'playlist' || containerType == 'PLAYLIST') {
-    playlistsMap.each { key, value ->
-      String mappedId = value?.id?.toString()
-      String mappedName = value?.name?.toString()
-      if(matchedById == null && mappedId != null && objectIdCandidates.contains(mappedId)) {
-        matchedById = value
-      }
-      if(mappedName != null && mappedName == containerName) {
-        matchingNameCount++
-        matchedByName = value
-      }
-    }
-  }
-
-  LinkedHashMap matchedPlaylist = matchedById ?: (matchingNameCount == 1 ? matchedByName : null)
-  Boolean isPlaylist = matchedPlaylist != null
-  String foundPlaylistId = matchedPlaylist?.id?.toString()
-  String foundPlaylistName = matchedPlaylist?.name?.toString()
-
-  Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
-  if(retryState != null) {
-    retryState.metadataConfirmed = isPlaylist && foundPlaylistId == retryState.playlistId?.toString()
-  }
-
-  setCurrentPlaylist(foundPlaylistId, foundPlaylistName, isPlaylist)
 }
 
 // =============================================================================

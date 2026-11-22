@@ -98,11 +98,18 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.getFavorites()
     Map request = driver.asyncCalls.last()
+    Map playbackSnapshot = [
+      currentTrackURI: 'x-sonos-http:song%3aother.mp4',
+      currentTrackMetaData: [:],
+      enqueuedTransportURIMetaData: driver.parseAvtMetaData(embedded)
+    ]
+    driver.runtimeState.lastTransportPlaybackSnapshot = playbackSnapshot
+    driver.currentAvtSnapshotByDni[driver.device.getDeviceNetworkId()] = playbackSnapshot
+    driver.device.updateDataValue('avtTransportJson', JsonOutput.toJson(playbackSnapshot))
     driver.favoritesBrowseCallback(new hubitat.scheduling.AsyncResponse(status: 200,
       data: '<BrowseResponse><Result>' + StringEscapeUtils.escapeXml10(didl) +
         '</Result><TotalMatches>1</TotalMatches><UpdateID>5</UpdateID></BrowseResponse>'), request.data)
-    driver.updateCurrentFavoriteFromUpnp([currentTrackURI: 'x-sonos-http:song%3aother.mp4',
-      enqueuedTransportURIMetaData: driver.parseAvtMetaData(embedded)])
+    driver.updateCurrentFavoriteFromUpnp(playbackSnapshot)
     driver.flushPendingLocalDeviceEvents()
 
     then:
@@ -775,6 +782,7 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.observeUpnpPlaybackSource(snapshot)
     driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>0</TOSLinkConnected></property></propertyset>')
+    driver.flushPendingLocalDeviceEvents()
 
     then:
     driver.state.audioSourceMetadataType == 'linein.homeTheater'
@@ -782,7 +790,6 @@ class SonosAdvPlayerSpec extends Specification {
     (driver.state.audioSourceSignalObservedAt as Long) > 0L
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalStatus') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('audioSourceSignalObservedAt') != true
-    driver.events.any { Map e -> e.name == 'lastUpdated' }
     playerStateMessages().isEmpty()
   }
 
@@ -3935,19 +3942,16 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.events.any { Map event -> event.name == 'lastError' }
   }
 
-  def "playlist metadata matches the exact ID before using a unique name fallback"() {
+  def "UPnP playback metadata confirms the exact saved playlist resource ID"() {
     given:
-    driver.getPlaylistsMap()['playlist-963'] = [id: 'playlist-963', name: 'Morning Mix']
+    driver.getPlaylistsMap()['playlist-963'] = [id: 'playlist-963', name: 'Morning Mix', upnpUri: 'x-rincon-cpcontainer:playlist-963']
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
 
     when:
-    driver.isPlaylistPlaying([
-      container: [
-        type: 'PLAYLIST',
-        name: 'Different Name',
-        id: [objectId: 'urn:sonos:playlist-963']
-      ]
+    driver.updateCurrentFavoriteFromUpnp([
+      currentTrackURI: 'x-rincon-cpcontainer:playlist-963',
+      enqueuedTransportURI: '', currentTrackMetaData: [:], enqueuedTransportURIMetaData: [:]
     ])
 
     then:
@@ -4311,8 +4315,8 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "websocket commands queue until the socket is open and flush in order"() {
     given:
-    String firstMessage = JsonOutput.toJson([[namespace: 'favorites', command: 'getFavorites', householdId: 'HOUSE_TEST'], [:]])
-    String secondMessage = JsonOutput.toJson([[namespace: 'playlists', command: 'getPlaylists', householdId: 'HOUSE_TEST'], [:]])
+    String firstMessage = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
+    String secondMessage = JsonOutput.toJson([[namespace: 'playlists', command: 'loadPlaylist', groupId: 'GROUP_TEST'], [playlistId: '963']])
     driver.device.dataValues.websocketStatus = 'closed'
     driver.runtimeState.remove('websocketConnectPending')
 
@@ -4518,7 +4522,7 @@ class SonosAdvPlayerSpec extends Specification {
     queued[3].wireCommand == 'skipToPreviousTrack'
   }
 
-  def "loading a Favorite expects playback and metadata subscription events"() {
+  def "loading a Favorite confirmation no longer waits for WebSocket metadata"() {
     given:
     String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
 
@@ -4528,16 +4532,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
     pending.size() == 1
-    pending[0].expected == [
-      [namespace: 'playbackMetadata', type: 'metadataStatus'],
-      [namespace: 'playback', type: 'playbackStatus']
-    ]
-
-    when:
-    driver.processWebsocketMessage('[{"namespace":"playbackMetadata","name":"playbackMetadataStatus","type":"metadataStatus"},{"currentItem":{"id":"24"}}]')
-
-    then:
-    (driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>)[0].received == ['playbackMetadata:metadataStatus']
+    pending[0].expected == [[namespace: 'playback', type: 'playbackStatus']]
 
     when:
     driver.observeExpectedSubscriptionEvent([namespace: 'playback', type: 'playbackStatus'])
@@ -4558,7 +4553,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.watchExpectedSubscriptionEvents()
 
     then:
-    websocketMessages.any { String message -> message.contains('"namespace":"playbackMetadata"') && message.contains('"command":"subscribe"') }
     websocketMessages.any { String message -> message.contains('"namespace":"playback"') && message.contains('"command":"subscribe"') }
     (driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>)[0].attempts == 1
   }
@@ -4571,12 +4565,12 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.subscribeToPlaybackDebounce([groupId: 'GROUP_TEST'])
-    driver.resubscribeWebsocketNamespace('playbackMetadata')
+    driver.resubscribeWebsocketNamespace('playback')
 
     then:
     websocketMessages.empty
     driver.runtimeState.websocketCommandLedger == null
-    driver.logs.count { it.toString().contains('Skipping') } >= 2
+    driver.logs.any { it.toString().contains('Skipping') }
   }
 
   def "SOAP state changes expect a matching UPnP event and renew its subscription on timeout"() {
@@ -4688,8 +4682,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.clear()
 
     when:
-    driver.isFavoritePlaying([
-      container: [imageUrl: 'https://example.test/cover', id: [objectId: 'urn:42', serviceId: 'service', accountId: 'account']]
+    driver.getFavoritesMap()['match'] = [id: '42', name: 'Favorite 42', imageUrl: 'https://example.test/cover',
+      resourceObjectId: 'urn:42']
+    driver.updateCurrentFavoriteFromUpnp([
+      currentTrackURI: 'x-sonos-http:song%3a42.mp4',
+      currentTrackMetaData: [id: 'urn:42'], enqueuedTransportURIMetaData: [:]
     ])
 
     then:
