@@ -308,7 +308,7 @@ Map getGroupCommandSettings() {
  * on the app gate from inside parse/command execution.
  */
 void setZgtInProgress(Object inProgress) {
-  String normalized = (inProgress == true || inProgress?.toString()?.trim()?.toLowerCase() in ['true', 'on', 'yes']) ? 'on' : 'off'
+  String normalized = (inProgress == true || inProgress?.toString()?.trim()?.toLowerCase(Locale.ROOT) in ['true', 'on', 'yes']) ? 'on' : 'off'
   sendEvent(name: 'zgtInProgress', value: normalized)
 }
 
@@ -497,7 +497,7 @@ void configure() {
 }
 
 void synchronizeTrackPositionPreference() {
-  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase() == 'true'
+  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase(Locale.ROOT) == 'true'
   Boolean isEnabled = getEnableTrackPositionUpdates()
   device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
   if(wasEnabled && !isEnabled) {
@@ -1018,7 +1018,7 @@ private List<String> normalizeGroupTopologyPlayerIds(Object rawIds) {
 /** Resolve the stored grouping intent, defaulting legacy or unknown values to exact grouping. */
 private String getGroupTopologyGroupingMode() {
   Object rawMode = device.getDataValue('lastGroupingMode')
-  if(rawMode == null || rawMode.toString().trim().isEmpty()) {
+  if(rawMode == null || StringUtils.isBlank(rawMode.toString())) {
     rawMode = device.currentValue('groupingMode', true)
   }
   return normalizeGroupTopologyGroupingMode(rawMode)

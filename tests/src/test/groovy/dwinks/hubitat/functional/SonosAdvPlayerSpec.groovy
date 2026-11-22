@@ -1575,6 +1575,17 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastMetadataContainerId.clear()
   }
 
+  def "player escaping helpers handle HTML, XML, and layered XML entities consistently"() {
+    expect:
+    driver.escapeHiddenStateHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
+    driver.escapeQueueHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
+    driver.escapeSoapXmlText("A&B <'\"") == 'A&amp;B &lt;&apos;&quot;'
+    driver.unEscapeLastChangeXML('&lt;title&gt;A &amp; B&lt;/title&gt;') == '<title>A & B</title>'
+    driver.unEscapeMetaData('&amp;lt;title&amp;gt;A&amp;lt;/title&amp;gt;') == '<title>A</title>'
+    driver.unescapeIfNeeded('&lt;x&gt;') == '<x>'
+    driver.normalizeLogLevel('INFO') == 'info'
+  }
+
   def "websocket connect requests the parent initialization turn when not granted"() {
     given:
     driver.device.dataValues.websocketStatus = 'closed'

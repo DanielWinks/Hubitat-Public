@@ -1202,7 +1202,7 @@ String renderNewUiUpnpStatus(Map row, String sid, Boolean groupedOnly = false) {
   if(groupedOnly) {
     try {
       Object grouped = row.player.currentValue('isGrouped', true)
-      if(grouped != null && grouped.toString().toLowerCase() in ['off', 'false']) {
+      if(grouped != null && grouped.toString().toLowerCase(Locale.ROOT) in ['off', 'false']) {
         return newUiStatusBadge('Not required', 'na', 'This subscription is only needed while grouped')
       }
     } catch(Exception ignored) {
@@ -1236,7 +1236,7 @@ String renderNewUiWebSocketStatus(Map row) {
     logDebug("Could not read WebSocket status for ${row.id}: ${e.message}")
   }
 
-  String normalized = status?.toString()?.trim()?.toLowerCase()
+  String normalized = status?.toString()?.trim()?.toLowerCase(Locale.ROOT)
   if(normalized == 'open') {
     return newUiStatusBadge('Connected', 'active', 'WebSocket is open')
   }
@@ -1691,7 +1691,7 @@ String renderNewUiGroupFollowers(Object followerIds) {
     return newUiStatusBadge('—', 'na', 'No follower speakers configured')
   }
   Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  return ids.collect { String id -> escapeNewUiHtml(playerNames[id] ?: id) }.join('<br>')
+  return StringUtils.join(ids.collect { String id -> escapeNewUiHtml(playerNames[id] ?: id) }, '<br>')
 }
 
 Map getNewUiGroupDraft() {
@@ -2968,7 +2968,7 @@ Boolean isZgtCandidateBattery(String dni) {
   ChildDeviceWrapper player = getChildDevice(dni)
   if(!player) { player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == dni } }
   if(!player) { return false }
-  String hasBatt = player.getDataValue('hasBattery')?.toString()?.toLowerCase()
+  String hasBatt = player.getDataValue('hasBattery')?.toString()?.toLowerCase(Locale.ROOT)
   if(hasBatt == 'true') { return true }
   if(hasBatt == 'false') { return false }
   try {
@@ -3295,9 +3295,9 @@ void enqueuePlayerInitialization(String dni, String reason, Boolean boot = false
 
 Boolean isZgtEligiblePlayer(ChildDeviceWrapper player) {
   if(player == null || !player.getDataValue('websocketUrl')) { return false }
-  String powerSource = player.getDataValue('powerSource')?.toString()?.toLowerCase()
+  String powerSource = player.getDataValue('powerSource')?.toString()?.toLowerCase(Locale.ROOT)
   if(powerSource == 'battery') { return false }
-  String model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString()?.toLowerCase()
+  String model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString()?.toLowerCase(Locale.ROOT)
   if(!model) { return false }
   return !(model.contains('roam') || model.contains('move'))
 }
@@ -4092,7 +4092,7 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
       playMode: alarm.PlayMode?.toString() ?: ''
     ]
     if(alarm.containsKey('IncludeLinkedZones')) {
-      String linkedZones = alarm.IncludeLinkedZones?.toString()?.toLowerCase()
+      String linkedZones = alarm.IncludeLinkedZones?.toString()?.toLowerCase(Locale.ROOT)
       alarmAttributes.includeGroupedRooms = linkedZones in ['1', 'true'] ? 'true' : 'false'
     }
     queueChildStateBatch(dni, alarmAttributes)
@@ -5031,7 +5031,7 @@ void processMdnsDiscovery() {
         logPayloadAtTrace("mDNS entry service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}; payload omitted",
             "mDNS entry: service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}, raw=${entry}")
 
-        if(serviceType == '_sonos._tcp' || serviceName.toLowerCase().contains('sonos') || (ipAddress && port == 1400)) {
+        if(serviceType == '_sonos._tcp' || serviceName.toLowerCase(Locale.ROOT).contains('sonos') || (ipAddress && port == 1400)) {
           logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}:${port}")
           processDiscoveredSonosDevice(ipAddress)
         } else {
@@ -5609,12 +5609,12 @@ String resolveLineInSourceRincon(ChildDeviceWrapper coordinator, String sourceId
   } else if(identifier.matches('^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$')) {
     source = children.find { ChildDeviceWrapper child -> child.getDataValue('deviceIp') == identifier }
   } else {
-    String lowerIdentifier = identifier.toLowerCase()
+    String lowerIdentifier = identifier.toLowerCase(Locale.ROOT)
     source = children.find { ChildDeviceWrapper child ->
-      child.getDataValue('name')?.toString()?.toLowerCase()?.contains(lowerIdentifier)
+      child.getDataValue('name')?.toString()?.toLowerCase(Locale.ROOT)?.contains(lowerIdentifier)
     }
     if(source == null) {
-      source = children.find { ChildDeviceWrapper child -> child.label?.toLowerCase()?.contains(lowerIdentifier) }
+      source = children.find { ChildDeviceWrapper child -> child.label?.toLowerCase(Locale.ROOT)?.contains(lowerIdentifier) }
     }
   }
 
@@ -6708,7 +6708,7 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
       item.coordinatorId = liveCoordinatorId
     }
   }
-  String transportStatus = coordinator.currentValue('transportStatus', true)?.toString()?.toLowerCase()
+  String transportStatus = coordinator.currentValue('transportStatus', true)?.toString()?.toLowerCase(Locale.ROOT)
   String currentAudioSource = coordinator.currentValue('audioSource', true)?.toString()
   String coordinatorId = coordinator?.getDataValue('id')?.toString()
   Map<String, Map> playbackObservations = state[PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY] instanceof Map
@@ -6920,12 +6920,12 @@ Boolean isPlayerActivelyPlaying(ChildDeviceWrapper player) {
 }
 
 Boolean isAirPlayAudioSource(String audioSource) {
-  String normalized = audioSource?.toLowerCase()
+  String normalized = audioSource?.toLowerCase(Locale.ROOT)
   return normalized?.contains('airplay:') == true || normalized?.contains('linein.airplay') == true
 }
 
 Boolean isUsableAnnouncementAudioSource(String audioSource) {
-  String normalized = audioSource?.trim()?.toLowerCase()
+  String normalized = audioSource?.trim()?.toLowerCase(Locale.ROOT)
   return normalized && !(normalized in ['not available', 'no source', 'n/a', 'unknown', 'unavailable', 'none'])
 }
 
@@ -7062,7 +7062,7 @@ Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = nu
 Map getPlayerPlaybackActivityForObservation(ChildDeviceWrapper player, Map observation, String audioSource = null) {
   if(player == null) { return [active: false, signal: 'no-player'] }
   String playbackState = observation?.playbackState?.toString()
-  String transportStatus = player.currentValue('transportStatus', true)?.toString()?.toLowerCase()
+  String transportStatus = player.currentValue('transportStatus', true)?.toString()?.toLowerCase(Locale.ROOT)
   String resolvedAudioSource = audioSource ?: observation?.audioSource?.toString()
       ?: player.currentValue('audioSource', true)?.toString()
   Object observedValue = observation?.playbackObservedAt
@@ -8748,11 +8748,11 @@ Map normalizeGroupFavoriteSpec(Map rawSpec) {
   Map spec = rawSpec ?: [:]
   return [
     favoriteId: spec.favoriteId?.toString(),
-    repeatMode: normalizeGroupOperationValue(spec.repeatMode, 'off').toLowerCase(),
-    queueMode: normalizeGroupOperationValue(spec.queueMode, 'replace').toLowerCase(),
-    shuffleMode: normalizeGroupOperationValue(spec.shuffleMode, 'off').toLowerCase(),
-    autoPlay: normalizeGroupOperationValue(spec.autoPlay, 'true').toLowerCase(),
-    crossfadeMode: normalizeGroupOperationValue(spec.crossfadeMode, 'on').toLowerCase()
+    repeatMode: normalizeGroupOperationValue(spec.repeatMode, 'off').toLowerCase(Locale.ROOT),
+    queueMode: normalizeGroupOperationValue(spec.queueMode, 'replace').toLowerCase(Locale.ROOT),
+    shuffleMode: normalizeGroupOperationValue(spec.shuffleMode, 'off').toLowerCase(Locale.ROOT),
+    autoPlay: normalizeGroupOperationValue(spec.autoPlay, 'true').toLowerCase(Locale.ROOT),
+    crossfadeMode: normalizeGroupOperationValue(spec.crossfadeMode, 'on').toLowerCase(Locale.ROOT)
   ]
 }
 
@@ -11818,7 +11818,7 @@ Boolean isGroupDeviceRosterActivelyGrouped(ChildDeviceWrapper coordinator, List<
   String groupId = getGroupOperationChildValue(coordinator, 'groupId')?.toString()
   List<String> activePlayerIds = normalizeGroupPlayerIds(
       getGroupOperationChildValue(coordinator, 'groupPlayerIds'))
-  return groupId != null && !groupId.trim().isEmpty() &&
+  return groupId != null && !StringUtils.isBlank(groupId) &&
       activePlayerIds.containsAll(normalizeGroupPlayerIds(playerIds))
 }
 
@@ -11937,7 +11937,7 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
 }
 
 Boolean isPlayerTrackPositionUpdatesEnabled(ChildDeviceWrapper player) {
-  return player?.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase() == 'true'
+  return player?.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase(Locale.ROOT) == 'true'
 }
 
 /**
@@ -12256,11 +12256,11 @@ Boolean hasLeftAndRightChannelsSync(DeviceWrapper device) {
 }
 
 String unEscapeOnce(String text) {
-  return text.replace('&lt;','<').replace('&gt;','>').replace('&quot;','"')
+  return StringEscapeUtils.unescapeXml(text)
 }
 
 String unEscapeMetaData(String text) {
-  return text.replace('&amp;lt;','<').replace('&amp;gt;','>').replace('&amp;quot;','"')
+  return StringEscapeUtils.unescapeXml(text.replace('&amp;lt;', '&lt;').replace('&amp;gt;', '&gt;').replace('&amp;quot;', '&quot;'))
 }
 // =============================================================================
 // Helper methods

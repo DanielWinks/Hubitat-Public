@@ -1417,7 +1417,7 @@ void reconcileChildDevices() {
 }
 
 void synchronizeTrackPositionPreference() {
-  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase() == 'true'
+  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase(Locale.ROOT) == 'true'
   Boolean isEnabled = getEnableTrackPositionUpdates()
   device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
   if(wasEnabled && !isEnabled) {
@@ -2373,7 +2373,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
 }
 
 Boolean isAirPlayAudioSource(String audioSource) {
-  String normalized = audioSource?.toLowerCase()
+  String normalized = audioSource?.toLowerCase(Locale.ROOT)
   return normalized?.contains('airplay:') == true || normalized?.contains('linein.airplay') == true
 }
 
@@ -3413,7 +3413,7 @@ void markAppMediatedUpnpSubscriptionsStarted() {
 
 @CompileStatic
 void loadFavorite(String favoriteId = null) {
-  if(favoriteId == null || favoriteId.trim() == '') {
+  if(StringUtils.isBlank(favoriteId)) {
     String randomFavoriteId = selectRandomAvailableId(getFavoriteIds())
     if(randomFavoriteId == null) {
       queueRandomMediaLoad('favorite')
@@ -3695,7 +3695,7 @@ void clearPlayerCommandRequestCurrentState() {
 // Playlist Methods
 @CompileStatic
 void loadPlaylist(String playlistId = null) {
-  if(playlistId == null || playlistId.trim() == '') {
+  if(StringUtils.isBlank(playlistId)) {
     String randomPlaylistId = selectRandomAvailableId(getPlaylistIds())
     if(randomPlaylistId == null) {
       queueRandomMediaLoad('playlist')
@@ -3755,7 +3755,7 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
   if(deferCommandToParentDuringGroupOperation('loadPlaylistFull',
       [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])) { return }
-  if(playlistId == null || playlistId.trim() == '') {
+  if(StringUtils.isBlank(playlistId)) {
     reportPlaylistLoadError(playlistId, 'ERROR_MISSING_PARAMETERS', 'A Sonos playlist ID is required.')
     return
   }
@@ -3816,7 +3816,7 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 
 @CompileStatic
 String normalizePlaylistQueueAction(String queueMode) {
-  if(queueMode == null || queueMode.trim() == '') { return null }
+  if(StringUtils.isBlank(queueMode)) { return null }
   String action = queueMode.trim().toUpperCase()
   return PLAYLIST_QUEUE_ACTIONS.contains(action) ? action : null
 }
@@ -6085,7 +6085,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
   String numberOfTracks = instanceId['NumberOfTracks']['@val']
   String trackNumber = instanceId['CurrentTrack']['@val']
 
-  Boolean isAirPlay = trackUri.toLowerCase().contains('airplay')
+  Boolean isAirPlay = trackUri.toLowerCase(Locale.ROOT).contains('airplay')
   String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
   setCurrentTrackDuration(currentTrackDuration)
 
@@ -6725,7 +6725,7 @@ void handleUpnpRawResponse(String raw) {
       Map<String, String> headers = [:]
       for(Integer i = 1; i < lines.length; i++) {
         Integer colon = lines[i].indexOf(':')
-        if(colon > 0) { headers.put(lines[i].substring(0, colon).trim().toLowerCase(), lines[i].substring(colon + 1).trim()) }
+        if(colon > 0) { headers.put(lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT), lines[i].substring(colon + 1).trim()) }
       }
       response = [status: status, headers: headers]
       logDebug("Parsed UPnP response guid=${guid} statusLine=${lines[0]} headerNames=${headers.keySet().join(',')}")
@@ -8390,7 +8390,7 @@ String normalizeTransportStatus(String transportState) {
 
 @CompileStatic
 void setStatusTransportStatus(String transportState, String source = 'transport status update') {
-  if(transportState == null || transportState.trim() == '') {
+  if(StringUtils.isBlank(transportState)) {
     logWarn("Ignoring empty Sonos TransportState from ${source}")
     return
   }
@@ -9072,7 +9072,7 @@ Map findFavoriteById(String favoriteId) {
 
 @CompileStatic
 Boolean isAmazonMusicService(String serviceName) {
-  return serviceName != null && serviceName.toLowerCase().contains('amazon')
+  return serviceName != null && serviceName.toLowerCase(Locale.ROOT).contains('amazon')
 }
 
 void clearFavoritesMap() {
@@ -10929,7 +10929,7 @@ void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolea
   if(playOnCompletion) {
     Map playlist = getPlaylistsMap()?.get(playlistId)
     String serviceName = playlist?.service
-    if(serviceName?.toLowerCase()?.contains('amazon')) {
+    if(serviceName?.toLowerCase(Locale.ROOT)?.contains('amazon')) {
       logDebug("Amazon Music playlist detected - scheduling auto-play in 3 seconds as workaround for service limitation")
       scheduleAmazonMusicAutoPlay()
     }

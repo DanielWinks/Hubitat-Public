@@ -257,6 +257,13 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.app.children = appScript.children
   }
 
+  def "SAC escaping helpers preserve the existing HTML and XML entity output"() {
+    expect:
+    appScript.escapeNewUiHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
+    appScript.escapeSonosXml("A&B <'\"") == 'A&amp;B &lt;&apos;&quot;'
+    appScript.normalizeLogLevel('INFO') == 'info'
+  }
+
   SonosAppPlayerDouble createPlayer(String id, String groupId, String coordinatorId,
       String playerIds, Boolean isCoordinator) {
     SonosAppPlayerDouble player = new SonosAppPlayerDouble(
