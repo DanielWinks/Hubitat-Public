@@ -791,6 +791,11 @@ Boolean hasLineInCapability() {
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Map> pendingZgtNotifyByDni = new ConcurrentHashMap<String, Map>()
+// Transient presence transition baseline (per originating DNI): visible playerId -> zoneName,
+// plus vanished-already-notified dedup set. Used only to diff arrived/departed; pruned like SEQ counters.
+@Field static ConcurrentHashMap<String, Map> lastZgtPresenceByDni = new ConcurrentHashMap<String, Map>()
+// Transient in-flight hand-off for arrived/departed notifications; claimed on flush like pendingZgtNotifyByDni.
+@Field static ConcurrentHashMap<String, Map> pendingZgtPresenceByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, Map> pendingCoordinatorAvtUpdatesByDni = new ConcurrentHashMap<String, Map>()
 @Field static final Striped<java.util.concurrent.locks.Lock> coordinatorAvtUpdateStripes = Striped.lock(64)
@@ -1619,6 +1624,7 @@ void resetPendingStatePublicationForInitialization() {
   unschedule('drainComponentChildEvents')
   unschedule('flushPendingGroupDeviceUpdates')
   unschedule('flushPendingZgtNotify')
+  unschedule('flushPendingZgtPresence')
   state.remove(PENDING_BATCH_EVENTS_KEY)
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   state.remove(BATCH_EVENTS_DUE_AT_KEY)
@@ -1635,6 +1641,8 @@ void resetPendingStatePublicationForInitialization() {
   pendingGroupDeviceUpdates.remove(dni)
   groupDeviceUpdateRetryAttempts.remove(dni)
   pendingZgtNotifyByDni.remove(dni)
+  pendingZgtPresenceByDni.remove(dni)
+  lastZgtPresenceByDni.remove(dni)
   clearLegacyBridgeCurrentStates()
   logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
 }
@@ -2268,6 +2276,8 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(pendingTopologyKindByDni)
     clearedEntries += clearStaticMap(zgtMemberHostByPlayerId)
     clearedEntries += clearStaticMap(pendingZgtNotifyByDni)
+    clearedEntries += clearStaticMap(pendingZgtPresenceByDni)
+    clearedEntries += clearStaticMap(lastZgtPresenceByDni)
     clearedEntries += clearStaticMap(currentAvtSeqByDni)
     clearedEntries += clearStaticMap(pendingCoordinatorAvtUpdatesByDni)
     coordinatorAvtUpdateScheduledDnis.clear()
@@ -2318,6 +2328,8 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(zgtMemberHostByPlayerId, activePlayerIds)
   removedEntries += pruneStaticMapKeys(pendingZgtNotifyByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingZgtPresenceByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(lastZgtPresenceByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentAvtSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingCoordinatorAvtUpdatesByDni, activePlayerDnis)
   coordinatorAvtUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
@@ -5242,6 +5254,7 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
   }
   List<Map> groups = (List<Map>)newSnapshot.groups
   cacheZgtMemberHosts(groups)
+  queueZgtPresenceTransitions(deviceDni, groups, (List<Map>)newSnapshot.vanishedDevices)
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
   if(eventsByGroupId.isEmpty()) { return }
   queueZgtTopologyNotification(deviceDni, eventsByGroupId)
@@ -5321,6 +5334,114 @@ void queueZgtTopologyNotification(String deviceDni, Map<String, List<Map>> event
   } catch(Exception e) {
     logWarn("Could not schedule ZGT parent notification for ${deviceDni}: ${e.message}")
     pendingZgtNotifyByDni.remove(deviceDni)
+  }
+}
+
+// Presence transitions are a parallel deferred notification alongside putZgtTopology (which is unchanged).
+void queueZgtPresenceTransitions(String deviceDni, List<Map> groups, List<Map> vanishedDevices) {
+  if(!deviceDni) { return }
+  List<Map> groupList = (groups instanceof List) ? groups : []
+  List<Map> vanishedList = (vanishedDevices instanceof List) ? vanishedDevices : []
+  if(groupList.isEmpty() && vanishedList.isEmpty()) { return }
+  Map<String, String> currentVisible = [:]
+  groupList.each { Map g ->
+    if(g?.members instanceof List) {
+      ((List<?>)g.members).each { Object mem ->
+        Map mm = (Map)mem
+        String pid = mm?.playerId?.toString()
+        Boolean isInvisible = (mm?.invisible == true || mm?.invisible?.toString() == '1')
+        if(pid && !isInvisible) { currentVisible[pid] = mm?.zoneName?.toString() ?: '' }
+      }
+    }
+  }
+  Map<String, Map> vanishedByUuid = [:]
+  vanishedList.each { Map vd -> String uuid = vd?.uuid?.toString(); if(uuid) { vanishedByUuid[uuid] = vd } }
+  Map prev = lastZgtPresenceByDni.get(deviceDni)
+  Boolean initialized = prev != null && prev['initialized'] == true
+  Map<String, String> prevVisible = [:]
+  Set<String> vanishedNotified = new HashSet<String>()
+  if(prev != null) {
+    if(prev['visible'] instanceof Map) { prevVisible.putAll((Map<String, String>)prev['visible']) }
+    if(prev['vanishedNotified'] instanceof Collection) { (prev['vanishedNotified'] as Collection).each { Object v -> if(v) { vanishedNotified.add(v.toString()) } } }
+  }
+  List<Map> arrived = []
+  List<Map> departed = []
+  if(!initialized) {
+    vanishedByUuid.keySet().each { String uuid ->
+      if(!currentVisible.containsKey(uuid)) {
+        Map vd = vanishedByUuid[uuid]
+        String name = vd?.zoneName?.toString() ?: ''
+        departed << [rincon: uuid, dni: safeDniFromRincon(uuid), name: name]
+      }
+    }
+  } else {
+    currentVisible.keySet().each { String pid ->
+      if(!prevVisible.containsKey(pid)) {
+        arrived << [rincon: pid, dni: safeDniFromRincon(pid), name: currentVisible[pid]]
+      }
+    }
+    prevVisible.keySet().each { String pid ->
+      if(!currentVisible.containsKey(pid)) {
+        String name = prevVisible[pid]
+        Map vd = vanishedByUuid[pid]
+        if(vd?.zoneName) { name = vd.zoneName.toString() }
+        departed << [rincon: pid, dni: safeDniFromRincon(pid), name: name]
+      }
+    }
+    vanishedByUuid.keySet().each { String uuid ->
+      if(!currentVisible.containsKey(uuid) && !prevVisible.containsKey(uuid) && !vanishedNotified.contains(uuid)) {
+        Map vd = vanishedByUuid[uuid]
+        departed << [rincon: uuid, dni: safeDniFromRincon(uuid), name: vd?.zoneName?.toString() ?: '']
+      }
+    }
+  }
+  Set<String> nextVanishedNotified = new HashSet<String>(vanishedNotified)
+  nextVanishedNotified.addAll(vanishedByUuid.keySet())
+  departed.each { Map d -> if(d?.rincon) { nextVanishedNotified.add(d.rincon.toString()) } }
+  arrived.each { Map a -> if(a?.rincon) { nextVanishedNotified.remove(a.rincon.toString()) } }
+  lastZgtPresenceByDni.put(deviceDni, [initialized: true, visible: new LinkedHashMap<String, String>(currentVisible), vanishedNotified: nextVanishedNotified])
+  if(arrived.isEmpty() && departed.isEmpty()) { return }
+  Map pending = [arrived: new ArrayList<Map>(arrived), departed: new ArrayList<Map>(departed)]
+  pendingZgtPresenceByDni.put(deviceDni, pending)
+  try {
+    runInMillis(1, 'flushPendingZgtPresence', [overwrite: false])
+  } catch(Exception e) {
+    logWarn("Could not schedule ZGT presence notification for ${deviceDni}: ${e.message}")
+    pendingZgtPresenceByDni.remove(deviceDni)
+  }
+}
+
+// Deferred so parse() returns before the app gate runs; mirrors flushPendingZgtNotify.
+void flushPendingZgtPresence() {
+  if(pendingZgtPresenceByDni.isEmpty()) { return }
+  Map<String, Map> drained = [:]
+  synchronized(pendingZgtPresenceByDni) {
+    drained.putAll(pendingZgtPresenceByDni)
+    pendingZgtPresenceByDni.clear()
+  }
+  drained.each { String dni, Map transitions ->
+    if(!(transitions instanceof Map)) { return }
+    List<Map> departed = (transitions['departed'] instanceof List) ? (List<Map>)transitions['departed'] : []
+    List<Map> arrived = (transitions['arrived'] instanceof List) ? (List<Map>)transitions['arrived'] : []
+    departed.each { Map d -> notifyParentPresence('departed', dni, d) }
+    arrived.each { Map a -> notifyParentPresence('arrived', dni, a) }
+  }
+}
+
+void notifyParentPresence(String kind, String sourceDni, Map entry) {
+  String rincon = entry?.rincon?.toString()
+  if(!rincon) { return }
+  String dni = entry?.dni?.toString() ?: safeDniFromRincon(rincon)
+  String name = entry?.name?.toString() ?: ''
+  try {
+    if(parent != null) {
+      if(kind == 'arrived') { parent.playerArrived(rincon, dni, name) } else { parent.playerDeparted(rincon, dni, name) }
+    } else {
+      logDebug("Standalone ZGT presence (no parent) kind=${kind} dni=${dni} rincon=${rincon} name=${name}")
+    }
+  } catch(Exception e) {
+    logWarn("parent ZGT presence notification failed kind=${kind} for ${rincon}: ${e.message}")
+    try { logDebug("ZGT presence failure detail: ${e}") } catch(Exception ignored) { }
   }
 }
 
@@ -5519,6 +5640,12 @@ Map parseZgtFullSnapshot(String xmlString) {
           GPathResult child = (GPathResult)childObject
           Map vanishedDevice = new LinkedHashMap()
           vanishedDevice.put('uuid', child['@UUID'].toString())
+          vanishedDevice.put('zoneName', child['@ZoneName'].toString())
+          vanishedDevice.put('lastKnownIp', child['@LastKnownIP'].toString())
+          vanishedDevice.put('mac', child['@Mac'].toString())
+          vanishedDevice.put('modelInfo', child['@ModelInfo'].toString())
+          vanishedDevice.put('reason', child['@Reason'].toString())
+          vanishedDevice.put('lastSeenUtc', child['@LastSeenUTC'].toString())
           vanished.add(vanishedDevice)
         }
       }
@@ -8727,6 +8854,11 @@ List<String> getGroupFollowerDNIs() {
 @CompileStatic
 String getDNIFromRincon(String rincon) {
   return splitTokens(rincon, '_')[1][0..-6]
+}
+
+String safeDniFromRincon(String rincon) {
+  if(!rincon) { return '' }
+  try { return getDNIFromRincon(rincon) ?: '' } catch(Exception ignored) { return '' }
 }
 
 String getGroupMemberNames() {

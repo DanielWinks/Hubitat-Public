@@ -3888,6 +3888,22 @@ class SonosAdvancedAppSpec extends Specification {
     stored2.every { Map e -> e.containsKey('name') && e.containsKey('value') && !e.containsKey('isStateChange') }
   }
 
+  def "player arrived and departed stubs log without persisting state"() {
+    given:
+    Map stateBefore = new LinkedHashMap(appScript.state)
+
+    when:
+    appScript.playerArrived('RINCON_542A1B66F5B201400', '542A1B66F5B2', 'Kitchen')
+    appScript.playerDeparted('RINCON_542A1B66F5B201400', '542A1B66F5B2', 'Kitchen')
+
+    then:
+    appScript.logs.any { String entry -> entry.contains('Sonos player arrived: Kitchen (RINCON_542A1B66F5B201400, 542A1B66F5B2)') }
+    appScript.logs.any { String entry -> entry.contains('Sonos player departed: Kitchen (RINCON_542A1B66F5B201400, 542A1B66F5B2)') }
+    appScript.state == stateBefore
+    coordinator.events.isEmpty()
+    follower.events.isEmpty()
+  }
+
   def "pure ZGT setter stores latest-only event lists and gates non-current speaker"() {
     given:
     appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,

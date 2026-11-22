@@ -11432,6 +11432,14 @@ Map<String, List<Map>> putZgtTopology(String sourceDni, Map<String, List<Map>> e
   return stored
 }
 
+void playerArrived(String rincon, String dni, String name) {
+  logInfo("Sonos player arrived: ${name} (${rincon}, ${dni})")
+}
+
+void playerDeparted(String rincon, String dni, String name) {
+  logInfo("Sonos player departed: ${name} (${rincon}, ${dni})")
+}
+
 /** Pure set+return only: merge delta by name into the stored list; no child calls. */
 List<Map> putAvtEvents(String coordinatorRincon, List<Map> events) {
   String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()

@@ -49,6 +49,7 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared List<Map> rawConnections = []
   @Shared List<Map> parentPlayerUpdates = []
   @Shared List<Map> parentPlayerRequests = []
+  @Shared List<Map> parentPlayerPresence = []
   @Shared List<List> websocketConnections = []
   @Shared List<String> rawRequests = []
   @Shared Object rawSocket
@@ -1646,6 +1647,7 @@ class SonosAdvPlayerSpec extends Specification {
   def setup() {
     parentPlayerUpdates.clear()
     parentPlayerRequests.clear()
+    parentPlayerPresence.clear()
     driver.binding.getVariable('interfaces').rawSocket = rawSocket
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
@@ -1680,6 +1682,8 @@ class SonosAdvPlayerSpec extends Specification {
       initializationFailed: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationFailed', requestId:reqId, detail:detail] },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
+      playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
+      playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
       putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
@@ -1712,6 +1716,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
+    driver.pendingZgtPresenceByDni.clear()
+    driver.lastZgtPresenceByDni.clear()
+    driver.currentZgtSeqByDni.clear()
   }
 
   def "player escaping helpers handle HTML, XML, and layered XML entities consistently"() {
@@ -2335,6 +2342,80 @@ class SonosAdvPlayerSpec extends Specification {
     Map record2 = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
     record2 != null
     record2.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_MEMBER'
+  }
+
+  def "ZGT presence emits departed then arrived for vanished and returning player"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    driver.currentZgtSeqByDni.clear()
+    String kitchenRincon = 'RINCON_542A1B66F5B201400'
+    String coordRincon = 'RINCON_542A1B67195401400'
+    String innerWithoutKitchen = '<ZoneGroupState><ZoneGroups>' +
+      '<ZoneGroup ID="G1:1" Coordinator="' + coordRincon + '">' +
+      '<ZoneGroupMember UUID="' + coordRincon + '" ZoneName="Living Room" Location="http://192.168.1.34:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups>' +
+      '<VanishedDevices><Device UUID="' + kitchenRincon + '" ZoneName="Kitchen" LastKnownIP="192.168.1.33" Mac="54:2A:1B:66:F5:B2" ModelInfo="S21" Reason="UNKNOWN" LastSeenUTC="2026-11-22T01:03:57Z"/></VanishedDevices></ZoneGroupState>'
+    String withKitchen = '<ZoneGroupState><ZoneGroups>' +
+      '<ZoneGroup ID="G1:1" Coordinator="' + coordRincon + '">' +
+      '<ZoneGroupMember UUID="' + coordRincon + '" ZoneName="Living Room" Location="http://192.168.1.34:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup>' +
+      '<ZoneGroup ID="G2:1" Coordinator="' + kitchenRincon + '">' +
+      '<ZoneGroupMember UUID="' + kitchenRincon + '" ZoneName="Kitchen" Location="http://192.168.1.33:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups><VanishedDevices/></ZoneGroupState>'
+    String bodyWithout = '<propertyset><property><ZoneGroupState>' + innerWithoutKitchen.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;') + '</ZoneGroupState></property></propertyset>'
+    String bodyWith = '<propertyset><property><ZoneGroupState>' + withKitchen.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;') + '</ZoneGroupState></property></propertyset>'
+
+    when: 'first snapshot with Kitchen vanished emits departed only'
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 0)
+    driver.flushPendingZgtPresence()
+
+    then:
+    parentPlayerPresence.size() == 1
+    parentPlayerPresence[0].kind == 'departed'
+    parentPlayerPresence[0].rincon == kitchenRincon
+    parentPlayerPresence[0].dni == '542A1B66F5B2'
+    parentPlayerPresence[0].name == 'Kitchen'
+
+    when: 'Kitchen returns and duplicate snapshot emits arrived once then nothing'
+    parentPlayerPresence.clear()
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWith, 1)
+    driver.flushPendingZgtPresence()
+
+    then:
+    parentPlayerPresence.any { it.kind == 'arrived' && it.rincon == kitchenRincon && it.dni == '542A1B66F5B2' && it.name == 'Kitchen' }
+    !parentPlayerPresence.any { it.kind == 'departed' }
+
+    when:
+    parentPlayerPresence.clear()
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWith, 2)
+    driver.flushPendingZgtPresence()
+
+    then:
+    parentPlayerPresence.isEmpty()
+
+    when: 'stale SEQ emits nothing'
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 1)
+    driver.flushPendingZgtPresence()
+
+    then:
+    parentPlayerPresence.isEmpty()
+
+    when: 'new SEQ without Kitchen emits departed again'
+    parentPlayerPresence.clear()
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 3)
+    driver.flushPendingZgtPresence()
+
+    then:
+    parentPlayerPresence.any { it.kind == 'departed' && it.rincon == kitchenRincon }
+    !parentPlayerPresence.any { it.kind == 'arrived' }
+
+    when: 'repeated vanished snapshot dedups the vanished-not-in-prev path'
+    parentPlayerPresence.clear()
+    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 4)
+    driver.flushPendingZgtPresence()
+
+    then:
+    parentPlayerPresence.isEmpty()
   }
 
   def "ZGT SEQ header drops stale payloads without applying"() {
