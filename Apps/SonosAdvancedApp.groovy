@@ -58,7 +58,6 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.security.MessageDigest
-import java.nio.charset.StandardCharsets
 import groovy.json.JsonBuilder
 import org.quartz.CronExpression
 
@@ -453,7 +452,7 @@ preferences {
 // writes it, delete the entry when the feature is removed, and pruneOrphanedAppPersistence()
 // deletes any stored key not in the set on next Save. No hand-maintained blacklist.
 // =============================================================================
-@Field static final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+@Field final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   ZGT_LAST_REPORT_STATE_KEY,
   LAST_PROCESSED_TOPOLOGY_STATE_KEY,
   GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY,
@@ -1923,14 +1922,14 @@ String newUiGroupToken(String groupName) {
   if(groupName == null || groupName.isEmpty()) { return '' }
   try {
     MessageDigest digest = MessageDigest.getInstance('SHA-256')
-    byte[] hash = digest.digest(groupName.getBytes(StandardCharsets.UTF_8))
+    byte[] hash = digest.digest(groupName.getBytes('UTF-8'))
     StringBuilder hex = new StringBuilder(hash.length * 2)
     for(byte b : hash) {
       hex.append(String.format(Locale.ROOT, '%02x', b & 0xff))
     }
     return hex.toString()
   } catch(Exception ignored) {
-    return UUID.nameUUIDFromBytes(groupName.getBytes(StandardCharsets.UTF_8)).toString()
+    return UUID.nameUUIDFromBytes(groupName.getBytes('UTF-8')).toString()
   }
 }
 
@@ -3296,7 +3295,6 @@ void sonosAlarmListCallback(AsyncResponse response, Map data) {
   }
 }
 
-@CompileStatic
 String sonosAlarmSoapBody(String action, Map values) {
   StringWriter writer = new StringWriter()
   MarkupBuilder xml = new MarkupBuilder(writer)
@@ -12278,7 +12276,7 @@ Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version
     logInfo("Current library version on hub: ${currentLibrary.version}")
 
     // Prepare form body for update (same format as apps/drivers)
-    String body = "id=${libraryId}&version=${currentLibrary.version ?: 0}&source=${URLEncoder.encode(sourceCode, StandardCharsets.UTF_8.name())}"
+    String body = "id=${libraryId}&version=${currentLibrary.version ?: 0}&source=${URLEncoder.encode(sourceCode, 'UTF-8')}"
 
     // Post update to hub
     Map params = [
@@ -13080,7 +13078,7 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
     if(stage == 'libraryCode') {
       Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
       if(payload.id == null) { maintenanceAdvanceFailure(job, stage); return }
-      String body = "id=${job.artifact.id}&version=${payload.version ?: 0}&source=${URLEncoder.encode(job.librarySource ?: job.source, StandardCharsets.UTF_8.name())}"
+      String body = "id=${job.artifact.id}&version=${payload.version ?: 0}&source=${URLEncoder.encode(job.librarySource ?: job.source, 'UTF-8')}"
       maintenanceRequest(job, 'libraryUpdate', [uri:'http://127.0.0.1:8080', path:'/library/ajax/update', headers:hubCookieHeaders(job.cookie as String)+['Content-Type':'application/x-www-form-urlencoded'], body:body, timeout:30, ignoreSSLIssues:true], 'POST')
       return
     }

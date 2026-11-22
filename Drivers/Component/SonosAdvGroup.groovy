@@ -95,9 +95,9 @@ void logTrace(String message) {
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingGroupRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 
 @Field static final Set<String> ACTIVE_GROUP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  PENDING_BATCH_EVENTS_KEY,
-  BATCH_EVENTS_SCHEDULED_KEY,
-  BATCH_EVENTS_DUE_AT_KEY,
+  'pendingBatchEvents',
+  'batchEventsScheduled',
+  'batchEventsDueAt',
 ]))
 
 @Field static final Set<String> ACTIVE_GROUP_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
