@@ -306,7 +306,6 @@ preferences {
 @Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
 @Field static final String ZGT_CURRENT_TOPOLOGY_EVENT = 'zgtCurrentTopology' // Deprecated bridge event — driver now notifies via onZgtTopologyAvailable; kept for migration unsubscribe
 @Field static final String PARENT_APP_REQUEST_ATTRIBUTE = 'parentAppRequest'
-@Field static java.util.concurrent.ConcurrentHashMap<String, Map> avzStoreByRincon = new java.util.concurrent.ConcurrentHashMap<String, Map>()
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
@@ -4032,18 +4031,49 @@ String escapeSonosXml(String value) {
 
 List<Map> parseSonosAlarmList(String responseXml) {
   if(!responseXml) { return [] }
-  GPathResult outer = new XmlSlurper(false, false).parseText(responseXml)
-  String alarmXml = outer.depthFirst().find { node -> node.name()?.toString()?.endsWith('CurrentAlarmList') }?.text()
+  GPathResult outer = new XmlSlurper().parseText(responseXml)
+  GPathResult body = findDirectXmlChild(outer, 'Body')
+  GPathResult alarmListNode = findXmlChildContainer(body, 'CurrentAlarmList')
+  String alarmXml = alarmListNode?.text()?.toString()
   if(!alarmXml) { return [] }
-  GPathResult alarmRoot = new XmlSlurper(false, false).parseText(alarmXml)
+  GPathResult alarmRoot = new XmlSlurper().parseText(alarmXml)
   List<Map> result = []
-  alarmRoot.depthFirst().findAll { node -> node.name()?.toString()?.endsWith('Alarm') }.each { node ->
+  for(Object alarmObject : alarmRoot.children()) {
+    if(!(alarmObject instanceof GPathResult) || xmlLocalName((GPathResult)alarmObject) != 'Alarm') { continue }
+    GPathResult node = (GPathResult)alarmObject
     Map attrs = [:]
-    node.attributes().each { Object key, Object value -> attrs[key.toString()] = value.toString() }
+    ['ID','StartTime','StartLocalTime','Duration','Recurrence','Enabled','RoomUUID',
+     'ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones'].each { String key ->
+      String value = node["@${key}"]?.toString()
+      if(value) { attrs[key] = value }
+    }
     if(attrs.StartTime && !attrs.StartLocalTime) { attrs.StartLocalTime = attrs.StartTime }
     if(attrs.ID) { result.add(attrs) }
   }
   return result
+}
+
+String xmlLocalName(GPathResult node) {
+  return node?.name()?.toString()?.tokenize(':')?.last()
+}
+
+GPathResult findDirectXmlChild(GPathResult node, String localName) {
+  if(node == null || !localName) { return null }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult && xmlLocalName((GPathResult)child) == localName) { return (GPathResult)child }
+  }
+  return null
+}
+
+GPathResult findXmlChildContainer(GPathResult node, String localName) {
+  if(node == null || !localName) { return null }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult) {
+      GPathResult match = findDirectXmlChild((GPathResult)child, localName)
+      if(match != null) { return match }
+    }
+  }
+  return null
 }
 
 void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
@@ -11063,30 +11093,34 @@ void onHouseholdTopologyAvailable(String dni, Map topology) {
 
 void onAvtReceived(Map payload) {
   String rincon = payload?.rincon?.toString()
-  if(rincon == null) { return }
-  List<String> followers = normalizeGroupPlayerIds(payload?.followers)
-  avzStoreByRincon[rincon] = new LinkedHashMap([rincon: rincon, followers: followers, receivedAt: now()])
-  runInMillis(1, 'forwardAvtToGroup', [data: [rincon: rincon, followers: followers], overwrite: false])
+  Map<String, Object> attributes = payload?.attributes instanceof Map
+      ? new LinkedHashMap<String, Object>((Map<String, Object>)payload.attributes) : [:]
+  if(!rincon || attributes.isEmpty()) { return }
+  Long receivedAt = now()
+  Map<String, Map> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[AVT_STORE_STATE_KEY]) : [:]
+  snapshots[rincon] = [rincon: rincon, followers: normalizeGroupPlayerIds(payload?.followers),
+    attributes: attributes, sourceObservedAt: payload.observedAt, seq: payload.seq, receivedAt: receivedAt]
+  while(snapshots.size() > 32) { snapshots.remove(snapshots.keySet().iterator().next()) }
+  state[AVT_STORE_STATE_KEY] = snapshots
+  runInMillis(1, 'forwardAvtToGroup', [data: [rincon: rincon, receivedAt: receivedAt], overwrite: false])
 }
 
 void forwardAvtToGroup(Map data = [:]) {
   String rincon = data?.rincon?.toString()
   if(rincon == null) { return }
-  Map zgt = getCurrentReceivedZgtTopology()
-  List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
-  Map group = groups.find { Map g -> (g.coordinatorId?.toString() == rincon) || ((List<?>)g.members).any { Map m -> m.playerId?.toString() == rincon } }
-  List<String> followerIds = []
-  if(group != null) {
-    String coord = group.coordinatorId?.toString()
-    followerIds = ((List<?>)group.members).collect { Map m -> m.playerId?.toString() }.findAll { String id -> id && id != coord }
-  } else {
-    followerIds = normalizeGroupPlayerIds(data?.followers)
-  }
+  Map<String, Map> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[AVT_STORE_STATE_KEY] : [:]
+  Map snapshot = snapshots[rincon]
+  if(snapshot == null || ((snapshot.receivedAt ?: 0L) as Long) != ((data.receivedAt ?: 0L) as Long)) { return }
+  List<String> followerIds = normalizeGroupPlayerIds(snapshot.followers)
+  Map attributes = snapshot.attributes instanceof Map ? (Map)snapshot.attributes : [:]
+  ChildDeviceWrapper coordinator = findPlayerBySonosId(rincon)
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
   followerIds.unique().each { String fid ->
-    ChildDeviceWrapper f = rinconMap[fid]
-    if(f != null) {
-      try { f.onAvtUpdated() } catch(Exception e) { logDebug("forwardAvtToGroup onAvtUpdated failed for ${fid}: ${e.message}") }
+    ChildDeviceWrapper follower = rinconMap[fid]
+    if(coordinator != null && follower != null) {
+      queueFollowerStateBatch(coordinator, follower, rincon, attributes)
     }
   }
 }

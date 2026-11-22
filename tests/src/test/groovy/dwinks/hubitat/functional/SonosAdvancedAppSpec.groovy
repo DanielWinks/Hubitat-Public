@@ -7,6 +7,7 @@ import dwinks.hubitat.stubs.ScriptLoader
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import hubitat.scheduling.AsyncResponse
+import org.apache.commons.lang3.StringEscapeUtils
 import spock.lang.Shared
 import spock.lang.Specification
 
@@ -2274,6 +2275,47 @@ class SonosAdvancedAppSpec extends Specification {
     calls[3..-1].every { List call -> call[1] == switchDni || call[0] == 'refresh' }
     calls.find { List call -> call[0] == 'setVolume' } == ['setVolume', switchDni, 5]
     calls.find { List call -> call[0] == 'setSource' } == ['setSource', switchDni, 'uri', 'meta']
+  }
+
+  def "Sonos alarm bounded XML parsing handles namespace prefixes in both XML layers"() {
+    given:
+    String alarmList = '<a:CurrentAlarmList xmlns:a="urn:sonos:alarms">' +
+      '<a:Alarm ID="alarm-1" StartTime="07:15:00"/>' +
+      '<a:Alarm ID="alarm-2" StartTime="08:30:00" StartLocalTime="08:30:00"/>' +
+      '<a:Alarm StartTime="09:00:00"/></a:CurrentAlarmList>'
+    String response = '<s:Envelope xmlns:s="urn:soap"><s:Body><u:GetZoneGroupAttributesResponse xmlns:u="urn:sonos:service">' +
+      '<r:CurrentAlarmList xmlns:r="urn:sonos:response">' + StringEscapeUtils.escapeXml10(alarmList) +
+      '</r:CurrentAlarmList></u:GetZoneGroupAttributesResponse></s:Body></s:Envelope>'
+
+    when:
+    List<Map> alarms = appScript.parseSonosAlarmList(response)
+
+    then:
+    alarms == [
+      [ID: 'alarm-1', StartTime: '07:15:00', StartLocalTime: '07:15:00'],
+      [ID: 'alarm-2', StartTime: '08:30:00', StartLocalTime: '08:30:00']
+    ]
+  }
+
+  def "deferred AVT snapshot fanout queues player states without reading the child snapshot"() {
+    given:
+    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
+    follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
+    coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
+    follower.currentValues.groupCoordinatorId = 'RINCON_COORD'
+
+    when:
+    appScript.onAvtReceived([rincon: 'RINCON_COORD', followers: ['RINCON_FOLLOW'],
+      observedAt: 1234L, seq: 5, attributes: [status: 'playing', transportStatus: 'playing',
+        currentTrackName: 'Deferred Track', currentArtistName: 'Deferred Artist']])
+    Map saved = appScript.state.avtStoreByRincon['RINCON_COORD']
+    appScript.forwardAvtToGroup([rincon: 'RINCON_COORD', receivedAt: saved.receivedAt])
+
+    then:
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == 'Deferred Track'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentArtistName == 'Deferred Artist'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
+    follower.refreshedPlaybackUpdates.isEmpty()
   }
 
   def "player app request callback returns the active-stream decision"() {

@@ -709,6 +709,9 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+@Field static ConcurrentHashMap<String, Map> pendingCoordinatorAvtUpdatesByDni = new ConcurrentHashMap<String, Map>()
+@Field static ConcurrentHashMap<String, Object> coordinatorAvtUpdateLocksByDni = new ConcurrentHashMap<String, Object>()
+@Field static Set<String> coordinatorAvtUpdateScheduledDnis = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>())
 @Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentGrcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
@@ -1925,6 +1928,12 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
     clearedEntries += clearStaticMap(pendingTopologyKindByDni)
     clearedEntries += clearStaticMap(pendingZgtNotifyByDni)
+    clearedEntries += clearStaticMap(currentAvtSnapshotByDni)
+    clearedEntries += clearStaticMap(currentAvtSnapshotByCoordinator)
+    clearedEntries += clearStaticMap(currentAvtSeqByDni)
+    clearedEntries += clearStaticMap(pendingCoordinatorAvtUpdatesByDni)
+    clearedEntries += clearStaticMap(coordinatorAvtUpdateLocksByDni)
+    coordinatorAvtUpdateScheduledDnis.clear()
     clearedEntries += clearStaticMap(currentGrcSnapshotByDni)
     clearedEntries += clearStaticMap(currentGrcSnapshotByCoordinator)
     clearedEntries += clearStaticMap(currentGrcSeqByDni)
@@ -1974,6 +1983,12 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingZgtNotifyByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentAvtSnapshotByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(currentAvtSnapshotByCoordinator, activePlayerIds)
+  removedEntries += pruneStaticMapKeys(currentAvtSeqByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingCoordinatorAvtUpdatesByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(coordinatorAvtUpdateLocksByDni, activePlayerDnis)
+  coordinatorAvtUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
   removedEntries += pruneStaticMapKeys(currentGrcSnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSidByDni, activePlayerDnis)
@@ -2135,6 +2150,12 @@ void clearStaticDriverStateForCurrentDevice() {
       currentRcSnapshotByDni?.remove(dni)
       currentRcSeqByDni?.remove(dni)
       currentRcSidByDni?.remove(dni)
+      currentAvtSnapshotByDni?.remove(dni)
+      currentAvtSnapshotByCoordinator?.remove(playerId)
+      currentAvtSeqByDni?.remove(dni)
+      pendingCoordinatorAvtUpdatesByDni?.remove(dni)
+      coordinatorAvtUpdateLocksByDni?.remove(dni)
+      coordinatorAvtUpdateScheduledDnis?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
       Map upnpEntry = upnpRequestQueues?.get(dni)
@@ -4616,14 +4637,7 @@ void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
 }
 
 String findSleepTimerXmlText(GPathResult node, String elementName) {
-  if(node?.name()?.toString() == elementName) { return node.text()?.toString() ?: '' }
-  for(Object child : node?.children() ?: []) {
-    if(child instanceof GPathResult) {
-      String value = findSleepTimerXmlText((GPathResult)child, elementName)
-      if(value != null) { return value }
-    }
-  }
-  return null
+  return findSoapBodyField(node, elementName)
 }
 
 void createRemoveRightChannelChildDevice(Boolean create) {
@@ -4781,6 +4795,8 @@ void parse(String raw) {
           return
         case 'AVTransport':
           try {
+            observeExpectedUpnpSubscriptionEvent('sid1')
+            setLastInboundAVTransportEvent()
             String avtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             logZgtXmlAtTrace(avtDni, xmlBody)
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AVT event payload'); return }
@@ -5093,9 +5109,8 @@ Map parseZgtFullSnapshot(String xmlString) {
     XmlSlurper parser = new XmlSlurper()
     GPathResult propertyset = parser.parseText(xmlString)
     String stateXml = ((GPathResult)propertyset['property']['ZoneGroupState']).text()
-    String unescaped = unEscapeLastChangeXML(stateXml)
-    if(!isPlausibleXmlPayload(unescaped)) { return null }
-    GPathResult stateXmlParsed = parser.parseText(unescaped)
+    if(!isPlausibleXmlPayload(stateXml)) { return null }
+    GPathResult stateXmlParsed = parser.parseText(stateXml)
     GPathResult wrapped = (GPathResult)stateXmlParsed['ZoneGroups']
     GPathResult zoneGroups = wrapped.size() > 0 ? wrapped : stateXmlParsed
     String outerName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
@@ -5157,11 +5172,13 @@ Map getCurrentZgtTopology() {
 
 Map<String, Object> parseAvtMetaData(String rawDidl) {
   if(!rawDidl) { return [:] }
-  String unescaped = null
-  try { unescaped = unEscapeMetaData(rawDidl) } catch(Exception ignored) { unescaped = rawDidl }
-  if(!unescaped || !isPlausibleXmlPayload(unescaped)) { return [:] }
+  String candidate = rawDidl.trim()
+  if(!isPlausibleXmlPayload(candidate)) {
+    try { candidate = unEscapeMetaData(rawDidl) } catch(Exception ignored) { return [:] }
+  }
+  if(!isPlausibleXmlPayload(candidate)) { return [:] }
   try {
-    GPathResult meta = new XmlSlurper().parseText(unescaped)
+    GPathResult meta = new XmlSlurper().parseText(candidate)
     GPathResult item = (GPathResult)meta['item']
     if(item.size() == 0) { return [:] }
     Map<String, String> streamInfo = [:]
@@ -5171,7 +5188,7 @@ Map<String, Object> parseAvtMetaData(String rawDidl) {
     while(albumArt.contains('&amp;')) { albumArt = albumArt.replace('&amp;','&') }
     return [
       title: item['title']?.text()?.toString(),
-      creator: item['creator']?.text()?.toString(),
+      creator: item['creator']?.text()?.toString() ?: item['artist']?.text()?.toString(),
       album: item['album']?.text()?.toString(),
       albumArtURI: albumArt,
       class: item['class']?.text()?.toString(),
@@ -5193,22 +5210,28 @@ Map parseAvtFullSnapshot(String xmlString) {
     GPathResult propertyset = parser.parseText(xmlString)
     String lastChange = ((GPathResult)propertyset['property']['LastChange']).text().toString()
     if(!lastChange) { return null }
-    String unescaped = unEscapeLastChangeXML(lastChange)
-    if(!isPlausibleXmlPayload(unescaped)) { return null }
-    GPathResult event = parser.parseText(unescaped)
+    if(!isPlausibleXmlPayload(lastChange)) { return null }
+    GPathResult event = parser.parseText(lastChange)
     GPathResult iid = (GPathResult)event['InstanceID']
     if(iid.size() == 0) { return null }
     def normalizeUri = { Object v -> v != null && v.toString() != '' ? v.toString().replace('&amp;','&').replace('&amp;','&') : null }
     String curUriRaw = iid['CurrentTrackURI']['@val']?.toString()
     return [
+      hasTransportState: iid['TransportState'].size() > 0,
       transportState: iid['TransportState']['@val']?.toString(),
+      hasPlayMode: iid['CurrentPlayMode'].size() > 0,
       playMode: iid['CurrentPlayMode']['@val']?.toString(),
+      hasCrossfadeMode: iid['CurrentCrossfadeMode'].size() > 0,
       crossfadeMode: iid['CurrentCrossfadeMode']['@val']?.toString(),
       numberOfTracks: iid['NumberOfTracks']['@val']?.toString(),
+      hasTrack: iid['CurrentTrack'].size() > 0,
       track: iid['CurrentTrack']['@val']?.toString(),
       section: iid['CurrentSection']['@val']?.toString(),
+      hasCurrentTrackURI: iid['CurrentTrackURI'].size() > 0,
       currentTrackURI: normalizeUri(curUriRaw),
+      hasCurrentTrackDuration: iid['CurrentTrackDuration'].size() > 0,
       currentTrackDuration: iid['CurrentTrackDuration']['@val']?.toString(),
+      hasCurrentTrackMetaData: iid['CurrentTrackMetaData'].size() > 0,
       currentTrackMetaDataRaw: iid['CurrentTrackMetaData']['@val']?.toString(),
       currentTrackMetaData: parseAvtMetaData(iid['CurrentTrackMetaData']['@val']?.toString()),
       nextTrackURI: iid['NextTrackURI']['@val']?.toString(),
@@ -5299,38 +5322,153 @@ void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
   }
   Map newSnapshot = parseAvtFullSnapshot(xmlBody)
   if(newSnapshot == null) { return }
+  String myRincon = getId()
+  String coordinatorRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni) ?: myRincon
+  Map previousSnapshot = currentAvtSnapshotByDni[deviceDni] instanceof Map
+      ? (Map)currentAvtSnapshotByDni[deviceDni] : [:]
+  Map mergedSnapshot = mergeAvtSnapshot(previousSnapshot, newSnapshot)
   if(incomingSeq != null) {
     AtomicInteger ref2 = currentAvtSeqByDni.get(deviceDni)
     if(ref2 != null && incomingSeq < ref2.get()) {
       logDebug("Ignoring AVT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
       return
     }
-    String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
-    if(coordRincon) { currentAvtSnapshotByCoordinator[coordRincon] = new LinkedHashMap(newSnapshot) }
-    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(newSnapshot)
+    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(mergedSnapshot)
     if(ref2 != null) { ref2.set(incomingSeq) } else { currentAvtSeqByDni[deviceDni] = new AtomicInteger(incomingSeq) }
   } else {
-    String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
-    if(coordRincon) { currentAvtSnapshotByCoordinator[coordRincon] = new LinkedHashMap(newSnapshot) }
-    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(newSnapshot)
+    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(mergedSnapshot)
   }
-  String myRincon = getId()
-  String coordForNotify = resolveCurrentCoordinatorRinconForAvt(deviceDni) ?: myRincon
-  List<String> followers = resolveFollowersRinconsForAvt(coordForNotify)
-  String coordinatorNow = coordForNotify
-  if(coordinatorNow == myRincon || myRincon == null || !coordForNotify) {
-    applyAvtSnapshotIfDifferent(newSnapshot)
-  }
-  try {
-    if(parent != null) {
-      parent.onAvtReceived([rincon: myRincon, followers: followers])
-    } else {
-      // No parent (standalone/test harness) — in-memory only, no Current State bloat
-      logDebug("Standalone AVT snapshot (no parent) tracked in memory for ${deviceDni}")
+  if(myRincon && coordinatorRincon == myRincon) {
+    currentAvtSnapshotByCoordinator[coordinatorRincon] = new LinkedHashMap(mergedSnapshot)
+    applyAvtSnapshotIfDifferent(mergedSnapshot)
+    List<String> followers = resolveFollowersRinconsForAvt(coordinatorRincon)
+    Map<String, Object> attributes = buildAvtPlaybackStateAttributes(mergedSnapshot, newSnapshot, previousSnapshot)
+    if(!attributes.isEmpty()) {
+      queueCoordinatorAvtParentUpdate(deviceDni, [rincon: coordinatorRincon, followers: followers,
+        attributes: attributes, observedAt: mergedSnapshot.observedAt, seq: incomingSeq])
     }
+  }
+}
+
+Map mergeAvtSnapshot(Map previous, Map incoming) {
+  Map merged = previous != null ? new LinkedHashMap(previous) : [:]
+  ['transportState', 'playMode', 'crossfadeMode', 'numberOfTracks', 'section',
+   'nextTrackURI', 'nextTrackMetaData', 'enqueuedTransportURI',
+   'enqueuedTransportURIMetaData', 'avTransportURI', 'avTransportURIMetaDataRaw',
+   'playbackStorageMedium', 'currentTransportActions', 'currentValidPlayModes',
+   'directControlClientID', 'directControlIsSuspended', 'directControlAccountID',
+   'transportStatus', 'sleepTimerGeneration', 'sleepTimerState', 'alarmRunning',
+   'snoozeRunning', 'restartPending', 'transportPlaySpeed', 'currentMediaDuration'].each { String key ->
+    Object value = incoming[key]
+    if(value != null && value.toString() != '') { merged[key] = value }
+  }
+  if(incoming.hasCurrentTrackURI == true) { merged.currentTrackURI = incoming.currentTrackURI }
+  if(incoming.hasCurrentTrackDuration == true) { merged.currentTrackDuration = incoming.currentTrackDuration }
+  if(incoming.hasTrack == true) { merged.track = incoming.track }
+  if(incoming.hasCurrentTrackMetaData == true) {
+    merged.currentTrackMetaDataRaw = incoming.currentTrackMetaDataRaw
+    merged.currentTrackMetaData = incoming.currentTrackMetaData
+  }
+  ['hasTransportState', 'hasPlayMode', 'hasCrossfadeMode', 'hasTrack',
+   'hasCurrentTrackURI', 'hasCurrentTrackDuration', 'hasCurrentTrackMetaData'].each { String key ->
+    merged[key] = incoming[key] == true
+  }
+  merged.observedAt = incoming.observedAt ?: now()
+  return merged
+}
+
+Map<String, Object> buildAvtPlaybackStateAttributes(Map snapshot, Map incoming, Map previous) {
+  Map<String, Object> attributes = [:]
+  String status = normalizeTransportStatus(snapshot.transportState?.toString())
+  if(incoming.hasTransportState == true && status) {
+    attributes.status = status
+    attributes.transportStatus = status
+  }
+  Boolean trackUriChanged = incoming.hasCurrentTrackURI == true &&
+      snapshot.currentTrackURI?.toString() != previous.currentTrackURI?.toString()
+  Boolean trackCleared = incoming.hasCurrentTrackURI == true && !snapshot.currentTrackURI?.toString()
+  Boolean metadataPresent = incoming.hasCurrentTrackMetaData == true
+  Boolean metadataEmpty = metadataPresent && !incoming.currentTrackMetaDataRaw?.toString()
+  Map metadata = snapshot.currentTrackMetaData instanceof Map ? (Map)snapshot.currentTrackMetaData : [:]
+  Boolean clearMetadata = trackCleared || metadataEmpty ||
+      (trackUriChanged && (!metadataPresent || metadata.isEmpty()))
+  if(clearMetadata) {
+    attributes.currentTrackName = 'Not Available'
+    attributes.currentArtistName = 'Not Available'
+    attributes.currentAlbumName = 'Not Available'
+    attributes.trackDescription = 'Not Available'
+    if(trackCleared) { attributes.currentTrackNumber = 0 }
+    if(incoming.hasCurrentTrackDuration == true || trackCleared || trackUriChanged) {
+      attributes.currentTrackDuration = incoming.currentTrackDuration?.toString() ?: ''
+    }
+  } else if(metadataPresent && !metadata.isEmpty()) {
+    String title = metadata.title?.toString() ?: 'Not Available'
+    String artist = metadata.creator?.toString() ?: 'Not Available'
+    attributes.currentTrackName = title
+    attributes.currentArtistName = artist
+    attributes.currentAlbumName = metadata.album?.toString() ?: 'Not Available'
+    attributes.trackDescription = metadata.title && metadata.creator
+        ? "${metadata.title} by ${metadata.creator}" : (metadata.streamContent?.toString() ?: title)
+  }
+  if(incoming.hasCurrentTrackDuration == true) {
+    attributes.currentTrackDuration = incoming.currentTrackDuration?.toString() ?: ''
+  }
+  if(incoming.hasTrack == true) {
+    String track = incoming.track?.toString()
+    if(track?.isInteger()) { attributes.currentTrackNumber = Integer.parseInt(track) }
+    else { attributes.currentTrackNumber = 0 }
+  }
+  return attributes
+}
+
+Object getCoordinatorAvtUpdateLock(String dni) {
+  Object lock = coordinatorAvtUpdateLocksByDni.get(dni)
+  if(lock == null) {
+    Object created = new Object()
+    Object existing = coordinatorAvtUpdateLocksByDni.putIfAbsent(dni, created)
+    lock = existing ?: created
+  }
+  return lock
+}
+
+void queueCoordinatorAvtParentUpdate(String dni, Map update) {
+  if(!dni || update == null || parent == null) { return }
+  Object lock = getCoordinatorAvtUpdateLock(dni)
+  synchronized(lock) {
+    pendingCoordinatorAvtUpdatesByDni.put(dni, new LinkedHashMap(update))
+    if(coordinatorAvtUpdateScheduledDnis.add(dni)) {
+      try { runInMillis(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true]) }
+      catch(Exception e) {
+        coordinatorAvtUpdateScheduledDnis.remove(dni)
+        runIn(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true])
+      }
+    }
+  }
+}
+
+void flushCoordinatorAvtParentUpdate() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  Object lock = getCoordinatorAvtUpdateLock(dni)
+  Map update
+  synchronized(lock) {
+    update = pendingCoordinatorAvtUpdatesByDni.remove(dni)
+    coordinatorAvtUpdateScheduledDnis.remove(dni)
+  }
+  if(update == null) { return }
+  try {
+    parent.onAvtReceived(update)
   } catch(Exception e) {
-    logWarn("parent.onAvtReceived failed: ${e.message}")
-    logDebug("AVT snapshot retained in memory after parent failure for ${deviceDni}")
+    logWarn("Deferred parent AVT update failed for ${dni}: ${e.message}")
+    synchronized(lock) {
+      Map newer = pendingCoordinatorAvtUpdatesByDni.get(dni)
+      if(newer == null || ((update.observedAt ?: 0L) as Long) > ((newer.observedAt ?: 0L) as Long)) {
+        pendingCoordinatorAvtUpdatesByDni.put(dni, update)
+      }
+      if(coordinatorAvtUpdateScheduledDnis.add(dni)) {
+        runIn(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true])
+      }
+    }
   }
 }
 
@@ -5406,31 +5544,60 @@ Boolean applyAvtSnapshotIfDifferent(Map snap) {
     }
   } catch(Exception ignored) {}
   try {
+    Map previousPlayback = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+        ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
+    Boolean trackUriPresent = snap.hasCurrentTrackURI == true
+    Boolean metadataPresent = snap.hasCurrentTrackMetaData == true
+    String trackUri = snap.currentTrackURI?.toString()
+    String rawMetadata = snap.currentTrackMetaDataRaw?.toString()
+    Boolean trackChanged = trackUriPresent && trackUri != previousPlayback.currentTrackURI?.toString()
+    Boolean trackCleared = trackUriPresent && !trackUri
+    Boolean metadataCleared = metadataPresent && !rawMetadata
+    Map meta = snap.currentTrackMetaData instanceof Map ? (Map)snap.currentTrackMetaData : [:]
+    Boolean metadataParsed = !meta.isEmpty()
+    Boolean clearTrackMetadata = trackCleared || metadataCleared ||
+        (trackChanged && (!metadataPresent || !metadataParsed))
+
     String ts = snap.transportState?.toString()
     if(ts) { setStatusTransportStatus(ts, 'AVT event') }
     String pm = snap.playMode?.toString()
     if(pm) { setPlayMode(pm) }
-    if(snap.currentTrackDuration) { setCurrentTrackDuration(snap.currentTrackDuration.toString()) }
+    if(snap.hasCurrentTrackDuration == true) {
+      setCurrentTrackDuration(snap.currentTrackDuration?.toString() ?: '')
+    } else if(trackChanged || trackCleared) {
+      setCurrentTrackDuration('')
+    }
     String cf = snap.crossfadeMode?.toString()?.trim()
     if(cf) { setCrossfadeMode(cf == '1' ? 'on' : 'off') }
-    Map meta = snap.currentTrackMetaData instanceof Map ? (Map)snap.currentTrackMetaData : [:]
-    if(snap?.currentTrackURI) { /* setAudioSource/trackDescription handled by presentation layer */
-      String trackName = meta.title?.toString()
-      String artist = meta.creator?.toString()
-      String album = meta.album?.toString()
-      if(trackName) { setCurrentTrackName(trackName) }
-      if(artist) { setCurrentArtistName(artist) }
-      if(album) { setCurrentAlbumName(album) }
-      String art = meta.albumArtURI?.toString()
-      if(art) { setAlbumArtURI(art, false) }
-      String desc = trackName && artist ? "${trackName} by ${artist}" : (meta.streamContent?.toString() ?: trackName)
-      if(desc) { setTrackDescription(desc) }
+    if(clearTrackMetadata) {
+      clearCurrentAvtTrackMetadata()
+    } else if(metadataPresent && metadataParsed) {
+      String trackName = meta.title?.toString() ?: 'Not Available'
+      String artist = meta.creator?.toString() ?: 'Not Available'
+      String album = meta.album?.toString() ?: 'Not Available'
+      setCurrentTrackName(trackName)
+      setCurrentArtistName(artist)
+      setCurrentAlbumName(album)
+      setAlbumArtURI(meta.albumArtURI?.toString() ?: '', false)
+      String desc = meta.title && meta.creator
+          ? "${meta.title} by ${meta.creator}"
+          : (meta.streamContent?.toString() ?: trackName)
+      setTrackDescription(desc)
     }
     String num = snap.track?.toString()
     if(num?.isInteger()) { setCurrentTrackNumber(Integer.parseInt(num)) }
+    else if(snap.containsKey('track') || trackCleared) { setCurrentTrackNumber(0) }
   } catch(Exception e) { logDebug("applyAvtSnapshotIfDifferent failed: ${e.message}") }
   runtimeState.lastTransportPlaybackSnapshot = new LinkedHashMap(snap)
   return true
+}
+
+void clearCurrentAvtTrackMetadata() {
+  setCurrentTrackName('Not Available')
+  setCurrentArtistName('Not Available')
+  setCurrentAlbumName('Not Available')
+  setAlbumArtURI('', false)
+  setTrackDescription('Not Available')
 }
 
 @CompileStatic
@@ -5580,9 +5747,8 @@ Map parseRcFullSnapshot(String xmlString) {
     GPathResult propertyset = parser.parseText(xmlString)
     String lastChange = ((GPathResult)propertyset['property']['LastChange']).text()?.toString()
     if(!lastChange) { return null }
-    String unescaped = unEscapeLastChangeXML(lastChange)
-    if(!isPlausibleXmlPayload(unescaped)) { return null }
-    GPathResult event = parser.parseText(unescaped)
+    if(!isPlausibleXmlPayload(lastChange)) { return null }
+    GPathResult event = parser.parseText(lastChange)
     GPathResult iid = (GPathResult)event['InstanceID']
     if(iid.size() == 0) { return null }
     String volumeMasterText = ''
@@ -5865,9 +6031,8 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
     XmlSlurper parser = new XmlSlurper()
     GPathResult propertyset = parser.parseText(xmlString)
     String stateXml = ((GPathResult)propertyset['property']['ZoneGroupState']).text()
-    String unescaped = unEscapeLastChangeXML(stateXml)
-    if(!isPlausibleXmlPayload(unescaped)) { return null }
-    GPathResult stateXmlParsed = parser.parseText(unescaped)
+    if(!isPlausibleXmlPayload(stateXml)) { return null }
+    GPathResult stateXmlParsed = parser.parseText(stateXml)
     GPathResult wrappedZoneGroups = (GPathResult)stateXmlParsed['ZoneGroups']
     GPathResult zoneGroups = wrappedZoneGroups.size() > 0 ? wrappedZoneGroups : stateXmlParsed
     String groupName = ((GPathResult)propertyset['property']['ZoneGroupName']).text().toString()
@@ -5975,8 +6140,35 @@ String unEscapeMetaData(String text) {
 }
 
 @CompileStatic
-String unEscapeLastChangeXML(String text) {
-  return StringEscapeUtils.unescapeXml(text)
+String xmlLocalName(GPathResult node) {
+  return node?.name()?.toString()?.tokenize(':')?.last()
+}
+
+GPathResult findDirectXmlChild(GPathResult node, String localName) {
+  if(node == null || !localName) { return null }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult && xmlLocalName((GPathResult)child) == localName) { return (GPathResult)child }
+  }
+  return null
+}
+
+GPathResult findXmlChildContainer(GPathResult node, String localName) {
+  if(node == null || !localName) { return null }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult) {
+      GPathResult match = findDirectXmlChild((GPathResult)child, localName)
+      if(match != null) { return match }
+    }
+  }
+  return null
+}
+
+String findSoapBodyField(GPathResult envelope, String localName) {
+  GPathResult body = findDirectXmlChild(envelope, 'Body')
+  GPathResult container = body ?: envelope
+  GPathResult field = findDirectXmlChild(container, localName)
+  if(field == null) { field = findXmlChildContainer(container, localName) }
+  return field?.text()?.toString()
 }
 
 @CompileStatic
@@ -12084,7 +12276,7 @@ void playlistAddBrowseCallback(AsyncResponse response, Map data = null) {
   }
   try {
     GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
-    String updateId = findQueueXmlText(envelope, 'UpdateID') ?: '0'
+    String updateId = findSoapBodyField(envelope, 'UpdateID') ?: '0'
     Map track = (Map)data.track
     Map params = getSoapActionParams(data.host.toString(), AVTransport, 'AddURIToSavedQueue', [
       ObjectID: data.objectId.toString(), UpdateID: updateId, EnqueuedURI: escapeSoapXmlText(track.uri.toString()),
@@ -12120,18 +12312,21 @@ Map getReusableCurrentTrack(Map snapshot) {
     return null
   }
   try {
-    GPathResult item = new XmlSlurper().parseText(unEscapeMetaData(metadata))
-    String title = item.'**'.find { node -> node.name()?.toString()?.endsWith('title') }?.text()
-    String resource = item.'**'.find { node -> node.name()?.toString()?.endsWith('res') }?.text()
-    String protocolInfo = item.'**'.find { node -> node.name()?.toString()?.endsWith('res') }?.attributes()?.get('protocolInfo')?.toString()
+    GPathResult parsed = null
+    try { parsed = new XmlSlurper().parseText(metadata) }
+    catch(Exception ignored) { parsed = new XmlSlurper().parseText(unEscapeMetaData(metadata)) }
+    GPathResult item = findDirectXmlChild(parsed, 'item')
+    String title = findQueueXmlText(item, 'title')
+    String resource = findQueueXmlText(item, 'res')
+    String protocolInfo = item?['res']?.getAt(0)?.attributes()?.get('protocolInfo')?.toString()
     String uri = normalizeQueueTrackUri(resource)
     if(!title || !uri || uri.startsWith('x-sonosapi-stream:') || uri.startsWith('x-rincon-mp3radio:') || uri.startsWith('x-sonosapi-radio:')) {
       logInfo("Cannot save the currently playing item for ${device.displayName}: the music service did not provide track metadata that Sonos can add to a Favorite or Playlist")
       return null
     }
-    return [uri: uri, metadata: unEscapeMetaData(metadata), title: title, creator: item.'**'.find { node -> node.name()?.toString()?.endsWith('creator') }?.text() ?: '',
-      album: item.'**'.find { node -> node.name()?.toString()?.endsWith('album') }?.text() ?: '',
-      art: item.'**'.find { node -> node.name()?.toString()?.endsWith('albumArtURI') }?.text() ?: '', protocolInfo: protocolInfo ?: '*:*:*:*']
+    return [uri: uri, metadata: metadata, title: title, creator: findQueueXmlText(item, 'creator') ?: findQueueXmlText(item, 'artist') ?: '',
+      album: findQueueXmlText(item, 'album') ?: '',
+      art: findQueueXmlText(item, 'albumArtURI') ?: '', protocolInfo: protocolInfo ?: '*:*:*:*']
   } catch(Exception e) {
     logInfo("Cannot save the currently playing item for ${device.displayName}: Sonos did not provide reusable track metadata (${e.message})")
     return null
@@ -12196,17 +12391,22 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
     String soap = response.getData()?.toString()
     if(!soap) { throw new IllegalArgumentException('Browse response was empty') }
     GPathResult envelope = new XmlSlurper().parseText(soap)
-    String resultXml = findQueueXmlText(envelope, 'Result')
-    Integer returned = findQueueXmlText(envelope, 'NumberReturned')?.toInteger() ?: 0
-    Integer total = findQueueXmlText(envelope, 'TotalMatches')?.toInteger() ?: 0
-    String updateId = findQueueXmlText(envelope, 'UpdateID') ?: '0'
+    GPathResult body = findDirectXmlChild(envelope, 'Body')
+    GPathResult browseResponse = findDirectXmlChild(body, 'BrowseResponse')
+    if(browseResponse == null && body != null && body.children().size() > 0) { browseResponse = (GPathResult)body.children()[0] }
+    String resultXml = findQueueXmlText(browseResponse, 'Result')
+    Integer returned = findQueueXmlText(browseResponse, 'NumberReturned')?.toInteger() ?: 0
+    Integer total = findQueueXmlText(browseResponse, 'TotalMatches')?.toInteger() ?: 0
+    String updateId = findQueueXmlText(browseResponse, 'UpdateID') ?: '0'
     List<Map> entries = (List<Map>)(data.entries ?: [])
     if(resultXml) {
       GPathResult didl = new XmlSlurper().parseText(resultXml)
-      didl.children().each { item ->
-        String objectId = item.getAt('@id')?.text()
+      for(Object itemObject : didl.children()) {
+        if(!(itemObject instanceof GPathResult) || xmlLocalName((GPathResult)itemObject) != 'item') { continue }
+        GPathResult item = (GPathResult)itemObject
+        String objectId = item.attributes()?.get('id')?.toString()
         String title = findQueueXmlText(item, 'title')
-        String artist = findQueueXmlText(item, 'creator')
+        String artist = findQueueXmlText(item, 'creator') ?: findQueueXmlText(item, 'artist')
         String album = findQueueXmlText(item, 'album')
         String albumArtURI = findQueueXmlText(item, 'albumArtURI')
         String trackUri = findQueueXmlText(item, 'res')
@@ -12276,20 +12476,9 @@ String snapshotTrackDescription(String trackUri) {
   return title ? "'${title}' (${trackUri ?: 'track URI unavailable'})" : (trackUri ?: 'track URI unavailable')
 }
 
-String queueXmlLocalName(Object nodeName) {
-  String name = nodeName?.toString() ?: ''
-  Integer separator = Math.max(name.lastIndexOf('}'), name.lastIndexOf(':'))
-  return separator >= 0 ? name.substring(separator + 1) : name
-}
-
 String findQueueXmlText(GPathResult node, String targetName) {
-  if(node == null) { return null }
-  if(queueXmlLocalName(node.name()) == targetName) { return node.text() }
-  for(GPathResult child : node.children()) {
-    String value = findQueueXmlText(child, targetName)
-    if(value != null) { return value }
-  }
-  return null
+  GPathResult match = findDirectXmlChild(node, targetName)
+  return match?.text()?.toString()
 }
 
 String escapeQueueHtml(String value) {

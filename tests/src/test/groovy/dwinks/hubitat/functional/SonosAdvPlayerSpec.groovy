@@ -4,8 +4,11 @@ import dwinks.hubitat.stubs.HubitatScriptHarness
 import dwinks.hubitat.stubs.ScriptLoader
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import groovy.util.XmlSlurper
+import groovy.util.slurpersupport.GPathResult
 import java.io.ByteArrayInputStream
 import java.time.Instant
+import org.apache.commons.lang3.StringEscapeUtils
 import spock.lang.Shared
 import spock.lang.Specification
 
@@ -63,6 +66,12 @@ class SonosAdvPlayerSpec extends Specification {
   List<Map> playerRequestMessages() {
     drainParentBridge()
     parentPlayerRequests.collect { Map event -> new LinkedHashMap(event) }
+  }
+
+  String avtBody(String instanceProperties) {
+    String event = "<Event><InstanceID val=\"0\">${instanceProperties}</InstanceID></Event>"
+    return '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(event) +
+      '</LastChange></property></propertyset>'
   }
 
   void appendAudioClipAdmissionSchedules(Integer regularRemaining, Integer highRemaining,
@@ -1532,6 +1541,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.binding.setVariable('atomicState', [:])
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
+    driver.currentAvtSnapshotByDni.remove('SONOS-TEST-DNI')
+    driver.currentAvtSeqByDni.remove('SONOS-TEST-DNI')
+    driver.pendingCoordinatorAvtUpdatesByDni.remove('SONOS-TEST-DNI')
+    driver.coordinatorAvtUpdateScheduledDnis.remove('SONOS-TEST-DNI')
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.metaClass.getParent = { -> new Expando(
@@ -1541,6 +1554,7 @@ class SonosAdvPlayerSpec extends Specification {
       initializationStarted: { String reqId -> parentPlayerUpdates << [kind:'initializationStarted', requestId:reqId] },
       initializationComplete: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationComplete', requestId:reqId, detail:detail] },
       initializationFailed: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationFailed', requestId:reqId, detail:detail] },
+      onAvtReceived: { Map payload -> parentPlayerUpdates << [kind:'avtReceived', payload: new LinkedHashMap(payload)] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
@@ -1580,7 +1594,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.escapeHiddenStateHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
     driver.escapeQueueHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
     driver.escapeSoapXmlText("A&B <'\"") == 'A&amp;B &lt;&apos;&quot;'
-    driver.unEscapeLastChangeXML('&lt;title&gt;A &amp; B&lt;/title&gt;') == '<title>A & B</title>'
     driver.unEscapeMetaData('&amp;lt;title&amp;gt;A&amp;lt;/title&amp;gt;') == '<title>A</title>'
     driver.unescapeIfNeeded('&lt;x&gt;') == '<x>'
     driver.normalizeLogLevel('INFO') == 'info'
@@ -2290,6 +2303,98 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:avt-test') && entry.contains('X-SONOS-SERVICETYPE=AVTransport') }
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') && entry.contains('seq=0') }
+  }
+
+  def "AVT parser preserves nested DIDL and ampersand entities"() {
+    given:
+    String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">' +
+      '<item><dc:title>Flowers &amp; Flags</dc:title><upnp:artist>Artist &amp; Co</upnp:artist>' +
+      '<upnp:album>Album &amp; Friends</upnp:album><res protocolInfo="http-get:*:audio/mpeg:*">' +
+      'http://media.example.test/song.mp3</res></item></DIDL-Lite>'
+    String encodedMetadata = StringEscapeUtils.escapeXml10(didl)
+    String body = avtBody('<TransportState val="PLAYING"/>' +
+      '<CurrentTrackURI val="http://media.example.test/song.mp3?one=1&amp;two=2"/>' +
+      '<CurrentTrackMetaData val="' + encodedMetadata + '"/>')
+
+    when:
+    Map snapshot = driver.parseAvtFullSnapshot(body)
+
+    then:
+    snapshot.transportState == 'PLAYING'
+    snapshot.currentTrackURI == 'http://media.example.test/song.mp3?one=1&two=2'
+    snapshot.currentTrackMetaData.title == 'Flowers & Flags'
+    snapshot.currentTrackMetaData.creator == 'Artist & Co'
+    snapshot.currentTrackMetaData.album == 'Album & Friends'
+  }
+
+  def "partial AVT events preserve track metadata and changed URI clears stale values"() {
+    given:
+    String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"><item><dc:title>First Track</dc:title></item></DIDL-Lite>'
+    String metadata = StringEscapeUtils.escapeXml10(didl)
+    String first = avtBody('<TransportState val="PLAYING"/><CurrentTrackURI val="http://media.test/first"/>' +
+      '<CurrentTrackMetaData val="' + metadata + '"/><CurrentTrackDuration val="0:03:00"/><CurrentTrack val="1"/>')
+    String transportOnly = avtBody('<TransportState val="PAUSED_PLAYBACK"/>')
+    String nextTrack = avtBody('<CurrentTrackURI val="http://media.test/second"/>')
+
+    when:
+    driver.handleAvtFull('SONOS-TEST-DNI', first, null)
+    String firstName = driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName
+    driver.handleAvtFull('SONOS-TEST-DNI', transportOnly, null)
+    String nameAfterPartial = driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName
+    driver.handleAvtFull('SONOS-TEST-DNI', nextTrack, null)
+
+    then:
+    firstName == 'First Track'
+    nameAfterPartial == 'First Track'
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName == 'Not Available'
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentArtistName == 'Not Available'
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackDuration == ''
+    driver.runtimeState.lastTransportPlaybackSnapshot.currentTrackURI == 'http://media.test/second'
+  }
+
+  def "AVT parent fanout is scheduled after parse and carries current playback state"() {
+    given:
+    String body = avtBody('<TransportState val="PLAYING"/><CurrentTrackURI val="http://media.test/track"/>' +
+      '<CurrentTrackMetaData val="' + StringEscapeUtils.escapeXml10(
+        '<DIDL-Lite><item><title>Deferred Track</title><creator>Deferred Artist</creator></item></DIDL-Lite>') + '"/>')
+
+    when:
+    driver.handleAvtFull('SONOS-TEST-DNI', body, 0)
+
+    then:
+    parentPlayerUpdates.isEmpty()
+    driver.scheduled.any { List job -> job[1] == 'flushCoordinatorAvtParentUpdate' }
+
+    when:
+    driver.flushCoordinatorAvtParentUpdate()
+    Map message = playerStateMessages().find { Map item -> item.kind == 'avtReceived' }
+
+    then:
+    message.payload.rincon == 'RINCON_TEST'
+    message.payload.attributes.status == 'playing'
+    message.payload.attributes.currentTrackName == 'Deferred Track'
+    message.payload.attributes.currentArtistName == 'Deferred Artist'
+  }
+
+  def "bounded XML lookups match namespace-prefixed sleep timer and queue fields"() {
+    given:
+    GPathResult sleepXml = new XmlSlurper().parseText(
+      '<s:Envelope xmlns:s="urn:soap"><s:Body><u:Response xmlns:u="urn:sonos"><RemainingSleepTimerDuration>00:04:00</RemainingSleepTimerDuration>' +
+      '<CurrentSleepTimerGeneration>12</CurrentSleepTimerGeneration></u:Response></s:Body></s:Envelope>')
+    GPathResult queueXml = new XmlSlurper().parseText(
+      '<s:Envelope xmlns:s="urn:soap"><s:Body><u:BrowseResponse xmlns:u="urn:content"><NumberReturned>1</NumberReturned>' +
+      '<Result><DIDL-Lite xmlns:dc="urn:dc"><item id="Q:0/1"><dc:title>Queue Title</dc:title><res protocolInfo="http-get:*:audio/mpeg:*">http://media.test/q</res></item></DIDL-Lite></Result>' +
+      '<UpdateID>27</UpdateID></u:BrowseResponse></s:Body></s:Envelope>')
+    GPathResult browseResponse = driver.findDirectXmlChild(driver.findDirectXmlChild(queueXml, 'Body'), 'BrowseResponse')
+    GPathResult didl = new XmlSlurper().parseText(driver.findQueueXmlText(browseResponse, 'Result'))
+    GPathResult item = driver.findDirectXmlChild(didl, 'item')
+
+    expect:
+    driver.findSleepTimerXmlText(sleepXml, 'RemainingSleepTimerDuration') == '00:04:00'
+    driver.findSleepTimerXmlText(sleepXml, 'CurrentSleepTimerGeneration') == '12'
+    driver.findSoapBodyField(queueXml, 'UpdateID') == '27'
+    driver.findQueueXmlText(item, 'title') == 'Queue Title'
+    item['res']['@protocolInfo'].toString() == 'http-get:*:audio/mpeg:*'
   }
 
   def "ZGT packet without service type header is not applied"() {
