@@ -2378,12 +2378,14 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "bounded XML lookups match namespace-prefixed sleep timer and queue fields"() {
     given:
+    String didlXml = '<DIDL-Lite xmlns:dc="urn:dc"><item id="Q:0/1"><dc:title>Queue Title</dc:title>' +
+      '<res protocolInfo="http-get:*:audio/mpeg:*">http://media.test/q</res></item></DIDL-Lite>'
     GPathResult sleepXml = new XmlSlurper().parseText(
       '<s:Envelope xmlns:s="urn:soap"><s:Body><u:Response xmlns:u="urn:sonos"><RemainingSleepTimerDuration>00:04:00</RemainingSleepTimerDuration>' +
       '<CurrentSleepTimerGeneration>12</CurrentSleepTimerGeneration></u:Response></s:Body></s:Envelope>')
     GPathResult queueXml = new XmlSlurper().parseText(
       '<s:Envelope xmlns:s="urn:soap"><s:Body><u:BrowseResponse xmlns:u="urn:content"><NumberReturned>1</NumberReturned>' +
-      '<Result><DIDL-Lite xmlns:dc="urn:dc"><item id="Q:0/1"><dc:title>Queue Title</dc:title><res protocolInfo="http-get:*:audio/mpeg:*">http://media.test/q</res></item></DIDL-Lite></Result>' +
+      '<Result>' + StringEscapeUtils.escapeXml10(didlXml) + '</Result>' +
       '<UpdateID>27</UpdateID></u:BrowseResponse></s:Body></s:Envelope>')
     GPathResult browseResponse = driver.findDirectXmlChild(driver.findDirectXmlChild(queueXml, 'Body'), 'BrowseResponse')
     GPathResult didl = new XmlSlurper().parseText(driver.findQueueXmlText(browseResponse, 'Result'))

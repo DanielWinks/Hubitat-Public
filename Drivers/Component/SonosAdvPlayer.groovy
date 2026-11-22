@@ -12318,7 +12318,7 @@ Map getReusableCurrentTrack(Map snapshot) {
     GPathResult item = findDirectXmlChild(parsed, 'item')
     String title = findQueueXmlText(item, 'title')
     String resource = findQueueXmlText(item, 'res')
-    String protocolInfo = item?['res']?.getAt(0)?.attributes()?.get('protocolInfo')?.toString()
+    String protocolInfo = item != null ? item['res']['@protocolInfo']?.toString() : null
     String uri = normalizeQueueTrackUri(resource)
     if(!title || !uri || uri.startsWith('x-sonosapi-stream:') || uri.startsWith('x-rincon-mp3radio:') || uri.startsWith('x-sonosapi-radio:')) {
       logInfo("Cannot save the currently playing item for ${device.displayName}: the music service did not provide track metadata that Sonos can add to a Favorite or Playlist")
