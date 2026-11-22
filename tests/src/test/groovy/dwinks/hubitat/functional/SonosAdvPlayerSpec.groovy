@@ -2518,6 +2518,14 @@ class SonosAdvPlayerSpec extends Specification {
     item['res']['@protocolInfo'].toString() == 'http-get:*:audio/mpeg:*'
   }
 
+  def "base SOAP builder escapes control values"() {
+    when:
+    String body = driver.getBaseControlXML(driver.AVTransport, 'SetAVTransportURI', [CurrentURI: 'x?a=1&b=<two>'])
+
+    then:
+    new XmlSlurper().parseText(body).'**'.find { it.name() == 'CurrentURI' }.text() == 'x?a=1&b=<two>'
+  }
+
   def "ZGT packet without service type header is not applied"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'

@@ -2284,6 +2284,14 @@ class SonosAdvancedAppSpec extends Specification {
     ]
   }
 
+  def "Sonos alarm SOAP builder escapes values as XML text"() {
+    when:
+    String body = appScript.sonosAlarmSoapBody('SetAlarm', [ProgramURI: 'x?a=1&b=<two>'])
+
+    then:
+    new XmlSlurper().parseText(body).'**'.find { it.name() == 'ProgramURI' }.text() == 'x?a=1&b=<two>'
+  }
+
   def "deferred AVT snapshot fanout queues player states without reading the child snapshot"() {
     given:
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'

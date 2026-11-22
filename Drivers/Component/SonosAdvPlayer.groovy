@@ -30,6 +30,12 @@ import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 import groovy.transform.Field
 import groovy.util.slurpersupport.GPathResult
+import groovy.xml.MarkupBuilder
+import groovy.xml.XmlUtil
+import java.io.StringWriter
+import java.io.StringReader
+import org.xml.sax.InputSource
+import javax.xml.xpath.XPathFactory
 import hubitat.scheduling.AsyncResponse
 import hubitat.device.HubResponse
 import java.io.InputStream
@@ -399,14 +405,20 @@ GPathResult parseSonosMessageXML(String xml) {
 
 @CompileStatic
 String getBaseControlXML(Map service, String action, Map controlValues = null) {
-  String preArgs = '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>' +
-      "<u:${action} xmlns:u=\"${service.serviceType}\">"
   Map actionArgs = service.actions[action] as Map
   Map args = new LinkedHashMap(actionArgs.arguments as Map)
   if(controlValues) { controlValues.each { entry -> args[entry.key] = entry.value } }
-  String xmlArgs = ''
-  args.each { entry -> xmlArgs += "<${entry.key}>${entry.value}</${entry.key}>" }
-  return preArgs + xmlArgs + "</u:${action}></s:Body></s:Envelope>"
+  StringWriter writer = new StringWriter()
+  MarkupBuilder xml = new MarkupBuilder(writer)
+  xml.mkp.xmlDeclaration(version: '1.0')
+  xml.'s:Envelope'('xmlns:s': 'http://schemas.xmlsoap.org/soap/envelope/', 's:encodingStyle': 'http://schemas.xmlsoap.org/soap/encoding/') {
+    's:Body' {
+      "u:${action}"('xmlns:u': service.serviceType) {
+        args.each { entry -> "${entry.key}"(entry.value == null ? '' : entry.value.toString()) }
+      }
+    }
+  }
+  return writer.toString()
 }
 
 @CompileStatic
@@ -4668,7 +4680,9 @@ void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
 }
 
 String findSleepTimerXmlText(GPathResult node, String elementName) {
-  return findSoapBodyField(node, elementName)
+  if(node == null || !elementName) { return null }
+  String expression = "//*[local-name()='${elementName.replace("'", "")}' or name()='${elementName.replace("'", "")}']/text()"
+  return XPathFactory.newInstance().newXPath().evaluate(expression, new InputSource(new StringReader(XmlUtil.serialize(node))))
 }
 
 void createRemoveRightChannelChildDevice(Boolean create) {
@@ -11137,7 +11151,7 @@ void playerSetGroupRelativeVolume(Integer volumeDelta) {
 
 @CompileStatic
 void getFavorites() {
-  if(state.favoritesBrowseRequestId) { return }
+  if(getDriverStateValue('favoritesBrowseRequestId')) { return }
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) {
     logWarn('Cannot retrieve Sonos favorites: local UPnP host is unavailable')
@@ -11265,7 +11279,7 @@ void cacheUpnpFavorites(List<Map> favorites) {
 
 @CompileStatic
 void getPlaylists() {
-  if(state.playlistsBrowseRequestId) { return }
+  if(getDriverStateValue('playlistsBrowseRequestId')) { return }
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) { logWarn('Cannot retrieve Sonos Playlists: local UPnP host is unavailable'); return }
   Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: 'SQ:',
@@ -13035,8 +13049,9 @@ String snapshotTrackDescription(String trackUri) {
 }
 
 String findQueueXmlText(GPathResult node, String targetName) {
-  GPathResult match = findDirectXmlChild(node, targetName)
-  return match?.text()?.toString()
+  if(node == null || !targetName) { return null }
+  String expression = "//*[local-name()='${targetName.replace("'", "")}' or name()='${targetName.replace("'", "")}']/text()"
+  return XPathFactory.newInstance().newXPath().evaluate(expression, new InputSource(new StringReader(XmlUtil.serialize(node))))
 }
 
 String escapeQueueHtml(String value) {

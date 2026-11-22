@@ -31,6 +31,13 @@ import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.util.slurpersupport.GPathResult
+import groovy.xml.MarkupBuilder
+import java.io.StringWriter
+import javax.xml.xpath.XPathFactory
+import javax.xml.xpath.XPathConstants
+import javax.xml.parsers.DocumentBuilderFactory
+import org.xml.sax.InputSource
+import java.io.StringReader
 import hubitat.scheduling.AsyncResponse
 import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.commons.lang3.StringUtils
@@ -4024,9 +4031,17 @@ void sonosAlarmListCallback(AsyncResponse response, Map data) {
 
 @CompileStatic
 String sonosAlarmSoapBody(String action, Map values) {
-  StringBuilder args = new StringBuilder()
-  values.each { Object key, Object value -> args.append('<').append(key).append('>').append(escapeSonosXml(value?.toString() ?: '')).append('</').append(key).append('>') }
-  return '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:' + action + ' xmlns:u="' + SONOS_ALARM_SERVICE_TYPE + '">' + args.toString() + '</u:' + action + '></s:Body></s:Envelope>'
+  StringWriter writer = new StringWriter()
+  MarkupBuilder xml = new MarkupBuilder(writer)
+  xml.mkp.xmlDeclaration(version: '1.0')
+  xml.'s:Envelope'('xmlns:s': 'http://schemas.xmlsoap.org/soap/envelope/', 's:encodingStyle': 'http://schemas.xmlsoap.org/soap/encoding/') {
+    's:Body' {
+      "u:${action}"('xmlns:u': SONOS_ALARM_SERVICE_TYPE) {
+        values.each { Object key, Object value -> "${key}"(value == null ? '' : value.toString()) }
+      }
+    }
+  }
+  return writer.toString()
 }
 
 @CompileStatic
@@ -4036,20 +4051,19 @@ String escapeSonosXml(String value) {
 
 List<Map> parseSonosAlarmList(String responseXml) {
   if(!responseXml) { return [] }
-  GPathResult outer = new XmlSlurper().parseText(responseXml)
-  GPathResult body = findDirectXmlChild(outer, 'Body')
-  GPathResult alarmListNode = findXmlChildContainer(body, 'CurrentAlarmList')
-  String alarmXml = alarmListNode?.text()?.toString()
+  javax.xml.xpath.XPath xpath = XPathFactory.newInstance().newXPath()
+  InputSource source = new InputSource(new StringReader(responseXml))
+  String alarmXml = xpath.evaluate("//*[local-name()='CurrentAlarmList' or name()='CurrentAlarmList']/text()", source)
   if(!alarmXml) { return [] }
-  GPathResult alarmRoot = new XmlSlurper().parseText(alarmXml)
+  org.w3c.dom.Document alarmRoot = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(new InputSource(new StringReader(alarmXml)))
+  org.w3c.dom.NodeList alarmNodes = (org.w3c.dom.NodeList) xpath.evaluate("//*[local-name()='Alarm' or name()='Alarm']", alarmRoot, XPathConstants.NODESET)
   List<Map> result = []
-  for(Object alarmObject : alarmRoot.children()) {
-    if(!(alarmObject instanceof GPathResult) || xmlLocalName((GPathResult)alarmObject) != 'Alarm') { continue }
-    GPathResult node = (GPathResult)alarmObject
+  for(Integer index = 0; index < alarmNodes.getLength(); index++) {
+    org.w3c.dom.Element node = (org.w3c.dom.Element)alarmNodes.item(index)
     Map attrs = [:]
     ['ID','StartTime','StartLocalTime','Duration','Recurrence','Enabled','RoomUUID',
      'ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones'].each { String key ->
-      String value = node["@${key}"]?.toString()
+      String value = node.getAttribute(key)
       if(value) { attrs[key] = value }
     }
     if(attrs.StartTime && !attrs.StartLocalTime) { attrs.StartLocalTime = attrs.StartTime }
