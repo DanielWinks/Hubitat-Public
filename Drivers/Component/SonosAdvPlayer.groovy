@@ -34,6 +34,10 @@ import hubitat.scheduling.AsyncResponse
 import hubitat.device.HubResponse
 import java.io.InputStream
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.Duration
+import java.time.format.DateTimeFormatter
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -47,6 +51,7 @@ import java.util.Locale
 
 @Field static final List<Integer> ANNOUNCEMENT_RESTORE_RETRY_DELAYS = [1, 2].asImmutable()
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+@Field static final DateTimeFormatter SID_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MMM-dd h:mm:ss a', Locale.ENGLISH)
 
 void logError(String message) {
   if (loggingEnabled('error')) {
@@ -126,9 +131,8 @@ void logWebSocketCommandPayload(Map command, String json) {
 // Keep the small timestamp formatter needed by the legacy SID visibility path
 // local so the standalone driver has the same behavior after publication.
 String formatEpoch(Long epochSeconds) {
-  Date timestamp = new Date(epochSeconds * 1000L)
-  if(location?.timeZone) { return timestamp.format('yyyy-MMM-dd h:mm:ss a', location.timeZone) }
-  return timestamp.format('yyyy-MMM-dd h:mm:ss a')
+  ZoneId zoneId = location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()
+  return Instant.ofEpochSecond(epochSeconds).atZone(zoneId).format(SID_TIMESTAMP_FORMATTER)
 }
 
 // =============================================================================
@@ -2774,8 +2778,12 @@ void announcementPlaybackPlayModeRestored(AsyncResponse response, Map data = nul
 }
 
 String formatSonosTime(Long positionMillis) {
-  Long seconds = Math.max(0L, positionMillis.intdiv(1000L))
-  return String.format('%02d:%02d:%02d', seconds.intdiv(3600L), seconds.intdiv(60L) % 60L, seconds % 60L)
+  Duration duration = Duration.ofMillis(Math.max(0L, positionMillis))
+  Long hours = duration.toHours()
+  Duration afterHours = duration.minusHours(hours)
+  Long minutes = afterHours.toMinutes()
+  Long seconds = afterHours.minusMinutes(minutes).seconds
+  return String.format(Locale.ROOT, '%02d:%02d:%02d', hours, minutes, seconds)
 }
 
 void finishAnnouncementPlaybackRestore(String correlationId, Boolean success, String reason) {
@@ -7535,8 +7543,7 @@ void setHouseholdId(String householdId) {
 }
 
 String getFormattedLocalTimestamp() {
-  if(location.timeZone) { return new Date().format('yyyy-MMM-dd h:mm:ss a', location.timeZone) }
-  return new Date().format('yyyy-MMM-dd h:mm:ss a')
+  return ZonedDateTime.now(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(SID_TIMESTAMP_FORMATTER)
 }
 
 void updateEventTimestampDeviceData(String key) {

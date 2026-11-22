@@ -36,12 +36,19 @@ import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.commons.lang3.math.NumberUtils
 import java.util.Locale
+import java.time.Instant
+import java.time.Duration
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 // =============================================================================
 // Library: Utilities and Logging (inlined)
 // =============================================================================
 @Field static final List<String> APP_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 @Field static final Integer CHILD_STATE_DRAIN_BATCH_SIZE = 2
+@Field static final DateTimeFormatter APP_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss')
 
 void logError(String message) {
   if(loggingEnabled('error')) {
@@ -527,7 +534,7 @@ Map mainPage() {
 
       input 'btnCheckInstalledVersions', 'button', title: 'Check Versions of Installed Files', submitOnChange: false
       if(state.lastVersionCheck) {
-        paragraph "Last version check: ${new Date(state.lastVersionCheck).format('yyyy-MM-dd HH:mm:ss')}"
+        paragraph "Last version check: ${Instant.ofEpochMilli(state.lastVersionCheck as Long).atZone(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(APP_TIMESTAMP_FORMATTER)}"
       }
 
       // Show message if update was just completed
@@ -705,7 +712,7 @@ void startDiscoverySession() {
     subscribeToSsdpEvents(location)
     atomicState.discoveryRunning = true
     ssdpDiscover()
-    atomicState.discoveryEndTime = now() + 60000
+    atomicState.discoveryEndTime = Instant.ofEpochMilli(now()).plus(Duration.ofMinutes(1)).toEpochMilli()
     app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
     runIn(60, 'stopDiscovery')
     runIn(1, 'updateDiscoveryTimer')
@@ -1711,7 +1718,7 @@ Map localPlayerPage() {
   startDiscoverySession()
 
   Long endTime = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
-  Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
+  Integer remainingSecs = Math.max(0, Duration.between(Instant.ofEpochMilli(now()), Instant.ofEpochMilli(endTime)).seconds as Integer)
 
   dynamicPage(
 		name: "localPlayerPage",
@@ -2987,11 +2994,12 @@ Boolean isZgtElectionStillValid(String candidateDni) {
   String expiresEpoch = player.getDataValue('zgtSubExpiresEpoch')?.toString()
   Long exp = null
   try { exp = expiresEpoch ? Long.parseLong(expiresEpoch) * 1000L : null } catch(Exception ignored) { exp = null }
-  Boolean subOk = zgtSub && zgtSub != '' && exp != null && exp > now()
+  Long nowEpochSeconds = Instant.ofEpochMilli(now()).epochSecond
+  Boolean subOk = zgtSub && zgtSub != '' && exp != null && exp > nowEpochSeconds * 1000L
   Boolean lastOk = false
   try {
     Long last = player.getLastInboundZgtEventEpoch() as Long
-    lastOk = last != null && last > 0 && (now() / 1000L - last) < 300
+    lastOk = last != null && last > 0 && (nowEpochSeconds - last) < 300
   } catch(Exception ignored) { }
   return subOk || lastOk
 }
@@ -3016,8 +3024,8 @@ void checkZgtSubscriptionHealth() {
   try { expMs = expiresEpochStr ? Long.parseLong(expiresEpochStr) * 1000L : null } catch(Exception ignored) { expMs = null }
   Long lastEpoch = 0L
   try { lastEpoch = player.getLastInboundZgtEventEpoch() as Long ?: 0L } catch(Exception ignored) { }
-  Long nowSec = now() / 1000L
-  Boolean subOk = zgtSub && zgtSub != '' && expMs != null && expMs > now()
+  Long nowSec = Instant.ofEpochMilli(now()).epochSecond
+  Boolean subOk = zgtSub && zgtSub != '' && expMs != null && expMs > nowSec * 1000L
   Boolean lastOk = lastEpoch > 0 && (nowSec - lastEpoch) < 300
   if(subOk && lastOk) { return }
   if(subOk && !lastOk) { logDebug("ZGT health: sub valid but lastZgtEvent stale for ${candidateDni}"); return }
@@ -3043,7 +3051,7 @@ void verifyZgtResubscription(Map data = [:]) {
   String expStr = player.getDataValue('zgtSubExpiresEpoch')?.toString()
   Long expMs = null
   try { expMs = expStr ? Long.parseLong(expStr) * 1000L : null } catch(Exception ignored) { }
-  Boolean ok = zgtSub && zgtSub != '' && expMs != null && expMs > now()
+  Boolean ok = zgtSub && zgtSub != '' && expMs != null && expMs > Instant.ofEpochMilli(now()).epochSecond * 1000L
   if(ok) {
     zgt.recoveryAttempt = 0
     state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
@@ -4144,7 +4152,7 @@ void createSonosAlarm(String householdId, Map alarm) {
     logWarn('Cannot create Sonos alarm: recurrence or play mode is invalid'); return
   }
   Integer volume = alarm.Volume.toString().toInteger()
-  if(volume < 0 || volume > 100 || !(alarm.StartLocalTime ==~ /\d{2}:\d{2}:\d{2}/) || !(alarm.Duration ==~ /\d{2}:\d{2}:\d{2}/)) {
+  if(volume < 0 || volume > 100 || !isValidLocalTime(alarm.StartLocalTime?.toString()) || !isValidSonosDuration(alarm.Duration?.toString())) {
     logWarn('Cannot create Sonos alarm: time, duration, or volume is invalid'); return
   }
   Map params = [uri: "http://${host}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
@@ -4269,8 +4277,28 @@ void refreshSonosAlarmsDeferred(Map data) {
 }
 
 void setSonosAlarmEnabled(String dni, Boolean enabled) { updateSonosAlarm(dni, [Enabled: enabled ? '1' : '0']) }
+Boolean isValidLocalTime(String value) {
+  if(!value) { return false }
+  try {
+    LocalTime.parse(value, DateTimeFormatter.ofPattern('HH:mm:ss'))
+    return true
+  } catch(Exception ignored) {
+    return false
+  }
+}
+Boolean isValidSonosDuration(String value) {
+  if(!value || !(value ==~ /\d{2}:\d{2}:\d{2}/)) { return false }
+  List<Integer> parts = value.split(':').collect { String part -> Integer.parseInt(part) }
+  if(parts[1] > 59 || parts[2] > 59) { return false }
+  try {
+    Duration.ofHours(parts[0]).plusMinutes(parts[1]).plusSeconds(parts[2])
+    return true
+  } catch(Exception ignored) {
+    return false
+  }
+}
 void setSonosAlarmTime(String dni, String time) {
-  if(!(time ==~ /\d{2}:\d{2}:\d{2}/)) { logWarn("Ignoring invalid alarm time ${time}"); return }
+  if(!isValidLocalTime(time)) { logWarn("Ignoring invalid alarm time ${time}"); return }
   updateSonosAlarm(dni, [StartLocalTime: time])
 }
 void setSonosAlarmVolume(String dni, Integer volume) {
@@ -4282,7 +4310,7 @@ void setSonosAlarmRecurrence(String dni, String recurrence) {
   updateSonosAlarm(dni, [Recurrence: recurrence])
 }
 void setSonosAlarmDuration(String dni, String duration) {
-  if(!(duration ==~ /\d{2}:\d{2}:\d{2}/)) { logWarn("Ignoring invalid alarm duration ${duration}"); return }
+  if(!isValidSonosDuration(duration)) { logWarn("Ignoring invalid alarm duration ${duration}"); return }
   updateSonosAlarm(dni, [Duration: duration])
 }
 void setSonosAlarmRoom(String dni, String playerId) {
@@ -13620,7 +13648,7 @@ void completeUpdateCheck(Map data, String currentVersion) {
   Integer comparison = compareVersions(currentVersion, latestVersion)
   logDebug("Async update check cached installed=${currentVersion}, latest=${latestVersion}, comparison=${comparison}")
   state.lastUpdateCheck = now()
-  state.lastUpdateCheckFormatted = new Date().format('yyyy-MM-dd HH:mm:ss')
+  state.lastUpdateCheckFormatted = ZonedDateTime.now(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(APP_TIMESTAMP_FORMATTER)
   Boolean updateDismissed = state.dismissedUpdateVersion?.toString() == latestVersion
   logDebug("Completing update check; currentVersion=${currentVersion}, latestVersion=${latestVersion}, comparison=${comparison}, dismissedVersion=${state.dismissedUpdateVersion}, updateDismissed=${updateDismissed}")
   if(comparison < 0 && !updateDismissed) {
@@ -13947,7 +13975,7 @@ void maintenanceFinish(Map job) {
     }
   } else if(job.op == 'publishLibraries') {
     Integer successes = job.successCount ?: 0
-    String timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
+    String timestamp = ZonedDateTime.now(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(APP_TIMESTAMP_FORMATTER)
     state.lastLibraryPublish = successes == job.totalLibraries ? "✓ ${timestamp}: Successfully published ${successes} libraries" : (successes ? "⚠ ${timestamp}: Published ${successes}, failed ${job.errors.size()} (${job.errors.join(', ')})" : "✗ ${timestamp}: Failed to publish libraries (${job.errors.join(', ')})")
     if(successes > 0) { runIn(1, 'checkInstalledVersions') }
   } else if(job.op == 'repairVersions') {
