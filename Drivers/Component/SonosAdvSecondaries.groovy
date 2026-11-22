@@ -78,6 +78,106 @@ metadata {
 @Field private final Integer WS_MAX_RECONNECT_ATTEMPTS = 3
 @Field private final List<Integer> WS_RECONNECT_DELAYS = [5, 15, 60]
 @Field private final Integer WS_COMMAND_ACK_TIMEOUT_SECONDS = 3
+
+@Field static final Set<String> ACTIVE_SECONDARY_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'websocketConnectPending',
+  'websocketReconnectAttempts',
+  'websocketReconnectScheduled',
+  'websocketConnectionGeneration',
+  'websocketLastInboundAt',
+  'websocketInboundSequence',
+  'websocketCommandLedger',
+  'synchronizedAudioClipReleases',
+  'parentInitializationGranted',
+]))
+
+@Field static final Set<String> ACTIVE_SECONDARY_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'id',
+  'deviceIp',
+  'householdId',
+  'websocketUrl',
+  'websocketStatus',
+]))
+
+@Field static final Set<String> ACTIVE_SECONDARY_CURRENT_STATE_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>([
+  'websocketStatus',
+  'websocketCommandResponse',
+  'secondaryInitRequest',
+]))
+
+@Field static final Set<String> ACTIVE_SECONDARY_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'logEnable',
+  'debugLogEnable',
+]))
+
+// =============================================================================
+// Migration-Prune Helpers — whitelist-driven for-each removal
+// =============================================================================
+Map<String, Object> pruneOrphanedSecondaryPersistence() {
+  Map<String, Object> result = [
+    stateRemoved: pruneOrphanStateKeys(state as Map, ACTIVE_SECONDARY_STATE_KEYS),
+    deviceDataRemoved: pruneOrphanDeviceData(device, ACTIVE_SECONDARY_DEVICE_DATA_KEYS),
+    currentStatesRemoved: pruneOrphanCurrentStates(device, ACTIVE_SECONDARY_CURRENT_STATE_ATTRIBUTES),
+    settingsRemoved: pruneOrphanSettings(ACTIVE_SECONDARY_SETTINGS_KEYS),
+  ]
+  Integer total = ((List)result.stateRemoved).size() + ((List)result.deviceDataRemoved).size() +
+    ((List)result.currentStatesRemoved).size() + ((List)result.settingsRemoved).size()
+  if(total > 0) {
+    logDebug("Secondary persistence prune: removed ${total} orphan value(s) (state=${result.stateRemoved}, deviceData=${result.deviceDataRemoved}, currentStates=${result.currentStatesRemoved}, settings=${result.settingsRemoved})")
+  }
+  return result
+}
+
+List<String> pruneOrphanStateKeys(Map persisted, Set<String> active) {
+  if(persisted == null || active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(persisted.keySet())
+    .findAll { String k -> !active.contains(k.toString()) }
+  toRemove.each { String k -> persisted.remove(k) }
+  return toRemove
+}
+
+List<String> pruneOrphanDeviceData(Object dev, Set<String> active) {
+  if(dev == null || active == null) { return [] }
+  try {
+    Map data = dev.getData()
+    if(data == null) { return [] }
+    List<String> toRemove = new ArrayList<String>(data.keySet())
+      .findAll { String k -> !active.contains(k) }
+    toRemove.each { String k -> dev.removeDataValue(k) }
+    return toRemove
+  } catch(Exception e) {
+    return []
+  }
+}
+
+List<String> pruneOrphanCurrentStates(Object dev, Set<String> active) {
+  if(dev == null || active == null) { return [] }
+  try {
+    List removed = []
+    dev.getCurrentStates().each { Object st ->
+      String name = null
+      try { name = st?.name?.toString() } catch(Exception ignored) { name = null }
+      if(name && !active.contains(name)) {
+        try { dev.deleteCurrentState(name); removed << name } catch(Exception ignored) { }
+      }
+    }
+    return removed
+  } catch(Exception e) {
+    return []
+  }
+}
+
+List<String> pruneOrphanSettings(Set<String> active) {
+  if(active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(settings.keySet())
+    .findAll { String k -> !active.contains(k) }
+  toRemove.each { String k ->
+    try { settings.remove(k) } catch(Exception ignored) { }
+    try { device.clearSetting(k) } catch(Exception ignored) { }
+    try { device.updatedSettings?.remove(k) } catch(Exception ignored) { }
+  }
+  return toRemove
+}
 // =============================================================================
 // End Fields
 // =============================================================================
@@ -89,8 +189,11 @@ metadata {
 // =============================================================================
 void initialize() { configure() }
 void configure() {
+  pruneOrphanedSecondaryPersistence()
   sendEvent(name: 'secondaryInitRequest', value: groovy.json.JsonOutput.toJson([reason: 'secondary device lifecycle initialize', dni: this.device.getDeviceNetworkId()]))
 }
+void installed() { configure() }
+void updated() { configure() }
 // =============================================================================
 // End Initialize And Configure
 // =============================================================================

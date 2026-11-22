@@ -92,6 +92,81 @@ void logTrace(String message) {
 @Field static final Integer PARENT_REQUEST_RETRY_MS = 1000
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingGroupRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 
+@Field static final Set<String> ACTIVE_GROUP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  PENDING_BATCH_EVENTS_KEY,
+  BATCH_EVENTS_SCHEDULED_KEY,
+  BATCH_EVENTS_DUE_AT_KEY,
+]))
+
+@Field static final Set<String> ACTIVE_GROUP_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'groupCoordinatorId',
+  'playerIds',
+  'householdTopology',
+  'lastGroupingMode',
+  'enableTrackPositionUpdates',
+]))
+
+@Field static final Set<String> ACTIVE_GROUP_CURRENT_STATE_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>([
+  'coordinatorActive',
+  'followers',
+  'currentlyJoinedPlayers',
+  'zgtInProgress',
+  'parentAppRequest',
+  'currentTrackDuration',
+  'trackPosition',
+  'trackPositionUpdated',
+  'currentArtistName',
+  'albumArtURI',
+  'albumArtSmall',
+  'albumArtMedium',
+  'albumArtLarge',
+  'audioSource',
+  'currentAlbumName',
+  'currentTrackName',
+  'currentFavorite',
+  'currentPlaylist',
+  'currentTrackNumber',
+  'nextArtistName',
+  'nextAlbumName',
+  'nextTrackName',
+  'nextTrackAlbumArtURI',
+  'queueTrackTotal',
+  'queueTrackPosition',
+  'transportStatus',
+  'groupVolume',
+  'groupMute',
+  'currentRepeatOneMode',
+  'currentRepeatAllMode',
+  'currentCrossfadeMode',
+  'currentShuffleMode',
+  'lastUpdated',
+  'switch',
+  'volume',
+  'mute',
+  'playbackStatus',
+  'status',
+  'trackData',
+  'trackMetaData',
+  'dataSource',
+  'sleepTimer',
+  'sleepTimerName',
+  'sleepTimerRunning',
+  'sleepTimerDuration',
+  'sleepTimerTime',
+  'playbackState',
+]))
+
+@Field static final Set<String> ACTIVE_GROUP_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'logLevel',
+  'chimeBeforeStandardPriorityTTS',
+  'chimeBeforeHighPriorityTTS',
+  'controlUngroupedIndividually',
+  'useProportionalVolume',
+  'enableTrackPositionUpdates',
+  'onlyUpdateWhenActive',
+  'resetAttributesWhenInactive',
+]))
+
 metadata {
   definition(
     name: 'Sonos Advanced Group',
@@ -272,6 +347,77 @@ Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive 
 Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
 Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
 
+// =============================================================================
+// Migration-Prune Helpers — whitelist-driven for-each removal
+// =============================================================================
+Map<String, Object> pruneOrphanedGroupPersistence() {
+  Map<String, Object> result = [
+    stateRemoved: pruneOrphanStateKeys(state as Map, ACTIVE_GROUP_STATE_KEYS),
+    deviceDataRemoved: pruneOrphanDeviceData(device, ACTIVE_GROUP_DEVICE_DATA_KEYS),
+    currentStatesRemoved: pruneOrphanCurrentStates(device, ACTIVE_GROUP_CURRENT_STATE_ATTRIBUTES),
+    settingsRemoved: pruneOrphanSettings(ACTIVE_GROUP_SETTINGS_KEYS),
+  ]
+  Integer total = ((List)result.stateRemoved).size() + ((List)result.deviceDataRemoved).size() +
+    ((List)result.currentStatesRemoved).size() + ((List)result.settingsRemoved).size()
+  if(total > 0) {
+    logDebug("Group persistence prune: removed ${total} orphan value(s) (state=${result.stateRemoved}, deviceData=${result.deviceDataRemoved}, currentStates=${result.currentStatesRemoved}, settings=${result.settingsRemoved})")
+  }
+  return result
+}
+
+List<String> pruneOrphanStateKeys(Map persisted, Set<String> active) {
+  if(persisted == null || active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(persisted.keySet())
+    .findAll { String k -> !active.contains(k.toString()) }
+  toRemove.each { String k -> persisted.remove(k) }
+  return toRemove
+}
+
+List<String> pruneOrphanDeviceData(Object dev, Set<String> active) {
+  if(dev == null || active == null) { return [] }
+  try {
+    Map data = dev.getData()
+    if(data == null) { return [] }
+    List<String> toRemove = new ArrayList<String>(data.keySet())
+      .findAll { String k -> !active.contains(k) }
+    toRemove.each { String k -> dev.removeDataValue(k) }
+    return toRemove
+  } catch(Exception e) {
+    logDebug("Could not enumerate device data for prune: ${e.message}")
+    return []
+  }
+}
+
+List<String> pruneOrphanCurrentStates(Object dev, Set<String> active) {
+  if(dev == null || active == null) { return [] }
+  try {
+    List removed = []
+    dev.getCurrentStates().each { Object st ->
+      String name = null
+      try { name = st?.name?.toString() } catch(Exception ignored) { name = null }
+      if(name && !active.contains(name)) {
+        try { dev.deleteCurrentState(name); removed << name } catch(Exception ignored) { }
+      }
+    }
+    return removed
+  } catch(Exception e) {
+    logDebug("Could not enumerate current states for prune: ${e.message}")
+    return []
+  }
+}
+
+List<String> pruneOrphanSettings(Set<String> active) {
+  if(active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(settings.keySet())
+    .findAll { String k -> !active.contains(k) }
+  toRemove.each { String k ->
+    try { settings.remove(k) } catch(Exception ignored) { }
+    try { device.clearSetting(k) } catch(Exception ignored) { }
+    try { device.updatedSettings?.remove(k) } catch(Exception ignored) { }
+  }
+  return toRemove
+}
+
 void setLastGroupingMode(String groupingMode) {
   if(groupingMode != GROUPING_MODE_EXPLICIT && groupingMode != GROUPING_MODE_ADDITIVE) {
     return
@@ -398,6 +544,7 @@ void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
 void initialize() {
   clearPendingCommandsForInitialization()
   migrateLegacyRuntimeState()
+  pruneOrphanedGroupPersistence()
   resetPendingStatePublicationForInitialization()
   removeStaleGroupStates()
   applyInitializationDefaults()
@@ -481,6 +628,7 @@ void uninstalled() {
 
 void configure() {
   migrateLegacyRuntimeState()
+  pruneOrphanedGroupPersistence()
   schedulePendingBatchEvents()
   removeStaleGroupStates()
   synchronizeTrackPositionPreference()

@@ -970,6 +970,267 @@ Boolean hasLineInCapability() {
 @Field static volatile String cachedTTSDefaultVoice = null
 
 // =============================================================================
+// Whitelisted persistence — pruning helper surfaces (standalone copy, no #include)
+// =============================================================================
+@Field static final Set<String> ACTIVE_PLAYER_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  PENDING_BATCH_EVENTS_KEY,
+  BATCH_EVENTS_SCHEDULED_KEY,
+  BATCH_EVENTS_DUE_AT_KEY,
+  LOCAL_EVENT_DRAIN_SCHEDULED_KEY,
+  LOCAL_EVENT_DRAIN_DUE_AT_KEY,
+  PENDING_COMPONENT_CHILD_EVENTS_KEY,
+  COMPONENT_CHILD_DRAIN_SCHEDULED_KEY,
+  COMPONENT_CHILD_DRAIN_DUE_AT_KEY,
+  COMPONENT_CHILD_RETRY_ATTEMPTS_KEY,
+  LAST_COMPONENT_CHILD_EVENTS_KEY,
+  GROUP_DEVICE_UPDATE_SCHEDULED_KEY,
+  LAST_PLAYER_INITIALIZATION_STATE_KEY,
+  'pendingParentAppTtsRequests',
+  'favoritesBrowseVersion',
+  'favoritesBrowseRequestId',
+  'favoritesBrowseItems',
+  'playlistsBrowseVersion',
+  'playlistsBrowseRequestId',
+  'playlistsBrowseItems',
+  'favoriteLoadRequestId',
+  'playlistLoadRequestId',
+  'playlistAddRequestId',
+  'queueBrowseRequestId',
+  'playbackState',
+  'playbackStateObservedAt',
+  'audioSourceMetadataType',
+  'audioSourceMetadataObservedAt',
+  'audioSourceSignalStatus',
+  'audioSourceSignalObservedAt',
+  'htControlTosLinkConnected',
+  'htControlObservedAt',
+  'lastError',
+  'lastErrorReason',
+  'lastErrorObservedAt',
+  'currentlyPlayingClip',
+  'activeAudioClipMessage',
+  'audioClipProgressByCorrelationId',
+]))
+
+@Field static final Set<String> ACTIVE_PLAYER_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'id',
+  'name',
+  'localUpnpHost',
+  'localUpnpPort',
+  'websocketUrl',
+  'capabilities',
+  'householdId',
+  'hasBattery',
+  'groupCoordinatorId',
+  'groupId',
+  'groupPlayerIds',
+  'isGroupCoordinator',
+  'coordinatorStatusChanged',
+  'householdTopology',
+  'expectedGroupTopology',
+  'deviceIp',
+  'secondaryIds',
+  'secondaryDeviceIps',
+  'rightChannelId',
+  'rightChannelDeviceIp',
+  'enableTrackPositionUpdates',
+  'appInitializationRequestId',
+  'zgtSubscribe',
+  'zgtLeaderGeneration',
+  IS_ZGT_SUBSCRIBER_DEVICE_KEY,
+  ZGT_SUB_DEVICE_KEY,
+  ZGT_SUB_EXPIRES_DEVICE_KEY,
+  ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY,
+  ZGT_LEADER_GEN_DEVICE_KEY,
+  HAS_BATTERY_DEVICE_KEY,
+  'rcSnapshotJson',
+  'staticDriverActivePlayerRoster',
+  'sid1',
+  'sid2',
+  'sid3',
+  'sid4',
+  'sid5',
+  'sid6',
+  'sid1-expires',
+  'sid2-expires',
+  'sid3-expires',
+  'sid4-expires',
+  'sid5-expires',
+  'sid6-expires',
+  'lastAVTransportEvent',
+  'lastMrRcEvent',
+  'lastZgtEvent',
+  'lastMrGrcEvent',
+  'lastHtControlEvent',
+  'lastWebsocketEvent',
+]))
+
+@Field static final Set<String> ACTIVE_PLAYER_CURRENT_STATE_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>([
+  'currentRepeatOneMode',
+  'currentRepeatAllMode',
+  'currentCrossfadeMode',
+  'currentShuffleMode',
+  'currentTrackDuration',
+  'trackPosition',
+  'trackPositionUpdated',
+  'currentArtistName',
+  'albumArtURI',
+  'albumArtSmall',
+  'albumArtMedium',
+  'albumArtLarge',
+  'audioSource',
+  'currentAlbumName',
+  'currentTrackName',
+  'currentFavorite',
+  'currentPlaylist',
+  'currentTrackNumber',
+  'nextArtistName',
+  'nextAlbumName',
+  'nextTrackName',
+  'nextTrackAlbumArtURI',
+  'queueTrackTotal',
+  'queueTrackPosition',
+  'treble',
+  'bass',
+  'loudness',
+  'balance',
+  'nightMode',
+  'speechEnhancement',
+  'groupVolume',
+  'groupMute',
+  'groupName',
+  'groupCoordinatorName',
+  'isGroupCoordinator',
+  'groupId',
+  'groupCoordinatorId',
+  'isGrouped',
+  'groupMemberCount',
+  'groupPlayerIds',
+  'groupMemberNames',
+  'status',
+  'transportStatus',
+  'lastUpdated',
+]))
+
+@Field static final Set<String> ACTIVE_PLAYER_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'logLevel',
+  'enableTrackPositionUpdates',
+  'disableTrackDataEvents',
+  'includeTrackDataMetaData',
+  'volumeAdjustAmountLow',
+  'volumeAdjustAmountMid',
+  'volumeAdjustAmount',
+  'ttsBoostAmount',
+  'disableArtistAlbumTrackEvents',
+  'disableAlbumArtEvents',
+  'createCrossfadeChildDevice',
+  'createShuffleChildDevice',
+  'createRepeatOneChildDevice',
+  'createRepeatAllChildDevice',
+  'createMuteChildDevice',
+  'createBatteryStatusChildDevice',
+  'createFavoritesChildDevice',
+  'createPlaylistChildDevice',
+  'createQueueChildDevice',
+  'createSleepTimerChildDevice',
+  'createRightChannelChildDevice',
+  'createNightModeChildDevice',
+  'createSpeechEnhancementChildDevice',
+  'chimeBeforeStandardPriorityTTS',
+  'chimeBeforeHighPriorityTTS',
+  'enableAirPlayUnmuteVolumeFix',
+  'enableRawWebsocketLogging',
+]))
+
+// =============================================================================
+// Migration-Prune Helpers — whitelist-driven for-each removal
+// =============================================================================
+Map<String, Object> pruneOrphanedDriverPersistence() {
+  Map<String, Object> result = [
+    stateRemoved: pruneOrphanStateKeys(state as Map, ACTIVE_PLAYER_STATE_KEYS),
+    atomicStateRemoved: pruneOrphanStateKeys(atomicState as Map, Collections.emptySet()),
+    deviceDataRemoved: pruneOrphanDeviceData(device, ACTIVE_PLAYER_DEVICE_DATA_KEYS),
+    currentStatesRemoved: pruneOrphanCurrentStates(device, ACTIVE_PLAYER_CURRENT_STATE_ATTRIBUTES),
+    settingsRemoved: pruneOrphanSettings(ACTIVE_PLAYER_SETTINGS_KEYS),
+  ]
+  Integer total = ((List)result.stateRemoved).size() + ((List)result.atomicStateRemoved).size() +
+    ((List)result.deviceDataRemoved).size() + ((List)result.currentStatesRemoved).size() +
+    ((List)result.settingsRemoved).size()
+  if(total > 0) {
+    logDebug("Driver persistence prune: removed ${total} orphan value(s) (state=${result.stateRemoved}, deviceData=${result.deviceDataRemoved}, currentStates=${result.currentStatesRemoved}, settings=${result.settingsRemoved})")
+  }
+  return result
+}
+
+List<String> pruneOrphanStateKeys(Map persisted, Set<String> active) {
+  if(persisted == null || active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(persisted.keySet())
+    .findAll { String k -> !active.contains(k.toString()) }
+  toRemove.each { String k -> persisted.remove(k) }
+  return toRemove
+}
+
+Boolean isActiveSidDataKey(String key) {
+  if(key == null) { return false }
+  if(key ==~ /^sid[1-6]$/) { return true }
+  if(key ==~ /^sid[1-6]-expires$/) { return true }
+  return false
+}
+
+Boolean isActiveWsDebugDataKey(String key) {
+  if(key == null) { return false }
+  if(key.startsWith('WS-')) {
+    return isDebugLoggingEnabled()
+  }
+  return false
+}
+
+List<String> pruneOrphanDeviceData(Object dev, Set<String> active) {
+  if(dev == null || active == null) { return [] }
+  try {
+    Map data = dev.getData()
+    if(data == null) { return [] }
+    List<String> toRemove = new ArrayList<String>(data.keySet())
+      .findAll { String k -> !active.contains(k) && !isActiveSidDataKey(k) && !isActiveWsDebugDataKey(k) }
+    toRemove.each { String k -> dev.removeDataValue(k) }
+    return toRemove
+  } catch(Exception e) {
+    logDebug("Could not enumerate device data for prune: ${e.message}")
+    return []
+  }
+}
+
+List<String> pruneOrphanCurrentStates(Object dev, Set<String> active) {
+  if(dev == null || active == null) { return [] }
+  try {
+    List removed = []
+    dev.getCurrentStates().each { Object st ->
+      String name = null
+      try { name = st?.name?.toString() } catch(Exception ignored) { name = null }
+      if(name && !active.contains(name)) {
+        try { dev.deleteCurrentState(name); removed << name } catch(Exception ignored) { }
+      }
+    }
+    return removed
+  } catch(Exception e) {
+    logDebug("Could not enumerate current states for prune: ${e.message}")
+    return []
+  }
+}
+
+List<String> pruneOrphanSettings(Set<String> active) {
+  if(active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(settings.keySet())
+    .findAll { String k -> !active.contains(k) }
+  toRemove.each { String k ->
+    try { settings.remove(k) } catch(Exception ignored) { }
+    try { device.clearSetting(k) } catch(Exception ignored) { }
+    try { device.updatedSettings?.remove(k) } catch(Exception ignored) { }
+  }
+  return toRemove
+}
+
+// =============================================================================
 // End Fields
 // =============================================================================
 
@@ -1006,6 +1267,7 @@ void handleSettingsUpdate() {
   reconcileChildDevices()
   synchronizeTrackPositionPreference()
   migrationCleanup()
+  pruneOrphanedDriverPersistence()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
@@ -1051,6 +1313,8 @@ void performImmediateInitialization() {
   clearPendingCommandsForInitialization()
   clearZgtSubscriptionForInitialization()
   migrateLegacyRuntimeState()
+  // Copy-then-prune: whitelist prune now deletes orphans including legacy state keys.
+  pruneOrphanedDriverPersistence()
   resetPendingStatePublicationForInitialization()
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
@@ -1425,6 +1689,7 @@ void cancelAppMediatedInitialization(String requestId) {
 void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
+  pruneOrphanedDriverPersistence()
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   schedulePendingBatchEvents()
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
@@ -1871,15 +2136,9 @@ void migrationCleanup() {
   if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
   if(settings.enableRawWebsocketLogging == null) { settings.enableRawWebsocketLogging = false }
   if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
-  // Remove debug-only device data keys when debug logging is off
-  if(!isDebugLoggingEnabled()) {
-    removeWsDeviceDataKeys()
-    removeEventTimestampDeviceDataKeys()
-  }
-  // Remove stale sid-expiresFormatted keys (replaced by human-readable sid-expires)
-  ['sid1', 'sid2', 'sid3', 'sid4', 'sid5', 'sid6'].each { String sid ->
-    if(device.getDataValue("${sid}-expiresFormatted") != null) { device.removeDataValue("${sid}-expiresFormatted") }
-  }
+  // Whitelist prune now handles debug-only WS-* keys, event timestamps,
+  // and stale sid-expiresFormatted keys (see pruneOrphanDeviceData).
+  // Kept here only for explicit log-level transitions that need immediate cleanup.
 }
 
 void maybeCleanupStaticDriverState() {

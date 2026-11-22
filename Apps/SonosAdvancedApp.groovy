@@ -384,6 +384,194 @@ preferences {
   "x-sonos-vli:.*,spotify:": "Spotify",
   "x-rincon-queue": "Sonos Q"
 ]
+
+// =============================================================================
+// Whitelisted persistence — pruning helper surfaces
+// Maintaining ACTIVE_* keeps forward migration simple: add the key when a feature
+// writes it, delete the entry when the feature is removed, and pruneOrphanedAppPersistence()
+// deletes any stored key not in the set on next Save. No hand-maintained blacklist.
+// =============================================================================
+@Field static final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  PLAYER_INITIALIZATION_QUEUE_STATE_KEY,
+  PLAYER_INITIALIZATION_ACTIVE_STATE_KEY,
+  PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY,
+  PLAYER_INITIALIZATION_DEFERRED_STATE_KEY,
+  PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY,
+  PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY,
+  PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY,
+  PLAYER_INITIALIZATION_ZGT_STATE_KEY,
+  HOUSEHOLD_TOPOLOGY_STATE_KEY,
+  LAST_PROCESSED_TOPOLOGY_STATE_KEY,
+  PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY,
+  PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY,
+  PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY,
+  GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY,
+  GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY,
+  PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY,
+  PENDING_PLAYER_STATE_UPDATES_STATE_KEY,
+  PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY,
+  PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY,
+  PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY,
+  GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY,
+  HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY,
+  OFFLINE_SONOS_PLAYERS_STATE_KEY,
+  PLAYER_COMMAND_QUEUE_STATE_KEY,
+  PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY,
+  DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY,
+  AVT_STORE_STATE_KEY,
+  ZGT_EVENTS_STATE_KEY,
+  GRC_STORE_STATE_KEY,
+  GROUP_OPERATION_STATE_KEY,
+  GROUPING_CONTEXTS_STATE_KEY,
+  GROUP_COMMAND_QUEUE_STATE_KEY,
+  PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY,
+  DEFERRED_GROUP_COMMANDS_STATE_KEY,
+  GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY,
+  GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY,
+  DEFERRED_PLAYER_COMMANDS_STATE_KEY,
+  PENDING_GROUP_STATE_QUEUE_KEY,
+  PENDING_CHILD_EVENT_QUEUE_KEY,
+  LAST_SENT_CHILD_STATE_KEY,
+  CHILD_STATE_DRAIN_SCHEDULED_KEY,
+  CHILD_STATE_DRAIN_DUE_AT_KEY,
+  GROUP_STATE_DRAIN_ATTEMPTS_KEY,
+  GROUP_STATE_DRAIN_SCHEDULED_KEY,
+  NEW_UI_GROUP_EDITOR_MODE_KEY,
+  NEW_UI_GROUP_ORIGINAL_NAME_KEY,
+  NEW_UI_GROUP_DRAFT_KEY,
+  NEW_UI_GROUP_AUTO_NAME_KEY,
+  NEW_UI_GROUP_ERROR_KEY,
+  NEW_UI_GROUP_DELETE_KEY,
+  DISCOVERED_SONOS_SECONDARIES_STATE_KEY,
+  LOCAL_CONTROL_RETRY_STATE_KEY,
+  LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
+  STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
+  ANNOUNCEMENT_POLICY_REFRESH_QUEUE_STATE_KEY,
+  ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY,
+  ANNOUNCEMENT_POLICY_TOPOLOGY_STATE_KEY,
+  'userGroups',
+  'alarmManagementPreferencesApplied',
+  'sonosAlarmRefreshRequestIds',
+  'receivedGroupCommandRequestIds',
+  'groupPageError',
+  'refreshGroupPage',
+  'pendingNewUiDeletePlayer',
+  'playerCreationFeedback',
+  'playerCreationTimestamp',
+  'playerRemovalFeedback',
+  'playerRemovalTimestamp',
+  'ttsVoiceRefreshRequestId',
+  'logLevel',
+  'updateAvailable',
+  'latestVersion',
+  'latestManifest',
+  'latestReleaseDate',
+  'latestReleaseUrl',
+  'dismissedUpdateVersion',
+  'installedAppVersion',
+  'lastUpdateCheck',
+  'lastUpdateCheckFormatted',
+  'lastVersionCheck',
+  'installedVersions',
+  'versionMismatches',
+  'versionCheckJob',
+  'maintenanceJob',
+  'pendingDriverMismatches',
+  'duplicateCleanupResult',
+  'lastLibraryPublish',
+  'hubCookie',
+  'hubCookieTime',
+  'updateCheckRequestId',
+  'updateCheckStartedAt',
+  'updateCheckCookie',
+  'updateJustCompleted',
+]))
+
+@Field static final Set<String> ACTIVE_APP_ATOMIC_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'discoveryRunning',
+  'discoveryEndTime',
+  'discoveryProbeAttempts',
+]))
+
+@Field static final Set<String> ACTIVE_APP_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'logLevel',
+  'useOldUi',
+  'maximumTtsRetention',
+  'groupAnnouncementMode',
+  'highPriorityAnnouncementMode',
+  'queueChimeSeparatelyFromTTS',
+  'suppressChimeOnSuccessiveTTS',
+  'automaticTtsTopologyChanges',
+  'useTemporaryStreamHolder',
+  'enableAlarmManagement',
+  'enableAlarmSwitches',
+  'autoCheckUpdates',
+  'autoInstallUpdates',
+  'updateCheckFrequency',
+  'autoInstallTime',
+  'autoInstallNextOccurrence',
+  'autoInstallDayOfWeek',
+  'hubSecurityUsername',
+  'hubSecurityPassword',
+  'libraryIdSMAPI',
+  'libraryIdUtilities',
+  'playerDevices',
+  'groupDevices',
+  'skipOrphanRemoval',
+  'descriptionTextEnable',
+  'newUiGroupName',
+  'newUiGroupCoordinator',
+  'newUiGroupFollowers',
+]))
+// =============================================================================
+// Migration-Prune Helpers — whitelist-driven for-each removal
+// =============================================================================
+Map<String, Object> pruneOrphanedAppPersistence() {
+  Map<String, Object> result = [
+    stateRemoved: [], atomicStateRemoved: [], settingsRemoved: []
+  ]
+  result.stateRemoved = pruneOrphanKeys(state as Map, ACTIVE_APP_STATE_KEYS, 'state')
+  result.atomicStateRemoved = pruneOrphanKeys(atomicState as Map, ACTIVE_APP_ATOMIC_STATE_KEYS, 'atomicState')
+  result.settingsRemoved = pruneOrphanSettings(ACTIVE_APP_SETTINGS_KEYS)
+  Integer total = ((List)result.stateRemoved).size() + ((List)result.atomicStateRemoved).size() + ((List)result.settingsRemoved).size()
+  if(total > 0) {
+    logDebug("Persistence prune: removed ${total} orphan value(s) (state=${result.stateRemoved}, atomicState=${result.atomicStateRemoved}, settings=${result.settingsRemoved})")
+  }
+  return result
+}
+
+List<String> pruneOrphanKeys(Map persisted, Set<String> active, String label) {
+  if(persisted == null || active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(persisted.keySet())
+    .findAll { String k -> !active.contains(k) }
+  toRemove.each { String k -> persisted.remove(k) }
+  return toRemove
+}
+
+List<String> pruneOrphanSettings(Set<String> active) {
+  if(active == null) { return [] }
+  List<String> toRemove = new ArrayList<String>(settings.keySet())
+    .findAll { String k -> !active.contains(k) }
+  toRemove.each { String k ->
+    try { app.removeSetting(k) } catch(Exception ignored) { }
+    try { settings.remove(k) } catch(Exception ignored) { }
+    try { app.updatedSettings?.remove(k) } catch(Exception ignored) { }
+  }
+  return toRemove
+}
+
+void migrateLegacyAppStateOnce() {
+  // One-release copy: legacy state.* keys that moved to atomicState.
+  // Prune will delete the old state key after this copy lands.
+  ['discoveryRunning', 'discoveryEndTime'].each { String key ->
+    try {
+      if(state[key] != null && atomicState[key] == null) {
+        atomicState[key] = state[key]
+      }
+    } catch(Exception ignored) { }
+  }
+}
+
 // =============================================================================
 // End Fields
 // =============================================================================
@@ -2614,9 +2802,11 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
 void configure(Boolean startup = false) {
   applyLogLevelChange()
   logInfo("${app.name} updated")
-  // Initialization history now lives with each player; remove the legacy
-  // app-wide ledger when an existing installation saves or reconfigures.
-  state.remove(PLAYER_INITIALIZATION_LEDGER_STATE_KEY)
+  // Copy-then-prune: migrate legacy keys before whitelist removal deletes them.
+  migrateLegacyAppStateOnce()
+  Map<String, Object> pruneResult = pruneOrphanedAppPersistence()
+  // Log summary is already emitted by prune; keep reference for debugging.
+  logDebug("App persistence prune completed: ${pruneResult}")
   unsubscribe()
   subscribe(location, 'systemStart', 'systemStartHandler')
   if(startup) {
@@ -2670,7 +2860,6 @@ void configure(Boolean startup = false) {
     runIn(1, 'drainGroupCommandRequests', [overwrite: true])
   }
 
-  state.remove('favs')
   unschedule('appGetFavoritesLocal')
   stopDiscovery()
 
