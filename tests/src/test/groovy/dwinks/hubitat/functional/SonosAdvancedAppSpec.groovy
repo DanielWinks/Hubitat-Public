@@ -36,13 +36,7 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
   List<String> groupPlaybackSnapshotRequests = []
-  List<String> initializationRequests = []
   Closure<Boolean> topologyApplyHook
-
-  void beginAppMediatedInitialization(String requestId, Integer attemptNumber = 1) {
-    initializationRequests << requestId
-  }
-  void cancelAppMediatedInitialization(String requestId) { commands << [name: 'cancelAppMediatedInitialization', requestId: requestId] }
 
   void mute() { commands << [name: 'mute'] }
   void unmute() { commands << [name: 'unmute'] }
@@ -287,45 +281,6 @@ class SonosAdvancedAppSpec extends Specification {
     follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
   }
 
-  def "player initialization queue grants up to three children at a time"() {
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', false)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'hub boot', false)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'hub boot', false)
-    appScript.startNextPlayerInitialization()
-
-    then:
-    coordinator.initializationRequests.size() == 1
-    follower.initializationRequests.size() == 1
-    extra.initializationRequests.size() == 1
-    appScript.state.playerInitializationActive.size() == 3
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].phase == 'initializing'
-    !appScript.scheduled.any { List job -> job[1] == 'playerInitializationStartWatchdog' }
-    appScript.scheduled.count { List job -> job[1] == 'playerInitializationHardWatchdog' &&
-      job[2]?.overwrite == true && job[0] >= 1 } == 1
-    appScript.state.playerInitializationActive.values().every { Map entry ->
-      entry.attemptNumber == 1 && entry.timeoutSeconds == 180
-    }
-    !appScript.state.containsKey('playerInitializationLedger')
-
-    when:
-    String requestId = coordinator.initializationRequests[0]
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
-      kind: 'initializationStarted', playerDni: coordinator.deviceNetworkId, requestId: requestId
-    ])] as Event)
-
-    then:
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].phase == 'initializing'
-
-    when:
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
-      kind: 'initializationComplete', playerDni: coordinator.deviceNetworkId, requestId: requestId
-    ])] as Event)
-
-    then:
-    appScript.state.playerInitializationActive.size() == 2
-    !appScript.state.playerInitializationActive.containsKey(coordinator.deviceNetworkId)
-  }
 
   def "initialization purge removes only the selected child's parent queues and announcements"() {
     given:
@@ -408,47 +363,14 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.pendingGroupCommandRequests.containsKey('GROUP-DNI')
   }
 
-  def "player initialization event clears parent commands before queuing initialization"() {
-    given:
-    appScript.state.pendingPlayerCommandRequests = [
-      (coordinator.deviceNetworkId): [[playerDni: coordinator.deviceNetworkId, command: 'play']]
-    ]
 
-    when:
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
-      kind: 'initializationRequested', playerDni: coordinator.deviceNetworkId,
-      reason: 'driver initialize', clearPendingCommands: true
-    ])] as Event)
-
-    then:
-    !(appScript.state.pendingPlayerCommandRequests instanceof Map) ||
-      !appScript.state.pendingPlayerCommandRequests.containsKey(coordinator.deviceNetworkId)
-    appScript.state.playerInitializationQueue*.dni.contains(coordinator.deviceNetworkId)
-    appScript.state.deviceCommandClearTimes[coordinator.deviceNetworkId] != null
-  }
-
-  def "first driver initialization request arms a delayed boot batch"() {
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'driver initialize', false)
-    appScript.startNextPlayerInitialization()
-
-    then:
-    appScript.state.playerInitializationBootPending == true
-    appScript.state.playerInitializationBootGeneration
-    appScript.state.playerInitializationNotBefore >= appScript.now() + 59000L
-    (appScript.state.playerInitializationQueue as List<Map>)[0].bootGeneration ==
-        appScript.state.playerInitializationBootGeneration
-    coordinator.initializationRequests.empty
-    appScript.state.playerInitializationQueue.size() == 1
-    appScript.scheduled.any { List job -> job[0] == 60 && job[1] == 'startNextPlayerInitialization' }
-  }
 
   def "system start re-arms persisted player state updates after reboot"() {
     given:
     appScript.state.playerStateUpdateDrainScheduled = true
     appScript.state.pendingPlayerStateUpdates = [[
-      kind: 'initializationComplete', playerDni: coordinator.deviceNetworkId,
-      requestId: 'stale-request', detail: 'completed before reboot'
+      kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
+      playbackState: 'PLAYBACK_STATE_PLAYING'
     ]]
 
     when:
@@ -457,30 +379,13 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.playerStateUpdateDrainScheduled == true
     appScript.state.pendingPlayerStateUpdates.size() == 1
+    !appScript.state.containsKey('playerInitializationQueue')
+    !appScript.scheduled.any { List job -> job[1] == 'startNextPlayerInitialization' }
     appScript.scheduled.any { List job ->
       job[0] == 25 && job[1] == 'drainQueuedPlayerStateUpdates' && job[2]?.overwrite == true
     }
   }
 
-  def "boot initialization queue proceeds without waiting for ZGT election or topology"() {
-    given:
-    appScript.state.playerInitializationNotBefore = 0L
-    appScript.state.playerInitializationBootPending = true
-    appScript.state.playerInitializationQueue = [
-      [dni: coordinator.deviceNetworkId, reason: 'hub boot', bootAttempt: 0],
-      [dni: follower.deviceNetworkId, reason: 'hub boot', bootAttempt: 0]
-    ]
-    appScript.state.playerInitializationActive = [:]
-
-    when:
-    appScript.startNextPlayerInitialization()
-
-    then:
-    appScript.state.playerInitializationActive.size() == 2
-    coordinator.initializationRequests.size() == 1
-    follower.initializationRequests.size() == 1
-    !appScript.state.containsKey('playerInitializationZgt')
-  }
 
   def "ZGT reports from every player replace the stored snapshot latest wins"() {
     given:
@@ -497,108 +402,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.zgtLastReport.sourcePlayerDni == follower.deviceNetworkId
   }
 
-  def "burst of off-turn WebSocket requests arms a delayed boot batch"() {
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId,
-      'WebSocket connection requested outside app initialization turn', false)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId,
-      'WebSocket connection requested outside app initialization turn', false)
-    appScript.classifyPlayerInitializationRequestBurst()
 
-    then:
-    appScript.state.playerInitializationBootPending == true
-    appScript.state.playerInitializationNotBefore >= appScript.now() + 59000L
-    (appScript.state.playerInitializationQueue as List<Map>).every { Map request ->
-      request.bootGeneration == appScript.state.playerInitializationBootGeneration
-    }
-    coordinator.initializationRequests.empty
-    follower.initializationRequests.empty
-  }
 
-  def "reboot initialization gets one tail retry then defers to hourly retry"() {
-    given:
-    appScript.state.playerInitializationBootGeneration = 'boot-generation-1'
-    appScript.state.playerInitializationBootPending = true
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'hub boot', true)
-    appScript.startNextPlayerInitialization()
-    String firstRequest = coordinator.initializationRequests[0]
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].deadlineAt = appScript.now() - 1L
-    appScript.playerInitializationHardWatchdog([dni: coordinator.deviceNetworkId, requestId: firstRequest])
-
-    then:
-    (appScript.state.playerInitializationQueue as List<Map>).size() == 1
-    appScript.state.playerInitializationQueue[0].bootAttempt == 1
-    appScript.state.playerInitializationActive.isEmpty()
-
-    when:
-    appScript.startNextPlayerInitialization()
-    String secondRequest = coordinator.initializationRequests[1]
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].deadlineAt = appScript.now() - 1L
-    appScript.playerInitializationHardWatchdog([dni: coordinator.deviceNetworkId, requestId: secondRequest])
-
-    then:
-    appScript.state.playerInitializationQueue.empty
-    appScript.state.playerInitializationDeferred[coordinator.deviceNetworkId] != null
-    appScript.scheduled.any { List job -> job[0] == 3600 && job[1] == 'retryDeferredPlayerInitializations' }
-    appScript.logs.any { String log -> log.contains('attempt 2') && log.contains('WARN') }
-  }
-
-  def "initialization retry waits for every first attempt and receives a ten minute timeout"() {
-    given:
-    appScript.state.playerInitializationBootPending = false
-    appScript.state.playerInitializationNotBefore = appScript.now()
-
-    when:
-    appScript.enqueuePlayerInitialization(coordinator.deviceNetworkId, 'test', false)
-    appScript.enqueuePlayerInitialization(follower.deviceNetworkId, 'test', false)
-    appScript.enqueuePlayerInitialization(extra.deviceNetworkId, 'test', false)
-    appScript.startNextPlayerInitialization()
-    String failedRequest = coordinator.initializationRequests[0]
-    String followerRequest = follower.initializationRequests[0]
-    String extraRequest = extra.initializationRequests[0]
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].deadlineAt = appScript.now() - 1L
-    appScript.playerInitializationHardWatchdog([dni: coordinator.deviceNetworkId, requestId: failedRequest])
-
-    then:
-    coordinator.initializationRequests.size() == 1
-    appScript.state.playerInitializationQueue[0].bootAttempt == 1
-
-    when:
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
-      kind: 'initializationComplete', playerDni: follower.deviceNetworkId,
-      requestId: followerRequest, detail: 'ready'
-    ])] as Event)
-
-    then:
-    coordinator.initializationRequests.size() == 1
-
-    when:
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
-      kind: 'initializationComplete', playerDni: extra.deviceNetworkId,
-      requestId: extraRequest, detail: 'ready'
-    ])] as Event)
-    appScript.startNextPlayerInitialization()
-
-    then:
-    coordinator.initializationRequests.size() == 2
-    String retryRequest = coordinator.initializationRequests[1]
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].attemptNumber == 2
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].timeoutSeconds == 600
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].deadlineAt ==
-      appScript.state.playerInitializationActive[coordinator.deviceNetworkId].initializationStartedAt + 600000L
-
-    when:
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
-      kind: 'initializationComplete', playerDni: coordinator.deviceNetworkId,
-      requestId: failedRequest, detail: 'late first-attempt callback'
-    ])] as Event)
-
-    then:
-    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].requestId == retryRequest
-    !appScript.state.containsKey('playerInitializationLedger')
-  }
 
   def "parent stamps coordinator transfer expectations on each affected player"() {
     given:
@@ -1763,28 +1568,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
   }
 
-  def "initialization request clears only that player's child publication cache"() {
-    given:
-    appScript.state.pendingChildEvents = [
-      (follower.deviceNetworkId): [status: 'stopped'],
-      (extra.deviceNetworkId): [status: 'paused']
-    ]
-    appScript.state.lastSentChildState = [
-      (follower.deviceNetworkId): [status: 'stopped'],
-      (extra.deviceNetworkId): [status: 'paused']
-    ]
-    Map request = [kind: 'initializationRequested', playerDni: follower.deviceNetworkId]
 
-    when:
-    appScript.playerStateUpdateHandler(request)
-
-    then:
-    !appScript.state.pendingChildEvents.containsKey(follower.deviceNetworkId)
-    !appScript.state.lastSentChildState.containsKey(follower.deviceNetworkId)
-    appScript.state.pendingChildEvents[extra.deviceNetworkId].status == 'paused'
-    appScript.state.lastSentChildState[extra.deviceNetworkId].status == 'paused'
-    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
-  }
 
   def "child state drain preserves events queued while a child batch is being delivered"() {
     given:

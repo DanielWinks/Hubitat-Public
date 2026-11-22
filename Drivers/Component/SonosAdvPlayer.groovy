@@ -825,14 +825,6 @@ Boolean hasLineInCapability() {
 @Field static final String WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY = 'websocketReplayWaitingForSubscriptions'
 @Field static final String WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY = 'websocketReplayWaitingForTopology'
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
-@Field static final String APP_INITIALIZATION_REQUEST_ID_STATE_KEY = 'appMediatedInitializationRequestId'
-@Field static final String APP_INITIALIZATION_STARTED_AT_STATE_KEY = 'appMediatedInitializationStartedAt'
-@Field static final String APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY = 'appMediatedInitializationResubscriptionsStarted'
-@Field static final String APP_INITIALIZATION_UPNP_STARTED_STATE_KEY = 'appMediatedInitializationUpnpStarted'
-@Field static final String APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY = 'appMediatedInitializationConnectionGranted'
-@Field static final String LAST_PLAYER_INITIALIZATION_STATE_KEY = 'lastPlayerInitialization'
-@Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
-@Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 180
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
 @Field static final Integer WS_COMMAND_LEDGER_EXPIRY_SECONDS = 60
@@ -996,7 +988,6 @@ Boolean hasLineInCapability() {
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
-@Field static final Integer DEFERRED_INIT_DELAY_SECONDS = 1
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -1018,7 +1009,6 @@ Boolean hasLineInCapability() {
   COMPONENT_CHILD_RETRY_ATTEMPTS_KEY,
   LAST_COMPONENT_CHILD_EVENTS_KEY,
   GROUP_DEVICE_UPDATE_SCHEDULED_KEY,
-  LAST_PLAYER_INITIALIZATION_STATE_KEY,
   'pendingParentAppTtsRequests',
   'favoritesBrowseVersion',
   'favoritesBrowseRequestId',
@@ -1067,7 +1057,6 @@ Boolean hasLineInCapability() {
   'rightChannelId',
   'rightChannelDeviceIp',
   'enableTrackPositionUpdates',
-  'appInitializationRequestId',
   ZGT_SUB_DEVICE_KEY,
   ZGT_SUB_EXPIRES_DEVICE_KEY,
   ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY,
@@ -1288,7 +1277,6 @@ void updated() { handleSettingsUpdate() }
 
 void initialize() {
   performImmediateInitialization()
-  signalInitializationTurn('driver initialize')
 }
 
 void handleSettingsUpdate() {
@@ -1313,73 +1301,72 @@ void handleSettingsUpdate() {
   }
 }
 
-void signalInitializationTurn(String reason) {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  recordPlayerInitializationStatus('requested', null, [reason: reason ?: 'driver initialize'])
-  try {
-    parent.requestInitializationTurn(dni, reason)
-  } catch(Exception e) {
-    logWarn("parent.requestInitializationTurn failed for ${dni}: ${e.message}; queuing via outbox fallback")
-    publishPlayerStateUpdate([kind: 'initializationRequested', reason: reason ?: 'device request'])
-  }
-}
 
-void recordPlayerInitializationStatus(String status, String requestId = null, Map details = [:]) {
-  Map previous = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY]) : [:]
-  Map entry = previous.status == 'requested' &&
-      (previous.requestId == null || previous.requestId?.toString() == requestId)
-      ? previous : [:]
-  if(requestId != null) { entry.requestId = requestId }
-  entry.status = status
-  entry.updatedAt = now()
-  if(details != null && !details.isEmpty()) { entry.putAll(details) }
-  state[LAST_PLAYER_INITIALIZATION_STATE_KEY] = entry
+
+
+
+/** Clear this player’s queued publications before local initialization. */
+void resetPendingStatePublicationForInitialization() {
+  String dni = device.getDeviceNetworkId()
+  unschedule('drainBatchEvents')
+  unschedule('flushPendingLocalDeviceEvents')
+  unschedule('drainComponentChildEvents')
+  unschedule('flushPendingGroupDeviceUpdates')
+  state.remove(PENDING_BATCH_EVENTS_KEY)
+  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
+  state.remove(BATCH_EVENTS_DUE_AT_KEY)
+  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
+  state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
+  state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
+  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
+  state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
+  state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
+  state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY)
+  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
+  pendingLocalDeviceEvents.remove(dni)
+  lastLocalDeviceEvents.remove(dni)
+  pendingGroupDeviceUpdates.remove(dni)
+  groupDeviceUpdateRetryAttempts.remove(dni)
+  clearLegacyBridgeCurrentStates()
+  logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
 }
 
 void performImmediateInitialization() {
+  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
+    try { wsClose() }
+    catch(Exception e) { logDebug("Could not close WebSocket before player initialization: ${e.message}") }
+  }
+  runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
+  setWebSocketStatus('closed')
   clearPendingCommandsForInitialization()
   clearPlayerSubscriptionsForInitialization()
   migrateLegacyRuntimeState()
-  // Copy-then-prune: whitelist prune now deletes orphans including legacy state keys.
   pruneOrphanedDriverPersistence()
   resetPendingStatePublicationForInitialization()
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
   cacheBatteryCapability()
   reconcileChildDevices()
-  scheduleEarlyRenderingControlSubscribe()
-  scheduleEarlyZgtSubscribe()
-}
 
-void scheduleEarlyRenderingControlSubscribe() {
-  String localUpnpHost = device.getDataValue('localUpnpHost')
-  if(!localUpnpHost) {
-    logDebug('RC early subscribe skipped — device data not yet configured')
-    return
-  }
-  runIn(1, 'subscribeToRenderingControlEventsImmediate', [overwrite: true])
-}
-
-void scheduleEarlyZgtSubscribe() {
-  String localUpnpHost = device.getDataValue('localUpnpHost')
-  if(!localUpnpHost) {
-    logDebug('ZGT early subscribe skipped — device data not yet configured')
-    return
-  }
-  runIn(1, 'subscribeToZgtEvents', [overwrite: true])
-}
-
-void subscribeToRenderingControlEventsImmediate() {
-  // Subscribe each device to rendering and home theater input events early.
+  // Issue UPnP subscriptions first. These calls enqueue async requests locally;
+  // starting the WebSocket does not wait for their callbacks.
   subscribeToMrRcEvents()
   subscribeToMrGrcEvents()
-  if(hasHTPlaybackCapability()) {
-    subscribeToHtControlEvents()
-  }
-  markAppMediatedUpnpSubscriptionsStarted()
+  if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
+  subscribeToZgtEvents()
+  if(getIsGroupCoordinator() == true) { subscribeToAVTransport() }
+  subscribeToContentDirectory()
+  wsConnect()
+  if(getIsGroupCoordinator() == true) { getPlaybackMetadataStatus() }
+  refreshUpnpMediaCatalogs()
+  scheduleWebsocketHealthCheck()
 }
+
+
+
+
+
+
 
 void clearPlayerSubscriptionsForInitialization() {
   String dni = device.getDeviceNetworkId()
@@ -1423,38 +1410,13 @@ void cacheBatteryCapability() {
   }
 }
 
-void performAppMediatedInitialization() {
-  // Preserve original scheduling for parent-initiated turn so existing tests and
-  // startup ordering still see initializeWebsocketConnection scheduled. Deferred
-  // also runs for per-device always-subscribe work.
-  runIn(2, 'initializeWebsocketConnection', [overwrite: true])
-  scheduleDeferredInitialization()
-}
 
-void scheduleDeferredInitialization() {
-  runIn(DEFERRED_INIT_DELAY_SECONDS, 'deferredInitCallback', [overwrite: true])
-}
 
-void deferredInitCallback() {
-  performDeferredInitialization()
-}
 
-void performDeferredInitialization() {
-  // RenderingControl and GroupRenderingControl are already scheduled early.
-  // GroupRenderingControl is subscribed early for every player.
-  if(getIsGroupCoordinator() == true) {
-    subscribeToAVTransport()
-    getPlaybackMetadataStatus()
-  }
-  subscribeToContentDirectory()
-  refreshUpnpMediaCatalogs()
-  subscribeToZgtEvents()
-  subscribeToWsEvents()
-  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
-    runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = true
-    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
-  }
-}
+
+
+
+
 
 /** Clear work owned by this player only at an explicit device initialization. */
 void clearPendingCommandsForInitialization() {
@@ -1561,123 +1523,7 @@ void clearPendingAudioClipCorrelation(String correlationId) {
   }
 }
 
-/** Perform lifecycle setup only after the parent app grants an initialization turn. */
-void prepareAppMediatedInitialization() {
-  invalidateUpnpRequestsForDevice()
-  Map queueEntry = getUpnpRequestQueue()
-  if(queueEntry != null) { synchronized(queueEntry.lock) { queueEntry.retired = false } }
-  migrateLegacyRuntimeState()
-  resetPendingStatePublicationForInitialization()
-  cancelAudioClipWatchdog()
-  resetSubscriptionMutexesForDevice()
-  maybeCleanupStaticDriverState()
-  configure()
-  scheduleWebsocketHealthCheck()
-}
 
-/** Drop stale publication work at the initialization boundary. A fresh Sonos
- * topology/playback snapshot repopulates these queues after subscriptions start. */
-void resetPendingStatePublicationForInitialization() {
-  String dni = device.getDeviceNetworkId()
-  unschedule('drainBatchEvents')
-  unschedule('flushPendingLocalDeviceEvents')
-  unschedule('drainComponentChildEvents')
-  unschedule('flushPendingGroupDeviceUpdates')
-  unschedule('flushPendingZgtNotify')
-  unschedule('flushPendingZgtPresence')
-  state.remove(PENDING_BATCH_EVENTS_KEY)
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  state.remove(BATCH_EVENTS_DUE_AT_KEY)
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-  state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-  state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
-  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-  state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
-  state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
-  state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY)
-  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
-  pendingLocalDeviceEvents.remove(dni)
-  lastLocalDeviceEvents.remove(dni)
-  pendingGroupDeviceUpdates.remove(dni)
-  groupDeviceUpdateRetryAttempts.remove(dni)
-  pendingZgtNotifyByDni.remove(dni)
-  pendingZgtPresenceByDni.remove(dni)
-  lastZgtPresenceByDni.remove(dni)
-  clearLegacyBridgeCurrentStates()
-  logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
-}
-
-/** Queue a full subscription recovery. Both lifecycle entry points schedule the
- * same method with overwrite enabled, coalescing close-together requests.
- */
-void requestFullSubscriptionRenewal(Integer delaySeconds, String reason) {
-  requestAppMediatedInitialization(reason ?: 'full subscription renewal')
-}
-
-void requestAppMediatedInitialization(String reason) {
-  publishPlayerStateUpdate([kind: 'initializationRequested', reason: reason ?: 'device request'])
-}
-
-/** Called only by the parent app after it grants this player the initialization turn. */
-void beginAppMediatedInitialization(String requestId, Integer attemptNumber = 1) {
-  logDebug("Starting app-mediated initialization; request=${requestId}")
-  if(!requestId) {
-    recordPlayerInitializationStatus('failed', null, [detail: 'missing parent request ID', finishedAt: now()])
-    return
-  }
-  if(device.getDataValue('appInitializationRequestId')?.toString() != requestId) {
-    logDebug("Ignoring stale app-mediated initialization request=${requestId}")
-    return
-  }
-  runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] = requestId
-  Long startedAt = now()
-  Map previousInitialization = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
-      ? (Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY] : [:]
-  String initializationReason = previousInitialization.status == 'requested'
-      ? previousInitialization.reason?.toString() : null
-  runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = startedAt
-  runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = false
-  runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = false
-  runtimeState[APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] = true
-  runtimeState.remove('appMediatedInitializationFailure')
-  try {
-    prepareAppMediatedInitialization()
-    // prepare migrates legacy state and clears state.*; record this after it
-    // completes so the per-player diagnostic survives initialization.
-    recordPlayerInitializationStatus('initializing', requestId, [startedAt: startedAt,
-        attempt: attemptNumber ?: 1,
-        reason: initializationReason])
-    performAppMediatedInitialization()
-  } catch(Exception e) {
-    logWarn("App-mediated initialization setup failed before subscription recovery: ${e.message}")
-    finishAppMediatedInitialization(false, "driver setup failed: ${e.message}")
-  }
-}
-
-void cancelAppMediatedInitialization(String requestId) {
-  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString() != requestId) { return }
-  Map initialization = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY]) : [:]
-  if(initialization.requestId?.toString() == requestId && initialization.status == 'initializing') {
-    Long finishedAt = now()
-    initialization.putAll([status: 'cancelled', finishedAt: finishedAt,
-      elapsedMs: finishedAt - ((initialization.startedAt ?: finishedAt) as Long),
-      detail: 'cancelled by parent initialization watchdog', updatedAt: finishedAt])
-    state[LAST_PLAYER_INITIALIZATION_STATE_KEY] = initialization
-  }
-  runtimeState.remove(APP_INITIALIZATION_REQUEST_ID_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_STARTED_AT_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_UPNP_STARTED_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY)
-  runtimeState.remove('appMediatedInitializationFailure')
-  unschedule('initializeWebsocketConnection')
-  unschedule('websocketConnectWatchdog')
-  unschedule('retryWebSocketConnection')
-  unschedule('subscribeToEvents')
-  unschedule('resubscribeAfterRenewal')
-  unschedule('checkAppMediatedInitializationReady')
-}
 void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
@@ -1869,28 +1715,7 @@ void registerRinconId() {
   unschedule('checkSubscriptions')
 }
 
-/** Compatibility callback: any persisted legacy schedule is redirected through the app queue. */
-void fullRenewSubscriptions() {
-  requestAppMediatedInitialization('legacy scheduled full subscription renewal')
-}
 
-void performFullSubscriptionRenewal() {
-  // Immediate stage already unsubscribed all sids; delegate to deferred for subscribes
-  releaseFavPlaylistDelegate()
-  clearWsSubscriptionStatus()
-  String localUpnpHost = device.getDataValue('localUpnpHost')
-  String websocketUrl = device.getDataValue('websocketUrl')
-  if(!localUpnpHost || !websocketUrl) {
-    logInfo('Device data not yet configured (fresh install). Subscriptions will be established after configuration by parent app.')
-    finishAppMediatedInitialization(false, 'local Sonos or WebSocket connection data is missing')
-    return
-  }
-  logDebug('Closing existing WebSocket before full subscription renewal')
-  try { wsClose() }
-  catch(Exception e) { logDebug("Could not close existing WebSocket during renewal: ${e.message}") }
-  setWebSocketStatus('closed')
-  scheduleDeferredInitialization()
-}
 
 void scheduleWebsocketHealthCheck() {
   runIn(WS_HEALTH_CHECK_SECONDS, 'websocketHealthCheck', [overwrite: true])
@@ -1927,106 +1752,6 @@ void reconnectWebsocket(String reason) {
   runIn(1, 'initializeWebsocketConnection', [overwrite: true])
 }
 
-/**
- * Re-establishes all WebSocket and coordinator-specific subscriptions after a
- * fullRenewSubscriptions() cycle. Called via runIn to allow WebSocket and base
- * UPnP subscriptions to be established first.
- */
-void resubscribeAfterRenewal() {
-  // Base WebSocket subscription is audioClip only; catalogs use ContentDirectory.
-  subscribeToWsEvents()
-  subscribeToContentDirectory()
-
-  // Coordinator playback state arrives through AVTransport UPnP events.
-  if(getIsGroupCoordinator()) {
-    subscribeToAVTransport()
-    getPlaybackMetadataStatus()
-  }
-  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
-    runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = true
-    ChildDeviceWrapper rightChannel = getRightChannelChild()
-    if(rightChannel != null && getRightChannelRincon()) {
-      watchRightChannelWebsocket(rightChannel)
-      try { rightChannel.beginParentMediatedConnection(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY].toString()) }
-      catch(Exception e) { logWarn("Could not start best-effort right-channel initialization for ${rightChannel.getDeviceNetworkId()}: ${e.message}") }
-    }
-    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
-  }
-}
-
-void checkAppMediatedInitializationReady() {
-  String requestId = runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString()
-  if(!requestId) { return }
-  String failure = runtimeState.appMediatedInitializationFailure?.toString()
-  if(failure) {
-    finishAppMediatedInitialization(false, failure)
-    return
-  }
-  Long startedAt = (runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] ?: now()) as Long
-  if(now() - startedAt >= APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS * 1000L) {
-    finishAppMediatedInitialization(false, 'WebSocket or subscription setup did not settle within 180 seconds')
-    return
-  }
-  if(runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] != true ||
-      runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] != true || !isWebsocketConnected()) {
-    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
-    return
-  }
-  Boolean pendingWebsocketSubscription
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    pendingWebsocketSubscription = ledger.any { Map entry -> entry.wireCommand == 'subscribe' }
-  }
-  List<Map> outbound = getWebsocketOutboundQueue()
-  pendingWebsocketSubscription = pendingWebsocketSubscription ||
-      outbound.any { Map entry -> entry.wireCommand == 'subscribe' }
-  Map upnpQueue = getUpnpRequestQueue()
-  Boolean pendingUpnpRequest = false
-  if(upnpQueue != null) {
-    synchronized(upnpQueue.lock) {
-      pendingUpnpRequest = upnpQueue.active != null || !(upnpQueue.queue as List).isEmpty()
-    }
-  }
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(pendingWebsocketSubscription || pendingUpnpRequest) {
-    runIn(APP_INITIALIZATION_READY_CHECK_SECONDS, 'checkAppMediatedInitializationReady', [overwrite: true])
-    return
-  }
-  if(rightChannel != null && getRightChannelRincon() && rightChannel.getDataValue('websocketStatus') != 'open') {
-    logWarn("Right-channel WebSocket is not ready after left-channel subscriptions settled; continuing initialization best-effort (dni=${rightChannel.getDeviceNetworkId()}, status=${rightChannel.getDataValue('websocketStatus') ?: 'unknown'})")
-  }
-  finishAppMediatedInitialization(true, 'WebSocket and subscription setup settled')
-}
-
-void finishAppMediatedInitialization(Boolean succeeded, String detail) {
-  String requestId = runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString()
-  if(!requestId) { return }
-  Long finishedAt = now()
-  Map initialization = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY]) : [:]
-  if(initialization.requestId?.toString() != requestId) {
-    initialization = [requestId: requestId, startedAt: runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY]]
-  }
-  Long startedAt = (initialization.startedAt ?: runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] ?: finishedAt) as Long
-  initialization.putAll([status: succeeded ? 'complete' : 'failed', finishedAt: finishedAt,
-      elapsedMs: Math.max(0L, finishedAt - startedAt), detail: detail ?: '', updatedAt: finishedAt])
-  state[LAST_PLAYER_INITIALIZATION_STATE_KEY] = initialization
-  unschedule('checkAppMediatedInitializationReady')
-  runtimeState.remove(APP_INITIALIZATION_REQUEST_ID_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_STARTED_AT_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_UPNP_STARTED_STATE_KEY)
-  runtimeState.remove(APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY)
-  runtimeState.remove('appMediatedInitializationFailure')
-  publishPlayerStateUpdate([kind: succeeded ? 'initializationComplete' : 'initializationFailed',
-      requestId: requestId, detail: detail])
-  if(succeeded) { logInfo("App-mediated initialization complete: ${detail}") }
-  else if(detail?.contains('180 seconds') || detail?.contains('hard timeout')) {
-    logDebug("App-mediated initialization timed out: ${detail}")
-  }
-  else { logWarn("App-mediated initialization failed: ${detail}") }
-}
 
 void secondaryConfiguration() {
   // Validate critical device data before proceeding
@@ -2084,14 +1809,13 @@ void secondaryConfigurationPhase4() {
   groupsRegistryInitialization()
   favoritesMapInitialization()
 
-  // After device data is configured, force a complete recovery. The persisted
-  // WebSocket status and in-memory namespace markers may survive a driver update
-  // even though the underlying connection and subscriptions do not.
+  // After device data is configured, establish this player’s UPnP subscriptions
+  // and WebSocket connection locally.
   String localUpnpHost = device.getDataValue('localUpnpHost')
   String websocketUrl = device.getDataValue('websocketUrl')
 
   if(localUpnpHost && websocketUrl) {
-    requestFullSubscriptionRenewal(1, 'secondary configuration')
+    performImmediateInitialization()
   } else {
     logWarn('Device data still incomplete after validation - subscriptions not established')
   }
@@ -3709,20 +3433,10 @@ void previousTrack() {
   if(routeGroupedPlaybackCommandToCoordinator('previousTrack')) { return }
   playerSkipToPreviousTrack()
 }
-@CompileStatic
-void subscribeToEvents() {
-  subscribeToZgtEvents()
-  subscribeToMrGrcEvents()
-  // Rendering subscriptions are handled by the early initialization callback.
-  markAppMediatedUpnpSubscriptionsStarted()
-}
 
 
-void markAppMediatedUpnpSubscriptionsStarted() {
-  if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
-    runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = true
-  }
-}
+
+
 
 @CompileStatic
 void loadFavorite(String favoriteId = null) {
@@ -8714,7 +8428,6 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
 
 void subscribeToCoordinatorSubs() {
   runIn(2, 'subscribeToAVTransport', [overwrite: true])
-  runIn(2, 'subscribeToWsEvents', [overwrite: true])
   runIn(2, 'getPlaybackMetadataStatus', [overwrite: true])
   runIn(2, 'playerGetGroupsFull', [overwrite: true])
 }
@@ -9498,7 +9211,8 @@ void setWebSocketStatus(String status) {
     }
     runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
     runtimeState[WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY] = true
-    subscribeToWsEvents()
+    runtimeState.audioClipSubscriptionRequestPending = false
+    subscribeToAudioClip()
     List<Map> subscriptionCommands = getWebsocketOutboundQueue()
     if(!pendingCommands.isEmpty()) {
       subscriptionCommands.addAll(pendingCommands)
@@ -9653,19 +9367,7 @@ Boolean dispatchParentStateUpdateDirect(Map payload) {
   String kind = payload?.kind?.toString()
   String dni = payload?.playerDni?.toString() ?: device.getDeviceNetworkId()
   try {
-    if(kind == 'initializationRequested') {
-      parent.requestInitializationTurn(dni, payload?.reason?.toString() ?: 'device request')
-      return true
-    } else if(kind == 'initializationStarted') {
-      parent.initializationStarted(payload?.requestId?.toString())
-      return true
-    } else if(kind == 'initializationComplete') {
-      parent.initializationComplete(payload?.requestId?.toString(), payload?.detail?.toString() ?: '')
-      return true
-    } else if(kind == 'initializationFailed') {
-      parent.initializationFailed(payload?.requestId?.toString(), payload?.detail?.toString() ?: '')
-      return true
-    } else if(kind == 'groupAnnouncementProgress') {
+    if(kind == 'groupAnnouncementProgress') {
       parent.groupAnnouncementProgress(payload?.correlationId?.toString(), payload?.phase?.toString(), payload, dni)
       return true
     }
@@ -9911,7 +9613,7 @@ Integer webSocketRetryIntervalSeconds(Long elapsedSeconds) {
 void retryWebSocketConnection() {
   runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
   logDebug("Attempting WebSocket reconnection...")
-  requestAppMediatedInitialization('WebSocket reconnect retry')
+  wsConnect()
 }
 
 void wsConnect() {
@@ -9919,8 +9621,9 @@ void wsConnect() {
     logTrace("Skipping primary WebSocket connect; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     return
   }
-  if(runtimeState[APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] != true) {
-    requestAppMediatedInitialization('WebSocket connection requested outside app initialization turn')
+  String websocketUrl = getDeviceDataValue('websocketUrl')
+  if(!websocketUrl) {
+    logDebug('WebSocket URL is not configured; waiting for player configuration before connecting')
     return
   }
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
@@ -9929,7 +9632,7 @@ void wsConnect() {
     logInfo("Requesting primary WebSocket connection; previousStatus=${getWebSocketStatus()}, retryCount=${runtimeState.wsRetryCount ?: 0}")
     // Hubitat's native ping detects a half-open transport independently of
     // command responses. A missing application ACK must not cycle the socket.
-    interfaces.webSocket.connect(getDeviceDataValue('websocketUrl'), headers: headers,
+    interfaces.webSocket.connect(websocketUrl, headers: headers,
         ignoreSSLIssues: true, pingInterval: WS_PING_INTERVAL_SECONDS)
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
     unschedule('renewWebsocketConnection')
@@ -10285,9 +9988,6 @@ void observeWebsocketCommandResponse(Map eventType, Map eventData) {
   Boolean success = eventType.success == true
   String outcome = success ? 'success' : 'failure'
   String detail = success ? "type=${eventType.type}" : "type=${eventType.type}, error=${eventData?.errorCode ?: eventData?.reason ?: 'unspecified'}"
-  if(matched.wireCommand == 'subscribe' && !success && runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
-    runtimeState.appMediatedInitializationFailure = "WebSocket subscription ${namespace} was rejected: ${detail}"
-  }
   logDebug("WebSocket command ledger ${outcome}: id=${matched.entryId}, fingerprint=${namespace}.${response}, target=${matched.targetId ?: 'n/a'}, ${detail}")
   if(success && matched.kind == 'transportCommand') {
     transportCommandAcknowledged(matched.transportCommandId?.toString(), response)
@@ -10567,17 +10267,7 @@ void rightChannelWebsocketStatusChanged(String status, String childDeviceNetwork
 }
 
 /** Authorize a right-channel-only connection without restarting the primary player. */
-void requestSecondaryWebsocketInitialization(String reason, String childDeviceNetworkId) {
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(rightChannel == null || rightChannel.getDeviceNetworkId()?.toString() != childDeviceNetworkId) {
-    logWarn("Ignoring secondary WebSocket request from unexpected child: dni=${childDeviceNetworkId ?: 'unknown'}")
-    return
-  }
-  Boolean resetRetries = reason == 'secondary device lifecycle initialize'
-  String requestId = UUID.randomUUID().toString()
-  logDebug("Granting right-channel-only WebSocket request; reason=${reason ?: 'secondary request'}, child=${childDeviceNetworkId}, resetRetries=${resetRetries}")
-  rightChannel.beginParentMediatedConnection(requestId, resetRetries)
-}
+
 
 void rightChannelWebsocketCommandResponse(String result, String correlationId, String errorCode, String childDeviceNetworkId) {
   ChildDeviceWrapper rightChannel = getRightChannelChild()
@@ -10838,7 +10528,7 @@ void resubscribeWebsocketNamespace(String namespace) {
 
 void initializeWebsocketConnection() { wsConnect() }
 void renewWebsocketConnection() {
-  if(!isWebsocketConnected()) { requestAppMediatedInitialization('scheduled WebSocket renewal') }
+  if(!isWebsocketConnected()) { initializeWebsocketConnection() }
 }
 // =============================================================================
 // End Websocket Connection and Initialization
@@ -10849,9 +10539,6 @@ void renewWebsocketConnection() {
 // =============================================================================
 // Websocket Subscriptions and polling
 // =============================================================================
-void subscribeToWsEvents() {
-  if(hasAudioClipCapability() && isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
-}
 
 void refreshUpnpMediaCatalogs() {
   if(getFavoritesChild() != null) { getFavorites() }

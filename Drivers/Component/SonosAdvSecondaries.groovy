@@ -68,7 +68,6 @@ metadata {
       capability 'Initialize'
       attribute 'websocketStatus', 'string'
       attribute 'websocketCommandResponse', 'string'
-      attribute 'secondaryInitRequest', 'string'
     }
 }
 // =============================================================================
@@ -88,7 +87,6 @@ metadata {
   'websocketInboundSequence',
   'websocketCommandLedger',
   'synchronizedAudioClipReleases',
-  'parentInitializationGranted',
 ]))
 
 @Field static final Set<String> ACTIVE_SECONDARY_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -102,7 +100,6 @@ metadata {
 @Field static final Set<String> ACTIVE_SECONDARY_CURRENT_STATE_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>([
   'websocketStatus',
   'websocketCommandResponse',
-  'secondaryInitRequest',
 ]))
 
 @Field static final Set<String> ACTIVE_SECONDARY_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -190,7 +187,10 @@ List<String> pruneOrphanSettings(Set<String> active) {
 void initialize() { configure() }
 void configure() {
   pruneOrphanedSecondaryPersistence()
-  sendEvent(name: 'secondaryInitRequest', value: groovy.json.JsonOutput.toJson([reason: 'secondary device lifecycle initialize', dni: this.device.getDeviceNetworkId()]))
+  unschedule('retryWebsocketConnection')
+  state.remove('websocketReconnectScheduled')
+  state.websocketReconnectAttempts = 0
+  initializeWebsocketConnection()
 }
 void installed() { configure() }
 void updated() { configure() }
@@ -272,13 +272,6 @@ void wsConnect() {
     logDebug("Skipping secondary WebSocket connect; status=${this.device.getDataValue('websocketStatus')}, connectPending=${state.websocketConnectPending == true}")
     return
   }
-  if(state.parentInitializationGranted != true) {
-    try {
-      sendEvent(name: 'secondaryInitRequest', value: groovy.json.JsonOutput.toJson([reason: 'secondary WebSocket connection requested', dni: this.device.getDeviceNetworkId()]))
-      logDebug("Requested parent-mediated secondary reconnect via event")
-    } catch(Exception e) { logDebug("Could not request parent-mediated secondary reconnect: ${e.message}") }
-    return
-  }
   try {
     String websocketUrl = this.device.getDataValue('websocketUrl') ?: getLocalWsUrl()
     if(!websocketUrl) {
@@ -288,13 +281,11 @@ void wsConnect() {
     String previousStatus = this.device.getDataValue('websocketStatus')?.toString() ?: 'unknown'
     Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
     state.websocketConnectPending = true
-    state.parentInitializationGranted = false
     this.device.updateDataValue('websocketStatus', 'connecting')
     logDebug("Requesting secondary WebSocket connection; previousStatus=${previousStatus}, retryCount=${state.websocketReconnectAttempts ?: 0}")
     interfaces.webSocket.connect(websocketUrl, headers: headers, ignoreSSLIssues: true)
   } catch (Exception e) {
     state.remove('websocketConnectPending')
-    state.parentInitializationGranted = false
     logError("Failed to connect websocket: ${e.message}")
     this.device.updateDataValue('websocketStatus', 'error')
     sendEvent(name: 'websocketStatus', value: 'error', isStateChange: true)
@@ -365,16 +356,7 @@ void initializeWebsocketConnection() {
   wsConnect()
 }
 
-void beginParentMediatedConnection(String requestId, Boolean resetRetries = false) {
-  if(resetRetries == true) {
-    unschedule('retryWebsocketConnection')
-    state.remove('websocketReconnectScheduled')
-    state.websocketReconnectAttempts = 0
-  }
-  state.parentInitializationGranted = true
-  logDebug("Starting parent-mediated secondary WebSocket connection; request=${requestId}")
-  wsConnect()
-}
+
 void renewWebsocketConnection() {
   state.remove('websocketConnectPending')
   this.device.updateDataValue('websocketStatus', 'closed')

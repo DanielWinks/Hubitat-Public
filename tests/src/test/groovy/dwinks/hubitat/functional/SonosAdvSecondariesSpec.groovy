@@ -11,7 +11,6 @@ class SonosAdvSecondariesSpec extends Specification {
   List<Map> connections = []
   List<String> sentMessages = []
   List<String> sendAttempts = []
-  List<Map> initializationRequests = []
   Integer sendFailuresRemaining = 0
 
   def setupSpec() {
@@ -22,11 +21,6 @@ class SonosAdvSecondariesSpec extends Specification {
 
   def setup() {
     driver = ScriptLoader.instantiate(driverClass)
-    Expando mockParent = new Expando()
-    mockParent.requestSecondaryWebsocketInitialization = { String reason, String childDni ->
-      initializationRequests << [reason: reason, childDni: childDni]
-    }
-    driver.binding.setVariable('parent', mockParent)
     driver.binding.setVariable('interfaces', [webSocket: new Expando(
       connect: { Map options, String url -> connections.add([url: url, options: options]) },
       sendMessage: { String message ->
@@ -45,24 +39,20 @@ class SonosAdvSecondariesSpec extends Specification {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.51'
     driver.device.deviceNetworkId = 'parent-right-channel'
+    driver.state.websocketReconnectAttempts = 3
+    driver.state.websocketReconnectScheduled = true
 
     when:
     driver.initialize()
 
     then:
-    connections.isEmpty()
-    initializationRequests.size() == 1 || driver.events.any { Map e -> e.name == 'secondaryInitRequest' }
-
-    when: 'the parent grants this child its initialization turn'
-    driver.beginParentMediatedConnection('request-1')
-
-    then:
     connections*.url == ['wss://192.168.1.51:1443/websocket/api']
     driver.device.getDataValue('websocketStatus') == 'connecting'
+    driver.state.websocketReconnectAttempts == 0
+    !driver.scheduled.any { List job -> job[1] == 'retryWebsocketConnection' }
 
     when: 'discovery updates the existing child IP'
     driver.device.dataValues.deviceIp = '192.168.1.52'
-    driver.state.parentInitializationGranted = true
     driver.renewWebsocketConnection()
 
     then:
@@ -79,7 +69,6 @@ class SonosAdvSecondariesSpec extends Specification {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.51'
     driver.device.dataValues.websocketUrl = 'wss://192.168.1.60:1443/websocket/api'
-    driver.state.parentInitializationGranted = true
 
     when:
     driver.wsConnect()
@@ -170,9 +159,8 @@ class SonosAdvSecondariesSpec extends Specification {
     !secondSent
     sentMessages.empty
     driver.state.websocketOutboundQueue == null
-    connections.empty
-    driver.events.count { Map e -> e.name == 'secondaryInitRequest' } == 2
-    driver.state.websocketConnectPending != true
+    connections.size() == 1
+    driver.state.websocketConnectPending == true
 
     when:
     driver.webSocketStatus('status: open')
@@ -182,24 +170,7 @@ class SonosAdvSecondariesSpec extends Specification {
     driver.device.getDataValue('websocketStatus') == 'open'
   }
 
-  def "explicit initialize grant clears the exhausted retry limit for this child"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.deviceNetworkId = 'parent-right-channel'
-    driver.state.websocketReconnectAttempts = 3
-    driver.state.websocketReconnectScheduled = true
 
-    when:
-    driver.initialize()
-    driver.beginParentMediatedConnection('request-retry', true)
-
-    then:
-    driver.state.websocketReconnectAttempts == 0
-    driver.state.websocketReconnectScheduled == null
-    driver.scheduled.every { List job -> job[1] != 'retryWebsocketConnection' }
-    driver.state.websocketConnectPending == true
-    connections*.url == ['wss://192.168.1.51:1443/websocket/api']
-  }
 
   def "secondary sends while opening wait for the parent coordinated release"() {
     given:
@@ -283,8 +254,7 @@ class SonosAdvSecondariesSpec extends Specification {
 
     then:
     driver.state.websocketOutboundQueue == null
-    connections.empty
-    driver.events.count { Map e -> e.name == 'secondaryInitRequest' } >= 1
+    connections.size() == 1
     driver.logs.any { it.toString().contains('Secondary socket was not open during paired release') }
   }
 
@@ -292,14 +262,12 @@ class SonosAdvSecondariesSpec extends Specification {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.51'
     driver.device.dataValues.websocketStatus = 'closed'
-    driver.state.parentInitializationGranted = true
 
     when:
     driver.initializeWebsocketConnection()
     (1..3).each {
       driver.webSocketStatus('failure: connect timed out')
-      driver.state.parentInitializationGranted = true
-      driver.retryWebsocketConnection()
+        driver.retryWebsocketConnection()
     }
     driver.webSocketStatus('failure: connect timed out')
 

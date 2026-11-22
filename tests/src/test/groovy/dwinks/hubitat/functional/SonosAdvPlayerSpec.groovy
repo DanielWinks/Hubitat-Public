@@ -280,121 +280,10 @@ class SonosAdvPlayerSpec extends Specification {
     command << ['pause', 'stop', 'play', 'skipToNextTrack', 'skipToPreviousTrack']
   }
 
-  def "initialize clears all local pending command queues before requesting parent initialization"() {
-    given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
-    driver.audioClipQueueInitialization()
-    driver.getDeviceAudioClipQueue().add([correlationId: 'regular'])
-    driver.getDeviceAudioClipQueueHighPriority().add([correlationId: 'high'])
-    driver.getDeviceAudioClipQueueTimers().put('clip-uri', 123L)
-    driver.state.pendingParentAppTtsRequests = [tts: [uri: 'http://example.test/tts.mp3']]
-    driver.runtimeState.pendingParentCoordinatorCommands = [[command: 'play']]
-    driver.runtimeState.activeParentCoordinatorCommand = [command: 'pause']
-    driver.runtimeState.transportCommandQueue = [[command: 'stop']]
-    driver.runtimeState.activeTransportCommand = [command: 'play']
-    driver.runtimeState.websocketOutboundQueue = [[namespace: 'playback', wireCommand: 'play']]
-    driver.runtimeState.websocketCommandLedger = [[namespace: 'playback', wireCommand: 'pause']]
-    driver.runtimeState.activeAudioClipCorrelationId = 'active-clip'
-    driver.atomicState.activeAudioClipMessage = [correlationId: 'active-clip']
-    driver.state.pendingParentCoordinatorCommands = [[command: 'legacy-play']]
-    driver.atomicState.transportCommandQueue = [[command: 'legacy-stop']]
-    driver.atomicState.audioClipProgressByCorrelationId = [legacy: [phase: 'QUEUED']]
 
-    when:
-    driver.initialize()
 
-    then:
-    driver.getDeviceAudioClipQueue().isEmpty()
-    driver.getDeviceAudioClipQueueHighPriority().isEmpty()
-    driver.getDeviceAudioClipQueueTimers().isEmpty()
-    !driver.state.containsKey('pendingParentAppTtsRequests')
-    !driver.runtimeState.containsKey('pendingParentCoordinatorCommands')
-    !driver.runtimeState.containsKey('activeParentCoordinatorCommand')
-    !driver.runtimeState.containsKey('transportCommandQueue')
-    !driver.runtimeState.containsKey('activeTransportCommand')
-    !driver.runtimeState.containsKey('websocketOutboundQueue')
-    !driver.runtimeState.containsKey('websocketCommandLedger')
-    !driver.runtimeState.containsKey('activeAudioClipCorrelationId')
-    !driver.state.containsKey('pendingParentCoordinatorCommands')
-    !driver.atomicState.containsKey('transportCommandQueue')
-    !driver.runtimeState.containsKey('audioClipProgressByCorrelationId')
-    playerStateMessages().any { Map event -> event.kind == 'initializationRequested' }
-  }
 
-  def "app-mediated initialization uses a 180 second settle timeout"() {
-    given:
-    Long startedAt = 1000000L
-    driver.runtimeState.appMediatedInitializationRequestId = 'init-180'
-    driver.runtimeState.appMediatedInitializationStartedAt = startedAt
-    driver.runtimeState.appMediatedInitializationUpnpStarted = true
-    driver.runtimeState.appMediatedInitializationResubscriptionsStarted = true
-    driver.metaClass.now = { -> startedAt + 180000L }
 
-    when:
-    driver.checkAppMediatedInitializationReady()
-
-    then:
-    driver.APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS == 180
-    playerStateMessages().any { Map event ->
-      event.kind == 'initializationFailed' && event.requestId == 'init-180' &&
-        event.detail == 'WebSocket or subscription setup did not settle within 180 seconds'
-    }
-    driver.logs.any { String log -> log.contains('App-mediated initialization timed out') }
-  }
-
-  def "right-channel initialization grants only that child a socket connection"() {
-    given:
-    List<List> grants = []
-    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
-      deviceNetworkId: driver.getRightChannelChildDNI())
-    rightChannel.metaClass.beginParentMediatedConnection = { String requestId, Boolean resetRetries ->
-      grants << [requestId, resetRetries]
-    }
-    driver.children << rightChannel
-
-    when:
-    driver.requestSecondaryWebsocketInitialization('secondary device lifecycle initialize',
-      driver.getRightChannelChildDNI())
-
-    then:
-    grants.size() == 1
-    grants[0][1] == true
-    !playerStateMessages().any { Map event -> event.kind == 'initializationRequested' }
-    parentPlayerRequests.empty
-
-    when: 'an unexpected child asks for access'
-    driver.requestSecondaryWebsocketInitialization('secondary WebSocket connection requested', 'other-child')
-
-    then:
-    grants.size() == 1
-    driver.logs.any { String message -> message.contains('Ignoring secondary WebSocket request from unexpected child') }
-  }
-
-  def "app-mediated initialization succeeds when only the best-effort right channel is unavailable"() {
-    given:
-    driver.runtimeState.appMediatedInitializationRequestId = 'init-right-channel-best-effort'
-    driver.runtimeState.appMediatedInitializationStartedAt = driver.now()
-    driver.runtimeState.appMediatedInitializationUpnpStarted = true
-    driver.runtimeState.appMediatedInitializationResubscriptionsStarted = true
-    driver.device.dataValues.websocketStatus = 'open'
-    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
-      deviceNetworkId: driver.getRightChannelChildDNI())
-    rightChannel.dataValues.websocketStatus = 'error'
-    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
-    driver.children << rightChannel
-
-    when:
-    driver.checkAppMediatedInitializationReady()
-
-    then:
-    playerStateMessages().any { Map event ->
-      event.kind == 'initializationComplete' && event.requestId == 'init-right-channel-best-effort'
-    }
-    !playerStateMessages().any { Map event ->
-      event.kind == 'initializationFailed' && event.requestId == 'init-right-channel-best-effort'
-    }
-    driver.logs.any { String message -> message.contains('Right-channel WebSocket is not ready') }
-  }
 
   def "external transport replacement reports correlated interruption of active group announcement"() {
     given:
@@ -1677,10 +1566,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.getParent = { -> new Expando(
       playerStateUpdate: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       playerAppRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload) },
-      requestInitializationTurn: { String dni, String reason -> parentPlayerUpdates << [kind:'initializationRequested', reason:reason, playerDni:dni] },
-      initializationStarted: { String reqId -> parentPlayerUpdates << [kind:'initializationStarted', requestId:reqId] },
-      initializationComplete: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationComplete', requestId:reqId, detail:detail] },
-      initializationFailed: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationFailed', requestId:reqId, detail:detail] },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
@@ -1736,18 +1621,32 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parseSonosDurationSeconds('invalid') == null
   }
 
-  def "websocket connect requests the parent initialization turn when not granted"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'closed'
 
+  def "every primary websocket open subscribes to audioClip"() {
     when:
-    driver.wsConnect()
+    driver.setWebSocketStatus('open')
 
     then:
-    websocketConnections.empty
-    playerStateMessages().any { Map event ->
-      event.kind == 'initializationRequested' && event.reason.contains('outside app initialization turn')
+    websocketMessages.any { String message ->
+      List parsed = (List)new JsonSlurper().parseText(message)
+      ((Map)parsed[0]).namespace == 'audioClip' && ((Map)parsed[0]).command == 'subscribe'
     }
+  }
+
+  def "player initialization starts subscriptions and websocket locally"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
+    driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
+    driver.device.dataValues.isGroupCoordinator = 'false'
+
+    when:
+    driver.initialize()
+
+    then:
+    websocketConnections.size() == 1
+    websocketConnections[0].last() == 'wss://192.168.1.50:1443/websocket/api'
+    driver.asyncCalls.any { Map call -> call.params?.uri?.toString()?.contains('192.168.1.50:1400') }
+    !parentPlayerUpdates.any { Map event -> event.kind?.toString()?.startsWith('initialization') }
   }
 
   def "duplicate open callback does not replay subscription setup"() {
@@ -1799,77 +1698,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.events.any { Map e -> e.name == 'lastUpdated' }
   }
 
-  def "polled parent updates never call the parent and only require the poll"() {
-    given:
-    List<Map> directCalls = []
-    driver.metaClass.getParent = { -> new Expando(
-      initializationStarted: { String reqId -> directCalls << [kind:'initializationStarted', requestId:reqId] }
-    ) }
 
-    when:
-    driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-poll'])
-    List<Map> batch = driver.flushPendingParentUpdates()
 
-    then:
-    // direct parent call now; poll stubs are no-ops for backward compat
-    directCalls.size() == 1
-    directCalls[0].requestId == 'req-poll'
-    batch.isEmpty()
-    !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
-  }
 
-  def "coalesced parent updates overwrite same key and preserve ordered lifecycle"() {
-    when:
-    // playbackObservation coalescing removed — parent now reads attributes; use ordered lifecycle to verify still ordered
-    driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-1'])
-    driver.publishPlayerStateUpdate([kind: 'initializationStarted', requestId: 'req-2'])
-    drainParentBridge()
-
-    then:
-    // ordered queue preserves both lifecycle events in order
-    parentPlayerUpdates.size() == 2
-    parentPlayerUpdates[0].requestId == 'req-1'
-    parentPlayerUpdates[1].requestId == 'req-2'
-  }
-
-  def "driver initialize only asks the parent app for an initialization turn"() {
-    given:
-    driver.device.currentValues.sonosPlayerStateUpdate = '{"kind":"old"}'
-    driver.device.currentValues.sonosPlayerAppRequest = '{"action":"old"}'
-
-    when:
-    driver.initialize()
-
-    then:
-    // initializationRequested now via parent.requestInitializationTurn direct; fallback outbox only if parent lacks it
-    playerStateMessages().size() == 1
-    playerStateMessages()[0].kind == 'initializationRequested'
-    playerStateMessages()[0].reason == 'driver initialize'
-    !driver.device.currentValues.containsKey('sonosPlayerStateUpdate')
-    !driver.device.currentValues.containsKey('sonosPlayerAppRequest')
-    !driver.events.any { Map event -> event.name in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
-    // Rendering subscriptions start via one shared runIn(1) during immediate init.
-    driver.scheduled.any { List job -> job[1] == 'subscribeToRenderingControlEventsImmediate' }
-    driver.scheduled.any { List job -> job[1] == 'subscribeToZgtEvents' }
-    !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
-    websocketConnections.empty
-  }
-
-  def "subscription renewal requests do not purge pending player commands"() {
-    given:
-    driver.runtimeState.transportCommandQueue = [[command: 'play']]
-    driver.runtimeState.pendingParentCoordinatorCommands = [[command: 'pause']]
-    driver.state.pendingParentAppTtsRequests = [tts: [uri: 'http://example.test/tts.mp3']]
-
-    when:
-    driver.requestFullSubscriptionRenewal(0, 'full subscription renewal')
-
-    then:
-    driver.runtimeState.transportCommandQueue.size() == 1
-    driver.runtimeState.pendingParentCoordinatorCommands.size() == 1
-    driver.state.pendingParentAppTtsRequests.size() == 1
-    playerStateMessages().last().clearPendingCommands == null
-  }
 
   def "parent announcement purge removes only the matching clip correlation"() {
     given:
@@ -1897,30 +1728,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.audioClipPlaying == false
   }
 
-  def "player records its own initialization status before scheduling recovery work"() {
-    given:
-    driver.device.dataValues.appInitializationRequestId = 'request-1'
-
-    when:
-    driver.beginAppMediatedInitialization('request-1')
-
-    then:
-    driver.state.lastPlayerInitialization.status == 'initializing'
-    driver.state.lastPlayerInitialization.requestId == 'request-1'
-    driver.state.lastPlayerInitialization.attempt == 1
-    !playerStateMessages().any { Map message -> message.kind == 'initializationStarted' }
-    driver.logs.any { it.contains('Starting app-mediated initialization') }
-    driver.scheduled.any { List job -> job[1] == 'initializeWebsocketConnection' }
-
-    when:
-    driver.finishAppMediatedInitialization(true, 'subscriptions settled')
-
-    then:
-    driver.state.lastPlayerInitialization.status == 'complete'
-    driver.state.lastPlayerInitialization.detail == 'subscriptions settled'
-    !driver.state.lastPlayerInitialization.containsKey('events')
-    playerStateMessages().any { Map message -> message.kind == 'initializationComplete' }
-  }
 
   def cleanup() {
     GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
@@ -3152,10 +2959,9 @@ class SonosAdvPlayerSpec extends Specification {
     List<String> zgtCalls = []
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
     driver.metaClass.subscribeToMrGrcEvents = { -> }
-    driver.metaClass.markAppMediatedUpnpSubscriptionsStarted = { -> }
 
     when:
-    driver.subscribeToEvents()
+    driver.initialize()
 
     then:
     zgtCalls == ['subscribe']
@@ -4568,7 +4374,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "websocket connection enables native ping liveness checks"() {
     given:
     driver.device.dataValues.websocketStatus = 'closed'
-    driver.runtimeState[driver.APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] = true
 
     when:
     driver.wsConnect()

@@ -352,25 +352,8 @@ preferences {
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
 // Hub login sessions expire; re-login when the cached cookie is older than this.
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
-@Field static final String PLAYER_INITIALIZATION_QUEUE_STATE_KEY = 'playerInitializationQueue'
-@Field static final String PLAYER_INITIALIZATION_ACTIVE_STATE_KEY = 'playerInitializationActive'
-@Field static final String PLAYER_INITIALIZATION_LEDGER_STATE_KEY = 'playerInitializationLedger'
-@Field static final String PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY = 'playerInitializationWatchdogDeadline'
-@Field static final String PLAYER_INITIALIZATION_DEFERRED_STATE_KEY = 'playerInitializationDeferred'
-@Field static final String PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY = 'playerInitializationBootGeneration'
-@Field static final String PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY = 'playerInitializationBootPending'
-@Field static final String PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY = 'playerInitializationBootAttempts'
 @Field static final String ZGT_LAST_REPORT_STATE_KEY = 'zgtLastReport'
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
-@Field static final String PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY = 'playerInitializationNotBefore'
-@Field static final String PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY = 'playerInitializationOffturnBurstStartedAt'
-@Field static final String PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY = 'playerInitializationOffturnProbeReleaseAt'
-@Field static final Integer PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS = 180
-@Field static final Integer PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS = 600
-@Field static final Integer PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS = 60
-@Field static final Integer PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS = 5
-@Field static final Integer PLAYER_INITIALIZATION_MAX_IN_PROGRESS = 3
-@Field static final Integer PLAYER_INITIALIZATION_HOURLY_RETRY_SECONDS = 3600
 @Field static final Integer HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS = 300
 @Field static final List<String> PLAYER_STATE_ATTRIBUTES = ['groupVolume','groupMute','groupPlayerIds','groupCoordinatorId','isGroupCoordinator','isGrouped','status','transportStatus','audioSource','currentTrackName','currentArtistName']
 @Field static final Integer LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS = 300
@@ -471,18 +454,8 @@ preferences {
 // deletes any stored key not in the set on next Save. No hand-maintained blacklist.
 // =============================================================================
 @Field static final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  PLAYER_INITIALIZATION_QUEUE_STATE_KEY,
-  PLAYER_INITIALIZATION_ACTIVE_STATE_KEY,
-  PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY,
-  PLAYER_INITIALIZATION_DEFERRED_STATE_KEY,
-  PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY,
-  PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY,
-  PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY,
   ZGT_LAST_REPORT_STATE_KEY,
   LAST_PROCESSED_TOPOLOGY_STATE_KEY,
-  PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY,
-  PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY,
-  PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY,
   GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY,
   GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY,
   PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY,
@@ -2904,14 +2877,6 @@ void configure(Boolean startup = false) {
   logDebug("App persistence prune completed: ${pruneResult}")
   unsubscribe()
   subscribe(location, 'systemStart', 'systemStartHandler')
-  if(startup) {
-    state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY] = UUID.randomUUID().toString()
-    state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = true
-    state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = [:]
-    state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = []
-    state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = [:]
-  }
-  state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] = now() + PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS * 1000L
   scheduleUpdateCheck()
   checkForUpdates()
 
@@ -2962,18 +2927,10 @@ void configure(Boolean startup = false) {
   // Schedule daily favorites/playlists refresh at 3:05 AM
   unschedule('refreshFavoritesAndPlaylists')
   schedule('0 5 3 * * ?', 'refreshFavoritesAndPlaylists')
-  runIn(3, 'enqueueAllPlayerInitializations', [overwrite: true,
-      data: [reason: 'app configuration']])
   rearmPlayerStateUpdateDrainAfterRestart()
 }
 
-/** Re-seed the serialized player initialization queue after a hub reboot. */
 void systemStartHandler(Object event = null) {
-  unschedule('playerInitializationHardWatchdog')
-  state.remove(PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY)
-  unschedule('startNextPlayerInitialization')
-  recoverInterruptedPlayerInitializations()
-  beginPlayerInitializationBootBatch('Hubitat systemStart event')
   rearmPlayerStateUpdateDrainAfterRestart()
 }
 
@@ -2990,34 +2947,6 @@ void scheduleHouseholdHealthCheck() {
   runIn(HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS, 'householdHealthCheck', [overwrite: true])
 }
 
-void requestInitializationTurn(String dni, String reason) {
-  if(!dni) { return }
-  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  if(queue.any { Map r -> r.dni?.toString() == dni }) { return }
-  String requestId = UUID.randomUUID().toString()
-  queue.add([dni: dni, requestId: requestId, reason: reason ?: 'driver initialize', requestedAt: now(), bootAttempt: 0, bootGeneration: state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]])
-  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-  runInMillis(1, 'startNextPlayerInitialization', [overwrite: true])
-}
-void initializationStarted(String requestId) {
-  if(!requestId) { return }
-  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  Map request = active.values().find { Map item -> item.requestId?.toString() == requestId }
-  if(request == null) { return }
-  request.phase = 'initializing'
-  request.startedAt = now()
-  active[request.dni?.toString()] = request
-  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-}
-void initializationComplete(String requestId, String detail) {
-  if(!requestId) { return }
-  finishPlayerInitialization(requestId, true, detail ?: '')
-}
-void initializationFailed(String requestId, String detail) {
-  if(!requestId) { return }
-  finishPlayerInitialization(requestId, false, detail ?: 'child reported initialization failure')
-}
 void groupAnnouncementProgress(String correlationId, String phase, Map payload, String dni) {
   if(!correlationId || !phase) { return }
   List<Map> q = state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY] instanceof List ? new ArrayList<Map>((List<Map>)state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY]) : []
@@ -3233,356 +3162,6 @@ void handlePolledPlayerRequest(ChildDeviceWrapper player, Map request) {
   } catch(Exception e) {
     logWarn("Polled player app request failed action=${action} from ${dni ?: 'unknown'}: ${e.message}")
   }
-}
-
-/** Requeue grants that were active before a hub reboot and invalidate their callbacks. */
-void recoverInterruptedPlayerInitializations() {
-  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  if(active.isEmpty()) { return }
-  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  active.values().each { Map request ->
-    String dni = request.dni?.toString()
-    if(dni && !queue.any { Map queued -> queued.dni?.toString() == dni }) {
-      Map recovered = new LinkedHashMap(request)
-      recovered.remove('requestId')
-      recovered.remove('phase')
-      recovered.remove('attemptNumber')
-      recovered.remove('initializationStartedAt')
-      recovered.bootAttempt = 0
-      recovered.reason = 'recovered after hub restart'
-      queue.add(recovered)
-    }
-  }
-  state.remove(PLAYER_INITIALIZATION_LEDGER_STATE_KEY)
-  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = [:]
-}
-
-/** Arm a boot batch and keep any early child requests queued until the hub has settled. */
-void beginPlayerInitializationBootBatch(String reason, Long releaseAtOverride = null) {
-  state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY] = UUID.randomUUID().toString()
-  state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = true
-  state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = [:]
-  state.remove(PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY)
-  state.remove(PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY)
-  Long releaseAt = releaseAtOverride ?: (now() + PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS * 1000L)
-  Long existingReleaseAt = (state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] ?: 0L) as Long
-  state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] = Math.max(existingReleaseAt, releaseAt)
-  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  queue.each { Map request ->
-    request.bootGeneration = state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]
-    request.bootAttempt = 0
-  }
-  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  active.values().each { Map request ->
-    request.bootGeneration = state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]
-    request.bootAttempt = 0
-  }
-  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-  logInfo("${reason}; initialization queue release delayed 60 seconds while the hub settles")
-  Long remainingMs = (state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] as Long) - now()
-  if(remainingMs > 0L) {
-    Integer delaySeconds = (Integer)Math.max(1L, Math.ceil(remainingMs / 1000.0d) as Long)
-    runIn(delaySeconds, 'startNextPlayerInitialization', [overwrite: true])
-  }
-  runIn(3, 'enqueueAllPlayerInitializations', [overwrite: true,
-      data: [reason: reason, boot: true]])
-}
-
-/** Distinguish a reboot burst from an isolated runtime WebSocket reconnect request. */
-void classifyPlayerInitializationRequestBurst() {
-  Long burstStartedAt = (state[PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY] ?: 0L) as Long
-  if(burstStartedAt <= 0L) { return }
-  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  List<String> burstDevices = queue.findAll { Map request ->
-    Long requestedAt = (request.requestedAt ?: 0L) as Long
-    requestedAt >= burstStartedAt && requestedAt <= burstStartedAt + PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS * 1000L &&
-        request.reason?.toString()?.startsWith('WebSocket connection requested outside app initialization turn')
-  }.collect { Map request -> request.dni?.toString() }.findAll { String dni -> dni }
-  if(burstDevices.unique().size() >= 2) {
-    beginPlayerInitializationBootBatch('Multiple child WebSocket requests detected at startup',
-        burstStartedAt + PLAYER_INITIALIZATION_STARTUP_DELAY_SECONDS * 1000L)
-    return
-  }
-  Long probeReleaseAt = (state[PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY] ?: 0L) as Long
-  Long notBefore = (state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] ?: 0L) as Long
-  if(probeReleaseAt > 0L && notBefore == probeReleaseAt) {
-    state.remove(PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY)
-  }
-  state.remove(PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY)
-  state.remove(PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY)
-  runIn(1, 'startNextPlayerInitialization', [overwrite: true])
-}
-
-/** Scan after subscriptions are active so initialization requests emitted early in boot are not lost. */
-void enqueueAllPlayerInitializations(Map data = [:]) {
-  Boolean boot = data?.boot == true || state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true
-  String reason = data?.reason?.toString() ?: (boot ? 'hub startup scan' : 'app configuration')
-  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
-  players.each { ChildDeviceWrapper player ->
-    String dni = player.getDeviceNetworkId()?.toString()
-    String websocketUrl = player.getDataValue('websocketUrl')?.toString()
-    Boolean socketUnavailable = player.getDataValue('websocketStatus') != 'open'
-    if(dni && websocketUrl && (boot || socketUnavailable)) {
-      enqueuePlayerInitialization(dni, reason, boot)
-    }
-  }
-  if(players.isEmpty()) { state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = false }
-}
-
-void enqueuePlayerInitialization(String dni, String reason, Boolean boot = false) {
-  if(!dni) { return }
-  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  Boolean driverStartupRequest = reason == 'driver initialize'
-  Boolean offturnWebsocketRequest = reason?.startsWith('WebSocket connection requested outside app initialization turn') == true
-  Boolean hubBeforeSystemStart = false
-  try { hubBeforeSystemStart = isBeforeSystemStart() }
-  catch(Exception e) { logTrace("Could not read Hubitat startup phase: ${e.message}") }
-  if(!boot && state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true && hubBeforeSystemStart) {
-    beginPlayerInitializationBootBatch('Hub startup phase detected during child initialization')
-    boot = true
-    queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-        ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-    active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-        ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  }
-  if(!boot && state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] != true && queue.isEmpty() && active.isEmpty() &&
-      (driverStartupRequest || offturnWebsocketRequest)) {
-    if(driverStartupRequest) {
-      beginPlayerInitializationBootBatch('First child driver initialize request')
-      boot = true
-    } else {
-      Long burstStartedAt = now()
-      state[PLAYER_INITIALIZATION_OFFTURN_BURST_STARTED_STATE_KEY] = burstStartedAt
-      Long existingReleaseAt = (state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] ?: 0L) as Long
-      if(existingReleaseAt <= burstStartedAt) {
-        Long probeReleaseAt = burstStartedAt + PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS * 1000L
-        state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] = probeReleaseAt
-        state[PLAYER_INITIALIZATION_OFFTURN_PROBE_RELEASE_STATE_KEY] = probeReleaseAt
-      }
-      runIn(PLAYER_INITIALIZATION_OFFTURN_BURST_WINDOW_SECONDS, 'classifyPlayerInitializationRequestBurst', [overwrite: true])
-    }
-    queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-        ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-    active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-        ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  }
-  if(boot && !state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]) {
-    beginPlayerInitializationBootBatch('Child initialization requests')
-    queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-        ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  }
-  boot = boot || state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true
-  Map existing = queue.find { Map request -> request.dni?.toString() == dni }
-  String bootGeneration = boot ? state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]?.toString() : null
-  if(active.containsKey(dni)) { return }
-  if(existing != null) {
-    if(bootGeneration && !existing.bootGeneration) {
-      existing.bootGeneration = bootGeneration
-      existing.bootAttempt = 0
-      existing.reason = reason
-      state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-    }
-    return
-  }
-  Map<String, Object> request = [dni: dni, reason: reason ?: 'device request', requestedAt: now()]
-  if(bootGeneration) {
-    Map attempts = state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] instanceof Map
-        ? (Map)state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] : [:]
-    request.bootGeneration = bootGeneration
-    request.bootAttempt = (attempts[dni] ?: 0) as Integer
-  }
-  queue.add(request)
-  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-  logDebug("Queued player initialization for ${dni}; reason=${reason}, boot=${bootGeneration != null}, queued=${queue.size()}")
-  runIn(1, 'startNextPlayerInitialization', [overwrite: true])
-}
-
-void startNextPlayerInitialization() {
-  Long notBefore = (state[PLAYER_INITIALIZATION_NOT_BEFORE_STATE_KEY] ?: 0L) as Long
-  Long remainingMs = notBefore - now()
-  if(remainingMs > 0L) {
-    Integer delaySeconds = (Integer)Math.max(1L, Math.ceil(remainingMs / 1000.0d) as Long)
-    runIn(delaySeconds, 'startNextPlayerInitialization', [overwrite: true])
-    return
-  }
-  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  if(active.size() >= PLAYER_INITIALIZATION_MAX_IN_PROGRESS) { return }
-  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-      ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  while(!queue.isEmpty() && active.size() < PLAYER_INITIALIZATION_MAX_IN_PROGRESS) {
-    Boolean firstPassQueued = queue.any { Map item -> ((item.bootAttempt ?: 0) as Integer) == 0 }
-    Integer requestIndex = firstPassQueued
-        ? queue.findIndexOf { Map item -> ((item.bootAttempt ?: 0) as Integer) == 0 } : 0
-    if(requestIndex == null || requestIndex < 0) { break }
-    Map request = queue.remove((int)requestIndex)
-    String dni = request?.dni?.toString()
-    if(!dni || active.containsKey(dni)) { continue }
-    Boolean isRetry = ((request.bootAttempt ?: 0) as Integer) > 0
-    if(isRetry && active.values().any { Map item -> ((item.attemptNumber ?: 1) as Integer) == 1 }) {
-      queue.add((int)requestIndex, request)
-      break
-    }
-    ChildDeviceWrapper player = getChildDevice(dni)
-    if(player == null || !player.getDataValue('websocketUrl')) {
-      logWarn("Skipping queued player initialization; child or WebSocket URL is unavailable for ${dni}")
-      continue
-    }
-    String requestId = UUID.randomUUID().toString()
-    Long startedAt = now()
-    Map activeRequest = new LinkedHashMap(request)
-    activeRequest.putAll([requestId: requestId, phase: 'initializing', initializationStartedAt: startedAt,
-      dequeuedAt: startedAt, attemptNumber: ((request.bootAttempt ?: 0) as Integer) + 1])
-    Integer timeoutSeconds = activeRequest.attemptNumber == 1
-        ? PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS : PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS
-    activeRequest.timeoutSeconds = timeoutSeconds
-    activeRequest.deadlineAt = startedAt + timeoutSeconds * 1000L
-    active[dni] = activeRequest
-    state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-    state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-    scheduleNextPlayerInitializationWatchdog()
-    logInfo("Initialization start time for ${dni}: ${startedAt}; initialization sent to ${dni}; attempt=${activeRequest.attemptNumber}, inProgress=${active.size()}, queued=${queue.size()}, request=${requestId}")
-    try {
-      player.updateDataValue('appInitializationRequestId', requestId)
-      player.beginAppMediatedInitialization(requestId, activeRequest.attemptNumber as Integer)
-    } catch(Exception e) {
-      logWarn("Could not start initialization for ${dni}: ${e.message}")
-      finishPlayerInitialization(requestId, false, "start invocation failed: ${e.message}")
-    }
-    active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-        ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-    queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-        ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  }
-  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-  if(queue.isEmpty() && active.isEmpty()) {
-    state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] = false
-  }
-  scheduleNextPlayerInitializationWatchdog()
-}
-
-void scheduleNextPlayerInitializationWatchdog() {
-  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  List<Long> deadlines = active.values().collect { Map request ->
-    request.deadlineAt == null ? null : (request.deadlineAt as Long)
-  }.findAll { Long deadline -> deadline != null }
-  Long nextDeadline = deadlines.isEmpty() ? null : deadlines.min()
-  Long scheduledDeadline = (state[PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY] ?: 0L) as Long
-  if(nextDeadline == null) {
-    if(scheduledDeadline > 0L) { unschedule('playerInitializationHardWatchdog') }
-    state.remove(PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY)
-    return
-  }
-  if(scheduledDeadline == nextDeadline) { return }
-  unschedule('playerInitializationHardWatchdog')
-  state[PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY] = nextDeadline
-  runInMillis(Math.max(1L, nextDeadline - now()), 'playerInitializationHardWatchdog', [overwrite: true])
-}
-
-void playerInitializationHardWatchdog(Map data = [:]) {
-  state.remove(PLAYER_INITIALIZATION_WATCHDOG_DEADLINE_STATE_KEY)
-  Map<String, Map> activeByDni = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
-  Long currentTime = now()
-  List<Map> expired = activeByDni.values().findAll { Map request ->
-    request.deadlineAt != null && (request.deadlineAt as Long) <= currentTime
-  }.collect { Map request -> new LinkedHashMap(request) }
-  expired.each { Map request ->
-    Integer attempt = (request.attemptNumber ?: 1) as Integer
-    Integer timeoutSeconds = attempt > 1 ? PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS : PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS
-    finishPlayerInitialization(request.requestId?.toString(), false,
-        "initialization exceeded the ${timeoutSeconds} second timeout", true)
-  }
-  scheduleNextPlayerInitializationWatchdog()
-}
-
-void finishPlayerInitialization(String requestId, Boolean succeeded, String detail = '', Boolean timedOut = false) {
-  Map<String, Map> activeByDni = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  Map active = activeByDni.values().find { Map request -> request.requestId?.toString() == requestId }
-  if(active == null || active.requestId?.toString() != requestId) { return }
-  String dni = active.dni?.toString()
-  Long finishedAt = now()
-  state.remove(PLAYER_INITIALIZATION_LEDGER_STATE_KEY)
-  activeByDni.remove(dni)
-  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = activeByDni
-  scheduleNextPlayerInitializationWatchdog()
-  if(dni) {
-    try {
-      ChildDeviceWrapper completedPlayer = getChildDevice(dni)
-      completedPlayer?.updateDataValue('appInitializationRequestId', '')
-      if(!succeeded) { completedPlayer?.cancelAppMediatedInitialization(requestId) }
-    }
-    catch(Exception e) { logDebug("Could not cancel stale initialization ${requestId} for ${dni}: ${e.message}") }
-  }
-  if(succeeded) {
-    Map deferred = state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] instanceof Map
-        ? (Map)state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] : [:]
-    deferred.remove(dni)
-    state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] = deferred
-    Map attempts = state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] instanceof Map
-        ? (Map)state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] : [:]
-    attempts.remove(dni)
-    state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = attempts
-    logInfo("Player initialization completed for ${dni}")
-  } else {
-    Integer bootAttempt = (active.bootAttempt ?: 0) as Integer
-    if(bootAttempt < 1) {
-      Map attempts = state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] instanceof Map
-          ? (Map)state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] : [:]
-      attempts[dni] = bootAttempt + 1
-      state[PLAYER_INITIALIZATION_BOOT_ATTEMPTS_STATE_KEY] = attempts
-      active.bootAttempt = bootAttempt + 1
-      active.reason = 'one reboot initialization retry'
-      active.requestedAt = now()
-      List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
-          ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-      queue.add(active)
-      state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
-      if(timedOut) {
-        logInfo("Player initialization timed out for ${dni} on attempt 1; retry queued: ${detail}")
-      } else {
-        logInfo("Player initialization failed for ${dni} on attempt 1; retry queued: ${detail}")
-      }
-    } else {
-      logWarn("Player initialization failed for ${dni} on attempt 2; ${timedOut ? 'timed out' : 'driver reported failure'}: ${detail}")
-      Map deferred = state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] instanceof Map
-          ? (Map)state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] : [:]
-      deferred[dni] = [failedAt: now(), reason: detail]
-      state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] = deferred
-      scheduleDeferredPlayerInitializationRetry()
-    }
-  }
-  runIn(1, 'startNextPlayerInitialization', [overwrite: true])
-}
-
-void scheduleDeferredPlayerInitializationRetry() {
-  Map deferred = state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] instanceof Map
-      ? (Map)state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] : [:]
-  if(!deferred.isEmpty()) {
-    runIn(PLAYER_INITIALIZATION_HOURLY_RETRY_SECONDS, 'retryDeferredPlayerInitializations', [overwrite: true])
-  }
-}
-
-void retryDeferredPlayerInitializations() {
-  Map deferred = state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_DEFERRED_STATE_KEY]) : [:]
-  deferred.keySet().each { Object dni ->
-    enqueuePlayerInitialization(dni.toString(), 'hourly deferred initialization retry', false)
-  }
-  scheduleDeferredPlayerInitializationRetry()
 }
 
 // =============================================================================
@@ -5617,27 +5196,7 @@ void scheduleQueuedChildEventDrain(Integer delayMs) {
 }
 
 /** Drop only the initializing player's stale child publication and dedupe state. */
-void clearPendingChildStateForPlayer(String dni) {
-  if(!dni) { return }
-  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
-  pending.remove(dni)
-  if(pending.isEmpty()) {
-    state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
-    unschedule('drainQueuedChildEvents')
-    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
-    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
-  } else {
-    state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
-    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
-    scheduleQueuedChildEventDrain(1)
-  }
-  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
-  lastSent.remove(dni)
-  if(lastSent.isEmpty()) { state.remove(LAST_SENT_CHILD_STATE_KEY) }
-  else { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
-}
+
 
 Boolean sameChildStateValue(Object left, Object right) {
   return left == right
@@ -5861,35 +5420,6 @@ void playerStateUpdateHandler(Object event) {
   String playerDni = payload.playerDni as String
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || !player.getDataValue('id')) { return }
-  String requestId = payload.requestId?.toString()
-  Map<String, Map> activeByDni = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
-  Map active = activeByDni[playerDni]
-  if(payload.kind == 'initializationRequested') {
-    if(payload.clearPendingCommands == true) { clearPendingCommandsForDevice(playerDni) }
-    clearPendingChildStateForPlayer(playerDni)
-    enqueuePlayerInitialization(playerDni, payload.reason?.toString() ?: 'child initialization request',
-        state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true)
-    return
-  }
-  if(payload.kind == 'initializationStarted') {
-    if(active?.requestId?.toString() == requestId) {
-      active.phase = 'initializing'
-      active.startedAt = now()
-      activeByDni[playerDni] = active
-      state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = activeByDni
-      logDebug("Child ${playerDni} acknowledged initialization start for request=${requestId}")
-    }
-    return
-  }
-  if(payload.kind == 'initializationComplete') {
-    finishPlayerInitialization(requestId, true, payload.detail?.toString() ?: '')
-    return
-  }
-  if(payload.kind == 'initializationFailed') {
-    finishPlayerInitialization(requestId, false, payload.detail?.toString() ?: 'child reported initialization failure')
-    return
-  }
   if(payload.kind == 'wsRetry') {
     Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
         ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
@@ -5904,9 +5434,6 @@ void playerStateUpdateHandler(Object event) {
     offlinePlayers.remove(playerDni)
     state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
     resumeAnnouncementsForPlayer(playerDni)
-    if(state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true) {
-      runIn(1, 'startNextPlayerInitialization', [overwrite: true])
-    }
     return
   }
   if(payload.kind == 'groupAnnouncementProgress') {
