@@ -500,7 +500,7 @@ class SonosAdvPlayerSpec extends Specification {
     MetaClass originalMetaClass = driver.getMetaClass()
     driver.setMetaClass(new ExpandoMetaClass(driver.class, false, true))
     driver.getMetaClass().initialize()
-    driver.metaClass.getParent = { -> new Expando(playerStateUpdate: { Map payload -> parentPlayerUpdates << payload }) }
+    driver.metaClass.getParent = { -> new Expando(playerStateUpdate: { Map payload -> parentPlayerUpdates << payload }, groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }) }
     driver.metaClass.postSonosSoapAsync = { String callback, Map params, Map data ->
       throw new IllegalStateException('HTTP dispatch failed')
     }
