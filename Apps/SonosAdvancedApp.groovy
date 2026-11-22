@@ -375,6 +375,7 @@ preferences {
   'currentAlbumName', 'albumArtURI', 'currentFavorite', 'currentPlaylist', 'currentTrackNumber',
   'currentTrackDuration', 'trackDescription', 'trackData', 'trackPosition', 'trackPositionUpdated',
   'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
+  'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
   'currentRepeatOneMode', 'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
   'groupVolume', 'groupMute'
 ]
@@ -5348,7 +5349,7 @@ void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes
   String playerId = player.getDataValue('id')?.toString()
   Map<String, Object> fanoutAttributes = new LinkedHashMap<String, Object>(attributes)
   if(fanoutAttributes.containsKey('albumArtURI')) {
-    fanoutAttributes.albumArtURI = formatAlbumArtForFanout(fanoutAttributes.albumArtURI?.toString(), playerId)
+    fanoutAttributes.putAll(albumArtAttributesForFanout(fanoutAttributes.albumArtURI?.toString(), playerId))
   }
   if(fanoutAttributes.containsKey('nextTrackAlbumArtURI')) {
     fanoutAttributes.nextTrackAlbumArtURI = formatAlbumArtForFanout(fanoutAttributes.nextTrackAlbumArtURI?.toString(), playerId)
@@ -5401,6 +5402,21 @@ void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes
     }
     flushGroupDeviceState(coordinatorId, volumeAttrs.isEmpty() ? null : volumeAttrs, sharedPlayback)
   }
+}
+
+/** A device preference save asks the app to republish the latest art using the new setting. */
+void playerAlbumArtPreferenceUpdate(Map payload) {
+  String playerDni = payload?.playerDni?.toString()
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  String playerId = player?.getDataValue('id')?.toString()
+  if(!player || !playerId) { return }
+  String coordinatorId = player.getDataValue('groupCoordinatorId')?.toString() ?: playerId
+  List<Map> events = getStoredAvtEvents(coordinatorId)
+  Map artEvent = events.find { Map event -> event?.name?.toString() == 'albumArtURI' }
+  String rawAlbumArtURI = artEvent?.value?.toString() ?: 'Not Available'
+  Map<String, Object> attributes = albumArtAttributesForFanout(rawAlbumArtURI, coordinatorId)
+  queueChildStateBatch(playerDni, attributes)
+  if(coordinatorId == playerId) { flushGroupDeviceState(coordinatorId, null, attributes) }
 }
 
 /** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
@@ -10515,11 +10531,91 @@ Map<String, Object> upnpEventsToAttributes(List<Map> events, String coordinatorI
     String name = event?.name?.toString()
     if(name && event.containsKey('value')) {
       Object value = event.value
-      if(name == 'albumArtURI') { value = formatAlbumArtForFanout(value?.toString(), coordinatorId) }
-      attributes[name] = value
+      if(name == 'albumArtURI') {
+        attributes.putAll(albumArtAttributesForFanout(value?.toString(), coordinatorId))
+      } else {
+        attributes[name] = value
+      }
     }
   }
   return attributes
+}
+
+Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String playerId) {
+  String resolvedUri = resolveAlbumArtUrl(rawAlbumArtURI, playerId)
+  Map<String, Object> attributes = [albumArtURI: formatAlbumArtForFanout(resolvedUri, playerId)]
+  ChildDeviceWrapper player = findPlayerBySonosId(playerId)
+  Boolean disabled = player?.getSetting('disableAlbumArtEvents') as Boolean
+  if(disabled == null) { disabled = true }
+  if(disabled) {
+    attributes.albumArtSmall = 'Disabled in preferences'
+    attributes.albumArtMedium = 'Disabled in preferences'
+    attributes.albumArtLarge = 'Disabled in preferences'
+    return attributes
+  }
+
+  if(!resolvedUri || resolvedUri == 'Not Available') {
+    attributes.albumArtSmall = 'Not Available'
+    attributes.albumArtMedium = 'Not Available'
+    attributes.albumArtLarge = 'Not Available'
+    return attributes
+  }
+  List<String> urls = parseConcatenatedAlbumArtUrls(resolvedUri)
+  if(urls.size() > 1) {
+    urls = urls.findAll { String url -> !url.contains('/AArt/') }
+    if(urls.isEmpty()) { urls = parseConcatenatedAlbumArtUrls(resolvedUri) }
+    String large = urls.find { String url -> url.contains('/AArl/') } ?: urls[0]
+    String medium = urls.find { String url -> url.contains('/AArm/') } ?: (urls.find { String url -> url.contains('/AArl/') } ?: urls[0])
+    String small = urls.find { String url -> url.contains('/AArs/') } ?: (urls.find { String url -> url.contains('/AArm/') } ?: urls[0])
+    attributes.albumArtSmall = small
+    attributes.albumArtMedium = medium
+    attributes.albumArtLarge = large
+    attributes.albumArtURI = formatAlbumArtForFanout(medium, playerId)
+    return attributes
+  }
+
+  if(resolvedUri.contains('/getaa?') || resolvedUri.contains('/getaa/')) {
+    attributes.albumArtSmall = appendAlbumArtSize(resolvedUri, 60)
+    attributes.albumArtMedium = appendAlbumArtSize(resolvedUri, 200)
+    attributes.albumArtLarge = appendAlbumArtSize(resolvedUri, 600)
+  } else {
+    attributes.albumArtSmall = resolvedUri
+    attributes.albumArtMedium = resolvedUri
+    attributes.albumArtLarge = resolvedUri
+  }
+  return attributes
+}
+
+String resolveAlbumArtUrl(String rawAlbumArtURI, String playerId) {
+  if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') { return 'Not Available' }
+  if(!rawAlbumArtURI.startsWith('/')) { return rawAlbumArtURI }
+  String baseUrl = resolvePlayerUpnpBaseUrl(findPlayerBySonosId(playerId))
+  return baseUrl ? "${baseUrl}${rawAlbumArtURI}" : rawAlbumArtURI
+}
+
+String appendAlbumArtSize(String url, Integer size) {
+  String separator = url.contains('?') ? '&' : '?'
+  return "${url}${separator}x=${size}&y=${size}"
+}
+
+List<String> parseConcatenatedAlbumArtUrls(String value) {
+  if(!value || !(value.contains('http://') || value.contains('https://'))) { return value ? [value] : [] }
+  List<String> urls = []
+  Integer start = 0
+  while(start < value.length()) {
+    Integer offset = value.substring(start).startsWith('https://') ? 8 : 7
+    Integer nextHttp = value.indexOf('http://', start + offset)
+    Integer nextHttps = value.indexOf('https://', start + offset)
+    Integer next = nextHttp > 0 && nextHttps > 0 ? Math.min(nextHttp, nextHttps) : (nextHttp > 0 ? nextHttp : nextHttps)
+    if(next > 0) {
+      urls.add(value.substring(start, next))
+      start = next
+    } else {
+      urls.add(value.substring(start))
+      break
+    }
+  }
+  return urls
 }
 
 String formatAlbumArtForFanout(String albumArtURI, String coordinatorId) {

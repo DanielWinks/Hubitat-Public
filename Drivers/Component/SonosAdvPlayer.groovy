@@ -1278,6 +1278,7 @@ void handleSettingsUpdate() {
     groupsRegistryInitialization()
     favoritesMapInitialization()
   }
+  scheduleAlbumArtPreferenceRefresh()
 }
 
 
@@ -1801,7 +1802,7 @@ void secondaryConfigurationPhase4() {
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  if(getDisableAlbumArtEvents()) { clearAlbumArtEvents() }
+  scheduleAlbumArtPreferenceRefresh()
   audioClipQueueInitialization()
   groupsRegistryInitialization()
   favoritesMapInitialization()
@@ -7574,11 +7575,16 @@ void clearCurrentNextArtistAlbumTrackData() {
   setNextArtistAlbumTrack(null, null, null)
 }
 
-void clearAlbumArtEvents() {
-  String disabled = 'Disabled in preferences'
-  queuePlayerAttributeUpdate('albumArtSmall', disabled)
-  queuePlayerAttributeUpdate('albumArtMedium', disabled)
-  queuePlayerAttributeUpdate('albumArtLarge', disabled)
+void scheduleAlbumArtPreferenceRefresh() {
+  runInMillis(1, 'notifyParentAlbumArtPreferenceUpdate', [overwrite: true])
+}
+
+void notifyParentAlbumArtPreferenceUpdate() {
+  try {
+    parent.playerAlbumArtPreferenceUpdate([playerDni: device.getDeviceNetworkId()])
+  } catch(Exception e) {
+    logWarn("Could not notify parent of album art preference update: ${e.message}")
+  }
 }
 
 void clearTrackDataEvent() {

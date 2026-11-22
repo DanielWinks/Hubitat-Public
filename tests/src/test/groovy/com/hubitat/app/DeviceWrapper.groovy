@@ -12,6 +12,7 @@ class DeviceWrapper {
   List<Map> events = []
   Object currentValue(String n)                   { currentValues[n] }
   Object currentValue(String n, boolean fresh)    { currentValues[n] }
+  Object getSetting(String name) { updatedSettings[name] }
   void   updateSetting(String n, Object v)        { updatedSettings[n] = v }
   void   updateSetting(String n, Map opts)        { updatedSettings[n] = opts.value }
   void   setDeviceNetworkId(String dni)           { this.deviceNetworkId = dni }

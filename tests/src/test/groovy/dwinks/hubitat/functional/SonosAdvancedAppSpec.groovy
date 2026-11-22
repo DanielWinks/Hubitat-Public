@@ -3326,6 +3326,39 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
   }
 
+  def "enabled album art preference fans out all Sonos artwork sizes"() {
+    given:
+    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
+    coordinator.updatedSettings.disableAlbumArtEvents = false
+
+    when:
+    Map<String, Object> attributes = appScript.upnpEventsToAttributes([
+      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
+    ], 'RINCON_COORD')
+
+    then:
+    attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
+    attributes.albumArtSmall == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=60&y=60'
+    attributes.albumArtMedium == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=200&y=200'
+    attributes.albumArtLarge == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=600&y=600'
+  }
+
+  def "album art preference refresh clears stale disabled values from the app fanout"() {
+    given:
+    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
+    coordinator.updatedSettings.disableAlbumArtEvents = false
+    appScript.putAvtEvents('RINCON_COORD', [[name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']])
+
+    when:
+    appScript.playerAlbumArtPreferenceUpdate([playerDni: coordinator.deviceNetworkId])
+
+    then:
+    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].albumArtSmall ==
+      'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=60&y=60'
+    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].albumArtLarge ==
+      'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=600&y=600'
+  }
+
   def "app player attribute updates fan out the full playback state to followers and group devices"() {
     given:
     List<Map> topology = [
