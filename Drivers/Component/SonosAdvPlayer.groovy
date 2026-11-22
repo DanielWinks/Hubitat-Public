@@ -2992,9 +2992,10 @@ void dispatchAnnouncementRestore(String correlationId, String stage, String call
 void setAVTransportURIForAnnouncementRestore(String uri, String metadata, String correlationId) {
   String ip = getLocalUpnpHostForGroupOperation()
   if(!ip) { finishAnnouncementPlaybackRestore(correlationId, false, 'coordinator-unavailable'); return }
-  // The SOAP builder interpolates values and mutates the action's argument map.
+  // The MarkupBuilder SOAP builder XML-escapes values; pass raw values here
+  // to avoid double-escaping.
   Map restoreService = AVTransport + [actions: [SetAVTransportURI: [arguments: [InstanceID: 0]]]]
-  Map values = [CurrentURI: escapeSoapXmlText(uri), CurrentURIMetaData: escapeSoapXmlText(metadata)]
+  Map values = [CurrentURI: uri, CurrentURIMetaData: metadata]
   Map params = getSoapActionParams(ip, restoreService, 'SetAVTransportURI', values)
   dispatchAnnouncementRestore(correlationId, 'uri', 'announcementPlaybackUriRestored', params)
 }
@@ -4971,10 +4972,22 @@ void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
   }
 }
 
+GPathResult findXmlDescendantByLocalName(GPathResult node, String localName) {
+  if(node == null || !localName) { return null }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult) {
+      GPathResult current = (GPathResult)child
+      if(xmlLocalName(current) == localName) { return current }
+      GPathResult hit = findXmlDescendantByLocalName(current, localName)
+      if(hit != null) { return hit }
+    }
+  }
+  return null
+}
+
 String findSleepTimerXmlText(GPathResult node, String elementName) {
   if(node == null || !elementName) { return null }
-  Object found = node.depthFirst().find { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == elementName }
-  return (found instanceof GPathResult) ? ((GPathResult)found).text() : null
+  return findXmlDescendantByLocalName(node, elementName)?.text()
 }
 
 void createRemoveRightChannelChildDevice(Boolean create) {
@@ -13018,8 +13031,8 @@ void playlistAddBrowseCallback(AsyncResponse response, Map data = null) {
     String updateId = findSoapBodyField(envelope, 'UpdateID') ?: '0'
     Map track = (Map)data.track
     Map params = getSoapActionParams(data.host.toString(), AVTransport, 'AddURIToSavedQueue', [
-      ObjectID: data.objectId.toString(), UpdateID: updateId, EnqueuedURI: escapeSoapXmlText(track.uri.toString()),
-      EnqueuedURIMetaData: escapeSoapXmlText(track.metadata.toString()), AddAtIndex: '4294967295'])
+      ObjectID: data.objectId.toString(), UpdateID: updateId, EnqueuedURI: track.uri.toString(),
+      EnqueuedURIMetaData: track.metadata.toString(), AddAtIndex: '4294967295'])
     postSonosSoapAsync('playlistAddTrackCallback', params, [requestId: data.requestId,
       playlistName: data.playlistName])
   } catch(Exception e) {
@@ -13217,8 +13230,7 @@ String snapshotTrackDescription(String trackUri) {
 
 String findQueueXmlText(GPathResult node, String targetName) {
   if(node == null || !targetName) { return null }
-  Object found = node.depthFirst().find { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == targetName }
-  return (found instanceof GPathResult) ? ((GPathResult)found).text() : null
+  return findXmlDescendantByLocalName(node, targetName)?.text()
 }
 
 String escapeQueueHtml(String value) {

@@ -4352,19 +4352,19 @@ String escapeSonosXml(String value) {
 List<Map> parseSonosAlarmList(String responseXml) {
   if(!responseXml) { return [] }
   GPathResult outer = new XmlSlurper().parseText(responseXml)
-  Object alarmHolder = outer.depthFirst().find { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == 'CurrentAlarmList' }
+  GPathResult alarmHolder = findXmlDescendantByLocalName(outer, 'CurrentAlarmList')
   String alarmXml = (alarmHolder instanceof GPathResult) ? ((GPathResult)alarmHolder).text() : null
   if(!alarmXml) { return [] }
   GPathResult alarmRoot = new XmlSlurper().parseText(alarmXml)
   List<Map> result = []
   List<String> alarmKeys = ['ID','StartTime','StartLocalTime','Duration','Recurrence','Enabled','RoomUUID',
     'ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones']
-  alarmRoot.depthFirst().findAll { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == 'Alarm' }.each { Object n ->
-    GPathResult node = (GPathResult)n
+  List<GPathResult> alarmNodes = []
+  collectXmlDescendantsByLocalName(alarmRoot, 'Alarm', alarmNodes)
+  alarmNodes.each { GPathResult node ->
     Map attrs = [:]
-    Map<String, Object> nodeAttrs = (Map<String, Object>)node.attributes()
     alarmKeys.each { String key ->
-      String value = nodeAttrs[key]?.toString()
+      String value = xmlAttribute(node, key)
       if(value) { attrs[key] = value }
     }
     if(attrs.StartTime && !attrs.StartLocalTime) { attrs.StartLocalTime = attrs.StartTime }
@@ -4381,6 +4381,35 @@ String xmlLocalName(GPathResult node) {
   Integer prefixEnd = qualifiedName.lastIndexOf(':')
   if(prefixEnd >= 0) { qualifiedName = qualifiedName.substring(prefixEnd + 1) }
   return qualifiedName
+}
+
+String xmlAttribute(GPathResult node, String attributeName) {
+  if(node == null || !attributeName) { return null }
+  return node.getAt("@${attributeName}")?.toString()
+}
+
+GPathResult findXmlDescendantByLocalName(GPathResult node, String localName) {
+  if(node == null || !localName) { return null }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult) {
+      GPathResult current = (GPathResult)child
+      if(xmlLocalName(current) == localName) { return current }
+      GPathResult hit = findXmlDescendantByLocalName(current, localName)
+      if(hit != null) { return hit }
+    }
+  }
+  return null
+}
+
+void collectXmlDescendantsByLocalName(GPathResult node, String localName, List<GPathResult> out) {
+  if(node == null || !localName || out == null) { return }
+  for(Object child : node.children()) {
+    if(child instanceof GPathResult) {
+      GPathResult current = (GPathResult)child
+      if(xmlLocalName(current) == localName) { out.add(current) }
+      collectXmlDescendantsByLocalName(current, localName, out)
+    }
+  }
 }
 
 GPathResult findDirectXmlChild(GPathResult node, String localName) {
