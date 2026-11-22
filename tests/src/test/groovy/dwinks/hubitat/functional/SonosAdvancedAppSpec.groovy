@@ -3312,6 +3312,20 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.currentTrackName == 'Track'
   }
 
+  def "relative album art resolves from the discovered Sonos host when the URL field is absent"() {
+    given:
+    coordinator.dataValues.remove('localUpnpUrl')
+    coordinator.dataValues.localUpnpHost = '192.168.1.20:1400'
+
+    when:
+    Map<String, Object> attributes = appScript.upnpEventsToAttributes([
+      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
+    ], 'RINCON_COORD')
+
+    then:
+    attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
+  }
+
   def "app player attribute updates fan out the full playback state to followers and group devices"() {
     given:
     List<Map> topology = [

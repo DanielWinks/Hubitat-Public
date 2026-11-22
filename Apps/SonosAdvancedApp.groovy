@@ -10527,10 +10527,24 @@ String formatAlbumArtForFanout(String albumArtURI, String coordinatorId) {
   String imageUrl = albumArtURI
   if(imageUrl.startsWith('/')) {
     ChildDeviceWrapper coordinator = findPlayerBySonosId(coordinatorId)
-    String localUpnpUrl = coordinator?.getDataValue('localUpnpUrl')?.toString()
+    String localUpnpUrl = resolvePlayerUpnpBaseUrl(coordinator)
     if(localUpnpUrl) { imageUrl = "${localUpnpUrl}${imageUrl}" }
   }
   return "<br><img src=\"${escapeNewUiHtml(imageUrl)}\" width=\"200\" height=\"200\" >"
+}
+
+String resolvePlayerUpnpBaseUrl(ChildDeviceWrapper player) {
+  if(player == null) { return '' }
+  String configuredUrl = player.getDataValue('localUpnpUrl')?.toString()?.trim()
+  if(configuredUrl) { return configuredUrl.endsWith('/') ? configuredUrl[0..-2] : configuredUrl }
+  String host = player.getDataValue('localUpnpHost')?.toString()?.trim()
+  if(!host) {
+    String ip = player.getDataValue('deviceIp')?.toString()?.trim()
+    if(ip) { host = ip.contains(':') ? ip : "${ip}:1400" }
+  } else if(!host.contains(':')) {
+    host = "${host}:1400"
+  }
+  return host ? "http://${host}" : ''
 }
 
 String formatFavoriteForFanout(Object favorite, String coordinatorId) {
