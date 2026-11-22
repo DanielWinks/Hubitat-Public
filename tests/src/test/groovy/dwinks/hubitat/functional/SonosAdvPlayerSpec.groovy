@@ -1715,8 +1715,8 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.device.currentValues.containsKey('sonosPlayerStateUpdate')
     !driver.device.currentValues.containsKey('sonosPlayerAppRequest')
     !driver.events.any { Map event -> event.name in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
-    // RC early subscribe via runIn(1) falls out of sync init
-    driver.scheduled.any { List job -> job[1] == 'subscribeToMrRcEventsImmediate' }
+    // Rendering subscriptions start via one shared runIn(1) during immediate init.
+    driver.scheduled.any { List job -> job[1] == 'subscribeToRenderingControlEventsImmediate' }
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
     websocketConnections.empty
   }
@@ -2919,6 +2919,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
     driver.metaClass.unsubscribeFromZgtEvents = { -> zgtCalls << 'unsubscribe' }
     driver.metaClass.subscribeToMrRcEvents = { -> }
+    List<String> grcCalls = []
+    driver.metaClass.subscribeToMrGrcEvents = { -> grcCalls << 'subscribe' }
     driver.metaClass.markAppMediatedUpnpSubscriptionsStarted = { -> }
     driver.device.dataValues.isZgtSubscriber = 'false'
 
@@ -2930,6 +2932,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     zgtCalls == ['unsubscribe', 'subscribe']
+    grcCalls == ['subscribe', 'subscribe']
   }
 
   def "every ZGT snapshot applies in order while a topology mutation is pending"() {
@@ -4483,7 +4486,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.any { it.toString().contains('No UPnP sid1 event arrived after resubscription for Play') }
   }
 
-  def "GroupRenderingControl expectation does not resubscribe after player becomes ungrouped"() {
+  def "GroupRenderingControl expectation resubscribes after player becomes ungrouped"() {
     given:
     driver.device.currentValues.isGrouped = 'off'
     driver.armExpectedUpnpSubscriptionEvent('sid4', 'SetGroupVolume')
@@ -4494,9 +4497,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.watchExpectedUpnpSubscriptionEvents()
 
     then:
-    driver.runtimeState.upnpExpectedSubscriptionEvents == null
-    rawRequests.empty
-    driver.logs.any { it.toString().contains('Skipping GroupRenderingControl resubscribe') }
+    pending[0].attempts == 1
+    rawRequests.size() == 1
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/GroupRenderingControl/Event HTTP/1.1')
   }
 
   def "AVTransport event receipt records a per-player diagnostic timestamp"() {

@@ -1003,12 +1003,13 @@ void scheduleEarlyRenderingControlSubscribe() {
     logDebug('RC early subscribe skipped — device data not yet configured')
     return
   }
-  runIn(1, 'subscribeToMrRcEventsImmediate', [overwrite: true])
+  runIn(1, 'subscribeToRenderingControlEventsImmediate', [overwrite: true])
 }
 
-void subscribeToMrRcEventsImmediate() {
-  // Unconditional per-device RC — falls out of sync initialize() processing
+void subscribeToRenderingControlEventsImmediate() {
+  // Subscribe each device to both per-player and group rendering events early.
   subscribeToMrRcEvents()
+  subscribeToMrGrcEvents()
   markAppMediatedUpnpSubscriptionsStarted()
 }
 
@@ -1065,8 +1066,8 @@ void deferredInitCallback() {
 }
 
 void performDeferredInitialization() {
-  // RC already scheduled early via scheduleEarlyRenderingControlSubscribe(); do not duplicate sid2 here
-  if(getIsGrouped() == true) { subscribeToMrGrcEvents() }
+  // RenderingControl and GroupRenderingControl are already scheduled early.
+  // GroupRenderingControl is subscribed early for every player.
   if(getIsGroupCoordinator() == true) {
     subscribeToAVTransport()
     getPlaybackMetadataStatus()
@@ -3415,8 +3416,8 @@ void subscribeToEvents() {
   } else {
     unsubscribeFromZgtEvents()
   }
-  if(getIsGrouped()) { subscribeToMrGrcEvents() } // sid4 only needed when grouped; setGroupPlayerIds() handles transitions
-  // RC handled early via scheduleEarlyRenderingControlSubscribe(); do not duplicate sid2 here
+  subscribeToMrGrcEvents()
+  // Rendering subscriptions are handled by the early initialization callback.
   markAppMediatedUpnpSubscriptionsStarted()
 }
 
@@ -8335,18 +8336,12 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   if(coordinatorChanged) { setDeviceDataValue('coordinatorStatusChanged', '') }
   if(newValue == oldValue && !coordinatorChanged) { return }
   if(newValue != oldValue) {
-    Boolean wasGrouped = oldValue ? splitTokens(oldValue, ',').size() > 1 : false
     Boolean isNowGrouped = groupPlayerIds.size() > 1
     setDeviceDataValue('groupPlayerIds', newValue)
     queueLocalDeviceEvent('isGrouped', isNowGrouped ? 'on' : 'off')
     queueLocalDeviceEvent('groupMemberCount', groupPlayerIds.size())
     queueLocalDeviceEvent('groupPlayerIds', newValue)
-    // Subscribe/unsubscribe sid4 (GroupRenderingControl) on group transitions
-    if(isNowGrouped && !wasGrouped) {
-      subscribeToMrGrcEvents()
-    } else if(!isNowGrouped && wasGrouped) {
-      unsubscribeFromMrGrcEvents()
-    }
+    // sid4 remains subscribed per device across group membership transitions.
   }
   logDebug('Updating group device with new group membership information')
 }
@@ -11885,11 +11880,6 @@ void watchExpectedUpnpSubscriptionEvents() {
         ? "${Math.max(0L, currentTimeEpoch - lastEventEpoch)}s ago"
         : 'not observed in this runtime'
     if(((expectation.attempts ?: 0) as Integer) < 1) {
-      if(sidKey == 'sid4' && !getIsGrouped()) {
-        logDebug("Skipping GroupRenderingControl resubscribe after ${expectation.action}; player is no longer grouped (guid=${expectation.guid})")
-        pending.remove(expectation)
-        return
-      }
       logWarn("No UPnP ${sidKey} subscription event arrived after ${expectation.action}; last event ${lastEventAge}; resubscribing (guid=${expectation.guid})")
       resubscribeUpnpSid(sidKey)
       expectation.attempts = 1
