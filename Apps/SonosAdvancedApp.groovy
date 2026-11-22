@@ -30,26 +30,37 @@ import com.hubitat.hub.domain.Event
 import com.hubitat.hub.domain.Location
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import groovy.util.XmlSlurper
 import groovy.util.slurpersupport.GPathResult
 import groovy.xml.MarkupBuilder
 import java.io.StringWriter
-import javax.xml.xpath.XPathFactory
-import javax.xml.xpath.XPathConstants
-import javax.xml.parsers.DocumentBuilderFactory
-import org.xml.sax.InputSource
-import java.io.StringReader
 import hubitat.scheduling.AsyncResponse
 import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.commons.lang3.math.NumberUtils
 import java.util.Locale
+import java.util.Collections
+import java.util.TreeSet
+import java.util.UUID
+import java.util.Random
+import java.math.BigDecimal
+import java.time.Clock
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.Duration
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.time.temporal.TemporalAdjusters
 import java.math.RoundingMode
+import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.security.MessageDigest
+import java.nio.charset.StandardCharsets
+import groovy.json.JsonBuilder
+import org.quartz.CronExpression
 
 // =============================================================================
 // Library: Utilities and Logging (inlined)
@@ -57,6 +68,86 @@ import java.math.RoundingMode
 @Field static final List<String> APP_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 @Field static final Integer CHILD_STATE_DRAIN_BATCH_SIZE = 2
 @Field static final DateTimeFormatter APP_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss')
+@Field static final JsonSlurper SHARED_JSON_SLURPER = new JsonSlurper()
+@Field static java.util.Random groupMediaRandom = new java.util.Random()
+
+JsonSlurper getSharedJsonSlurper() {
+  return SHARED_JSON_SLURPER
+}
+
+ZoneId hubZoneId() {
+  return location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()
+}
+
+Clock hubClock() {
+  return Clock.system(hubZoneId())
+}
+
+Instant hubNowInstant() {
+  return hubClock().instant()
+}
+
+Long nowPlusSeconds(long seconds) {
+  return hubNowInstant().plusSeconds(seconds).toEpochMilli()
+}
+
+Long nowPlusMillis(long millis) {
+  return hubNowInstant().plusMillis(millis).toEpochMilli()
+}
+
+Long millisSince(Long epochMillis) {
+  if(epochMillis == null) { return null }
+  return Duration.between(Instant.ofEpochMilli(epochMillis), hubNowInstant()).toMillis()
+}
+
+DayOfWeek parseDayOfWeek(String value) {
+  if(!value) { return DayOfWeek.SUNDAY }
+  String normalized = value.trim().toLowerCase(Locale.ROOT)
+  switch(normalized) {
+    case 'sunday': return DayOfWeek.SUNDAY
+    case 'monday': return DayOfWeek.MONDAY
+    case 'tuesday': return DayOfWeek.TUESDAY
+    case 'wednesday': return DayOfWeek.WEDNESDAY
+    case 'thursday': return DayOfWeek.THURSDAY
+    case 'friday': return DayOfWeek.FRIDAY
+    case 'saturday': return DayOfWeek.SATURDAY
+    case 'sun': return DayOfWeek.SUNDAY
+    case 'mon': return DayOfWeek.MONDAY
+    case 'tue': return DayOfWeek.TUESDAY
+    case 'wed': return DayOfWeek.WEDNESDAY
+    case 'thu': return DayOfWeek.THURSDAY
+    case 'fri': return DayOfWeek.FRIDAY
+    case 'sat': return DayOfWeek.SATURDAY
+    default: return DayOfWeek.SUNDAY
+  }
+}
+
+ZonedDateTime nextWeeklyOccurrence(LocalTime time, DayOfWeek dayOfWeek, ZoneId zone) {
+  ZonedDateTime nowDateTime = ZonedDateTime.now(hubClock())
+  ZonedDateTime candidate = nowDateTime.with(time).with(TemporalAdjusters.nextOrSame(dayOfWeek))
+  if(candidate.isBefore(nowDateTime)) {
+    candidate = candidate.plusWeeks(1)
+  }
+  return candidate
+}
+
+ZonedDateTime atInstallTime(Date installTime, ZoneId zone) {
+  LocalTime time = LocalTime.of(installTime.hours, installTime.minutes)
+  return ZonedDateTime.of(ZonedDateTime.now(Clock.system(zone)).toLocalDate(), time, zone)
+}
+
+Set<DayOfWeek> sonosAlarmRecurrenceDays(String recurrence) {
+  switch(recurrence?.toString()?.toUpperCase(Locale.ROOT)) {
+    case 'DAILY': return Collections.unmodifiableSet(new HashSet<DayOfWeek>(DayOfWeek.values()))
+    case 'WEEKDAYS': return Collections.unmodifiableSet(new HashSet<DayOfWeek>([DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY, DayOfWeek.THURSDAY, DayOfWeek.FRIDAY]))
+    case 'WEEKENDS': return Collections.unmodifiableSet(new HashSet<DayOfWeek>([DayOfWeek.SATURDAY, DayOfWeek.SUNDAY]))
+    default: return Collections.unmodifiableSet(new HashSet<DayOfWeek>())
+  }
+}
+
+Boolean isValidSonosRecurrence(String recurrence) {
+  return recurrence in ['ONCE', 'DAILY', 'WEEKDAYS', 'WEEKENDS']
+}
 
 void logError(String message) {
   if(loggingEnabled('error')) {
@@ -260,12 +351,12 @@ preferences {
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
 // Hub login sessions expire; re-login when the cached cookie is older than this.
-@Field static final Long HUB_COOKIE_MAX_AGE_MS = 10L * 60L * 1000L
+@Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
 // Per-child debounce for GROUP_STATUS_MOVED driven ZGT resubscribes. Burst 499
 // responses during group transitions would otherwise fire dozens of subscribes
 // on the same device back to back.
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtResubRequestAt = new java.util.concurrent.ConcurrentHashMap<String, Long>()
-@Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = 60000L
+@Field static final Long ZGT_RESUB_REQUEST_MIN_INTERVAL_MS = Duration.ofMinutes(1).toMillis()
 @Field static final String PLAYER_INITIALIZATION_QUEUE_STATE_KEY = 'playerInitializationQueue'
 @Field static final String PLAYER_INITIALIZATION_ACTIVE_STATE_KEY = 'playerInitializationActive'
 @Field static final String PLAYER_INITIALIZATION_LEDGER_STATE_KEY = 'playerInitializationLedger'
@@ -1238,7 +1329,7 @@ String renderNewUiSpeakerTableMarkup() {
       String safeIp = escapeNewUiHtml(row.ip ?: 'Unknown')
       String childDeviceId = row.player?.id?.toString()
       if(row.created == true && childDeviceId) {
-        safeName = "<a href='/device/edit/${escapeNewUiHtml(childDeviceId)}' target='_blank'>${safeName}</a>"
+        safeName = deviceEditLink(childDeviceId, safeName)
       }
       String detail = [safeModel, safeId]
           .findAll { String value -> value }
@@ -1275,7 +1366,7 @@ String renderNewUiSpeakerMobileListMarkup() {
       String safeIp = escapeNewUiHtml(row.ip ?: 'Unknown')
       String childDeviceId = row.player?.id?.toString()
       if(row.created == true && childDeviceId) {
-        safeName = "<a href='/device/edit/${escapeNewUiHtml(childDeviceId)}' target='_blank'>${safeName}</a>"
+        safeName = deviceEditLink(childDeviceId, safeName)
       }
       String detail = [safeModel, safeId].findAll { String value -> value }.join(' &middot; ')
       String speakerMarkup = "<strong>${safeName}</strong>" + (detail ? "<div class='new-ui-speaker-detail'>${detail}</div>" : '')
@@ -1484,6 +1575,14 @@ String newUiStatusBadge(String label, String statusClass, String title) {
 
 String escapeNewUiHtml(Object value) {
   return StringEscapeUtils.escapeHtml4(StringUtils.defaultString(value?.toString())).replace("'", '&#39;')
+}
+
+// The prefs HTML fragment builders below stay on StringBuilder deliberately:
+// MarkupBuilder emits double-quoted attributes, which would break the
+// single-quoted href/class contract asserted by the specs and rendered by
+// Hubitat's prefs. Escaping is centralized in escapeNewUiHtml instead.
+String deviceEditLink(String deviceId, String escapedLabel) {
+  return "<a href='/device/edit/${escapeNewUiHtml(deviceId)}' target='_blank'>${escapedLabel}</a>"
 }
 
 String displayNewUiGroupEditor() {
@@ -1756,7 +1855,7 @@ String renderNewUiGroupTableMarkup() {
       String safeName = escapeNewUiHtml(groupName)
       String groupDeviceId = row.device?.id?.toString()
       if(groupDeviceId) {
-        safeName = "<a href='/device/edit/${escapeNewUiHtml(groupDeviceId)}' target='_blank'>${safeName}</a>"
+        safeName = deviceEditLink(groupDeviceId, safeName)
       }
       String coordinatorName = row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown'
       String safeCoordinator = escapeNewUiHtml(coordinatorName)
@@ -1789,7 +1888,7 @@ String renderNewUiGroupTableMobileListMarkup() {
       String safeName = escapeNewUiHtml(groupName)
       String groupDeviceId = row.device?.id?.toString()
       if(groupDeviceId) {
-        safeName = "<a href='/device/edit/${escapeNewUiHtml(groupDeviceId)}' target='_blank'>${safeName}</a>"
+        safeName = deviceEditLink(groupDeviceId, safeName)
       }
       String coordinator = escapeNewUiHtml(row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown')
       String followers = renderNewUiGroupFollowers(row.followerIds)
@@ -1862,8 +1961,18 @@ Map findNewUiGroupByToken(String token) {
 }
 
 String newUiGroupToken(String groupName) {
-  String encoded = groupName?.bytes?.encodeBase64()?.toString() ?: ''
-  return encoded.replace('+', '-').replace('/', '_').replace('=', '')
+  if(groupName == null || groupName.isEmpty()) { return '' }
+  try {
+    MessageDigest digest = MessageDigest.getInstance('SHA-256')
+    byte[] hash = digest.digest(groupName.getBytes(StandardCharsets.UTF_8))
+    StringBuilder hex = new StringBuilder(hash.length * 2)
+    for(byte b : hash) {
+      hex.append(String.format(Locale.ROOT, '%02x', b & 0xff))
+    }
+    return hex.toString()
+  } catch(Exception ignored) {
+    return UUID.nameUUIDFromBytes(groupName.getBytes(StandardCharsets.UTF_8)).toString()
+  }
 }
 
 String newUiGroupNameFromDeviceNetworkId(String deviceNetworkId) {
@@ -2778,7 +2887,7 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
       players: roster
     ]
     Boolean rosterChanged = previousRoster?.players != roster
-    String serializedRoster = JsonOutput.toJson(state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY])
+    String serializedRoster = new JsonBuilder(state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY]).toString()
     children.each { ChildDeviceWrapper child ->
       if(child.getDeviceNetworkId() && child.getDataValue('id')) {
         child.updateDataValue('staticDriverActivePlayerRoster', serializedRoster)
@@ -3001,7 +3110,7 @@ void handleLastUpdatedAttribute(Event event) {
 }
 
 void pollLastUpdatedHealth() {
-  Long nowMs = now()
+  Instant nowInstant = hubNowInstant()
   Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
   getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
@@ -3010,12 +3119,12 @@ void pollLastUpdatedHealth() {
     Long lastUpdated = null
     try { lastUpdated = player.currentValue('lastUpdated', true) as Long } catch(Exception ignored) { }
     if(lastUpdated == null) {
-      try { 
+      try {
         String v = player.getDataValue('lastUpdated')?.toString()
         lastUpdated = v ? Long.parseLong(v) : null
       } catch(Exception ignored) { }
     }
-    Boolean offline = lastUpdated == null || (nowMs - lastUpdated) > (LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS * 1000L)
+    Boolean offline = lastUpdated == null || Duration.between(Instant.ofEpochMilli(lastUpdated), nowInstant).seconds > LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS
     if(offline) {
       if(!offlinePlayers.containsKey(dni)) {
         offlinePlayers[dni] = [id: player.getDataValue('id'), name: player.displayName, retryDelay: 300]
@@ -3187,14 +3296,14 @@ Boolean isZgtElectionStillValid(String candidateDni) {
   if(!player) { return false }
   String zgtSub = player.getDataValue('zgtSub')?.toString()
   String expiresEpoch = player.getDataValue('zgtSubExpiresEpoch')?.toString()
-  Long exp = null
-  try { exp = expiresEpoch ? Long.parseLong(expiresEpoch) * 1000L : null } catch(Exception ignored) { exp = null }
-  Long nowEpochSeconds = Instant.ofEpochMilli(now()).epochSecond
-  Boolean subOk = zgtSub && zgtSub != '' && exp != null && exp > nowEpochSeconds * 1000L
+  Instant nowInstant = hubNowInstant()
+  Instant exp = null
+  try { exp = expiresEpoch ? Instant.ofEpochSecond(Long.parseLong(expiresEpoch)) : null } catch(Exception ignored) { exp = null }
+  Boolean subOk = zgtSub && zgtSub != '' && exp != null && exp.isAfter(nowInstant)
   Boolean lastOk = false
   try {
     Long last = player.getLastInboundZgtEventEpoch() as Long
-    lastOk = last != null && last > 0 && (nowEpochSeconds - last) < 300
+    lastOk = last != null && last > 0 && Duration.between(Instant.ofEpochSecond(last), nowInstant).seconds < 300
   } catch(Exception ignored) { }
   return subOk || lastOk
 }
@@ -3215,16 +3324,16 @@ void checkZgtSubscriptionHealth() {
   }
   String zgtSub = player.getDataValue('zgtSub')?.toString()
   String expiresEpochStr = player.getDataValue('zgtSubExpiresEpoch')?.toString()
-  Long expMs = null
-  try { expMs = expiresEpochStr ? Long.parseLong(expiresEpochStr) * 1000L : null } catch(Exception ignored) { expMs = null }
+  Instant exp = null
+  try { exp = expiresEpochStr ? Instant.ofEpochSecond(Long.parseLong(expiresEpochStr)) : null } catch(Exception ignored) { exp = null }
   Long lastEpoch = 0L
   try { lastEpoch = player.getLastInboundZgtEventEpoch() as Long ?: 0L } catch(Exception ignored) { }
-  Long nowSec = Instant.ofEpochMilli(now()).epochSecond
-  Boolean subOk = zgtSub && zgtSub != '' && expMs != null && expMs > nowSec * 1000L
-  Boolean lastOk = lastEpoch > 0 && (nowSec - lastEpoch) < 300
+  Instant nowInstant = hubNowInstant()
+  Boolean subOk = zgtSub && zgtSub != '' && exp != null && exp.isAfter(nowInstant)
+  Boolean lastOk = lastEpoch > 0 && Duration.between(Instant.ofEpochSecond(lastEpoch), nowInstant).seconds < 300
   if(subOk && lastOk) { return }
   if(subOk && !lastOk) { logDebug("ZGT health: sub valid but lastZgtEvent stale for ${candidateDni}"); return }
-  logDebug("ZGT health fail for ${candidateDni}: sub=${zgtSub ? 'present' : 'missing'}, expires=${expMs ?: 'none'}, last=${lastEpoch}")
+  logDebug("ZGT health fail for ${candidateDni}: sub=${zgtSub ? 'present' : 'missing'}, expires=${exp ?: 'none'}, last=${lastEpoch}")
   if(zgt.recoveryAttempt == null || (zgt.recoveryAttempt as Integer) == 0) {
     try { player.requestAppZgtResubscription() } catch(Exception e) { logWarn("checkZgt requestAppZgtResubscription failed: ${e.message}") }
     zgt.recoveryAttempt = 1
@@ -3244,9 +3353,9 @@ void verifyZgtResubscription(Map data = [:]) {
   if(!player) { return }
   String zgtSub = player.getDataValue('zgtSub')?.toString()
   String expStr = player.getDataValue('zgtSubExpiresEpoch')?.toString()
-  Long expMs = null
-  try { expMs = expStr ? Long.parseLong(expStr) * 1000L : null } catch(Exception ignored) { }
-  Boolean ok = zgtSub && zgtSub != '' && expMs != null && expMs > Instant.ofEpochMilli(now()).epochSecond * 1000L
+  Instant exp = null
+  try { exp = expStr ? Instant.ofEpochSecond(Long.parseLong(expStr)) : null } catch(Exception ignored) { }
+  Boolean ok = zgtSub && zgtSub != '' && exp != null && exp.isAfter(hubNowInstant())
   if(ok) {
     zgt.recoveryAttempt = 0
     state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
@@ -3810,7 +3919,7 @@ void applyHouseholdTopologyBatch() {
     logDebug('Discarding superseded household topology apply continuation')
     return
   }
-  String json = JsonOutput.toJson(state[HOUSEHOLD_TOPOLOGY_STATE_KEY])
+  String json = new JsonBuilder(state[HOUSEHOLD_TOPOLOGY_STATE_KEY]).toString()
   List<String> playerDnis = apply.playerDnis instanceof List ? (List<String>)apply.playerDnis : []
   Integer playerCursor = (apply.playerCursor ?: 0) as Integer
   Integer playerEnd = Math.min(playerDnis.size(), playerCursor + HOUSEHOLD_TOPOLOGY_APPLY_BATCH_SIZE)
@@ -4237,24 +4346,25 @@ String sonosAlarmSoapBody(String action, Map values) {
 
 @CompileStatic
 String escapeSonosXml(String value) {
-  return StringEscapeUtils.escapeXml10(value)
+  return value ? StringEscapeUtils.escapeXml10(value) : ''
 }
 
 List<Map> parseSonosAlarmList(String responseXml) {
   if(!responseXml) { return [] }
-  javax.xml.xpath.XPath xpath = XPathFactory.newInstance().newXPath()
-  InputSource source = new InputSource(new StringReader(responseXml))
-  String alarmXml = xpath.evaluate("//*[local-name()='CurrentAlarmList' or name()='CurrentAlarmList']/text()", source)
+  GPathResult outer = new XmlSlurper().parseText(responseXml)
+  Object alarmHolder = outer.depthFirst().find { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == 'CurrentAlarmList' }
+  String alarmXml = (alarmHolder instanceof GPathResult) ? ((GPathResult)alarmHolder).text() : null
   if(!alarmXml) { return [] }
-  org.w3c.dom.Document alarmRoot = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(new InputSource(new StringReader(alarmXml)))
-  org.w3c.dom.NodeList alarmNodes = (org.w3c.dom.NodeList) xpath.evaluate("//*[local-name()='Alarm' or name()='Alarm']", alarmRoot, XPathConstants.NODESET)
+  GPathResult alarmRoot = new XmlSlurper().parseText(alarmXml)
   List<Map> result = []
-  for(Integer index = 0; index < alarmNodes.getLength(); index++) {
-    org.w3c.dom.Element node = (org.w3c.dom.Element)alarmNodes.item(index)
+  List<String> alarmKeys = ['ID','StartTime','StartLocalTime','Duration','Recurrence','Enabled','RoomUUID',
+    'ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones']
+  alarmRoot.depthFirst().findAll { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == 'Alarm' }.each { Object n ->
+    GPathResult node = (GPathResult)n
     Map attrs = [:]
-    ['ID','StartTime','StartLocalTime','Duration','Recurrence','Enabled','RoomUUID',
-     'ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones'].each { String key ->
-      String value = node.getAttribute(key)
+    Map<String, Object> nodeAttrs = (Map<String, Object>)node.attributes()
+    alarmKeys.each { String key ->
+      String value = nodeAttrs[key]?.toString()
       if(value) { attrs[key] = value }
     }
     if(attrs.StartTime && !attrs.StartLocalTime) { attrs.StartLocalTime = attrs.StartTime }
@@ -4264,7 +4374,13 @@ List<Map> parseSonosAlarmList(String responseXml) {
 }
 
 String xmlLocalName(GPathResult node) {
-  return node?.name()?.toString()?.tokenize(':')?.last()
+  String qualifiedName = node?.name()?.toString()
+  if(!qualifiedName) { return null }
+  Integer namespaceEnd = qualifiedName.lastIndexOf('}')
+  if(namespaceEnd >= 0) { qualifiedName = qualifiedName.substring(namespaceEnd + 1) }
+  Integer prefixEnd = qualifiedName.lastIndexOf(':')
+  if(prefixEnd >= 0) { qualifiedName = qualifiedName.substring(prefixEnd + 1) }
+  return qualifiedName
 }
 
 GPathResult findDirectXmlChild(GPathResult node, String localName) {
@@ -4350,7 +4466,7 @@ void createSonosAlarm(String householdId, Map alarm) {
   if(!host) { logWarn("Cannot create Sonos alarm in ${householdId}: no local player endpoint"); return }
   List<String> required = ['StartLocalTime','Duration','Recurrence','Enabled','RoomUUID','ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones']
   if(required.any { String key -> alarm[key] == null }) { logWarn('Cannot create Sonos alarm: one or more required settings are missing'); return }
-  if(!(alarm.Recurrence in ['ONCE','DAILY','WEEKDAYS','WEEKENDS']) || !(alarm.PlayMode in ['NORMAL','REPEAT_ALL','SHUFFLE_NOREPEAT','SHUFFLE'])) {
+  if(!isValidSonosRecurrence(alarm.Recurrence?.toString()) || !(alarm.PlayMode in ['NORMAL','REPEAT_ALL','SHUFFLE_NOREPEAT','SHUFFLE'])) {
     logWarn('Cannot create Sonos alarm: recurrence or play mode is invalid'); return
   }
   Integer volume = alarm.Volume.toString().toInteger()
@@ -4401,8 +4517,9 @@ void createSonosAlarmFromCatalogSource(String householdId, String sourceType, St
   createSonosAlarm(householdId, alarmData)
 }
 
+@CompileStatic
 String sonosAlarmXmlEscape(String value) {
-  return value?.replace('&', '&amp;')?.replace('<', '&lt;')?.replace('>', '&gt;')?.replace('"', '&quot;')?.replace("'", '&apos;') ?: ''
+  return value ? StringEscapeUtils.escapeXml10(value) : ''
 }
 
 void sonosAlarmCreateCallback(AsyncResponse response, Map data) {
@@ -4434,7 +4551,7 @@ void sonosAlarmDestroyCallback(AsyncResponse response, Map data) {
 void updateSonosAlarm(String dni, Map changes) {
   ChildDeviceWrapper child = getChildDevice(dni)
   Map alarm = [:]
-  try { alarm = (Map)new JsonSlurper().parseText(child?.getDataValue('alarmData')?.toString() ?: '{}') }
+  try { alarm = (Map)getSharedJsonSlurper().parseText(child?.getDataValue('alarmData')?.toString() ?: '{}') }
   catch(Exception e) { logWarn("Cannot update Sonos alarm ${dni}: cached alarm data is invalid"); return }
   String host = child?.getDataValue('localUpnpHost')?.toString()
   if(!host) { logWarn("Cannot update Sonos alarm ${dni}: its room player is unavailable"); return }
@@ -4508,7 +4625,7 @@ void setSonosAlarmVolume(String dni, Integer volume) {
   updateSonosAlarm(dni, [Volume: volume.toString()])
 }
 void setSonosAlarmRecurrence(String dni, String recurrence) {
-  if(!(recurrence in ['ONCE','DAILY','WEEKDAYS','WEEKENDS'])) { logWarn("Ignoring invalid alarm recurrence ${recurrence}"); return }
+  if(!isValidSonosRecurrence(recurrence)) { logWarn("Ignoring invalid alarm recurrence ${recurrence}"); return }
   updateSonosAlarm(dni, [Recurrence: recurrence])
 }
 void setSonosAlarmDuration(String dni, String duration) {
@@ -6937,9 +7054,9 @@ Long getMaximumTtsRetentionMs() {
   String configuredValue = settings.maximumTtsRetention?.toString() ?: '60'
   if(configuredValue == 'unlimited') { return null }
   try {
-    return Long.parseLong(configuredValue) * 60L * 1000L
+    return Duration.ofMinutes(Long.parseLong(configuredValue)).toMillis()
   } catch(NumberFormatException ignored) {
-    return 60L * 60L * 1000L
+    return Duration.ofHours(1).toMillis()
   }
 }
 
@@ -7116,9 +7233,9 @@ Boolean hasActiveAnnouncementTopologyTransaction() {
 }
 
 Boolean isTargetRosterCurrentlyGrouped(List<ChildDeviceWrapper> players, String coordinatorId) {
-  List<String> targetIds = players.collect { ChildDeviceWrapper player ->
+  List<String> targetIds = new TreeSet<String>(players.collect { ChildDeviceWrapper player ->
     player.getDataValue('id')?.toString()
-  }.findAll { String id -> id }.unique().sort()
+  }.findAll { String id -> id }).toList()
   if(targetIds.size() < 2) { return targetIds.size() <= 1 }
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
   String commonGroupId
@@ -7136,9 +7253,9 @@ Boolean isTargetRosterCurrentlyGrouped(List<ChildDeviceWrapper> players, String 
 Boolean isTargetRosterGroupedInSnapshot(List<ChildDeviceWrapper> players, String coordinatorId, Map snapshot) {
   Map<String, Map> observations = snapshot?.observations instanceof Map
       ? (Map<String, Map>)snapshot.observations : [:]
-  List<String> targetIds = players.collect { ChildDeviceWrapper player ->
+  List<String> targetIds = new TreeSet<String>(players.collect { ChildDeviceWrapper player ->
     player.getDataValue('id')?.toString()
-  }.findAll { String id -> id }.unique().sort()
+  }.findAll { String id -> id }).toList()
   if(targetIds.size() < 2) { return targetIds.size() <= 1 }
   String commonGroupId
   String commonCoordinatorId
@@ -7443,7 +7560,7 @@ void requestAnnouncementTopologyObservations(Map transaction, Collection<String>
       logDebug("Could not request topology for announcement participant ${playerId}: ${e.message}")
     }
   }
-  transaction.requestedPlayerIds = requested.unique().sort()
+  transaction.requestedPlayerIds = new TreeSet<String>(requested).toList()
   Map<String, Map> transactions = state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] : [:]
   transactions[transaction.correlationId.toString()] = transaction
@@ -8893,7 +9010,7 @@ List<String> getGroupMediaIds(ChildDeviceWrapper coordinator, String mediaType) 
 
 String chooseRandomGroupMediaId(List<String> ids) {
   if(ids == null || ids.isEmpty()) { return null }
-  return ids.get(new java.util.Random().nextInt(ids.size()))
+  return ids.get(groupMediaRandom.nextInt(ids.size()))
 }
 
 void queueRandomGroupMediaLoad(Map request, String mediaType, ChildDeviceWrapper coordinator) {
@@ -9104,7 +9221,7 @@ List<String> normalizeGroupPlayerIds(Object raw) {
       if(id) { ids.add(id) }
     }
   }
-  return ids.unique().sort()
+  return new TreeSet<String>(ids).toList()
 }
 
 Object getGroupOperationChildValue(ChildDeviceWrapper player, String name) {
@@ -9143,7 +9260,7 @@ Map getDeviceDataExactTarget(DeviceWrapper groupDevice) {
   String coordinatorId = groupDevice.getDataValue('groupCoordinatorId') as String
   if(coordinatorId != null) { coordinatorId = coordinatorId.trim() }
   List<String> followers = getDeviceDataFollowerIds(groupDevice)
-  followers = followers.findAll { String id -> id != coordinatorId }.unique().sort()
+  followers = new TreeSet<String>(followers.findAll { String id -> id != coordinatorId }).toList()
   List<String> required = coordinatorId ? ([coordinatorId] + followers) : followers
   return [coordinatorId: coordinatorId, requiredPlayerIds: required, followerIds: followers]
 }
@@ -9305,7 +9422,7 @@ void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
     if(prevCoordinator != null) {
       List<String> preservedMembers = normalizeGroupPlayerIds(membersOfDesired)
       if(preservedMembers.isEmpty()) { preservedMembers = requiredIds }
-      preservedMembers = (preservedMembers + requiredIds).unique().sort()
+      preservedMembers = new TreeSet<String>(preservedMembers + requiredIds).toList()
       Map<String, Map> finalExpectation = [:]
       preservedMembers.each { String pid ->
         finalExpectation[pid] = [coordinatorId: coordinatorId, memberIds: preservedMembers]
@@ -9366,19 +9483,17 @@ void joinAssemblyAfterDetach(Map data = [:]) {
 
 Map buildGroupOperationTarget(ChildDeviceWrapper groupDevice, String groupingMode) {
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  List<String> requiredPlayerIds = getAllPlayersForGroupDevice(groupDevice).collect { String id -> id?.trim() }
-      .findAll { String id -> id }
-      .unique()
-      .sort()
+  List<String> requiredPlayerIds = new TreeSet<String>(getAllPlayersForGroupDevice(groupDevice).collect { String id -> id?.trim() }
+      .findAll { String id -> id }).toList()
   Map configuredGroup = getConfiguredGroupDefinition(groupDevice)
   String configuredCoordinatorId = groupDevice.getDataValue('groupCoordinatorId') as String ?:
       configuredGroup.groupCoordinatorId as String
   if(configuredCoordinatorId && !requiredPlayerIds.contains(configuredCoordinatorId)) {
     requiredPlayerIds.add(configuredCoordinatorId)
-    requiredPlayerIds = requiredPlayerIds.unique().sort()
+    requiredPlayerIds = new TreeSet<String>(requiredPlayerIds).toList()
   }
   if(configuredGroup.playerIds instanceof Collection) {
-    requiredPlayerIds = (requiredPlayerIds + normalizeGroupPlayerIds(configuredGroup.playerIds)).unique().sort()
+    requiredPlayerIds = new TreeSet<String>(requiredPlayerIds + normalizeGroupPlayerIds(configuredGroup.playerIds)).toList()
   }
   ChildDeviceWrapper configuredCoordinator = configuredCoordinatorId ? rinconMap[configuredCoordinatorId] : null
   ChildDeviceWrapper activeCoordinator = resolveGroupCommandCoordinator(configuredCoordinator, requiredPlayerIds, rinconMap)
@@ -9722,7 +9837,7 @@ void registerGroupOperationOnPlayers(Map operation, Collection ids) {
       logWarn("Could not register group operation ${operation.operationId} on ${playerId}: ${e.message}")
     }
   }
-  operation.registeredPlayerIds = registered.unique().sort()
+  operation.registeredPlayerIds = new TreeSet<String>(registered).toList()
   operation.registrationRequestIds = requestIds
   operation.registrationRequestedAt = requestedAt
   saveActiveGroupOperation(operation)
@@ -11473,7 +11588,7 @@ void groupFavoriteOperationEventHandler(Event event) {
     if(!expectedRegistrationId || payload.requestId?.toString() == expectedRegistrationId) {
       List<String> eventRegisteredPlayers = normalizeGroupPlayerIds(operation.registrationEventPlayerIds)
       eventRegisteredPlayers.add(eventPlayerId)
-      operation.registrationEventPlayerIds = eventRegisteredPlayers.unique().sort()
+      operation.registrationEventPlayerIds = new TreeSet<String>(eventRegisteredPlayers).toList()
       logDebug("Player ${eventPlayerId} acknowledged registration request ${payload.requestId ?: '(legacy)'} for operation ${operation.operationId}")
     }
   }
@@ -12808,7 +12923,7 @@ void checkInstalledVersions() {
   state.installedVersions = []
   Map job = [id:UUID.randomUUID().toString(), stage:'login', appVersion:getCurrentVersion(), artifacts:[]]
   state.versionCheckJob = job
-  Long cookieAge = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+  Long cookieAge = millisSince(state.hubCookieTime as Long)
   if(state.hubCookie && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
     job.cookie = state.hubCookie
     versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
@@ -13274,7 +13389,7 @@ Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version
     logInfo("Current library version on hub: ${currentLibrary.version}")
 
     // Prepare form body for update (same format as apps/drivers)
-    String body = "id=${libraryId}&version=${currentLibrary.version ?: 0}&source=${java.net.URLEncoder.encode(sourceCode, 'UTF-8')}"
+    String body = "id=${libraryId}&version=${currentLibrary.version ?: 0}&source=${URLEncoder.encode(sourceCode, StandardCharsets.UTF_8.name())}"
 
     // Post update to hub
     Map params = [
@@ -13743,16 +13858,13 @@ void checkForUpdates(Boolean manual = false) {
   // Check frequency limits for automatic checks
   if(!manual && state.lastUpdateCheck) {
     Long lastCheck = state.lastUpdateCheck as Long
-    Long now = now()
-    Long dayInMs = 86400000L
-    Long weekInMs = dayInMs * 7
-
-    if(updateCheckFrequency == 'Daily' && (now - lastCheck) < dayInMs) { return }
-    if(updateCheckFrequency == 'Weekly' && (now - lastCheck) < weekInMs) { return }
+    Instant nowInstant = hubNowInstant()
+    if(updateCheckFrequency == 'Daily' && Duration.between(Instant.ofEpochMilli(lastCheck), nowInstant).compareTo(Duration.ofDays(1)) < 0) { return }
+    if(updateCheckFrequency == 'Weekly' && Duration.between(Instant.ofEpochMilli(lastCheck), nowInstant).compareTo(Duration.ofDays(7)) < 0) { return }
   }
 
   Long startedAt = state.updateCheckStartedAt instanceof Number ? (state.updateCheckStartedAt as Long) : 0L
-  if(!manual && state.updateCheckRequestId && now() - startedAt < 60000L) { return }
+  if(!manual && state.updateCheckRequestId && millisSince(startedAt as Long) < Duration.ofMinutes(1).toMillis()) { return }
   String requestId = UUID.randomUUID().toString()
   state.updateCheckRequestId = requestId
   state.updateCheckStartedAt = now()
@@ -13783,7 +13895,7 @@ void updateCheckCallback(AsyncResponse response, Map data) {
       return
     }
     Map next = [requestId: data.requestId, manual: data.manual, manifest: parsed]
-    Long cookieAge = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+    Long cookieAge = millisSince(state.hubCookieTime as Long)
     if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
       state.updateCheckCookie = state.hubCookie
       requestUpdateCheckAppList(next)
@@ -13957,7 +14069,7 @@ void maintenanceRequest(Map job, String stage, Map params, String method = 'GET'
 }
 
 void maintenanceAuthenticate(Map job) {
-  Long cookieAge = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+  Long cookieAge = millisSince(state.hubCookieTime as Long)
   if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
     job.cookie = state.hubCookie
     Map pending = (Map)job.pendingRequest
@@ -14099,7 +14211,7 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
     if(stage == 'libraryCode') {
       Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
       if(payload.id == null) { maintenanceAdvanceFailure(job, stage); return }
-      String body = "id=${job.artifact.id}&version=${payload.version ?: 0}&source=${java.net.URLEncoder.encode(job.librarySource ?: job.source, 'UTF-8')}"
+      String body = "id=${job.artifact.id}&version=${payload.version ?: 0}&source=${URLEncoder.encode(job.librarySource ?: job.source, StandardCharsets.UTF_8.name())}"
       maintenanceRequest(job, 'libraryUpdate', [uri:'http://127.0.0.1:8080', path:'/library/ajax/update', headers:hubCookieHeaders(job.cookie as String)+['Content-Type':'application/x-www-form-urlencoded'], body:body, timeout:30, ignoreSSLIssues:true], 'POST')
       return
     }
@@ -14617,7 +14729,7 @@ String login() {
   // Reuse a recent cookie, but treat it as stale after HUB_COOKIE_MAX_AGE_MS --
   // hub sessions expire, and a cookie trusted forever breaks version checks and
   // library publishing until it is manually cleared.
-  Long cookieAgeMs = state.hubCookieTime != null ? now() - (state.hubCookieTime as Long) : null
+  Long cookieAgeMs = millisSince(state.hubCookieTime as Long)
   if(state.hubCookie != null && cookieAgeMs != null && cookieAgeMs < HUB_COOKIE_MAX_AGE_MS) {
     logDebug("Reusing existing cookie")
     return state.hubCookie
@@ -14749,34 +14861,30 @@ void scheduleAutoInstall() {
   try {
     Date installTime = timeToday(autoInstallTime, location.timeZone)
     String cronExpression
+    ZoneId zone = hubZoneId()
+    Clock clock = hubClock()
 
     if(autoInstallNextOccurrence == true) {
-      // Install at next occurrence of time, regardless of day
       cronExpression = "0 ${installTime.minutes} ${installTime.hours} * * ?"
-
-      Date now = new Date()
-      if(installTime.before(now)) {
+      ZonedDateTime nowDateTime = ZonedDateTime.now(clock)
+      ZonedDateTime installDateTime = atInstallTime(installTime, zone)
+      if(installDateTime.isBefore(nowDateTime)) {
         logDebug("Auto-install time has passed today, will install tomorrow at ${autoInstallTime}")
       } else {
         logDebug("Auto-install scheduled for today at ${autoInstallTime}")
       }
     } else {
-      // Install on specific day of week
-      String dayOfWeek = autoInstallDayOfWeek ?: 'Sunday'
-      Map dayMap = [
-        'Sunday': 'SUN',
-        'Monday': 'MON',
-        'Tuesday': 'TUE',
-        'Wednesday': 'WED',
-        'Thursday': 'THU',
-        'Friday': 'FRI',
-        'Saturday': 'SAT'
-      ]
-      String cronDay = dayMap[dayOfWeek]
+      DayOfWeek weekday = parseDayOfWeek(autoInstallDayOfWeek ?: 'Sunday')
+      String cronDay = weekday.name().substring(0, 3)
       cronExpression = "0 ${installTime.minutes} ${installTime.hours} ? * ${cronDay}"
-
-      logDebug("Auto-install scheduled for ${dayOfWeek}s at ${autoInstallTime}")
+      LocalTime time = LocalTime.of(installTime.hours, installTime.minutes)
+      ZonedDateTime nextFire = nextWeeklyOccurrence(time, weekday, zone)
+      logDebug("Auto-install scheduled for ${weekday}s at ${autoInstallTime}; next fire ${nextFire.format(APP_TIMESTAMP_FORMATTER)}")
     }
+
+    CronExpression cron = new CronExpression(cronExpression)
+    Date nextFireDate = cron.getNextValidTimeAfter(Date.from(clock.instant()))
+    logDebug("Auto-install cron ${cronExpression} validated; next fire ${nextFireDate}")
 
     schedule(cronExpression, 'performScheduledInstall')
   } catch(Exception e) {

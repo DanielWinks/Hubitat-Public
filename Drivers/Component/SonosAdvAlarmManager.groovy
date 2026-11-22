@@ -23,6 +23,7 @@
 
 import groovy.transform.Field
 import groovy.json.JsonOutput
+import java.math.BigDecimal
 
 metadata {
   definition(

@@ -23,6 +23,7 @@
 
 import groovy.transform.Field
 import groovy.json.JsonOutput
+import java.math.BigDecimal
 
 @Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
 @Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'

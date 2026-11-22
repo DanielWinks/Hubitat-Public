@@ -30,13 +30,10 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
 import groovy.transform.Field
+import groovy.util.XmlSlurper
 import groovy.util.slurpersupport.GPathResult
 import groovy.xml.MarkupBuilder
-import groovy.xml.XmlUtil
 import java.io.StringWriter
-import java.io.StringReader
-import org.xml.sax.InputSource
-import javax.xml.xpath.XPathFactory
 import hubitat.scheduling.AsyncResponse
 import hubitat.device.HubResponse
 import java.io.InputStream
@@ -45,7 +42,16 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.Duration
 import java.time.format.DateTimeFormatter
+import java.math.BigDecimal
 import java.math.RoundingMode
+import java.net.URI
+import java.net.URLDecoder
+import java.util.Collections
+import java.util.TreeSet
+import java.util.UUID
+import java.nio.charset.StandardCharsets
+import java.time.Clock
+import org.apache.commons.codec.binary.Base64
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -60,6 +66,26 @@ import java.util.Locale
 @Field static final List<Integer> ANNOUNCEMENT_RESTORE_RETRY_DELAYS = [1, 2].asImmutable()
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 @Field static final DateTimeFormatter SID_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MMM-dd h:mm:ss a', Locale.ENGLISH)
+
+ZoneId hubZoneId() {
+  return location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()
+}
+
+Clock hubClock() {
+  return Clock.system(hubZoneId())
+}
+
+Instant hubNowInstant() {
+  return hubClock().instant()
+}
+
+JsonSlurper getSharedJsonSlurper() {
+  String dni = device?.getDeviceNetworkId()?.toString()
+  if(dni) {
+    return jsonSlurpers.computeIfAbsent(dni, { String ignored -> new JsonSlurper() } as java.util.function.Function<String, JsonSlurper>)
+  }
+  return jsonSlurpers.computeIfAbsent('__shared__', { String ignored -> new JsonSlurper() } as java.util.function.Function<String, JsonSlurper>)
+}
 
 void logError(String message) {
   if (loggingEnabled('error')) {
@@ -431,7 +457,12 @@ Map getSoapActionParams(String deviceIp, Map service, String action, Map control
     logDebug("Preparing SOAP action ${action} for ${deviceIp}; control payload omitted")
   }
   String body = getBaseControlXML(service, action, controlValues)
-  String uri = "http://${deviceIp}${service.controlURL}"
+  String uri
+  try {
+    uri = new URI('http', deviceIp, service.controlURL?.toString(), null).toString()
+  } catch(Exception ignored) {
+    uri = "http://${deviceIp}${service.controlURL}"
+  }
   String soapAction = "${service.serviceType}#${action}"
   return [uri: uri, headers: [SOAPAction: soapAction], contentType: 'text/xml', body: body]
 }
@@ -1840,7 +1871,7 @@ void storeHiddenJsonState(String name, String visibleText, Object value) {
     state.remove(name)
     return
   }
-  String encoded = JsonOutput.toJson(value).getBytes('UTF-8').encodeBase64().toString()
+  String encoded = Base64.encodeBase64String(JsonOutput.toJson(value).getBytes(StandardCharsets.UTF_8))
   state[name] = "<root><span class=\"visible-data\">${escapeHiddenStateHtml(visibleText)}</span><span class=\"hidden-data\" style=\"display:none\">${encoded}</span></root>"
 }
 
@@ -1850,7 +1881,7 @@ Object fetchHiddenJsonStateValue(Object storedValue) {
     GPathResult xml = new XmlSlurper().parseText(storedValue.toString())
     String encoded = xml.span.find { GPathResult span -> span.@class.toString() == 'hidden-data' }?.text()
     if(!encoded) { return null }
-    return new JsonSlurper().parseText(new String(encoded.decodeBase64(), 'UTF-8'))
+    return getSharedJsonSlurper().parseText(new String(Base64.decodeBase64(encoded), StandardCharsets.UTF_8))
   } catch(Exception e) {
     logWarn("Could not decode hidden JSON state: ${e.message}")
     return null
@@ -2142,7 +2173,7 @@ void migrationCleanup() {
 }
 
 void maybeCleanupStaticDriverState() {
-  Long nowEpoch = Instant.now().getEpochSecond()
+  Long nowEpoch = hubNowInstant().epochSecond
   Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
   Long lastAttempt = lastStaticStateCleanupAttemptEpoch != null ? lastStaticStateCleanupAttemptEpoch : 0L
   Long lastCheck = Math.max(lastCleanup, lastAttempt)
@@ -2152,7 +2183,7 @@ void maybeCleanupStaticDriverState() {
   Map rosterSnapshot
   String serializedRoster = device.getDataValue('staticDriverActivePlayerRoster')
   if(serializedRoster) {
-    try { rosterSnapshot = (Map)new JsonSlurper().parseText(serializedRoster) }
+    try { rosterSnapshot = (Map)getSharedJsonSlurper().parseText(serializedRoster) }
     catch(Exception e) { logDebug("Ignoring malformed parent app roster snapshot: ${e.message}") }
   }
   if(rosterSnapshot == null) {
@@ -4942,8 +4973,8 @@ void sleepTimerGetCallback(AsyncResponse response, Map data = null) {
 
 String findSleepTimerXmlText(GPathResult node, String elementName) {
   if(node == null || !elementName) { return null }
-  String expression = "//*[local-name()='${elementName.replace("'", "")}' or name()='${elementName.replace("'", "")}']/text()"
-  return XPathFactory.newInstance().newXPath().evaluate(expression, new InputSource(new StringReader(XmlUtil.serialize(node))))
+  Object found = node.depthFirst().find { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == elementName }
+  return (found instanceof GPathResult) ? ((GPathResult)found).text() : null
 }
 
 void createRemoveRightChannelChildDevice(Boolean create) {
@@ -5306,7 +5337,7 @@ void flushPendingZgtNotify() {
 Boolean applyAppHouseholdTopology(String topologyJson) {
   if(!topologyJson) { return false }
   try {
-    Map topology = (Map)new JsonSlurper().parseText(topologyJson)
+    Map topology = (Map)getSharedJsonSlurper().parseText(topologyJson)
     if(!(topology.groups instanceof List)) { return false }
     String playerId = getId()
     Map ownGroup = ((List<Map>)topology.groups).find { Map group ->
@@ -5337,7 +5368,7 @@ void flushPendingTopologyUpdates() {
   String expectedJson = getDeviceDataValue('expectedGroupTopology')
   if(expectedJson) {
     try {
-      Map expected = (Map)new JsonSlurper().parseText(expectedJson)
+      Map expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
       Long expiresAt = expected.expiresAt as Long
       if(expiresAt != null && expiresAt > (getHubitatCurrentTime() as Long)) {
         scheduleTopologyTimeoutFlush()
@@ -5367,7 +5398,7 @@ Boolean evaluateExpectedTopology(Map topology, Boolean holdOnMismatch) {
   if(!expectedJson) { return false }
   Map expected
   try {
-    expected = (Map)new JsonSlurper().parseText(expectedJson)
+    expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
   } catch(Exception e) {
     setDeviceDataValue('expectedGroupTopology', '')
     clearPendingTopologyForDevice()
@@ -5400,7 +5431,7 @@ void scheduleTopologyTimeoutFlush() {
   String expectedJson = getDeviceDataValue('expectedGroupTopology')
   if(!expectedJson) { return }
   try {
-    Map expected = (Map)new JsonSlurper().parseText(expectedJson)
+    Map expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
     Long expiresAt = expected.expiresAt as Long
     Integer remaining = Math.max(1, Math.ceil((expiresAt - (getHubitatCurrentTime() as Long)) / 1000.0d) as Integer)
     runIn(remaining, 'flushPendingTopologyUpdates', [overwrite: true])
@@ -5479,7 +5510,7 @@ Map parseZgtFullSnapshot(String xmlString) {
         }
       }
     } catch(Exception ignored) { vanished.clear() }
-    return [observedAt: Instant.now().toEpochMilli(), groups: groups, vanishedDevices: vanished]
+    return [observedAt: hubNowInstant().toEpochMilli(), groups: groups, vanishedDevices: vanished]
   } catch(Exception e) {
     logDebug("Could not inspect ZGT topology: ${e.message}")
     return null
@@ -5507,7 +5538,7 @@ Map<String, Object> parseAvtMetaData(String rawDidl) {
     String si = findDirectXmlChild(item, 'streamInfo')?.text()?.toString()
     if(si) { si.split(',').each { String kv -> if(kv.contains(':')) { def ab = kv.split(':', 2); streamInfo[ab[0].trim()] = ab[1].trim() } } }
     String albumArt = findDirectXmlChild(item, 'albumArtURI')?.text()?.toString() ?: ''
-    while(albumArt.contains('&amp;')) { albumArt = albumArt.replace('&amp;','&') }
+    while(albumArt?.contains('&amp;')) { albumArt = StringEscapeUtils.unescapeXml(albumArt) }
     String creator = findDirectXmlChild(item, 'creator')?.text()?.toString()
     if(!creator) { creator = findDirectXmlChild(item, 'artist')?.text()?.toString() }
     return [
@@ -5542,7 +5573,7 @@ Map parseAvtFullSnapshot(String xmlString) {
     GPathResult event = parser.parseText(lastChange)
     GPathResult iid = (GPathResult)event['InstanceID']
     if(iid.size() == 0) { return null }
-    def normalizeUri = { Object v -> v != null && v.toString() != '' ? v.toString().replace('&amp;','&').replace('&amp;','&') : null }
+    def normalizeUri = { Object v -> v != null && v.toString() != '' ? StringEscapeUtils.unescapeXml(v.toString()) : null }
     String curUriRaw = iid['CurrentTrackURI']['@val']?.toString()
     return [
       hasTransportState: iid['TransportState'].size() > 0,
@@ -5874,10 +5905,15 @@ Boolean applyAvtSnapshotIfDifferent(Map snap) {
 
 String normalizeFavoriteUri(String uri) {
   if(!uri) { return null }
-  String normalized = uri.trim().replace('&amp;', '&').replace('%3a', ':').replace('%3A', ':')
+  String normalized = StringEscapeUtils.unescapeXml(uri.trim())
+  if(normalized.contains('%')) {
+    try { normalized = URLDecoder.decode(normalized, StandardCharsets.UTF_8.name()) } catch(Exception ignored) { }
+  }
   Integer query = normalized.indexOf('?')
   if(query >= 0) { normalized = normalized.substring(0, query) }
-  return normalized.replaceFirst(/(?i)\.mp4$/, '')
+  normalized = normalized.replaceFirst(/(?i)\.mp4$/, '')
+  try { new URI(normalized) } catch(Exception ignored) { }
+  return normalized
 }
 
 void updateCurrentFavoriteFromUpnp(Map snapshot) {
@@ -5942,7 +5978,12 @@ void updateCurrentFavoriteFromUpnp(Map snapshot) {
 }
 
 String normalizeFavoriteResourceId(String resourceId) {
-  return resourceId?.trim()?.replace('&amp;', '&')?.replace('%3a', ':')?.replace('%3A', ':')
+  if(resourceId == null) { return null }
+  String normalized = StringEscapeUtils.unescapeXml(resourceId.trim())
+  if(normalized.contains('%')) {
+    try { normalized = URLDecoder.decode(normalized, StandardCharsets.UTF_8.name()) } catch(Exception ignored) { }
+  }
+  return normalized
 }
 
 void clearCurrentAvtTrackMetadata() {
@@ -5983,7 +6024,7 @@ Map parseGrcFullSnapshot(String xmlString) {
       else { logDebug("Ignoring unexpected GRC GroupVolumeChangeable value=${changeableText}") }
     }
     if(groupVolume == null && groupMute == null && changeable == null) { return null }
-    return [groupVolume: groupVolume, groupMute: groupMute, groupVolumeChangeable: changeable, observedAt: Instant.now().toEpochMilli()]
+    return [groupVolume: groupVolume, groupMute: groupMute, groupVolumeChangeable: changeable, observedAt: hubNowInstant().toEpochMilli()]
   } catch(Exception e) {
     logDebug("Could not parse GRC snapshot: ${e.message}")
     return null
@@ -6384,7 +6425,7 @@ Boolean applyRcSnapshotIfDifferent(Map snap) {
   Map prior = null
   try {
     String json = device.getDataValue('rcSnapshotJson')?.toString()
-    if(json) { prior = (Map)new JsonSlurper().parseText(json) }
+    if(json) { prior = (Map)getSharedJsonSlurper().parseText(json) }
   } catch(Exception ignored) { prior = null }
   Integer newVolume = snap.volumeMaster != null ? (snap.volumeMaster as Integer) : null
   Integer priorVolume = prior?.volumeMaster != null ? (prior.volumeMaster as Integer) : null
@@ -7848,7 +7889,7 @@ void setHouseholdId(String householdId) {
 }
 
 String getFormattedLocalTimestamp() {
-  return ZonedDateTime.now(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(SID_TIMESTAMP_FORMATTER)
+  return ZonedDateTime.now(hubClock()).format(SID_TIMESTAMP_FORMATTER)
 }
 
 void updateEventTimestampDeviceData(String key) {
@@ -9310,7 +9351,7 @@ void rotateAudioClipCorrelationId(Map clipMessage) {
     String rawCommand = clipMessage[channel] as String
     if(!rawCommand) { return }
     try {
-      List commandEnvelope = (List)new groovy.json.JsonSlurper().parseText(rawCommand)
+      List commandEnvelope = (List)getSharedJsonSlurper().parseText(rawCommand)
       if(commandEnvelope.size() >= 2 && commandEnvelope[1] instanceof Map) {
         ((Map)commandEnvelope[1]).name = nextGuid
         clipMessage[channel] = JsonOutput.toJson(commandEnvelope)
@@ -9969,7 +10010,7 @@ void expireWebsocketOutboundQueueEntry(Map data = [:]) {
 
 Map describeWebSocketCommand(String message) {
   try {
-    List payload = (List)new JsonSlurper().parseText(message)
+    List payload = (List)getSharedJsonSlurper().parseText(message)
     Map command = payload && payload[0] instanceof Map ? (Map)payload[0] : [:]
     Map args = payload.size() > 1 && payload[1] instanceof Map ? (Map)payload[1] : [:]
     String namespace = command.namespace?.toString()
@@ -10038,8 +10079,8 @@ Boolean isWebsocketQueueOrderingBarrier(Map entry) {
 
 void mergeQueuedPlayModeFields(Map prior, Map latest) {
   try {
-    List priorPayload = (List)new JsonSlurper().parseText(prior.message.toString())
-    List latestPayload = (List)new JsonSlurper().parseText(latest.message.toString())
+    List priorPayload = (List)getSharedJsonSlurper().parseText(prior.message.toString())
+    List latestPayload = (List)getSharedJsonSlurper().parseText(latest.message.toString())
     Map priorArgs = (Map)priorPayload[1]
     Map latestArgs = (Map)latestPayload[1]
     Boolean latestIsNewer = ((latest.queueSequence ?: 0L) as Long) >= ((prior.queueSequence ?: 0L) as Long)
@@ -10569,7 +10610,7 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
 List<Map> expectedSubscriptionEventsForWsCommand(String message) {
   if(!message) { return [] }
   try {
-    List payload = (List)new JsonSlurper().parseText(message)
+    List payload = (List)getSharedJsonSlurper().parseText(message)
     Map command = payload && payload[0] instanceof Map ? (Map)payload[0] : [:]
     String namespace = command.namespace?.toString()
     String name = command.command?.toString()
@@ -13165,7 +13206,7 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
 
 String normalizeQueueTrackUri(String uri) {
   String normalized = uri?.trim()
-  while(normalized?.contains('&amp;')) { normalized = normalized.replace('&amp;', '&') }
+  while(normalized?.contains('&amp;')) { normalized = StringEscapeUtils.unescapeXml(normalized) }
   return normalized
 }
 
@@ -13176,8 +13217,8 @@ String snapshotTrackDescription(String trackUri) {
 
 String findQueueXmlText(GPathResult node, String targetName) {
   if(node == null || !targetName) { return null }
-  String expression = "//*[local-name()='${targetName.replace("'", "")}' or name()='${targetName.replace("'", "")}']/text()"
-  return XPathFactory.newInstance().newXPath().evaluate(expression, new InputSource(new StringReader(XmlUtil.serialize(node))))
+  Object found = node.depthFirst().find { Object n -> n instanceof GPathResult && xmlLocalName((GPathResult)n) == targetName }
+  return (found instanceof GPathResult) ? ((GPathResult)found).text() : null
 }
 
 String escapeQueueHtml(String value) {
@@ -13210,7 +13251,7 @@ String buildHubitatRunMethodOnclick(Long deviceId, String method, List<String> v
   List<Map> args = (values ?: []).collect { String value -> [type: 'STRING', value: value ?: ''] }
   String payload = JsonOutput.toJson([id: deviceId, method: method, args: args])
   String handler = "(function(){fetch('http://${device.hub.localIP}/device/runmethod',{method:'POST',headers:{'Content-Type':'application/json'},body:${JsonOutput.toJson(payload)}})})()"
-  return handler.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;').replace('>', '&gt;')
+  return StringEscapeUtils.escapeHtml4(handler)
 }
 
 void setChildQueue(String html) {
@@ -13962,7 +14003,7 @@ void setAudioClipPlaying(Boolean s) {
 void addAudioClipCorrelation(Map clipMessage) {
   if(clipMessage == null) { return }
   if(!clipMessage.get('correlationId')) { clipMessage.put('correlationId', UUID.randomUUID().toString()) }
-  if(!clipMessage.get('enqueuedAt')) { clipMessage.put('enqueuedAt', new Date().getTime()) }
+  if(!clipMessage.get('enqueuedAt')) { clipMessage.put('enqueuedAt', Instant.now().toEpochMilli()) }
   if(!clipMessage.get('origin')) { clipMessage.put('origin', 'audio-clip') }
 }
 
