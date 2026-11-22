@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Hubitat Code Publisher
+Sonos Advanced (SAC) Publisher for the C7 hub.
 
-Publishes Groovy source files (apps, drivers, libraries) to a Hubitat hub.
-Reads hub connection info and file mappings from .hubitat/metadata.json.
+Publishes the Sonos Advanced app and all of its component drivers to the
+C7 hub (192.168.1.3) with no arguments and no prompting. Each file is
+matched on the hub by its definition name + namespace and updated in
+place; if no match exists, it is created.
 
 Usage:
-    python3 hubitat_publish.py <code_type> <file_path> [workspace_root]
+    python3 scripts/hubitat_publish.py
 
-Where code_type is one of: app, driver, library, auto
-(Use "auto" to auto-detect from file content)
-
-Workspace root defaults to the ZED_WORKTREE_ROOT env var, falling back to cwd.
+Per-file results are printed as each file completes, followed by a
+summary. Exit code is 0 only when every file published successfully.
+Failures distinguish timeouts, connection errors, and hub-rejected
+saves (compile errors), with the fullest error detail available from
+the hub.
 """
 
 import json
-import os
 import re
 import socket
 import sys
@@ -25,42 +27,66 @@ import urllib.request
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Constants
+# Hard-coded SAC / C7 targets
 # ---------------------------------------------------------------------------
-METADATA_DIR = ".hubitat"
-METADATA_FILE = ".hubitat/metadata.json"
+HUB_HOST = "192.168.1.3"
 
-# Patterns for auto-detecting code type from file content
-# (mirrors the VS Code extension's detection logic)
-DRIVER_PATTERN = re.compile(r"^\s*metadata\s*\{", re.MULTILINE)
-APP_PATTERN = re.compile(r"^\s*definition\s*\(", re.MULTILINE)
-LIBRARY_PATTERN = re.compile(r"^\s*library\s*\(", re.MULTILINE)
+# SAC = the controller app plus all component drivers. The app is
+# published last. Paths are relative to the repository root.
+SAC_FILES = [
+    ("Drivers/Component/SonosAdvAlarmManager.groovy", "driver"),
+    ("Drivers/Component/SonosAdvAlarmSwitch.groovy", "driver"),
+    ("Drivers/Component/SonosAdvBatteryStats.groovy", "driver"),
+    ("Drivers/Component/SonosAdvFavorites.groovy", "driver"),
+    ("Drivers/Component/SonosAdvGroup.groovy", "driver"),
+    ("Drivers/Component/SonosAdvPlayer.groovy", "driver"),
+    ("Drivers/Component/SonosAdvPlaylist.groovy", "driver"),
+    ("Drivers/Component/SonosAdvQueue.groovy", "driver"),
+    ("Drivers/Component/SonosAdvSecondaries.groovy", "driver"),
+    ("Drivers/Component/SonosAdvSleepTimer.groovy", "driver"),
+    ("Drivers/Component/SonosAdvSnapshot.groovy", "driver"),
+    ("Apps/SonosAdvancedApp.groovy", "app"),
+]
 
-# Patterns for extracting name / namespace from Groovy definitions
-# Groovy allows both single and double quotes for strings
-NAME_RE = re.compile(r"""name\s*:\s*["']([^"']+)["']""")
-NAMESPACE_RE = re.compile(r"""namespace\s*:\s*["']([^"']+)["']""")
-
-# Start of the definition/library block. Extraction is anchored here so that
-# earlier occurrences of name:/namespace: (license headers, page(name:...),
-# child-app references like app(name:..., appName:..., namespace:...)) can
-# never be mistaken for the code's own identity.
-DEFINITION_START_RE = re.compile(r"^\s*(?:definition|library)\s*\(", re.MULTILINE)
+# Compile of the large app/driver files takes a while on the hub.
+SAVE_TIMEOUT_SECONDS = 180
+LIST_TIMEOUT_SECONDS = 15
 
 # Hubitat API endpoints for listing user code
 HUB_LIST_ENDPOINTS = {
     "app": "hub2/userAppTypes",
     "driver": "hub2/userDeviceTypes",
-    "library": "hub2/userLibraries",
 }
 
-VALID_TYPES = {"app", "driver", "library"}
+# Groovy allows both single and double quotes for strings
+NAME_RE = re.compile(r"""name\s*:\s*["']([^"']+)["']""")
+NAMESPACE_RE = re.compile(r"""namespace\s*:\s*["']([^"']+)["']""")
+
+# Start of the definition block. Extraction is anchored here so that
+# earlier occurrences of name:/namespace: (license headers, page(name:...),
+# child-app references like app(name:..., appName:..., namespace:...)) can
+# never be mistaken for the code's own identity.
+DEFINITION_START_RE = re.compile(r"^\s*definition\s*\(", re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# Failure types (classified for the per-file report)
+# ---------------------------------------------------------------------------
+class HubTimeoutError(Exception):
+    """The hub did not answer within the request timeout."""
+
+
+class HubConnectionError(Exception):
+    """The hub could not be reached at all."""
+
+
+class HubSaveError(Exception):
+    """The hub rejected the save (e.g. the source failed to compile)."""
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
-
-
 def _create_req(url, data=None, method="GET", headers=None):
     """Create a urllib Request with common headers and optional extras."""
     req = urllib.request.Request(url, data=data, method=method)
@@ -76,6 +102,9 @@ def _open(req, timeout=15, allow_redirects=True):
     """
     Open a request.
     Returns (status, body_str, final_url, headers_dict).
+
+    Raises HubTimeoutError on timeout and HubConnectionError when the
+    hub cannot be reached, so the report can tell the two apart.
     """
     if allow_redirects:
         opener = urllib.request.build_opener()
@@ -96,37 +125,27 @@ def _open(req, timeout=15, allow_redirects=True):
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""
         return e.code, body, e.url, dict(e.headers)
     except urllib.error.URLError as e:
-        raise ConnectionError(f"Cannot connect to hub: {e.reason}") from e
-    except socket.timeout:
-        raise ConnectionError("Connection to hub timed out") from None
+        reason = getattr(e, "reason", None)
+        if isinstance(reason, (socket.timeout, TimeoutError)):
+            raise HubTimeoutError(
+                f"timed out after {timeout}s waiting for the hub"
+            ) from e
+        raise HubConnectionError(
+            f"cannot connect to hub at {HUB_HOST} ({reason})"
+        ) from e
+    except (socket.timeout, TimeoutError) as e:
+        raise HubTimeoutError(
+            f"timed out after {timeout}s waiting for the hub"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
-# Code type detection
+# Code identification
 # ---------------------------------------------------------------------------
-
-
-def detect_code_type(filepath):
-    """Auto-detect the Hubitat code type from file content. Returns None if unclear."""
-    try:
-        content = Path(filepath).read_text(encoding="utf-8")
-    except (IOError, OSError) as e:
-        print(f"Error reading file: {e}")
-        return None
-
-    if DRIVER_PATTERN.search(content):
-        return "driver"
-    if APP_PATTERN.search(content):
-        return "app"
-    if LIBRARY_PATTERN.search(content):
-        return "library"
-    return None
-
-
 def extract_name_and_namespace(source):
     """Extract the definition name and namespace from Groovy source code.
 
-    Search is anchored at the definition(/library( block so that name:/namespace:
+    Search is anchored at the definition( block so that name:/namespace:
     occurrences elsewhere in the file (pages, child-app references, comments)
     are ignored. Returns (name, namespace) — either may be None if not found."""
     block = DEFINITION_START_RE.search(source)
@@ -147,10 +166,10 @@ def fetch_hub_code_list(host, code_type):
         return []
     url = f"http://{host}/{endpoint}"
     try:
-        status, body, _, _ = _open(_create_req(url), timeout=10)
+        status, body, _, _ = _open(_create_req(url), timeout=LIST_TIMEOUT_SECONDS)
         if status == 200:
             return json.loads(body)
-    except (ConnectionError, json.JSONDecodeError):
+    except (HubTimeoutError, HubConnectionError, json.JSONDecodeError):
         pass
     return []
 
@@ -176,99 +195,49 @@ def find_matching_code(hub_list, name, namespace):
 
 
 # ---------------------------------------------------------------------------
-# Settings & metadata I/O
+# Hubitat save calls
 # ---------------------------------------------------------------------------
+def _extract_compile_detail(body):
+    """Pull every scrap of error detail out of a failed save response.
 
-
-def load_hub_hostname(workspace_root):
-    """Load hub hostname from .hubitat/metadata.json."""
-    metadata_path = Path(workspace_root) / METADATA_FILE
-    if not metadata_path.exists():
-        raise FileNotFoundError(
-            f"Metadata file not found: {metadata_path}\n"
-            f"Please create {METADATA_FILE} with 'hubitat.hub.hostname' set.\n"
-            f'Example: {{"hubitat.hub.hostname": "192.168.1.4", "files": []}}'
+    Returns a multi-line string with the Hubitat #errors block, any
+    editor-shell markers, and a raw-body excerpt. The editor-shell
+    note covers newer firmware that re-renders the SPA with HTTP 200
+    and no server-side error text — that almost always means a
+    compile failure (bad import, sandbox, or syntax)."""
+    parts = []
+    if body:
+        errors_match = re.search(
+            r'id=["\']errors["\'][^>]*>(.*?)</div>',
+            body,
+            re.IGNORECASE | re.DOTALL,
         )
-
-    with open(metadata_path, "r") as f:
-        data = json.load(f)
-
-    host = data.get("hubitat.hub.hostname")
-    if not host:
-        raise ValueError(
-            f"'hubitat.hub.hostname' not set in {METADATA_FILE}.\n"
-            f"Add your hub's IP or hostname to the top-level of the JSON.\n"
-            f'Example: {{"hubitat.hub.hostname": "192.168.1.4", "files": [...]}}'
-        )
-
-    return host
-
-
-def load_metadata(workspace_root):
-    """Load the files list from .hubitat/metadata.json. Returns empty list if missing."""
-    metadata_path = Path(workspace_root) / METADATA_FILE
-    if not metadata_path.exists():
-        return []
-    with open(metadata_path, "r") as f:
-        data = json.load(f)
-    return data.get("files", [])
-
-
-def save_metadata(workspace_root, files):
-    """Save the files list to .hubitat/metadata.json, preserving any extra top-level keys."""
-    metadata_path = Path(workspace_root) / METADATA_FILE
-
-    # Preserve any existing top-level keys (e.g. hubitat.hub.hostname, networkTimeout)
-    extra = {}
-    if metadata_path.exists():
-        try:
-            with open(metadata_path, "r") as f:
-                existing = json.load(f)
-            for key, value in existing.items():
-                if key != "files":
-                    extra[key] = value
-        except (json.JSONDecodeError, IOError):
-            pass
-
-    metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"files": files, **extra}
-    with open(metadata_path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-
-
-def find_file_in_metadata(files, filepath):
-    """Return the first metadata entry matching the given filepath, or None."""
-    for entry in files:
-        if entry.get("filepath") == filepath:
-            return entry
-    return None
-
-
-def find_conflicting_link(files, code_type, code_id, filepath):
-    """Return a metadata entry that already links the given hub ID (for the same
-    code type) to a DIFFERENT local file, or None. Used to prevent accidentally
-    re-linking a hub app/driver that belongs to another source file (e.g. a
-    parent app matching an older standalone app with the same name)."""
-    for entry in files:
-        if (
-            entry.get("codeType") == code_type
-            and entry.get("id") == code_id
-            and entry.get("filepath") != filepath
-        ):
-            return entry
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Hubitat API calls
-# ---------------------------------------------------------------------------
+        if errors_match:
+            detail = re.sub(r"<[^>]+>", " ", errors_match.group(1)).strip()
+            detail = re.sub(r"\s+", " ", detail)
+            if detail:
+                parts.append(f"Hubitat #errors: {detail}")
+        low = body[:5000].lower()
+        if "password" in low and "login" in low:
+            parts.append(
+                "Hub returned a login page (hub security may be enabled)"
+            )
+        elif "/ui2/" in body or "<title>" in low:
+            parts.append(
+                "Hub returned its editor shell page with no error detail. "
+                "This usually means the source failed to COMPILE on the hub "
+                "(bad import, sandbox-disallowed import, or syntax error). "
+                "Open the file in the hub editor to see the exact compiler message."
+            )
+        parts.append(f"Raw response ({len(body)} bytes, first 1500):")
+        parts.append(body[:1500])
+    return "\n".join(parts) if parts else "empty response from hub"
 
 
 def get_hub_version(host, code_type, code_id):
     """Fetch the current version of a code file from the hub. Returns int or None."""
     url = f"http://{host}/{code_type}/ajax/code?id={code_id}"
-    status, body, _, _ = _open(_create_req(url))
+    status, body, _, _ = _open(_create_req(url), timeout=LIST_TIMEOUT_SECONDS)
 
     if status == 200:
         try:
@@ -280,40 +249,6 @@ def get_hub_version(host, code_type, code_id):
     return None
 
 
-def _extract_create_error(body):
-    """Extract the Hubitat '#errors' message from a /save HTML failure response.
-
-    On a rejected create, Hubitat re-renders the editor page (HTTP 200) with the
-    failure reason inside a <div id="errors">...</div> block. This mirrors the
-    reference extension's parseCreateNewErrorFromHTML().
-    """
-    if not body:
-        return "empty response from hub"
-    errors_match = re.search(
-        r'id=["\']errors["\'][^>]*>\s*([^<]{1,500})', body, re.IGNORECASE | re.DOTALL
-    )
-    if errors_match and errors_match.group(1).strip():
-        return errors_match.group(1).strip()
-    low = body[:2000].lower()
-    if "password" in low and "login" in low:
-        return (
-            "hub returned a login page (this script targets unsecured hubs; "
-            "hub security may be enabled)"
-        )
-    if "/ui2/" in body or "<title>" in low:
-        # Newer firmware re-renders the editor SPA shell (HTTP 200, no server-side
-        # #errors block) when a create is rejected — typically a COMPILE failure.
-        return (
-            "hub rejected the save and returned its editor shell page with no error "
-            "detail. This almost always means the source failed to COMPILE on the hub "
-            "— e.g. a missing import (Hubitat does not auto-import "
-            "groovy.transform.Field or groovy.transform.CompileStatic), a "
-            "sandbox-disallowed import, or a syntax error. Open the file on the hub to "
-            "see the exact compiler message."
-        )
-    return f"unparseable hub response. Body: {body[:300]}"
-
-
 def create_new_code(host, code_type, source):
     """
     Create a brand-new code file on the hub via the /save endpoint.
@@ -321,11 +256,8 @@ def create_new_code(host, code_type, source):
 
     On success Hubitat responds 302 with Location: /<type>/editor/<id>, where the
     new ID is the final path segment. On failure it returns 200 with the editor
-    HTML containing a <div id="errors"> block.
-
-    This mirrors the working vscode-hubitat-dev extension: do NOT follow the
-    redirect — the 302 itself is the success signal and its Location header is
-    the only reliable source of the new ID.
+    HTML containing a <div id="errors"> block. The 302 is the success signal —
+    do NOT follow the redirect, as its Location header is the only reliable id.
     """
     url = f"http://{host}/{code_type}/save"
     form_data = urllib.parse.urlencode(
@@ -333,28 +265,31 @@ def create_new_code(host, code_type, source):
     ).encode("utf-8")
 
     req = _create_req(url, data=form_data, method="POST")
-    status, body, _, headers = _open(req, allow_redirects=False)
+    status, body, _, headers = _open(
+        req, timeout=SAVE_TIMEOUT_SECONDS, allow_redirects=False
+    )
 
     if status == 302:
         location = headers.get("Location") or headers.get("location") or ""
         new_id = location.rstrip("/").rsplit("/", 1)[-1].split("?")[0].split("#")[0]
         if new_id.isdigit():
             return int(new_id)
-        raise RuntimeError(
+        raise HubSaveError(
             f"Hub created the {code_type} but returned an unexpected "
             f"redirect Location: '{location}'"
         )
 
     # Anything other than a 302 means the save was rejected.
-    raise RuntimeError(
-        f"Failed to create new {code_type}. HTTP {status}: {_extract_create_error(body)}"
+    raise HubSaveError(
+        f"Failed to create new {code_type}. HTTP {status}:\n"
+        f"{_extract_compile_detail(body)}"
     )
 
 
 def update_existing_code(host, code_type, code_id, version, source):
     """
     Update an existing code file on the hub.
-    Returns (success_bool, new_version_int).
+    Returns the new version int assigned by Hubitat.
     """
     url = f"http://{host}/{code_type}/ajax/update"
     form_data = urllib.parse.urlencode(
@@ -366,330 +301,115 @@ def update_existing_code(host, code_type, code_id, version, source):
     ).encode("utf-8")
 
     req = _create_req(url, data=form_data, method="POST")
-    status, body, _, _ = _open(req)
+    status, body, _, _ = _open(req, timeout=SAVE_TIMEOUT_SECONDS)
 
     if status == 200:
         try:
             data = json.loads(body)
-            if data.get("status") == "success":
-                return True, data.get("version", version + 1)
-            else:
-                error_msg = data.get("errorMessage", "Unknown error")
-                # Clean up Java SQL prefix that Hubitat sometimes includes
-                error_msg = error_msg.replace("java.sql.SQLException:", "").strip()
-                raise RuntimeError(f"Hub rejected update: {error_msg}")
         except json.JSONDecodeError:
-            raise RuntimeError(
-                f"Unexpected response from hub (HTTP 200 but not JSON): {body[:200]}"
+            raise HubSaveError(
+                f"Hub returned a non-JSON response on update "
+                f"(HTTP 200, {len(body)} bytes, first 1500):\n{body[:1500]}"
             )
+        if data.get("status") == "success":
+            return data.get("version", version + 1)
+        error_msg = data.get("errorMessage") or "(no errorMessage in response)"
+        # Clean up Java SQL prefix that Hubitat sometimes includes
+        error_msg = error_msg.replace("java.sql.SQLException:", "").strip()
+        raise HubSaveError(
+            f"Hub rejected update (status={data.get('status')!r}):\n"
+            f"errorMessage: {error_msg}\n"
+            f"Raw response ({len(body)} bytes):\n{body[:1500]}"
+        )
 
-    raise RuntimeError(f"Failed to update {code_type}. HTTP {status}: {body[:200]}")
+    raise HubSaveError(
+        f"Failed to update {code_type}. HTTP {status}:\n"
+        f"{_extract_compile_detail(body)}"
+    )
 
 
 # ---------------------------------------------------------------------------
-# Orchestration
+# Per-file publish (unconditional, non-interactive)
 # ---------------------------------------------------------------------------
-
-
-def publish(host, code_type, filepath, workspace_root):
-    """Orchestrate the full publish flow for a single file."""
-    # ---- Read source ----
-    print(f"File: {filepath}")
+def publish_one(host, code_type, filepath, hub_lists):
+    """Publish one SAC file. Returns (ok_bool, report_line, detail_str)."""
     try:
         source = Path(filepath).read_text(encoding="utf-8")
     except (IOError, OSError) as e:
-        print(f"Error reading source file: {e}")
-        sys.exit(1)
+        return False, f"FAILED: {filepath} — cannot read file: {e}", ""
 
-    # ---- Confirm detected type matches (already resolved by main if using auto) ----
-    detected = detect_code_type(filepath)
-    if detected and detected != code_type:
-        print(
-            f"\u26a0\ufe0f  Warning: file content looks like a '{detected}' "
-            f"but you're publishing as '{code_type}'."
-        )
-        print(f"   Proceeding anyway...")
-    elif detected is None:
-        print(
-            f"\u26a0\ufe0f  Warning: could not auto-detect code type from file content."
-        )
-        print(f"   Publishing as '{code_type}'.")
+    code_name, code_namespace = extract_name_and_namespace(source)
+    label = f"{Path(filepath).name} ({code_type}: {code_name or '?'})"
 
-    # ---- Load metadata ----
-    files = load_metadata(workspace_root)
-    existing = find_file_in_metadata(files, filepath)
+    hub_list = hub_lists.get(code_type) or []
+    matched, match_kind = find_matching_code(hub_list, code_name, code_namespace)
 
-    if existing and existing.get("id") is not None:
-        # ============================================================
-        # UPDATE EXISTING
-        # ============================================================
-        code_id = existing["id"]
-        local_version = existing.get("version", "?")
-
-        print(
-            f"Found existing {code_type} mapping: ID={code_id}, local version={local_version}"
-        )
-        print(f"Fetching current version from hub...")
-
-        hub_version = get_hub_version(host, code_type, code_id)
-        if hub_version is None:
-            print(
-                f"\u26a0\ufe0f  Could not fetch version from hub (code may have been deleted)."
-            )
-            print(f"   Forcing update with version 0...")
-            hub_version = 0
-        else:
-            print(f"Hub version: {hub_version}")
-
-        print(f"Publishing to {host} ...")
-        success, new_version = update_existing_code(
-            host, code_type, code_id, hub_version, source
-        )
-
-        if success:
-            existing["version"] = new_version
-            save_metadata(workspace_root, files)
-            print(
-                f"\u2705 Successfully published {code_type} (ID {code_id}, version {new_version})"
-            )
-
-    else:
-        # ============================================================
-        # CREATE NEW (or link to existing)
-        # ============================================================
-        print(f"No existing mapping found for this file in {METADATA_FILE}.")
-
-        # ---- Auto-detect from hub ----
-        code_name, code_namespace = extract_name_and_namespace(source)
-        if code_name:
-            print(
-                f'Extracted name="{code_name}", namespace="{code_namespace}" from source.'
-            )
-        else:
-            print("Could not extract name from source code.")
-
-        print(f"Fetching existing {code_type}s from hub...")
-        hub_list = fetch_hub_code_list(host, code_type)
-
-        matched = None
-        match_kind = None
-        if hub_list:
-            print(f"Found {len(hub_list)} {code_type}(s) on hub.")
-            matched, match_kind = find_matching_code(hub_list, code_name, code_namespace)
-        else:
-            print(
-                f"Could not fetch {code_type} list from hub (will fall back to manual entry)."
-            )
-
+    try:
         if matched:
-            # ---- Auto-matched an existing hub entry ----
-            match_id = matched["id"]
-            match_name = matched["name"]
-            conflict = find_conflicting_link(files, code_type, match_id, filepath)
-            used_by = matched.get("usedBy") or []
-            print()
-            print(f"Found matching {code_type} on hub:")
-            print(f"  ID: {match_id}")
-            print(f"  Name: {match_name}")
-            if matched.get("namespace"):
-                print(f"  Namespace: {matched['namespace']}")
-            if matched.get("lastModified"):
-                print(f"  Last modified: {matched['lastModified']}")
-            if used_by:
-                print(f"  In use by {len(used_by)} installed instance(s)")
-            if match_kind == "name-only":
-                print(
-                    f"  \u26a0\ufe0f  Name matches but namespace differs "
-                    f"(local: '{code_namespace}', hub: '{matched.get('namespace')}')"
-                )
-            if conflict:
-                print(
-                    f"  \u26a0\ufe0f  Hub ID {match_id} is already linked to a "
-                    f"different local file in {METADATA_FILE}:"
-                )
-                print(f"     {conflict.get('filepath')}")
-                print(
-                    f"     Linking would make both files publish over the same "
-                    f"hub {code_type}."
-                )
-            print()
-
-            default_yes = match_kind == "exact" and not conflict
-            if default_yes:
-                prompt_text = (
-                    f"Link to this {code_type}? (Y/n, or enter a different ID): "
-                )
-            else:
-                prompt_text = (
-                    f"Link to this {code_type}? (y/N, or enter a different ID): "
-                )
-            prompt = input(prompt_text).strip().lower()
-
-            if prompt == "y" or (prompt == "" and default_yes):
-                # Use the matched ID
-                code_id = match_id
-            elif prompt in ("", "n"):
-                # Declined — fall through to manual entry / create new
-                code_id = None
-            else:
-                # User may have entered a different ID
-                try:
-                    code_id = int(prompt)
-                    print(f"Linking to manually specified {code_type} ID {code_id} ...")
-                except ValueError:
-                    print(f"Invalid input. Not linking to ID {match_id}.")
-                    code_id = None
-
-            if code_id is not None:
-                hub_version = get_hub_version(host, code_type, code_id)
-                if hub_version is None:
-                    print(
-                        f"\u26a0\ufe0f  No {code_type} with ID {code_id} found on hub."
-                    )
-                    confirm = (
-                        input("Continue anyway and force push? (y/n): ").strip().lower()
-                    )
-                    if confirm != "y":
-                        print("Cancelled.")
-                        sys.exit(0)
-                    hub_version = 0
-
-                success, new_version = update_existing_code(
-                    host, code_type, code_id, hub_version, source
-                )
-
-                if success:
-                    files.append(
-                        {
-                            "filepath": filepath,
-                            "codeType": code_type,
-                            "id": code_id,
-                            "version": new_version,
-                        }
-                    )
-                    save_metadata(workspace_root, files)
-                    print(
-                        f"\u2705 Successfully published {code_type} (ID {code_id}, version {new_version})"
-                    )
-                return
-
-        # ---- No auto-match — manual entry or create new ----
-        print()
-        prompt = input("Enter Hubitat ID (leave blank to create new): ").strip()
-
-        if prompt:
-            # ---- Link to an existing Hubitat code by ID ----
-            try:
-                code_id = int(prompt)
-            except ValueError:
-                print(f"Invalid ID: '{prompt}'. Must be a number.")
-                sys.exit(1)
-
-            print(f"Linking to existing {code_type} ID {code_id} ...")
+            code_id = matched["id"]
             hub_version = get_hub_version(host, code_type, code_id)
             if hub_version is None:
-                print(f"\u26a0\ufe0f  No {code_type} with ID {code_id} found on hub.")
-                confirm = (
-                    input("Continue anyway and force push? (y/n): ").strip().lower()
-                )
-                if confirm != "y":
-                    print("Cancelled.")
-                    sys.exit(0)
                 hub_version = 0
-
-            success, new_version = update_existing_code(
+            new_version = update_existing_code(
                 host, code_type, code_id, hub_version, source
             )
-
-            if success:
-                files.append(
-                    {
-                        "filepath": filepath,
-                        "codeType": code_type,
-                        "id": code_id,
-                        "version": new_version,
-                    }
-                )
-                save_metadata(workspace_root, files)
-                print(
-                    f"\u2705 Successfully published {code_type} (ID {code_id}, version {new_version})"
-                )
-
-        else:
-            # ---- Create brand new code on Hubitat ----
-            print(f"Creating new {code_type} on hub ...")
-            code_id = create_new_code(host, code_type, source)
-
-            files.append(
-                {
-                    "filepath": filepath,
-                    "codeType": code_type,
-                    "id": code_id,
-                    "version": 1,
-                }
+            note = "" if match_kind == "exact" else " (name-only match)"
+            return (
+                True,
+                f"OK: {label} → updated ID {code_id}, version {new_version}{note}",
+                "",
             )
-            save_metadata(workspace_root, files)
-            print(f"\u2705 Created new {code_type} on hub with ID {code_id}")
+
+        code_id = create_new_code(host, code_type, source)
+        return True, f"OK: {label} → created ID {code_id}", ""
+
+    except HubTimeoutError as e:
+        return False, f"FAILED: {label} — TIMED OUT: {e}", str(e)
+    except HubConnectionError as e:
+        return False, f"FAILED: {label} — CONNECTION ERROR: {e}", str(e)
+    except HubSaveError as e:
+        return False, f"FAILED: {label} — COMPILE/SAVE ERROR:\n{e}", str(e)
+    except Exception as e:  # keep publishing the rest no matter what
+        return False, f"FAILED: {label} — UNEXPECTED ERROR: {type(e).__name__}: {e}", str(e)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def repo_root():
+    """Repository root: the parent of this script's directory."""
+    return Path(__file__).resolve().parent.parent
 
 
 def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        sys.exit(1)
+    root = repo_root()
+    print(f"Publishing {len(SAC_FILES)} SAC files to C7 ({HUB_HOST})...")
+    print()
 
-    code_type = sys.argv[1].lower()
-    filepath = sys.argv[2]
-    workspace_root = (
-        sys.argv[3]
-        if len(sys.argv) > 3
-        else os.environ.get("ZED_WORKTREE_ROOT", os.getcwd())
-    )
+    # One code list per type, fetched once up front.
+    hub_lists = {}
+    for code_type in ("app", "driver"):
+        hub_lists[code_type] = fetch_hub_code_list(HUB_HOST, code_type)
+        n = len(hub_lists[code_type])
+        print(f"Hub list for {code_type}s: {n} code file(s)" + ("" if n else " — NOT FETCHED (will try create; may duplicate)"))
+    print()
 
-    # ---- Resolve "auto" code type ----
-    if code_type == "auto":
-        code_type = detect_code_type(filepath)
-        if code_type is None:
-            print(
-                "Error: could not auto-detect code type from file content.\n"
-                "Please specify one of: app, driver, library"
-            )
-            sys.exit(1)
-        print(f"Auto-detected code type: {code_type}")
+    successes, failures = [], []
+    for i, (relpath, code_type) in enumerate(SAC_FILES, 1):
+        filepath = root / relpath
+        print(f"[{i}/{len(SAC_FILES)}] Publishing {relpath} ...", flush=True)
+        ok, report, detail = publish_one(HUB_HOST, code_type, filepath, hub_lists)
+        # Print the per-file verdict; on failure the report already
+        # carries the full compile-error detail.
+        for line in report.split("\n"):
+            print(f"    {line}" if line else "")
+        (successes if ok else failures).append(relpath)
+        print(flush=True)
 
-    if code_type not in VALID_TYPES:
-        print(
-            f"Invalid code type: '{code_type}'. Must be one of: {', '.join(sorted(VALID_TYPES))}"
-        )
-        sys.exit(1)
-
-    # Normalize to absolute path so metadata entries are always consistent
-    filepath = os.path.abspath(filepath)
-
-    if not os.path.isfile(filepath):
-        print(f"File not found: {filepath}")
-        sys.exit(1)
-
-    try:
-        host = load_hub_hostname(workspace_root)
-        publish(host, code_type, filepath, workspace_root)
-    except (FileNotFoundError, ValueError) as e:
-        print(f"Configuration error: {e}")
-        sys.exit(1)
-    except ConnectionError as e:
-        print(f"Connection error: {e}")
-        print(f"Verify your hub is reachable at the address in {METADATA_FILE}")
-        sys.exit(1)
-    except RuntimeError as e:
-        print(f"Publish error: {e}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print("\nCancelled.")
-        sys.exit(0)
+    print(f"Summary: {len(successes)} published, {len(failures)} failed")
+    for relpath in failures:
+        print(f"  FAILED: {relpath}")
+    sys.exit(0 if not failures else 1)
 
 
 if __name__ == "__main__":
