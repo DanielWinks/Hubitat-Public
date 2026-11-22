@@ -1557,10 +1557,10 @@ void reconcileChildDevices() {
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
-  // Clear event attributes per preference
+  // Ask the parent app to refresh artwork attributes using this device's preference.
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  if(getDisableAlbumArtEvents()) { clearAlbumArtEvents() }
+  scheduleAlbumArtPreferenceRefresh()
   // Re-initialize in-memory data structures (static fields cleared on JVM restart)
   // Guard: these methods use getId() as a ConcurrentHashMap key, which throws NPE if null.
   // On fresh install, device data isn't set yet — secondaryConfigurationPhase4() will handle this.
