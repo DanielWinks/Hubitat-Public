@@ -33,7 +33,8 @@ class SonosAdvPlayerSpec extends Specification {
 
   void queueTestGroupSocketCommand(Integer marker = 10) {
     driver.device.dataValues.websocketStatus = 'open'
-    driver.sendWsMessage(JsonOutput.toJson([[namespace: 'groups', command: 'getGroups', householdId: 'HOUSE_TEST'], [marker: marker]]))
+    driver.sendWsMessage(JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RINCON_TEST'],
+      [name: "clip-${marker}", clipType: 'CUSTOM', appId: 'test', priority: 'HIGH', streamUrl: 'http://example.test/clip.mp3']]))
   }
 
   void seedGroupTopology(String coordinatorId, Map<String, String> hostByPlayer) {
@@ -307,29 +308,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.groupAnnouncementStream == null
   }
 
-  def "paused coordinator stream completes correlated group announcement immediately"() {
-    given:
-    driver.events.clear()
-    driver.device.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    driver.device.currentValues.audioSource = 'http://example.test/announcement.mp3'
-    driver.runtimeState.groupAnnouncementStream = [correlationId: 'announcement-paused',
-      phase: 'ACTIVE', activeObserved: true]
-
-    when:
-    driver.processWebsocketMessage(JsonOutput.toJson([
-      [namespace: 'playback', type: 'playbackStatus'],
-      [playbackState: 'PLAYBACK_STATE_PAUSED', itemId: 'announcement-item']
-    ]))
-
-    then:
-    playerStateMessages().any { Map event ->
-      event.kind == 'groupAnnouncementProgress' &&
-        event.correlationId == 'announcement-paused' && event.phase == 'DONE' &&
-        event.playbackState == 'PLAYBACK_STATE_PAUSED' && event.termination == 'paused'
-    }
-    driver.runtimeState.groupAnnouncementStream == null
-  }
-
   def "group announcement restores the captured queue track and playback position"() {
     given:
     driver.runtimeState.announcementPlaybackSnapshot = [
@@ -585,7 +563,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.state.playbackState == 'PLAYBACK_STATE_IDLE'
-    (driver.state.playbackStateObservedAt as Long) > 0L
+    driver.state.playbackStateObservedAt == null
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackState') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackStateObservedAt') != true
     driver.events.any { Map e -> e.name == 'lastUpdated' }
@@ -1589,8 +1567,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingGroupedPlayerVolumes.clear()
     driver.groupDeviceUpdateRetryAttempts.clear()
     driver.pendingGroupDeviceUpdates.clear()
-    driver.pendingTopologyWebsocketByDni.clear()
-    driver.pendingTopologyKindByDni.clear()
     driver.pendingGrcByDni.clear()
     driver.grcUpdateScheduledDnis.clear()
     driver.currentGrcSeqByDni.clear()
@@ -1633,6 +1609,22 @@ class SonosAdvPlayerSpec extends Specification {
     }
   }
 
+  def "audioClip subscription is sent ahead of queued clips"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    String clip = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RINCON_TEST'],
+      [name: 'queued-clip', clipType: 'CUSTOM', appId: 'test', priority: 'HIGH', streamUrl: 'http://example.test/clip.mp3']])
+    driver.queueWebsocketMessage(clip, 0, [kind: 'audioClip', correlationId: 'queued-clip'])
+
+    when:
+    driver.subscribeToAudioClip()
+
+    then:
+    websocketMessages.size() == 1
+    ((List)new JsonSlurper().parseText(websocketMessages[0]))[0].command == 'subscribe'
+    driver.runtimeState.websocketOutboundQueue*.correlationId == ['queued-clip']
+  }
+
   def "player initialization starts subscriptions and websocket locally"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
@@ -1645,7 +1637,6 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     websocketConnections.size() == 1
     websocketConnections[0].last() == 'wss://192.168.1.50:1443/websocket/api'
-    driver.asyncCalls.any { Map call -> call.params?.uri?.toString()?.contains('192.168.1.50:1400') }
     !parentPlayerUpdates.any { Map event -> event.kind?.toString()?.startsWith('initialization') }
   }
 
@@ -3102,8 +3093,6 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.containsKey('G-UNREL') == true
-    !driver.pendingTopologyWebsocketByDni.containsKey('SONOS-TEST-DNI')
-    !driver.pendingTopologyKindByDni.containsKey('SONOS-TEST-DNI')
   }
 
   def "expired expected topology drops stale zgt hold entries without applying"() {
@@ -3112,7 +3101,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.expectedGroupTopology = groovy.json.JsonOutput.toJson([
       coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: (driver.now() as Long) - 1L
     ])
-    driver.pendingTopologyKindByDni['SONOS-TEST-DNI'] = 'zgt'
     Integer parseCalls = 0
     driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
       parseCalls++
@@ -3128,12 +3116,11 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.runtimeState.appliedTopologyXml == null
-    !driver.pendingTopologyKindByDni.containsKey('SONOS-TEST-DNI')
     driver.device.dataValues.expectedGroupTopology == ''
     parseCalls == 0
   }
 
-  def "held groups websocket topology is not published to the parent outbox"() {
+  def "groups websocket messages are ignored because topology arrives over UPnP"() {
     given:
     driver.device.currentValues.groupCoordinatorId = 'RINCON_OLD_COORD'
     driver.device.currentValues.isGrouped = 'on'
@@ -3157,7 +3144,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.every { Map event -> event.name != 'groupCoordinatorId' }
   }
 
-  def "groups websocket change queues groupPlayerIds attribute and skips the outbox"() {
+  def "groups websocket messages do not update topology state"() {
     given:
     driver.device.dataValues.id = 'RINCON_ARC'
     driver.device.dataValues.groupId = 'GROUP_ARC'
@@ -3176,8 +3163,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.processWebsocketMessage(message)
 
     then:
-    driver.device.dataValues.groupPlayerIds == 'RINCON_ARC,RINCON_B'
-    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupPlayerIds == 'RINCON_ARC,RINCON_B'
+    driver.device.dataValues.groupPlayerIds == 'RINCON_ARC'
+    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId]?.groupPlayerIds == null
     !playerStateMessages().any { Map event -> event.kind == 'topology' }
   }
 
@@ -3692,32 +3679,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Stop')
   }
 
-  def "unsupported stop fails and queues a separately tracked pause fallback"() {
-    given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
-    driver.device.currentValues.transportStatus = 'playing'
-    driver.stop()
-    driver.drainTransportCommandQueue()
-    Map stopCommand = driver.runtimeState.activeTransportCommand
-
-    when:
-    driver.failTransportCommand('stop', 'ERROR_UNSUPPORTED_COMMAND: stop command is not supported')
-
-    then:
-    driver.runtimeState.activeTransportCommand == null
-    driver.runtimeState.transportCommandQueue*.command == ['pause']
-    driver.logs.any { String entry -> entry.contains("Transport command stop (${stopCommand.id}) failed: ERROR_UNSUPPORTED_COMMAND") }
-    !driver.logs.any { String entry -> entry.contains("Transport command stop (${stopCommand.id}) confirmed:") }
-
-    when:
-    driver.drainTransportCommandQueue()
-
-    then:
-    driver.asyncCalls.collect { it.params.headers.SOAPAction.find(/#(Stop|Pause)$/)?.replace('#', '') } == ['Stop', 'Pause']
-    driver.runtimeState.activeTransportCommand.command == 'pause'
-    driver.logs.any { String entry -> entry.contains('sending pause as the supported fallback') }
-  }
-
   def "playlist confirmation also polls before performing a bounded reload"() {
     given:
     seedUpnpPlaylist('playlist-7')
@@ -3834,57 +3795,6 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.empty
     driver.playlistRetryState.isEmpty()
     driver.state.lastError?.contains('PLAYBACK_NOT_STARTED')
-    !driver.events.any { Map event -> event.name == 'lastError' }
-  }
-
-  def "buffering counts as playlist playback progress and does not reload the playlist"() {
-    given:
-    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
-    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-
-    when:
-    driver.processWebsocketMessage('[{"type":"playbackStatus","namespace":"playback"},{"playbackState":"PLAYBACK_STATE_BUFFERING"}]')
-    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    driver.playlistRetryState.isEmpty()
-    websocketMessages.every { String message -> !message.contains('loadPlaylist') && !message.contains('"command":"play"') }
-  }
-
-  def "playback status publishes play modes including crossfade"() {
-    given:
-    driver.device.events.clear()
-    driver.device.currentValues.currentCrossfadeMode = 'off'
-    driver.device.currentValues.currentShuffleMode = 'off'
-    driver.device.currentValues.currentRepeatAllMode = 'off'
-    driver.device.currentValues.currentRepeatOneMode = 'off'
-
-    when:
-    driver.processWebsocketMessage(JsonOutput.toJson([
-      [namespace: 'playback', type: 'playbackStatus'],
-      [playbackState: 'PLAYBACK_STATE_PAUSED', playModes: [repeat: false, repeatOne: false, shuffle: true, crossfade: true]]
-    ]))
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.device.events.any { Map event -> event.name == 'currentCrossfadeMode' && event.value == 'on' }
-    driver.device.events.any { Map event -> event.name == 'currentShuffleMode' && event.value == 'on' }
-  }
-
-  def "deterministic playlist load errors are surfaced without retrying"() {
-    given:
-    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
-
-    when:
-    driver.processWebsocketMessage('[{"type":"globalError","namespace":"playlists","response":"loadPlaylist","success":false},{"errorCode":"ERROR_INVALID_OBJECT_ID","reason":"Playlist not found"}]')
-
-    then:
-    driver.playlistRetryState.isEmpty()
-    driver.state.lastError == "Playlist 'playlist-963' failed to load: ERROR_INVALID_OBJECT_ID"
-    driver.state.lastErrorReason == 'Playlist not found'
     !driver.events.any { Map event -> event.name == 'lastError' }
   }
 
@@ -4241,12 +4151,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.subscriptions.clear()
   }
 
-  def "websocket commands queue until the socket is open and flush in order"() {
+  def "non audioClip websocket commands are rejected"() {
     given:
     String firstMessage = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
     String secondMessage = JsonOutput.toJson([[namespace: 'playlists', command: 'loadPlaylist', groupId: 'GROUP_TEST'], [playlistId: '963']])
-    driver.device.dataValues.websocketStatus = 'closed'
-    driver.runtimeState.remove('websocketConnectPending')
+    driver.device.dataValues.websocketStatus = 'open'
 
     when:
     driver.sendWsMessage(firstMessage)
@@ -4254,27 +4163,8 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     websocketMessages.empty
-    driver.runtimeState.websocketOutboundQueue*.message == [firstMessage, secondMessage]
-
-    when:
-    driver.setWebSocketStatus('open')
-    List<Map> subscriptions = (driver.runtimeState.websocketCommandLedger as List<Map>).findAll { Map entry ->
-      entry.wireCommand == 'subscribe'
-    }
-    subscriptions.each { Map entry ->
-      driver.processWebsocketMessage(JsonOutput.toJson([
-        [namespace: entry.namespace, response: 'subscribe', success: true, type: 'none'], [:]
-      ]))
-    }
-
-    then:
-    Integer firstCommandIndex = websocketMessages.indexOf(firstMessage)
-    Integer secondCommandIndex = websocketMessages.indexOf(secondMessage)
-    Integer subscriptionIndex = websocketMessages.findIndexOf { String message -> message.contains('"command":"subscribe"') }
-    subscriptionIndex == -1
-    firstCommandIndex >= 0
-    secondCommandIndex > firstCommandIndex
     driver.runtimeState.websocketOutboundQueue == null
+    driver.logs.any { String entry -> entry.contains('Refusing to send a WebSocket command without a known response fingerprint') }
   }
 
   def "matching websocket response clears the command ledger with trace success"() {
@@ -4284,12 +4174,12 @@ class SonosAdvPlayerSpec extends Specification {
     Integer pendingCount = pending.size()
 
     when:
-    driver.processWebsocketMessage('[{"namespace":"groups","response":"getGroups","success":true,"type":"groups"},{ }]')
+    driver.processWebsocketMessage('[{"namespace":"audioClip","response":"loadAudioClip","success":true,"type":"audioClip"},{"name":"clip-10"}]')
 
     then:
     pendingCount == 1
     driver.runtimeState.websocketCommandLedger == null
-    driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('groups.getGroups') }
+    driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('audioClip.loadAudioClip') }
   }
 
   def "primary websocket ledger expiry cleans correlation without reconnecting"() {
@@ -4322,8 +4212,8 @@ class SonosAdvPlayerSpec extends Specification {
     claimed.size() == 1
     claimed[0].entryId == original.entryId
     ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).entryId != original.entryId
-    claimed[0].message.contains('"marker":10')
-    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).message.contains('"marker":20')
+    claimed[0].message.contains('clip-10')
+    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).message.contains('clip-20')
   }
 
   def "websocket ledger locks are stable per device and distinct across devices"() {
@@ -4346,7 +4236,7 @@ class SonosAdvPlayerSpec extends Specification {
     Integer generation = (driver.runtimeState.websocketConnectionGeneration ?: 0) as Integer
 
     when:
-    driver.processWebsocketMessage('[{"namespace":"groups","response":"getGroups","success":false,"type":"globalError"},{"errorCode":"ERROR_INVALID_ARGUMENT","reason":"invalid request"}]')
+    driver.processWebsocketMessage('[{"namespace":"audioClip","response":"loadAudioClip","success":false,"type":"globalError"},{"errorCode":"ERROR_INVALID_ARGUMENT","reason":"invalid request","name":"clip-10"}]')
 
     then:
     driver.runtimeState.websocketCommandLedger == null
@@ -4384,120 +4274,6 @@ class SonosAdvPlayerSpec extends Specification {
       argument instanceof Map && (argument as Map).pingInterval == driver.WS_PING_INTERVAL_SECONDS
     }
     driver.WS_PING_INTERVAL_SECONDS > 0
-  }
-
-  def "websocket send gate queues work while a connection attempt is pending"() {
-    given:
-    String message = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume',
-      playerId: 'RINCON_TEST'], [volume: 30]])
-    driver.device.dataValues.websocketStatus = 'open'
-    driver.runtimeState[driver.WS_CONNECT_PENDING_STATE_KEY] = true
-
-    when:
-    Boolean sent = driver.sendWsMessage(message)
-
-    then:
-    !sent
-    websocketMessages.empty
-    websocketConnections.empty
-    driver.runtimeState.websocketOutboundQueue*.message == [message]
-  }
-
-  def "outbound command expirations use one earliest-deadline scheduler job"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'closed'
-
-    when:
-    (1..40).each { Integer sequence ->
-      String message = JsonOutput.toJson([[namespace: 'playback', command: 'skipToNextTrack',
-        groupId: "GROUP-${sequence}"], [:]])
-      driver.queueWebsocketMessage(message)
-    }
-
-    then:
-    (driver.runtimeState.websocketOutboundQueue as List<Map>).size() == 40
-    driver.scheduled.count { List job -> job[1] == 'expireWebsocketOutboundQueueEntry' &&
-      job[2]?.overwrite == true } == 1
-    driver.runtimeState.websocketOutboundQueueExpiryAt ==
-      (driver.runtimeState.websocketOutboundQueue as List<Map>).collect { Map entry -> entry.expiresAt as Long }.min()
-  }
-
-  def "disconnected command queue replaces absolute state but preserves relative commands"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'closed'
-    String volume20 = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume', playerId: 'RINCON_TEST'], [volume: 20]])
-    String volume30 = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume', playerId: 'RINCON_TEST'], [volume: 30]])
-    String volume40 = JsonOutput.toJson([[namespace: 'playerVolume', command: 'setVolume', playerId: 'RINCON_TEST'], [volume: 40]])
-    String next = JsonOutput.toJson([[namespace: 'playback', command: 'skipToNextTrack', groupId: 'GROUP_TEST'], [:]])
-    String previous = JsonOutput.toJson([[namespace: 'playback', command: 'skipToPreviousTrack', groupId: 'GROUP_TEST'], [:]])
-
-    when:
-    driver.queueWebsocketMessage(volume20)
-    driver.queueWebsocketMessage(volume30)
-    driver.queueWebsocketMessage(next)
-    driver.queueWebsocketMessage(volume40)
-    driver.queueWebsocketMessage(previous)
-
-    then:
-    List<Map> queued = driver.runtimeState.websocketOutboundQueue as List<Map>
-    queued.size() == 4
-    queued[0].wireCommand == 'setVolume'
-    ((List)new JsonSlurper().parseText(queued[0].message))[1].volume == 30
-    queued[1].wireCommand == 'skipToNextTrack'
-    queued[2].wireCommand == 'setVolume'
-    ((List)new JsonSlurper().parseText(queued[2].message))[1].volume == 40
-    queued[3].wireCommand == 'skipToPreviousTrack'
-  }
-
-  def "loading a Favorite confirmation no longer waits for WebSocket metadata"() {
-    given:
-    String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
-
-    when:
-    driver.sendWsMessage(command)
-
-    then:
-    List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
-    pending.size() == 1
-    pending[0].expected == [[namespace: 'playback', type: 'playbackStatus']]
-
-    when:
-    driver.observeExpectedSubscriptionEvent([namespace: 'playback', type: 'playbackStatus'])
-
-    then:
-    driver.runtimeState.websocketExpectedSubscriptionEvents == null
-  }
-
-  def "missing subscription events trigger one namespace resubscription"() {
-    given:
-    driver.device.dataValues.isGroupCoordinator = 'true'
-    String command = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
-    driver.sendWsMessage(command)
-    List<Map> pending = driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>
-    pending[0].deadlineAt = driver.now() - 1001L
-
-    when:
-    driver.watchExpectedSubscriptionEvents()
-
-    then:
-    websocketMessages.any { String message -> message.contains('"namespace":"playback"') && message.contains('"command":"subscribe"') }
-    (driver.runtimeState.websocketExpectedSubscriptionEvents as List<Map>)[0].attempts == 1
-  }
-
-  def "follower refuses delayed and watchdog group namespace subscriptions"() {
-    given:
-    driver.device.dataValues.isGroupCoordinator = 'false'
-    driver.device.dataValues.groupId = 'GROUP_TEST'
-    driver.device.dataValues.websocketStatus = 'open'
-
-    when:
-    driver.subscribeToPlaybackDebounce([groupId: 'GROUP_TEST'])
-    driver.resubscribeWebsocketNamespace('playback')
-
-    then:
-    websocketMessages.empty
-    driver.runtimeState.websocketCommandLedger == null
-    driver.logs.any { it.toString().contains('Skipping') }
   }
 
   def "SOAP state changes expect a matching UPnP event and renew its subscription on timeout"() {
@@ -4624,52 +4400,6 @@ class SonosAdvPlayerSpec extends Specification {
     payload.data.confirmed == true
   }
 
-  def "group Favorite acknowledgements are emitted for the parent operation"() {
-    given:
-    driver.registerGroupFavoriteOperation('group-op-3', '42')
-    driver.device.events.clear()
-
-    when:
-    driver.processWebsocketMessage('[{"namespace":"favorites","response":"loadFavorite","success":true},{}]')
-
-    then:
-    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
-    payload.event == 'favoriteLoadAck'
-    payload.data.success == true
-  }
-
-  def "groups websocket refreshes descriptive metadata without republishing unchanged membership"() {
-    given:
-    driver.device.dataValues.id = 'RINCON_ARC'
-    driver.device.dataValues.groupId = 'GROUP_ARC'
-    driver.device.dataValues.groupCoordinatorId = 'RINCON_ARC'
-    driver.device.dataValues.groupPlayerIds = 'RINCON_ARC'
-    driver.device.dataValues.isGroupCoordinator = 'true'
-    driver.device.currentValues.groupName = 'Cora’s Room'
-    driver.device.currentValues.groupCoordinatorName = 'Old Name'
-    driver.device.currentValues.groupMemberNames = '[Old Name]'
-    List<Map> parentMembershipUpdates = []
-    driver.metaClass.parentUpdateGroupDevices = { String coordinatorId, List<String> playerIds ->
-      parentMembershipUpdates << [coordinatorId, playerIds]
-    }
-    String message = JsonOutput.toJson([
-      [type: 'groups', name: 'groups'],
-      [groups: [[id: 'GROUP_ARC', name: 'Arc', coordinatorId: 'RINCON_ARC', playerIds: ['RINCON_ARC']]],
-       players: [[id: 'RINCON_ARC', name: 'Arc']]]
-    ])
-
-    when:
-    driver.processWebsocketMessage(message)
-
-    then:
-    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupName == 'Arc'
-    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupCoordinatorName == 'Arc'
-    driver.pendingLocalDeviceEvents[driver.device.deviceNetworkId].groupMemberNames == '[Arc]'
-    parentMembershipUpdates.empty
-    driver.logs.any { String log -> log.contains('topology identity unchanged; descriptive metadata refreshed') }
-  }
-
   def "empty groups responses emit a negative topology observation"() {
     given:
     driver.registerGroupFavoriteOperation('group-op-4', '42')
@@ -4679,13 +4409,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.processWebsocketMessage('[{"type":"groups","name":"groups"}, {"groups":[]}]')
 
     then:
-    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
-    payload.event == 'groups'
-    payload.observedAt instanceof Number
-    payload.data.groupId == null
-    payload.data.coordinatorId == null
-    payload.data.playerIds == []
+    driver.device.events.every { Map item -> item.name != 'groupFavoriteOperation' }
   }
   def "announcement volume preserves explicit zero across paths and boosts"() {
     given:

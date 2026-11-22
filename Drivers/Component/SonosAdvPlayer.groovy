@@ -781,8 +781,6 @@ Boolean hasLineInCapability() {
 @Field static final Striped<java.util.concurrent.locks.Lock> websocketCommandLedgerStripes = Striped.lock(64)
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
-@Field static ConcurrentHashMap<String, String> pendingTopologyWebsocketByDni = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
 // App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
 // SEQ/SID gate counters remain below: numbers deciding staleness, never payloads.
 @Field static ConcurrentHashMap<String, AtomicInteger> currentZgtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
@@ -819,11 +817,6 @@ Boolean hasLineInCapability() {
 @Field static final String WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY = 'websocketOutboundQueueExpiryAt'
 @Field static final String WS_COMMAND_LEDGER_STATE_KEY = 'websocketCommandLedger'
 @Field static final String WS_CONNECTION_GENERATION_STATE_KEY = 'websocketConnectionGeneration'
-@Field static final String WS_COMMAND_SEQUENCE_STATE_KEY = 'websocketCommandSequence'
-@Field static final String WS_LAST_INBOUND_AT_STATE_KEY = 'websocketLastInboundAt'
-@Field static final String WS_INBOUND_SEQUENCE_STATE_KEY = 'websocketInboundSequence'
-@Field static final String WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY = 'websocketReplayWaitingForSubscriptions'
-@Field static final String WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY = 'websocketReplayWaitingForTopology'
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
@@ -843,8 +836,6 @@ Boolean hasLineInCapability() {
 @Field static final String ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY = 'announcementPlaybackSnapshot'
 @Field static final Integer TRANSPORT_WATCHDOG_SECONDS = 4
 @Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
-@Field static final String WS_EXPECTED_EVENTS_KEY = 'websocketExpectedSubscriptionEvents'
-@Field static final Integer WS_EXPECTED_EVENT_TIMEOUT_SECONDS = 20
 @Field static final String UPNP_EXPECTED_EVENTS_KEY = 'upnpExpectedSubscriptionEvents'
 @Field static final Integer UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS = 10
 @Field static final List<Long> WS_BACKOFF_STAGE_SECONDS = [600L, 600L, 600L, 7200L, 14400L, 21600L]
@@ -1266,9 +1257,7 @@ void uninstalled() {
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
-  unschedule('watchExpectedSubscriptionEvents')
   unschedule('watchExpectedUpnpSubscriptionEvents')
-  runtimeState.remove(WS_EXPECTED_EVENTS_KEY)
   runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY)
   clearStaticDriverStateForCurrentDevice()
 }
@@ -1949,8 +1938,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
-    clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
-    clearedEntries += clearStaticMap(pendingTopologyKindByDni)
     clearedEntries += clearStaticMap(zgtMemberHostByPlayerId)
     clearedEntries += clearStaticMap(pendingZgtNotifyByDni)
     clearedEntries += clearStaticMap(pendingZgtPresenceByDni)
@@ -2001,8 +1988,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(zgtMemberHostByPlayerId, activePlayerIds)
   removedEntries += pruneStaticMapKeys(pendingZgtNotifyByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingZgtPresenceByDni, activePlayerDnis)
@@ -5161,12 +5146,6 @@ void flushPendingTopologyUpdates() {
     } catch(Exception ignored) { }
   }
   setDeviceDataValue('expectedGroupTopology', '')
-  String pendingKind = pendingTopologyKindByDni.remove(dni)
-  String pendingWs = pendingTopologyWebsocketByDni.remove(dni)
-  if(pendingKind == 'ws' && pendingWs) {
-    processWebsocketMessage(pendingWs)
-    logDebug('Published the latest groups websocket topology snapshot after its hold window elapsed')
-  }
 }
 
 Boolean shouldHoldTopologyUpdate(Map topology) {
@@ -5185,30 +5164,20 @@ Boolean evaluateExpectedTopology(Map topology, Boolean holdOnMismatch) {
     expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
   } catch(Exception e) {
     setDeviceDataValue('expectedGroupTopology', '')
-    clearPendingTopologyForDevice()
     return false
   }
   Long expiresAt = expected.expiresAt as Long
   if(expiresAt == null || expiresAt <= (getHubitatCurrentTime() as Long)) {
     setDeviceDataValue('expectedGroupTopology', '')
-    clearPendingTopologyForDevice()
     return false
   }
   if(topology != null && topology.coordinatorId == expected.coordinatorId &&
      topology.memberIds == expected.memberIds) {
     setDeviceDataValue('expectedGroupTopology', '')
-    clearPendingTopologyForDevice()
     logDebug('Observed expected topology for this player; releasing the update')
     return false
   }
   return holdOnMismatch == true
-}
-
-void clearPendingTopologyForDevice() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  pendingTopologyWebsocketByDni.remove(dni)
-  pendingTopologyKindByDni.remove(dni)
 }
 
 void scheduleTopologyTimeoutFlush() {
@@ -8129,7 +8098,7 @@ Boolean isDebugLoggingEnabled() {
 }
 
 // Retain WS namespace bookkeeping for the commands and event streams still in use.
-@Field static final List<String> WS_NAMESPACES = ['playback', 'audioClip', 'groups', 'playerVolume', 'groupVolume']
+@Field static final List<String> WS_NAMESPACES = ['audioClip']
 @Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
@@ -8326,11 +8295,11 @@ void setGroupId(String groupId) {
   queueLocalDeviceEvent('groupId', groupId)
   // Refresh coordinator AVTransport state after the topology transition.
   if(getIsGroupCoordinator() == true) {
-    runIn(1, 'subscribeToPlaybackDebounce', [data:[groupId:groupId], overwrite:true])
+    runIn(1, 'refreshCoordinatorPlaybackState', [data:[groupId:groupId], overwrite:true])
   }
 }
 
-void subscribeToPlaybackDebounce(Map data = null) {
+void refreshCoordinatorPlaybackState(Map data = null) {
   if(getIsGroupCoordinator() != true) {
     logDebug('Skipping delayed group subscription because this player is no longer the coordinator')
     return
@@ -8343,22 +8312,7 @@ void subscribeToPlaybackDebounce(Map data = null) {
   }
 }
 @CompileStatic
-Boolean isCurrentlySubcribedToCoodinatorWS() {
-  return getWsSubscriptionValue('playback') == 'Subscribed' && getWsSubscriptionValue('groupVolume') == 'Subscribed'
-}
-@CompileStatic
-Boolean isCurrentlySubcribedToPlaylistWS() { return getWsSubscriptionValue('playlists') == 'Subscribed' }
-@CompileStatic
 Boolean isCurrentlySubcribedToAudioClipWS() { return getWsSubscriptionValue('audioClip') == 'Subscribed' }
-@CompileStatic
-Boolean isCurrentlySubcribedToGroupsWS() { return getWsSubscriptionValue('groups') == 'Subscribed' }
-@CompileStatic
-Boolean isCurrentlySubcribedToFavoritesWS() { return getWsSubscriptionValue('favorites') == 'Subscribed' }
-@CompileStatic
-Boolean isCurrentlySubcribedToPlayerVolumeWS() { return getWsSubscriptionValue('playerVolume') == 'Subscribed' }
-@CompileStatic
-Boolean isCurrentlySubcribedToGroupVolumeWS() { return getWsSubscriptionValue('groupVolume') == 'Subscribed' }
-
 String getGroupName() {
   return this.device.currentValue('groupName',true)
 }
@@ -8972,8 +8926,7 @@ Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackN
 void observeTransportTrackNumber(Integer currentTrackNumber) {
   Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || active.queuedOnSocket == true ||
-      !(active.command in ['skipToNextTrack', 'skipToPreviousTrack'])) { return }
+  if(active == null || !(active.command in ['skipToNextTrack', 'skipToPreviousTrack'])) { return }
   Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
   Integer previous = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
   if(previous != null && currentTrackNumber != null && previous != currentTrackNumber) {
@@ -9197,20 +9150,10 @@ void setWebSocketStatus(String status) {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     Long generation = ((runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long) + 1L
     runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] = generation
-    runtimeState[WS_LAST_INBOUND_AT_STATE_KEY] = now()
-    // Keep commands queued while the socket was unavailable behind the
-    // subscriptions re-established below. Temporarily remove the pending
-    // commands so sendWsMessage() can deliver those subscriptions directly;
-    // otherwise its FIFO flush would put a queued operation ahead of them.
-    List<Map> pendingCommands = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue()).findAll { Map entry ->
-      if(entry.wireCommand == 'subscribe') {
-        logDebug("Discarding queued ${entry.namespace}.subscribe; recovery will issue a fresh subscription for generation=${generation}")
-        return false
-      }
-      return true
-    }
+    // The player WebSocket is reserved for audioClip commands. Re-establish
+    // only that subscription after reconnecting.
+    List<Map> pendingCommands = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue())
     runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
-    runtimeState[WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY] = true
     runtimeState.audioClipSubscriptionRequestPending = false
     subscribeToAudioClip()
     List<Map> subscriptionCommands = getWebsocketOutboundQueue()
@@ -9219,12 +9162,10 @@ void setWebSocketStatus(String status) {
       runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
     }
     scheduleNextWebsocketOutboundQueueExpiry()
-    finishWebsocketSubscriptionBarrierIfReady()
+    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
   }
   else {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
-    runtimeState.remove(WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY)
-    runtimeState.remove(WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY)
     releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
     runtimeState.audioClipSubscriptionRequestPending = false
@@ -9669,69 +9610,25 @@ List<Map> getWebsocketOutboundQueue() {
 void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = [:]) {
   if(!message) { return }
   Map descriptor = describeWebSocketCommand(message)
-  if(!descriptor.namespace || !descriptor.wireCommand || !descriptor.expectedResponseType) {
-    logWarn('Dropping a queued WebSocket command without a known response fingerprint')
+  if(descriptor.namespace != 'audioClip' || !(descriptor.wireCommand in ['subscribe', 'loadAudioClip', 'cancelAudioClip'])) {
+    logWarn('Dropping a WebSocket message outside the audioClip namespace')
     return
   }
-  List<Map> queue = getWebsocketOutboundQueue()
-  Map entry = [message: message, attempts: attempts ?: 0, createdAt: metadata?.createdAt ?: now(),
+  List<Map> queue = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue())
+  Map entry = [message: message, attempts: attempts ?: 0,
+      createdAt: metadata?.createdAt ?: now(),
       expiresAt: metadata?.expiresAt ?: now() + WS_COMMAND_MAX_AGE_SECONDS * 1000L]
-  if(metadata instanceof Map && !metadata.isEmpty()) { entry.putAll(metadata) }
-  entry.queueSequence = entry.queueSequence ?: nextWebsocketCommandSequence()
+  if(metadata instanceof Map) { entry.putAll(metadata) }
   entry.putAll(descriptor)
-  if(!entry.expectedSubscriptionEvents) { entry.expectedSubscriptionEvents = expectedSubscriptionEventsForWsCommand(message) }
-  entry.queueId = entry.queueId ?: UUID.randomUUID().toString()
-  List<Map> retained = removeExpiredWebsocketQueueEntries(queue)
-  String replacementKey = queuedCommandReplacementKey(entry)
-  if(replacementKey) { entry.replacementKey = replacementKey }
-  if(replacementKey) {
-    Long sequence = entry.queueSequence as Long
-    List<Map> matching = retained.findAll { Map queued ->
-      queued.replacementKey?.toString() == replacementKey &&
-        isWithinWebsocketQueueSegment(retained, queued, sequence)
-    }
-    Long newestPriorSequence = matching.collect { Map queued -> (queued.queueSequence ?: 0L) as Long }.max() ?: 0L
-    if(newestPriorSequence > (entry.queueSequence as Long)) {
-      logDebug("Discarding older replay candidate for ${replacementKey}; newer queued intent already exists")
-      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
-      scheduleNextWebsocketOutboundQueueExpiry()
-      return
-    }
-    Integer replaced = matching.size()
-    Set<Long> replacedSequences = matching.collect { Map queued -> (queued.queueSequence ?: 0L) as Long } as Set<Long>
-    retained = retained.findAll { Map queued ->
-      !(queued.replacementKey?.toString() == replacementKey &&
-        replacedSequences.contains((queued.queueSequence ?: 0L) as Long))
-    }
-    if(replaced > 0) { logDebug("Replaced ${replaced} queued WebSocket command(s) for key=${replacementKey}") }
+  if(entry.correlationId) {
+    queue = queue.findAll { Map queued -> queued.correlationId?.toString() != entry.correlationId.toString() || queued.kind == 'audioClipSubscribe' }
   }
-  Boolean playModesMerged = false
-  if(entry.namespace == 'playback' && entry.wireCommand == 'setPlayModes') {
-    Map prior = retained.reverse().find { Map queued ->
-      queued.namespace == 'playback' && queued.wireCommand == 'setPlayModes' &&
-        queued.targetId?.toString() == entry.targetId?.toString() &&
-        isWithinWebsocketQueueSegment(retained, queued, entry.queueSequence as Long)
-    } as Map
-    if(prior != null) {
-      mergeQueuedPlayModeFields(prior, entry)
-      playModesMerged = true
-    }
-  }
-  if(playModesMerged) {
-    runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
-    scheduleNextWebsocketOutboundQueueExpiry()
+  if(queue.size() >= WS_OUTBOUND_QUEUE_MAX_SIZE) {
+    logWarn('Dropping newest audioClip WebSocket message because the queue is full')
     return
   }
-  if(retained.size() >= WS_OUTBOUND_QUEUE_MAX_SIZE) {
-    logWarn("Dropping newest queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'}: queue reached ${WS_OUTBOUND_QUEUE_MAX_SIZE} entries")
-    runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
-    scheduleNextWebsocketOutboundQueueExpiry()
-    return
-  }
-  retained.add(entry)
-  retained.sort { Map left, Map right -> ((left.queueSequence ?: 0L) as Long) <=> ((right.queueSequence ?: 0L) as Long) }
-  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained
-  logDebug("Queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} target=${entry.targetId ?: 'n/a'} queueId=${entry.queueId} expiresAt=${entry.expiresAt} queued=${retained.size()}")
+  queue.add(entry)
+  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
   scheduleNextWebsocketOutboundQueueExpiry()
 }
 
@@ -9802,129 +9699,26 @@ Map describeWebSocketCommand(String message) {
 }
 
 String expectedWebsocketResponseType(String namespace, String wireCommand) {
-  if(wireCommand == 'subscribe' && namespace in ['groups', 'audioClip',
-      'playback', 'playerVolume', 'groupVolume']) { return 'none' }
-  if(namespace == 'playback' && wireCommand in ['play', 'pause', 'stop', 'skipToNextTrack',
-      'skipToPreviousTrack', 'setPlayModes']) { return 'none' }
-  if(namespace in ['playerVolume', 'groupVolume'] && wireCommand in ['setVolume', 'setMute', 'setRelativeVolume']) { return 'none' }
-  if(namespace == 'groups' && wireCommand == 'getGroups') { return 'groups' }
-  if(namespace == 'playback' && wireCommand == 'getPlaybackStatus') { return 'playbackStatus' }
-  if(namespace == 'groups' && wireCommand in ['createGroup', 'modifyGroupMembers']) { return 'groupInfo' }
+  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'subscribe') { return 'none' }
   if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'loadAudioClip') { return 'audioClip' }
   if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'cancelAudioClip') { return 'none' }
   return null
-}
-
-Long nextWebsocketCommandSequence() {
-  Long next = ((runtimeState[WS_COMMAND_SEQUENCE_STATE_KEY] ?: 0L) as Long) + 1L
-  runtimeState[WS_COMMAND_SEQUENCE_STATE_KEY] = next
-  return next
-}
-
-String queuedCommandReplacementKey(Map entry) {
-  String namespace = entry?.namespace?.toString()
-  String command = entry?.wireCommand?.toString()
-  String target = entry?.targetId?.toString()
-  if(!namespace || !command || !target) { return null }
-  if(namespace == 'playback' && command in ['play', 'pause', 'stop']) { return "transport:${target}" }
-  if(namespace == 'playerVolume' && command in ['setVolume', 'setMute']) { return "${namespace}:${command}:${target}" }
-  if(namespace == 'groupVolume' && command in ['setVolume', 'setMute']) { return "${namespace}:${command}:${target}" }
-  return null
-}
-
-Boolean isWithinWebsocketQueueSegment(List<Map> queue, Map candidate, Long sequence) {
-  Long candidateSequence = (candidate?.queueSequence ?: 0L) as Long
-  Long lowerBound = 0L
-  Long upperBound = Long.MAX_VALUE
-  (queue ?: []).each { Map queued ->
-    if(isWebsocketQueueOrderingBarrier(queued)) {
-      Long barrierSequence = (queued.queueSequence ?: 0L) as Long
-      if(barrierSequence < sequence && barrierSequence > lowerBound) { lowerBound = barrierSequence }
-      if(barrierSequence > sequence && barrierSequence < upperBound) { upperBound = barrierSequence }
-    }
-  }
-  return candidateSequence > lowerBound && candidateSequence < upperBound
-}
-
-Boolean isWebsocketQueueOrderingBarrier(Map entry) {
-  return queuedCommandReplacementKey(entry) == null &&
-      !(entry?.namespace == 'playback' && entry?.wireCommand == 'setPlayModes')
-}
-
-void mergeQueuedPlayModeFields(Map prior, Map latest) {
-  try {
-    List priorPayload = (List)getSharedJsonSlurper().parseText(prior.message.toString())
-    List latestPayload = (List)getSharedJsonSlurper().parseText(latest.message.toString())
-    Map priorArgs = (Map)priorPayload[1]
-    Map latestArgs = (Map)latestPayload[1]
-    Boolean latestIsNewer = ((latest.queueSequence ?: 0L) as Long) >= ((prior.queueSequence ?: 0L) as Long)
-    Map firstModes = latestIsNewer ?
-        (Map)(priorArgs.playModes instanceof Map ? priorArgs.playModes : [:]) :
-        (Map)(latestArgs.playModes instanceof Map ? latestArgs.playModes : [:])
-    Map secondModes = latestIsNewer ?
-        (Map)(latestArgs.playModes instanceof Map ? latestArgs.playModes : [:]) :
-        (Map)(priorArgs.playModes instanceof Map ? priorArgs.playModes : [:])
-    Map mergedModes = new LinkedHashMap(firstModes)
-    mergedModes.putAll(secondModes)
-    priorArgs.playModes = mergedModes
-    prior.message = JsonOutput.toJson([priorPayload[0], priorArgs])
-    prior.createdAt = Math.min((prior.createdAt ?: now()) as Long, (latest.createdAt ?: now()) as Long)
-    prior.expiresAt = Math.min((prior.expiresAt ?: now()) as Long, (latest.expiresAt ?: now()) as Long)
-    prior.queueSequence = Math.min((prior.queueSequence ?: 0L) as Long, (latest.queueSequence ?: 0L) as Long)
-    logDebug("Merged queued playback.setPlayModes fields for group=${prior.targetId}: ${mergedModes.keySet()}")
-  } catch(Exception e) { logWarn("Could not merge queued WebSocket play modes: ${e.message}") }
-}
-
-void finishWebsocketSubscriptionBarrierIfReady() {
-  if(runtimeState[WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY] != true) { return }
-  Long generation = (runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long
-  Boolean pending
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    pending = ledger.any { Map entry -> entry.connectionGeneration == generation && entry.wireCommand == 'subscribe' }
-  }
-  if(pending) { return }
-  runtimeState.remove(WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY)
-  List<Map> queue = getWebsocketOutboundQueue()
-  Boolean needsTopology = queue.any { Map entry -> entry.requiresTopologyReconciliation == true }
-  if(needsTopology) {
-    if(runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] != true) {
-      runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] = true
-      logDebug('Holding WebSocket command replay until a fresh groups snapshot reconciles pending topology mutations')
-      runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
-      playerGetGroupsFull()
-      List<Map> queuedDuringQuery = getWebsocketOutboundQueue()
-      if(!queuedDuringQuery.isEmpty()) { queue.addAll(queuedDuringQuery) }
-      if(!queue.isEmpty()) { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue }
-    }
-    return
-  }
-  logDebug("All WebSocket subscription responses settled for generation=${generation}; releasing queued commands")
-  if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
 }
 
 Map registerWebsocketCommandLedgerEntry(String message, Map outbound, Long createdAt = null) {
   Map descriptor = describeWebSocketCommand(message)
   if(descriptor.isEmpty()) { return [:] }
   Long sentAt = now()
-  Long inboundSequenceAtSend = (runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long
   Long generation = (runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long
   String entryId = UUID.randomUUID().toString()
   Map entry = new LinkedHashMap(descriptor)
   entry.putAll([entryId: entryId, connectionGeneration: generation, message: message,
       createdAt: createdAt ?: sentAt, sentAt: sentAt,
       expiresAt: (createdAt ?: sentAt) + WS_COMMAND_MAX_AGE_SECONDS * 1000L,
-      queueSequence: outbound?.queueSequence ?: nextWebsocketCommandSequence(),
-      inboundSequenceAtSend: inboundSequenceAtSend])
+      ])
   entry.args = descriptor.args instanceof Map ? new LinkedHashMap((Map)descriptor.args) : [:]
   entry.kind = outbound?.kind
-  entry.transportCommandId = outbound?.transportCommandId
   entry.correlationId = outbound?.correlationId ?: entry.args?.name
-  entry.expectedEventsGuid = outbound?.expectedEventsGuid
-  if(entry.namespace == 'groups' && entry.wireCommand == 'modifyGroupMembers') {
-    entry.semanticBaseline = getGroupPlayerIds().collect { Object id -> id?.toString() }.findAll { String id -> id }.sort()
-  }
   synchronized(getWebsocketCommandLedgerLock()) {
     List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
         ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
@@ -9974,8 +9768,6 @@ void observeWebsocketCommandResponse(Map eventType, Map eventData) {
         if(returnedCorrelation && entry.correlationId && returnedCorrelation != entry.correlationId.toString()) { return false }
       }
       if(eventType.success == true && entry.expectedResponseType && eventType.type?.toString() != entry.expectedResponseType.toString()) { return false }
-      if(eventType.success == true && namespace == 'groups' && response in ['createGroup', 'modifyGroupMembers'] &&
-          !doesTopologyAckMatch(entry, eventData)) { return false }
       return true
     } as Map
     if(matched != null) {
@@ -9989,69 +9781,6 @@ void observeWebsocketCommandResponse(Map eventType, Map eventData) {
   String outcome = success ? 'success' : 'failure'
   String detail = success ? "type=${eventType.type}" : "type=${eventType.type}, error=${eventData?.errorCode ?: eventData?.reason ?: 'unspecified'}"
   logDebug("WebSocket command ledger ${outcome}: id=${matched.entryId}, fingerprint=${namespace}.${response}, target=${matched.targetId ?: 'n/a'}, ${detail}")
-  if(success && matched.kind == 'transportCommand') {
-    transportCommandAcknowledged(matched.transportCommandId?.toString(), response)
-  }
-  if(namespace == 'groups' && response == 'getGroups' && success == true && runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] == true) {
-    reconcileQueuedTopologyCommands(eventData)
-  }
-  if(matched.wireCommand == 'subscribe') { finishWebsocketSubscriptionBarrierIfReady() }
-}
-
-Boolean doesTopologyAckMatch(Map entry, Map eventData) {
-  Map group = eventData?.group instanceof Map ? (Map)eventData.group : eventData
-  List<String> returnedMembers = (group?.playerIds instanceof List ? (List)group.playerIds : [])
-      .collect { Object id -> id?.toString() }.findAll { String id -> id }.sort()
-  Map args = entry.args instanceof Map ? (Map)entry.args : [:]
-  if(entry.wireCommand == 'createGroup') {
-    List<String> requested = (args.playerIds instanceof List ? (List)args.playerIds : [])
-        .collect { Object id -> id?.toString() }.findAll { String id -> id }.sort()
-    return requested && returnedMembers == requested
-  }
-  if(entry.wireCommand == 'modifyGroupMembers') {
-    Set<String> requested = new LinkedHashSet<String>((entry.semanticBaseline instanceof List ? (List)entry.semanticBaseline : []).collect { Object id -> id?.toString() })
-    (args.playerIdsToAdd instanceof List ? (List)args.playerIdsToAdd : []).each { Object id -> if(id) { requested.add(id.toString()) } }
-    (args.playerIdsToRemove instanceof List ? (List)args.playerIdsToRemove : []).each { Object id -> if(id) { requested.remove(id.toString()) } }
-    return requested && returnedMembers == requested.toList().sort()
-  }
-  return true
-}
-
-void reconcileQueuedTopologyCommands(Map eventData) {
-  List<Map> groups = eventData?.groups instanceof List ? (List<Map>)eventData.groups : []
-  List<Map> queue = getWebsocketOutboundQueue()
-  List<Map> retained = []
-  queue.each { Map entry ->
-    if(entry.requiresTopologyReconciliation != true) {
-      retained.add(entry)
-      return
-    }
-    Map args = entry.args instanceof Map ? (Map)entry.args : [:]
-    List<String> desired = []
-    if(entry.wireCommand == 'createGroup') {
-      desired = (args.playerIds instanceof List ? (List)args.playerIds : []).collect { Object id -> id?.toString() }.findAll { String id -> id }.sort()
-    } else if(entry.wireCommand == 'modifyGroupMembers') {
-      Set<String> desiredSet = new LinkedHashSet<String>((entry.semanticBaseline instanceof List ? (List)entry.semanticBaseline : []).collect { Object id -> id?.toString() })
-      (args.playerIdsToAdd instanceof List ? (List)args.playerIdsToAdd : []).each { Object id -> if(id) { desiredSet.add(id.toString()) } }
-      (args.playerIdsToRemove instanceof List ? (List)args.playerIdsToRemove : []).each { Object id -> if(id) { desiredSet.remove(id.toString()) } }
-      desired = desiredSet.toList().sort()
-    }
-    Boolean alreadyApplied = desired && groups.any { Map group ->
-      List<String> members = (group?.playerIds instanceof List ? (List)group.playerIds : []).collect { Object id -> id?.toString() }.findAll { String id -> id }.sort()
-      members == desired
-    }
-    if(alreadyApplied) {
-      logDebug("Suppressed replay of ${entry.namespace}.${entry.wireCommand}; fresh groups snapshot already matches members=${desired}")
-    } else {
-      entry.remove('requiresTopologyReconciliation')
-      logDebug("Replaying ${entry.namespace}.${entry.wireCommand}; fresh groups snapshot did not match desired members=${desired}")
-      retained.add(entry)
-    }
-  }
-  if(retained.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained }
-  runtimeState.remove(WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY)
-  if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
 }
 
 /** Expire correlation state only. Command response silence is not transport evidence. */
@@ -10067,42 +9796,9 @@ void expireWebsocketCommandLedgerEntry(Map data = [:]) {
   }
   if(entry == null || entry.connectionGeneration != generation) { return }
   removeWebsocketCommandLedgerEntryById(entryId, 'response correlation expired; transport state unchanged')
-  if(entry.wireCommand == 'subscribe') {
-    logWarn("WebSocket subscription ${entry.namespace}.subscribe produced no response before correlation expiry; leaving the connection open")
-    finishWebsocketSubscriptionBarrierIfReady()
+  if(entry.namespace == 'audioClip' && entry.wireCommand == 'subscribe') {
+    logWarn('WebSocket audioClip subscription response was not received before correlation expiry')
   }
-}
-
-Boolean shouldReplayUnacknowledgedCommand(Map entry) {
-  if(entry?.wireCommand == 'subscribe' || entry?.namespace == 'audioClip' || entry?.kind in ['audioClip', 'transportCommand', 'transportStatusQuery']) { return false }
-  return true
-}
-
-Boolean requeuePendingWebsocketCommands(String reason) {
-  List<Map> ledger = takeWebsocketCommandLedgerBatch()
-  if(ledger.isEmpty()) { return false }
-  Long currentTime = now()
-  ledger.each { Map entry ->
-    cancelExpectedSubscriptionEvents(entry)
-    if(((entry.expiresAt ?: 0L) as Long) <= currentTime) {
-      logDebug("Dropping expired unacknowledged command ${entry.namespace}.${entry.wireCommand} during recovery")
-    } else if(!shouldReplayUnacknowledgedCommand(entry)) {
-      logWarn("Not automatically replaying unacknowledged ${entry.namespace}.${entry.wireCommand}; its effect may already have occurred (${reason})")
-    } else {
-      Map metadata = new LinkedHashMap(entry)
-      metadata.remove('entryId')
-      metadata.remove('ledgerEntryId')
-      metadata.remove('connectionGeneration')
-      metadata.remove('sentAt')
-      metadata.remove('expectedResponseType')
-      if(entry.namespace == 'groups' && entry.wireCommand in ['createGroup', 'modifyGroupMembers']) {
-        metadata.requiresTopologyReconciliation = true
-      }
-      logDebug("Preserving unacknowledged WebSocket command for replay: ${entry.namespace}.${entry.wireCommand}, id=${entry.entryId}, expiresAt=${entry.expiresAt}")
-      queueWebsocketMessage(entry.message.toString(), 0, metadata)
-    }
-  }
-  return true
 }
 
 List<Map> takeWebsocketCommandLedgerBatch() {
@@ -10118,21 +9814,14 @@ List<Map> takeWebsocketCommandLedgerBatch() {
 
 void cancelWebsocketCommandLedgerForClosedConnection(String status) {
   if(status == 'open') { return }
-  requeuePendingWebsocketCommands("socket status ${status}")
+  List<Map> pending = takeWebsocketCommandLedgerBatch()
+  if(!pending.isEmpty()) { logWarn("Cleared ${pending.size()} pending audioClip WebSocket acknowledgement(s) after socket status ${status}; clips will not be replayed") }
 }
 
 void flushWebsocketOutboundQueue() {
   if(!isWebsocketSendAllowed()) {
     logDebug("Outbound WebSocket queue drain deferred; primary websocketStatus=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
-    return
-  }
-  if(runtimeState[WS_REPLAY_WAIT_SUBSCRIPTIONS_STATE_KEY] == true) {
-    logDebug("Outbound WebSocket queue drain deferred until subscription ACKs arrive; queued=${getWebsocketOutboundQueue().size()}")
-    return
-  }
-  if(runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] == true) {
-    logDebug("Outbound WebSocket queue drain deferred until topology reconciliation completes; queued=${getWebsocketOutboundQueue().size()}")
     return
   }
 
@@ -10181,7 +9870,6 @@ void flushWebsocketOutboundQueue() {
     Boolean primarySendReturned = false
     try {
       logDebug("Dispatching audioClip primary channel: correlation=${entry?.correlationId}, paired=${pairedRightMessage != null}, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, secondaryExpired=${secondaryExpired}, attempts=${attempts}")
-      armExpectedSubscriptionEvents(entry)
       registerWebsocketCommandLedgerEntry(message, entry, entry.createdAt as Long)
       interfaces.webSocket.sendMessage(message)
       primarySendReturned = true
@@ -10195,13 +9883,7 @@ void flushWebsocketOutboundQueue() {
         }
       }
       logDebug("AudioClip channel dispatch completed: correlation=${entry?.correlationId}, primary=sent, secondary=${!pairedRightMessage ? 'not paired' : (secondaryExpired ? 'timed out; skipped' : (rightSent ? 'sent' : 'failed'))}")
-      if(entry?.kind == 'audioClip') {
-        audioClipCommandSent(entry.correlationId as String)
-      } else if(entry?.kind == 'transportCommand') {
-        transportCommandSocketSent(entry.transportCommandId as String)
-      } else if(entry?.kind == 'transportStatusQuery') {
-        transportStatusQuerySocketSent(entry.transportCommandId as String)
-      }
+      if(entry?.kind == 'audioClip') { audioClipCommandSent(entry.correlationId as String) }
     } catch(Exception e) {
       removeWebsocketCommandLedgerEntryById(entry?.ledgerEntryId?.toString(), 'send threw')
       logDebug("Outbound WebSocket send threw for correlation=${entry?.correlationId ?: 'n/a'}, kind=${entry?.kind ?: 'unknown'}, attempt=${attempts + 1}: ${e.message}")
@@ -10215,8 +9897,7 @@ void flushWebsocketOutboundQueue() {
         audioClipCommandSent(entry.correlationId as String)
         continue
       }
-      cancelExpectedSubscriptionEvents(entry)
-      Integer nextAttempt = attempts + 1
+        Integer nextAttempt = attempts + 1
       if(nextAttempt >= WS_OUTBOUND_MAX_ATTEMPTS) {
         if(entry?.kind in ['audioClip', 'audioClipSubscribe']) {
           entry.attempts = nextAttempt
@@ -10331,7 +10012,7 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
   }
 
   List<Map> queued = getWebsocketOutboundQueue()
-  if(!queued.isEmpty()) {
+  if(!queued.isEmpty() && metadata?.kind != 'audioClipSubscribe') {
     queueWebsocketMessage(message, 0, metadata)
     flushWebsocketOutboundQueue()
     return false
@@ -10346,183 +10027,18 @@ Boolean sendWsMessage(String message, Map metadata = [:]) {
   outbound.createdAt = outbound.createdAt ?: now()
   outbound.expiresAt = outbound.expiresAt ?: ((outbound.createdAt as Long) + WS_COMMAND_MAX_AGE_SECONDS * 1000L)
   outbound.putAll(describeWebSocketCommand(message))
-  if(!outbound.expectedSubscriptionEvents) {
-    outbound.expectedSubscriptionEvents = expectedSubscriptionEventsForWsCommand(message)
-  }
   try {
-    armExpectedSubscriptionEvents(outbound)
     registerWebsocketCommandLedgerEntry(message, outbound, outbound.createdAt as Long)
     interfaces.webSocket.sendMessage(message)
     if(metadata?.kind == 'audioClip') { audioClipCommandSent(metadata.correlationId as String) }
-    if(metadata?.kind == 'transportCommand') { transportCommandSocketSent(metadata.transportCommandId as String) }
-    if(metadata?.kind == 'transportStatusQuery') { transportStatusQuerySocketSent(metadata.transportCommandId as String) }
     return true
   } catch(Exception e) {
-    cancelExpectedSubscriptionEvents(outbound)
     removeWebsocketCommandLedgerEntryById(outbound.ledgerEntryId?.toString(), 'send threw')
     queueWebsocketMessage(message, 1, metadata)
     setWebSocketStatus('closed')
     logWarn("WebSocket send failed; queued message for retry: ${e.message}")
     scheduleWebSocketReconnect()
     return false
-  }
-}
-
-List<Map> expectedSubscriptionEventsForWsCommand(String message) {
-  if(!message) { return [] }
-  try {
-    List payload = (List)getSharedJsonSlurper().parseText(message)
-    Map command = payload && payload[0] instanceof Map ? (Map)payload[0] : [:]
-    String namespace = command.namespace?.toString()
-    String name = command.command?.toString()
-    if(namespace == 'playback' && name in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack', 'seek']) {
-      return [[namespace: 'playback', type: 'playbackStatus']]
-    }
-    if(namespace == 'groups' && name in ['createGroup', 'modifyGroupMembers']) {
-      return [[namespace: 'groups', type: 'groups']]
-    }
-  } catch(Exception e) {
-    logDebug("Could not inspect WebSocket command for expected subscription events: ${e.message}")
-  }
-  return []
-}
-
-String subscriptionEventKey(Map eventType) {
-  return "${eventType?.namespace ?: ''}:${eventType?.type ?: ''}".toString()
-}
-
-void armExpectedSubscriptionEvents(Map outbound) {
-  List<Map> expected = outbound?.expectedSubscriptionEvents instanceof List
-      ? (List<Map>)outbound.expectedSubscriptionEvents : []
-  if(expected.isEmpty()) { return }
-  String guid = UUID.randomUUID().toString()
-  Map expectation = [guid: guid, command: outbound.message?.toString(), expected: expected,
-      received: [], attempts: 0, deadlineAt: now() + WS_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L]
-  synchronized(runtimeState) {
-    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
-    pending.add(expectation)
-    runtimeState[WS_EXPECTED_EVENTS_KEY] = pending
-  }
-  outbound.expectedEventsGuid = guid
-  logDebug("Armed subscription event watchdog guid=${guid} expected=${expected}")
-  scheduleExpectedSubscriptionEventWatchdog()
-}
-
-void cancelExpectedSubscriptionEvents(Map outbound) {
-  String guid = outbound?.expectedEventsGuid?.toString()
-  if(!guid) { return }
-  synchronized(runtimeState) {
-    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
-    pending = pending.findAll { Map item -> item.guid?.toString() != guid }
-    if(pending.isEmpty()) { runtimeState.remove(WS_EXPECTED_EVENTS_KEY) }
-    else { runtimeState[WS_EXPECTED_EVENTS_KEY] = pending }
-  }
-  scheduleExpectedSubscriptionEventWatchdog()
-}
-
-void observeExpectedSubscriptionEvent(Map eventType) {
-  if(!(eventType instanceof Map) || eventType.response != null) { return }
-  String observed = subscriptionEventKey(eventType)
-  synchronized(runtimeState) {
-    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
-    if(pending.isEmpty()) { return }
-    List<String> completedGuids = []
-    pending.each { Map expectation ->
-      List<Map> expected = expectation.expected instanceof List ? (List<Map>)expectation.expected : []
-      List<String> received = expectation.received instanceof List ? (List<String>)expectation.received : []
-      if(expected.any { Map item -> subscriptionEventKey(item) == observed }) {
-        if(!received.contains(observed)) { received.add(observed) }
-        expectation.received = received
-        logDebug("Subscription event watchdog guid=${expectation.guid} observed=${observed} received=${received}")
-        List<Map> missing = expected.findAll { Map item -> !received.contains(subscriptionEventKey(item)) }
-        if(missing.isEmpty()) {
-          completedGuids.add(expectation.guid?.toString())
-          logDebug("Expected subscription events arrived for WebSocket command guid=${expectation.guid}")
-        }
-      }
-    }
-    if(!completedGuids.isEmpty()) {
-      pending = pending.findAll { Map item -> !completedGuids.contains(item.guid?.toString()) }
-      if(pending.isEmpty()) { runtimeState.remove(WS_EXPECTED_EVENTS_KEY) }
-      else { runtimeState[WS_EXPECTED_EVENTS_KEY] = pending }
-    } else {
-      // Reassign the top-level state entry so Hubitat persists nested receipt
-      // updates for the scheduled watchdog invocation.
-      runtimeState[WS_EXPECTED_EVENTS_KEY] = pending
-    }
-  }
-  scheduleExpectedSubscriptionEventWatchdog()
-}
-
-void scheduleExpectedSubscriptionEventWatchdog() {
-  List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
-  if(pending.isEmpty()) {
-    unschedule('watchExpectedSubscriptionEvents')
-    return
-  }
-  Long earliest = pending.collect { Map item -> item.deadlineAt as Long }.min() as Long
-  Integer delay = Math.max(1, (int)Math.ceil((earliest - now()) / 1000.0d))
-  runIn(delay, 'watchExpectedSubscriptionEvents', [overwrite: true])
-}
-
-void watchExpectedSubscriptionEvents() {
-  Long currentTime = now()
-  List<Map> toResubscribe = []
-  synchronized(runtimeState) {
-    List<Map> pending = runtimeState[WS_EXPECTED_EVENTS_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_EXPECTED_EVENTS_KEY] : []
-    // Leave one second of slack for a subscription notification arriving on the
-    // same scheduler tick as its timeout callback.
-    List<Map> due = pending.findAll { Map item -> (item.deadlineAt as Long) <= currentTime - 1000L }
-    due.each { Map expectation ->
-      List<Map> expected = expectation.expected instanceof List ? (List<Map>)expectation.expected : []
-      List<String> received = expectation.received instanceof List ? (List<String>)expectation.received : []
-      List<Map> missing = expected.findAll { Map item -> !received.contains(subscriptionEventKey(item)) }
-      if(missing.isEmpty()) {
-        pending = pending.findAll { Map item -> item.guid?.toString() != expectation.guid?.toString() }
-        logDebug("Expected subscription events arrived before watchdog recovery for guid=${expectation.guid}")
-      } else if(((expectation.attempts ?: 0) as Integer) < 1) {
-        expectation.missingEvents = missing
-        expectation.attempts = 1
-        expectation.deadlineAt = currentTime + WS_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L
-        toResubscribe.add(expectation)
-      } else {
-        logWarn("Expected subscription events still missing after resubscription for guid=${expectation.guid}; received=${expectation.received}: ${missing}")
-        pending = pending.findAll { Map item -> item.guid?.toString() != expectation.guid?.toString() }
-      }
-    }
-    if(pending.isEmpty()) { runtimeState.remove(WS_EXPECTED_EVENTS_KEY) }
-    else { runtimeState[WS_EXPECTED_EVENTS_KEY] = pending }
-  }
-  toResubscribe.each { Map expectation ->
-    List<Map> missing = expectation.missingEvents instanceof List ? (List<Map>)expectation.missingEvents : []
-    Set<String> namespaces = missing.collect { Map item -> item.namespace.toString() } as Set<String>
-    logWarn("No expected subscription event arrived for WebSocket command guid=${expectation.guid}; resubscribing namespaces=${namespaces}, missing=${missing}")
-    namespaces.each { String namespace -> resubscribeWebsocketNamespace(namespace) }
-  }
-  scheduleExpectedSubscriptionEventWatchdog()
-}
-
-void resubscribeWebsocketNamespace(String namespace) {
-  if(namespace in ['playback', 'groupVolume'] && getIsGroupCoordinator() != true) {
-    logDebug("Skipping ${namespace} resubscription because this player is not the group coordinator")
-    return
-  }
-  String groupId = getGroupId()
-  if(namespace in ['playback', 'groupVolume'] && !groupId) {
-    logWarn("Cannot resubscribe to ${namespace}: no current group ID")
-    return
-  }
-  switch(namespace) {
-    case 'playback': subscribeToPlayback(groupId); break
-    case 'groups': subscribeToGroups(); break
-    case 'playerVolume': subscribeToPlayerVolume(); break
-    case 'groupVolume': subscribeToGroupVolume(groupId); break
-    default: logWarn("No resubscribe handler for WebSocket namespace ${namespace}")
   }
 }
 
@@ -10565,18 +10081,6 @@ void handleContentDirectoryPayload(String xmlBody) {
 }
 
 @CompileStatic
-void subscribeToGroups() {
-  Map command = [
-    'namespace':'groups',
-    'command':'subscribe',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
-
 void subscribeToAudioClip() {
   if(runtimeState.audioClipSubscriptionRequestPending == true) { return }
   Map command = [
@@ -10596,45 +10100,6 @@ void retryAudioClipSubscription() {
       isCurrentlySubcribedToAudioClipWS() != true && runtimeState.audioClipSubscriptionRequestPending != true && isWebsocketConnected()) {
     subscribeToAudioClip()
   }
-}
-
-@CompileStatic
-void subscribeToPlayback(String groupId) {
-  Map command = [
-    'namespace':'playback',
-    'command':'subscribe',
-    'groupId':"${groupId}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
-
-@CompileStatic
-void subscribeToPlayerVolume() {
-  Map command = [
-    'namespace':'playerVolume',
-    'command':'subscribe',
-    'playerId':"${getId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
-}
-
-@CompileStatic
-void subscribeToGroupVolume(String groupId) {
-  Map command = [
-    'namespace':'groupVolume',
-    'command':'subscribe',
-    'groupId':"${groupId}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
 }
 
 @CompileStatic
@@ -10728,11 +10193,7 @@ void enqueueTransportCommand(String command) {
       queued = retained
       Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
           ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-      if(active != null && active.queuedOnSocket == true && active.command in ['play', 'pause', 'stop']) {
-        cancelUnsentTransportCommand(active)
-        replaced++
-      }
-      if(replaced > 0) {
+        if(replaced > 0) {
         logDebug("Transport command ${command} replaced ${replaced} queued play/pause/stop command(s)")
       }
     }
@@ -10774,7 +10235,7 @@ void drainTransportCommandQueue() {
   baseline.trackNumber = getCurrentTrackNumber()
   Map active = [id: item.id, command: item.command, replayId: item.replayId,
       attempts: 0, baseline: baseline,
-      queuedOnSocket: false, statusQueryPending: false]
+      statusQueryPending: false]
   runtimeState[TRANSPORT_ACTIVE_KEY] = active
   sendTransportCommandAttempt(active)
 }
@@ -10792,7 +10253,6 @@ void sendTransportCommandAttempt(Map active) {
   }
   Map params = getSoapActionParams(host, AVTransport, action)
   active.attempts = ((active.attempts ?: 0) as Integer) + 1
-  active.queuedOnSocket = false
   active.statusQueryPending = false
   active.sentAt = now()
   logDebug("Sending UPnP transport command ${commandName} as ${action}, attempt ${active.attempts} (${active.id})")
@@ -10813,7 +10273,7 @@ void transportCommandSoapCallback(AsyncResponse response, Map data = null) {
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
   if(active == null || !commandId || active.id?.toString() != commandId) { return }
   if(response?.status == 200 && !response.hasError()) {
-    transportCommandAcknowledged(commandId, "UPnP ${data?.action}")
+    transportCommandSoapAcknowledged(commandId, "UPnP ${data?.action}")
     return
   }
   active.lastFailureReason = "UPnP ${data?.action} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}"
@@ -10821,38 +10281,15 @@ void transportCommandSoapCallback(AsyncResponse response, Map data = null) {
   retryUnconfirmedTransportCommand([commandId: commandId])
 }
 
-void transportCommandSocketSent(String commandId) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || active.id?.toString() != commandId) { return }
-  active.queuedOnSocket = false
-  active.sentAt = now()
-  logDebug("Transport command ${active.command} (${commandId}) sent to Sonos WebSocket")
-  runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand', [overwrite: true, data: [commandId: commandId]])
-}
-
-void transportCommandAcknowledged(String commandId, String response) {
+void transportCommandSoapAcknowledged(String commandId, String response) {
   Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
   if(active == null || !commandId || active.id?.toString() != commandId) { return }
-  active.websocketAcknowledged = true
+  active.soapAcknowledged = true
   active.acknowledgedResponse = response
   active.acknowledgedAt = now()
   unschedule('retryUnconfirmedTransportCommand')
-  logDebug("Transport command ${active.command} (${commandId}) received WebSocket ACK response=${response}; suppressing resend attempts")
-}
-
-void cancelUnsentTransportCommand(Map active) {
-  if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
-  List<Map> socketQueue = getWebsocketOutboundQueue()
-  socketQueue.removeAll { Map entry ->
-    entry?.kind == 'transportCommand' && entry.transportCommandId?.toString() == active.id?.toString()
-  }
-  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = socketQueue
-  runtimeState.remove(TRANSPORT_ACTIVE_KEY)
-  unschedule('watchTransportCommand')
-  unschedule('retryUnconfirmedTransportCommand')
-  logDebug("Cancelled unsent transport command ${active.command} (${active.id}) because a newer state command arrived")
+  logDebug("Transport command ${active.command} (${commandId}) received successful UPnP response=${response}; suppressing resend attempts")
 }
 
 void watchTransportCommand(Map data = [:]) {
@@ -10860,23 +10297,9 @@ void watchTransportCommand(Map data = [:]) {
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
   String commandId = data?.commandId?.toString()
   if(active == null || active.id?.toString() != commandId) { return }
-  if(active.queuedOnSocket == true) {
-    logDebug("Transport command ${active.command} (${commandId}) is still waiting in the WebSocket send queue")
-    runIn(30, 'watchTransportCommand', [overwrite: true, data: [commandId: commandId]])
-    return
-  }
   active.statusQueryPending = true
   logDebug("Watchdog querying playback status for ${active.command} (${commandId})")
   getPlaybackStatus()
-}
-
-void transportStatusQuerySocketSent(String commandId) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || active.id?.toString() != commandId || active.statusQueryPending != true) { return }
-  active.statusQuerySentAt = now()
-  logDebug("Watchdog status query sent for ${active.command} (${commandId})")
-  runIn(2, 'retryUnconfirmedTransportCommand', [overwrite: true, data: [commandId: commandId]])
 }
 
 void retryUnconfirmedTransportCommand(Map data = [:]) {
@@ -10884,10 +10307,9 @@ void retryUnconfirmedTransportCommand(Map data = [:]) {
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
   String commandId = data?.commandId?.toString()
   if(active == null || active.id?.toString() != commandId) { return }
-  if(active.queuedOnSocket == true) { return }
-  if(active.websocketAcknowledged == true) {
+  if(active.soapAcknowledged == true) {
     String reason = active.lastFailureReason?.toString() ?:
-        'no confirming playback status arrived after the successful WebSocket ACK'
+        'no confirming playback status arrived after the successful UPnP response'
     finishTransportCommand(active, false,
         "Sonos acknowledged ${active.acknowledgedResponse ?: active.command}; ${reason}; not retrying")
     return
@@ -10914,7 +10336,7 @@ void observeTransportPlaybackStatus(Map eventData) {
   runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] = snapshot
   Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || active.queuedOnSocket == true) { return }
+  if(active == null) { return }
   String command = active.command as String
   String playbackState = snapshot.playbackState as String
   if(command == 'play' && playbackState == 'PLAYBACK_STATE_BUFFERING') {
@@ -10957,7 +10379,7 @@ Long toLongValue(Object value) {
 
 void finishTransportCommand(Map active, Boolean succeeded, String detail) {
   if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
-  if(!succeeded && active.websocketAcknowledged != true &&
+  if(!succeeded && active.soapAcknowledged != true &&
       active.command in ['skipToNextTrack', 'skipToPreviousTrack'] && active.replayId) {
     List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
         ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
@@ -10973,31 +10395,11 @@ void finishTransportCommand(Map active, Boolean succeeded, String detail) {
   unschedule('retryUnconfirmedTransportCommand')
   runtimeState.remove(TRANSPORT_ACTIVE_KEY)
   if(succeeded) { logDebug("Transport command ${active.command} (${active.id}) confirmed: ${detail}") }
-  else if(active.websocketAcknowledged == true) {
-    logWarn("Transport command ${active.command} (${active.id}) was acknowledged by Sonos but not confirmed by playback status; no retry: ${detail}")
+  else if(active.soapAcknowledged == true) {
+    logWarn("Transport command ${active.command} (${active.id}) received a successful UPnP response but was not confirmed by playback status; no retry: ${detail}")
   }
   else { logWarn("Transport command ${active.command} (${active.id}) failed: ${detail}") }
   runIn(1, 'drainTransportCommandQueue', [overwrite: true])
-}
-
-void failTransportCommand(String response, String reason) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null) { return }
-  String command = active.command as String
-  if(response == command || (response == 'stop' && command == 'stop') ||
-      (response == 'pause' && command == 'pause')) {
-    active.lastFailureReason = reason ?: 'Sonos returned a command error'
-    if(reason?.contains('ERROR_UNSUPPORTED_COMMAND') && command == 'stop') {
-      finishTransportCommand(active, false, active.lastFailureReason as String)
-      logInfo('Sonos does not support playback stop for this target; sending pause as the supported fallback')
-      enqueueTransportCommand('pause')
-    } else if(reason?.contains('ERROR_PLAYBACK_FAILED') && command in ['skipToNextTrack', 'skipToPreviousTrack']) {
-      finishTransportCommand(active, false, active.lastFailureReason as String)
-    } else {
-      retryUnconfirmedTransportCommand([commandId: active.id])
-    }
-  }
 }
 
 @CompileStatic
@@ -12095,9 +11497,6 @@ void zoneGroupTopologySoapCallback(AsyncResponse response, Map data = null) {
       List<Map> members = group.members instanceof List ? (List<Map>)group.members : []
       [id: group.groupId, name: group.groupName, coordinatorId: group.coordinatorId,
        playerIds: members.findAll { Map member -> member.invisible != true }.collect { Map member -> member.playerId?.toString() }]
-    }
-    if(runtimeState[WS_REPLAY_WAIT_TOPOLOGY_STATE_KEY] == true) {
-      reconcileQueuedTopologyCommands([groups: ledgerGroups])
     }
     Map current = ledgerGroups.find { Map group -> (group.playerIds as List).contains(getId()) }
     if(current != null) {
@@ -13243,12 +12642,6 @@ void processWebsocketMessage(String message) {
     throw e
   }
   logDebug("WebSocket message dispatched; type=${eventType.type ?: 'unset'}, namespace=${eventType.namespace ?: 'unset'}, name=${eventType.name ?: 'unset'}, response=${eventType.response ?: 'unset'}")
-  runtimeState[WS_LAST_INBOUND_AT_STATE_KEY] = now()
-  runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] = ((runtimeState[WS_INBOUND_SEQUENCE_STATE_KEY] ?: 0L) as Long) + 1L
-  logDebug('WebSocket expected-subscription observation beginning')
-  observeExpectedSubscriptionEvent(eventType)
-  logDebug('WebSocket expected-subscription observation completed')
-
   if(loggingEnabled('trace')) {
     // Suppress consecutive duplicate WS event log messages to reduce logging load
     String eventSig = eventType.toString()
@@ -13265,8 +12658,8 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
     logDebug("WebSocket subscription response processing beginning; namespace=${eventType?.namespace}, success=${eventType?.success}")
     logDebug("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was successful' : 'failed'}")
-    if(eventType?.success == true && eventType?.namespace != null && eventType?.namespace != '') {
-      setWsSubscriptionValue("${eventType?.namespace}", 'Subscribed')
+    if(eventType?.namespace == 'audioClip' && eventType?.success == true) {
+      setWsSubscriptionValue('audioClip', 'Subscribed')
     }
     if(eventType?.namespace == 'audioClip') {
       runtimeState.audioClipSubscriptionRequestPending = false
@@ -13285,122 +12678,6 @@ void processWebsocketMessage(String message) {
   logDebug('WebSocket command-response observation beginning')
   observeWebsocketCommandResponse(eventType, eventData)
   logDebug('WebSocket command-response observation completed')
-
-  //Process groups
-  if(eventType?.type == 'groups' && (eventType?.name == 'groups' || eventType?.response == 'getGroups')) {
-    Integer groupCount = eventData?.groups instanceof Collection ? ((Collection)eventData.groups).size() : 0
-    logDebug("WebSocket groups response processing beginning; groupCount=${groupCount}")
-    ArrayList<Map> groups = (ArrayList<Map>)eventData?.groups
-    if(groups != null && groups.size() > 0) {
-      Map group = groups.find{ ((ArrayList<String>)it?.playerIds)?.contains(getId()) }
-      if(group == null) {
-        if(shouldHoldTopologyUpdate([coordinatorId: null, memberIds: []])) {
-          pendingTopologyWebsocketByDni.put(dni, message)
-          pendingTopologyKindByDni.put(dni, 'ws')
-          scheduleTopologyTimeoutFlush()
-          logDebug('Holding groups websocket topology update until the affected player reaches its expected topology')
-          return
-        }
-        logDebug("Player ${getId()} not found in any group")
-        emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
-        return
-      }
-
-      // Extract only the fields we need from the group
-      String groupId = group?.id?.toString()
-      String groupName = group?.name?.toString()
-      ArrayList<String> playerIds = (ArrayList<String>)group?.playerIds
-      String coordinatorId = group?.coordinatorId?.toString()
-
-      // Resolve descriptive metadata before the topology identity fast path.
-      // Names can change while group membership remains stable.
-      ArrayList<Map> players = (ArrayList<Map>)eventData?.players
-      Map<String, String> playerNameMap = [:]
-      if(players != null) {
-        players.each { Map p -> playerNameMap[(String)p?.id] = p?.name?.toString() }
-      }
-      String coordinatorName = playerNameMap[coordinatorId]
-      List<String> groupMemberNames = playerIds.collect { String pid -> playerNameMap[pid] }.findAll { it != null }
-
-      Map websocketTopology = [
-        coordinatorId: coordinatorId,
-        memberIds: (playerIds ?: []).toList().sort()
-      ]
-      if(shouldHoldTopologyUpdate(websocketTopology)) {
-        pendingTopologyWebsocketByDni.put(dni, message)
-        pendingTopologyKindByDni.put(dni, 'ws')
-        scheduleTopologyTimeoutFlush()
-        logDebug('Holding groups websocket topology update until the affected player reaches its expected topology')
-        return
-      }
-
-      // Deduplicate: skip processing if nothing has changed
-      String oldGroupId = getGroupId()
-      String oldCoordinatorId = getGroupCoordinatorId()
-      List<String> oldPlayerIds = getGroupPlayerIds()
-      Boolean expectedCoordinatorRole = getId() == coordinatorId
-      if(oldGroupId == groupId && oldCoordinatorId == coordinatorId && oldPlayerIds == playerIds &&
-          getIsGroupCoordinator() == expectedCoordinatorRole) {
-        if(groupName) { setGroupName(groupName) }
-        if(coordinatorName) { setGroupCoordinatorName(coordinatorName) }
-        if(groupMemberNames) { setGroupMemberNames(groupMemberNames) }
-        logDebug('Groups websocket topology identity unchanged; descriptive metadata refreshed')
-        emitGroupFavoriteOperationEvent('groups', [
-          groupId: groupId,
-          coordinatorId: coordinatorId,
-          playerIds: playerIds ?: []
-        ])
-        return
-      }
-
-      if(groupId != null && groupId != '') { setGroupId(groupId) }
-      if(groupName != null && groupName != '') { setGroupName(groupName) }
-      if(coordinatorId != null && coordinatorId != '') { setGroupCoordinatorId(coordinatorId) }
-      if(playerIds != null && playerIds.size() > 0) { setGroupPlayerIds(playerIds) }
-
-      if(coordinatorName != null && coordinatorName != '') { setGroupCoordinatorName(coordinatorName) }
-
-      try {
-        setGroupMemberNames(groupMemberNames)
-      } catch (Exception e) { logDebug('Could not get group member names, continuing on...') }
-
-      if(hasSecondaries() == true && players != null && players.size() > 0) {
-        Map p = (Map)players.find{ it?.id == getId() }
-        if(p != null && p.size() > 0) {
-          Map zInfo = (Map)p?.zoneInfo
-          if(zInfo != null && zInfo.size() > 0) {
-            ArrayList<Map> members = (ArrayList<Map>)zInfo?.members
-            if(members != null && members.size() > 0) {
-              String companionId = selectStereoCompanionId(members, getId())
-              setRightChannelRincon(companionId)
-              if(getCreateRightChannelChildDevice()) { createRemoveRightChannelChildDevice(true) }
-            }
-          }
-        }
-      }
-      emitGroupFavoriteOperationEvent('groups', [
-        groupId: groupId,
-        coordinatorId: coordinatorId,
-        playerIds: playerIds ?: []
-      ])
-    } else {
-      logDebug('Groups websocket response contained no group for player ' + getId())
-      emitGroupFavoriteOperationEvent('groups', [groupId: null, coordinatorId: null, playerIds: []])
-    }
-    logDebug('WebSocket groups response processing completed')
-  }
-
-  //Process groupCoordinatorChanged
-  if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged') {
-    // logWarn("if(eventType?.type == 'groupCoordinatorChanged' && eventType?.name == 'groupCoordinatorChanged')")
-    // ArrayList<LinkedHashMap> groups = (ArrayList<LinkedHashMap>)eventData.groups
-    // if(group?.groupStatus == 'GROUP_STATUS_UPDATED') {
-    //   logDebug("Group name: ${group.name}")
-    //   logDebug("Group coordinatorId: ${group.coordinatorId}")
-    //   logDebug("Group playerIds: ${group.playerIds}")
-    //   logDebug("Group Id: ${group.id}")
-    // }
-  }
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
     logDebug("WebSocket audio-clip status processing beginning; dataKeys=${eventData.keySet().join(',')}")
@@ -13558,116 +12835,8 @@ void processWebsocketMessage(String message) {
           "Sonos rejected audioClip command: ${eventData?.errorCode ?: eventData?.reason ?: 'unknown error'}")
       }
     }
-    if(eventType?.namespace == 'playback') {
-      String errorReason = "${eventData?.errorCode ?: 'UNKNOWN'}: ${eventData?.reason ?: eventData}"
-      failTransportCommand(eventType?.response?.toString(), errorReason)
-      if(eventType?.response == 'stop' && eventData?.errorCode == 'ERROR_UNSUPPORTED_COMMAND') {
-        logDebug('Stop command unavailable for current target; pause fallback queued and tracked independently')
-      }
-    }
-    if(eventType?.namespace == 'groups' && (eventType?.response == 'createGroup' || eventType?.response == 'modifyGroupMembers')) {
-      String reason = eventData?.reason as String
-      if(eventData?.errorCode == 'ERROR_PLAYBACK_FAILED' && reason != null && reason.contains('musicContextGroupId')) {
-        logWarn("Cannot group/join while playing from this music service (likely Amazon Music). Use 'Join Players to Coordinator' or stop playback first. Reason: ${reason}")
-        recordLastError('Cannot group: incompatible music service', reason)
-      } else {
-        logError("Group operation failed - Error: ${eventData?.errorCode}, Reason: ${reason}")
-        recordLastError("Group operation failed: ${eventData?.errorCode}", reason)
-      }
-    }
   }
 
-  if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {
-    logDebug("WebSocket playback-status processing beginning; state=${eventData?.playbackState ?: 'unset'}")
-    Map playModes = eventData?.playModes instanceof Map ? (Map)eventData.playModes : null
-    if(playModes != null) {
-      if(playModes.repeat instanceof Boolean && playModes.repeatOne instanceof Boolean && playModes.shuffle instanceof Boolean) {
-        Boolean repeat = playModes.repeat as Boolean
-        Boolean repeatOne = playModes.repeatOne as Boolean
-        Boolean shuffle = playModes.shuffle as Boolean
-        String playMode = shuffle ? (repeatOne ? 'SHUFFLE_REPEAT_ONE' : (repeat ? 'SHUFFLE' : 'SHUFFLE_NOREPEAT')) :
-            (repeatOne ? 'REPEAT_ONE' : (repeat ? 'REPEAT_ALL' : 'NORMAL'))
-        setPlayMode(playMode)
-      }
-      if(playModes.crossfade instanceof Boolean) {
-        setCrossfadeMode((playModes.crossfade as Boolean) ? 'on' : 'off')
-      }
-    }
-    String currentState = eventData?.playbackState?.toString()
-    Long playbackStateObservedAt = now()
-    state.playbackState = currentState
-    state.playbackStateObservedAt = playbackStateObservedAt
-    observeTransportPlaybackStatus(eventData)
-    setTrackPositionFromPlaybackStatus(eventData, currentState, playbackStateObservedAt)
-    Map announcement = runtimeState.groupAnnouncementStream instanceof Map
-        ? (Map)runtimeState.groupAnnouncementStream : null
-    if(announcement != null) {
-      String announcementGuid = announcement.correlationId?.toString()
-      logDebug("Group announcement playback observation player=${getId()}, correlation=${announcementGuid}, playbackState=${currentState}, itemId=${eventData?.itemId}, source=${device.currentValue('audioSource')}, activeObserved=${announcement.activeObserved}")
-      if(currentState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
-        announcement.activeObserved = true
-        announcement.phase = 'ACTIVE'
-        publishGroupAnnouncementProgress(announcementGuid, 'ACTIVE')
-      } else if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED'] && announcement.activeObserved == true) {
-        // A user stop/pause does not necessarily transition a Sonos stream to
-        // IDLE. Treat either terminal transport state as completion so the app
-        // can restore temporary topology without waiting for its watchdog.
-        announcement.phase = 'DONE'
-        publishGroupAnnouncementProgress(announcementGuid, 'DONE', [playbackState: currentState,
-          termination: currentState == 'PLAYBACK_STATE_PAUSED' ? 'paused' : 'idle'])
-        runtimeState.remove('groupAnnouncementStream')
-      }
-    }
-    String previousState = lastPlaybackState.put(dni, currentState)
-    Map favoriteState = favoriteRetryState.get(dni)
-    Map playlistState = playlistRetryState.get(dni)
-    if(currentState == 'PLAYBACK_STATE_PLAYING') {
-      if(favoriteState != null) { favoriteState.playbackObserved = true }
-      if(playlistState != null) { playlistState.playbackObserved = true }
-    } else if(currentState == 'PLAYBACK_STATE_BUFFERING') {
-      if(playlistState != null) { playlistState.bufferingObserved = true }
-    }
-    emitGroupFavoriteOperationEvent('playbackStatus', [
-      playbackState: currentState,
-      groupId: getGroupId(),
-      coordinatorId: getGroupCoordinatorId()
-    ])
-    // Dedup: skip repeated same-state events (common as periodic heartbeats).
-    // Retry observation is updated before this return so an explicit playback
-    // poll can still confirm an unchanged PLAYING state.
-    if(currentState == previousState) { return }
-    if(currentState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_PAUSED']) {
-      lastMetadataContainerId.remove(dni)
-    }
-  }
-
-  //Process playerVolume events
-  if(eventType?.type == 'playerVolume' && eventType?.namespace == 'playerVolume') {
-    logDebug("WebSocket player-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
-    if(eventData?.volume != null) {
-      Integer vol = eventData.volume as Integer
-      setPlayerVolume(vol)
-    }
-    if(eventData?.muted != null) {
-      String muteState = eventData.muted == true ? 'muted' : 'unmuted'
-      setMuteState(muteState)
-    }
-  }
-
-  //Process groupVolume events
-  if(eventType?.type == 'groupVolume' && eventType?.namespace == 'groupVolume') {
-    logDebug("WebSocket group-volume processing beginning; hasVolume=${eventData?.volume != null}, hasMute=${eventData?.muted != null}")
-    if(eventData?.volume != null) {
-      Integer groupVol = eventData.volume as Integer
-      setGroupVolumeState(groupVol)
-      queueGroupDeviceUpdate([_groupVolume: groupVol])
-    }
-    if(eventData?.muted != null) {
-      String groupMuteState = eventData.muted == true ? 'muted' : 'unmuted'
-      setGroupMuteState(groupMuteState)
-      queueGroupDeviceUpdate([_groupMute: groupMuteState])
-    }
-  }
   logDebug('WebSocket message dispatch completed all matching handlers')
 }
 
