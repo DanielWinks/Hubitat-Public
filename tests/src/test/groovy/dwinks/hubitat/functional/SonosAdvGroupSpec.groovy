@@ -37,7 +37,6 @@ class SonosAdvGroupSpec extends Specification {
     driver.runtimeState.clear()
     driver.state.clear()
     driver.pendingGroupRequests.clear()
-    driver.parentRequestLocks.clear()
     driver.device.deviceNetworkId = 'SONOS-GROUP-TEST-DNI'
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()

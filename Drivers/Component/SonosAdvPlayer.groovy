@@ -25,6 +25,7 @@ import com.hubitat.app.ChildDeviceWrapper
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.hub.domain.Event
+import com.google.common.util.concurrent.Striped
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
@@ -744,9 +745,8 @@ Boolean hasLineInCapability() {
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
-// Keep lock identities stable while callbacks may still hold a reference, even
-// after a device is removed or its other static runtime state is pruned.
-@Field static ConcurrentHashMap<String, Object> websocketCommandLedgerLocks = new ConcurrentHashMap<String, Object>()
+// Fixed stripes bound lock storage while preserving per-DNI mutual exclusion.
+@Field static final Striped<java.util.concurrent.locks.Lock> websocketCommandLedgerStripes = Striped.lock(64)
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
 @Field static ConcurrentHashMap<String, String> pendingTopologyXmlByDni = new ConcurrentHashMap<String, String>()
@@ -760,7 +760,7 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, Map> pendingCoordinatorAvtUpdatesByDni = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, Object> coordinatorAvtUpdateLocksByDni = new ConcurrentHashMap<String, Object>()
+@Field static final Striped<java.util.concurrent.locks.Lock> coordinatorAvtUpdateStripes = Striped.lock(64)
 @Field static Set<String> coordinatorAvtUpdateScheduledDnis = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>())
 @Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
@@ -925,7 +925,7 @@ Boolean hasLineInCapability() {
 @Field static final Integer LOCAL_EVENT_MAX_WAIT_MS = 500
 @Field static final Integer LOCAL_EVENTS_PER_DRAIN = 8
 @Field static final Integer LOCAL_EVENT_DRAIN_INTERVAL_MS = 200
-@Field static ConcurrentHashMap<String, Object> localDeviceEventLocks = new ConcurrentHashMap<String, Object>()
+@Field static final Striped<java.util.concurrent.locks.Lock> localDeviceEventStripes = Striped.lock(64)
 @Field static final String PENDING_COMPONENT_CHILD_EVENTS_KEY = 'pendingComponentChildEvents'
 @Field static final String COMPONENT_CHILD_DRAIN_SCHEDULED_KEY = 'componentChildDrainScheduled'
 @Field static final String COMPONENT_CHILD_DRAIN_DUE_AT_KEY = 'componentChildDrainDueAt'
@@ -1498,11 +1498,7 @@ ConcurrentHashMap<String, Object> getRuntimeState() {
 Object getWebsocketCommandLedgerLock() {
   String dni = getDeviceDNI()
   if(!dni) { return this }
-  Object lock = websocketCommandLedgerLocks.get(dni)
-  if(lock != null) { return lock }
-  Object created = new Object()
-  Object existing = websocketCommandLedgerLocks.putIfAbsent(dni, created)
-  return existing ?: created
+  return websocketCommandLedgerStripes.get(dni)
 }
 
 void migrateLegacyRuntimeState() {
@@ -1958,7 +1954,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(groupDeviceUpdateRetryAttempts)
     clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastLocalDeviceEvents)
-    clearedEntries += clearStaticMap(localDeviceEventLocks)
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
@@ -1971,7 +1966,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(currentAvtSnapshotByCoordinator)
     clearedEntries += clearStaticMap(currentAvtSeqByDni)
     clearedEntries += clearStaticMap(pendingCoordinatorAvtUpdatesByDni)
-    clearedEntries += clearStaticMap(coordinatorAvtUpdateLocksByDni)
     coordinatorAvtUpdateScheduledDnis.clear()
     clearedEntries += clearStaticMap(currentGrcSnapshotByDni)
     clearedEntries += clearStaticMap(currentGrcSnapshotByCoordinator)
@@ -2013,7 +2007,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(groupDeviceUpdateRetryAttempts, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastLocalDeviceEvents, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(localDeviceEventLocks, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
@@ -2026,7 +2019,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(currentAvtSnapshotByCoordinator, activePlayerIds)
   removedEntries += pruneStaticMapKeys(currentAvtSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingCoordinatorAvtUpdatesByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(coordinatorAvtUpdateLocksByDni, activePlayerDnis)
   coordinatorAvtUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
   removedEntries += pruneStaticMapKeys(currentGrcSnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
@@ -2178,7 +2170,6 @@ void clearStaticDriverStateForCurrentDevice() {
       groupDeviceUpdateRetryAttempts?.remove(dni)
       pendingLocalDeviceEvents?.remove(dni)
       lastLocalDeviceEvents?.remove(dni)
-      localDeviceEventLocks?.remove(dni)
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
@@ -2193,7 +2184,6 @@ void clearStaticDriverStateForCurrentDevice() {
       currentAvtSnapshotByCoordinator?.remove(playerId)
       currentAvtSeqByDni?.remove(dni)
       pendingCoordinatorAvtUpdatesByDni?.remove(dni)
-      coordinatorAvtUpdateLocksByDni?.remove(dni)
       coordinatorAvtUpdateScheduledDnis?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
@@ -5485,13 +5475,7 @@ Map<String, Object> buildAvtPlaybackStateAttributes(Map snapshot, Map incoming, 
 }
 
 Object getCoordinatorAvtUpdateLock(String dni) {
-  Object lock = coordinatorAvtUpdateLocksByDni.get(dni)
-  if(lock == null) {
-    Object created = new Object()
-    Object existing = coordinatorAvtUpdateLocksByDni.putIfAbsent(dni, created)
-    lock = existing ?: created
-  }
-  return lock
+  return coordinatorAvtUpdateStripes.get(dni)
 }
 
 void queueCoordinatorAvtParentUpdate(String dni, Map update) {
@@ -7844,13 +7828,7 @@ Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
 void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
 
 private Object getLocalDeviceEventLock(String dni) {
-  Object lock = localDeviceEventLocks.get(dni)
-  if(lock == null) {
-    Object created = new Object()
-    Object existing = localDeviceEventLocks.putIfAbsent(dni, created)
-    lock = existing ?: created
-  }
-  return lock
+  return localDeviceEventStripes.get(dni)
 }
 
 /** Queue one local attribute until its fixed maximum-wait drain deadline. */

@@ -91,7 +91,6 @@ void logTrace(String message) {
 @Field static final Integer PARENT_REQUEST_MAX_ITEMS = 32
 @Field static final Integer PARENT_REQUEST_RETRY_MS = 1000
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingGroupRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
-@Field static ConcurrentHashMap<String, Object> parentRequestLocks = new ConcurrentHashMap<String, Object>()
 
 metadata {
   definition(

@@ -9,6 +9,7 @@
 # allowlist - this file should err on the side of being conservative.
 
 # --- Hubitat platform ---
+com.google.common.util.concurrent.Striped
 com.hubitat.app.*
 com.hubitat.app.exception.*
 com.hubitat.hub.domain.*
