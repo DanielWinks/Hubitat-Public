@@ -69,40 +69,20 @@ class SonosAdvGroupSpec extends Specification {
     ]]])
   }
 
-  def "on and join set zgtInProgress on at initiation"() {
+  def "group actions use app requests without publishing control attributes"() {
     when:
     driver.on()
 
     then:
-    driver.events.find { Map event -> event.name == 'zgtInProgress' }?.value == 'on'
+    driver.events.isEmpty()
     groupRequests()[0].command == 'on'
 
     when:
-    driver.events.clear()
     driver.joinPlayersToCoordinator()
 
     then:
-    driver.events.find { Map event -> event.name == 'zgtInProgress' }?.value == 'on'
-  }
-
-  def "playback commands do not set zgtInProgress and setZgtInProgress clears to off"() {
-    when:
-    driver.play()
-
-    then:
-    driver.events.find { Map event -> event.name == 'zgtInProgress' } == null
-
-    when:
-    driver.setZgtInProgress(false)
-
-    then:
-    driver.events.find { Map event -> event.name == 'zgtInProgress' }?.value == 'off'
-
-    when:
-    driver.setZgtInProgress('yes')
-
-    then:
-    driver.events.findAll { Map event -> event.name == 'zgtInProgress' }.last()?.value == 'on'
+    driver.events.isEmpty()
+    groupRequests().last().command == 'joinPlayersToCoordinator'
   }
 
   def "group batch enqueue re-arms a drain when the scheduled marker is stale"() {
@@ -214,7 +194,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.lastGroupDeviceVolumeFadeCallTime.isEmpty()
     driver.unschedules.contains('drainGroupCommandQueue')
     driver.unschedules.contains('retryActiveGroupCommandRequest')
-    driver.events.find { Map e -> e.name == 'parentAppRequest' } == null
+    ((SonosGroupParentDouble)driver.parent).requests.isEmpty()
     driver.scheduled.any { List item ->
       item[1] == 'purgeParentGroupCommandsAfterInitialization' &&
         item[2].data.deviceDni == 'SONOS-GROUP-TEST-DNI'
@@ -226,8 +206,8 @@ class SonosAdvGroupSpec extends Specification {
     driver.purgeParentGroupCommandsAfterInitialization([deviceDni: 'SONOS-GROUP-TEST-DNI'])
 
     then:
-    driver.events.count { Map e -> e.name == 'parentAppRequest' } == 1
-    new JsonSlurper().parseText(driver.events.find { Map e -> e.name == 'parentAppRequest' }.value as String).action == 'initializationPurge'
+    ((SonosGroupParentDouble)driver.parent).requests.count { Map request -> request.action == 'initializationPurge' } == 1
+    driver.events.isEmpty()
   }
 
   def "track position preference controls updates received by the group device"() {

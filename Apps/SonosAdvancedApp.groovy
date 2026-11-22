@@ -367,6 +367,17 @@ preferences {
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerStateUpdateDrainScheduled'
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY = 'playerStateUpdateDrainDueAt'
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY = 'playerStateUpdateDrainActive'
+@Field static final String PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY = 'pendingPlayerAttributeUpdates'
+@Field static final String PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerAttributeUpdateDrainScheduled'
+@Field static final String PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY = 'playerAttributeSnapshotsByRincon'
+@Field static final List<String> SHARED_PLAYER_PLAYBACK_ATTRIBUTES = [
+  'status', 'transportStatus', 'audioSource', 'currentTrackName', 'currentArtistName',
+  'currentAlbumName', 'albumArtURI', 'currentFavorite', 'currentPlaylist', 'currentTrackNumber',
+  'currentTrackDuration', 'trackDescription', 'trackData', 'trackPosition', 'trackPositionUpdated',
+  'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
+  'currentRepeatOneMode', 'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
+  'groupVolume', 'groupMute'
+]
 @Field static final Integer PLAYER_STATE_UPDATE_DRAIN_MAX_ITEMS = 12
 @Field static final Long PLAYER_STATE_UPDATE_DRAIN_BUDGET_MS = 200L
 @Field static final Integer PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS = 512
@@ -374,13 +385,11 @@ preferences {
 @Field static final Integer GROUP_MEMBERSHIP_APPLY_BATCH_SIZE = 8
 @Field static final String GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY = 'groupMembershipApplyGenerations'
 @Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
-@Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
 @Field static final String PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY = 'receivedPlayerCommandRequestIds'
+@Field static final String PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY = 'pendingGroupFavoriteEvents'
+@Field static final String GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY = 'groupFavoriteEventDrainScheduled'
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
-@Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
-@Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
-@Field static final String PARENT_APP_REQUEST_ATTRIBUTE = 'parentAppRequest'
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final String GRC_STORE_STATE_KEY = 'grcStoreByCoordinator'
@@ -3778,8 +3787,6 @@ void subscribeToGroupCommandRequests() {
   getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
     unsubscribe(playerDevice, 'sonosPlayerStateUpdate', 'playerStateUpdateHandler')
     unsubscribe(playerDevice, 'sonosPlayerAppRequest', 'playerAppRequestHandler')
-    unsubscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
-    unsubscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     unsubscribe(playerDevice, 'groupCoordinatorId', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
@@ -3788,16 +3795,10 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
     subscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
     subscribe(playerDevice, 'groupPlayerIds', 'topologyAttributeHandler')
-    subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
-    subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
     // ZGT household topology now delivered via parent.putZgtTopology() (in-memory DTO) — no Current State publication or subscription
     subscribedPlayers++
   }
   getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
-    unsubscribe(groupDevice, ZGT_IN_PROGRESS_ATTRIBUTE, 'zgtInProgressHandler')
-    unsubscribe(groupDevice, PARENT_APP_REQUEST_ATTRIBUTE, 'parentAppRequestHandler')
-    subscribe(groupDevice, ZGT_IN_PROGRESS_ATTRIBUTE, 'zgtInProgressHandler')
-    subscribe(groupDevice, PARENT_APP_REQUEST_ATTRIBUTE, 'parentAppRequestHandler')
   }
   logDebug("Child request subscriptions configured; players=${subscribedPlayers}")
 }
@@ -5303,6 +5304,105 @@ void playerStateUpdate(Map payload) {
   }
 }
 
+/** Receive driver observations and make the app the only owner of player attributes. */
+synchronized void playerAttributeUpdate(Map payload) {
+  String playerDni = payload?.playerDni?.toString()
+  Map incoming = payload?.attributes instanceof Map ? (Map)payload.attributes : [:]
+  if(!playerDni || incoming.isEmpty()) { return }
+  Map<String, Map<String, Object>> pending = state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] : [:]
+  Map<String, Object> merged = pending[playerDni] instanceof Map
+      ? new LinkedHashMap<String, Object>(pending[playerDni]) : [:]
+  incoming.each { Object rawName, Object value ->
+    String name = rawName?.toString()
+    if(name && value != null) { merged[name] = value }
+  }
+  pending[playerDni] = merged
+  state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] = pending
+  if(state[PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] != true) {
+    state[PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
+    runInMillis(1, 'drainPlayerAttributeUpdates', [overwrite: true])
+  }
+}
+
+/** App-gated drain only queues child batches; delivery happens on a later tick. */
+synchronized void drainPlayerAttributeUpdates() {
+  state.remove(PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY)
+  Map<String, Map<String, Object>> pending = state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY]) : [:]
+  state.remove(PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY)
+  pending.each { String playerDni, Map<String, Object> attributes ->
+    applyPlayerAttributeUpdate(playerDni, attributes)
+  }
+  Map<String, Map<String, Object>> arrivals = state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] : [:]
+  if(!arrivals.isEmpty() && state[PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] != true) {
+    state[PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = true
+    runInMillis(1, 'drainPlayerAttributeUpdates', [overwrite: true])
+  }
+}
+
+void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes) {
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  if(player == null || attributes == null || attributes.isEmpty()) { return }
+  String playerId = player.getDataValue('id')?.toString()
+  Map<String, Object> fanoutAttributes = new LinkedHashMap<String, Object>(attributes)
+  if(fanoutAttributes.containsKey('albumArtURI')) {
+    fanoutAttributes.albumArtURI = formatAlbumArtForFanout(fanoutAttributes.albumArtURI?.toString(), playerId)
+  }
+  if(fanoutAttributes.containsKey('nextTrackAlbumArtURI')) {
+    fanoutAttributes.nextTrackAlbumArtURI = formatAlbumArtForFanout(fanoutAttributes.nextTrackAlbumArtURI?.toString(), playerId)
+  }
+  if(fanoutAttributes.containsKey('currentFavorite')) {
+    fanoutAttributes.currentFavorite = formatFavoriteForFanout(fanoutAttributes.currentFavorite, playerId)
+  }
+  queueChildStateBatch(playerDni, fanoutAttributes)
+
+  if(!playerId) { return }
+  Map<String, Map<String, Object>> snapshots = state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] : [:]
+  Map<String, Object> playerSnapshot = snapshots[playerId] instanceof Map
+      ? new LinkedHashMap<String, Object>(snapshots[playerId]) : [:]
+  playerSnapshot.putAll(fanoutAttributes)
+  snapshots[playerId] = playerSnapshot
+  state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] = snapshots
+  if(fanoutAttributes.keySet().any { Object name ->
+      name?.toString() in ['audioSource', 'status', 'transportStatus'] } &&
+      (player.getDataValue('groupCoordinatorId')?.toString() ?: playerId) == playerId &&
+      hasAutomaticAnnouncementPolicy()) {
+    queueAnnouncementPolicyRefreshForPlayer(playerDni)
+  }
+  Map<String, List<Map>> topology = getStoredZgtEventsMap()
+  Map.Entry<String, List<Map>> topologyEntry = topology.entrySet().find { Map.Entry<String, List<Map>> entry ->
+    normalizeGroupPlayerIds(entry.value?.find { Map event -> event?.name?.toString() == 'groupPlayerIds' }?.value?.toString()).contains(playerId)
+  }
+  List<Map> topologyEvents = topologyEntry?.value ?: []
+  String coordinatorId = topologyEvents.find { Map event -> event?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+  if(!coordinatorId) { coordinatorId = player.getDataValue('groupCoordinatorId')?.toString() ?: playerId }
+  if(coordinatorId != playerId) { return }
+
+  Map<String, Object> sharedPlayback = [:]
+  fanoutAttributes.each { String name, Object value ->
+    if(name in SHARED_PLAYER_PLAYBACK_ATTRIBUTES) { sharedPlayback[name] = value }
+  }
+  Map<String, Object> volumeAttrs = [:]
+  ['volume', 'mute', 'level', 'groupVolume', 'groupMute'].each { String name ->
+    if(attributes.containsKey(name)) { volumeAttrs[name] = attributes[name] }
+  }
+  if(!sharedPlayback.isEmpty() || !volumeAttrs.isEmpty()) {
+    List<String> memberIds = topologyEntry != null ? normalizeGroupPlayerIds(
+        topologyEvents.find { Map event -> event?.name?.toString() == 'groupPlayerIds' }?.value?.toString()) : [playerId]
+    if(!memberIds.contains(playerId)) { memberIds.add(0, playerId) }
+    memberIds.unique().each { String memberId ->
+      ChildDeviceWrapper member = findPlayerBySonosId(memberId)
+      if(member != null && member.getDeviceNetworkId() != playerDni) {
+        queueChildStateBatch(member.getDeviceNetworkId(), sharedPlayback)
+      }
+    }
+    flushGroupDeviceState(coordinatorId, volumeAttrs.isEmpty() ? null : volumeAttrs, sharedPlayback)
+  }
+}
+
 /** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
 String playerStateUpdateCoalesceKey(Map payload) {
   // playbackObservation/state/wsConnected/wsRetry removed — parent now reads attributes + lastUpdated
@@ -5443,6 +5543,10 @@ void playerStateUpdateHandler(Object event) {
   }
   if(payload.kind == 'groupAnnouncementProgress') {
     handleGroupAnnouncementProgress(player, payload)
+    return
+  }
+  if(payload.kind == 'deviceAttributes') {
+    applyPlayerAttributeUpdate(playerDni, payload.attributes instanceof Map ? (Map)payload.attributes : [:])
     return
   }
   String coordinatorId = payload.coordinatorId as String
@@ -5611,19 +5715,32 @@ void queueCoordinatorPlaybackSnapshot(ChildDeviceWrapper coordinator,
   if(coordinator == null || !followerDevices) { return }
   String coordinatorId = coordinator.getDataValue('id')?.toString()
   if(!coordinatorId) { return }
-  List<Map> snapshot
-  try {
-    snapshot = (List<Map>)coordinator.getCurrentPlayingStatesForGroup() ?: []
-  } catch(Exception e) {
-    logWarn("Could not read coordinator playback snapshot from ${coordinator.deviceNetworkId}: ${e.message}")
-    return
-  }
-  Map<String, Object> attributes = [:]
-  snapshot.each { Map event -> if(event?.name != null && event?.value != null) {
-      attributes[event.name.toString()] = event.value } }
+  Map<String, Object> attributes = coordinatorPlaybackAttributes(coordinatorId)
   if(attributes.isEmpty()) { return }
   followerDevices.each { ChildDeviceWrapper follower ->
       queueFollowerStateBatch(coordinator, follower, coordinatorId, attributes) }
+}
+
+Map<String, Object> coordinatorPlaybackAttributes(String coordinatorId) {
+  Map<String, Map<String, Object>> snapshots = state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] instanceof Map
+      ? (Map<String, Map<String, Object>>)state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] : [:]
+  Map<String, Object> attributes = [
+    status: 'stopped', transportStatus: 'stopped', currentTrackName: 'Not Available',
+    currentArtistName: 'Not Available', currentAlbumName: 'Not Available', albumArtURI: 'Not Available',
+    currentFavorite: 'No favorite playing', currentPlaylist: 'No playlist playing',
+    currentTrackNumber: 0, currentTrackDuration: '00:00:00', trackDescription: 'Not Available',
+    trackData: JsonOutput.toJson([name: 'Not Available', artist: 'Not Available', album: 'Not Available']),
+    currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'off',
+    currentCrossfadeMode: 'off', audioSource: 'Not Available', nextArtistName: 'Not Available',
+    nextAlbumName: 'Not Available', nextTrackName: 'Not Available', nextTrackAlbumArtURI: 'Not Available',
+    trackPosition: 0L, trackPositionUpdated: 0L, groupVolume: 0, groupMute: 'unmuted'
+  ]
+  if(snapshots[coordinatorId] instanceof Map) {
+    attributes.putAll((Map<String, Object>)snapshots[coordinatorId])
+  }
+  attributes.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId), coordinatorId))
+  attributes.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId), coordinatorId))
+  return attributes
 }
 
 /** Reject delayed coordinator snapshots after topology has moved the player. */
@@ -10248,10 +10365,6 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   ])
 }
 
-void zgtInProgressHandler(Event event) {
-  logDebug("ZGT In Progress ${event?.value?.toString() ?: ''} from ${event?.device?.deviceNetworkId?.toString() ?: ''}")
-}
-
 /** Pure set+return only: no child calls, so the flush→setter call cannot deadlock the single-threaded gate. */
 Map<String, List<Map>> putZgtTopology(String sourceDni, Map<String, List<Map>> eventsByGroupId) {
   Map<String, List<Map>> stored = [:]
@@ -10420,6 +10533,16 @@ String formatAlbumArtForFanout(String albumArtURI, String coordinatorId) {
   return "<br><img src=\"${escapeNewUiHtml(imageUrl)}\" width=\"200\" height=\"200\" >"
 }
 
+String formatFavoriteForFanout(Object favorite, String coordinatorId) {
+  if(!(favorite instanceof Map)) { return favorite?.toString() ?: 'No favorite playing' }
+  Map value = (Map)favorite
+  String label = value.label?.toString() ?: 'No favorite playing'
+  String imageUrl = value.imageUrl?.toString()
+  if(!imageUrl) { return label }
+  String formattedImage = formatAlbumArtForFanout(imageUrl, coordinatorId)
+  return formattedImage == 'Not Available' ? label : "${label} ${formattedImage}"
+}
+
 /** Pure set+return only: merge delta by name into the stored list; no child calls. */
 List<Map> putAvtEvents(String coordinatorRincon, List<Map> events) {
   String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()
@@ -10557,29 +10680,36 @@ Map getCurrentReceivedZgtTopology() {
   }
 }
 
-void parentAppRequestHandler(Event event) {
-  String raw = stripHiddenBridgeValue(event?.value?.toString())
-  if(!raw) { return }
-  try {
-    Map payload = (Map)parseJson(raw)
-    if(payload?.action == 'initializationPurge' && payload?.groupDni) {
-      purgeParentCommandMap((payload.groupDni as String), 'initialization')
-    }
-    logDebug("Parent app request handled: action=${payload?.action ?: 'unknown'}")
-  } catch(Exception e) {
-    logWarn("Ignoring malformed parentAppRequest event: ${e.message}")
+void playerGroupFavoriteOperationUpdate(Map payload) {
+  if(!(payload instanceof Map) || payload.isEmpty()) { return }
+  List<Map> pending = state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] instanceof List
+      ? (List<Map>)state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] : []
+  pending.add(new LinkedHashMap(payload))
+  state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] = pending
+  if(state[GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY] != true) {
+    state[GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY] = true
+    runInMillis(1, 'drainPlayerGroupFavoriteEvents', [overwrite: true])
   }
 }
 
-void groupFavoriteOperationEventHandler(Event event) {
-  String rawEvent = stripHiddenBridgeValue(event?.value?.toString())
-  if(!rawEvent) { return }
+void drainPlayerGroupFavoriteEvents() {
+  state.remove(GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY)
+  List<Map> pending = state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY]) : []
+  state.remove(PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY)
+  pending.each { Map payload -> groupFavoriteOperationEventHandler(payload) }
+}
+
+void groupFavoriteOperationEventHandler(Object event) {
   Map payload
-  try {
-    payload = (Map)parseJson(rawEvent)
-  } catch(Exception e) {
-    logWarn("Ignoring malformed group Favorite operation event: ${e.message}")
-    return
+  if(event instanceof Map && !((Map)event).containsKey('value') && !((Map)event).containsKey('data')) {
+    payload = (Map)event
+  } else {
+    try { payload = (Map)parseJson(event?.value?.toString()) }
+    catch(Exception e) {
+      logWarn("Ignoring malformed group Favorite operation event: ${e.message}")
+      return
+    }
   }
   Map operation = getActiveGroupOperation()
   if(operation == null || payload.operationId?.toString() != operation.operationId?.toString()) {
@@ -10877,50 +11007,22 @@ ChildDeviceWrapper resolveLiveGroupCoordinator(ChildDeviceWrapper anchor,
   return liveCoordinator ?: anchor
 }
 
-/**
- * Receive a deferred player-to-parent command. Player drivers use this bridge
- * when a command is addressed to a follower; the event is emitted after the
- * follower method returns so the player never waits on the parent app's child
- * lookup semaphore.
- */
-void playerCommandRequestHandler(Event event) {
-  String rawRequest = stripHiddenBridgeValue(event?.value?.toString())
-  if(!rawRequest) {
-    logWarn('Ignoring empty player command request')
-    return
-  }
-
-  Map request
-  try {
-    request = (Map)parseJson(rawRequest)
-  } catch(Exception e) {
-    logWarn("Ignoring malformed player command request: ${e.message}")
-    return
-  }
-
-  enqueuePlayerCommandRequest(request)
+/** Called from the driver's deferred callback after its command gate is released. */
+Boolean playerCommandRequest(Map request) {
+  return enqueuePlayerCommandRequest(request, false)
 }
 
-/** Remove the hidden current-state presentation wrapper before parsing a
- * player bridge payload. The wrapper keeps internal event data off the device
- * page while remaining available to this parent app subscription. */
-String stripHiddenBridgeValue(String value) {
-  if(!value) { return value }
-  return value.replaceAll('(?is)<span[^>]*display\\s*:\\s*none[^>]*>', '')
-      .replaceAll('(?is)</span\\s*>', '')
-}
-
-void enqueuePlayerCommandRequest(Map request) {
+Boolean enqueuePlayerCommandRequest(Map request, Boolean acknowledgeSource = true) {
   String playerDni = request?.playerDni as String
   String command = request?.command as String
   ChildDeviceWrapper source = playerDni ? getChildDevice(playerDni) : null
   if(!playerDni || !command || source == null) {
     logWarn("Ignoring player command request with invalid target or command: ${JsonOutput.toJson(request)}")
-    return
+    return false
   }
   if(isRequestOlderThanDeviceCommandClear(playerDni, request.createdAt)) {
     logDebug("Ignoring stale player command request ${request.requestId ?: 'unknown'} from before initialization for ${playerDni}")
-    return
+    return false
   }
   String requestId = request.requestId as String
   Map<String, List<String>> received = state[PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY] instanceof Map
@@ -10930,8 +11032,8 @@ void enqueuePlayerCommandRequest(Map request) {
       ? (List<String>)received[playerDni]
       : []
   if(requestId && receivedForPlayer.contains(requestId)) {
-    acknowledgePlayerCommandRequest(source, requestId)
-    return
+    if(acknowledgeSource) { acknowledgePlayerCommandRequest(source, requestId) }
+    return true
   }
 
   Map<String, List<Map>> pending = state[PLAYER_COMMAND_QUEUE_STATE_KEY] instanceof Map
@@ -10948,9 +11050,10 @@ void enqueuePlayerCommandRequest(Map request) {
     if(receivedForPlayer.size() > 200) { receivedForPlayer = receivedForPlayer.takeRight(200) }
     received[playerDni] = receivedForPlayer
     state[PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY] = received
-    acknowledgePlayerCommandRequest(source, requestId)
+    if(acknowledgeSource) { acknowledgePlayerCommandRequest(source, requestId) }
   }
   runIn(1, 'drainPlayerCommandRequests', [overwrite: true])
+  return true
 }
 
 void acknowledgePlayerCommandRequest(ChildDeviceWrapper source, String requestId) {

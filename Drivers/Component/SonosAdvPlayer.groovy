@@ -810,8 +810,6 @@ Boolean hasLineInCapability() {
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static final String PLAYER_COMMAND_REQUEST_ATTRIBUTE = 'playerCommandRequest'
-@Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
 @Field static final String WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY = 'websocketOutboundQueueExpiryAt'
 @Field static final String WS_COMMAND_LEDGER_STATE_KEY = 'websocketCommandLedger'
@@ -1535,8 +1533,6 @@ void reconcileChildDevices() {
   // Remove transient parent-app bridge attributes from existing devices.
   device.deleteCurrentState('sonosPlayerStateUpdate')
   device.deleteCurrentState('sonosPlayerAppRequest')
-  clearGroupFavoriteOperationCurrentState()
-  clearPlayerCommandRequestCurrentState()
   clearLegacyBridgeCurrentStates()
   // Remove the retired audio clip progress state from devices upgraded from
   // versions that exposed it as a current state.
@@ -1580,8 +1576,8 @@ void synchronizeTrackPositionPreference() {
   Boolean isEnabled = getEnableTrackPositionUpdates()
   device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
   if(wasEnabled && !isEnabled) {
-    queueLocalDeviceEvent('trackPosition', 0L)
-    queueLocalDeviceEvent('trackPositionUpdated', 0L)
+    queuePlayerAttributeUpdate('trackPosition', 0L)
+    queuePlayerAttributeUpdate('trackPositionUpdated', 0L)
   }
 }
 
@@ -3151,9 +3147,19 @@ void drainParentCoordinatorCommandQueue() {
 void emitParentCoordinatorCommand(Map data) {
   Map payload = data?.payload instanceof Map ? (Map)data.payload : data
   if(payload?.command) {
-    sendDeviceEvent(PLAYER_COMMAND_REQUEST_ATTRIBUTE, hideCurrentStateValue(JsonOutput.toJson(payload)))
-    logDebug("Delivered parent command ${payload.command} (${payload.requestId}); waiting for controller acknowledgement")
-    runIn(5, 'retryParentCoordinatorCommand', [overwrite: true])
+    try {
+      Boolean accepted = parent.playerCommandRequest(new LinkedHashMap(payload)) as Boolean
+      if(accepted) {
+        logDebug("Parent accepted command ${payload.command} (${payload.requestId})")
+        acknowledgeParentCommand(payload.requestId?.toString())
+      } else {
+        logWarn("Parent rejected command ${payload.command} (${payload.requestId}); retrying")
+        runIn(5, 'retryParentCoordinatorCommand', [overwrite: true])
+      }
+    } catch(Exception e) {
+      logWarn("Parent command ${payload.command} (${payload.requestId}) failed: ${e.message}")
+      runIn(5, 'retryParentCoordinatorCommand', [overwrite: true])
+    }
   }
 }
 
@@ -3673,7 +3679,6 @@ void clearGroupOperation(String operationId = null) {
   runtimeState.remove('groupFavoriteOperationLoadAt')
   runtimeState.remove('groupTopologyOperationId')
   runtimeState.remove('groupTopologyOperationRequestId')
-  clearGroupFavoriteOperationCurrentState()
 }
 
 /** Backward-compatible alias for existing parent app deployments. */
@@ -3696,26 +3701,41 @@ void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
     observedAt: now(),
     data: data ?: [:]
   ]
-  sendDeviceEvent(GROUP_FAVORITE_OPERATION_ATTRIBUTE, hideCurrentStateValue(JsonOutput.toJson(payload)))
-}
-
-String hideCurrentStateValue(String value) {
-  return "<span style=\"display:none\">${value ?: ''}</span>"
-}
-
-void clearGroupFavoriteOperationCurrentState() {
-  try {
-    device.deleteCurrentState(GROUP_FAVORITE_OPERATION_ATTRIBUTE)
-  } catch(Exception e) {
-    logDebug("Could not remove transient group Favorite operation state: ${e.message}")
+  synchronized(runtimeState) {
+    List<Map> pending = runtimeState.pendingGroupFavoriteOperationEvents instanceof List
+        ? (List<Map>)runtimeState.pendingGroupFavoriteOperationEvents : []
+    pending.add(payload)
+    runtimeState.pendingGroupFavoriteOperationEvents = pending
+    if(runtimeState.groupFavoriteOperationDispatchScheduled != true) {
+      runtimeState.groupFavoriteOperationDispatchScheduled = true
+      runInMillis(1, 'flushPendingGroupFavoriteOperationEvents', [overwrite: true])
+    }
   }
 }
 
-void clearPlayerCommandRequestCurrentState() {
-  try {
-    device.deleteCurrentState(PLAYER_COMMAND_REQUEST_ATTRIBUTE)
-  } catch(Exception e) {
-    logDebug("Could not remove transient player command request state: ${e.message}")
+void flushPendingGroupFavoriteOperationEvents() {
+  List<Map> pending
+  synchronized(runtimeState) {
+    pending = runtimeState.pendingGroupFavoriteOperationEvents instanceof List
+        ? new ArrayList<Map>((List<Map>)runtimeState.pendingGroupFavoriteOperationEvents) : []
+    runtimeState.remove('pendingGroupFavoriteOperationEvents')
+    runtimeState.remove('groupFavoriteOperationDispatchScheduled')
+  }
+  pending.each { Map payload ->
+    try { parent.playerGroupFavoriteOperationUpdate(payload) }
+    catch(Exception e) {
+      logWarn("Deferred group Favorite update failed: ${e.message}")
+      synchronized(runtimeState) {
+        List<Map> retry = runtimeState.pendingGroupFavoriteOperationEvents instanceof List
+            ? (List<Map>)runtimeState.pendingGroupFavoriteOperationEvents : []
+        retry.add(payload)
+        runtimeState.pendingGroupFavoriteOperationEvents = retry
+        if(runtimeState.groupFavoriteOperationDispatchScheduled != true) {
+          runtimeState.groupFavoriteOperationDispatchScheduled = true
+          runIn(1, 'flushPendingGroupFavoriteOperationEvents', [overwrite: true])
+        }
+      }
+    }
   }
 }
 
@@ -4254,9 +4274,9 @@ void componentOff(DeviceWrapper child) {
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
   if(getDisableArtistAlbumTrackEvents()) {return}
-  queueLocalDeviceEvent('nextArtistName', nextArtistName ?: 'Not Available')
-  queueLocalDeviceEvent('nextAlbumName', nextAlbumName ?: 'Not Available')
-  queueLocalDeviceEvent('nextTrackName', nextTrackName ?: 'Not Available')
+  queuePlayerAttributeUpdate('nextArtistName', nextArtistName ?: 'Not Available')
+  queuePlayerAttributeUpdate('nextAlbumName', nextAlbumName ?: 'Not Available')
+  queuePlayerAttributeUpdate('nextTrackName', nextTrackName ?: 'Not Available')
 }
 
 void updateChildBatteryStatus(Integer battery, String powerSource, BigDecimal temperature) {
@@ -4746,19 +4766,18 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
 // Parse
 // =============================================================================
 Long getHubitatCurrentTime() { return now() }
-void sendHubitatEvent(Map event) { sendEvent(event) }
 
 @CompileStatic
 void parse(String raw) {
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
-    try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
+    try { queuePlayerAttributeUpdate('lastUpdated', getHubitatCurrentTime()) } catch(Exception ignored) { }
     logDebug("UPnP response parse entered; payloadLength=${raw.length()}")
     handleUpnpRawResponse(raw)
     return
   }
   if(!raw.startsWith('mac:')) {
-    try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
+    try { queuePlayerAttributeUpdate('lastUpdated', getHubitatCurrentTime()) } catch(Exception ignored) { }
     logDebug("WebSocket parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     try {
       setLastWebsocketEvent()
@@ -4791,7 +4810,7 @@ void parse(String raw) {
     }
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]?.toString()
     if(!(serviceType in ['ZoneGroupTopology', 'AVTransport', 'GroupRenderingControl'])) {
-      try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
+      try { queuePlayerAttributeUpdate('lastUpdated', getHubitatCurrentTime()) } catch(Exception ignored) { }
     }
     String seqRaw = messageHeaders["SEQ"] ?: messageHeaders["X-SONOS-SEQ"]
     Integer seq = null
@@ -5786,7 +5805,6 @@ void clearCurrentAvtTrackMetadata() {
   setCurrentTrackName('Not Available')
   setCurrentArtistName('Not Available')
   setCurrentAlbumName('Not Available')
-  setAlbumArtURI('', false)
   setTrackDescription('Not Available')
 }
 
@@ -6550,20 +6568,20 @@ void clearCurrentPlayingStates() {
   setNextTrackName('Not Available')
   setNextTrackAlbumArtURI('Not Available', false)
   // Artwork attributes are owned by the app's UPnP fanout.
-  if(shouldQueueLocalDeviceEvent('audioSource', 'Not Available', this.device.currentValue('audioSource'))) {
-    queueLocalDeviceEvent('audioSource', 'Not Available')
+  if(shouldQueuePlayerAttributeUpdate('audioSource', 'Not Available', this.device.currentValue('audioSource'))) {
+    queuePlayerAttributeUpdate('audioSource', 'Not Available')
   }
-  if(shouldQueueLocalDeviceEvent('currentFavorite', 'Not Available', this.device.currentValue('currentFavorite'))) {
-    queueLocalDeviceEvent('currentFavorite', 'Not Available')
+  if(shouldQueuePlayerAttributeUpdate('currentFavorite', 'Not Available', this.device.currentValue('currentFavorite'))) {
+    queuePlayerAttributeUpdate('currentFavorite', 'Not Available')
   }
-  if(shouldQueueLocalDeviceEvent('trackDescription', 'Not Available', this.device.currentValue('trackDescription'))) {
-    queueLocalDeviceEvent('trackDescription', 'Not Available')
+  if(shouldQueuePlayerAttributeUpdate('trackDescription', 'Not Available', this.device.currentValue('trackDescription'))) {
+    queuePlayerAttributeUpdate('trackDescription', 'Not Available')
   }
 }
 
 @CompileStatic
 void updateZoneGroupName(String groupName) {
-  queueLocalDeviceEvent('groupName', groupName)
+  queuePlayerAttributeUpdate('groupName', groupName)
 }
 
 void processGroupRenderingControlMessages(String xmlString) {
@@ -6572,8 +6590,8 @@ void processGroupRenderingControlMessages(String xmlString) {
 
 @CompileStatic
 void setGroupVolumeState(Integer groupVolume) {
-  if(!shouldQueueLocalDeviceEvent('groupVolume', groupVolume, getGroupVolumeState())) { return }
-  queueLocalDeviceEvent('groupVolume', groupVolume)
+  if(!shouldQueuePlayerAttributeUpdate('groupVolume', groupVolume, getGroupVolumeState())) { return }
+  queuePlayerAttributeUpdate('groupVolume', groupVolume)
 }
 @CompileStatic
 Integer getGroupVolumeState() {
@@ -6583,8 +6601,8 @@ Integer getGroupVolumeState() {
 
 @CompileStatic
 void setGroupMuteState(String groupMute) {
-  if(!shouldQueueLocalDeviceEvent('groupMute', groupMute, getGroupMuteState())) { return }
-  queueLocalDeviceEvent('groupMute', groupMute)
+  if(!shouldQueuePlayerAttributeUpdate('groupMute', groupMute, getGroupMuteState())) { return }
+  queuePlayerAttributeUpdate('groupMute', groupMute)
 }
 @CompileStatic
 String getGroupMuteState() {
@@ -6594,16 +6612,16 @@ String getGroupMuteState() {
 
 @CompileStatic
 void setNightModeState(String value) {
-  if(!shouldQueueLocalDeviceEvent('nightMode', value, this.device.currentValue('nightMode') as String)) { return }
-  queueLocalDeviceEvent('nightMode', value)
+  if(!shouldQueuePlayerAttributeUpdate('nightMode', value, this.device.currentValue('nightMode') as String)) { return }
+  queuePlayerAttributeUpdate('nightMode', value)
   sendChildEvent(getNightModeChild(), 'switch', value)
 }
 
 @CompileStatic
 void setDialogLevelState(String value) {
-  if(!shouldQueueLocalDeviceEvent('speechEnhancement', value,
+  if(!shouldQueuePlayerAttributeUpdate('speechEnhancement', value,
       this.device.currentValue('speechEnhancement') as String)) { return }
-  queueLocalDeviceEvent('speechEnhancement', value)
+  queuePlayerAttributeUpdate('speechEnhancement', value)
   sendChildEvent(getSpeechEnhancementChild(), 'switch', value)
 }
 
@@ -7558,13 +7576,13 @@ void clearCurrentNextArtistAlbumTrackData() {
 
 void clearAlbumArtEvents() {
   String disabled = 'Disabled in preferences'
-  queueLocalDeviceEvent('albumArtSmall', disabled)
-  queueLocalDeviceEvent('albumArtMedium', disabled)
-  queueLocalDeviceEvent('albumArtLarge', disabled)
+  queuePlayerAttributeUpdate('albumArtSmall', disabled)
+  queuePlayerAttributeUpdate('albumArtMedium', disabled)
+  queuePlayerAttributeUpdate('albumArtLarge', disabled)
 }
 
 void clearTrackDataEvent() {
-  queueLocalDeviceEvent('trackData', '{}')
+  queuePlayerAttributeUpdate('trackData', '{}')
 }
 // =============================================================================
 // End Misc Helpers
@@ -7789,14 +7807,12 @@ Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
   }
 }
 
-void sendDeviceEvent(String name, Object value) { this.device.sendEvent(name:name, value:value) }
-
 private Object getLocalDeviceEventLock(String dni) {
   return localDeviceEventStripes.get(dni)
 }
 
 /** Queue one local attribute until its fixed maximum-wait drain deadline. */
-void queueLocalDeviceEvent(String name, Object value) {
+void queuePlayerAttributeUpdate(String name, Object value) {
   if(!name || value == null) { return }
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
@@ -7828,7 +7844,7 @@ void queueLocalDeviceEvent(String name, Object value) {
   }
 }
 
-Boolean shouldQueueLocalDeviceEvent(String name, Object value, Object currentValue) {
+Boolean shouldQueuePlayerAttributeUpdate(String name, Object value, Object currentValue) {
   if(value != currentValue) { return true }
   String dni = device.getDeviceNetworkId()
   ConcurrentHashMap<String, Object> localPending = pendingLocalDeviceEvents.get(dni)
@@ -7877,22 +7893,19 @@ void flushPendingLocalDeviceEvents() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
   Object lock = getLocalDeviceEventLock(dni)
-  List<Map<String, Object>> batch = []
+  Map<String, Object> batch = [:]
   synchronized(lock) {
     state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
     state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
     ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-    logDebug("Local event drain claimed; dni=${dni}, pending=${pending?.size() ?: 0}")
     if(!pending || pending.isEmpty()) {
       if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
-      logDebug("Local event drain found no pending events; dni=${dni}")
       return
     }
-
     List<String> names = new ArrayList<String>(pending.keySet()).take(LOCAL_EVENTS_PER_DRAIN)
     names.each { String attrName ->
       Object attrValue = pending.remove(attrName)
-      if(attrValue != null) { batch.add([name: attrName, value: attrValue]) }
+      if(attrValue != null) { batch[attrName] = attrValue }
     }
   }
 
@@ -7902,21 +7915,12 @@ void flushPendingLocalDeviceEvents() {
     ConcurrentHashMap<String, Object> existing = lastLocalDeviceEvents.putIfAbsent(dni, created)
     lastSent = existing ?: created
   }
-
-  batch.each { Map<String, Object> event ->
-    String attrName = event.name as String
-    Object attrValue = event.value
+  if(!batch.isEmpty()) {
     try {
-      Object currentValue = this.device.currentValue(attrName, true)
-      if(lastSent.containsKey(attrName) && lastSent.get(attrName) == attrValue && currentValue == attrValue) {
-        lastSent.put(attrName, attrValue)
-        logDebug("Local event drain skipped duplicate sent value still present on device; dni=${dni}, attribute=${attrName}, value=${attrValue}")
-        return
+      if(!dispatchParentStateUpdateDirect([kind: 'deviceAttributes', playerDni: dni, attributes: batch])) {
+        throw new IllegalStateException('Parent app rejected player attribute handoff')
       }
-      logDebug("Local event send starting; dni=${dni}, attribute=${attrName}, value=${attrValue}, current=${currentValue}, lastSent=${lastSent.get(attrName)}")
-      this.device.sendEvent(name: attrName, value: attrValue)
-      lastSent.put(attrName, attrValue)
-      logDebug("Local event sendEvent returned; dni=${dni}, attribute=${attrName}, value=${attrValue}, currentAfter=${this.device.currentValue(attrName, true)}")
+      lastSent.putAll(batch)
     } catch(Exception e) {
       synchronized(lock) {
         ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
@@ -7925,21 +7929,18 @@ void flushPendingLocalDeviceEvents() {
           ConcurrentHashMap<String, Object> existing = pendingLocalDeviceEvents.putIfAbsent(dni, created)
           pending = existing ?: created
         }
-        pending.putIfAbsent(attrName, attrValue)
-        logWarn("Could not emit local ${attrName} event for dni=${dni}; retaining value=${attrValue} for retry, pending=${pending.size()}: ${e.message}")
+        batch.each { String attrName, Object attrValue -> pending.put(attrName, attrValue) }
+        logWarn("Could not hand off player attributes to the app for dni=${dni}; retaining ${batch.size()} values: ${e.message}")
       }
     }
   }
-
   synchronized(lock) {
     ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
     if(!pending || pending.isEmpty()) {
       if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
       state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
       state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-      logDebug("Local event drain completed; dni=${dni}, processed=${batch.size()}, pending=0")
     } else {
-      logDebug("Local event drain yielded; dni=${dni}, processed=${batch.size()}, pending=${pending.size()}, nextDelayMs=${LOCAL_EVENT_DRAIN_INTERVAL_MS}")
       scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
     }
   }
@@ -8315,7 +8316,7 @@ void setGroupId(String groupId) {
   String oldGroupId = getGroupId()
   if(oldGroupId == groupId) { return }
   setDeviceDataValue('groupId', groupId)
-  queueLocalDeviceEvent('groupId', groupId)
+  queuePlayerAttributeUpdate('groupId', groupId)
   // Refresh coordinator AVTransport state after the topology transition.
   if(getIsGroupCoordinator() == true) {
     runIn(1, 'refreshCoordinatorPlaybackState', [data:[groupId:groupId], overwrite:true])
@@ -8340,8 +8341,8 @@ String getGroupName() {
   return this.device.currentValue('groupName',true)
 }
 void setGroupName(String groupName) {
-  if(!shouldQueueLocalDeviceEvent('groupName', groupName, getGroupName())) { return }
-  queueLocalDeviceEvent('groupName', groupName)
+  if(!shouldQueuePlayerAttributeUpdate('groupName', groupName, getGroupName())) { return }
+  queuePlayerAttributeUpdate('groupName', groupName)
 }
 
 Boolean getIsGrouped() {
@@ -8349,17 +8350,17 @@ Boolean getIsGrouped() {
 }
 void setIsGrouped(Boolean isGrouped) {
   String newValue = isGrouped ? 'on' : 'off'
-  if(!shouldQueueLocalDeviceEvent('isGrouped', newValue, this.device.currentValue('isGrouped'))) { return }
-  queueLocalDeviceEvent('isGrouped', newValue)
+  if(!shouldQueuePlayerAttributeUpdate('isGrouped', newValue, this.device.currentValue('isGrouped'))) { return }
+  queuePlayerAttributeUpdate('isGrouped', newValue)
 }
 
 Integer getGroupMemberCount() {
   return this.device.currentValue('groupMemberCount') as Integer
 }
 void setGroupMemberCount(Integer groupMemberCount) {
-  if(!shouldQueueLocalDeviceEvent('groupMemberCount', groupMemberCount,
+  if(!shouldQueuePlayerAttributeUpdate('groupMemberCount', groupMemberCount,
       this.device.currentValue('groupMemberCount') as Integer)) { return }
-  queueLocalDeviceEvent('groupMemberCount', groupMemberCount)
+  queuePlayerAttributeUpdate('groupMemberCount', groupMemberCount)
 }
 
 String getGroupCoordinatorId() {
@@ -8377,7 +8378,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   // State is stale (for example after a lost local-event drain callback).
   if(groupCoordinatorId != previousGroupCoordinator ||
       this.device.currentValue('groupCoordinatorId', true) != groupCoordinatorId) {
-    queueLocalDeviceEvent('groupCoordinatorId', groupCoordinatorId)
+    queuePlayerAttributeUpdate('groupCoordinatorId', groupCoordinatorId)
   }
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
   // Keep the persisted coordinator role derived from the ID on every topology
@@ -8413,8 +8414,8 @@ String getGroupCoordinatorName() {
   return this.device.currentValue('groupCoordinatorName')
 }
 void setGroupCoordinatorName(String groupCoordinatorName) {
-  if(shouldQueueLocalDeviceEvent('groupCoordinatorName', groupCoordinatorName, getGroupCoordinatorName())) {
-    queueLocalDeviceEvent('groupCoordinatorName', groupCoordinatorName)
+  if(shouldQueuePlayerAttributeUpdate('groupCoordinatorName', groupCoordinatorName, getGroupCoordinatorName())) {
+    queuePlayerAttributeUpdate('groupCoordinatorName', groupCoordinatorName)
   }
 }
 
@@ -8427,7 +8428,7 @@ void setIsGroupCoordinator(Boolean isGroupCoordinator) {
   setDeviceDataValue('isGroupCoordinator', isGroupCoordinator.toString())
   if(isGroupCoordinator != previouslyWasGroupCoordinator ||
       this.device.currentValue('isGroupCoordinator', true) != publicValue) {
-    queueLocalDeviceEvent('isGroupCoordinator', publicValue)
+    queuePlayerAttributeUpdate('isGroupCoordinator', publicValue)
   }
 }
 
@@ -8451,9 +8452,9 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   if(newValue != oldValue) {
     Boolean isNowGrouped = groupPlayerIds.size() > 1
     setDeviceDataValue('groupPlayerIds', newValue)
-    queueLocalDeviceEvent('isGrouped', isNowGrouped ? 'on' : 'off')
-    queueLocalDeviceEvent('groupMemberCount', groupPlayerIds.size())
-    queueLocalDeviceEvent('groupPlayerIds', newValue)
+    queuePlayerAttributeUpdate('isGrouped', isNowGrouped ? 'on' : 'off')
+    queuePlayerAttributeUpdate('groupMemberCount', groupPlayerIds.size())
+    queuePlayerAttributeUpdate('groupPlayerIds', newValue)
     // sid4 remains subscribed per device across group membership transitions.
   }
   logDebug('Updating group device with new group membership information')
@@ -8482,8 +8483,8 @@ String getGroupMemberNames() {
 }
 void setGroupMemberNames(List<String> groupPlayerNames) {
   String newValue = groupPlayerNames.toString()
-  if(!shouldQueueLocalDeviceEvent('groupMemberNames', newValue, getGroupMemberNames())) { return }
-  queueLocalDeviceEvent('groupMemberNames', newValue)
+  if(!shouldQueuePlayerAttributeUpdate('groupMemberNames', newValue, getGroupMemberNames())) { return }
+  queuePlayerAttributeUpdate('groupMemberNames', newValue)
 }
 
 @CompileStatic
@@ -8556,10 +8557,10 @@ void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
     ])
     runtimeState.remove('groupAnnouncementStream')
   }
-  Boolean audioSourceChanged = shouldQueueLocalDeviceEvent('audioSource', audioSourceUrl,
+  Boolean audioSourceChanged = shouldQueuePlayerAttributeUpdate('audioSource', audioSourceUrl,
       this.device.currentValue('audioSource'))
   if(!audioSourceChanged) { return }
-  queueLocalDeviceEvent('audioSource', audioSourceUrl)
+  queuePlayerAttributeUpdate('audioSource', audioSourceUrl)
   // Queue for batched group device update
   queueGroupDeviceUpdate([audioSource: audioSourceUrl])
 }
@@ -8569,20 +8570,18 @@ String getAlbumArtURI() {
 }
 
 void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String foundFavName, Boolean isFav) {
-  String value = 'No favorite playing'
-  if((isFav) && foundFavImageUrl?.startsWith('/')) {
-    value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${getLocalUpnpUrl()}${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
-  } else if((isFav) && !foundFavImageUrl) {
-    value = "Favorite #${foundFavId} ${foundFavName}"
-  } else if(isFav) {
-    value = "Favorite #${foundFavId} ${foundFavName} <br><img src=\"${foundFavImageUrl}\" width=\"200\" height=\"200\" >"
+  if(isFav) {
+    Map<String, Object> value = [label: "Favorite #${foundFavId} ${foundFavName}", imageUrl: foundFavImageUrl ?: '']
+    queuePlayerAttributeUpdate('currentFavorite', value)
+    queueGroupDeviceUpdate([currentFavorite: value])
+  } else {
+    setCurrentFavorite('No favorite playing')
   }
-  setCurrentFavorite(value)
 }
 @CompileStatic
 void setCurrentFavorite(String uri) {
-  if(!shouldQueueLocalDeviceEvent('currentFavorite', uri, getCurrentFavorite())) { return }
-  queueLocalDeviceEvent('currentFavorite', uri)
+  if(!shouldQueuePlayerAttributeUpdate('currentFavorite', uri, getCurrentFavorite())) { return }
+  queuePlayerAttributeUpdate('currentFavorite', uri)
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentFavorite: uri])
 }
@@ -8600,8 +8599,8 @@ void setCurrentPlaylist(String foundPlaylistId, String foundPlaylistName, Boolea
 
 @CompileStatic
 void setCurrentPlaylist(String uri) {
-  if(!shouldQueueLocalDeviceEvent('currentPlaylist', uri, getCurrentPlaylist())) { return }
-  queueLocalDeviceEvent('currentPlaylist', uri)
+  if(!shouldQueuePlayerAttributeUpdate('currentPlaylist', uri, getCurrentPlaylist())) { return }
+  queuePlayerAttributeUpdate('currentPlaylist', uri)
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentPlaylist: uri])
 }
@@ -8636,10 +8635,10 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
     logWarn("Ignoring unsupported Sonos TransportState='${transportState}' from ${source}")
     return
   }
-  if(!shouldQueueLocalDeviceEvent('status', status, this.device.currentValue('status')) &&
-      !shouldQueueLocalDeviceEvent('transportStatus', status, getTransportStatus())) { return }
-  queueLocalDeviceEvent('status', status)
-  queueLocalDeviceEvent('transportStatus', status)
+  if(!shouldQueuePlayerAttributeUpdate('status', status, this.device.currentValue('status')) &&
+      !shouldQueuePlayerAttributeUpdate('transportStatus', status, getTransportStatus())) { return }
+  queuePlayerAttributeUpdate('status', status)
+  queuePlayerAttributeUpdate('transportStatus', status)
   // Queue for batched group device update
   queueGroupDeviceUpdate([status: status, transportStatus: status])
 }
@@ -8652,16 +8651,16 @@ Integer getPlayerVolume() {
 }
 void setPlayerVolume(Integer volume) {
   Integer oldVolume = getPlayerVolume()
-  if(!shouldQueueLocalDeviceEvent('volume', volume, oldVolume) &&
-      !shouldQueueLocalDeviceEvent('level', volume, this.device.currentValue('level') as Integer)) { return }
-  queueLocalDeviceEvent('level', volume)
-  queueLocalDeviceEvent('volume', volume)
+  if(!shouldQueuePlayerAttributeUpdate('volume', volume, oldVolume) &&
+      !shouldQueuePlayerAttributeUpdate('level', volume, this.device.currentValue('level') as Integer)) { return }
+  queuePlayerAttributeUpdate('level', volume)
+  queuePlayerAttributeUpdate('volume', volume)
   if(volume > 0) { runtimeState.restoreLevelAfterUnmute = volume }
 }
 void setBalanceState(Integer balance) {
   Integer oldBalance = this.device.currentValue('balance') as Integer
-  if(!shouldQueueLocalDeviceEvent('balance', balance, oldBalance)) { return }
-  queueLocalDeviceEvent('balance', balance)
+  if(!shouldQueuePlayerAttributeUpdate('balance', balance, oldBalance)) { return }
+  queuePlayerAttributeUpdate('balance', balance)
 }
 Boolean getIsMuted() {
   return getMuteState() == 'muted'
@@ -8676,7 +8675,7 @@ void setMuteState(String muted) {
   Object restoreLevel = runtimeState.restoreLevelAfterUnmute
   logDebug("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
   sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
-  if(!shouldQueueLocalDeviceEvent('mute', muted, observedMutedState)) {
+  if(!shouldQueuePlayerAttributeUpdate('mute', muted, observedMutedState)) {
     logDebug("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
     return
   }
@@ -8696,21 +8695,21 @@ void setMuteState(String muted) {
       logWarn('Skipping AirPlay unmute volume restore because the saved restore level is unavailable or invalid')
     }
   }
-  queueLocalDeviceEvent('mute', muted)
+  queuePlayerAttributeUpdate('mute', muted)
   logDebug("setMuteState queued parent mute event; value=${muted}")
 }
 
 void setBassState(Integer bass) {
-  if(!shouldQueueLocalDeviceEvent('bass', bass, this.device.currentValue('bass') as Integer)) { return }
-  queueLocalDeviceEvent('bass', bass)
+  if(!shouldQueuePlayerAttributeUpdate('bass', bass, this.device.currentValue('bass') as Integer)) { return }
+  queuePlayerAttributeUpdate('bass', bass)
 }
 void setTrebleState(Integer treble) {
-  if(!shouldQueueLocalDeviceEvent('treble', treble, this.device.currentValue('treble') as Integer)) { return }
-  queueLocalDeviceEvent('treble', treble)
+  if(!shouldQueuePlayerAttributeUpdate('treble', treble, this.device.currentValue('treble') as Integer)) { return }
+  queuePlayerAttributeUpdate('treble', treble)
 }
 void setLoudnessState(String loudness) {
-  if(!shouldQueueLocalDeviceEvent('loudness', loudness, this.device.currentValue('loudness'))) { return }
-  queueLocalDeviceEvent('loudness', loudness)
+  if(!shouldQueuePlayerAttributeUpdate('loudness', loudness, this.device.currentValue('loudness'))) { return }
+  queuePlayerAttributeUpdate('loudness', loudness)
 }
 
 @CompileStatic
@@ -8729,12 +8728,12 @@ void setPlayMode(String playMode){
     default: return
   }
   if(newRepeatOne == oldRepeatOne && newRepeatAll == oldRepeatAll && newShuffle == oldShuffle &&
-      !shouldQueueLocalDeviceEvent('currentRepeatOneMode', newRepeatOne, oldRepeatOne) &&
-      !shouldQueueLocalDeviceEvent('currentRepeatAllMode', newRepeatAll, oldRepeatAll) &&
-      !shouldQueueLocalDeviceEvent('currentShuffleMode', newShuffle, oldShuffle)) { return }
-  queueLocalDeviceEvent('currentRepeatOneMode', newRepeatOne)
-  queueLocalDeviceEvent('currentRepeatAllMode', newRepeatAll)
-  queueLocalDeviceEvent('currentShuffleMode', newShuffle)
+      !shouldQueuePlayerAttributeUpdate('currentRepeatOneMode', newRepeatOne, oldRepeatOne) &&
+      !shouldQueuePlayerAttributeUpdate('currentRepeatAllMode', newRepeatAll, oldRepeatAll) &&
+      !shouldQueuePlayerAttributeUpdate('currentShuffleMode', newShuffle, oldShuffle)) { return }
+  queuePlayerAttributeUpdate('currentRepeatOneMode', newRepeatOne)
+  queuePlayerAttributeUpdate('currentRepeatAllMode', newRepeatAll)
+  queuePlayerAttributeUpdate('currentShuffleMode', newShuffle)
   sendChildEvent(getRepeatOneControlChild(), 'switch', newRepeatOne)
   sendChildEvent(getRepeatAllControlChild(), 'switch', newRepeatAll)
   sendChildEvent(getShuffleControlChild(), 'switch', newShuffle)
@@ -8752,8 +8751,8 @@ String getCurrentShuffleMode() { return this.device.currentValue('currentShuffle
 
 @CompileStatic
 void setCrossfadeMode(String currentCrossfadeMode) {
-  if(!shouldQueueLocalDeviceEvent('currentCrossfadeMode', currentCrossfadeMode, getCrossfadeMode())) { return }
-  queueLocalDeviceEvent('currentCrossfadeMode', currentCrossfadeMode)
+  if(!shouldQueuePlayerAttributeUpdate('currentCrossfadeMode', currentCrossfadeMode, getCrossfadeMode())) { return }
+  queuePlayerAttributeUpdate('currentCrossfadeMode', currentCrossfadeMode)
   sendChildEvent(getCrossfadeControlChild(), 'switch', currentCrossfadeMode)
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentCrossfadeMode: currentCrossfadeMode])
@@ -8762,8 +8761,8 @@ String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMod
 
 @CompileStatic
 void setCurrentTrackDuration(String currentTrackDuration){
-  if(shouldQueueLocalDeviceEvent('currentTrackDuration', currentTrackDuration, getCurrentTrackDuration())) {
-    queueLocalDeviceEvent('currentTrackDuration', currentTrackDuration)
+  if(shouldQueuePlayerAttributeUpdate('currentTrackDuration', currentTrackDuration, getCurrentTrackDuration())) {
+    queuePlayerAttributeUpdate('currentTrackDuration', currentTrackDuration)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackDuration: currentTrackDuration])
@@ -8811,8 +8810,8 @@ void setTrackPositionFromPlaybackStatus(Map eventData, String playbackState, Lon
 void setTrackPosition(Long positionSeconds, Long updatedAt) {
   if(positionSeconds == null || updatedAt == null) { return }
   if(getEnableTrackPositionUpdates()) {
-    queueLocalDeviceEvent('trackPosition', positionSeconds)
-    queueLocalDeviceEvent('trackPositionUpdated', updatedAt)
+    queuePlayerAttributeUpdate('trackPosition', positionSeconds)
+    queuePlayerAttributeUpdate('trackPositionUpdated', updatedAt)
   }
   // Keep group devices independent: their own preference decides whether they
   // apply these coordinator updates, even when this player suppresses its event.
@@ -8825,8 +8824,8 @@ Long getTrackPositionUpdated() { return this.device.currentValue('trackPositionU
 @CompileStatic
 void setCurrentArtistName(String currentArtistName) {
   String value = currentArtistName ?: 'Not Available'
-  if(shouldQueueLocalDeviceEvent('currentArtistName', value, getCurrentArtistName())) {
-    queueLocalDeviceEvent('currentArtistName', value)
+  if(shouldQueuePlayerAttributeUpdate('currentArtistName', value, getCurrentArtistName())) {
+    queuePlayerAttributeUpdate('currentArtistName', value)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentArtistName: value])
@@ -8836,8 +8835,8 @@ String getCurrentArtistName() { return this.device.currentValue('currentArtistNa
 @CompileStatic
 void setCurrentAlbumName(String currentAlbumName) {
   String value = currentAlbumName ?: 'Not Available'
-  if(shouldQueueLocalDeviceEvent('currentAlbumName', value, getCurrentAlbumName())) {
-    queueLocalDeviceEvent('currentAlbumName', value)
+  if(shouldQueuePlayerAttributeUpdate('currentAlbumName', value, getCurrentAlbumName())) {
+    queuePlayerAttributeUpdate('currentAlbumName', value)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentAlbumName: value])
@@ -8847,8 +8846,8 @@ String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName
 @CompileStatic
 void setCurrentTrackName(String currentTrackName) {
   String value = currentTrackName ?: 'Not Available'
-  if(shouldQueueLocalDeviceEvent('currentTrackName', value, getCurrentTrackName())) {
-    queueLocalDeviceEvent('currentTrackName', value)
+  if(shouldQueuePlayerAttributeUpdate('currentTrackName', value, getCurrentTrackName())) {
+    queuePlayerAttributeUpdate('currentTrackName', value)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackName: value])
@@ -8858,8 +8857,8 @@ String getCurrentTrackName() { return this.device.currentValue('currentTrackName
 @CompileStatic
 void setCurrentTrackNumber(Integer currentTrackNumber) {
   Integer value = currentTrackNumber ?: 0
-  if(shouldQueueLocalDeviceEvent('currentTrackNumber', value, getCurrentTrackNumber())) {
-    queueLocalDeviceEvent('currentTrackNumber', value)
+  if(shouldQueuePlayerAttributeUpdate('currentTrackNumber', value, getCurrentTrackNumber())) {
+    queuePlayerAttributeUpdate('currentTrackNumber', value)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([currentTrackNumber: value])
@@ -8881,9 +8880,9 @@ void observeTransportTrackNumber(Integer currentTrackNumber) {
 @CompileStatic
 void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
-  Boolean changed = shouldQueueLocalDeviceEvent('trackDescription', trackDescription, prevTrackDescription)
+  Boolean changed = shouldQueuePlayerAttributeUpdate('trackDescription', trackDescription, prevTrackDescription)
   if(changed) {
-    queueLocalDeviceEvent('trackDescription', trackDescription)
+    queuePlayerAttributeUpdate('trackDescription', trackDescription)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([trackDescription: trackDescription])
@@ -8894,8 +8893,8 @@ String getTrackDescription() { return this.device.currentValue('trackDescription
 @CompileStatic
 void setTrackDataEvents(Map trackData) {
   String trackDataJson = JsonOutput.toJson(trackData)
-  if(shouldQueueLocalDeviceEvent('trackData', trackDataJson, getTrackDataEvents())) {
-    queueLocalDeviceEvent('trackData', trackDataJson)
+  if(shouldQueuePlayerAttributeUpdate('trackData', trackDataJson, getTrackDataEvents())) {
+    queuePlayerAttributeUpdate('trackData', trackDataJson)
   }
   // Queue for batched group device update
   queueGroupDeviceUpdate([trackData: trackDataJson])
@@ -8905,8 +8904,8 @@ String getTrackDataEvents() {return this.device.currentValue('trackData')}
 @CompileStatic
 void setNextArtistName(String nextArtistName) {
   String value = nextArtistName ?: 'Not Available'
-  if(!shouldQueueLocalDeviceEvent('nextArtistName', value, getNextArtistName())) { return }
-  queueLocalDeviceEvent('nextArtistName', value)
+  if(!shouldQueuePlayerAttributeUpdate('nextArtistName', value, getNextArtistName())) { return }
+  queuePlayerAttributeUpdate('nextArtistName', value)
   // Queue for batched group device update
   queueGroupDeviceUpdate([nextArtistName: value])
 }
@@ -8915,8 +8914,8 @@ String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 @CompileStatic
 void setNextAlbumName(String nextAlbumName) {
   String value = nextAlbumName ?: 'Not Available'
-  if(!shouldQueueLocalDeviceEvent('nextAlbumName', value, getNextAlbumName())) { return }
-  queueLocalDeviceEvent('nextAlbumName', value)
+  if(!shouldQueuePlayerAttributeUpdate('nextAlbumName', value, getNextAlbumName())) { return }
+  queuePlayerAttributeUpdate('nextAlbumName', value)
   // Queue for batched group device update
   queueGroupDeviceUpdate([nextAlbumName: value])
 }
@@ -8925,8 +8924,8 @@ String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 @CompileStatic
 void setNextTrackName(String nextTrackName) {
   String value = nextTrackName ?: 'Not Available'
-  if(!shouldQueueLocalDeviceEvent('nextTrackName', value, getNextTrackName())) { return }
-  queueLocalDeviceEvent('nextTrackName', value)
+  if(!shouldQueuePlayerAttributeUpdate('nextTrackName', value, getNextTrackName())) { return }
+  queuePlayerAttributeUpdate('nextTrackName', value)
   // Queue for batched group device update
   queueGroupDeviceUpdate([nextTrackName: value])
 }
@@ -8934,24 +8933,11 @@ String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 
 @CompileStatic
 void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocalTrack) {
-  String formattedUri = '<br>'
-
-  if(nextTrackAlbumArtURI.startsWith('/') && !isPlayingLocalTrack) {
-    // Local Sonos path - prepend base URL and wrap in HTML
-    String baseUrl = "${getLocalUpnpUrl()}${nextTrackAlbumArtURI}"
-    formattedUri += "<img src=\"${baseUrl}\" width=\"200\" height=\"200\" >"
-  } else if(!isPlayingLocalTrack && nextTrackAlbumArtURI && nextTrackAlbumArtURI != 'Not Available') {
-    // External URL - wrap in HTML
-    formattedUri += "<img src=\"${nextTrackAlbumArtURI}\" width=\"200\" height=\"200\" >"
-  } else {
-    // No album art available
-    formattedUri = 'Not Available'
-  }
-
-  if(!shouldQueueLocalDeviceEvent('nextTrackAlbumArtURI', formattedUri, getNextTrackAlbumArtURI())) { return }
-  queueLocalDeviceEvent('nextTrackAlbumArtURI', formattedUri)
+  String rawUri = isPlayingLocalTrack || !nextTrackAlbumArtURI ? 'Not Available' : nextTrackAlbumArtURI
+  if(!shouldQueuePlayerAttributeUpdate('nextTrackAlbumArtURI', rawUri, getNextTrackAlbumArtURI())) { return }
+  queuePlayerAttributeUpdate('nextTrackAlbumArtURI', rawUri)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([nextTrackAlbumArtURI: formattedUri])
+  queueGroupDeviceUpdate([nextTrackAlbumArtURI: rawUri])
 }
 String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
 
@@ -9256,6 +9242,10 @@ Boolean dispatchParentStateUpdateDirect(Map payload) {
       parent.groupAnnouncementProgress(payload?.correlationId?.toString(), payload?.phase?.toString(), payload, dni)
       return true
     }
+    if(kind == 'deviceAttributes') {
+      parent.playerAttributeUpdate(payload)
+      return true
+    }
   } catch(Exception e) {
     logWarn("direct parent dispatch failed for kind=${kind}: ${e.message}")
   }
@@ -9352,61 +9342,6 @@ void clearPlaylistsMap() {
   playlistsMap = new ConcurrentHashMap<String, LinkedHashMap>()
 }
 
-@CompileStatic
-List<Map> getCurrentPlayingStatesForGroup() {
-  List<Map> currentStates = []
-  currentStates.add([name: 'albumArtURI',           value: getAlbumArtURI()])
-  currentStates.add([name: 'status',                value: getTransportStatus()])
-  currentStates.add([name: 'transportStatus',       value: getTransportStatus()])
-  currentStates.add([name: 'currentRepeatOneMode',  value: getCurrentRepeatOneMode()])
-  currentStates.add([name: 'currentRepeatAllMode',  value: getCurrentRepeatAllMode()])
-  currentStates.add([name: 'currentShuffleMode',    value: getCurrentShuffleMode()])
-  currentStates.add([name: 'currentCrossfadeMode',  value: getCrossfadeMode()])
-  currentStates.add([name: 'currentTrackDuration',  value: getCurrentTrackDuration()])
-  if(getEnableTrackPositionUpdates()) {
-    currentStates.add([name: 'trackPosition', value: getTrackPosition()])
-    currentStates.add([name: 'trackPositionUpdated', value: getTrackPositionUpdated()])
-  }
-  currentStates.add([name: 'currentArtistName',     value: getCurrentArtistName()])
-  currentStates.add([name: 'currentAlbumName',      value: getCurrentAlbumName()])
-  currentStates.add([name: 'currentTrackName',      value: getCurrentTrackName()])
-  currentStates.add([name: 'trackDescription',      value: getTrackDescription()])
-  currentStates.add([name: 'trackData',             value: getTrackDataEvents()])
-  currentStates.add([name: 'currentFavorite',       value: getCurrentFavorite()])
-  currentStates.add([name: 'currentPlaylist',       value: getCurrentPlaylist()])
-  currentStates.add([name: 'nextAlbumName',         value: getNextAlbumName()])
-  currentStates.add([name: 'nextArtistName',        value: getNextArtistName()])
-  currentStates.add([name: 'nextTrackName',         value: getNextTrackName()])
-  currentStates.add([name: 'nextTrackAlbumArtURI',  value: this.device.currentValue('nextTrackAlbumArtURI')])
-  currentStates.add([name: 'albumArtSmall',         value: this.device.currentValue('albumArtSmall')])
-  currentStates.add([name: 'albumArtMedium',        value: this.device.currentValue('albumArtMedium')])
-  currentStates.add([name: 'albumArtLarge',         value: this.device.currentValue('albumArtLarge')])
-  currentStates.add([name: 'audioSource',           value: this.device.currentValue('audioSource')])
-  currentStates.add([name: 'currentTrackNumber',    value: this.device.currentValue('currentTrackNumber')])
-  currentStates.add([name: 'groupVolume',           value: getGroupVolumeState()])
-  currentStates.add([name: 'groupMute',             value: getGroupMuteState()])
-  for(Object itemObject : currentStates) {
-    Map item = (Map)itemObject
-    if(item.get('value') == null) { item.put('value', groupSnapshotFallback(item.get('name')?.toString())) }
-  }
-  return currentStates
-}
-
-@CompileStatic
-Object groupSnapshotFallback(String attributeName) {
-  switch(attributeName) {
-    case 'status': case 'transportStatus': return 'stopped'
-    case 'currentRepeatOneMode': case 'currentRepeatAllMode': case 'currentShuffleMode':
-    case 'currentCrossfadeMode': return 'off'
-    case 'currentTrackDuration': return '00:00:00'
-    case 'currentFavorite': return 'No favorite playing'
-    case 'currentPlaylist': return 'No playlist playing'
-    case 'currentTrackNumber': case 'groupVolume': return 0
-    case 'groupMute': return 'unmuted'
-    case 'trackData': return JsonOutput.toJson([name: 'Not Available', artist: 'Not Available', album: 'Not Available'])
-    default: return 'Not Available'
-  }
-}
 // =============================================================================
 // End Getters and Setters
 // =============================================================================
@@ -12553,7 +12488,7 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 // Websocket Incoming Data Processing
 // =============================================================================
 void processWebsocketMessage(String message) {
-  try { sendEvent(name: 'lastUpdated', value: now()) } catch(Exception ignored) { }
+  try { queuePlayerAttributeUpdate('lastUpdated', now()) } catch(Exception ignored) { }
   if(message == null || message == '') {return}
   String dni
   ArrayList json

@@ -35,7 +35,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<String> acknowledgedParentRequests = []
   List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
-  List<String> groupPlaybackSnapshotRequests = []
   Closure<Boolean> topologyApplyHook
 
   void mute() { commands << [name: 'mute'] }
@@ -59,11 +58,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
   void playerGetGroupsFull() {
     commands << [name: 'playerGetGroupsFull']
-  }
-
-  List<Map> getCurrentPlayingStatesForGroup() {
-    groupPlaybackSnapshotRequests << deviceNetworkId
-    return [[name: 'status', value: 'playing'], [name: 'transportStatus', value: 'playing']]
   }
 
   void playerLoadAudioClip(String uri, BigDecimal volume, Integer duration, String correlationId) {
@@ -1447,6 +1441,9 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.currentValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
     coordinator.currentValues.groupId = 'GROUP-1'
+    appScript.state.playerAttributeSnapshotsByRincon = [
+      'RINCON_COORD': [status: 'playing', transportStatus: 'playing']
+    ]
 
     when:
     appScript.topologyAttributeHandler([device: coordinator, name: 'groupPlayerIds',
@@ -2643,9 +2640,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.subscribeToGroupCommandRequests()
 
     then:
-    appScript.subscriptions.count { it == [coordinator, 'playerCommandRequest', 'playerCommandRequestHandler'] } == 1
-    appScript.subscriptions.count { it == [coordinator, 'groupFavoriteOperation', 'groupFavoriteOperationEventHandler'] } == 1
-    appScript.subscriptions.count { it == [group, 'zgtInProgress', 'zgtInProgressHandler'] } == 1
+    !appScript.subscriptions.any { it[0] in [coordinator, follower] &&
+      it[1] in ['playerCommandRequest', 'groupFavoriteOperation'] }
+    !appScript.subscriptions.any { it[0] == group && it[1] in ['zgtInProgress', 'parentAppRequest'] }
     !appScript.subscriptions.any { it[1] == 'sonosGroupCommandRequest' }
     !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
   }
@@ -2684,18 +2681,6 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     !appScript.scheduled.any { List job -> job[1] == 'zgtTopologyWatchdog' }
-  }
-
-  def "zgtInProgress handler accepts parent clear without error"() {
-    given:
-    group.dataValues.zgtInProgress = 'on'
-
-    when:
-    appScript.zgtInProgressHandler([value: 'off', deviceId: 'GROUP-DNI'] as Event)
-
-    then:
-    noExceptionThrown()
-    appScript.logs.any { String entry -> entry.contains('ZGT In Progress') }
   }
 
   def "Favorite with full options dispatches directly without topology checks"() {
@@ -3325,6 +3310,50 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
     attributes.currentTrackName == 'Track'
+  }
+
+  def "app player attribute updates fan out the full playback state to followers and group devices"() {
+    given:
+    List<Map> topology = [
+      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+    ]
+    appScript.state.zgtEventsByGroupId = ['GROUP-1': topology]
+    Map<String, Object> playback = [
+      status: 'playing', transportStatus: 'playing', audioSource: 'music',
+      currentTrackName: 'Track', currentArtistName: 'Artist', currentAlbumName: 'Album',
+      albumArtURI: 'http://example.test/art.jpg', currentFavorite: 'Favorite',
+      currentPlaylist: 'Playlist', currentTrackNumber: 4, currentTrackDuration: '00:03:20',
+      trackDescription: 'Track by Artist', trackData: '{}', trackPosition: 15L,
+      trackPositionUpdated: 123L, nextArtistName: 'Next Artist', nextAlbumName: 'Next Album',
+      nextTrackName: 'Next Track', nextTrackAlbumArtURI: 'Not Available',
+      currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'on',
+      currentCrossfadeMode: 'off'
+    ]
+
+    when:
+    appScript.applyPlayerAttributeUpdate(coordinator.deviceNetworkId, playback)
+
+    then:
+    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
+    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].currentTrackName == 'Track'
+    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
+  }
+
+  def "new member playback snapshots come from app state with explicit empty defaults"() {
+    when:
+    Map<String, Object> snapshot = appScript.coordinatorPlaybackAttributes('RINCON_COORD')
+
+    then:
+    snapshot.status == 'stopped'
+    snapshot.transportStatus == 'stopped'
+    snapshot.currentTrackName == 'Not Available'
+    snapshot.currentFavorite == 'No favorite playing'
+    snapshot.currentPlaylist == 'No playlist playing'
+    snapshot.currentTrackNumber == 0
+    snapshot.trackPosition == 0L
+    snapshot.trackData.contains('Not Available')
   }
 
   def "SAC UPnP intake debounces then fans out from a one millisecond callback"() {

@@ -248,8 +248,6 @@ metadata {
     attribute 'coordinatorActive', 'string'
     attribute 'followers', 'string'
     attribute 'currentlyJoinedPlayers', 'string'
-    attribute 'zgtInProgress', 'enum', ['on', 'off']
-    attribute 'parentAppRequest', 'string'
 
     // Extended playback attributes forwarded from coordinator
     attribute 'currentTrackDuration', 'string'
@@ -447,23 +445,9 @@ Map getGroupCommandSettings() {
   ]
 }
 
-/**
- * Queue a group command for deferred delivery to the parent app.
- * The caller returns immediately; the drain calls parent.groupAppRequest
- * after the device gate is released so playHighPriorityTTS never blocks
- * on the app gate from inside parse/command execution.
- */
-void setZgtInProgress(Object inProgress) {
-  String normalized = (inProgress == true || inProgress?.toString()?.trim()?.toLowerCase(Locale.ROOT) in ['true', 'on', 'yes']) ? 'on' : 'off'
-  sendEvent(name: 'zgtInProgress', value: normalized)
-}
-
 void requestGroupCommand(String command, Map args = [:]) {
   if(!command) {
     return
-  }
-  if(command in ['on', 'groupPlayers', 'joinPlayersToCoordinator', 'evictUnlistedPlayers', 'addPlayerToGroup', 'removePlayersFromCoordinator', 'ungroupPlayers', 'off']) {
-    setZgtInProgress(true)
   }
   Integer sequence = ((runtimeState.groupCommandSequence ?: 0) as Integer) + 1
   runtimeState.groupCommandSequence = sequence
@@ -604,9 +588,8 @@ void purgeParentGroupCommandsAfterInitialization(Map data = [:]) {
   try {
     Map payload = [version: 1, channel: 'groupAppRequest', action: 'initializationPurge',
       groupDni: dni, createdAt: now(), requestId: UUID.randomUUID().toString()]
-    // Event-only parent communication (child never calls parent.methodName())
-    sendEvent(name: 'parentAppRequest', value: JsonOutput.toJson(payload))
-    logDebug("Parent app initialization purge sent via event, sourceDni=${dni}, requestId=${payload.requestId}")
+    parent.groupAppRequest(payload)
+    logDebug("Parent app initialization purge delivered, sourceDni=${dni}, requestId=${payload.requestId}")
   } catch(Exception e) {
     logWarn("Parent app initialization purge event failed for ${dni}: ${e.message}")
   }
@@ -1107,7 +1090,6 @@ void updateBatchPlaybackState(String jsonAttributes) {
 
 /** Accept one coalesced parent batch through the normal group-state guard. */
 void applyStateBatch(String jsonAttributes) {
-  try { sendEvent(name: 'lastUpdated', value: now()) } catch(Exception ignored) { }
   processBatchPlaybackState(jsonAttributes, false)
 }
 

@@ -478,7 +478,10 @@ class SonosAdvPlayerSpec extends Specification {
     MetaClass originalMetaClass = driver.getMetaClass()
     driver.setMetaClass(new ExpandoMetaClass(driver.class, false, true))
     driver.getMetaClass().initialize()
-    driver.metaClass.getParent = { -> new Expando(playerStateUpdate: { Map payload -> parentPlayerUpdates << payload }, groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }) }
+    driver.metaClass.getParent = { -> new Expando(
+      playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
+      playerStateUpdate: { Map payload -> parentPlayerUpdates << payload },
+      groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }) }
     driver.metaClass.postSonosSoapAsync = { String callback, Map params, Map data ->
       throw new IllegalStateException('HTTP dispatch failed')
     }
@@ -566,8 +569,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.state.playbackStateObservedAt == null
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackState') != true
     driver.pendingLocalDeviceEvents[dni]?.containsKey('playbackStateObservedAt') != true
-    driver.events.any { Map e -> e.name == 'lastUpdated' }
-    playerStateMessages().isEmpty()
+    driver.flushPendingLocalDeviceEvents()
+    parentPlayerUpdates.any { Map update -> update.kind == 'deviceAttributes' && update.attributes.lastUpdated != null }
+    !playerStateMessages().any { Map update -> update.kind != 'deviceAttributes' }
   }
 
   def "track position publishes on playback changes and seek but ignores normal progress heartbeats"() {
@@ -1512,6 +1516,17 @@ class SonosAdvPlayerSpec extends Specification {
     rawSocket = driver.binding.getVariable('interfaces').rawSocket
   }
 
+  void applyMockAppPlayerAttributes(Map payload) {
+    parentPlayerUpdates << new LinkedHashMap(payload)
+    Map attributes = payload?.attributes instanceof Map ? (Map)payload.attributes : [:]
+    attributes.each { Object name, Object value ->
+      if(name == 'currentFavorite' && value instanceof Map) {
+        value = ((Map)value).label?.toString() ?: 'No favorite playing'
+      }
+      driver.device.sendEvent(name: name.toString(), value: value)
+    }
+  }
+
   def setup() {
     parentPlayerUpdates.clear()
     parentPlayerRequests.clear()
@@ -1561,6 +1576,18 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.isGroupCoordinator = 'true'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
+    driver.metaClass.getParent = { -> new Expando(
+      playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
+      playerCommandRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload); true },
+      playerGroupFavoriteOperationUpdate: { Map payload -> parentPlayerUpdates << [kind: 'groupFavoriteOperation', payload: new LinkedHashMap(payload)] },
+      putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
+      putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
+      putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
+      putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
+      playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
+      playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
+      groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
+    ) }
     driver.clearFavoritesMap()
     driver.clearPlaylistsMap()
     driver.favoriteRetryState.clear()
@@ -1679,7 +1706,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     parentPlayerUpdates.empty
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
-    driver.events.any { Map e -> e.name == 'lastUpdated' }
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].lastUpdated != null
 
     when:
     drainParentBridge()
@@ -1687,7 +1714,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     // playbackObservation now via lastUpdated + attribute subscription, not outbox
     parentPlayerUpdates.isEmpty()
-    driver.events.any { Map e -> e.name == 'lastUpdated' }
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].lastUpdated != null
   }
 
 
@@ -1731,12 +1758,29 @@ class SonosAdvPlayerSpec extends Specification {
     driver.state.localDeviceEventDrainScheduled = true
 
     when:
-    driver.queueLocalDeviceEvent('isGrouped', 'on')
+    driver.queuePlayerAttributeUpdate('isGrouped', 'on')
 
     then:
     driver.scheduled.any { List item -> item[1] == 'flushPendingLocalDeviceEvents' }
     driver.state.localDeviceEventDrainScheduled == true
     driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].isGrouped == 'on'
+  }
+
+  def "player state changes are handed to the app without driver attribute events"() {
+    given:
+    List<Map> updates = []
+    driver.metaClass.getParent = { -> new Expando(playerAttributeUpdate: { Map payload -> updates << new LinkedHashMap(payload) }) }
+
+    when:
+    driver.queuePlayerAttributeUpdate('currentTrackName', 'App Owned Track')
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    updates.size() == 1
+    updates[0].playerDni == 'SONOS-TEST-DNI'
+    updates[0].attributes.currentTrackName == 'App Owned Track'
+    driver.device.events.isEmpty()
+    driver.device.currentValue('currentTrackName') == null
   }
 
   def "local event rescheduling preserves the original maximum-wait deadline"() {
@@ -1745,10 +1789,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.now = { -> clock[0] }
 
     when:
-    driver.queueLocalDeviceEvent('groupMemberCount', 2)
+    driver.queuePlayerAttributeUpdate('groupMemberCount', 2)
     Long firstDueAt = driver.state.localDeviceEventDrainDueAt as Long
     clock[0] = 1300L
-    driver.queueLocalDeviceEvent('groupMemberCount', 1)
+    driver.queuePlayerAttributeUpdate('groupMemberCount', 1)
 
     then:
     firstDueAt == 1500L
@@ -1759,12 +1803,12 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "local event drain schedules values enqueued while it sends a batch"() {
     given:
-    driver.queueLocalDeviceEvent('groupName', 'Cora’s Room + 1')
+    driver.queuePlayerAttributeUpdate('groupName', 'Cora’s Room + 1')
     driver.device.metaClass.sendEvent = { Map event ->
       delegate.events << event
       delegate.currentValues[event.name as String] = event.value
       if(event.name == 'groupName') {
-        driver.queueLocalDeviceEvent('groupMemberCount', 2)
+        driver.queuePlayerAttributeUpdate('groupMemberCount', 2)
       }
     }
 
@@ -1787,7 +1831,7 @@ class SonosAdvPlayerSpec extends Specification {
   def "failed local event remains queued and is delivered on a later drain"() {
     given:
     Integer attempts = 0
-    driver.queueLocalDeviceEvent('isGrouped', 'on')
+    driver.queuePlayerAttributeUpdate('isGrouped', 'on')
     driver.device.metaClass.sendEvent = { Map event ->
       attempts++
       if(attempts == 1) { throw new IllegalStateException('temporary event failure') }
@@ -3897,24 +3941,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
   }
 
-  def "new group member snapshot explicitly clears absent coordinator playback values"() {
-    when:
-    List<Map> snapshot = driver.getCurrentPlayingStatesForGroup()
-    Map<String, Object> attributes = [:]
-    snapshot.each { Map item -> attributes[item.name.toString()] = item.value }
-
-    then:
-    attributes.currentFavorite == 'No favorite playing'
-    attributes.currentPlaylist == 'No playlist playing'
-    attributes.currentTrackName == 'Not Available'
-    attributes.currentArtistName == 'Not Available'
-    attributes.audioSource == 'Not Available'
-    attributes.status == 'stopped'
-    attributes.transportStatus == 'stopped'
-    attributes.currentTrackNumber == 0
-    attributes.values().every { Object value -> value != null }
-  }
-
   def "grouped follower ignores its local AVTransport playback stream"() {
     given:
     driver.device.dataValues.id = 'RINCON_TEST'
@@ -3980,6 +4006,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "parent command queue waits for controller acknowledgement before sending the next request"() {
     given:
+    driver.metaClass.getParent = { -> new Expando(playerCommandRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload); false }) }
     driver.requestParentCoordinatorCommand('muteGroup')
     driver.requestParentCoordinatorCommand('unmuteGroup')
 
@@ -4055,24 +4082,24 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
     driver.runtimeState.groupFavoriteOperationId == 'group-op-1'
     driver.runtimeState.groupFavoriteOperationAttemptId == 'group-op-1:1'
-    String bridgeValue = driver.device.events.find { Map event ->
-      event.name == 'groupFavoriteOperation'
-    }.value as String
-    ((Map)new JsonSlurper().parseText(bridgeValue.replaceAll('(?is)<[^>]+>', ''))).attemptId == 'group-op-1:1'
-    driver.device.currentValues.groupFavoriteOperation == bridgeValue
-    bridgeValue.startsWith('<span style="display:none">')
+    driver.flushPendingGroupFavoriteOperationEvents()
+    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'groupFavoriteOperation' }.payload
+    update.attemptId == 'group-op-1:1'
+    driver.device.events.isEmpty()
     driver.scheduled.every { List call -> call[1] != 'playerPlay' }
   }
 
-  def "stale group Favorite bridge state is removable"() {
+  def "group Favorite updates use a deferred app handoff without device events"() {
     given:
-    driver.device.currentValues.groupFavoriteOperation = '{"event":"stale"}'
+    driver.registerGroupFavoriteOperation('group-op-private', '42')
 
     when:
-    driver.clearGroupFavoriteOperationCurrentState()
+    driver.emitGroupFavoriteOperationEvent('registered', [favoriteId: '42'])
+    driver.flushPendingGroupFavoriteOperationEvents()
 
     then:
-    !driver.device.currentValues.containsKey('groupFavoriteOperation')
+    parentPlayerUpdates.any { Map item -> item.kind == 'groupFavoriteOperation' && item.payload.event == 'registered' }
+    driver.device.events.isEmpty()
   }
 
   def "paired audio clip waits for both sockets and never replays secondary after primary dispatch"() {
@@ -4413,8 +4440,9 @@ class SonosAdvPlayerSpec extends Specification {
     ])
 
     then:
-    Map event = driver.device.events.find { Map item -> item.name == 'groupFavoriteOperation' }
-    Map payload = (Map)new JsonSlurper().parseText((event.value as String).replaceAll('(?is)<[^>]+>', ''))
+    driver.flushPendingGroupFavoriteOperationEvents()
+    List<Map> updates = parentPlayerUpdates.findAll { Map item -> item.kind == 'groupFavoriteOperation' }
+    Map payload = updates.collect { Map item -> item.payload }.find { Map item -> item.event == 'metadataConfirmed' }
     payload.event == 'metadataConfirmed'
     payload.data.favoriteId == '42'
     payload.data.confirmed == true
@@ -4429,7 +4457,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.processWebsocketMessage('[{"type":"groups","name":"groups"}, {"groups":[]}]')
 
     then:
-    driver.device.events.every { Map item -> item.name != 'groupFavoriteOperation' }
+    driver.device.events.isEmpty()
   }
   def "announcement volume preserves explicit zero across paths and boosts"() {
     given:
