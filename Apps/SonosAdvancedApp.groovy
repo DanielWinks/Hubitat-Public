@@ -274,6 +274,11 @@ preferences {
 @Field static java.util.concurrent.ConcurrentHashMap<String, Long> zgtReadyByDni = new java.util.concurrent.ConcurrentHashMap<String, Long>()
 @Field static final List<String> PLAYER_STATE_ATTRIBUTES = ['groupVolume','groupMute','groupPlayerIds','groupCoordinatorId','isGroupCoordinator','isGrouped','status','transportStatus','audioSource','currentTrackName','currentArtistName']
 @Field static final Integer LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS = 300
+@Field static final String GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY = 'groupAnnouncementProgressQueue'
+@Field static final String GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY = 'groupAnnouncementDueAt'
+@Field static final Integer GROUP_ANNOUNCEMENT_PROGRESS_MAX = 64
+@Field static final Long GROUP_ANNOUNCEMENT_MAX_WAIT_MS = 2000L
+@Field static final Integer GROUP_ANNOUNCEMENT_DEBOUNCE_MS = 1000
 @Field static final String ALARM_REQUEST_ATTRIBUTE = 'sonosAlarmRequest'
 @Field static final String PLAYER_PLAYBACK_OBSERVATIONS_STATE_KEY = 'sonosPlayerPlaybackObservations'
 @Field static final String PENDING_PLAYER_STATE_UPDATES_STATE_KEY = 'pendingPlayerStateUpdates'
@@ -2682,7 +2687,6 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
   state[PLAYER_STATE_UPDATE_DRAIN_SCHEDULED_STATE_KEY] = false
   state.remove(PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY)
   scheduleQueuedPlayerStateUpdateDrain(25)
-  scheduleDriverParentPoll()
   scheduleHouseholdHealthCheck()
   if(state[HOUSEHOLD_TOPOLOGY_APPLY_STATE_KEY] instanceof Map) {
     runIn(1, 'applyHouseholdTopologyBatch', [overwrite: true])
@@ -2691,60 +2695,80 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
 
 @Field static final Integer DRIVER_PARENT_POLL_INTERVAL_MS = 100
 
-/** Re-arm the driver outbox poll after a reboot discards its job. */
 void scheduleDriverParentPoll() {
-  runInMillis(DRIVER_PARENT_POLL_INTERVAL_MS, 'pollDriverParentQueues', [overwrite: true])
+  // Driver outbox retired — no polling; kept for backward-compat no-op
 }
 
-/**
- * Poll child driver outboxes for parent-bound work without any synchronous
- * driver→parent call: drivers only enqueue (ConcurrentHashMap, no gate wait)
- * and this app-side poll claims their batches via pure getters. Driver
- * executions never wait for the app gate and app executions never wait for a
- * driver gate held by a blocked parent call, so the 120 s cycle cannot form.
- */
 void pollDriverParentQueues() {
-  Integer polled = 0
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    String dni = player.getDeviceNetworkId()?.toString()
-    if(!dni) { return }
-    List<Map> updates = []
-    try { updates = (List<Map>)player.drainPendingParentUpdatesForPoll() ?: [] } catch(Exception e) {
-      logWarn("Could not poll parent updates from ${dni}: ${e.message}")
-      updates = []
-    }
-    updates.each { Map payload ->
-      polled++
-      playerStateUpdate(new LinkedHashMap(payload))
-    }
-    List<Map> requests = []
-    try { requests = (List<Map>)player.drainPendingParentRequestsForPoll() ?: [] } catch(Exception e) {
-      logWarn("Could not poll parent requests from ${dni}: ${e.message}")
-      requests = []
-    }
-    requests.each { Map request -> handlePolledPlayerRequest(player, new LinkedHashMap(request)) }
-  }
-  getCurrentGroupDevices().each { ChildDeviceWrapper group ->
-    String dni = group.getDeviceNetworkId()?.toString()
-    if(!dni) { return }
-    List<Map> requests = []
-    try { requests = (List<Map>)group.drainPendingGroupRequestsForPoll() ?: [] } catch(Exception e) {
-      logWarn("Could not poll group requests from ${dni}: ${e.message}")
-      requests = []
-    }
-    requests.each { Map request ->
-      polled++
-      enqueueGroupCommandRequest(new LinkedHashMap(request))
-    }
-  }
-  if(polled > 0) {
-    logDebug("Driver parent poll delivered ${polled} item(s)")
-  }
-  scheduleDriverParentPoll()
+  // Direct parent calls now handle init/announcement/request; polling removed
 }
 
 void scheduleHouseholdHealthCheck() {
   runIn(HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS, 'householdHealthCheck', [overwrite: true])
+}
+
+void requestInitializationTurn(String dni, String reason) {
+  if(!dni) { return }
+  List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
+  if(queue.any { Map r -> r.dni?.toString() == dni }) { return }
+  String requestId = UUID.randomUUID().toString()
+  queue.add([dni: dni, requestId: requestId, reason: reason ?: 'driver initialize', requestedAt: now(), bootAttempt: 0, bootGeneration: state[PLAYER_INITIALIZATION_BOOT_GENERATION_STATE_KEY]])
+  state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
+  runInMillis(1, 'startNextPlayerInitialization', [overwrite: true])
+}
+void initializationStarted(String requestId) {
+  if(!requestId) { return }
+  Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
+  Map entry = ledger[requestId] instanceof Map ? new LinkedHashMap((Map)ledger[requestId]) : [:]
+  entry.status = 'started'
+  entry.startedAt = now()
+  ledger[requestId] = entry
+  state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+}
+void initializationComplete(String requestId, String detail) {
+  if(!requestId) { return }
+  finishPlayerInitialization(requestId, true, detail ?: '')
+}
+void initializationFailed(String requestId, String detail) {
+  if(!requestId) { return }
+  finishPlayerInitialization(requestId, false, detail ?: 'child reported initialization failure')
+}
+void groupAnnouncementProgress(String correlationId, String phase, Map payload, String dni) {
+  if(!correlationId || !phase) { return }
+  List<Map> q = state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY] instanceof List ? new ArrayList<Map>((List<Map>)state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY]) : []
+  q.add([correlationId: correlationId, phase: phase, payload: new LinkedHashMap(payload ?: [:]), dni: dni, at: now()])
+  if(q.size() > GROUP_ANNOUNCEMENT_PROGRESS_MAX) {
+    q.remove(0)
+    logWarn("Group announcement progress queue overflow; dropped oldest phase (max=${GROUP_ANNOUNCEMENT_PROGRESS_MAX})")
+  }
+  state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY] = q
+  Long dueAt = state[GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY] as Long
+  if(dueAt == null || dueAt < now()) {
+    dueAt = now() + GROUP_ANNOUNCEMENT_DEBOUNCE_MS as Long
+    state[GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY] = dueAt
+  }
+  Long remain = dueAt - now()
+  if(remain < 1L) { remain = 1L }
+  Integer delay = (remain / 1000L).toInteger()
+  if(delay < 1) { delay = 1 }
+  try { runIn(delay, 'drainGroupAnnouncementProgress', [overwrite: true]) } catch(Exception e) { logWarn("Could not schedule group announcement drain: ${e.message}") }
+}
+void drainGroupAnnouncementProgress() {
+  Long dueAt = state[GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY] as Long
+  if(dueAt != null && dueAt > now()) {
+    // debounce not yet at hard deadline
+    try { runIn(1, 'drainGroupAnnouncementProgress', [overwrite: true]) } catch(Exception ignored) { }
+    return
+  }
+  List<Map> q = state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY] instanceof List ? new ArrayList<Map>((List<Map>)state[GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY]) : []
+  state.remove(GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY)
+  state.remove(GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY)
+  if(q.isEmpty()) { return }
+  q.each { Map item ->
+    ChildDeviceWrapper player = getChildDevice(item.dni?.toString())
+    if(!player) { player = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == item.dni?.toString() } }
+    if(player) { handleGroupAnnouncementProgress(player, item.payload ?: item) }
+  }
 }
 
 void householdHealthCheck() {
