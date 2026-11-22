@@ -4750,14 +4750,15 @@ void sendHubitatEvent(Map event) { sendEvent(event) }
 
 @CompileStatic
 void parse(String raw) {
-  try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
+    try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
     logDebug("UPnP response parse entered; payloadLength=${raw.length()}")
     handleUpnpRawResponse(raw)
     return
   }
   if(!raw.startsWith('mac:')) {
+    try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
     logDebug("WebSocket parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     try {
       setLastWebsocketEvent()
@@ -4789,6 +4790,9 @@ void parse(String raw) {
       return
     }
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]?.toString()
+    if(!(serviceType in ['ZoneGroupTopology', 'AVTransport', 'GroupRenderingControl'])) {
+      try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
+    }
     String seqRaw = messageHeaders["SEQ"] ?: messageHeaders["X-SONOS-SEQ"]
     Integer seq = null
     if(seqRaw != null) {
@@ -4806,21 +4810,23 @@ void parse(String raw) {
       switch(serviceType) {
         case 'ZoneGroupTopology':
           try {
-            observeExpectedUpnpSubscriptionEvent('sid3')
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
+            Map snapshot = parseZgtFullSnapshot(xmlBody)
+            if(snapshot == null) { return }
             String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            logZgtXmlAtTrace(zgtDni, xmlBody)
-            deferOrProcessZoneGroupTopologyPayload(zgtDni, xmlBody, seq)
+            Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
+            queueParsedUpnpRelay([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId])
           } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
           return
         case 'AVTransport':
           try {
-            observeExpectedUpnpSubscriptionEvent('sid1')
-            setLastInboundAVTransportEvent()
-            String avtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            logZgtXmlAtTrace(avtDni, xmlBody)
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AVT event payload'); return }
-            deferOrProcessAvTransportPayload(avtDni, xmlBody, seq)
+            Map snapshot = parseAvtFullSnapshot(xmlBody)
+            if(snapshot == null) { return }
+            String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+            String rincon = resolveCurrentCoordinatorRinconForAvt(sourceDni) ?: getId()
+            List<Map> events = buildAvtEvents(snapshot, [:])
+            queueParsedUpnpRelay([service: 'AVT', sourceDni: sourceDni, rincon: rincon, events: events])
           } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
           return
         case 'RenderingControl':
@@ -4837,12 +4843,13 @@ void parse(String raw) {
           return
         case 'GroupRenderingControl':
           try {
-            observeExpectedUpnpSubscriptionEvent('sid4')
-            setLastInboundMrGrcEvent()
-            String grcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            logZgtXmlAtTrace(grcDni, xmlBody)
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
-            deferOrProcessGroupRenderingControlPayload(grcDni, xmlBody, seq, sid)
+            Map snapshot = parseGrcFullSnapshot(xmlBody)
+            if(snapshot == null) { return }
+            String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+            String rincon = resolveCurrentCoordinatorRinconForAvt(sourceDni) ?: getId()
+            List<Map> events = buildGrcEvents(snapshot)
+            queueParsedUpnpRelay([service: 'GRC', sourceDni: sourceDni, rincon: rincon, events: events])
           } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
           return
         case 'HTControl':
@@ -4864,6 +4871,21 @@ void parse(String raw) {
     logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
         "Could not determine service type for message: ${message}")
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
+}
+
+// Parse handlers relay sendEvent-ready payloads after parse() releases the player gate.
+void queueParsedUpnpRelay(Map payload) {
+  if(payload == null || parent == null) { return }
+  runInMillis(1, 'relayParsedUpnpToParent', [overwrite: false, data: new LinkedHashMap(payload)])
+}
+
+void relayParsedUpnpToParent(Map data) {
+  if(data == null || parent == null) { return }
+  try {
+    parent.putPlayerUpnpEvents(new LinkedHashMap(data))
+  } catch(Exception e) {
+    logWarn("Could not relay parsed UPnP ${data.service ?: 'unknown'} data to parent: ${e.message}")
+  }
 }
 
 // Stale payloads are dropped before enqueue because republished stale state has no value;

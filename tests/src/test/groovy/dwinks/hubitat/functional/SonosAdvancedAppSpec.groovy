@@ -3300,6 +3300,18 @@ class SonosAdvancedAppSpec extends Specification {
     timerMarkup ==~ /(?s).*<div class='new-ui-discovery-detail'>About [0-9]+ seconds remaining<\/div>.*/
   }
 
+  def "parsed player UPnP event DTOs update the matching parent stores"() {
+    when:
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_RELAY',
+      events: [[name: 'albumArtURI', value: '<img src="art.jpg">']]])
+    appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_RELAY',
+      events: [[name: 'groupVolume', value: 37]]])
+
+    then:
+    appScript.getStoredAvtEvents('RINCON_RELAY').find { Map event -> event.name == 'albumArtURI' }.value == '<img src="art.jpg">'
+    appScript.getStoredGrcEvents('RINCON_RELAY').find { Map event -> event.name == 'groupVolume' }.value == 37
+  }
+
   def "pure AVT setter merges latest-only without scheduling fanout"() {
     when:
     List<Map> stored = appScript.putAvtEvents('RINCON_COORD', [

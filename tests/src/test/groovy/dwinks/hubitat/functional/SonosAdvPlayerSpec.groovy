@@ -1544,6 +1544,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.getParent = { -> new Expando(
       playerStateUpdate: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       playerAppRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload) },
+      putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
@@ -2259,6 +2260,25 @@ class SonosAdvPlayerSpec extends Specification {
     driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 21
   }
 
+  def "AVT parse relays sendEvent maps without publishing player events"() {
+    given:
+    String body = avtBody('<TransportState val="PLAYING"/>')
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\n' +
+      'X-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 1\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
+    }
+
+    when:
+    driver.parse(raw)
+
+    then:
+    driver.device.events.empty
+    driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' && row[2].data.service == 'AVT' &&
+      row[2].data.events.any { Map event -> event.name == 'status' && event.value == 'playing' } }
+    driver.pendingGroupDeviceUpdates[driver.device.deviceNetworkId] == null
+  }
+
   def "ZGT notification logs header values with SEQ 0"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
@@ -2918,7 +2938,7 @@ class SonosAdvPlayerSpec extends Specification {
     ]
   }
 
-  def "ZGT notification with unrelated service properties still publishes household topology"() {
+  def "ZGT notification with unrelated service properties relays parsed topology"() {
     given:
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/>' +
@@ -2940,9 +2960,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parse(raw)
 
     then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.containsKey('G1') == true
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].last()['G1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
-    parentPlayerUpdates.isEmpty()  // hand-off is queued; parent is called on flush only
+    driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' &&
+      row[2].data.service == 'ZGT' && row[2].data.eventsByGroupId['G1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST' }
+    parentPlayerUpdates.isEmpty()  // hand-off is queued; parent is called after parse returns
   }
 
   def "every player subscribes to ZGT without app election state"() {

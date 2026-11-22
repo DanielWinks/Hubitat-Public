@@ -10272,6 +10272,23 @@ void playerDeparted(String rincon, String dni, String name) {
   logInfo("Sonos player departed: ${name} (${rincon}, ${dni})")
 }
 
+/** Accept the parsed UPnP DTO from a player; event maps are ready for direct replay. */
+void putPlayerUpnpEvents(Map payload) {
+  String service = payload?.service?.toString()
+  if(service == 'AVT' || service == 'GRC') {
+    String rincon = payload?.rincon?.toString()
+    List<Map> events = payload?.events instanceof List ? (List<Map>)payload.events : []
+    if(!rincon || events.isEmpty()) { return }
+    if(service == 'AVT') { putAvtEvents(rincon, events) }
+    else { putGrcEvents(rincon, events) }
+  } else if(service == 'ZGT') {
+    String sourceDni = payload?.sourceDni?.toString()
+    Map<String, List<Map>> eventsByGroupId = payload?.eventsByGroupId instanceof Map
+        ? (Map<String, List<Map>>)payload.eventsByGroupId : [:]
+    if(sourceDni && !eventsByGroupId.isEmpty()) { putZgtTopology(sourceDni, eventsByGroupId) }
+  }
+}
+
 /** Pure set+return only: merge delta by name into the stored list; no child calls. */
 List<Map> putAvtEvents(String coordinatorRincon, List<Map> events) {
   String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()
