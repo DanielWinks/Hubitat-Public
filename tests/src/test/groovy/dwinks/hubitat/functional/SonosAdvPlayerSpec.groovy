@@ -14,6 +14,28 @@ import spock.lang.Specification
 
 class SonosAdvPlayerSpec extends Specification {
 
+  void seedUpnpFavorite(String favoriteId, String uri = "x-sonos-http:song%3a${favoriteId}.mp4?sid=204&flags=8232&sn=9") {
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.isGroupCoordinator = 'true'
+    driver.getFavoritesMap()["test-${favoriteId}"] = [id: favoriteId, name: "Favorite ${favoriteId}",
+      service: 'Apple Music', upnpUri: uri,
+      upnpMetadata: '<DIDL-Lite><item id="10032028song%3a' + favoriteId + '"><dc:title>Favorite ' + favoriteId + '</dc:title></item></DIDL-Lite>',
+      resourceObjectId: '10032028song%3a' + favoriteId, matchObjectId: favoriteId]
+  }
+
+  void seedUpnpPlaylist(String playlistId) {
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.isGroupCoordinator = 'true'
+    driver.getPlaylistsMap()[playlistId] = [id: playlistId, objectId: "SQ:${playlistId}", name: "Playlist ${playlistId}",
+      upnpUri: "x-rincon-cpcontainer:SQ:${playlistId}",
+      upnpMetadata: '<DIDL-Lite><item id="SQ:' + playlistId + '"><dc:title>Playlist ' + playlistId + '</dc:title></item></DIDL-Lite>']
+  }
+
+  void queueTestGroupSocketCommand(Integer marker = 10) {
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.sendWsMessage(JsonOutput.toJson([[namespace: 'groups', command: 'getGroups', householdId: 'HOUSE_TEST'], [marker: marker]]))
+  }
+
   @Shared HubitatScriptHarness driver
   @Shared List<String> websocketMessages = []
   @Shared List<Map> rawConnections = []
@@ -44,6 +66,40 @@ class SonosAdvPlayerSpec extends Specification {
     service.actions.SetVolume.arguments == originalArguments
     driver.parseSonosMessageXML('<Event><title>A &amp; B</title></Event>').getAt('title').text() == 'A & B'
     driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').getAt('title').text() == 'A < B > C "D" \'E\''
+  }
+
+  def "favorites are browsed and correlated to AVTransport by their UPnP resource URI"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    String uri = 'x-sonos-http:song%3a933958518.mp4?sid=204&flags=8232&sn=9'
+    String embedded = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
+      'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
+      'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="10032028song%3a933958518">' +
+      '<dc:title>Peepers On Crane Pond</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>' +
+      '</item></DIDL-Lite>'
+    String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
+      'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
+      'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" ' +
+      'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="FV:2/14" parentID="FV:2">' +
+      '<dc:title>Peepers On Crane Pond</dc:title><upnp:albumArtURI>https://example.test/cover.jpg</upnp:albumArtURI>' +
+      '<res>' + uri.replace('&', '&amp;') + '</res><r:resMD>' + StringEscapeUtils.escapeXml10(embedded) +
+      '</r:resMD></item></DIDL-Lite>'
+
+    when:
+    driver.getFavorites()
+    Map request = driver.asyncCalls.last()
+    driver.favoritesBrowseCallback(new hubitat.scheduling.AsyncResponse(status: 200,
+      data: '<BrowseResponse><Result>' + StringEscapeUtils.escapeXml10(didl) +
+        '</Result><TotalMatches>1</TotalMatches><UpdateID>5</UpdateID></BrowseResponse>'), request.data)
+    driver.updateCurrentFavoriteFromUpnp([currentTrackURI: 'x-sonos-http:song%3aother.mp4',
+      enqueuedTransportURIMetaData: driver.parseAvtMetaData(embedded)])
+    driver.flushPendingLocalDeviceEvents()
+
+    then:
+    request.params.uri == 'http://192.168.1.50/MediaServer/ContentDirectory/Control'
+    request.params.body.contains('<ObjectID>FV:2</ObjectID>')
+    driver.findFavoriteById('14').name == 'Peepers On Crane Pond'
+    driver.device.currentValue('currentFavorite').contains('Favorite #14 Peepers On Crane Pond')
   }
 
   void drainParentBridge() {
@@ -1070,6 +1126,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "mute child commands send player mute requests"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
     com.hubitat.app.DeviceWrapper child = new com.hubitat.app.DeviceWrapper(dataValues: [command: 'Mute'])
 
     when:
@@ -1077,9 +1134,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.componentOff(child)
 
     then:
-    List messages = websocketMessages.collect { String message -> new JsonSlurper().parseText(message) }
-    messages.collect { it[0].command } == ['setMute', 'setMute']
-    messages.collect { it[1].muted } == [true, false]
+    driver.asyncCalls.collect { it.params.headers.SOAPAction } == [
+      'urn:schemas-upnp-org:service:RenderingControl:1#SetMute',
+      'urn:schemas-upnp-org:service:RenderingControl:1#SetMute']
+    driver.asyncCalls.collect { it.params.body.contains('<DesiredMute>true</DesiredMute>') } == [true, false]
   }
 
   def "mute child refresh reports valid switch states"() {
@@ -3422,67 +3480,83 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "loadFavorite without an ID chooses an available sparse favorite ID"() {
     given:
-    driver.getFavoritesMap()['object-1'] = [id: '3', name: 'First']
-    driver.getFavoritesMap()['object-2'] = [id: '9001', name: 'Second']
+    seedUpnpFavorite('3')
+    seedUpnpFavorite('9001')
 
     when:
     driver.loadFavorite()
 
     then:
-    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
-    payload[1].favoriteId in ['3', '9001']
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') &&
+      (it.params.body.contains('song%3a3') || it.params.body.contains('song%3a9001')) }
   }
 
   def "loadPlaylist without an ID chooses an available sparse playlist ID"() {
     given:
-    driver.getPlaylistsMap()['playlist-2'] = [id: 'playlist-2', name: 'First']
-    driver.getPlaylistsMap()['playlist-10004'] = [id: 'playlist-10004', name: 'Second']
+    seedUpnpPlaylist('playlist-2')
+    seedUpnpPlaylist('playlist-10004')
 
     when:
     driver.loadPlaylist()
 
     then:
-    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadPlaylist"') })
-    payload[1].playlistId in ['playlist-2', 'playlist-10004']
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') &&
+      (it.params.body.contains('SQ:playlist-2') || it.params.body.contains('SQ:playlist-10004')) }
   }
 
   def "random favorite load waits for the asynchronous favorites query when the cache is empty"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+
     when:
     driver.loadFavorite()
 
     then:
     driver.runtimeState.pendingRandomMediaLoads == ['favorite']
-    websocketMessages.any { String message -> message.contains('"command":"getFavorites"') }
+    driver.asyncCalls.any { it.params.body.contains('<ObjectID>FV:2</ObjectID>') }
 
     when:
-    driver.getFavoritesMap()['object-1'] = [id: '9001', name: 'Second']
+    seedUpnpFavorite('9001')
     driver.completePendingRandomMediaLoads('favorite')
 
     then:
     driver.runtimeState.pendingRandomMediaLoads.isEmpty()
-    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
-    payload[1].favoriteId == '9001'
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') &&
+      it.params.body.contains('song%3a9001') }
   }
 
-  def "Amazon favorite gets its play workaround before the first confirmation check"() {
+  def "favorite autoplay follows the accepted UPnP load"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.isGroupCoordinator = 'true'
     driver.getFavoritesMap()['object-service-account'] = [
-      id: '353', name: 'Amazon Favorite', service: 'Amazon Music'
+      id: '353', name: 'Favorite 353', service: 'Amazon Music',
+      upnpUri: 'x-sonos-http:song%3a353.mp4?sid=204&flags=8232&sn=9',
+      upnpMetadata: '<DIDL-Lite><item id="10032028song%3a353"/></DIDL-Lite>'
     ]
 
     when:
     driver.loadFavoriteFull('353', 'repeat all', 'replace', 'off', 'true', 'on')
 
     then:
-    driver.scheduled.find { List call -> call[1] == 'playerPlay' }?.getAt(0) == 3
-    driver.scheduled.find { List call -> call[1] == 'checkFavoritePlaybackAndRetry' }?.getAt(0) == 12
-    driver.favoriteRetryState['SONOS-TEST-DNI'].isAmazon == true
+    driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#SetAVTransportURI')
+    !driver.scheduled.any { List call -> call[1] == 'playerPlay' }
+
+    when:
+    Map request = driver.asyncCalls.last()
+    driver.favoriteLoadSoapCallback(new hubitat.scheduling.AsyncResponse(status: 200, data: ''), request.data)
+    driver.drainTransportCommandQueue()
+
+    then:
+    driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Play')
   }
 
   def "favorite confirmation polls first and does not immediately reload"() {
     given:
+    seedUpnpFavorite('42')
     driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
+    driver.asyncCalls.clear()
     websocketMessages.clear()
     rawConnections.clear()
     rawRequests.clear()
@@ -3492,10 +3566,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.checkFavoritePlaybackAndRetry([operationId: retryState.operationId])
 
     then:
-    websocketMessages.size() == 2
-    websocketMessages.any { String message -> message.contains('getPlaybackStatus') }
-    websocketMessages.any { String message -> message.contains('getMetadataStatus') }
-    websocketMessages.every { String message -> !message.contains('loadFavorite') }
+    driver.asyncCalls.collect { it.params.headers.SOAPAction }.containsAll([
+      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo',
+      'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo'])
+    driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
     driver.scheduled.last() == [
       2,
       'evaluateFavoritePlaybackAndRetry',
@@ -3505,8 +3579,10 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "favorite evaluation performs one bounded reload only after confirmation fails"() {
     given:
+    seedUpnpFavorite('42')
     driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
+    driver.asyncCalls.clear()
     websocketMessages.clear()
     rawConnections.clear()
     rawRequests.clear()
@@ -3516,7 +3592,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.evaluateFavoritePlaybackAndRetry([operationId: retryState.operationId])
 
     then:
-    websocketMessages.count { String message -> message.contains('loadFavorite') } == 1
+    driver.asyncCalls.count { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') } == 1
     retryState.attemptNumber == 1
     driver.scheduled.last() == [
       5,
@@ -3552,6 +3628,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "stop is queued even when the reported playback state is stopped"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
     driver.device.currentValues.transportStatus = 'stopped'
 
     when:
@@ -3559,14 +3636,14 @@ class SonosAdvPlayerSpec extends Specification {
     driver.drainTransportCommandQueue()
 
     then:
-    websocketMessages.size() == 1
-    websocketMessages[0].contains('"command":"stop"')
+    driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Stop')
     // Stop is intentionally sent even with stale reported state.
     driver.runtimeState.activeTransportCommand.command == 'stop'
   }
 
   def "stop sends a playback stop request when playback is active"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
     driver.device.currentValues.transportStatus = 'playing'
 
     when:
@@ -3574,13 +3651,12 @@ class SonosAdvPlayerSpec extends Specification {
     driver.drainTransportCommandQueue()
 
     then:
-    websocketMessages.size() == 1
-    websocketMessages[0].contains('"namespace":"playback"')
-    websocketMessages[0].contains('"command":"stop"')
+    driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Stop')
   }
 
   def "unsupported stop fails and queues a separately tracked pause fallback"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
     driver.device.currentValues.transportStatus = 'playing'
     driver.stop()
     driver.drainTransportCommandQueue()
@@ -3599,17 +3675,17 @@ class SonosAdvPlayerSpec extends Specification {
     driver.drainTransportCommandQueue()
 
     then:
-    websocketMessages.size() == 2
-    websocketMessages[0].contains('"command":"stop"')
-    websocketMessages[1].contains('"command":"pause"')
+    driver.asyncCalls.collect { it.params.headers.SOAPAction.find(/#(Stop|Pause)$/)?.replace('#', '') } == ['Stop', 'Pause']
     driver.runtimeState.activeTransportCommand.command == 'pause'
     driver.logs.any { String entry -> entry.contains('sending pause as the supported fallback') }
   }
 
   def "playlist confirmation also polls before performing a bounded reload"() {
     given:
+    seedUpnpPlaylist('playlist-7')
     driver.loadPlaylistFull('playlist-7', 'repeat all', 'replace', 'off', 'true', 'on')
     Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
+    driver.asyncCalls.clear()
     websocketMessages.clear()
     rawConnections.clear()
     rawRequests.clear()
@@ -3619,10 +3695,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.checkPlaylistPlaybackAndRetry([operationId: retryState.operationId])
 
     then:
-    websocketMessages.size() == 2
-    websocketMessages.any { String message -> message.contains('getPlaybackStatus') }
-    websocketMessages.any { String message -> message.contains('getMetadataStatus') }
-    websocketMessages.every { String message -> !message.contains('loadPlaylist') }
+    driver.asyncCalls.collect { it.params.headers.SOAPAction }.containsAll([
+      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo',
+      'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo'])
+    driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
 
     when:
     websocketMessages.clear()
@@ -3631,7 +3707,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
 
     then:
-    websocketMessages.count { String message -> message.contains('loadPlaylist') } == 1
+    driver.asyncCalls.count { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') } == 1
     retryState.attemptNumber == 1
     driver.scheduled.last() == [
       5,
@@ -3641,13 +3717,18 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def "short media load overloads enable crossfade in the outgoing command"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    if(method.toLowerCase(Locale.ROOT).contains('favorite')) { seedUpnpFavorite('42') }
+    else { seedUpnpPlaylist('42') }
+
     when:
     driver."${method}"(*arguments)
 
     then:
-    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
-    payload[0].command == command
-    payload[1].playModes.crossfade == true
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetCrossfadeMode') &&
+      it.params.body.contains('<CrossfadeMode>1</CrossfadeMode>') }
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
 
     where:
     method | arguments | command
@@ -3666,23 +3747,26 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def "append-and-play sends INSERT with the unchanged Sonos playlist ID"() {
+    given:
+    seedUpnpPlaylist('playlist-963')
+
     when:
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
 
     then:
-    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
-    payload[0].namespace == 'playlists'
-    payload[0].command == 'loadPlaylist'
-    payload[1].playlistId == 'playlist-963'
-    payload[1].action == 'INSERT'
-    payload[1].playOnCompletion == true
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#AddURIToQueue') &&
+      it.params.body.contains('<EnqueuedURI>x-rincon-cpcontainer:SQ:playlist-963</EnqueuedURI>') &&
+      it.params.body.contains('<EnqueueAsNext>true</EnqueueAsNext>') }
   }
 
   def "acknowledged playlist load issues play instead of duplicating the playlist request"() {
     given:
+    seedUpnpPlaylist('playlist-963')
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
     Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
-    driver.processWebsocketMessage('[{"namespace":"playlists","response":"loadPlaylist","success":true},{}]')
+    Map request = driver.asyncCalls.find { it.params.headers.SOAPAction.endsWith('#AddURIToQueue') }
+    driver.playlistLoadSoapCallback(new hubitat.scheduling.AsyncResponse(status: 200, data: ''), request.data)
+    driver.asyncCalls.clear()
     websocketMessages.clear()
     rawConnections.clear()
     rawRequests.clear()
@@ -3693,8 +3777,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.drainTransportCommandQueue()
 
     then:
-    websocketMessages.count { String message -> message.contains('"command":"play"') } == 1
-    websocketMessages.every { String message -> !message.contains('loadPlaylist') }
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#Play') }
+    driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
     retryState.playCommandAttempts == 1
     driver.scheduled.contains([
       2,
@@ -3972,6 +4056,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "grouped player volume is staggered without issuing playback commands"() {
     given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
     driver.device.currentValues.isGrouped = 'on'
     driver.device.dataValues.groupPlayerIds = 'RINCON_FIRST,RINCON_TEST,RINCON_THIRD'
 
@@ -3992,35 +4077,35 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingGroupedPlayerVolume()
 
     then:
-    websocketMessages.size() == 1
-    websocketMessages[0].contains('"namespace":"playerVolume"')
-    websocketMessages[0].contains('"command":"setVolume"')
-    !websocketMessages[0].contains('"command":"play"')
-    !websocketMessages[0].contains('"command":"pause"')
+    driver.asyncCalls.size() == 1
+    driver.asyncCalls[0].params.headers.SOAPAction.endsWith('#SetVolume')
+    driver.asyncCalls[0].params.body.contains('<DesiredVolume>41</DesiredVolume>')
+    !driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#Play') || it.params.headers.SOAPAction.endsWith('#Pause') }
   }
 
   def "setVolumeZero sends a direct player volume command with zero"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+
     when:
     driver.setVolumeZero()
 
     then:
-    websocketMessages.size() == 1
-    List payload = (List)new JsonSlurper().parseText(websocketMessages[0])
-    payload[0].namespace == 'playerVolume'
-    payload[0].command == 'setVolume'
-    payload[1].volume == 0
-    websocketMessages[0].contains('"volume":0')
+    driver.asyncCalls.size() == 1
+    driver.asyncCalls[0].params.headers.SOAPAction.endsWith('#SetVolume')
+    driver.asyncCalls[0].params.body.contains('<DesiredVolume>0</DesiredVolume>')
   }
 
   def "group Favorite loads use the verified group ID without the per-player Amazon workaround"() {
+    given:
+    seedUpnpFavorite('42')
+    driver.device.dataValues.isGroupCoordinator = 'true'
+
     when:
     driver.loadFavoriteForGroupOperation('42', 'repeat all', 'replace', 'off', 'true', 'on', 'group-op-1', 'GROUP-VERIFIED', 'group-op-1:1')
 
     then:
-    List payload = (List)new JsonSlurper().parseText(websocketMessages.find { String message -> message.contains('"command":"loadFavorite"') })
-    payload[0].namespace == 'favorites'
-    payload[0].command == 'loadFavorite'
-    payload[0].groupId == 'GROUP-VERIFIED'
+    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
     driver.runtimeState.groupFavoriteOperationId == 'group-op-1'
     driver.runtimeState.groupFavoriteOperationAttemptId == 'group-op-1:1'
     String bridgeValue = driver.device.events.find { Map event ->
@@ -4169,25 +4254,25 @@ class SonosAdvPlayerSpec extends Specification {
     Integer firstCommandIndex = websocketMessages.indexOf(firstMessage)
     Integer secondCommandIndex = websocketMessages.indexOf(secondMessage)
     Integer subscriptionIndex = websocketMessages.findIndexOf { String message -> message.contains('"command":"subscribe"') }
-    subscriptionIndex >= 0
-    firstCommandIndex > subscriptionIndex
+    subscriptionIndex == -1
+    firstCommandIndex >= 0
     secondCommandIndex > firstCommandIndex
     driver.runtimeState.websocketOutboundQueue == null
   }
 
   def "matching websocket response clears the command ledger with trace success"() {
     given:
-    driver.playerSetPlayerVolume(10)
+    queueTestGroupSocketCommand()
     List<Map> pending = driver.runtimeState.websocketCommandLedger as List<Map>
     Integer pendingCount = pending.size()
 
     when:
-    driver.processWebsocketMessage('[{"namespace":"playerVolume","response":"setVolume","success":true,"type":"none"},{ }]')
+    driver.processWebsocketMessage('[{"namespace":"groups","response":"getGroups","success":true,"type":"groups"},{ }]')
 
     then:
     pendingCount == 1
     driver.runtimeState.websocketCommandLedger == null
-    driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('playerVolume.setVolume') }
+    driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('groups.getGroups') }
   }
 
   def "primary websocket ledger expiry cleans correlation without reconnecting"() {
@@ -4195,7 +4280,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.websocketStatus = 'open'
 
     when:
-    driver.playerSetPlayerVolume(10)
+    queueTestGroupSocketCommand()
     Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
     driver.expireWebsocketCommandLedgerEntry([entryId: pending.entryId,
       connectionGeneration: pending.connectionGeneration])
@@ -4209,19 +4294,19 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "claimed websocket ledger batch is detached from commands registered afterward"() {
     given:
-    driver.playerSetPlayerVolume(10)
+    queueTestGroupSocketCommand(10)
     Map original = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
 
     when:
     List<Map> claimed = driver.takeWebsocketCommandLedgerBatch()
-    driver.playerSetPlayerVolume(20)
+    queueTestGroupSocketCommand(20)
 
     then:
     claimed.size() == 1
     claimed[0].entryId == original.entryId
     ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).entryId != original.entryId
-    claimed[0].message.contains('"volume":10')
-    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).message.contains('"volume":20')
+    claimed[0].message.contains('"marker":10')
+    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).message.contains('"marker":20')
   }
 
   def "websocket ledger locks are stable per device and distinct across devices"() {
@@ -4240,11 +4325,11 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "explicit websocket command rejection clears the ledger as failure without declaring socket stale"() {
     given:
-    driver.playerSetPlayerVolume(10)
+    queueTestGroupSocketCommand()
     Integer generation = (driver.runtimeState.websocketConnectionGeneration ?: 0) as Integer
 
     when:
-    driver.processWebsocketMessage('[{"namespace":"playerVolume","response":"setVolume","success":false,"type":"globalError"},{"errorCode":"ERROR_INVALID_ARGUMENT","reason":"invalid volume"}]')
+    driver.processWebsocketMessage('[{"namespace":"groups","response":"getGroups","success":false,"type":"globalError"},{"errorCode":"ERROR_INVALID_ARGUMENT","reason":"invalid request"}]')
 
     then:
     driver.runtimeState.websocketCommandLedger == null
@@ -4255,7 +4340,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "command response silence expires correlation without queueing or reconnecting"() {
     given:
-    driver.playerSetPlayerVolume(10)
+    queueTestGroupSocketCommand()
     Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
 
     when:

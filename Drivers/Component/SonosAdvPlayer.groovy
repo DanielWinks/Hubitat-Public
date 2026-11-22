@@ -921,6 +921,7 @@ Boolean hasLineInCapability() {
 // Initialize and Configure
 // =============================================================================
 void uninstalled() {
+  unschedule('refreshUpnpMediaCatalogs')
   unschedule('flushPendingLocalDeviceEvents')
   state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
@@ -1075,12 +1076,8 @@ void performDeferredInitialization() {
   if(getIsGroupCoordinator() == true) {
     subscribeToAVTransport()
     getPlaybackMetadataStatus()
-    String groupId = getGroupId()
-    if(groupId) {
-      subscribeToPlayback(groupId)
-      subscribeToPlaybackMetadata(groupId)
-    }
   }
+  refreshUpnpMediaCatalogs()
   // ZGT remains conditional — only elected holder subscribes
   if(isZgtSubscriber()) {
     subscribeToZgtEvents()
@@ -1592,18 +1589,7 @@ void websocketHealthCheck() {
       return
     }
 
-    Long nowEpoch = (now() / 1000L) as Long
-    Long openedEpoch = (runtimeState.websocketOpenedAt ?: nowEpoch) as Long
-    Long lastEventEpoch = getLastWebsocketEventEpoch()
-    Long lastActivityEpoch = lastEventEpoch > 0L ? lastEventEpoch : openedEpoch
-    if((nowEpoch - lastActivityEpoch) > WS_STALE_TIMEOUT_SECONDS) {
-      logWarn("WebSocket health check found no inbound activity for ${nowEpoch - lastActivityEpoch}s; reconnecting.")
-      reconnectWebsocket('stale inbound activity')
-      return
-    }
-
-    // Generate a response that lets the next health check verify the socket.
-    if(getGroupId()) { getPlaybackStatus() }
+    // The socket is retained for audioClip only, so ordinary inactivity is expected.
   } finally {
     scheduleWebsocketHealthCheck()
   }
@@ -1624,19 +1610,13 @@ void reconnectWebsocket(String reason) {
  * UPnP subscriptions to be established first.
  */
 void resubscribeAfterRenewal() {
-  // Base WebSocket namespace subscriptions (groups, favorites, playlists, audioClip)
+  // Base WebSocket subscription is audioClip only; catalogs use ContentDirectory.
   subscribeToWsEvents()
 
-  // Coordinator-specific subscriptions
+  // Coordinator playback state arrives through AVTransport UPnP events.
   if(getIsGroupCoordinator()) {
     subscribeToAVTransport()
     getPlaybackMetadataStatus()
-    // Playback and playbackMetadata WS subscriptions are group-scoped
-    String groupId = getGroupId()
-    if(groupId) {
-      subscribeToPlayback(groupId)
-      subscribeToPlaybackMetadata(groupId)
-    }
   }
   if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] != null) {
     runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = true
@@ -5202,12 +5182,16 @@ Map<String, Object> parseAvtMetaData(String rawDidl) {
     String creator = findDirectXmlChild(item, 'creator')?.text()?.toString()
     if(!creator) { creator = findDirectXmlChild(item, 'artist')?.text()?.toString() }
     return [
+      id: xmlAttribute(item, 'id'),
+      parentID: xmlAttribute(item, 'parentID'),
       title: findDirectXmlChild(item, 'title')?.text()?.toString(),
       creator: creator,
       album: findDirectXmlChild(item, 'album')?.text()?.toString(),
       albumArtURI: albumArt,
       class: findDirectXmlChild(item, 'class')?.text()?.toString(),
       res: findDirectXmlChild(item, 'res')?.text()?.toString(),
+      resMD: findDirectXmlChild(item, 'resMD')?.text()?.toString(),
+      favoriteType: findDirectXmlChild(item, 'type')?.text()?.toString(),
       streamInfo: streamInfo,
       streamContent: findDirectXmlChild(item, 'streamContent')?.text()?.toString(),
       description: findDirectXmlChild(item, 'description')?.text()?.toString()
@@ -5599,12 +5583,81 @@ Boolean applyAvtSnapshotIfDifferent(Map snap) {
           : (meta.streamContent?.toString() ?: trackName)
       setTrackDescription(desc)
     }
+    updateCurrentFavoriteFromUpnp(snap)
     String num = snap.track?.toString()
     if(num?.isInteger()) { setCurrentTrackNumber(Integer.parseInt(num)) }
     else if(snap.containsKey('track') || trackCleared) { setCurrentTrackNumber(0) }
   } catch(Exception e) { logDebug("applyAvtSnapshotIfDifferent failed: ${e.message}") }
   runtimeState.lastTransportPlaybackSnapshot = new LinkedHashMap(snap)
   return true
+}
+
+String normalizeFavoriteUri(String uri) {
+  if(!uri) { return null }
+  String normalized = uri.trim().replace('&amp;', '&').replace('%3a', ':').replace('%3A', ':')
+  Integer query = normalized.indexOf('?')
+  if(query >= 0) { normalized = normalized.substring(0, query) }
+  return normalized.replaceFirst(/(?i)\.mp4$/, '')
+}
+
+void updateCurrentFavoriteFromUpnp(Map snapshot) {
+  if(getFavoritesMap().isEmpty() && getPlaylistsMap().isEmpty()) { return }
+  String currentUri = normalizeFavoriteUri(snapshot?.currentTrackURI?.toString())
+  String enqueuedUri = normalizeFavoriteUri(snapshot?.enqueuedTransportURI?.toString())
+  Map currentMetadata = snapshot?.currentTrackMetaData instanceof Map ? (Map)snapshot.currentTrackMetaData : [:]
+  Map enqueuedMetadata = snapshot?.enqueuedTransportURIMetaData instanceof Map
+      ? (Map)snapshot.enqueuedTransportURIMetaData : [:]
+  String currentResourceId = normalizeFavoriteResourceId(currentMetadata.id?.toString())
+  String enqueuedResourceId = normalizeFavoriteResourceId(enqueuedMetadata.id?.toString())
+  Map matched = null
+  for(Map favorite : getFavoritesMap().values()) {
+    String favoriteUri = normalizeFavoriteUri(favorite?.upnpUri?.toString())
+    String resourceId = normalizeFavoriteResourceId(favorite?.resourceObjectId?.toString())
+    if((favoriteUri && (favoriteUri == currentUri || favoriteUri == enqueuedUri)) ||
+        (resourceId && (resourceId == currentResourceId || resourceId == enqueuedResourceId))) {
+      matched = favorite
+      break
+    }
+  }
+  String favoriteId = matched?.id?.toString()
+  String favoriteName = matched?.name?.toString()
+  String imageUrl = matched?.imageUrl?.toString()
+  Boolean isFavorite = matched != null
+  setCurrentFavorite(imageUrl, favoriteId, favoriteName, isFavorite)
+
+  Map matchedPlaylist = null
+  for(Map playlist : getPlaylistsMap().values()) {
+    String playlistUri = normalizeFavoriteUri(playlist?.upnpUri?.toString())
+    String playlistObjectId = normalizeFavoriteResourceId(playlist?.objectId?.toString())
+    if((playlistUri && (playlistUri == currentUri || playlistUri == enqueuedUri)) ||
+        (playlistObjectId && (playlistObjectId == currentResourceId || playlistObjectId == enqueuedResourceId))) {
+      matchedPlaylist = playlist
+      break
+    }
+  }
+  String playlistId = matchedPlaylist?.id?.toString()
+  Boolean isPlaylist = matchedPlaylist != null
+  setCurrentPlaylist(playlistId, matchedPlaylist?.name?.toString(), isPlaylist)
+
+  Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
+  if(retryState != null && favoriteId) {
+    retryState.metadataConfirmed = favoriteId == retryState.favoriteId?.toString()
+  }
+  String operationId = runtimeState.groupFavoriteOperationId?.toString()
+  String expectedFavoriteId = runtimeState.groupFavoriteOperationFavoriteId?.toString()
+  if(operationId && expectedFavoriteId && getIsGroupCoordinator() == true) {
+    emitGroupFavoriteOperationEvent('metadataConfirmed', [favoriteId: favoriteId,
+      confirmed: isFavorite && favoriteId == expectedFavoriteId,
+      groupId: runtimeState.groupFavoriteOperationGroupId as String])
+  }
+  Map playlistRetry = playlistRetryState.get(device.getDeviceNetworkId())
+  if(playlistRetry != null && playlistId) {
+    playlistRetry.metadataConfirmed = playlistId == playlistRetry.playlistId?.toString()
+  }
+}
+
+String normalizeFavoriteResourceId(String resourceId) {
+  return resourceId?.trim()?.replace('&amp;', '&')?.replace('%3a', ':')?.replace('%3A', ':')
 }
 
 void clearCurrentAvtTrackMetadata() {
@@ -6156,7 +6209,18 @@ String unEscapeMetaData(String text) {
 
 @CompileStatic
 String xmlLocalName(GPathResult node) {
-  return node?.name()?.toString()?.tokenize(':')?.last()
+  String qualifiedName = node?.name()?.toString()
+  if(!qualifiedName) { return null }
+  Integer namespaceEnd = qualifiedName.lastIndexOf('}')
+  if(namespaceEnd >= 0) { qualifiedName = qualifiedName.substring(namespaceEnd + 1) }
+  Integer prefixEnd = qualifiedName.lastIndexOf(':')
+  if(prefixEnd >= 0) { qualifiedName = qualifiedName.substring(prefixEnd + 1) }
+  return qualifiedName
+}
+
+String xmlAttribute(GPathResult node, String attributeName) {
+  if(node == null || !attributeName) { return null }
+  return node.getAt("@${attributeName}")?.toString()
 }
 
 GPathResult findDirectXmlChild(GPathResult node, String localName) {
@@ -7998,6 +8062,8 @@ Boolean isDebugLoggingEnabled() {
   return loggingEnabled('debug')
 }
 
+// Retain WS namespace bookkeeping for compatibility with legacy responses and
+// the remaining groups/audioClip commands; only audioClip and HT metadata are subscribed.
 @Field static final List<String> WS_NAMESPACES = ['playback', 'playbackMetadata', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
 @Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastWebsocketEvent']
 
@@ -8193,8 +8259,7 @@ void setGroupId(String groupId) {
   if(oldGroupId == groupId) { return }
   setDeviceDataValue('groupId', groupId)
   queueLocalDeviceEvent('groupId', groupId)
-  // Always re-subscribe when groupId changes — playback/playbackMetadata subscriptions
-  // are group-scoped, so the old subscription is stale for the new group.
+  // Refresh coordinator AVTransport state after the topology transition.
   if(getIsGroupCoordinator() == true) {
     runIn(1, 'subscribeToPlaybackDebounce', [data:[groupId:groupId], overwrite:true])
   }
@@ -8207,9 +8272,10 @@ void subscribeToPlaybackDebounce(Map data = null) {
   }
   String groupId = data?.groupId
   if(groupId != null && groupId != '') {
-    subscribeToPlayback(groupId)
+    subscribeToAVTransport()
     subscribeToPlaybackMetadata(groupId)
-    subscribeToGroupVolume(groupId)
+    getPlaybackStatus()
+    getPlaybackMetadataStatus()
   }
 }
 @CompileStatic
@@ -10447,25 +10513,20 @@ void renewWebsocketConnection() {
 // Websocket Subscriptions and polling
 // =============================================================================
 void subscribeToWsEvents() {
-  // Favorites and playlists are household-scoped — only one player per household needs to subscribe
-  if(checkIsFavPlaylistDelegate()) {
-    if(isCurrentlySubcribedToPlaylistWS() == false) { subscribeToPlaylists() }
-    if(isCurrentlySubcribedToFavoritesWS() == false) { subscribeToFavorites() }
-  }
   if(hasAudioClipCapability() && isCurrentlySubcribedToAudioClipWS() == false) { subscribeToAudioClip() }
-  if(isCurrentlySubcribedToGroupsWS() == false) { subscribeToGroups() }
-  if(isCurrentlySubcribedToPlayerVolumeWS() == false) { subscribeToPlayerVolume() }
-  // Re-establish coordinator-specific subscriptions if this player is the group
-  // coordinator and the subscriptions have been lost (e.g., after WS reconnect).
-  // These are group-scoped and require a valid groupId.
-  if(getIsGroupCoordinator() == true && isCurrentlySubcribedToCoodinatorWS() == false) {
+  if(getIsGroupCoordinator() == true && hasHTPlaybackCapability() == true &&
+      getWsSubscriptionValue('playbackMetadata') != 'Subscribed') {
     String groupId = getGroupId()
-    if(groupId) {
-      subscribeToPlayback(groupId)
-      subscribeToPlaybackMetadata(groupId)
-      subscribeToGroupVolume(groupId)
-    }
+    if(groupId) { subscribeToPlaybackMetadata(groupId) }
   }
+}
+
+void refreshUpnpMediaCatalogs() {
+  if(checkIsFavPlaylistDelegate()) {
+    getFavorites()
+    getPlaylists()
+  }
+  runIn(900, 'refreshUpnpMediaCatalogs', [overwrite: true])
 }
 
 @CompileStatic
@@ -10582,33 +10643,70 @@ void subscribeToGroupVolume(String groupId) {
 
 @CompileStatic
 void getPlaybackMetadataStatus() {
-  Map command = [
-    'namespace':'playbackMetadata',
-    'command':'getMetadataStatus',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('Cannot query playback metadata: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, AVTransport, 'GetPositionInfo')
+  asynchttpPost('playbackMetadataSoapCallback', params)
+}
+
+void playbackMetadataSoapCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("UPnP playback-metadata query failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    String metadata = findSoapBodyField(envelope, 'TrackMetaData')
+    Map snapshot = [hasTrack: true, track: findSoapBodyField(envelope, 'Track'),
+        hasCurrentTrackURI: true, currentTrackURI: findSoapBodyField(envelope, 'TrackURI'),
+        hasCurrentTrackDuration: true, currentTrackDuration: findSoapBodyField(envelope, 'TrackDuration'),
+        hasCurrentTrackMetaData: true, currentTrackMetaDataRaw: metadata,
+        currentTrackMetaData: parseAvtMetaData(metadata), observedAt: now()]
+    Map prior = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+        ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
+    snapshot.transportState = prior.transportState
+    snapshot.enqueuedTransportURI = prior.enqueuedTransportURI
+    applyAvtSnapshotIfDifferent(snapshot)
+  } catch(Exception e) {
+    logWarn("Could not parse UPnP playback-metadata response: ${e.message}")
+  }
 }
 
 @CompileStatic
 void getPlaybackStatus() {
-  Map command = [
-    'namespace':'playback',
-    'command':'getPlaybackStatus',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('Cannot query playback status: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, AVTransport, 'GetTransportInfo')
   Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
       ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active != null && active.statusQueryPending == true) {
-    sendWsMessage(json, [kind: 'transportStatusQuery', transportCommandId: active.id])
-  } else {
-    sendWsMessage(json)
+  asynchttpPost('transportStatusSoapCallback', params,
+      active != null && active.statusQueryPending == true ? [transportCommandId: active.id] : [:])
+}
+
+void transportStatusSoapCallback(AsyncResponse response, Map data = null) {
+  String commandId = data?.transportCommandId?.toString()
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(commandId && (active == null || active.id?.toString() != commandId)) { return }
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("UPnP playback-status query failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    if(active != null && (!commandId || active.id?.toString() == commandId)) {
+      active.statusQueryPending = false
+      active.lastFailureReason = 'UPnP GetTransportInfo failed'
+    }
+    return
+  }
+  try {
+    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    String transportState = findSoapBodyField(envelope, 'CurrentTransportState')
+    String playbackState = transportState == 'PLAYING' ? 'PLAYBACK_STATE_PLAYING' :
+        (transportState == 'PAUSED_PLAYBACK' ? 'PLAYBACK_STATE_PAUSED' :
+        (transportState == 'STOPPED' ? 'PLAYBACK_STATE_IDLE' : 'PLAYBACK_STATE_BUFFERING'))
+    state.playbackState = transportState
+    state.playbackStateObservedAt = now()
+    observeTransportPlaybackStatus([playbackState: playbackState])
+  } catch(Exception e) {
+    logWarn("Could not parse UPnP playback-status response: ${e.message}")
   }
 }
 
@@ -10700,15 +10798,43 @@ void drainTransportCommandQueue() {
 void sendTransportCommandAttempt(Map active) {
   if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
   String commandName = active.command as String
-  String wireCommand = commandName == 'skipToNextTrack' ? 'skipToNextTrack' :
-      commandName == 'skipToPreviousTrack' ? 'skipToPreviousTrack' : commandName
-  Map command = [namespace: 'playback', command: wireCommand, groupId: getGroupId()]
-  String message = JsonOutput.toJson([command, [:]])
+  String action = commandName == 'skipToNextTrack' ? 'Next' :
+      (commandName == 'skipToPreviousTrack' ? 'Previous' : commandName.capitalize())
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) {
+    active.lastFailureReason = 'local UPnP host is unavailable'
+    finishTransportCommand(active, false, active.lastFailureReason as String)
+    return
+  }
+  Map params = getSoapActionParams(host, AVTransport, action)
   active.attempts = ((active.attempts ?: 0) as Integer) + 1
-  active.queuedOnSocket = true
+  active.queuedOnSocket = false
   active.statusQueryPending = false
-  logDebug("Sending transport command ${commandName}, attempt ${active.attempts} (${active.id})")
-  sendWsMessage(message, [kind: 'transportCommand', transportCommandId: active.id])
+  active.sentAt = now()
+  logDebug("Sending UPnP transport command ${commandName} as ${action}, attempt ${active.attempts} (${active.id})")
+  try {
+    postSonosSoapAsync('transportCommandSoapCallback', params,
+        [transportCommandId: active.id, action: action, command: commandName])
+    runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand', [overwrite: true,
+        data: [commandId: active.id]])
+  } catch(Exception e) {
+    active.lastFailureReason = "UPnP ${action} request could not be sent: ${e.message}"
+    retryUnconfirmedTransportCommand([commandId: active.id])
+  }
+}
+
+void transportCommandSoapCallback(AsyncResponse response, Map data = null) {
+  String commandId = data?.transportCommandId?.toString()
+  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+  if(active == null || !commandId || active.id?.toString() != commandId) { return }
+  if(response?.status == 200 && !response.hasError()) {
+    transportCommandAcknowledged(commandId, "UPnP ${data?.action}")
+    return
+  }
+  active.lastFailureReason = "UPnP ${data?.action} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}"
+  logWarn("Transport command ${data?.command} (${commandId}) failed: ${active.lastFailureReason}")
+  retryUnconfirmedTransportCommand([commandId: commandId])
 }
 
 void transportCommandSocketSent(String commandId) {
@@ -10917,131 +11043,274 @@ void playerSkipToPreviousTrack() {
 
 @CompileStatic
 void playerSetPlayModes(Map playModes) {
-  Map command = [
-    'namespace':'playback',
-    'command':'setPlayModes',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [ 'playModes': playModes ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  if(!(playModes instanceof Map) || playModes.isEmpty()) { return }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('Cannot set Sonos play modes: local UPnP host is unavailable'); return }
+  Boolean repeat = playModes.containsKey('repeat') ? playModes.repeat as Boolean : getCurrentRepeatAllMode() == 'on'
+  Boolean repeatOne = playModes.containsKey('repeatOne') ? playModes.repeatOne as Boolean : getCurrentRepeatOneMode() == 'on'
+  Boolean shuffle = playModes.containsKey('shuffle') ? playModes.shuffle as Boolean : getCurrentShuffleMode() == 'on'
+  String newPlayMode = shuffle ? (repeatOne ? 'SHUFFLE_REPEAT_ONE' : (repeat ? 'SHUFFLE' : 'SHUFFLE_NOREPEAT')) :
+      (repeatOne ? 'REPEAT_ONE' : (repeat ? 'REPEAT_ALL' : 'NORMAL'))
+  Map params = getSoapActionParams(host, AVTransport, 'SetPlayMode', [NewPlayMode: newPlayMode])
+  postSonosSoapAsync('localControlCallback', params)
+  if(playModes.containsKey('crossfade')) {
+    Map crossfadeParams = getSoapActionParams(host, AVTransport, 'SetCrossfadeMode',
+        [CrossfadeMode: (playModes.crossfade as Boolean) ? 1 : 0])
+    postSonosSoapAsync('localControlCallback', crossfadeParams)
+  }
 }
 
 @CompileStatic
 void playerSetPlayerVolume(Integer volume) {
-  Map command = [
-    'namespace':'playerVolume',
-    'command':'setVolume',
-    'playerId':"${getId()}"
-  ]
-  Map args = [
-    'volume': volume,
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getDeviceDataValue('localUpnpHost')
+  if(!host) { logWarn('Cannot set player volume: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, RenderingControl, 'SetVolume', [DesiredVolume: volume])
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 @CompileStatic
 void playerSetPlayerMute(Boolean muted) {
-  Map command = [
-    'namespace':'playerVolume',
-    'command':'setMute',
-    'playerId':"${getId()}"
-  ]
-  Map args = [
-    'muted': muted
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getDeviceDataValue('localUpnpHost')
+  if(!host) { logWarn('Cannot set player mute: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, RenderingControl, 'SetMute', [DesiredMute: muted])
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 @CompileStatic
 void playerSetPlayerRelativeVolume(Integer volumeDelta) {
-  Map command = [
-    'namespace':'playerVolume',
-    'command':'setRelativeVolume',
-    'playerId':"${getId()}"
-  ]
-  Map args = [
-    'volumeDelta': volumeDelta
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getDeviceDataValue('localUpnpHost')
+  if(!host) { logWarn('Cannot adjust player volume: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, RenderingControl, 'SetRelativeVolume', [Adjustment: volumeDelta])
+  postSonosSoapAsync('localControlCallback', params)
 }
 
 @CompileStatic
 void playerSetGroupVolume(Integer volume) {
-  Map command = [
-    'namespace':'groupVolume',
-    'command':'setVolume',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [
-    'volume': volume
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  componentSetGroupLevelLocal(new BigDecimal(volume))
 }
 
 @CompileStatic
 void playerSetGroupMute(Boolean muted) {
-  Map command = [
-    'namespace':'groupVolume',
-    'command':'setMute',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [
-    'muted': muted
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  componentMuteGroupLocal(muted)
 }
 
 @CompileStatic
 void playerSetGroupRelativeVolume(Integer volumeDelta) {
-  Map command = [
-    'namespace':'groupVolume',
-    'command':'setRelativeVolume',
-    'groupId':"${getGroupId()}"
-  ]
-  Map args = [
-    'volumeDelta': volumeDelta
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  componentSetGroupRelativeLevelLocal(volumeDelta)
 }
 
 @CompileStatic
 void getFavorites() {
-  Map command = [
-    'namespace':'favorites',
-    'command':'getFavorites',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) {
+    logWarn('Cannot retrieve Sonos favorites: local UPnP host is unavailable')
+    return
+  }
+  Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: 'FV:2',
+      BrowseFlag: 'BrowseDirectChildren', Filter: '*', StartingIndex: 0, RequestedCount: 100,
+      SortCriteria: ''])
+  String requestId = UUID.randomUUID().toString()
+  state.favoritesBrowseRequestId = requestId
+  state.favoritesBrowseItems = []
+  logDebug("Requesting Sonos favorites through ContentDirectory Browse; requestId=${requestId}")
+  try {
+    asynchttpPost('favoritesBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
+  } catch(Exception e) {
+    state.remove('favoritesBrowseRequestId')
+    state.remove('favoritesBrowseItems')
+    logWarn("Could not request Sonos favorites through UPnP: ${e.message}")
+  }
+}
+
+void favoritesBrowseCallback(AsyncResponse response, Map data = null) {
+  if(data?.requestId?.toString() != state.favoritesBrowseRequestId?.toString()) { return }
+  if(response?.status != 200 || response.hasError()) {
+    state.remove('favoritesBrowseRequestId')
+    state.remove('favoritesBrowseItems')
+    logWarn("Sonos favorites UPnP Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    String resultXml = findSoapBodyField(envelope, 'Result')
+    String totalText = findSoapBodyField(envelope, 'TotalMatches')
+    Integer total = totalText?.isInteger() ? Integer.parseInt(totalText) : 0
+    String returnedText = findSoapBodyField(envelope, 'NumberReturned')
+    Integer returned = returnedText?.isInteger() ? Integer.parseInt(returnedText) : 0
+    GPathResult didl = resultXml ? new XmlSlurper().parseText(resultXml) : null
+    List<Map> favorites = []
+    if(didl != null) {
+      for(GPathResult item : (GPathResult)didl.children()) {
+        if(item.name()?.toString() != 'item') { continue }
+        String favoriteObjectId = xmlAttribute(item, 'id')
+        String favoriteId = favoriteObjectId?.startsWith('FV:2/')
+            ? favoriteObjectId.substring('FV:2/'.length()) : null
+        String uri = findQueueXmlText(item, 'res')
+        String resMetadata = findQueueXmlText(item, 'resMD')
+        String title = findQueueXmlText(item, 'title')
+        String description = findQueueXmlText(item, 'description')
+        String imageUrl = findQueueXmlText(item, 'albumArtURI')
+        String resourceObjectId = null
+        if(resMetadata) {
+          try {
+            GPathResult inner = new XmlSlurper().parseText(resMetadata)
+            GPathResult innerItem = findDirectXmlChild(inner, 'item')
+            resourceObjectId = xmlAttribute(innerItem, 'id')
+          } catch(Exception ignored) {
+            logDebug("Favorite ${favoriteId ?: '(unknown)'} has unparseable embedded UPnP metadata")
+          }
+        }
+        String serviceId = uri?.contains('?sid=') ? uri.substring(uri.indexOf('?sid=') + 5).split('&')[0] : null
+        String accountId = uri?.contains('&sn=') ? "sn_${uri.substring(uri.indexOf('&sn=') + 4).split('&')[0]}" : null
+        String matchObjectId = uri?.contains(':') ? uri.substring(uri.indexOf(':') + 1).split('\\?')[0] : resourceObjectId
+        matchObjectId = matchObjectId?.replaceFirst(/(?i)\\.mp4$/, '')
+        matchObjectId = matchObjectId?.replace('%3a', ':')?.replace('%3A', ':')
+        if(matchObjectId?.contains(':')) { matchObjectId = matchObjectId.substring(matchObjectId.indexOf(':') + 1) }
+        favorites.add([id: favoriteId, name: title, imageUrl: imageUrl, description: description,
+            service: description, upnpFavoriteObjectId: favoriteObjectId, upnpUri: uri,
+            upnpMetadata: resMetadata, resourceObjectId: resourceObjectId,
+            serviceId: serviceId, accountId: accountId, matchObjectId: matchObjectId,
+            type: findQueueXmlText(item, 'type'), details: [id: favoriteId, name: title,
+              imageUrl: imageUrl, description: description, resource: [id: [objectId: matchObjectId,
+                serviceId: serviceId, accountId: accountId]], upnpFavoriteObjectId: favoriteObjectId,
+              upnpUri: uri, upnpMetadata: resMetadata]])
+      }
+    }
+    List<Map> accumulated = state.favoritesBrowseItems instanceof List
+        ? (List<Map>)state.favoritesBrowseItems : []
+    accumulated.addAll(favorites)
+    state.favoritesBrowseItems = accumulated
+    Integer startingIndex = data?.startingIndex != null ? (data.startingIndex as Integer) : 0
+    if(returned > 0 && total > startingIndex + returned) {
+      Integer nextIndex = startingIndex + returned
+      Map nextParams = getSoapActionParams(data.host?.toString(), ContentDirectory, 'Browse',
+          [ObjectID: 'FV:2', BrowseFlag: 'BrowseDirectChildren', Filter: '*',
+           StartingIndex: nextIndex, RequestedCount: 100, SortCriteria: ''])
+      asynchttpPost('favoritesBrowseCallback', nextParams,
+          [requestId: requestId, host: data.host, startingIndex: nextIndex])
+      return
+    }
+    cacheUpnpFavorites(accumulated)
+    state.favoritesBrowseVersion = findSoapBodyField(envelope, 'UpdateID')
+    state.remove('favoritesBrowseRequestId')
+    state.remove('favoritesBrowseItems')
+    logInfo("Loaded ${accumulated.size()} Sonos favorites through UPnP (total=${total}, updateId=${state.favoritesBrowseVersion ?: 'unknown'})")
+    completePendingRandomMediaLoads('favorite')
+  } catch(Exception e) {
+    state.remove('favoritesBrowseRequestId')
+    state.remove('favoritesBrowseItems')
+    logWarn("Could not parse Sonos favorites UPnP Browse response: ${e.message}")
+  }
+}
+
+void cacheUpnpFavorites(List<Map> favorites) {
+  clearFavoritesMap()
+  String html = '<html><body><div class="favorites-container">'
+  favorites?.each { Map favorite ->
+    String favoriteId = favorite?.id?.toString()
+    String matchObjectId = favorite?.matchObjectId?.toString()
+    String serviceId = favorite?.serviceId?.toString()
+    String accountId = favorite?.accountId?.toString()
+    if(favoriteId && matchObjectId) {
+      getFavoritesMap()["${matchObjectId}${serviceId ?: ''}${accountId ?: ''}"] = favorite
+    }
+    if(favoriteId) {
+      String onclick = buildHubitatRunMethodOnclick(device.getIdAsLong(), 'loadFavorite', [favoriteId])
+      String name = StringEscapeUtils.escapeHtml4(favorite?.name?.toString() ?: "Favorite ${favoriteId}")
+      String image = favorite?.imageUrl?.toString()
+      html += "<div onclick=\"${onclick}\">${image ? '<img src=\"' + image + '\" width=\"120\" />' : ''}<span>Favorite #${favoriteId} ${name}</span></div>"
+    }
+  }
+  html += '</div></body></html>'
+  setChildFavs(html)
 }
 
 @CompileStatic
 void getPlaylists() {
-  Map command = [
-    'namespace':'playlists',
-    'command':'getPlaylists',
-    'householdId':"${getHouseholdId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn('Cannot retrieve Sonos Playlists: local UPnP host is unavailable'); return }
+  Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: 'SQ:',
+      BrowseFlag: 'BrowseDirectChildren', Filter: '*', StartingIndex: 0, RequestedCount: 100,
+      SortCriteria: ''])
+  String requestId = UUID.randomUUID().toString()
+  state.playlistsBrowseRequestId = requestId
+  state.playlistsBrowseItems = []
+  try {
+    asynchttpPost('playlistsBrowseCallback', params, [requestId: requestId, host: host, startingIndex: 0])
+  } catch(Exception e) {
+    state.remove('playlistsBrowseRequestId')
+    state.remove('playlistsBrowseItems')
+    logWarn("Could not request Sonos Playlists through UPnP: ${e.message}")
+  }
+}
+
+void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
+  if(data?.requestId?.toString() != state.playlistsBrowseRequestId?.toString()) { return }
+  if(response?.status != 200 || response.hasError()) {
+    state.remove('playlistsBrowseRequestId')
+    state.remove('playlistsBrowseItems')
+    logWarn("Sonos Playlists UPnP Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    String resultXml = findSoapBodyField(envelope, 'Result')
+    String totalText = findSoapBodyField(envelope, 'TotalMatches')
+    Integer total = totalText?.isInteger() ? Integer.parseInt(totalText) : 0
+    String returnedText = findSoapBodyField(envelope, 'NumberReturned')
+    Integer returned = returnedText?.isInteger() ? Integer.parseInt(returnedText) : 0
+    GPathResult didl = resultXml ? new XmlSlurper().parseText(resultXml) : null
+    List<Map> page = []
+    if(didl != null) {
+      for(GPathResult item : (GPathResult)didl.children()) {
+        if(item.name()?.toString() != 'container' && item.name()?.toString() != 'item') { continue }
+        String objectId = xmlAttribute(item, 'id')
+        String playlistId = objectId?.startsWith('SQ:') ? objectId.substring(3) : objectId
+        if(!playlistId) { continue }
+        String uri = findQueueXmlText(item, 'res')
+        String metadata = findQueueXmlText(item, 'resMD')
+        String name = findQueueXmlText(item, 'title')
+        String imageUrl = findQueueXmlText(item, 'albumArtURI')
+        page.add([id: playlistId, objectId: objectId, name: name,
+            imageUrl: imageUrl, upnpUri: uri, upnpMetadata: metadata,
+            details: [id: playlistId, name: name, imageUrl: imageUrl, objectId: objectId,
+              upnpUri: uri, upnpMetadata: metadata]])
+      }
+    }
+    List<Map> accumulated = state.playlistsBrowseItems instanceof List
+        ? (List<Map>)state.playlistsBrowseItems : []
+    accumulated.addAll(page)
+    state.playlistsBrowseItems = accumulated
+    Integer startingIndex = data?.startingIndex != null ? (data.startingIndex as Integer) : 0
+    if(returned > 0 && total > startingIndex + returned) {
+      Integer nextIndex = startingIndex + returned
+      Map nextParams = getSoapActionParams(data.host?.toString(), ContentDirectory, 'Browse',
+          [ObjectID: 'SQ:', BrowseFlag: 'BrowseDirectChildren', Filter: '*',
+           StartingIndex: nextIndex, RequestedCount: 100, SortCriteria: ''])
+      asynchttpPost('playlistsBrowseCallback', nextParams,
+          [requestId: data.requestId, host: data.host, startingIndex: nextIndex])
+      return
+    }
+    clearPlaylistsMap()
+    String html = '<html><body><div class="playlists-container">'
+    accumulated.each { Map playlist ->
+      String playlistId = playlist.id?.toString()
+      getPlaylistsMap()[playlistId] = playlist
+      String onclick = buildHubitatRunMethodOnclick(device.getIdAsLong(), 'loadPlaylist', [playlistId])
+      html += "<div onclick=\"${onclick}\"><span>${StringEscapeUtils.escapeHtml4(playlist.name?.toString() ?: "Playlist ${playlistId}")}</span></div>"
+    }
+    html += '</div></body></html>'
+    setChildPlaylists(html)
+    state.playlistsBrowseVersion = findSoapBodyField(envelope, 'UpdateID')
+    state.remove('playlistsBrowseRequestId')
+    state.remove('playlistsBrowseItems')
+    logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${state.playlistsBrowseVersion ?: 'unknown'})")
+    completePendingRandomMediaLoads('playlist')
+  } catch(Exception e) {
+    state.remove('playlistsBrowseRequestId')
+    state.remove('playlistsBrowseItems')
+    logWarn("Could not parse Sonos Playlists UPnP Browse response: ${e.message}")
+  }
 }
 
 @CompileStatic
@@ -11072,31 +11341,89 @@ private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean
     Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId,
     Boolean scheduleAmazonWorkaround) {
   if(playOnCompletion == true) { invalidateGroupAnnouncementStream('FAVORITE_LOAD_REQUESTED') }
-  Map command = [
-    'namespace':'favorites',
-    'command':'loadFavorite',
-    'groupId':"${groupId}"
-  ]
   Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
-  Map args = [
-    'favoriteId': favoriteId,
-    'action': action,
-    'playModes': playModes,
-    'playOnCompletion': playOnCompletion
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  Map request = [favoriteId: favoriteId, action: action, playModes: playModes,
+      playOnCompletion: playOnCompletion, groupId: groupId, attempts: 0]
+  loadFavoriteOverUpnp(request)
 
-  // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
-  if(playOnCompletion && scheduleAmazonWorkaround) {
-    Map favorite = findFavoriteById(favoriteId)
-    String serviceName = favorite?.service
-    if(isAmazonMusicService(serviceName)) {
-      logDebug("Amazon Music favorite detected - scheduling auto-play in 3 seconds as workaround for service limitation")
-      scheduleAmazonMusicAutoPlay()
+  // UPnP SetAVTransportURI is followed by Play only after the SOAP action succeeds.
+}
+
+void loadFavoriteOverUpnp(Map request) {
+  if(!(request instanceof Map)) { return }
+  String favoriteId = request.favoriteId?.toString()
+  Map favorite = findFavoriteById(favoriteId)
+  if(favorite == null) {
+    Integer attempts = (request.attempts ?: 0) as Integer
+    if(attempts < 2) {
+      request.attempts = attempts + 1
+      logDebug("Favorite ${favoriteId ?: '(unset)'} is not cached; refreshing the UPnP favorites list before retry ${request.attempts}")
+      getFavorites()
+      runIn(3, 'loadFavoriteOverUpnp', [overwrite: true, data: new LinkedHashMap(request)])
+    } else {
+      logWarn("Cannot load favorite ${favoriteId ?: '(unset)'}: it was not found in the UPnP favorites list")
+    }
+    return
+  }
+  String uri = favorite.upnpUri?.toString()
+  String metadata = favorite.upnpMetadata?.toString()
+  if(!uri || !metadata) {
+    logWarn("Cannot load favorite ${favoriteId}: its UPnP Browse entry has no usable resource URI or metadata")
+    return
+  }
+  String action = request.action?.toString()?.toUpperCase(Locale.ROOT) ?: 'REPLACE'
+  if(action == 'INSERT') { action = 'INSERT_NEXT' }
+  if(!(action in ['REPLACE', 'APPEND', 'INSERT_NEXT'])) {
+    logWarn("UPnP favorite loading does not yet support queue action ${action}; favorite ${favoriteId} was not sent")
+    return
+  }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { logWarn("Cannot load favorite ${favoriteId}: local UPnP host is unavailable"); return }
+  Map<String, Boolean> playModes = request.playModes instanceof Map
+      ? (Map<String, Boolean>)request.playModes : [:]
+  if(!playModes.isEmpty()) { playerSetPlayModes(playModes) }
+  Map params
+  if(action == 'REPLACE') {
+    params = getSoapActionParams(host, AVTransport, 'SetAVTransportURI',
+        [CurrentURI: uri, CurrentURIMetaData: metadata])
+  } else {
+    params = getSoapActionParams(host, AVTransport, 'AddURIToQueue', [EnqueuedURI: uri,
+        EnqueuedURIMetaData: metadata, DesiredFirstTrackNumberEnqueued: 0,
+        EnqueueAsNext: action == 'INSERT_NEXT'])
+  }
+  String requestId = UUID.randomUUID().toString()
+  state.favoriteLoadRequestId = requestId
+  logInfo("Loading Sonos favorite ${favoriteId} (${favorite.name ?: 'unnamed'}) through UPnP; action=${action}")
+  try {
+    postSonosSoapAsync('favoriteLoadSoapCallback', params, [requestId: requestId,
+        favoriteId: favoriteId, action: action, playOnCompletion: request.playOnCompletion == true])
+  } catch(Exception e) {
+    state.remove('favoriteLoadRequestId')
+    logWarn("Could not send UPnP load for favorite ${favoriteId}: ${e.message}")
+  }
+}
+
+void favoriteLoadSoapCallback(AsyncResponse response, Map data = null) {
+  if(data?.requestId?.toString() != state.favoriteLoadRequestId?.toString()) { return }
+  state.remove('favoriteLoadRequestId')
+  Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
+  Boolean accepted = response?.status == 200 && !response.hasError()
+  if(retryState != null && retryState.favoriteId?.toString() == data?.favoriteId?.toString()) {
+    retryState.loadAcknowledged = accepted
+    if(!accepted) {
+      retryState.loadErrorCode = 'UPNP_LOAD_FAILED'
+      retryState.loadErrorReason = response?.getErrorMessage()?.toString()
     }
   }
+  emitGroupFavoriteOperationEvent('favoriteLoadAck', [success: accepted,
+      errorCode: accepted ? null : 'UPNP_LOAD_FAILED', reason: response?.getErrorMessage()?.toString(),
+      groupId: getGroupId()])
+  if(response?.status != 200 || response.hasError()) {
+    logWarn("UPnP load of favorite ${data?.favoriteId} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  logInfo("Sonos accepted UPnP load of favorite ${data?.favoriteId}")
+  if(data?.playOnCompletion == true) { playerPlay() }
 }
 
 void scheduleAmazonMusicAutoPlay() {
@@ -11109,31 +11436,72 @@ void cancelPendingAmazonMusicAutoPlay() {
 
 void playerLoadPlaylist(String playlistId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
   if(playOnCompletion == true) { invalidateGroupAnnouncementStream('PLAYLIST_LOAD_REQUESTED') }
-  Map command = [
-    'namespace':'playlists',
-    'command':'loadPlaylist',
-    'groupId':"${getGroupId()}"
-  ]
   Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
-  Map args = [
-    'playlistId': playlistId,
-    'action': action,
-    'playModes': playModes,
-    'playOnCompletion': playOnCompletion
-  ]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  sendWsMessage(json)
+  loadPlaylistOverUpnp([playlistId: playlistId, action: action, playModes: playModes,
+      playOnCompletion: playOnCompletion, attempts: 0])
 
-  // Amazon Music doesn't honor playOnCompletion parameter - schedule manual play as workaround
-  if(playOnCompletion) {
-    Map playlist = getPlaylistsMap()?.get(playlistId)
-    String serviceName = playlist?.service
-    if(serviceName?.toLowerCase(Locale.ROOT)?.contains('amazon')) {
-      logDebug("Amazon Music playlist detected - scheduling auto-play in 3 seconds as workaround for service limitation")
-      scheduleAmazonMusicAutoPlay()
+}
+
+void loadPlaylistOverUpnp(Map request) {
+  if(!(request instanceof Map)) { return }
+  String playlistId = request.playlistId?.toString()
+  Map playlist = getPlaylistsMap().get(playlistId)
+  if(playlist == null) {
+    Integer attempts = (request.attempts ?: 0) as Integer
+    if(attempts < 2) {
+      request.attempts = attempts + 1
+      getPlaylists()
+      runIn(3, 'loadPlaylistOverUpnp', [overwrite: true, data: new LinkedHashMap(request)])
+    } else {
+      reportPlaylistLoadError(playlistId, 'ERROR_NOT_FOUND', 'The playlist was not found in the UPnP saved-playlist list.')
+    }
+    return
+  }
+  String uri = playlist.upnpUri?.toString()
+  String metadata = playlist.upnpMetadata?.toString()
+  if(!uri || !metadata) {
+    reportPlaylistLoadError(playlistId, 'ERROR_UNSUPPORTED', 'The UPnP playlist entry did not include a usable resource URI and metadata.')
+    return
+  }
+  String action = request.action?.toString()?.toUpperCase(Locale.ROOT) ?: 'REPLACE'
+  if(action == 'INSERT') { action = 'INSERT_NEXT' }
+  if(!(action in ['REPLACE', 'APPEND', 'INSERT_NEXT'])) {
+    reportPlaylistLoadError(playlistId, 'ERROR_UNSUPPORTED', "UPnP playlist loading does not yet support queue action ${action}.")
+    return
+  }
+  String host = getLocalUpnpHostForGroupOperation()
+  if(!host) { reportPlaylistLoadError(playlistId, 'ERROR_OFFLINE', 'Local UPnP host is unavailable.'); return }
+  Map<String, Boolean> playModes = request.playModes instanceof Map
+      ? (Map<String, Boolean>)request.playModes : [:]
+  if(!playModes.isEmpty()) { playerSetPlayModes(playModes) }
+  Map params = action == 'REPLACE'
+      ? getSoapActionParams(host, AVTransport, 'SetAVTransportURI', [CurrentURI: uri, CurrentURIMetaData: metadata])
+      : getSoapActionParams(host, AVTransport, 'AddURIToQueue', [EnqueuedURI: uri,
+          EnqueuedURIMetaData: metadata, DesiredFirstTrackNumberEnqueued: 0,
+          EnqueueAsNext: action == 'INSERT_NEXT'])
+  String requestId = UUID.randomUUID().toString()
+  state.playlistLoadRequestId = requestId
+  postSonosSoapAsync('playlistLoadSoapCallback', params, [requestId: requestId,
+      playlistId: playlistId, action: action, playOnCompletion: request.playOnCompletion == true])
+}
+
+void playlistLoadSoapCallback(AsyncResponse response, Map data = null) {
+  if(data?.requestId?.toString() != state.playlistLoadRequestId?.toString()) { return }
+  state.remove('playlistLoadRequestId')
+  Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
+  if(retryState != null && retryState.playlistId?.toString() == data?.playlistId?.toString()) {
+    retryState.loadAcknowledged = response?.status == 200 && !response.hasError()
+    if(response?.status != 200 || response.hasError()) {
+      retryState.loadErrorCode = 'UPNP_LOAD_FAILED'
+      retryState.loadErrorReason = response?.getErrorMessage()?.toString()
     }
   }
+  if(response?.status != 200 || response.hasError()) {
+    reportPlaylistLoadError(data?.playlistId?.toString(), 'UPNP_LOAD_FAILED',
+        "UPnP load failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+    return
+  }
+  if(data?.playOnCompletion == true) { playerPlay() }
 }
 
 /** Explicit zero (including the -1 public-command sentinel) stays silent despite a TTS boost. */
@@ -11801,9 +12169,11 @@ String expectedUpnpSidForSoapAction(Map params) {
   String service = soapAction.substring(0, separator)
   String action = soapAction.substring(separator + 1)
   if(service.contains('AVTransport') && action in ['Play', 'Pause', 'Stop', 'Next', 'Previous', 'Seek',
-      'SetAVTransportURI', 'RemoveAllTracksFromQueue', 'AddURIToQueue', 'ConfigureSleepTimer']) { return 'sid1' }
+      'SetAVTransportURI', 'RemoveAllTracksFromQueue', 'AddURIToQueue', 'ConfigureSleepTimer',
+      'SetPlayMode', 'SetCrossfadeMode']) { return 'sid1' }
   if(service.contains('GroupRenderingControl') && action in ['SetGroupVolume', 'SetRelativeGroupVolume', 'SetGroupMute']) { return 'sid4' }
-  if(service.contains('RenderingControl') && action in ['SetVolume', 'SetMute', 'SetBass', 'SetTreble', 'SetLoudness', 'SetEQ']) { return 'sid2' }
+  if(service.contains('RenderingControl') && action in ['SetVolume', 'SetMute', 'SetRelativeVolume',
+      'SetBass', 'SetTreble', 'SetLoudness', 'SetEQ']) { return 'sid2' }
   return null
 }
 
@@ -12407,7 +12777,7 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
       for(Object itemObject : didl.children()) {
         if(!(itemObject instanceof GPathResult) || xmlLocalName((GPathResult)itemObject) != 'item') { continue }
         GPathResult item = (GPathResult)itemObject
-        String objectId = item.attributes()?.get('id')?.toString()
+        String objectId = xmlAttribute(item, 'id')
         String title = findQueueXmlText(item, 'title')
         String artist = findQueueXmlText(item, 'creator') ?: findQueueXmlText(item, 'artist')
         String album = findQueueXmlText(item, 'album')
