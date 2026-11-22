@@ -2381,9 +2381,9 @@ void sendParentAppRequestDirect(String action, Map args) {
   Map payload = [version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action, args: args ?: [:], requestId: UUID.randomUUID().toString()]
   try { parent.playerAppRequest(payload) } catch(Exception e) { logWarn("parent.playerAppRequest failed for ${action}: ${e.message}") }
 }
-
 List<Map> drainPendingParentRequestsForPoll() { return [] }
 List<Map> flushPendingParentRequests() { return [] }
+
 
 /** Complete the asynchronous parent-app decision for an active-stream TTS request. */
 void completeParentAppActiveStreamTts(String requestId, String accepted) {
@@ -8894,7 +8894,6 @@ void enqueueParentStateUpdate(Map payload) {
   if(payload == null || payload.isEmpty()) { return }
   Boolean directOk = dispatchParentStateUpdateDirect(payload)
   if(directOk) { return }
-  // Fallback to legacy poll queue for hubs without new binding (test harness)
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
   Object lock = parentUpdateLocks.get(dni)
@@ -8914,6 +8913,25 @@ void enqueueParentStateUpdate(Map payload) {
     ordered.add(new LinkedHashMap(payload))
   }
 }
+List<Map> drainPendingParentUpdatesForPoll() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return [] }
+  Object lock = parentUpdateLocks.get(dni)
+  if(lock == null) { return [] }
+  List<Map> batch = []
+  synchronized(lock) {
+    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
+    if(ordered != null && !ordered.isEmpty()) {
+      while(ordered.peek() != null && batch.size() < 64) {
+        Map item = ordered.poll()
+        if(item != null) { batch.add(item) }
+      }
+      if(ordered.isEmpty()) { pendingParentOrdered.remove(dni) }
+    }
+  }
+  return batch
+}
+List<Map> flushPendingParentUpdates() { return drainPendingParentUpdatesForPoll() }
 Boolean dispatchParentStateUpdateDirect(Map payload) {
   if(payload == null || payload.isEmpty()) { return true }
   String kind = payload?.kind?.toString()
@@ -8940,25 +8958,7 @@ Boolean dispatchParentStateUpdateDirect(Map payload) {
   }
   return false
 }
-List<Map> drainPendingParentUpdatesForPoll() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return [] }
-  Object lock = parentUpdateLocks.get(dni)
-  if(lock == null) { return [] }
-  List<Map> batch = []
-  synchronized(lock) {
-    ConcurrentLinkedQueue<Map> ordered = pendingParentOrdered.get(dni)
-    if(ordered != null && !ordered.isEmpty()) {
-      while(ordered.peek() != null && batch.size() < 64) {
-        Map item = ordered.poll()
-        if(item != null) { batch.add(item) }
-      }
-      if(ordered.isEmpty()) { pendingParentOrdered.remove(dni) }
-    }
-  }
-  return batch
-}
-List<Map> flushPendingParentUpdates() { return drainPendingParentUpdatesForPoll() }
+
 
 
 ConcurrentHashMap<String, LinkedHashMap> getFavoritesMap() {
