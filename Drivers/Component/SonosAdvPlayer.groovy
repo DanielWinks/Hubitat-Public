@@ -864,6 +864,9 @@ Boolean hasLineInCapability() {
 @Field private final String MRAVT_EVENTS_CALLBACK =  'subscribeResubscribeToMrAvTCallback'
 @Field private final String MRAVT_EVENTS_UNSUB_CALLBACK =  'unsubscribeToMrAvTCallback'
 @Field private final String MRAVT_EVENTS_DOMAIN =  'MediaRenderer/AVTransport'
+@Field private final String CONTENT_DIRECTORY_EVENTS = '/MediaServer/ContentDirectory/Event'
+@Field private final String CONTENT_DIRECTORY_CALLBACK = 'subscribeResubscribeToContentDirectoryCallback'
+@Field private final String CONTENT_DIRECTORY_UNSUB_CALLBACK = 'unsubscribeContentDirectoryCallback'
 
 @Field private final String MRRC_EVENTS  =  '/MediaRenderer/RenderingControl/Event'
 @Field private final String MRRC_EVENTS_CALLBACK  =  'subscribeResubscribeMrRcCallback'
@@ -1076,7 +1079,12 @@ void clearZgtSubscriptionForInitialization() {
   if(!dni) { return }
   String sid = device.getDataValue(ZGT_SUB_DEVICE_KEY) ?: getSid('sid3')
   Boolean hadValid = subValid('sid3') || sid
+  Boolean hadContentDirectorySubscription = subValid('sid6') || getSid('sid6') != null
   invalidateUpnpRequestsForDevice()
+  if(hadContentDirectorySubscription) {
+    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromContentDirectory', 'resubscribeToContentDirectory',
+        'sid6', null, CONTENT_DIRECTORY_UNSUB_CALLBACK, CONTENT_DIRECTORY_EVENTS)
+  }
   // Synchronous local delete after generation bump — stale callbacks are guarded by generation
   deleteSid('sid3')
   device.removeDataValue(ZGT_SUB_DEVICE_KEY)
@@ -1088,11 +1096,13 @@ void clearZgtSubscriptionForInitialization() {
   deleteSid('sid2')
   deleteSid('sid4')
   deleteSid('sid5')
+  deleteSid('sid6')
   device.removeDataValue('sid1-expires')
   device.removeDataValue('sid2-expires')
   device.removeDataValue('sid3-expires')
   device.removeDataValue('sid4-expires')
   device.removeDataValue('sid5-expires')
+  device.removeDataValue('sid6-expires')
   if(hadValid) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'sid3', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
   }
@@ -1132,6 +1142,7 @@ void performDeferredInitialization() {
     subscribeToAVTransport()
     getPlaybackMetadataStatus()
   }
+  subscribeToContentDirectory()
   refreshUpnpMediaCatalogs()
   // ZGT remains conditional — only elected holder subscribes
   if(isZgtSubscriber()) {
@@ -1663,6 +1674,7 @@ void reconnectWebsocket(String reason) {
 void resubscribeAfterRenewal() {
   // Base WebSocket subscription is audioClip only; catalogs use ContentDirectory.
   subscribeToWsEvents()
+  subscribeToContentDirectory()
 
   // Coordinator playback state arrives through AVTransport UPnP events.
   if(getIsGroupCoordinator()) {
@@ -1861,7 +1873,7 @@ void migrationCleanup() {
     removeEventTimestampDeviceDataKeys()
   }
   // Remove stale sid-expiresFormatted keys (replaced by human-readable sid-expires)
-  ['sid1', 'sid2', 'sid3', 'sid4', 'sid5'].each { String sid ->
+  ['sid1', 'sid2', 'sid3', 'sid4', 'sid5', 'sid6'].each { String sid ->
     if(device.getDataValue("${sid}-expiresFormatted") != null) { device.removeDataValue("${sid}-expiresFormatted") }
   }
 }
@@ -4814,7 +4826,7 @@ void parse(String raw) {
     String sid = messageHeaders["SID"]?.toString()?.trim() ?: null
     if(sid == '') { sid = null }
     logDebug("UPnP NOTIFY parsed; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, bodyLength=${xmlBody.length()}, headerNames=${messageHeaders.keySet().join(',')}")
-    if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport') {
+    if(serviceType == 'ZoneGroupTopology' || serviceType == 'AVTransport' || serviceType == 'ContentDirectory') {
       logDebug("UPnP NOTIFY header values; serviceType=${serviceType ?: 'header-unset'}, seq=${seqDisplay}, headerValues=${renderHeaderValues(messageHeaders)}")
     }
     // Header switch: serviceType is the sole dispatch for all UPnP services
@@ -4867,6 +4879,13 @@ void parse(String raw) {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML HTControl event payload'); return }
             handleHtControlPayload(xmlBody)
           } catch(Exception e) { logWarn("Ran into an issue parsing HTControl: ${e}") }
+          return
+        case 'ContentDirectory':
+          try {
+            observeExpectedUpnpSubscriptionEvent('sid6')
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ContentDirectory event payload'); return }
+            handleContentDirectoryPayload(xmlBody)
+          } catch(Exception e) { logWarn("Ran into an issue parsing ContentDirectory: ${e}") }
           return
       }
     }
@@ -5651,10 +5670,10 @@ String normalizeFavoriteUri(String uri) {
 }
 
 void updateCurrentFavoriteFromUpnp(Map snapshot) {
-  if(getFavoritesMap().isEmpty() && !state.favoritesBrowseVersion && !state.favoritesBrowseRequestId) {
+  if(getFavoritesChild() != null && getFavoritesMap().isEmpty() && !state.favoritesBrowseVersion && !state.favoritesBrowseRequestId) {
     getFavorites()
   }
-  if(getPlaylistsMap().isEmpty() && !state.playlistsBrowseVersion && !state.playlistsBrowseRequestId) {
+  if(getPlaylistChild() != null && getPlaylistsMap().isEmpty() && !state.playlistsBrowseVersion && !state.playlistsBrowseRequestId) {
     getPlaylists()
   }
   String currentUri = normalizeFavoriteUri(snapshot?.currentTrackURI?.toString())
@@ -6812,7 +6831,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','sid3','sid4','sid5'].contains(sidKey)) { return }
+  if(entry == null || !['sid1','sid2','sid3','sid4','sid5','sid6'].contains(sidKey)) { return }
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
@@ -6848,6 +6867,7 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
         case 'sid3': unschedule('retryUpnpSid3'); break
         case 'sid4': unschedule('retryUpnpSid4'); break
         case 'sid5': unschedule('retryUpnpSid5'); break
+        case 'sid6': unschedule('retryUpnpSid6'); break
       }
     }
   }
@@ -6860,10 +6880,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', sid3: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents'][sidKey]
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', sid3: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', sid3: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents'][sidKey]
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', sid3: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -7181,6 +7201,7 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
     case 'sid3': runIn(delay, 'retryUpnpSid3', options); break
     case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
     case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
+    case 'sid6': runIn(delay, 'retryUpnpSid6', options); break
   }
 }
 void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
@@ -7188,6 +7209,7 @@ void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid3(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
+void retryUpnpSid6(Map data) { retryUpnpRequest(data) }
 
 void retryUpnpRequest(Map data) {
   Map retry = data?.request as Map
@@ -7266,6 +7288,7 @@ void invalidateUpnpRequestsForDevice() {
     unschedule('retryUpnpSid3')
     unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
+    unschedule('retryUpnpSid6')
     active = entry.active as Map
     if(active != null) {
       active.phase = 'expired'
@@ -7297,6 +7320,7 @@ void retireUpnpRequestsForDevice() {
     unschedule('retryUpnpSid3')
     unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
+    unschedule('retryUpnpSid6')
     active = entry.active as Map
     if(active != null) { active.phase = 'expired'; socket = detachOwnedUpnpSocketLocked(entry, active) }
     (entry.queue as List<Map>).clear()
@@ -7576,6 +7600,39 @@ void unsubscribeFromHtControlEvents() {
 @CompileStatic
 void unsubscribeFromHtControlEventsCallback(HubResponse response) {
   upnpUnsubscribeCallbackGeneric('sid5', 'MediaRenderer/HTControl', response)
+}
+// /////////////////////////////////////////////////////////////////////////////
+// '/MediaServer/ContentDirectory/Event' //sid6
+// /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
+void subscribeToContentDirectory() {
+  if(!hasFavoriteOrPlaylistChild()) { return }
+  upnpSubscribeGeneric('subscribeToContentDirectory', 'sid6', '/contentdirectory',
+      CONTENT_DIRECTORY_CALLBACK, CONTENT_DIRECTORY_EVENTS)
+}
+
+@CompileStatic
+void resubscribeToContentDirectory() {
+  if(!hasFavoriteOrPlaylistChild()) { return }
+  upnpResubscribeGeneric('resubscribeToContentDirectory', 'sid6', '/contentdirectory',
+      CONTENT_DIRECTORY_CALLBACK, CONTENT_DIRECTORY_EVENTS)
+}
+
+@CompileStatic
+void unsubscribeFromContentDirectory() {
+  upnpUnsubscribeGeneric('unsubscribeFromContentDirectory', 'sid6', 'resubscribeToContentDirectory',
+      CONTENT_DIRECTORY_EVENTS, CONTENT_DIRECTORY_UNSUB_CALLBACK)
+}
+
+@CompileStatic
+void subscribeResubscribeToContentDirectoryCallback(HubResponse response) {
+  subscribeResubscribeGenericCallback('subscribeToContentDirectory', 'resubscribeToContentDirectory',
+      'sid6', 'MediaServer/ContentDirectory', response)
+}
+
+@CompileStatic
+void unsubscribeContentDirectoryCallback(HubResponse response) {
+  upnpUnsubscribeCallbackGeneric('sid6', 'MediaServer/ContentDirectory', response)
 }
 // =============================================================================
 // End UPnP Subscriptions and Resubscriptions
@@ -8158,7 +8215,7 @@ Boolean isDebugLoggingEnabled() {
 }
 
 // Retain WS namespace bookkeeping for the commands and event streams still in use.
-@Field static final List<String> WS_NAMESPACES = ['playback', 'playlists', 'audioClip', 'groups', 'favorites', 'playerVolume', 'groupVolume']
+@Field static final List<String> WS_NAMESPACES = ['playback', 'audioClip', 'groups', 'playerVolume', 'groupVolume']
 @Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
@@ -9837,13 +9894,11 @@ Map describeWebSocketCommand(String message) {
 }
 
 String expectedWebsocketResponseType(String namespace, String wireCommand) {
-  if(wireCommand == 'subscribe' && namespace in ['groups', 'favorites', 'playlists', 'audioClip',
+  if(wireCommand == 'subscribe' && namespace in ['groups', 'audioClip',
       'playback', 'playerVolume', 'groupVolume']) { return 'none' }
   if(namespace == 'playback' && wireCommand in ['play', 'pause', 'stop', 'skipToNextTrack',
       'skipToPreviousTrack', 'setPlayModes']) { return 'none' }
   if(namespace in ['playerVolume', 'groupVolume'] && wireCommand in ['setVolume', 'setMute', 'setRelativeVolume']) { return 'none' }
-  if(namespace == 'favorites' && wireCommand == 'loadFavorite') { return 'none' }
-  if(namespace == 'playlists' && wireCommand == 'loadPlaylist') { return 'none' }
   if(namespace == 'groups' && wireCommand == 'getGroups') { return 'groups' }
   if(namespace == 'playback' && wireCommand == 'getPlaybackStatus') { return 'playbackStatus' }
   if(namespace == 'groups' && wireCommand in ['createGroup', 'modifyGroupMembers']) { return 'groupInfo' }
@@ -9866,8 +9921,6 @@ String queuedCommandReplacementKey(Map entry) {
   if(namespace == 'playback' && command in ['play', 'pause', 'stop']) { return "transport:${target}" }
   if(namespace == 'playerVolume' && command in ['setVolume', 'setMute']) { return "${namespace}:${command}:${target}" }
   if(namespace == 'groupVolume' && command in ['setVolume', 'setMute']) { return "${namespace}:${command}:${target}" }
-  if(namespace in ['favorites', 'playlists'] && command in ['loadFavorite', 'loadPlaylist'] &&
-      entry.args?.action?.toString()?.toUpperCase() == 'REPLACE') { return "media:${target}" }
   return null
 }
 
@@ -10117,9 +10170,6 @@ void expireWebsocketCommandLedgerEntry(Map data = [:]) {
 
 Boolean shouldReplayUnacknowledgedCommand(Map entry) {
   if(entry?.wireCommand == 'subscribe' || entry?.namespace == 'audioClip' || entry?.kind in ['audioClip', 'transportCommand', 'transportStatusQuery']) { return false }
-  if(entry?.namespace in ['favorites', 'playlists'] && entry?.wireCommand in ['loadFavorite', 'loadPlaylist']) {
-    return entry.args?.action?.toString()?.toUpperCase() == 'REPLACE'
-  }
   return true
 }
 
@@ -10430,9 +10480,6 @@ List<Map> expectedSubscriptionEventsForWsCommand(String message) {
     Map command = payload && payload[0] instanceof Map ? (Map)payload[0] : [:]
     String namespace = command.namespace?.toString()
     String name = command.command?.toString()
-    if(namespace in ['favorites', 'playlists'] && name in ['loadFavorite', 'loadPlaylist']) {
-      return [[namespace: 'playback', type: 'playbackStatus']]
-    }
     if(namespace == 'playback' && name in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack', 'seek']) {
       return [[namespace: 'playback', type: 'playbackStatus']]
     }
@@ -10602,11 +10649,27 @@ void subscribeToWsEvents() {
 }
 
 void refreshUpnpMediaCatalogs() {
-  if(checkIsFavPlaylistDelegate()) {
-    getFavorites()
-    getPlaylists()
+  if(getFavoritesChild() != null) { getFavorites() }
+  if(getPlaylistChild() != null) { getPlaylists() }
+}
+
+Boolean hasFavoriteOrPlaylistChild() { return getFavoritesChild() != null || getPlaylistChild() != null }
+
+void handleContentDirectoryPayload(String xmlBody) {
+  GPathResult root = new XmlSlurper().parseText(xmlBody)
+  Boolean favoritesChanged = false
+  Boolean playlistsChanged = false
+  for(Object property : root.children()) {
+    if(!(property instanceof GPathResult)) { continue }
+    for(Object value : ((GPathResult)property).children()) {
+      if(!(value instanceof GPathResult)) { continue }
+      String name = xmlLocalName((GPathResult)value)
+      if(name == 'FavoritesUpdateID') { favoritesChanged = true }
+      if(name == 'SavedQueuesUpdateID') { playlistsChanged = true }
+    }
   }
-  runIn(900, 'refreshUpnpMediaCatalogs', [overwrite: true])
+  if(favoritesChanged && getFavoritesChild() != null) { getFavorites() }
+  if(playlistsChanged && getPlaylistChild() != null) { getPlaylists() }
 }
 
 @CompileStatic
@@ -12460,6 +12523,7 @@ Long getLastInboundUpnpEventEpoch(String sidKey) {
     case 'sid3': return getLastInboundZgtEventEpoch()
     case 'sid4': return getLastInboundMrGrcEventEpoch()
     case 'sid5': return getLastInboundHtControlEventEpoch()
+    case 'sid6': return 0L
     default: return 0L
   }
 }
@@ -12471,6 +12535,7 @@ void resubscribeUpnpSid(String sidKey) {
     case 'sid3': resubscribeToZgtEvents(); break
     case 'sid4': resubscribeToMrGrcEvents(); break
     case 'sid5': resubscribeToHtControlEvents(); break
+    case 'sid6': resubscribeToContentDirectory(); break
     default: logWarn("No UPnP resubscribe handler for ${sidKey}")
   }
 }
@@ -13635,38 +13700,6 @@ void processWebsocketMessage(String message) {
         recordLastError("Group operation failed: ${eventData?.errorCode}", reason)
       }
     }
-    if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
-      String errorCode = eventData?.errorCode?.toString()
-      String reason = eventData?.reason?.toString()
-      Map retryState = playlistRetryState.get(dni)
-      if(retryState != null) {
-        retryState.loadAcknowledged = false
-        retryState.loadErrorCode = errorCode
-        retryState.loadErrorReason = reason
-      }
-      if(retryState == null || !isRetryablePlaylistError(errorCode)) {
-        reportPlaylistLoadError(retryState?.playlistId as String, errorCode, reason)
-        if(retryState != null) { clearPlaylistRetryState() }
-      } else {
-        logWarn("Playlist '${retryState.playlistId}' load returned retryable error ${errorCode}: ${reason}")
-      }
-    }
-  }
-
-  if(eventType?.namespace == 'favorites' && eventType?.response == 'loadFavorite') {
-    Map retryState = favoriteRetryState.get(dni)
-    if(retryState != null) { retryState.loadAcknowledged = eventType?.success == true }
-    emitGroupFavoriteOperationEvent('favoriteLoadAck', [
-      success: eventType?.success == true,
-      errorCode: eventData?.errorCode?.toString(),
-      reason: eventData?.reason?.toString(),
-      groupId: getGroupId()
-    ])
-  }
-
-  if(eventType?.namespace == 'playlists' && eventType?.response == 'loadPlaylist') {
-    Map retryState = playlistRetryState.get(dni)
-    if(retryState != null) { retryState.loadAcknowledged = eventType?.success == true }
   }
 
   if(eventType?.type == 'playbackStatus' && eventType?.namespace == 'playback') {

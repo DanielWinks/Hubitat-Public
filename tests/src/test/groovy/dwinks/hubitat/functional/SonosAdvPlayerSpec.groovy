@@ -119,6 +119,37 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValue('currentFavorite').contains('Favorite #14 Peepers On Crane Pond')
   }
 
+  def "ContentDirectory updates refresh only the changed active catalog over UPnP"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
+    driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getPlaylistChildDNI())
+    String favoritesEvent = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>RINCON_TEST,101</FavoritesUpdateID></e:property></e:propertyset>'
+    String playlistsEvent = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><SavedQueuesUpdateID>RINCON_TEST,33</SavedQueuesUpdateID></e:property></e:propertyset>'
+
+    when:
+    driver.handleContentDirectoryPayload(favoritesEvent)
+    driver.handleContentDirectoryPayload(playlistsEvent)
+
+    then:
+    driver.asyncCalls*.cb == ['favoritesBrowseCallback', 'playlistsBrowseCallback']
+    driver.asyncCalls[0].params.body.contains('<ObjectID>FV:2</ObjectID>')
+    driver.asyncCalls[1].params.body.contains('<ObjectID>SQ:</ObjectID>')
+  }
+
+  def "ContentDirectory subscription is active when a favorite or playlist child exists"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
+
+    when:
+    driver.subscribeToContentDirectory()
+
+    then:
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'sid6'
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.eventUrl == '/MediaServer/ContentDirectory/Event'
+  }
+
   void drainParentBridge() {
     List<Map> updates = driver.flushPendingParentUpdates() ?: []
     updates.each { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) }
