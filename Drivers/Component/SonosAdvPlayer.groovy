@@ -13690,7 +13690,6 @@ void processWebsocketMessage(String message) {
     Long playbackStateObservedAt = now()
     state.playbackState = currentState
     state.playbackStateObservedAt = playbackStateObservedAt
-    publishPlaybackObservation()
     observeTransportPlaybackStatus(eventData)
     setTrackPositionFromPlaybackStatus(eventData, currentState, playbackStateObservedAt)
     Map announcement = runtimeState.groupAnnouncementStream instanceof Map
@@ -13785,7 +13784,6 @@ void observeUpnpPlaybackSource(Map snapshot) {
   }
   state.audioSourceSignalStatus = signalStatus
   state.audioSourceSignalObservedAt = now()
-  publishPlaybackObservation()
   logDebug("UPnP playback-source observation player=${getId()}, uri=${uri}, itemClass=${itemClass}, signalStatus=${signalStatus}")
 }
 
@@ -13809,11 +13807,6 @@ void handleHtControlPayload(String xmlBody) {
       : (runtimeState.lastTransportPlaybackSnapshot instanceof Map ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:])
   observeUpnpPlaybackSource(currentSnapshot)
   logDebug("UPnP HTControl TOSLinkConnected=${connected} player=${getId()}")
-}
-
-/** No longer published via outbox — parent reads status/audioSource attributes directly. Kept as no-op for compatibility. */
-void publishPlaybackObservation() {
-  // Parent now constructs playbackObservation from status/audioSource attributes via subscription/poll
 }
 
 void setChildFavs(String html) {

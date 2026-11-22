@@ -1943,19 +1943,6 @@ class SonosAdvancedAppSpec extends Specification {
     } == 1
   }
 
-  def "poll pulls driver outboxes without any synchronous parent call"() {
-    given:
-    coordinator.pendingParentUpdatePoll = [[kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId, playbackState: 'PLAYBACK_STATE_PLAYING']]
-    group.pendingGroupRequestPoll = [request('refresh', [:], 1)]
-
-    when:
-    appScript.pollDriverParentQueues()
-
-    then:
-    // Direct parent calls — poll loop removed, no pending at that time
-    true
-  }
-
   def "player location state batches queue follower and group updates"() {
     given:
     Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',

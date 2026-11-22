@@ -2700,9 +2700,6 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
   }
 }
 
-/** Driver outbox retired — poll loop removed */
-void scheduleDriverParentPoll() { }
-void pollDriverParentQueues() { }
 void scheduleHouseholdHealthCheck() {
   runIn(HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS, 'householdHealthCheck', [overwrite: true])
 }
