@@ -5179,23 +5179,29 @@ Map<String, Object> parseAvtMetaData(String rawDidl) {
   if(!isPlausibleXmlPayload(candidate)) { return [:] }
   try {
     GPathResult meta = new XmlSlurper().parseText(candidate)
-    GPathResult item = (GPathResult)meta['item']
-    if(item.size() == 0) { return [:] }
+    // Sonos DIDL-Lite uses a default namespace for <item> and prefixes fields
+    // such as dc:title, dc:creator, and upnp:album. Unqualified GPath lookups
+    // miss those elements, so inspect only the direct item children by local
+    // name rather than recursively walking the DIDL tree.
+    GPathResult item = findDirectXmlChild(meta, 'item')
+    if(item == null) { return [:] }
     Map<String, String> streamInfo = [:]
-    String si = item['streamInfo']?.text()?.toString()
+    String si = findDirectXmlChild(item, 'streamInfo')?.text()?.toString()
     if(si) { si.split(',').each { String kv -> if(kv.contains(':')) { def ab = kv.split(':', 2); streamInfo[ab[0].trim()] = ab[1].trim() } } }
-    String albumArt = item['albumArtURI']?.text()?.toString() ?: ''
+    String albumArt = findDirectXmlChild(item, 'albumArtURI')?.text()?.toString() ?: ''
     while(albumArt.contains('&amp;')) { albumArt = albumArt.replace('&amp;','&') }
+    String creator = findDirectXmlChild(item, 'creator')?.text()?.toString()
+    if(!creator) { creator = findDirectXmlChild(item, 'artist')?.text()?.toString() }
     return [
-      title: item['title']?.text()?.toString(),
-      creator: item['creator']?.text()?.toString() ?: item['artist']?.text()?.toString(),
-      album: item['album']?.text()?.toString(),
+      title: findDirectXmlChild(item, 'title')?.text()?.toString(),
+      creator: creator,
+      album: findDirectXmlChild(item, 'album')?.text()?.toString(),
       albumArtURI: albumArt,
-      class: item['class']?.text()?.toString(),
-      res: item['res']?.text()?.toString(),
+      class: findDirectXmlChild(item, 'class')?.text()?.toString(),
+      res: findDirectXmlChild(item, 'res')?.text()?.toString(),
       streamInfo: streamInfo,
-      streamContent: item['streamContent']?.text()?.toString(),
-      description: item['description']?.text()?.toString()
+      streamContent: findDirectXmlChild(item, 'streamContent')?.text()?.toString(),
+      description: findDirectXmlChild(item, 'description')?.text()?.toString()
     ]
   } catch(Exception e) {
     logDebug("Could not parse AVT DIDL: ${e.message}")

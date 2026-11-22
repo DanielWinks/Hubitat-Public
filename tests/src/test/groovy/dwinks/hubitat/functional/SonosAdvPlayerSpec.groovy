@@ -2327,6 +2327,29 @@ class SonosAdvPlayerSpec extends Specification {
     snapshot.currentTrackMetaData.album == 'Album & Friends'
   }
 
+  def "AVT DIDL metadata lookup supports Sonos default and prefixed namespaces"() {
+    given:
+    String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
+      'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
+      'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" ' +
+      'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
+      '<item><res>sonos:track</res><r:streamContent></r:streamContent>' +
+      '<upnp:albumArtURI>/getaa?s=1&amp;u=track</upnp:albumArtURI>' +
+      '<dc:title>Peepers On Crane Pond</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>' +
+      '<dc:creator>Adirondack Environments</dc:creator><upnp:album>Peepers On Crane Pond</upnp:album>' +
+      '</item></DIDL-Lite>'
+
+    when:
+    Map<String, Object> metadata = driver.parseAvtMetaData(didl)
+
+    then:
+    metadata.title == 'Peepers On Crane Pond'
+    metadata.creator == 'Adirondack Environments'
+    metadata.album == 'Peepers On Crane Pond'
+    metadata.albumArtURI == '/getaa?s=1&u=track'
+    metadata.class == 'object.item.audioItem.musicTrack'
+  }
+
   def "partial AVT events preserve track metadata and changed URI clears stale values"() {
     given:
     String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"><item><dc:title>First Track</dc:title></item></DIDL-Lite>'
