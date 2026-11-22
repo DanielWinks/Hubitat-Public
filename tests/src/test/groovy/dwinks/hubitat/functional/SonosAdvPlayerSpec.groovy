@@ -1640,9 +1640,9 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "polled parent updates never call the parent and only require the poll"() {
     given:
+    List<Map> directCalls = []
     driver.metaClass.getParent = { -> new Expando(
-      playerStateUpdate: { Map payload -> throw new AssertionError('poll must not call parent') },
-      playerAppRequest: { Map payload -> throw new AssertionError('poll must not call parent') }
+      initializationStarted: { String reqId -> directCalls << [kind:'initializationStarted', requestId:reqId] }
     ) }
 
     when:
@@ -1650,8 +1650,10 @@ class SonosAdvPlayerSpec extends Specification {
     List<Map> batch = driver.flushPendingParentUpdates()
 
     then:
-    batch.size() == 1
-    batch[0].requestId == 'req-poll'
+    // direct parent call now; poll stubs are no-ops for backward compat
+    directCalls.size() == 1
+    directCalls[0].requestId == 'req-poll'
+    batch.isEmpty()
     !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
   }
 
