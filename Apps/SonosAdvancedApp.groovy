@@ -49,6 +49,7 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.math.RoundingMode
 
 // =============================================================================
 // Library: Utilities and Logging (inlined)
@@ -11971,7 +11972,7 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
       if(player.currentValue('mute', true) != 'muted') { allMuted = false }
     }
     if(volumeCount > 0) {
-      Integer averageVolume = Math.round(totalVolume / volumeCount) as Integer
+      Integer averageVolume = new BigDecimal(totalVolume).divide(new BigDecimal(volumeCount), 0, RoundingMode.HALF_UP).intValue()
       attributes.volume = averageVolume
       attributes.groupVolume = averageVolume
     }

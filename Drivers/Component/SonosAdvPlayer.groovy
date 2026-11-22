@@ -45,6 +45,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.Duration
 import java.time.format.DateTimeFormatter
+import java.math.RoundingMode
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -2888,7 +2889,7 @@ void mute(){ playerSetPlayerMute(true) }
 @CompileStatic
 void unmute(){ playerSetPlayerMute(false) }
 void setLevel(BigDecimal level, BigDecimal duration = null) {
-  Integer targetVolume = Math.max(0, Math.min(100, level as Integer))
+  Integer targetVolume = Math.max(0, Math.min(100, roundVolume(level)))
   if(duration == null || duration <= 0) {
     cancelVolumeFade()
     dispatchPlayerVolume(targetVolume)
@@ -3208,7 +3209,7 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
     return
   }
   String deviceId = getId()
-  Integer targetVolume = Math.max(0, Math.min(100, level as Integer))
+  Integer targetVolume = Math.max(0, Math.min(100, roundVolume(level)))
   Boolean useGroupApi = isCoord
   if(duration == null || duration <= 0) {
     cancelGroupVolumeFade()
@@ -11561,7 +11562,12 @@ static Integer calculateAnnouncementVolume(BigDecimal requestedVolume, Integer c
   if(requestedVolume != null && requestedVolume.compareTo(BigDecimal.valueOf(-1L)) == 0) { return 0 }
   if(requestedVolume != null && requestedVolume.compareTo(BigDecimal.ZERO) == 0) { return 0 }
   BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
-  return Math.max(0, Math.min((baseVolume + boost) as Integer, 100))
+  return Math.max(0, Math.min(roundVolume(baseVolume + boost), 100))
+}
+
+@CompileStatic
+static Integer roundVolume(BigDecimal volume) {
+  return volume.setScale(0, RoundingMode.HALF_UP).intValue()
 }
 
 @CompileStatic

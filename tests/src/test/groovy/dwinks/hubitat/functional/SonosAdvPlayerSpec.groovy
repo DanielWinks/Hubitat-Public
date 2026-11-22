@@ -5053,4 +5053,16 @@ class SonosAdvPlayerSpec extends Specification {
     12G       | 17
   }
 
+  def "volume scaling rounds fractional values half up"() {
+    expect:
+    driver.roundVolume(input) == expected
+    driver.calculateAnnouncementVolume(input, 20, 0) == expected
+
+    where:
+    input | expected
+    12.49G | 12
+    12.5G  | 13
+    12.51G | 13
+  }
+
 }
