@@ -3361,6 +3361,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "app player attribute updates fan out the full playback state to followers and group devices"() {
     given:
+    coordinator.updatedSettings.disableAlbumArtEvents = false
     List<Map> topology = [
       [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
       [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
@@ -3386,6 +3387,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingChildEvents[follower.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].currentTrackName == 'Track'
     appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
+    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].albumArtSmall == 'http://example.test/art.jpg'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].albumArtLarge == 'http://example.test/art.jpg'
+    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].albumArtMedium == 'http://example.test/art.jpg'
   }
 
   def "new member playback snapshots come from app state with explicit empty defaults"() {
