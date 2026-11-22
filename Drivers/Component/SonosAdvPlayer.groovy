@@ -1041,8 +1041,7 @@ void performImmediateInitialization() {
 
 void scheduleEarlyRenderingControlSubscribe() {
   String localUpnpHost = device.getDataValue('localUpnpHost')
-  String websocketUrl = device.getDataValue('websocketUrl')
-  if(!localUpnpHost || !websocketUrl) {
+  if(!localUpnpHost) {
     logDebug('RC early subscribe skipped — device data not yet configured')
     return
   }
