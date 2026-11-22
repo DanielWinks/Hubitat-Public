@@ -32,6 +32,9 @@ class HubitatScriptHarness extends Script {
   /** Mutable runtime state - tests assert on this Map after invocations. */
   Map<String, Object> state = [:]
 
+  /** Atomic state - immediate persistence, also a Map on Hubitat. */
+  Map<String, Object> atomicState = [:]
+
   /** Per-call recordings the spec can assert against. */
   List<Map> events = []
   List<Map> locationEvents = []
@@ -199,6 +202,7 @@ class MockDevice extends ChildDeviceWrapper {
   String getName()            { name }
   Long   getId()              { id }
   String getDataValue(String name) { dataValues[name] }
+  Map<String,String> getData() { dataValues }
   void updateDataValue(String name, String value) { dataValues[name] = value }
   void removeDataValue(String name) { dataValues.remove(name) }
   void sendEvent(Map event) {
@@ -215,6 +219,8 @@ class MockDevice extends ChildDeviceWrapper {
     currentValues.collect { String n, Object v -> [name: n, value: v] }
   }
   void deleteCurrentState(String n) { currentValues.remove(n) }
+  void clearSetting(String name) { updatedSettings.remove(name) }
+  Object getSetting(String name) { updatedSettings[name] }
 }
 
 /** Stand-in for an InstalledAppWrapper. */

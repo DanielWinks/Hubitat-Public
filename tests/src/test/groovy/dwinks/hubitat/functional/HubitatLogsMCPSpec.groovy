@@ -450,4 +450,215 @@ class HubitatLogsMCPSpec extends Specification {
     cleanup:
     app.metaClass = null
   }
+
+  def "device events filter and paginate newest first"() {
+    given:
+    List<Map> requests = []
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      requests.add(params)
+      callback.call([status: 200, data: [
+        [id: 1, source: 'DEVICE', name: 'switch', value: 'on', deviceId: 530, descriptionText: 'Lamp is on', type: 'API', date: '2026-11-22T07:30:00.229-0500'],
+        [id: 2, source: 'DEVICE', name: 'switch', value: 'off', deviceId: 530, descriptionText: 'Lamp is off', type: 'API', date: '2026-11-22T07:31:00.100-0500'],
+        [id: 3, source: 'LOCATION', name: 'mode', value: 'Day', deviceId: null, descriptionText: 'Day mode', type: 'LOCATION_MODE_CHANGE', date: '2026-11-22T07:29:00.000-0500']
+      ]])
+    }
+
+    when:
+    Map first = (Map) new JsonSlurper().parseText(app.getDeviceEvents([deviceId: 530, maxEntries: 1]).content[0].text)
+    Map second = (Map) new JsonSlurper().parseText(app.getDeviceEvents([cursor: first.nextCursor]).content[0].text)
+
+    then:
+    requests[0].uri == 'http://127.0.0.1:8080/logs/eventsJson'
+    first.totalMatches == 2
+    first.entries[0].value == 'off'
+    first.entries[0].timestamp == '2026-11-22 07:31:00.100'
+    second.entries[0].value == 'on'
+    second.nextCursor == null
+    app.getDeviceEvents([deviceId: '../530']).isError
+    app.getDeviceEvents([since: 'bad']).isError
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "hub info excludes account data and summarizes lists"() {
+    given:
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      callback.call([status: 200, data: [hubName: 'Hubitat C7', platformVersion: '2.5.3.133', ipAddress: '<a href="http://192.168.1.3">192.168.1.3</a> (Ethernet)', timeZones: [[id: 'ACT'], [id: 'AET']], users: [[email: 'a@example.com', admin: true]]]])
+    }
+
+    when:
+    Map body = (Map) new JsonSlurper().parseText(app.getHubInfo([:]).content[0].text)
+    Map entries = body.entries.collectEntries { [(it.key): it.value] }
+
+    then:
+    entries.hubName == 'Hubitat C7'
+    entries.timeZones == [count: 2]
+    !entries.containsKey('users')
+    !body.toString().contains('a@example.com')
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "hub health parses scalar counters and memory CSV rows"() {
+    given:
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      if (params.uri.contains('cpuInfo')) {
+        callback.call([status: 200, data: 'Processors 4\nLoad Average 0.19\n'])
+      } else if (params.uri.contains('freeOSMemoryHistory')) {
+        callback.call([status: 200, data: 'Date/time,Free OS,5m CPU avg\n11-22 11:24:56,838016,0.14\n11-22 11:29:56,837000,0.20\n'])
+      } else if (params.uri.contains('freeOSMemory')) {
+        callback.call([status: 200, data: '836560'])
+      } else if (params.uri.contains('databaseSize')) {
+        callback.call([status: 200, data: '9'])
+      } else if (params.uri.contains('internalTemp')) {
+        callback.call([status: 200, data: '40.0'])
+      } else if (params.uri.contains('freeOSMemoryLast')) {
+        callback.call([status: 200, data: 'Date/time,Free OS,5m CPU avg\n11-22 11:24:56,838016,0.14\n'])
+      } else {
+        callback.call([status: 404, data: ''])
+      }
+    }
+
+    when:
+    Map cpu = (Map) new JsonSlurper().parseText(app.getHubHealth([section: 'cpu']).content[0].text)
+    Map memory = (Map) new JsonSlurper().parseText(app.getHubHealth([section: 'memory']).content[0].text)
+    Map history = (Map) new JsonSlurper().parseText(app.getHubHealth([section: 'memoryHistory', maxEntries: 1]).content[0].text)
+    Map all = (Map) new JsonSlurper().parseText(app.getHubHealth([:]).content[0].text)
+
+    then:
+    cpu.value.processors == 4
+    memory.value == 836560
+    history.total == 2
+    history.entries[0].value['Free OS'] == 838016
+    history.nextCursor != null
+    all.cpu.present
+    all.database.present
+    app.getHubHealth([section: 'notASection']).isError
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "capability inventory routes to the capability endpoint lowercased"() {
+    given:
+    List<Map> requests = []
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      requests.add(params)
+      callback.call([status: 200, data: [[id: 386, name: 'Dimmer', displayName: '10v dimmer']]])
+    }
+
+    when:
+    Map body = (Map) new JsonSlurper().parseText(app.getDeviceInventory([capability: 'capability.Switch']).content[0].text)
+
+    then:
+    requests.size() == 1
+    requests[0].uri == 'http://127.0.0.1:8080/device/listJson?capability=capability.switch'
+    body.totalMatches == 1
+    body.devices[0].id == 386
+    app.getDeviceInventory([capability: 'Switch']).isError
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "retention readbacks parse values and tolerate unsupported endpoints"() {
+    given:
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      if (params.uri.contains('event/limit')) {
+        callback.call([status: 200, data: 'Maximum event count: [11]'])
+      } else if (params.uri.contains('deviceStateHistorySize')) {
+        callback.call([status: 404, data: 'not found'])
+      } else if (params.uri.contains('maxDeviceStateAgeDays')) {
+        callback.call([status: 200, data: '7'])
+      } else if (params.uri.contains('maxEventAgeDays')) {
+        callback.call([status: 200, data: '31'])
+      } else {
+        callback.call([status: 404, data: ''])
+      }
+    }
+
+    when:
+    Map body = (Map) new JsonSlurper().parseText(app.getEventRetention([:]).content[0].text)
+    Map entries = body.entries.collectEntries { [(it.key): it] }
+
+    then:
+    entries.eventLimit.present
+    entries.eventLimit.value == 11
+    !entries.deviceStateHistorySize.present
+    entries.maxDeviceStateAgeDays.value == 7
+    entries.maxEventAgeDays.value == 31
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "rooms and device types list paginated inventories"() {
+    given:
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      if (params.uri.contains('roomsList')) {
+        callback.call([status: 200, data: [roomNodes: [[data: [id: 1, name: 'Basement'], children: []], [data: [id: 2, name: 'Kitchen'], children: []]], devices: []]])
+      } else if (params.uri.contains('userDeviceTypes')) {
+        callback.call([status: 200, data: [[id: 1041, name: 'HTTP Switch', namespace: 'dwinks', capabilities: 'Switch'], [id: 1042, name: 'HTTP Other', namespace: 'dwinks', capabilities: 'Switch']]])
+      } else if (params.uri.contains('device/drivers')) {
+        callback.call([status: 200, data: [drivers: [[id: 1, name: 'Kasa EM Multi Plug', namespace: 'davegutBuiltin', password: 'hidden']]]])
+      } else {
+        callback.call([status: 404, data: ''])
+      }
+    }
+
+    when:
+    Map rooms = (Map) new JsonSlurper().parseText(app.getRooms([query: 'kitch']).content[0].text)
+    Map drivers = (Map) new JsonSlurper().parseText(app.getDeviceTypes([section: 'drivers']).content[0].text)
+    Map userTypes = (Map) new JsonSlurper().parseText(app.getDeviceTypes([section: 'userDeviceTypes', query: 'switch']).content[0].text)
+
+    then:
+    rooms.total == 1
+    rooms.entries[0].name == 'Kitchen'
+    drivers.entries[0].name == 'Kasa EM Multi Plug'
+    drivers.entries[0].password == null
+    userTypes.total == 2
+    app.getDeviceTypes([section: 'nope']).isError
+
+    cleanup:
+    app.metaClass = null
+  }
+
+  def "job deletion and thread dump require explicit authorization"() {
+    given:
+    List<Map> requests = []
+    app.metaClass.httpGet = { Map params, Closure callback ->
+      requests.add(params)
+      callback.call([status: 200, data: 'done'])
+    }
+
+    when:
+    Map deleteDef = app.deleteJobsToolDefinition()
+    Map dumpDef = app.dumpThreadsToolDefinition()
+    Map rejectedDelete = app.deleteAppJobs([targetId: 530])
+    Map rejectedDump = app.dumpThreadsToLog([:])
+
+    then:
+    deleteDef.annotations.destructiveHint == true
+    deleteDef.inputSchema.required == ['targetId', 'allowSensitive']
+    dumpDef.inputSchema.required == ['allowSensitive']
+    rejectedDelete.isError
+    rejectedDump.isError
+    requests.empty
+
+    when:
+    Map deleted = (Map) new JsonSlurper().parseText(app.deleteAppJobs([targetId: 530, allowSensitive: true]).content[0].text)
+    Map dumped = (Map) new JsonSlurper().parseText(app.dumpThreadsToLog([allowSensitive: true]).content[0].text)
+
+    then:
+    deleted.success
+    deleted.outcome == 'accepted'
+    dumped.success
+    dumped.outcome == 'accepted'
+    requests*.uri == ['http://127.0.0.1:8080/hub/advanced/deleteAppJobs/530', 'http://127.0.0.1:8080/hub/advanced/dumpThreadsToLog']
+
+    cleanup:
+    app.metaClass = null
+  }
 }

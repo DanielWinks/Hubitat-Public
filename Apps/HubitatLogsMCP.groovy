@@ -29,7 +29,35 @@ import java.text.SimpleDateFormat
 @Field static final String APP_STATUS_URI = "http://127.0.0.1:8080/installedapp/statusJson/"
 @Field static final String LOG_DIAGNOSTICS_TOOL_NAME = "hubitat_get_runtime_diagnostics"
 @Field static final String APP_STATUS_TOOL_NAME = "hubitat_get_app_diagnostics"
+@Field static final String EVENTS_TOOL_NAME = "hubitat_get_device_events"
+@Field static final String EVENTS_URI = "http://127.0.0.1:8080/logs/eventsJson"
+@Field static final String HUB_INFO_TOOL_NAME = "hubitat_get_hub_info"
+@Field static final String HUB_DETAILS_URI = "http://127.0.0.1:8080/hub/details/json"
+@Field static final String HUB_HEALTH_TOOL_NAME = "hubitat_get_hub_health"
+@Field static final String CPU_INFO_URI = "http://127.0.0.1:8080/hub/cpuInfo"
+@Field static final String FREE_MEM_URI = "http://127.0.0.1:8080/hub/advanced/freeOSMemory"
+@Field static final String FREE_MEM_HISTORY_URI = "http://127.0.0.1:8080/hub/advanced/freeOSMemoryHistory"
+@Field static final String FREE_MEM_LAST_URI = "http://127.0.0.1:8080/hub/advanced/freeOSMemoryLast"
+@Field static final String DATABASE_SIZE_URI = "http://127.0.0.1:8080/hub/advanced/databaseSize"
+@Field static final String INTERNAL_TEMP_URI = "http://127.0.0.1:8080/hub/advanced/internalTempCelsius"
+@Field static final String RETENTION_TOOL_NAME = "hubitat_get_event_retention"
+@Field static final String EVENT_LIMIT_URI = "http://127.0.0.1:8080/hub/advanced/event/limit"
+@Field static final String STATE_HISTORY_URI = "http://127.0.0.1:8080/hub/advanced/deviceStateHistorySize"
+@Field static final String MAX_DEVICE_STATE_AGE_URI = "http://127.0.0.1:8080/hub/advanced/maxDeviceStateAgeDays"
+@Field static final String MAX_EVENT_AGE_URI = "http://127.0.0.1:8080/hub/advanced/maxEventAgeDays"
+@Field static final String ROOMS_TOOL_NAME = "hubitat_list_rooms"
+@Field static final String ROOMS_URI = "http://127.0.0.1:8080/hub2/roomsList"
+@Field static final String DEVICE_TYPES_TOOL_NAME = "hubitat_list_device_types"
+@Field static final String DRIVERS_URI = "http://127.0.0.1:8080/device/drivers"
+@Field static final String USER_DEVICE_TYPES_URI = "http://127.0.0.1:8080/hub2/userDeviceTypes"
+@Field static final String DEVICE_CAPABILITY_URI = "http://127.0.0.1:8080/device/listJson?capability="
+@Field static final String DELETE_JOBS_TOOL_NAME = "hubitat_delete_app_jobs"
+@Field static final String DELETE_JOBS_URI = "http://127.0.0.1:8080/hub/advanced/deleteAppJobs/"
+@Field static final String DUMP_THREADS_TOOL_NAME = "hubitat_dump_threads_to_log"
+@Field static final String DUMP_THREADS_URI = "http://127.0.0.1:8080/hub/advanced/dumpThreadsToLog"
 @Field static final List<String> LOG_DIAGNOSTIC_SECTIONS = ["summary", "appStats", "deviceStats", "jobs", "runningJobs"]
+@Field static final List<String> HUB_HEALTH_SECTIONS = ["cpu", "memory", "memoryHistory", "memoryLast", "database", "temperature"]
+@Field static final List<String> DEVICE_TYPES_SECTIONS = ["drivers", "userDeviceTypes"]
 @Field static final List<String> APP_INVENTORY_SECTIONS = ["apps", "systemAppTypes", "userAppTypes", "appCollections"]
 @Field static final List<String> DEVICE_DETAIL_SECTIONS = ["overview", "device", "data", "attributes", "state", "settings", "inputValues", "commands", "scheduledJobs", "appsUsing", "appsUsingForDialog", "childDevices", "parentApp", "dashboards", "dashboardTypes", "raw"]
 @Field static final String STREAM_CHILD_DNI = "hubitat-log-stream"
@@ -119,7 +147,7 @@ Map mainPage() {
             } else {
                 paragraph("Save this app, then reopen it to view the OAuth-protected MCP URL.")
             }
-            paragraph("This server exposes logs, runtime and app diagnostics, device inventory, device details, device commands, and a guarded hub reboot action.")
+            paragraph("This server exposes logs and device events, runtime and app diagnostics, hub details and health counters, device inventory, device details, device commands, and guarded hub actions (reboot, job deletion, thread dump).")
             paragraph("The MCP URL permits device commands and a hub reboot. Share it only with trusted clients.")
             paragraph("This reads the same logs route as ${LAN_LOGS_URI} through Hubitat's internal loopback address.")
         }
@@ -172,7 +200,7 @@ Map handleMcpPost() {
                 result = [:]
                 break
             case "tools/list":
-                result = [tools: [logsToolDefinition(), logSummaryToolDefinition(), liveLogsToolDefinition(), timelineToolDefinition(), deviceDetailsToolDefinition(), deviceCommandToolDefinition(), hubRebootToolDefinition(), deviceInventoryToolDefinition(), appInventoryToolDefinition(), runtimeDiagnosticsToolDefinition(), appDiagnosticsToolDefinition()]]
+                result = [tools: [logsToolDefinition(), logSummaryToolDefinition(), liveLogsToolDefinition(), timelineToolDefinition(), deviceDetailsToolDefinition(), deviceCommandToolDefinition(), hubRebootToolDefinition(), deviceInventoryToolDefinition(), appInventoryToolDefinition(), runtimeDiagnosticsToolDefinition(), appDiagnosticsToolDefinition(), deviceEventsToolDefinition(), hubInfoToolDefinition(), hubHealthToolDefinition(), eventRetentionToolDefinition(), roomsToolDefinition(), deviceTypesToolDefinition(), deleteJobsToolDefinition(), dumpThreadsToolDefinition()]]
                 break
             case "tools/call":
                 result = dispatchTool(message.params)
@@ -197,8 +225,8 @@ Map initializeResult(Map message) {
     return [
         protocolVersion: version,
         capabilities: [tools: [listChanged: false]],
-        serverInfo: [name: "hubitat-logs-mcp", version: "1.2.0"],
-        instructions: "Use ${MCP_TOOL_NAME} for filtered historical log pages, ${SUMMARY_TOOL_NAME} for compact counts and recurring issues, ${LOG_DIAGNOSTICS_TOOL_NAME} for Hubitat performance counters and jobs, ${APP_STATUS_TOOL_NAME} for app subscriptions and scheduled jobs, ${TIMELINE_TOOL_NAME} for a chronological log timeline, ${LIVE_TOOL_NAME} for the live stream, ${DEVICE_LIST_TOOL_NAME} to find devices, ${APP_LIST_TOOL_NAME} to find apps, and ${DEVICE_DETAILS_TOOL_NAME} for device diagnostics. ${DEVICE_COMMAND_TOOL_NAME} changes device state; invoke it only when the user explicitly requests the command. ${HUB_REBOOT_TOOL_NAME} immediately reboots the hub; invoke it only when the user explicitly requests a reboot and pass allowSensitive=true."
+        serverInfo: [name: "hubitat-logs-mcp", version: "1.3.0"],
+        instructions: "Use ${MCP_TOOL_NAME} for filtered historical log pages, ${SUMMARY_TOOL_NAME} for compact counts and recurring issues, ${LOG_DIAGNOSTICS_TOOL_NAME} for Hubitat performance counters and jobs, ${APP_STATUS_TOOL_NAME} for app subscriptions and scheduled jobs, ${TIMELINE_TOOL_NAME} for a chronological log timeline, ${LIVE_TOOL_NAME} for the live stream, ${DEVICE_LIST_TOOL_NAME} to find devices, ${APP_LIST_TOOL_NAME} to find apps, and ${DEVICE_DETAILS_TOOL_NAME} for device diagnostics. ${EVENTS_TOOL_NAME} returns device and location events newest first to correlate with logs. ${HUB_INFO_TOOL_NAME} returns hub identity and firmware. ${HUB_HEALTH_TOOL_NAME} returns CPU, memory, database size, and temperature counters. ${RETENTION_TOOL_NAME} returns event and state retention settings. ${ROOMS_TOOL_NAME} lists rooms. ${DEVICE_TYPES_TOOL_NAME} lists driver and user device types. ${DEVICE_COMMAND_TOOL_NAME} changes device state; invoke it only when the user explicitly requests the command. ${HUB_REBOOT_TOOL_NAME} immediately reboots the hub; invoke it only when the user explicitly requests a reboot and pass allowSensitive=true. ${DELETE_JOBS_TOOL_NAME} deletes pending jobs for one app or device; invoke it only when the user explicitly requests it and pass allowSensitive=true. ${DUMP_THREADS_TOOL_NAME} writes current Java threads to the engineering log; follow up with ${MCP_TOOL_NAME} to read them."
     ]
 }
 
@@ -308,12 +336,13 @@ Map hubRebootToolDefinition() {
 }
 
 Map deviceInventoryToolDefinition() {
-    return [name: DEVICE_LIST_TOOL_NAME, description: "Search a paginated device inventory, including child devices. Results contain device names, IDs, types, rooms, and other metadata; current attribute values are omitted.",
+    return [name: DEVICE_LIST_TOOL_NAME, description: "Search a paginated device inventory, including child devices. Results contain device names, IDs, types, rooms, and other metadata; current attribute values are omitted. When capability is given, only devices advertising that capability or driver are returned.",
         annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
         inputSchema: [type: "object", properties: [
             query: [type: "string", maxLength: 120, description: "Case-insensitive substring of device ID, name, type, network ID, or room."],
             room: [type: "string", maxLength: 120, description: "Case-insensitive exact room name."],
             deviceId: [type: "integer", minimum: 1, description: "Exact device ID."],
+            capability: [type: "string", maxLength: 120, description: "Capability filter, for example capability.switch or device.SomeDriver."],
             maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Page size, default 25."],
             cursor: [type: "string", description: "Continue an inventory snapshot; filters are ignored."]
         ], additionalProperties: false]]
@@ -345,6 +374,91 @@ Map appDiagnosticsToolDefinition() {
         inputSchema: [type: "object", properties: [appId: [type: "integer", minimum: 1, description: "Installed Hubitat app instance ID."], maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Page size, default 25."], cursor: [type: "string", description: "Continue a result snapshot."]], required: ["appId"], additionalProperties: false]]
 }
 
+Map deviceEventsToolDefinition() {
+    return [name: EVENTS_TOOL_NAME,
+        description: "Return device and location events from /logs/eventsJson, newest first, to correlate with logs. Filter by deviceId, attribute name, keyword, or timestamp.",
+        annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            deviceId: [type: "integer", minimum: 1, description: "Filter to events for one device ID."],
+            attribute: [type: "string", maxLength: 120, description: "Filter to events with this attribute name."],
+            contains: [type: "string", maxLength: 120, description: "Case-insensitive substring of event name, value, or description."],
+            since: [type: "string", description: "Inclusive timestamp, formatted YYYY-MM-DD HH:mm:ss.SSS (hub local time)."],
+            before: [type: "string", description: "Exclusive timestamp, formatted YYYY-MM-DD HH:mm:ss.SSS (hub local time)."],
+            maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Page size (default 25, maximum 50)."],
+            cursor: [type: "string", description: "Opaque cursor returned by the previous page."]
+        ], additionalProperties: false]]
+}
+
+Map hubInfoToolDefinition() {
+    return [name: HUB_INFO_TOOL_NAME,
+        description: "Return hub identity and platform details from /hub/details/json: hub name, hardware and platform version, network and time settings. Large reference lists are summarized as counts and account data is excluded.",
+        annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Maximum summary entries to return (default 25)."]
+        ], additionalProperties: false]]
+}
+
+Map hubHealthToolDefinition() {
+    return [name: HUB_HEALTH_TOOL_NAME,
+        description: "Return hub resource counters: CPU load, free OS and Java memory, database size, and internal temperature. Select one section or omit to return all.",
+        annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            section: [type: "string", enum: HUB_HEALTH_SECTIONS, description: "Counter to return; omit to return all sections."],
+            maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Page size for history rows, default 25."]
+        ], additionalProperties: false]]
+}
+
+Map eventRetentionToolDefinition() {
+    return [name: RETENTION_TOOL_NAME,
+        description: "Return event and device-state retention settings: maximum event count, device-state history size, and maximum retention ages in days. Read-only; settings are not changed.",
+        annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Maximum entries to return (default 25)."]
+        ], additionalProperties: false]]
+}
+
+Map roomsToolDefinition() {
+    return [name: ROOMS_TOOL_NAME,
+        description: "List Hubitat rooms from /hub2/roomsList with IDs and names for room resolution.",
+        annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            query: [type: "string", maxLength: 120, description: "Case-insensitive substring of room ID or name."],
+            maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Page size, default 25."],
+            cursor: [type: "string", description: "Continue a rooms snapshot; filters are ignored."]
+        ], additionalProperties: false]]
+}
+
+Map deviceTypesToolDefinition() {
+    return [name: DEVICE_TYPES_TOOL_NAME,
+        description: "List driver and user device types from /device/drivers and /hub2/userDeviceTypes to resolve log source names to driver code.",
+        annotations: [readOnlyHint: true, destructiveHint: false, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            section: [type: "string", enum: DEVICE_TYPES_SECTIONS, description: "Select drivers or userDeviceTypes; default drivers."],
+            query: [type: "string", maxLength: 120, description: "Case-insensitive substring of ID, name, namespace, type, or capabilities."],
+            maxEntries: [type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE, description: "Page size, default 25."],
+            cursor: [type: "string", description: "Continue a device types snapshot; filters are ignored."]
+        ], additionalProperties: false]]
+}
+
+Map deleteJobsToolDefinition() {
+    return [name: DELETE_JOBS_TOOL_NAME,
+        description: "Delete pending jobs for one app or device via /hub/advanced/deleteAppJobs/<id>. This changes hub state; invoke it only when the user explicitly requests it and pass allowSensitive=true. Results are reported as accepted, unknown, or rejected; check jobs before retrying an unknown result.",
+        annotations: [readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            targetId: [type: "integer", minimum: 1, description: "Installed app instance ID or device ID whose pending jobs are deleted."],
+            allowSensitive: [type: "boolean", const: true, description: "Required authorization flag. Set true only after the user explicitly requests job deletion."]
+        ], required: ["targetId", "allowSensitive"], additionalProperties: false]]
+}
+
+Map dumpThreadsToolDefinition() {
+    return [name: DUMP_THREADS_TOOL_NAME,
+        description: "Write current Java threads to the engineering log for deadlock and hang diagnosis. Follow up with hubitat_get_logs to read the dumped threads. Invoke only when the user explicitly requests it and pass allowSensitive=true.",
+        annotations: [readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false],
+        inputSchema: [type: "object", properties: [
+            allowSensitive: [type: "boolean", const: true, description: "Required authorization flag. Set true only after the user explicitly requests a thread dump."]
+        ], required: ["allowSensitive"], additionalProperties: false]]
+}
+
 Map dispatchTool(Object rawParams) {
     Map params = rawParams instanceof Map ? (Map) rawParams : [:]
     Map arguments = params.arguments instanceof Map ? (Map) params.arguments : [:]
@@ -371,6 +485,22 @@ Map dispatchTool(Object rawParams) {
             return getRuntimeDiagnostics(arguments)
         case APP_STATUS_TOOL_NAME:
             return getAppDiagnostics(arguments)
+        case EVENTS_TOOL_NAME:
+            return getDeviceEvents(arguments)
+        case HUB_INFO_TOOL_NAME:
+            return getHubInfo(arguments)
+        case HUB_HEALTH_TOOL_NAME:
+            return getHubHealth(arguments)
+        case RETENTION_TOOL_NAME:
+            return getEventRetention(arguments)
+        case ROOMS_TOOL_NAME:
+            return getRooms(arguments)
+        case DEVICE_TYPES_TOOL_NAME:
+            return getDeviceTypes(arguments)
+        case DELETE_JOBS_TOOL_NAME:
+            return deleteAppJobs(arguments)
+        case DUMP_THREADS_TOOL_NAME:
+            return dumpThreadsToLog(arguments)
         default:
             return mcpError("Unknown tool: ${params.name ?: "(missing)"}".toString())
     }
@@ -486,6 +616,389 @@ Map getAppDiagnostics(Map arguments) {
     }
 }
 
+// Device and location events from Hubitat's fixed local events route.
+Map getDeviceEvents(Map arguments) {
+    Map paging = validateLogFilters([maxEntries: arguments.maxEntries], true)
+    if (paging.error) { return mcpError(paging.error.toString()) }
+    int pageSize = (Integer) paging.pageSize
+    if (arguments.cursor) { return continueLogSearch(arguments.cursor.toString(), pageSize, "events") }
+    String deviceId = arguments.deviceId?.toString()
+    if (arguments.deviceId != null && (!deviceId || !(deviceId ==~ /[1-9]\d*/) || deviceId.length() > 18)) { return mcpError("deviceId must be a positive integer.") }
+    String attribute = arguments.attribute?.toString()?.trim()
+    if (arguments.attribute != null && (!attribute || attribute.length() > 120)) { return mcpError("attribute must be a non-empty string of at most 120 characters.") }
+    String contains = arguments.contains?.toString()?.trim()
+    if (arguments.contains != null && (!contains || contains.length() > 120)) { return mcpError("contains must be a non-empty string of at most 120 characters.") }
+    String since = arguments.since?.toString()
+    String before = arguments.before?.toString()
+    if (since && !isLogTimestamp(since)) { return mcpError("since must use YYYY-MM-DD HH:mm:ss.SSS format.") }
+    if (before && !isLogTimestamp(before)) { return mcpError("before must use YYYY-MM-DD HH:mm:ss.SSS format.") }
+    if (since && before && since >= before) { return mcpError("Provide since and before in ascending order.") }
+    try {
+        Object responseData
+        httpGet([uri: EVENTS_URI, timeout: 15, contentType: "application/json"]) { response ->
+            if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Events endpoint returned an error.") }
+            responseData = response.data
+        }
+        if (responseData instanceof String) { responseData = parseJson((String) responseData) }
+        if (!(responseData instanceof List)) { throw new RuntimeException("Events endpoint returned an unexpected response.") }
+        Long fetchedAt = now()
+        List<Map> events = []
+        for (Object row : (List) responseData) {
+            Map entry = normalizeEventEntry(row)
+            if (entry == null) { continue }
+            if (deviceId && (entry.deviceId?.toString() != deviceId && entry.deviceID?.toString() != deviceId)) { continue }
+            if (attribute) {
+                String eventAttribute = entry.name?.toString() ?: ""
+                if (!eventAttribute.equalsIgnoreCase(attribute)) { continue }
+            }
+            if (contains) {
+                String searchable = "${entry.name ?: ''} ${entry.value ?: ''} ${entry.descriptionText ?: ''}".toString().toLowerCase()
+                if (!searchable.contains(contains.toLowerCase())) { continue }
+            }
+            if (since && (entry.timestamp == null || entry.timestamp.toString() < since)) { continue }
+            if (before && (entry.timestamp == null || entry.timestamp.toString() >= before)) { continue }
+            events.add(entry)
+        }
+        events = events.sort { Map left, Map right -> (right.timestamp?.toString() ?: "") <=> (left.timestamp?.toString() ?: "") }
+        Map snapshot = createSearchSnapshot(events, fetchedAt, ((List) responseData).size(), false, "events")
+        return renderLogPage(snapshot, 0, pageSize, false)
+    } catch (Exception e) {
+        logWarn("Device event lookup failed: ${e.class.simpleName}")
+        return mcpError("Could not load device events from the hub's local events endpoint.")
+    }
+}
+
+Map normalizeEventEntry(Object row) {
+    if (!(row instanceof Map)) { return null }
+    Map source = (Map) row
+    String rawDate = source.date?.toString()
+    String timestamp = normalizeEventTimestamp(rawDate)
+    Map entry = [
+        id: source.id,
+        source: source.source,
+        name: source.name,
+        displayName: source.displayName,
+        value: source.value,
+        unit: source.unit,
+        deviceId: source.deviceId,
+        deviceID: source.deviceID,
+        hubId: source.hubId,
+        locationId: source.locationId,
+        installedAppId: source.installedAppId,
+        descriptionText: source.descriptionText == null ? null : compactLogText(source.descriptionText.toString(), 500),
+        isStateChange: source.isStateChange,
+        physical: source.physical,
+        digital: source.digital,
+        type: source.type,
+        date: rawDate,
+        timestamp: timestamp
+    ]
+    return (Map) redactSensitiveFields(entry)
+}
+
+String normalizeEventTimestamp(String value) {
+    if (!value) { return null }
+    String text = value.trim()
+    if (!text) { return null }
+    // Hubitat events use ISO offsets such as 2026-11-22T07:30:00.229-0500.
+    // Convert the local wall time to the hub-local format used by log filters.
+    String normalized = text.replace("T", " ")
+    int dot = normalized.indexOf(".")
+    if (dot > 0) {
+        int end = dot + 1
+        while (end < normalized.length() && Character.isDigit(normalized.charAt(end))) { end++ }
+        String fraction = normalized.substring(dot + 1, end)
+        while (fraction.length() < 3) { fraction = fraction + "0" }
+        if (fraction.length() > 3) { fraction = fraction.substring(0, 3) }
+        normalized = normalized.substring(0, dot + 1) + fraction + normalized.substring(end)
+    }
+    if (normalized.length() > 23) { normalized = normalized.substring(0, 23) }
+    return normalized
+}
+
+// Hub identity and platform details from the fixed local hub details route.
+Map getHubInfo(Map arguments) {
+    Map paging = validateLogFilters([maxEntries: arguments.maxEntries], true)
+    if (paging.error) { return mcpError(paging.error.toString()) }
+    try {
+        Object responseData
+        httpGet([uri: HUB_DETAILS_URI, timeout: 15, contentType: "application/json"]) { response ->
+            if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Hub details endpoint returned an error.") }
+            responseData = response.data
+        }
+        if (responseData instanceof String) { responseData = parseJson((String) responseData) }
+        if (!(responseData instanceof Map)) { throw new RuntimeException("Hub details endpoint returned an unexpected response.") }
+        Map source = (Map) responseData
+        List<Map> entries = []
+        source.each { Object key, Object value ->
+            String field = key?.toString()
+            if (field == "users") { return }
+            if (value instanceof List) {
+                entries.add([key: field, value: [count: ((List) value).size()]])
+            } else if (value instanceof Map) {
+                entries.add([key: field, value: redactSensitiveFields(value)])
+            } else if (value instanceof String) {
+                entries.add([key: field, value: compactLogText((String) value, 500)])
+            } else if (!isSensitiveField(field)) {
+                entries.add([key: field, value: value])
+            }
+        }
+        Map result = [totalEntries: entries.size(), entries: entries, availableSections: ["summary"]]
+        String json = JsonOutput.toJson(result)
+        if (json.getBytes("UTF-8").length > MAX_RESPONSE_BYTES) {
+            return mcpError("The filtered result is still too large. Narrow the filters or reduce maxEntries.")
+        }
+        return mcpJsonResult(result)
+    } catch (Exception e) {
+        logWarn("Hub details lookup failed: ${e.class.simpleName}")
+        return mcpError("Could not load hub details from the hub's local details endpoint.")
+    }
+}
+
+// Hub resource counters from fixed local health routes.
+Map getHubHealth(Map arguments) {
+    String section = arguments.section == null ? "all" : arguments.section.toString()
+    if (section != "all" && !HUB_HEALTH_SECTIONS.contains(section)) { return mcpError("Unknown hub health section.") }
+    Map paging = validateLogFilters([maxEntries: arguments.maxEntries], true)
+    if (paging.error) { return mcpError(paging.error.toString()) }
+    int pageSize = (Integer) paging.pageSize
+    String kind = "hubHealth|${section}".toString()
+    if (arguments.cursor) {
+        if (section == "all") { return mcpError("Cursor pagination is only supported with an explicit section.") }
+        return continueOperationalSnapshot(arguments.cursor.toString(), pageSize, kind)
+    }
+    try {
+        if (section != "all") {
+            if (section in ["memoryHistory", "memoryLast"]) {
+                String uri = section == "memoryHistory" ? FREE_MEM_HISTORY_URI : FREE_MEM_LAST_URI
+                String text = fetchHubText(uri, 15)
+                List<Map> rows = parseMemoryCsv(text)
+                Map snapshot = createSearchSnapshot(rows, now(), rows.size(), false, kind)
+                return renderOperationalPage(snapshot, 0, pageSize, section)
+            }
+            String uri = hubHealthUri(section)
+            String text = fetchHubText(uri, 15)
+            Map entry = normalizeHubHealthText(section, text)
+            return mcpJsonResult([section: section, present: true, value: entry.value, raw: entry.raw])
+        }
+        Map all = [section: "all"]
+        List<String> failures = []
+        HUB_HEALTH_SECTIONS.each { String name ->
+            try {
+                if (name in ["memoryHistory", "memoryLast"]) {
+                    String uri = name == "memoryHistory" ? FREE_MEM_HISTORY_URI : FREE_MEM_LAST_URI
+                    String text = fetchHubText(uri, 15)
+                    List<Map> rows = parseMemoryCsv(text)
+                    all.put(name, [present: true, totalRows: rows.size(), rows: rows])
+                } else {
+                    String uri = hubHealthUri(name)
+                    String text = fetchHubText(uri, 15)
+                    Map entry = normalizeHubHealthText(name, text)
+                    all.put(name, entry)
+                }
+            } catch (Exception ignored) {
+                all.put(name, [present: false])
+                failures.add(name)
+            }
+        }
+        if (failures.size() == HUB_HEALTH_SECTIONS.size()) { throw new RuntimeException("All hub health sections failed.") }
+        String json = JsonOutput.toJson(all)
+        if (json.getBytes("UTF-8").length > MAX_RESPONSE_BYTES) {
+            return mcpError("The filtered result is still too large. Narrow the filters or reduce maxEntries.")
+        }
+        return mcpJsonResult(all)
+    } catch (Exception e) {
+        logWarn("Hub health lookup failed: ${e.class.simpleName}")
+        return mcpError("Could not load hub health counters from the hub's local endpoints.")
+    }
+}
+
+// Retention setting readbacks from fixed local advanced routes.
+Map getEventRetention(Map arguments) {
+    Map paging = validateLogFilters([maxEntries: arguments.maxEntries], true)
+    if (paging.error) { return mcpError(paging.error.toString()) }
+    try {
+        List<Map> entries = []
+        entries.add(fetchRetentionEntry("eventLimit", EVENT_LIMIT_URI, true))
+        entries.add(fetchRetentionEntry("deviceStateHistorySize", STATE_HISTORY_URI, false))
+        entries.add(fetchRetentionEntry("maxDeviceStateAgeDays", MAX_DEVICE_STATE_AGE_URI, false))
+        entries.add(fetchRetentionEntry("maxEventAgeDays", MAX_EVENT_AGE_URI, false))
+        return mcpJsonResult([totalEntries: entries.size(), entries: entries])
+    } catch (Exception e) {
+        logWarn("Retention lookup failed: ${e.class.simpleName}")
+        return mcpError("Could not load retention settings from the hub's local endpoints.")
+    }
+}
+
+Map fetchRetentionEntry(String key, String uri, boolean extractBracketNumber) {
+    try {
+        String text = fetchHubText(uri, 15)
+        String trimmed = text == null ? "" : text.trim()
+        Object value
+        if (extractBracketNumber) {
+            String number = trimmed.replaceAll(/.*\[(\d+)\].*/, '$1')
+            value = number && number != trimmed ? parseHubNumber(number) : (trimmed ? parseHubNumber(trimmed) : trimmed)
+        } else {
+            value = trimmed ? parseHubNumber(trimmed) : trimmed
+        }
+        return [key: key, present: true, value: value, raw: trimmed]
+    } catch (Exception e) {
+        return [key: key, present: false]
+    }
+}
+
+// Hubitat rooms from the fixed local rooms route.
+Map getRooms(Map arguments) {
+    Map paging = validateLogFilters([maxEntries: arguments.maxEntries], true)
+    if (paging.error) { return mcpError(paging.error.toString()) }
+    int pageSize = (Integer) paging.pageSize
+    if (arguments.cursor) { return continueOperationalSnapshot(arguments.cursor.toString(), pageSize, "rooms") }
+    if (arguments.query != null && (!(arguments.query instanceof String) || arguments.query.toString().length() > 120)) { return mcpError("query must be a string of at most 120 characters.") }
+    try {
+        Object responseData
+        httpGet([uri: ROOMS_URI, timeout: 15, contentType: "application/json"]) { response ->
+            if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Rooms endpoint returned an error.") }
+            responseData = response.data
+        }
+        if (responseData instanceof String) { responseData = parseJson((String) responseData) }
+        if (!(responseData instanceof Map)) { throw new RuntimeException("Rooms endpoint returned an unexpected response.") }
+        Object nodes = ((Map) responseData).get("roomNodes")
+        if (!(nodes instanceof List)) { throw new RuntimeException("Rooms endpoint returned an unexpected response.") }
+        List<Map> rooms = ((List) nodes).findAll { Object item -> item instanceof Map }.collect { Object item ->
+            Map node = (Map) item
+            Object data = node.get("data")
+            return data instanceof Map ? new LinkedHashMap((Map) data) : new LinkedHashMap(node)
+        }
+        String query = arguments.query?.toString()?.trim()?.toLowerCase()
+        if (query) {
+            rooms = rooms.findAll { Map item ->
+                [item.id, item.name].any { Object value -> value?.toString()?.toLowerCase()?.contains(query) }
+            }
+        }
+        rooms = rooms.sort { Map left, Map right -> (left.name?.toString() ?: "").toLowerCase() <=> (right.name?.toString() ?: "").toLowerCase() }
+        Map snapshot = createSearchSnapshot(rooms, now(), rooms.size(), false, "rooms")
+        return renderOperationalPage(snapshot, 0, pageSize, "rooms")
+    } catch (Exception e) {
+        logWarn("Rooms lookup failed: ${e.class.simpleName}")
+        return mcpError("Could not load rooms from the hub's local rooms endpoint.")
+    }
+}
+
+// Driver and user device types from fixed local type routes.
+Map getDeviceTypes(Map arguments) {
+    Map paging = validateLogFilters([maxEntries: arguments.maxEntries], true)
+    if (paging.error) { return mcpError(paging.error.toString()) }
+    int pageSize = (Integer) paging.pageSize
+    String section = arguments.section == null ? "drivers" : arguments.section.toString()
+    if (!DEVICE_TYPES_SECTIONS.contains(section)) { return mcpError("Unknown device types section.") }
+    String kind = "deviceTypes|${section}".toString()
+    if (arguments.cursor) { return continueOperationalSnapshot(arguments.cursor.toString(), pageSize, kind) }
+    if (arguments.query != null && (!(arguments.query instanceof String) || arguments.query.toString().length() > 120)) { return mcpError("query must be a string of at most 120 characters.") }
+    try {
+        Object responseData
+        String uri = section == "drivers" ? DRIVERS_URI : USER_DEVICE_TYPES_URI
+        httpGet([uri: uri, timeout: 15, contentType: "application/json"]) { response ->
+            if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Device types endpoint returned an error.") }
+            responseData = response.data
+        }
+        if (responseData instanceof String) { responseData = parseJson((String) responseData) }
+        List<Map> items
+        if (section == "drivers") {
+            if (!(responseData instanceof Map) || !(((Map) responseData).drivers instanceof List)) { throw new RuntimeException("Driver endpoint returned an unexpected response.") }
+            items = ((List) ((Map) responseData).drivers).findAll { Object item -> item instanceof Map }.collect { Map item -> (Map) redactSensitiveFields(item) }
+        } else {
+            if (!(responseData instanceof List)) { throw new RuntimeException("User device types endpoint returned an unexpected response.") }
+            items = ((List) responseData).findAll { Object item -> item instanceof Map }.collect { Map item -> (Map) redactSensitiveFields(item) }
+        }
+        String query = arguments.query?.toString()?.trim()?.toLowerCase()
+        if (query) {
+            items = items.findAll { Map item ->
+                [item.id, item.name, item.namespace, item.type, item.capabilities, item.category].any { Object value -> value?.toString()?.toLowerCase()?.contains(query) }
+            }
+        }
+        Map snapshot = createSearchSnapshot(items, now(), items.size(), false, kind)
+        return renderOperationalPage(snapshot, 0, pageSize, section)
+    } catch (Exception e) {
+        logWarn("Device types lookup failed: ${e.class.simpleName}")
+        return mcpError("Could not load device types from the hub's local endpoints.")
+    }
+}
+
+String hubHealthUri(String section) {
+    switch (section) {
+        case "cpu": return CPU_INFO_URI
+        case "memory": return FREE_MEM_URI
+        case "database": return DATABASE_SIZE_URI
+        case "temperature": return INTERNAL_TEMP_URI
+        default: return ""
+    }
+}
+
+String fetchHubText(String uri, int timeoutSeconds) {
+    Object responseData
+    httpGet([uri: uri, timeout: timeoutSeconds, contentType: "application/json"]) { response ->
+        if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Hub endpoint returned an error.") }
+        responseData = response.data
+    }
+    if (responseData == null) { return "" }
+    if (responseData instanceof String) { return (String) responseData }
+    return responseData.toString()
+}
+
+Map normalizeHubHealthText(String section, String text) {
+    String trimmed = text == null ? "" : text.trim()
+    if (section == "cpu") {
+        Map parsed = [:]
+        trimmed.eachLine { String line ->
+            String value = line.trim()
+            if (value.startsWith("Processors")) {
+                String number = value.replace("Processors", "").trim()
+                parsed.put("processors", number ? parseHubNumber(number) : number)
+            } else if (value.startsWith("Load Average")) {
+                String number = value.replace("Load Average", "").trim()
+                parsed.put("loadAverage", number ? parseHubNumber(number) : number)
+            } else if (value) {
+                parsed.put("line", value)
+            }
+        }
+        return [present: true, value: parsed, raw: trimmed]
+    }
+    if (section in ["memory", "database", "temperature"]) {
+        return [present: true, value: parseHubNumber(trimmed), raw: trimmed]
+    }
+    return [present: true, value: compactLogText(trimmed, 2000), raw: trimmed]
+}
+
+Object parseHubNumber(String text) {
+    if (!text) { return text }
+    String clean = text.trim()
+    try {
+        if (clean ==~ /-?\d+/) { return Integer.parseInt(clean) }
+        if (clean ==~ /-?\d+\.\d+/) { return Double.parseDouble(clean) }
+    } catch (NumberFormatException ignored) {
+    }
+    return clean
+}
+
+List<Map> parseMemoryCsv(String text) {
+    List<Map> rows = []
+    if (!text) { return rows }
+    List<String> lines = text.split(/\r?\n/).findAll { String line -> line != null && line.trim() }
+    if (lines.isEmpty()) { return rows }
+    List<String> headers = lines.get(0).split(/,/).collect { String header -> header.trim() }
+    int index = 0
+    for (int i = 1; i < lines.size(); i++) {
+        List<String> cells = lines.get(i).split(/,/)
+        Map<String, Object> value = [:]
+        for (int h = 0; h < headers.size(); h++) {
+            String cell = h < cells.size() ? cells.get(h).trim() : ""
+            value.put(headers.get(h), parseHubNumber(cell))
+        }
+        rows.add([index: index++, value: value])
+    }
+    return rows
+}
+
 List<Map> operationalRows(Object value, String section = null) {
     List<Map> rows = []
     if (value instanceof List) {
@@ -523,7 +1036,15 @@ Map continueOperationalSnapshot(String cursor, int pageSize, String expectedKind
     synchronized (LOG_SEARCH_SNAPSHOTS) { expireSearchSnapshots(); snapshot = LOG_SEARCH_SNAPSHOTS.get(snapshotId) as Map }
     if (snapshot == null) { return mcpError("This diagnostics cursor has expired. Start a new request.") }
     if (snapshot.kind != expectedKind) { return mcpError("This cursor belongs to a different diagnostics section or app.") }
-    return renderOperationalPage(snapshot + [id: snapshotId], offset, pageSize, expectedKind.startsWith("runtime|") ? expectedKind.substring("runtime|".length()) : "appDiagnostics")
+    String label = expectedKind
+    if (expectedKind.startsWith("runtime|")) {
+        label = expectedKind.substring("runtime|".length())
+    } else if (expectedKind.startsWith("appDiagnostics|")) {
+        label = "appDiagnostics"
+    } else if (expectedKind.contains("|")) {
+        label = expectedKind.substring(expectedKind.lastIndexOf("|") + 1)
+    }
+    return renderOperationalPage(snapshot + [id: snapshotId], offset, pageSize, label)
 }
 
 Map renderOperationalPage(Map snapshot, int offset, int pageSize, String section) {
@@ -599,15 +1120,38 @@ Map getDeviceInventory(Map arguments) {
     for (String key : ["query", "room"]) {
         if (arguments.get(key) != null && (!(arguments.get(key) instanceof String) || arguments.get(key).toString().length() > 120)) { return mcpError("${key} must be a string of at most 120 characters.") }
     }
+    String capability = arguments.capability?.toString()?.trim()
+    String capabilityQuery = null
+    if (arguments.capability != null) {
+        if (!(arguments.capability instanceof String) || !capability || capability.length() > 120) { return mcpError("capability must be a non-empty string of at most 120 characters.") }
+        if (capability.startsWith("capability.")) {
+            String name = capability.substring("capability.".length())
+            if (!name || !(name ==~ /[A-Za-z][A-Za-z0-9_.-]*/)) { return mcpError("capability must follow capability.<name> or device.<Driver> form.") }
+            capabilityQuery = "capability.${name.toLowerCase()}".toString()
+        } else if (capability.startsWith("device.")) {
+            String name = capability.substring("device.".length())
+            if (!name || !(name ==~ /[A-Za-z][A-Za-z0-9_.-]*/)) { return mcpError("capability must follow capability.<name> or device.<Driver> form.") }
+            capabilityQuery = capability
+        } else {
+            return mcpError("capability must follow capability.<name> or device.<Driver> form.")
+        }
+    }
     try {
         Object responseData
-        httpGet([uri: DEVICE_LIST_URI, timeout: 15, contentType: "application/json"]) { response ->
+        String requestUri = capabilityQuery ? "${DEVICE_CAPABILITY_URI}${capabilityQuery}".toString() : DEVICE_LIST_URI
+        httpGet([uri: requestUri, timeout: 15, contentType: "application/json"]) { response ->
             if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Device inventory endpoint returned an error.") }
             responseData = response.data
         }
         if (responseData instanceof String) { responseData = parseJson((String) responseData) }
-        if (!(responseData instanceof Map) || !(((Map) responseData).devices instanceof List)) { throw new RuntimeException("Device inventory endpoint returned an unexpected response.") }
-        List<Map> devices = flattenDeviceInventory((List) ((Map) responseData).devices)
+        List<Map> devices
+        if (capabilityQuery) {
+            if (!(responseData instanceof List)) { throw new RuntimeException("Capability endpoint returned an unexpected response.") }
+            devices = ((List) responseData).findAll { Object item -> item instanceof Map }.collect { Map item -> new LinkedHashMap(item) }
+        } else {
+            if (!(responseData instanceof Map) || !(((Map) responseData).devices instanceof List)) { throw new RuntimeException("Device inventory endpoint returned an unexpected response.") }
+            devices = flattenDeviceInventory((List) ((Map) responseData).devices)
+        }
         String query = arguments.query?.toString()?.trim()?.toLowerCase()
         String room = arguments.room?.toString()?.trim()?.toLowerCase()
         devices = devices.findAll { Map item ->
@@ -707,6 +1251,49 @@ Map invokeDeviceCommand(Map arguments) {
     } catch (Exception e) {
         logWarn("Device command request failed for device ${deviceId}: ${e.class.simpleName}")
         return mcpError("The command request failed or timed out. The command may have executed; check device state before retrying.")
+    }
+}
+
+// Guarded pending-job deletion from the fixed local advanced route.
+Map deleteAppJobs(Map arguments) {
+    if (arguments.allowSensitive != true) {
+        return mcpError("Job deletion requires allowSensitive=true and an explicit user request.")
+    }
+    String targetId = arguments.targetId?.toString()
+    if (!targetId || !(targetId ==~ /[1-9]\d*/) || targetId.length() > 18) { return mcpError("targetId must be a positive integer.") }
+    try {
+        String responseText = ""
+        httpGet([uri: "${DELETE_JOBS_URI}${targetId}".toString(), timeout: 15, contentType: "application/json"]) { response ->
+            if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Job deletion endpoint returned an error.") }
+            Object data = response.data
+            responseText = data == null ? "" : data.toString()
+        }
+        return mcpJsonResult([targetId: targetId, success: true, outcome: "accepted", message: compactLogText(responseText, 500)])
+    } catch (Exception e) {
+        logWarn("Job deletion failed for target ${targetId}: ${e.class.simpleName}")
+        return mcpJsonResult([targetId: targetId, success: false, outcome: "unknown", retryable: false,
+            message: "The job deletion request failed or timed out. The deletion may have been applied; check hub jobs before retrying."])
+    }
+}
+
+// Guarded engineering thread dump from the fixed local diagnostics route.
+Map dumpThreadsToLog(Map arguments) {
+    if (arguments.allowSensitive != true) {
+        return mcpError("Thread dump requires allowSensitive=true and an explicit user request.")
+    }
+    try {
+        String responseText = ""
+        httpGet([uri: DUMP_THREADS_URI, timeout: 15, contentType: "application/json"]) { response ->
+            if (response.status < 200 || response.status >= 300) { throw new RuntimeException("Thread dump endpoint returned an error.") }
+            Object data = response.data
+            responseText = data == null ? "" : data.toString()
+        }
+        return mcpJsonResult([success: true, outcome: "accepted", message: compactLogText(responseText, 500),
+            followUp: "Read the engineering log with hubitat_get_logs to view the dumped threads."])
+    } catch (Exception e) {
+        logWarn("Thread dump failed: ${e.class.simpleName}")
+        return mcpJsonResult([success: false, outcome: "unknown", retryable: false,
+            message: "The thread dump request failed or timed out. Check the engineering log before retrying."])
     }
 }
 
