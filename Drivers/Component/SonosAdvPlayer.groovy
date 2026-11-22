@@ -5488,6 +5488,7 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
     events << [name: 'currentTrackName', value: 'Not Available']
     events << [name: 'currentArtistName', value: 'Not Available']
     events << [name: 'currentAlbumName', value: 'Not Available']
+    events << [name: 'albumArtURI', value: 'Not Available']
     events << [name: 'trackDescription', value: 'Not Available']
   } else if(metadataPresent && !metadata.isEmpty()) {
     String title = metadata.title?.toString() ?: 'Not Available'
@@ -5684,7 +5685,6 @@ Boolean applyAvtSnapshotIfDifferent(Map snap) {
       setCurrentTrackName(trackName)
       setCurrentArtistName(artist)
       setCurrentAlbumName(album)
-      setAlbumArtURI(meta.albumArtURI?.toString() ?: '', false)
       String desc = meta.title && meta.creator
           ? "${meta.title} by ${meta.creator}"
           : (meta.streamContent?.toString() ?: trackName)
@@ -6549,21 +6549,7 @@ void clearCurrentPlayingStates() {
   setNextAlbumName('Not Available')
   setNextTrackName('Not Available')
   setNextTrackAlbumArtURI('Not Available', false)
-  // Queue directly (not via setters) to avoid triggering group propagation and metadata refresh on clear
-  if(shouldQueueLocalDeviceEvent('albumArtURI', 'Not Available', this.device.currentValue('albumArtURI'))) {
-    queueLocalDeviceEvent('albumArtURI', 'Not Available')
-  }
-  if(!getDisableAlbumArtEvents()) {
-    if(shouldQueueLocalDeviceEvent('albumArtSmall', 'Not Available', this.device.currentValue('albumArtSmall'))) {
-      queueLocalDeviceEvent('albumArtSmall', 'Not Available')
-    }
-    if(shouldQueueLocalDeviceEvent('albumArtMedium', 'Not Available', this.device.currentValue('albumArtMedium'))) {
-      queueLocalDeviceEvent('albumArtMedium', 'Not Available')
-    }
-    if(shouldQueueLocalDeviceEvent('albumArtLarge', 'Not Available', this.device.currentValue('albumArtLarge'))) {
-      queueLocalDeviceEvent('albumArtLarge', 'Not Available')
-    }
-  }
+  // Artwork attributes are owned by the app's UPnP fanout.
   if(shouldQueueLocalDeviceEvent('audioSource', 'Not Available', this.device.currentValue('audioSource'))) {
     queueLocalDeviceEvent('audioSource', 'Not Available')
   }
@@ -8501,85 +8487,6 @@ void setGroupMemberNames(List<String> groupPlayerNames) {
 }
 
 @CompileStatic
-void setAlbumArtURI(String albumArtURI, Boolean isPlayingLocalTrack) {
-  Boolean artEventsDisabled = getDisableAlbumArtEvents()
-  String uri = '<br>'
-  String smallUri = ''
-  String mediumUri = ''
-  String largeUri = ''
-
-  if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
-    String baseUrl = "${getLocalUpnpUrl()}${albumArtURI}"
-    uri += "<img src=\"${baseUrl}\" width=\"200\" height=\"200\" >"
-    if(!artEventsDisabled) {
-      // Generate URLs for different sizes based on Sonos conventions
-      smallUri = baseUrl.contains('?') ? "${baseUrl}&x=60&y=60" : "${baseUrl}?x=60&y=60"
-      mediumUri = baseUrl.contains('?') ? "${baseUrl}&x=200&y=200" : "${baseUrl}?x=200&y=200"
-      largeUri = baseUrl.contains('?') ? "${baseUrl}&x=600&y=600" : "${baseUrl}?x=600&y=600"
-    }
-  } else if(!isPlayingLocalTrack && albumArtURI) {
-    // Check if this is J River format with multiple concatenated URLs
-    if(albumArtURI.contains('http://') && albumArtURI.indexOf('http://', 7) > 0) {
-      // J River style: multiple URLs concatenated together
-      // Format: http://IP:PORT/AArl/file.jpghttp://IP:PORT/AArm/file.jpghttp://IP:PORT/AArs/file.jpg
-      // May also include /AArt/ (tiny) which we explicitly ignore
-      List<String> urls = parseJRiverAlbumArtUrls(albumArtURI)
-      // Filter out tiny artwork (/AArt/)
-      urls = urls.findAll { !it.contains('/AArt/') }
-
-      if(urls.size() > 0) {
-        if(!artEventsDisabled) {
-          // Find URLs by size preference: large, medium, small
-          largeUri = urls.find { it.contains('/AArl/') } ?: urls[0]
-          mediumUri = urls.find { it.contains('/AArm/') } ?: urls.find { it.contains('/AArl/') } ?: urls[0]
-          smallUri = urls.find { it.contains('/AArs/') } ?: urls.find { it.contains('/AArm/') } ?: urls[0]
-        }
-        String imgUrl = urls.find { it.contains('/AArm/') } ?: urls[0]
-        uri += "<img src=\"${imgUrl}\" width=\"200\" height=\"200\" >"
-      } else {
-        // Fallback if all URLs were filtered out
-        uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
-        if(!artEventsDisabled) {
-          smallUri = albumArtURI
-          mediumUri = albumArtURI
-          largeUri = albumArtURI
-        }
-      }
-    } else {
-      // Single URL format (Spotify, etc.) - use as-is for all sizes
-      uri += "<img src=\"${albumArtURI}\" width=\"200\" height=\"200\" >"
-      if(!artEventsDisabled) {
-        smallUri = albumArtURI
-        mediumUri = albumArtURI
-        largeUri = albumArtURI
-      }
-    }
-  }
-
-  // Skip albumArtURI if nothing changed
-  if(shouldQueueLocalDeviceEvent('albumArtURI', uri, this.device.currentValue('albumArtURI'))) {
-    queueLocalDeviceEvent('albumArtURI', uri)
-  }
-  if(!artEventsDisabled) {
-    Boolean artChanged = shouldQueueLocalDeviceEvent('albumArtSmall', smallUri, this.device.currentValue('albumArtSmall')) ||
-        shouldQueueLocalDeviceEvent('albumArtMedium', mediumUri, this.device.currentValue('albumArtMedium')) ||
-        shouldQueueLocalDeviceEvent('albumArtLarge', largeUri, this.device.currentValue('albumArtLarge'))
-    if(artChanged) {
-      queueLocalDeviceEvent('albumArtSmall', smallUri)
-      queueLocalDeviceEvent('albumArtMedium', mediumUri)
-      queueLocalDeviceEvent('albumArtLarge', largeUri)
-    }
-  }
-  // Queue for batched group device update
-  Map groupUpdate = [albumArtURI: uri]
-  if(!artEventsDisabled) {
-    groupUpdate.albumArtSmall = smallUri
-    groupUpdate.albumArtMedium = mediumUri
-    groupUpdate.albumArtLarge = largeUri
-  }
-  queueGroupDeviceUpdate(groupUpdate)
-}
-
 @CompileStatic
 List<String> parseJRiverAlbumArtUrls(String concatenatedUrls) {
   // Parse J River's concatenated album art URLs

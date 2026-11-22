@@ -3312,6 +3312,21 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getStoredGrcEvents('RINCON_RELAY').find { Map event -> event.name == 'groupVolume' }.value == 37
   }
 
+  def "UPnP app fanout formats relative album art URLs as images"() {
+    given:
+    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
+
+    when:
+    Map<String, Object> attributes = appScript.upnpEventsToAttributes([
+      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a'],
+      [name: 'currentTrackName', value: 'Track']
+    ], 'RINCON_COORD')
+
+    then:
+    attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
+    attributes.currentTrackName == 'Track'
+  }
+
   def "SAC UPnP intake debounces then fans out from a one millisecond callback"() {
     given:
     List<Map> topology = [

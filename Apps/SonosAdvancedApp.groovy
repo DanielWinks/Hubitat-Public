@@ -10326,10 +10326,10 @@ synchronized void performUpnpFanout(Map data = [:]) {
   Map<String, String> newGroups = buildPlayerGroupMap(topology)
 
   topology.each { String groupId, List<Map> events ->
-    Map<String, Object> attrs = upnpEventsToAttributes(events)
+    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    Map<String, Object> attrs = upnpEventsToAttributes(events, coordinatorId)
     List<String> members = normalizeGroupPlayerIds(
         events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
     if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
     members.unique().each { String rincon ->
       ChildDeviceWrapper child = findPlayerBySonosId(rincon)
@@ -10352,7 +10352,7 @@ synchronized void performUpnpFanout(Map data = [:]) {
       List<Map> groupEvents = topology[groupId] ?: []
       String coordinatorId = groupEvents.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
       if(coordinatorId) {
-        reconciled.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId)))
+        reconciled.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId), coordinatorId))
         reconciled.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId)))
       }
     }
@@ -10371,7 +10371,7 @@ synchronized void performUpnpFanout(Map data = [:]) {
     String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
     if(!coordinatorId) { return }
     Map<String, Object> combined = [:]
-    combined.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId)))
+    combined.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId), coordinatorId))
     combined.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId)))
     if(combined.isEmpty()) { return }
     List<String> members = normalizeGroupPlayerIds(
@@ -10396,13 +10396,28 @@ Map<String, String> buildPlayerGroupMap(Map<String, List<Map>> topology) {
   return result
 }
 
-Map<String, Object> upnpEventsToAttributes(List<Map> events) {
+Map<String, Object> upnpEventsToAttributes(List<Map> events, String coordinatorId = null) {
   Map<String, Object> attributes = [:]
   (events ?: []).each { Map event ->
     String name = event?.name?.toString()
-    if(name && event.containsKey('value')) { attributes[name] = event.value }
+    if(name && event.containsKey('value')) {
+      Object value = event.value
+      if(name == 'albumArtURI') { value = formatAlbumArtForFanout(value?.toString(), coordinatorId) }
+      attributes[name] = value
+    }
   }
   return attributes
+}
+
+String formatAlbumArtForFanout(String albumArtURI, String coordinatorId) {
+  if(!albumArtURI || albumArtURI == 'Not Available') { return 'Not Available' }
+  String imageUrl = albumArtURI
+  if(imageUrl.startsWith('/')) {
+    ChildDeviceWrapper coordinator = findPlayerBySonosId(coordinatorId)
+    String localUpnpUrl = coordinator?.getDataValue('localUpnpUrl')?.toString()
+    if(localUpnpUrl) { imageUrl = "${localUpnpUrl}${imageUrl}" }
+  }
+  return "<br><img src=\"${escapeNewUiHtml(imageUrl)}\" width=\"200\" height=\"200\" >"
 }
 
 /** Pure set+return only: merge delta by name into the stored list; no child calls. */
