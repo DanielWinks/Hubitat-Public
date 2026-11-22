@@ -732,7 +732,6 @@ Boolean hasLineInCapability() {
 @Field static final String APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY = 'appMediatedInitializationResubscriptionsStarted'
 @Field static final String APP_INITIALIZATION_UPNP_STARTED_STATE_KEY = 'appMediatedInitializationUpnpStarted'
 @Field static final String APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY = 'appMediatedInitializationConnectionGranted'
-@Field static final String SKIP_PENDING_COMMAND_PURGE_ON_UPDATED_KEY = 'skipPendingCommandPurgeOnUpdated'
 @Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
 @Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 180
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
@@ -1083,22 +1082,17 @@ void signalZgtReadyForElection() {
 void zgtSubscriberElected(String leaderGeneration) {
   device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'true')
   device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
-  device.updateDataValue('appZgtSubscribe', 'true')
-  device.updateDataValue('appZgtLeaderGeneration', leaderGeneration ?: '')
-  runtimeState['appZgtSubscribe'] = true
-  runtimeState['appZgtLeaderGeneration'] = leaderGeneration ?: ''
+  device.updateDataValue('zgtLeaderGeneration', leaderGeneration ?: '')
+  runtimeState['zgtLeaderGeneration'] = leaderGeneration ?: ''
   subscribeToZgtEvents()
 }
 
 Boolean isZgtSubscriber() {
-  return device.getDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY) == 'true' ||
-         isAppZgtSubscriber()
+  return device.getDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY) == 'true'
 }
 
 void revokeZgtSubscription() {
   device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, 'false')
-  device.updateDataValue('appZgtSubscribe', 'false')
-  device.updateDataValue('appZgtLeaderGeneration', '')
   device.removeDataValue(ZGT_LEADER_GEN_DEVICE_KEY)
   invalidateUpnpRequestsForDevice()
   deleteSid('sid3')
@@ -1277,10 +1271,10 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
     return
   }
   runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] = requestId
-  runtimeState['appZgtSubscribe'] = subscribeZgt == true
-  runtimeState['appZgtLeaderGeneration'] = leaderGeneration ?: ''
-  device.updateDataValue('appZgtSubscribe', (subscribeZgt == true).toString())
-  device.updateDataValue('appZgtLeaderGeneration', leaderGeneration ?: '')
+  runtimeState['zgtSubscribe'] = subscribeZgt == true
+  runtimeState['zgtLeaderGeneration'] = leaderGeneration ?: ''
+  device.updateDataValue('zgtSubscribe', (subscribeZgt == true).toString())
+  device.updateDataValue('zgtLeaderGeneration', leaderGeneration ?: '')
   device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, (subscribeZgt == true).toString())
   device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
   runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = now()
@@ -3342,11 +3336,6 @@ void subscribeToEvents() {
   if(getIsGrouped()) { subscribeToMrGrcEvents() } // sid4 only needed when grouped; setGroupPlayerIds() handles transitions
   // RC handled early via scheduleEarlyRenderingControlSubscribe(); do not duplicate sid2 here
   markAppMediatedUpnpSubscriptionsStarted()
-}
-
-Boolean isAppZgtSubscriber() {
-  return device.getDataValue('appZgtSubscribe') == 'true' &&
-      device.getDataValue('appZgtLeaderGeneration')?.toString()
 }
 
 void requestAppZgtResubscription() {

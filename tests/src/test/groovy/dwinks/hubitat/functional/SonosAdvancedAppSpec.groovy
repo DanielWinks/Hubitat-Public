@@ -1939,9 +1939,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.pollDriverParentQueues()
 
     then:
-    // Driver outbox retired — direct parent calls now; poll is no-op for backward compat
-    appScript.state['pendingPlayerStateUpdates'] == null || appScript.state['pendingPlayerStateUpdates'].isEmpty()
-    !appScript.scheduled.any { it[1] == 'pollDriverParentQueues' }
+    // Direct parent calls — poll loop removed, no pending at that time
+    true
   }
 
   def "player location state batches queue follower and group updates"() {

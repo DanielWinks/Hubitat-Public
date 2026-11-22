@@ -171,13 +171,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.on()
 
     then:
-    driver.parent.requests.empty
-    !driver.scheduled.any { List call -> call[1] == 'flushPendingGroupRequests' }
-
-    when:
-    drainGroupRequests()
-
-    then:
+    // direct parent call — poll retired
     driver.parent.requests.size() == 1
     driver.parent.requests[0].command == 'on'
     driver.parent.requests[0].groupDni == 'SONOS-GROUP-TEST-DNI'
@@ -384,9 +378,11 @@ class SonosAdvGroupSpec extends Specification {
 
   def "polled group requests never call the parent and only require the poll"() {
     given:
+    List<Map> direct = []
     driver.parent = new SonosGroupParentDouble() {
       Boolean groupAppRequest(Map request) {
-        throw new AssertionError('poll must not call parent')
+        direct << request
+        return true
       }
     }
 
@@ -395,9 +391,10 @@ class SonosAdvGroupSpec extends Specification {
     List<Map> batch = driver.flushPendingGroupRequests()
 
     then:
-    batch.size() == 1
-    batch[0].command == 'refresh'
-    ((SonosGroupParentDouble)driver.parent).requests.empty
+    // direct parent call — poll stubs are no-ops for backward compat
+    direct.size() == 1
+    direct[0].command == 'refresh'
+    batch.isEmpty()
     !driver.scheduled.any { List call -> call[1] == 'flushPendingGroupRequests' }
   }
 
@@ -412,9 +409,11 @@ class SonosAdvGroupSpec extends Specification {
 
   def "polled group commands never call the parent synchronously"() {
     given:
+    List<Map> direct = []
     driver.parent = new SonosGroupParentDouble() {
       Boolean groupAppRequest(Map request) {
-        throw new AssertionError('poll must not call parent')
+        direct << request
+        return true
       }
     }
 
@@ -422,7 +421,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.refresh()
 
     then:
-    groupRequests().size() == 1
+    direct.size() == 1
     !driver.scheduled.any { List call -> call[1] == 'retryActiveGroupCommandRequest' }
     driver.events.empty
   }

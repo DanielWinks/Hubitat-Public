@@ -332,78 +332,12 @@ void requestGroupCommand(String command, Map args = [:]) {
   enqueueGroupAppRequest(payload)
 }
 
-private Object getParentRequestLock(String dni) {
-  Object lock = parentRequestLocks.get(dni)
-  if(lock == null) {
-    Object created = new Object()
-    Object existing = parentRequestLocks.putIfAbsent(dni, created)
-    lock = existing ?: created
-  }
-  return lock
-}
-
 void enqueueGroupAppRequest(Map payload) {
-  String dni = device.getDeviceNetworkId()
-  if(!dni || payload == null) { return }
-  Object lock = getParentRequestLock(dni)
-  synchronized(lock) {
-    ConcurrentLinkedQueue<Map> queue = pendingGroupRequests.get(dni)
-    if(queue == null) {
-      ConcurrentLinkedQueue<Map> created = new ConcurrentLinkedQueue<Map>()
-      ConcurrentLinkedQueue<Map> existing = pendingGroupRequests.putIfAbsent(dni, created)
-      queue = existing ?: created
-    }
-    queue.add(new LinkedHashMap(payload))
-    if(queue.size() > PARENT_REQUEST_MAX_ITEMS) {
-      queue.poll()
-      logWarn("Parent group request queue overflow for dni=${dni}; dropped oldest request")
-    }
-  }
+  if(payload == null) { return }
+  try { parent.groupAppRequest(new LinkedHashMap(payload)) } catch(Exception e) { logWarn("parent.groupAppRequest failed: ${e.message}") }
 }
-
-private void scheduleParentRequestDrain(Integer delayMs) {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = getParentRequestLock(dni)
-  synchronized(lock) {
-    ConcurrentLinkedQueue<Map> queue = pendingGroupRequests.get(dni)
-    if(queue == null || queue.isEmpty()) {
-      state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
-      return
-    }
-    state[PARENT_REQUEST_DRAIN_SCHEDULED_KEY] = true
-    try {
-      runInMillis(Math.max(1, delayMs ?: PARENT_REQUEST_DRAIN_MS), 'flushPendingGroupRequests', [overwrite: true])
-    } catch(Exception e) {
-      state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
-      logWarn("Could not schedule parent group request drain for dni=${dni}: ${e.message}")
-    }
-  }
-}
-
-List<Map> drainPendingGroupRequestsForPoll() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return [] }
-  Object lock = getParentRequestLock(dni)
-  List<Map> batch = []
-  synchronized(lock) {
-    ConcurrentLinkedQueue<Map> queue = pendingGroupRequests.get(dni)
-    if(queue == null || queue.isEmpty()) { return [] }
-    Integer count = 0
-    while(queue.peek() != null && count < PARENT_REQUEST_MAX_ITEMS) {
-      Map item = queue.poll()
-      if(item != null) { batch.add(new LinkedHashMap(item)) }
-      count++
-    }
-    if(queue.isEmpty()) { pendingGroupRequests.remove(dni) }
-  }
-  return batch
-}
-
-/** Back-compat poll alias for tests and the app poller. */
-List<Map> flushPendingGroupRequests() {
-  return drainPendingGroupRequestsForPoll()
-}
+List<Map> drainPendingGroupRequestsForPoll() { return [] }
+List<Map> flushPendingGroupRequests() { return [] }
 
 private Map getFavoriteLoadOptionsFromPlayMode(String playMode) {
   String normalizedPlayMode = playMode != null ? playMode.toUpperCase() : 'NORMAL'
@@ -500,12 +434,9 @@ void clearPendingCommandsForInitialization() {
   unschedule('drainGroupCommandQueue')
   unschedule('retryActiveGroupCommandRequest')
   unschedule('groupDeviceVolumeFadeStep')
-  unschedule('flushPendingGroupRequests')
-  state.remove(PARENT_REQUEST_DRAIN_SCHEDULED_KEY)
   String dni = device.getDeviceNetworkId()
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
-  pendingGroupRequests.remove(dni)
   runInMillis(1, 'purgeParentGroupCommandsAfterInitialization', [
     overwrite: true,
     data: [deviceDni: dni]
@@ -545,7 +476,6 @@ void uninstalled() {
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
   heldPlaybackState.remove(dni)
-  pendingGroupRequests.remove(dni)
 }
 
 void configure() {

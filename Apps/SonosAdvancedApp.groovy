@@ -2554,7 +2554,6 @@ Map<String, Object> getStaticDriverActivePlayerRoster() {
 
 /** Refresh the driver cleanup snapshot after child-device changes. */
 void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChanges = true) {
-  scheduleDriverParentPoll()
   try {
     Map<String, Object> previousRoster = getStaticDriverActivePlayerRoster()
     List<Map<String, String>> roster = []
@@ -2693,16 +2692,9 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
   }
 }
 
-@Field static final Integer DRIVER_PARENT_POLL_INTERVAL_MS = 100
-
-void scheduleDriverParentPoll() {
-  // Driver outbox retired — direct parent calls, poll kept as covered stub
-}
-
-void pollDriverParentQueues() {
-  // Stub for backward-compat: production path uses direct calls, no polling
-}
-
+/** Driver outbox retired — poll loop removed */
+void scheduleDriverParentPoll() { }
+void pollDriverParentQueues() { }
 void scheduleHouseholdHealthCheck() {
   runIn(HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS, 'householdHealthCheck', [overwrite: true])
 }
@@ -5953,7 +5945,6 @@ void drainQueuedChildEvents() {
 
 /** Handle driver-reported player state batches. */
 void playerStateUpdate(Map payload) {
-  scheduleDriverParentPoll()
   if(!(payload instanceof Map) || payload.isEmpty()) { return }
   List<Map> pending = state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PENDING_PLAYER_STATE_UPDATES_STATE_KEY]) : []
@@ -6014,7 +6005,6 @@ void scheduleQueuedPlayerStateUpdateDrain(Integer delayMs) {
 }
 
 void drainQueuedPlayerStateUpdates() {
-  scheduleDriverParentPoll()
   if(state[PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY] == true) {
     scheduleQueuedPlayerStateUpdateDrain(100)
     return
@@ -6422,7 +6412,6 @@ void alarmRequestHandler(Event event) {
 
 /** Handle player requests sent directly by the child player driver. */
 Boolean playerAppRequest(Map request) {
-  scheduleDriverParentPoll()
   return playerAppRequestHandler(request)
 }
 
@@ -8168,7 +8157,6 @@ void startNextGroupAnnouncementCallback(Map data = null) {
 
 /** Handle requests sent directly by a child group driver. */
 Boolean groupAppRequest(Map request) {
-  scheduleDriverParentPoll()
   if(!(request instanceof Map) || request.channel != 'groupAppRequest') {
     logDebug("Ignoring invalid group app request channel=${request?.channel ?: 'unknown'}")
     return false

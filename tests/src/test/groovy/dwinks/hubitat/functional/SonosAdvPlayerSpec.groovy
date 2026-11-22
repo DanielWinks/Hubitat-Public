@@ -2763,12 +2763,12 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.unsubscribeFromZgtEvents = { -> zgtCalls << 'unsubscribe' }
     driver.metaClass.subscribeToMrRcEvents = { -> }
     driver.metaClass.markAppMediatedUpnpSubscriptionsStarted = { -> }
-    driver.device.dataValues.appZgtSubscribe = 'false'
+    driver.device.dataValues.isZgtSubscriber = 'false'
 
     when:
     driver.subscribeToEvents()
-    driver.device.dataValues.appZgtSubscribe = 'true'
-    driver.device.dataValues.appZgtLeaderGeneration = 'leader-1'
+    driver.device.dataValues.isZgtSubscriber = 'true'
+    driver.device.dataValues.zgtLeaderGeneration = 'leader-1'
     driver.subscribeToEvents()
 
     then:
