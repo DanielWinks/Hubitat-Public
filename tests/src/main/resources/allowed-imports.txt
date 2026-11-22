@@ -93,6 +93,9 @@ java.util.regex.Matcher
 java.util.regex.Pattern
 
 # --- IO/strings ---
+org.apache.commons.lang3.StringEscapeUtils
+org.apache.commons.lang3.StringUtils
+org.apache.commons.lang3.math.NumberUtils
 java.nio.charset.StandardCharsets
 java.io.ByteArrayInputStream
 java.io.ByteArrayOutputStream

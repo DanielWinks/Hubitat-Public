@@ -26,6 +26,9 @@ import groovy.transform.CompileStatic
 import groovy.json.JsonOutput
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import org.apache.commons.lang3.StringUtils
+import org.apache.commons.lang3.math.NumberUtils
+import java.util.Locale
 
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 
@@ -251,7 +254,7 @@ String getConfiguredLogLevel() {
 }
 
 String normalizeLogLevel(String level) {
-  String normalized = level?.toLowerCase()
+  String normalized = level?.toLowerCase(Locale.ROOT)
   return LOG_LEVELS.contains(normalized) ? normalized : 'info'
 }
 

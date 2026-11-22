@@ -32,6 +32,10 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.util.slurpersupport.GPathResult
 import hubitat.scheduling.AsyncResponse
+import org.apache.commons.lang3.StringEscapeUtils
+import org.apache.commons.lang3.StringUtils
+import org.apache.commons.lang3.math.NumberUtils
+import java.util.Locale
 
 // =============================================================================
 // Library: Utilities and Logging (inlined)
@@ -82,7 +86,7 @@ String getConfiguredLogLevel() {
 }
 
 String normalizeLogLevel(String level) {
-  String normalized = level?.toLowerCase()
+  String normalized = level?.toLowerCase(Locale.ROOT)
   return APP_LOG_LEVELS.contains(normalized) ? normalized : 'info'
 }
 
@@ -300,7 +304,7 @@ preferences {
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
-@Field static final String ZGT_CURRENT_TOPOLOGY_EVENT = 'zgtCurrentTopology'
+@Field static final String ZGT_CURRENT_TOPOLOGY_EVENT = 'zgtCurrentTopology' // Deprecated bridge event — driver now notifies via onZgtTopologyAvailable; kept for migration unsubscribe
 @Field static final String PARENT_APP_REQUEST_ATTRIBUTE = 'parentAppRequest'
 @Field static java.util.concurrent.ConcurrentHashMap<String, Map> avzStoreByRincon = new java.util.concurrent.ConcurrentHashMap<String, Map>()
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
@@ -1276,12 +1280,7 @@ String newUiStatusBadge(String label, String statusClass, String title) {
 }
 
 String escapeNewUiHtml(Object value) {
-  String text = value?.toString() ?: ''
-  return text.replace('&', '&amp;')
-      .replace('<', '&lt;')
-      .replace('>', '&gt;')
-      .replace('"', '&quot;')
-      .replace("'", '&#39;')
+  return StringEscapeUtils.escapeHtml4(StringUtils.defaultString(value?.toString())).replace("'", '&#39;')
 }
 
 String displayNewUiGroupEditor() {
@@ -2600,6 +2599,9 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
 void configure(Boolean startup = false) {
   applyLogLevelChange()
   logInfo("${app.name} updated")
+  // Initialization history now lives with each player; remove the legacy
+  // app-wide ledger when an existing installation saves or reconfigures.
+  state.remove(PLAYER_INITIALIZATION_LEDGER_STATE_KEY)
   unsubscribe()
   subscribe(location, 'systemStart', 'systemStartHandler')
   if(startup) {
@@ -2710,12 +2712,14 @@ void requestInitializationTurn(String dni, String reason) {
 }
 void initializationStarted(String requestId) {
   if(!requestId) { return }
-  Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
-  Map entry = ledger[requestId] instanceof Map ? new LinkedHashMap((Map)ledger[requestId]) : [:]
-  entry.status = 'started'
-  entry.startedAt = now()
-  ledger[requestId] = entry
-  state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+  Map<String, Map> active = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY]) : [:]
+  Map request = active.values().find { Map item -> item.requestId?.toString() == requestId }
+  if(request == null) { return }
+  request.phase = 'initializing'
+  request.startedAt = now()
+  active[request.dni?.toString()] = request
+  state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
 }
 void initializationComplete(String requestId, String detail) {
   if(!requestId) { return }
@@ -3106,15 +3110,8 @@ void recoverInterruptedPlayerInitializations() {
   if(active.isEmpty()) { return }
   List<Map> queue = state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY]) : []
-  Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
   active.values().each { Map request ->
     String dni = request.dni?.toString()
-    String requestId = request.requestId?.toString()
-    Map entry = requestId && ledger[requestId] instanceof Map
-        ? new LinkedHashMap((Map)ledger[requestId]) : [:]
-    entry.putAll([status: 'interrupted by hub restart', failedAt: now()])
-    if(requestId) { ledger[requestId] = entry }
     if(dni && !queue.any { Map queued -> queued.dni?.toString() == dni }) {
       Map recovered = new LinkedHashMap(request)
       recovered.remove('requestId')
@@ -3126,7 +3123,7 @@ void recoverInterruptedPlayerInitializations() {
       queue.add(recovered)
     }
   }
-  state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+  state.remove(PLAYER_INITIALIZATION_LEDGER_STATE_KEY)
   state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = [:]
 }
@@ -3410,17 +3407,9 @@ void startNextPlayerInitialization() {
     state[PLAYER_INITIALIZATION_QUEUE_STATE_KEY] = queue
     active[dni] = activeRequest
     state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
-    Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
-        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
-    ledger[requestId] = [requestId: requestId, dni: dni, status: "initialization sent to ${dni}",
-      initializationStartTime: initializationStartedAt, initializationSentAt: initializationStartedAt,
-      events: [[status: 'initialization start time', at: initializationStartedAt],
-        [status: "initialization sent to ${dni}", at: initializationStartedAt]],
-      attempt: activeRequest.attemptNumber, zgt: subscribeZgt, timeoutSeconds: activeRequest.attemptNumber == 1
-        ? PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS : PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS]
-    while(ledger.size() > 100) { ledger.remove(ledger.keySet().iterator().next()) }
-    state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
-    Integer timeoutSeconds = (Integer)ledger[requestId].timeoutSeconds
+    Integer timeoutSeconds = activeRequest.attemptNumber == 1
+        ? PLAYER_INITIALIZATION_FIRST_TIMEOUT_SECONDS : PLAYER_INITIALIZATION_SECOND_TIMEOUT_SECONDS
+    activeRequest.timeoutSeconds = timeoutSeconds
     activeRequest.deadlineAt = initializationStartedAt + timeoutSeconds * 1000L
     active[dni] = activeRequest
     state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
@@ -3435,7 +3424,8 @@ void startNextPlayerInitialization() {
       player.updateDataValue('appInitializationRequestId', requestId)
       player.updateDataValue('appZgtSubscribe', subscribeZgt.toString())
       player.updateDataValue('appZgtLeaderGeneration', subscribeZgt ? zgtState.leaderGeneration.toString() : '')
-      player.beginAppMediatedInitialization(requestId, subscribeZgt, subscribeZgt ? zgtState.leaderGeneration.toString() : '')
+      player.beginAppMediatedInitialization(requestId, subscribeZgt,
+          subscribeZgt ? zgtState.leaderGeneration.toString() : '', activeRequest.attemptNumber as Integer)
     } catch(Exception e) {
       logWarn("Could not start initialization for ${dni}: ${e.message}")
       finishPlayerInitialization(requestId, false, "start invocation failed: ${e.message}")
@@ -3480,12 +3470,10 @@ void failZgtInitializationCandidate(String dni, String reason) {
   Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
   if(zgt.candidateDni?.toString() != dni) { return }
-  String zgtRequestId = zgt.requestId?.toString()
-  Map priorLedger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
-      ? (Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] : [:]
-  Map priorEntry = zgtRequestId && priorLedger[zgtRequestId] instanceof Map
-      ? (Map)priorLedger[zgtRequestId] : [:]
-  Integer failedAttemptNumber = (priorEntry.attempt ?: 1) as Integer
+  Map<String, Map> priorActive = state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] : [:]
+  Map priorRequest = priorActive[dni]
+  Integer failedAttemptNumber = (priorRequest?.attemptNumber ?: (((priorRequest?.bootAttempt ?: 0) as Integer) + 1)) as Integer
   List<String> failed = zgt.failedCandidates instanceof List
       ? new ArrayList<String>((List<String>)zgt.failedCandidates) : []
   if(!failed.contains(dni)) { failed.add(dni) }
@@ -3505,20 +3493,6 @@ void failZgtInitializationCandidate(String dni, String reason) {
   Map failedRequest = active.remove(dni)
   state[PLAYER_INITIALIZATION_ACTIVE_STATE_KEY] = active
   scheduleNextPlayerInitializationWatchdog()
-  if(failedRequest != null) {
-    String failedRequestId = failedRequest.requestId?.toString()
-    Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
-        ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
-    Map entry = failedRequestId && ledger[failedRequestId] instanceof Map
-        ? new LinkedHashMap((Map)ledger[failedRequestId]) : [:]
-    String terminalStatus = entry.status?.toString() == 'timed out' ? 'timed out' : 'init failed'
-    entry.putAll([status: terminalStatus, failedAt: now(), detail: reason])
-    List<Map> events = entry.events instanceof List ? new ArrayList<Map>((List<Map>)entry.events) : []
-    events.add([status: terminalStatus, at: now(), detail: reason])
-    entry.events = events
-    if(failedRequestId) { ledger[failedRequestId] = entry }
-    state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
-  }
   ChildDeviceWrapper failedPlayer = getChildDevice(dni)
   try {
     failedPlayer?.updateDataValue('appZgtSubscribe', 'false')
@@ -3829,17 +3803,7 @@ void finishPlayerInitialization(String requestId, Boolean succeeded, String deta
   if(active == null || active.requestId?.toString() != requestId) { return }
   String dni = active.dni?.toString()
   Long finishedAt = now()
-  Map ledger = state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY]) : [:]
-  Map ledgerEntry = ledger[requestId] instanceof Map ? new LinkedHashMap((Map)ledger[requestId]) : [:]
-  ledgerEntry.putAll([status: succeeded ? 'init complete' : (timedOut ? 'timed out' : 'init failed'),
-    completedAt: succeeded ? finishedAt : null, failedAt: succeeded ? null : finishedAt,
-    detail: detail, elapsedMs: finishedAt - ((active.initializationStartTime ?: finishedAt) as Long)])
-  List<Map> ledgerEvents = ledgerEntry.events instanceof List ? new ArrayList<Map>((List<Map>)ledgerEntry.events) : []
-  ledgerEvents.add([status: ledgerEntry.status, at: finishedAt, detail: detail])
-  ledgerEntry.events = ledgerEvents
-  ledger[requestId] = ledgerEntry
-  state[PLAYER_INITIALIZATION_LEDGER_STATE_KEY] = ledger
+  state.remove(PLAYER_INITIALIZATION_LEDGER_STATE_KEY)
   Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
       ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
   if(!succeeded && state[PLAYER_INITIALIZATION_BOOT_PENDING_STATE_KEY] == true &&
@@ -4063,7 +4027,7 @@ String sonosAlarmSoapBody(String action, Map values) {
 
 @CompileStatic
 String escapeSonosXml(String value) {
-  return value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&apos;')
+  return StringEscapeUtils.escapeXml10(value)
 }
 
 List<Map> parseSonosAlarmList(String responseXml) {
@@ -4449,7 +4413,7 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, 'groupPlayerIds', 'topologyAttributeHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
-    subscribe(playerDevice, ZGT_CURRENT_TOPOLOGY_EVENT, 'zgtCurrentTopologyHandler')
+    // ZGT household topology now delivered via parent.onZgtTopologyAvailable() (deferred in-memory DTO) — no Current State publication or subscription
     subscribedPlayers++
   }
   getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
@@ -8887,7 +8851,7 @@ List<String> normalizeGroupPlayerIds(Object raw) {
 Object getGroupOperationChildValue(ChildDeviceWrapper player, String name) {
   if(player == null) { return null }
   Object value = player.getDataValue(name)
-  if(value == null || value.toString().trim() == '') {
+  if(value == null || StringUtils.isBlank(value.toString())) {
     try {
       value = player.currentValue(name, true)
     } catch(Exception ignored) {
@@ -11018,7 +10982,9 @@ void zgtInProgressHandler(Event event) {
   logDebug("ZGT In Progress ${event?.value?.toString() ?: ''} from ${event?.device?.deviceNetworkId?.toString() ?: ''}")
 }
 
+/** Deprecated bridge handler for legacy drivers that still publish zgtCurrentTopology as a Current State. New drivers use onZgtTopologyAvailable() with a minimal in-memory DTO and never publish an attribute. */
 void zgtCurrentTopologyHandler(Event event) {
+  logDebug("Received deprecated zgtCurrentTopology event (legacy bridge); new path is onZgtTopologyAvailable")
   ChildDeviceWrapper player = resolveTopologyEventPlayer(event)
   String playerDni = event?.device?.getDeviceNetworkId()?.toString() ?: event?.deviceId?.toString()
       ?: player?.getDeviceNetworkId()?.toString()
@@ -11056,6 +11022,43 @@ void zgtCurrentTopologyHandler(Event event) {
     }
   }
   acceptHouseholdTopology(playerDni, [groups: groups])
+}
+
+/** In-memory parent entry point for new drivers: deferred minimal ZGT DTO [groups: [groupId, coordinatorId, playerIds]] — no Current State, no large JSON. Called via driver's flushPendingZgtNotify runIn after gate release. */
+void onZgtTopologyAvailable(String dni, Map topology) {
+  if(!dni || topology == null) { return }
+  List<Map> groups = []
+  if(topology?.groups instanceof List) {
+    ((List)topology.groups).each { Object item ->
+      Map m = (Map)item
+      List<String> playerIds = []
+      if(m?.playerIds instanceof List) {
+        playerIds = normalizeGroupPlayerIds(m.playerIds)
+      } else if(m?.members instanceof List) {
+        List<String> visible = []
+        List<String> all = []
+        ((List)m.members).each { Object mem ->
+          Map mm = (Map)mem
+          String pid = mm?.playerId?.toString()
+          if(pid) {
+            all << pid
+            if(mm?.invisible != true && mm?.invisible?.toString() != '1') { visible << pid }
+          }
+        }
+        playerIds = normalizeGroupPlayerIds(visible.isEmpty() ? all : visible)
+      }
+      groups << [groupId: m?.groupId?.toString(), coordinatorId: m?.coordinatorId?.toString(), playerIds: playerIds]
+    }
+  }
+  if(groups.isEmpty()) {
+    logDebug("onZgtTopologyAvailable empty groups for ${dni}; ignoring")
+    return
+  }
+  acceptHouseholdTopology(dni, [groups: groups])
+}
+
+void onHouseholdTopologyAvailable(String dni, Map topology) {
+  onZgtTopologyAvailable(dni, topology)
 }
 
 void onAvtReceived(Map payload) {
@@ -11787,7 +11790,7 @@ void processPlayerCommandRequest(Map data) {
 }
 
 BigDecimal toBigDecimal(Object value) {
-  if(value == null || value.toString().trim() == '') {
+  if(value == null || StringUtils.isBlank(value.toString())) {
     return null
   }
   try {

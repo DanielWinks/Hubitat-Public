@@ -40,6 +40,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import org.apache.commons.lang3.StringEscapeUtils
+import org.apache.commons.lang3.StringUtils
+import org.apache.commons.lang3.math.NumberUtils
+import java.util.Locale
 
 @Field static final List<Integer> ANNOUNCEMENT_RESTORE_RETRY_DELAYS = [1, 2].asImmutable()
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
@@ -523,7 +527,6 @@ metadata {
   attribute 'groupMute', 'string'
   attribute 'groupName', 'string'
   attribute 'groupCoordinatorName', 'string'
-  attribute 'zgtCurrentTopology', 'string'
   attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
   attribute 'groupId', 'string'
   attribute 'groupCoordinatorId', 'string'
@@ -592,7 +595,7 @@ String getConfiguredLogLevel() {
 }
 
 String normalizeLogLevel(String level) {
-  String normalized = level?.toLowerCase()
+  String normalized = level?.toLowerCase(Locale.ROOT)
   return LOG_LEVELS.contains(normalized) ? normalized : 'info'
 }
 
@@ -702,6 +705,7 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Map> currentZgtByGroupId = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentZgtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+@Field static ConcurrentHashMap<String, Map> pendingZgtNotifyByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
@@ -732,6 +736,7 @@ Boolean hasLineInCapability() {
 @Field static final String APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY = 'appMediatedInitializationResubscriptionsStarted'
 @Field static final String APP_INITIALIZATION_UPNP_STARTED_STATE_KEY = 'appMediatedInitializationUpnpStarted'
 @Field static final String APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY = 'appMediatedInitializationConnectionGranted'
+@Field static final String LAST_PLAYER_INITIALIZATION_STATE_KEY = 'lastPlayerInitialization'
 @Field static final Integer APP_INITIALIZATION_READY_CHECK_SECONDS = 1
 @Field static final Integer APP_INITIALIZATION_CHILD_TIMEOUT_SECONDS = 180
 @Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
@@ -954,12 +959,26 @@ void handleSettingsUpdate() {
 void signalInitializationTurn(String reason) {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
+  recordPlayerInitializationStatus('requested', null, [reason: reason ?: 'driver initialize'])
   try {
     parent.requestInitializationTurn(dni, reason)
   } catch(Exception e) {
     logWarn("parent.requestInitializationTurn failed for ${dni}: ${e.message}; queuing via outbox fallback")
     publishPlayerStateUpdate([kind: 'initializationRequested', reason: reason ?: 'device request'])
   }
+}
+
+void recordPlayerInitializationStatus(String status, String requestId = null, Map details = [:]) {
+  Map previous = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY]) : [:]
+  Map entry = previous.status == 'requested' &&
+      (previous.requestId == null || previous.requestId?.toString() == requestId)
+      ? previous : [:]
+  if(requestId != null) { entry.requestId = requestId }
+  entry.status = status
+  entry.updatedAt = now()
+  if(details != null && !details.isEmpty()) { entry.putAll(details) }
+  state[LAST_PLAYER_INITIALIZATION_STATE_KEY] = entry
 }
 
 void performImmediateInitialization() {
@@ -1229,6 +1248,7 @@ void resetPendingStatePublicationForInitialization() {
   unschedule('flushPendingLocalDeviceEvents')
   unschedule('drainComponentChildEvents')
   unschedule('flushPendingGroupDeviceUpdates')
+  unschedule('flushPendingZgtNotify')
   state.remove(PENDING_BATCH_EVENTS_KEY)
   state.remove(BATCH_EVENTS_SCHEDULED_KEY)
   state.remove(BATCH_EVENTS_DUE_AT_KEY)
@@ -1244,6 +1264,8 @@ void resetPendingStatePublicationForInitialization() {
   lastLocalDeviceEvents.remove(dni)
   pendingGroupDeviceUpdates.remove(dni)
   groupDeviceUpdateRetryAttempts.remove(dni)
+  pendingZgtNotifyByDni.remove(dni)
+  clearLegacyBridgeCurrentStates()
   logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
 }
 
@@ -1259,11 +1281,11 @@ void requestAppMediatedInitialization(String reason) {
 }
 
 /** Called only by the parent app after it grants this player the initialization turn. */
-void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false, String leaderGeneration = null) {
-  publishPlayerStateUpdate([kind: 'initializationStarted', requestId: requestId])
+void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false,
+    String leaderGeneration = null, Integer attemptNumber = 1) {
   logDebug("Starting app-mediated initialization; request=${requestId}")
   if(!requestId) {
-    publishPlayerStateUpdate([kind: 'initializationFailed', requestId: requestId, detail: 'missing parent request ID'])
+    recordPlayerInitializationStatus('failed', null, [detail: 'missing parent request ID', finishedAt: now()])
     return
   }
   if(device.getDataValue('appInitializationRequestId')?.toString() != requestId) {
@@ -1271,19 +1293,29 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
     return
   }
   runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY] = requestId
+  Long startedAt = now()
+  Map previousInitialization = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
+      ? (Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY] : [:]
+  String initializationReason = previousInitialization.status == 'requested'
+      ? previousInitialization.reason?.toString() : null
   runtimeState['zgtSubscribe'] = subscribeZgt == true
   runtimeState['zgtLeaderGeneration'] = leaderGeneration ?: ''
   device.updateDataValue('zgtSubscribe', (subscribeZgt == true).toString())
   device.updateDataValue('zgtLeaderGeneration', leaderGeneration ?: '')
   device.updateDataValue(IS_ZGT_SUBSCRIBER_DEVICE_KEY, (subscribeZgt == true).toString())
   device.updateDataValue(ZGT_LEADER_GEN_DEVICE_KEY, leaderGeneration ?: '')
-  runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = now()
+  runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] = startedAt
   runtimeState[APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY] = false
   runtimeState[APP_INITIALIZATION_UPNP_STARTED_STATE_KEY] = false
   runtimeState[APP_INITIALIZATION_CONNECTION_GRANTED_STATE_KEY] = true
   runtimeState.remove('appMediatedInitializationFailure')
   try {
     prepareAppMediatedInitialization()
+    // prepare migrates legacy state and clears state.*; record this after it
+    // completes so the per-player diagnostic survives initialization.
+    recordPlayerInitializationStatus('initializing', requestId, [startedAt: startedAt,
+        attempt: attemptNumber ?: 1, zgtRole: subscribeZgt == true,
+        reason: initializationReason])
     performAppMediatedInitialization()
   } catch(Exception e) {
     logWarn("App-mediated initialization setup failed before subscription recovery: ${e.message}")
@@ -1293,6 +1325,15 @@ void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = fal
 
 void cancelAppMediatedInitialization(String requestId) {
   if(runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString() != requestId) { return }
+  Map initialization = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY]) : [:]
+  if(initialization.requestId?.toString() == requestId && initialization.status == 'initializing') {
+    Long finishedAt = now()
+    initialization.putAll([status: 'cancelled', finishedAt: finishedAt,
+      elapsedMs: finishedAt - ((initialization.startedAt ?: finishedAt) as Long),
+      detail: 'cancelled by parent initialization watchdog', updatedAt: finishedAt])
+    state[LAST_PLAYER_INITIALIZATION_STATE_KEY] = initialization
+  }
   runtimeState.remove(APP_INITIALIZATION_REQUEST_ID_STATE_KEY)
   runtimeState.remove(APP_INITIALIZATION_STARTED_AT_STATE_KEY)
   runtimeState.remove(APP_INITIALIZATION_RESUBSCRIPTIONS_STARTED_STATE_KEY)
@@ -1324,12 +1365,20 @@ void configure() {
   reconcileChildDevices()
 }
 
+void clearLegacyBridgeCurrentStates() {
+  try { device.deleteCurrentState('zgtCurrentTopology') } catch(Exception ignored) { }
+  try { device.deleteCurrentState('avtTransport') } catch(Exception ignored) { }
+  try { device.deleteCurrentState('grcGroupControl') } catch(Exception ignored) { }
+  try { device.deleteCurrentState('rcDeviceControl') } catch(Exception ignored) { }
+}
+
 void reconcileChildDevices() {
   // Remove transient parent-app bridge attributes from existing devices.
   device.deleteCurrentState('sonosPlayerStateUpdate')
   device.deleteCurrentState('sonosPlayerAppRequest')
   clearGroupFavoriteOperationCurrentState()
   clearPlayerCommandRequestCurrentState()
+  clearLegacyBridgeCurrentStates()
   // Remove the retired audio clip progress state from devices upgraded from
   // versions that exposed it as a current state.
   clearAudioClipPlaybackProgressCurrentState()
@@ -1447,7 +1496,7 @@ String summarizeHiddenJsonState(String name, Object value) {
 }
 
 String escapeHiddenStateHtml(String value) {
-  return (value ?: '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&#39;')
+  return StringEscapeUtils.escapeHtml4(StringUtils.defaultString(value)).replace("'", '&#39;')
 }
 
 void storeHiddenJsonState(String name, String visibleText, Object value) {
@@ -1641,6 +1690,16 @@ void checkAppMediatedInitializationReady() {
 void finishAppMediatedInitialization(Boolean succeeded, String detail) {
   String requestId = runtimeState[APP_INITIALIZATION_REQUEST_ID_STATE_KEY]?.toString()
   if(!requestId) { return }
+  Long finishedAt = now()
+  Map initialization = state[LAST_PLAYER_INITIALIZATION_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[LAST_PLAYER_INITIALIZATION_STATE_KEY]) : [:]
+  if(initialization.requestId?.toString() != requestId) {
+    initialization = [requestId: requestId, startedAt: runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY]]
+  }
+  Long startedAt = (initialization.startedAt ?: runtimeState[APP_INITIALIZATION_STARTED_AT_STATE_KEY] ?: finishedAt) as Long
+  initialization.putAll([status: succeeded ? 'complete' : 'failed', finishedAt: finishedAt,
+      elapsedMs: Math.max(0L, finishedAt - startedAt), detail: detail ?: '', updatedAt: finishedAt])
+  state[LAST_PLAYER_INITIALIZATION_STATE_KEY] = initialization
   unschedule('checkAppMediatedInitializationReady')
   runtimeState.remove(APP_INITIALIZATION_REQUEST_ID_STATE_KEY)
   runtimeState.remove(APP_INITIALIZATION_STARTED_AT_STATE_KEY)
@@ -1865,6 +1924,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(pendingTopologySnapshotByDni)
     clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
     clearedEntries += clearStaticMap(pendingTopologyKindByDni)
+    clearedEntries += clearStaticMap(pendingZgtNotifyByDni)
     clearedEntries += clearStaticMap(currentGrcSnapshotByDni)
     clearedEntries += clearStaticMap(currentGrcSnapshotByCoordinator)
     clearedEntries += clearStaticMap(currentGrcSeqByDni)
@@ -1913,6 +1973,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(pendingTopologySnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingZgtNotifyByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSidByDni, activePlayerDnis)
@@ -4650,9 +4711,12 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
 // =============================================================================
 // Parse
 // =============================================================================
+Long getHubitatCurrentTime() { return now() }
+void sendHubitatEvent(Map event) { sendEvent(event) }
+
 @CompileStatic
 void parse(String raw) {
-  try { sendEvent(name: 'lastUpdated', value: now()) } catch(Exception ignored) { }
+  try { sendHubitatEvent([name: 'lastUpdated', value: getHubitatCurrentTime()]) } catch(Exception ignored) { }
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
     logDebug("UPnP response parse entered; payloadLength=${raw.length()}")
@@ -4803,12 +4867,83 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
     List<Map> groups = (List<Map>)newSnapshot.groups
     currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
     if(ref2 != null) { ref2.set(incomingSeq) } else { currentZgtSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
-    sendDeviceEvent('zgtCurrentTopology', JsonOutput.toJson(newSnapshot))
+    queueZgtTopologyNotification(deviceDni, groups)
     return
   }
   List<Map> groups = (List<Map>)newSnapshot.groups
   currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
-  sendDeviceEvent('zgtCurrentTopology', JsonOutput.toJson(newSnapshot))
+  queueZgtTopologyNotification(deviceDni, groups)
+}
+
+Map buildMinimalZgtTopologyForParent(List<Map> groups) {
+  List<Map> minimalGroups = []
+  if(groups instanceof List) {
+    groups.each { Map g ->
+      List<String> visibleIds = []
+      List<String> allIds = []
+      if(g?.members instanceof List) {
+        ((List<?>)g.members).each { Object mem ->
+          Map mm = (Map)mem
+          String pid = mm?.playerId?.toString()
+          if(pid) {
+            allIds << pid
+            Boolean isInvisible = (mm?.invisible == true || mm?.invisible?.toString() == '1')
+            if(!isInvisible) { visibleIds << pid }
+          }
+        }
+      }
+      if(visibleIds.isEmpty() && allIds.isEmpty() && g?.playerIds instanceof List) {
+        List<String> normalized = ((List<?>)g.playerIds).collect { Object id -> id?.toString() }.findAll { String id -> id }
+        visibleIds = normalized
+        allIds = normalized
+      }
+      List<String> finalIds = visibleIds.isEmpty() ? allIds : visibleIds
+      minimalGroups << [groupId: g?.groupId?.toString(), coordinatorId: g?.coordinatorId?.toString(), playerIds: new ArrayList<String>(finalIds)]
+    }
+  }
+  return [groups: minimalGroups, observedAt: Instant.now().toEpochMilli()]
+}
+
+void queueZgtTopologyNotification(String deviceDni, List<Map> groups) {
+  if(!deviceDni || groups == null) { return }
+  Map minimal = buildMinimalZgtTopologyForParent(groups)
+  pendingZgtNotifyByDni.put(deviceDni, minimal)
+  try {
+    runInMillis(1, 'flushPendingZgtNotify', [overwrite: false])
+  } catch(Exception e) {
+    logWarn("Could not schedule ZGT parent notification for ${deviceDni}: ${e.message}")
+    pendingZgtNotifyByDni.remove(deviceDni)
+  }
+}
+
+void flushPendingZgtNotify() {
+  if(pendingZgtNotifyByDni.isEmpty()) { return }
+  Map<String, Map> drained = [:]
+  synchronized(pendingZgtNotifyByDni) {
+    drained.putAll(pendingZgtNotifyByDni)
+    pendingZgtNotifyByDni.clear()
+  }
+  drained.each { String dni, Map topo ->
+    if(topo == null || !(topo.groups instanceof List)) { return }
+    try {
+      if(parent != null) {
+        try {
+          parent.onZgtTopologyAvailable(dni, topo)
+        } catch(MissingMethodException e) {
+          try {
+            parent.acceptHouseholdTopology(dni, topo)
+          } catch(MissingMethodException ignored) {
+            logDebug("No parent ZGT handler found for ${dni}; storing minimal topology in memory only")
+          }
+        }
+      } else {
+        logDebug("Standalone ZGT topology (no parent) dni=${dni} groups=${topo.groups?.size() ?: 0}")
+      }
+    } catch(Exception e) {
+      logWarn("parent ZGT notification failed for ${dni}: ${e.message}")
+      try { logDebug("ZGT notify failure detail: ${e}") } catch(Exception ignored) { }
+    }
+  }
 }
 
 void applyZoneGroupTopologyPayload(String dni, String xmlBody, Map topology) {
@@ -4854,7 +4989,7 @@ void flushPendingTopologyUpdates() {
     try {
       Map expected = (Map)new JsonSlurper().parseText(expectedJson)
       Long expiresAt = expected.expiresAt as Long
-      if(expiresAt != null && expiresAt > (now() as Long)) {
+      if(expiresAt != null && expiresAt > (getHubitatCurrentTime() as Long)) {
         scheduleTopologyTimeoutFlush()
         return
       }
@@ -4901,7 +5036,7 @@ Boolean evaluateExpectedTopology(Map topology, Boolean holdOnMismatch) {
     return false
   }
   Long expiresAt = expected.expiresAt as Long
-  if(expiresAt == null || expiresAt <= (now() as Long)) {
+  if(expiresAt == null || expiresAt <= (getHubitatCurrentTime() as Long)) {
     setDeviceDataValue('expectedGroupTopology', '')
     clearPendingTopologyForDevice()
     return false
@@ -4931,7 +5066,7 @@ void scheduleTopologyTimeoutFlush() {
   try {
     Map expected = (Map)new JsonSlurper().parseText(expectedJson)
     Long expiresAt = expected.expiresAt as Long
-    Integer remaining = Math.max(1, Math.ceil((expiresAt - (now() as Long)) / 1000.0d) as Integer)
+    Integer remaining = Math.max(1, Math.ceil((expiresAt - (getHubitatCurrentTime() as Long)) / 1000.0d) as Integer)
     runIn(remaining, 'flushPendingTopologyUpdates', [overwrite: true])
   } catch(Exception e) {
     runIn(1, 'flushPendingTopologyUpdates', [overwrite: true])
@@ -5096,7 +5231,7 @@ Map parseAvtFullSnapshot(String xmlString) {
       restartPending: iid['RestartPending']['@val']?.toString(),
       transportPlaySpeed: iid['TransportPlaySpeed']['@val']?.toString(),
       currentMediaDuration: iid['CurrentMediaDuration']['@val']?.toString(),
-      observedAt: now()
+      observedAt: getHubitatCurrentTime()
     ]
   } catch(Exception e) {
     logDebug("Could not parse AVT snapshot: ${e.message}")
@@ -5107,7 +5242,7 @@ Map parseAvtFullSnapshot(String xmlString) {
 String unescapeIfNeeded(String s) {
   if(s == null) return s
   if(s.contains('&lt;') || s.contains('&quot;')) {
-    return s.replace('&lt;','<').replace('&gt;','>').replace('&quot;','"')
+    return StringEscapeUtils.unescapeXml(s)
   }
   return s
 }
@@ -5190,12 +5325,12 @@ void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
     if(parent != null) {
       parent.onAvtReceived([rincon: myRincon, followers: followers])
     } else {
-      // No parent (standalone/test harness) — still sendEvent for observability
-      sendDeviceEvent('avtTransport', JsonOutput.toJson(newSnapshot))
+      // No parent (standalone/test harness) — in-memory only, no Current State bloat
+      logDebug("Standalone AVT snapshot (no parent) tracked in memory for ${deviceDni}")
     }
   } catch(Exception e) {
     logWarn("parent.onAvtReceived failed: ${e.message}")
-    sendDeviceEvent('avtTransport', JsonOutput.toJson(newSnapshot))
+    logDebug("AVT snapshot retained in memory after parent failure for ${deviceDni}")
   }
 }
 
@@ -5406,7 +5541,7 @@ void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incom
   }
   if(sidKey != null) { currentGrcSidByDni[deviceDni] = sidKey }
   applyGrcSnapshotIfDifferent(merged)
-  sendDeviceEvent('grcGroupControl', JsonOutput.toJson(merged))
+  // GRC snapshot is canonical in currentGrcSnapshotByDni + device data (grcSnapshotJson); no Current State publication
 }
 
 Boolean applyGrcSnapshotIfDifferent(Map snap) {
@@ -5570,7 +5705,7 @@ Map parseRcFullSnapshot(String xmlString) {
       outputFixed: outputFixed, speakerSize: speakerSize, subGain: subGain,
       subCrossover: subCrossover, subPolarity: subPolarity, subEnabled: subEnabled,
       sonarEnabled: sonarEnabled, sonarCalibrationAvailable: sonarCalibrationAvailable,
-      presetNameList: presetNameList, observedAt: now()]
+      presetNameList: presetNameList, observedAt: getHubitatCurrentTime()]
   } catch(Exception e) {
     logDebug("Could not parse RC snapshot: ${e.message}")
     return null
@@ -5580,6 +5715,16 @@ Map parseRcFullSnapshot(String xmlString) {
 Map getCurrentRcSnapshot() {
   String dni = device.getDeviceNetworkId()?.toString()
   return [snapshot: currentRcSnapshotByDni[dni], seq: currentRcSeqByDni[dni]?.get(), sid: currentRcSidByDni[dni]]
+}
+
+String getRcDeviceControlJson() {
+  try {
+    String stored = device.getDataValue('rcSnapshotJson')?.toString()
+    if(stored) { return stored }
+  } catch(Exception ignored) { }
+  String dni = device.getDeviceNetworkId()?.toString()
+  Map snap = currentRcSnapshotByDni[dni]
+  return JsonOutput.toJson(snap ?: [:])
 }
 
 Map getCurrentRc() { return getCurrentRcSnapshot() }
@@ -5646,7 +5791,7 @@ void handleRcFull(String dni, String xmlBody, Integer incomingSeq, String incomi
   }
   if(sidKey != null) { currentRcSidByDni[deviceDni] = sidKey }
   applyRcSnapshotIfDifferent(merged)
-  sendDeviceEvent('rcDeviceControl', JsonOutput.toJson(merged))
+  // RC snapshot canonical in currentRcSnapshotByDni + device data (rcSnapshotJson); no Current State publication
 }
 
 Integer deriveBalanceFromStereo(Integer lf, Integer rf) {
@@ -5826,12 +5971,12 @@ LinkedHashMap getMapForRaw(String raw) {
 // =============================================================================
 @CompileStatic
 String unEscapeMetaData(String text) {
-  return text.replace('&amp;lt;','<').replace('&amp;gt;','>').replace('&amp;quot;','"')
+  return StringEscapeUtils.unescapeXml(text.replace('&amp;lt;', '&lt;').replace('&amp;gt;', '&gt;').replace('&amp;quot;', '&quot;'))
 }
 
 @CompileStatic
 String unEscapeLastChangeXML(String text) {
-  return text.replace('&lt;','<').replace('&gt;','>').replace('&quot;','\"').replace('&apos;',"'").replace('&amp;','&')
+  return StringEscapeUtils.unescapeXml(text)
 }
 
 @CompileStatic
@@ -11993,7 +12138,7 @@ Map getReusableCurrentTrack(Map snapshot) {
   }
 }
 
-String escapeSoapXmlText(String value) { return value?.replace('&', '&amp;')?.replace('<', '&lt;')?.replace('>', '&gt;')?.replace('"', '&quot;')?.replace("'", '&apos;') ?: '' }
+String escapeSoapXmlText(String value) { return StringEscapeUtils.escapeXml10(StringUtils.defaultString(value)) }
 String escapeSoapXmlAttribute(String value) { return escapeSoapXmlText(value) }
 
 void getQueue() {
@@ -12148,7 +12293,7 @@ String findQueueXmlText(GPathResult node, String targetName) {
 }
 
 String escapeQueueHtml(String value) {
-  return (value ?: '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;').replace("'", '&#39;')
+  return StringEscapeUtils.escapeHtml4(StringUtils.defaultString(value)).replace("'", '&#39;')
 }
 
 String renderQueueHtml(List<Map> entries) {

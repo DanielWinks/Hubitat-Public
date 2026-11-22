@@ -902,7 +902,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [0]
     driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
     driver.device.events.findAll { Map item -> item.name == 'loudness' }*.value == ['on']
-    driver.device.events.find { Map e -> e.name == 'rcDeviceControl' }?.value?.contains('"volumeMaster"')
+    driver.getRcDeviceControlJson().contains('"volumeMaster"')
     driver.device.getDataValue('rcSnapshotJson')?.contains('"volumeMaster":1')
   }
 
@@ -1735,7 +1735,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.audioClipPlaying == false
   }
 
-  def "parent initialization reports start before scheduling recovery work"() {
+  def "player records its own initialization status before scheduling recovery work"() {
     given:
     driver.device.dataValues.appInitializationRequestId = 'request-1'
 
@@ -1743,10 +1743,21 @@ class SonosAdvPlayerSpec extends Specification {
     driver.beginAppMediatedInitialization('request-1')
 
     then:
-    playerStateMessages()[0].kind == 'initializationStarted'
-    playerStateMessages()[0].requestId == 'request-1'
+    driver.state.lastPlayerInitialization.status == 'initializing'
+    driver.state.lastPlayerInitialization.requestId == 'request-1'
+    driver.state.lastPlayerInitialization.attempt == 1
+    !playerStateMessages().any { Map message -> message.kind == 'initializationStarted' }
     driver.logs.any { it.contains('Starting app-mediated initialization') }
     driver.scheduled.any { List job -> job[1] == 'initializeWebsocketConnection' }
+
+    when:
+    driver.finishAppMediatedInitialization(true, 'subscriptions settled')
+
+    then:
+    driver.state.lastPlayerInitialization.status == 'complete'
+    driver.state.lastPlayerInitialization.detail == 'subscriptions settled'
+    !driver.state.lastPlayerInitialization.containsKey('events')
+    playerStateMessages().any { Map message -> message.kind == 'initializationComplete' }
   }
 
   def cleanup() {
@@ -2331,7 +2342,8 @@ class SonosAdvPlayerSpec extends Specification {
     // Fresh device reports groupMute as 'unmuted' by default, so the first
     // 'unmuted' is vetoed as already-current; the snapshot still records it.
     driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
-    driver.device.events.find { Map e -> e.name == 'grcGroupControl' }?.value?.contains('"groupVolume"')
+    // GRC snapshot is now in-memory + device data only — no Current State publication
+    driver.device.events.find { Map e -> e.name == 'grcGroupControl' } == null
     driver.device.getDataValue('grcSnapshotJson')?.contains('"groupVolume":25')
   }
 

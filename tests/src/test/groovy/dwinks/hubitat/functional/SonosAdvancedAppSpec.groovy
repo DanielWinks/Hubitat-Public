@@ -39,9 +39,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<Map> initializationRoles = []
   Closure<Boolean> topologyApplyHook
 
-  void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false, String leaderGeneration = null) {
+  void beginAppMediatedInitialization(String requestId, Boolean subscribeZgt = false,
+      String leaderGeneration = null, Integer attemptNumber = 1) {
     initializationRequests << requestId
-    initializationRoles << [subscribeZgt: subscribeZgt, leaderGeneration: leaderGeneration]
+    initializationRoles << [subscribeZgt: subscribeZgt, leaderGeneration: leaderGeneration,
+      attemptNumber: attemptNumber]
   }
   void cancelAppMediatedInitialization(String requestId) { commands << [name: 'cancelAppMediatedInitialization', requestId: requestId] }
 
@@ -297,9 +299,10 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.scheduled.any { List job -> job[1] == 'playerInitializationStartWatchdog' }
     appScript.scheduled.count { List job -> job[1] == 'playerInitializationHardWatchdog' &&
       job[2]?.overwrite == true && job[0] >= 1 } == 1
-    appScript.state.playerInitializationLedger.values().every { Map entry ->
-      entry.events*.status.contains('initialization start time') && entry.status.startsWith('initialization sent to ')
+    appScript.state.playerInitializationActive.values().every { Map entry ->
+      entry.attemptNumber == 1 && entry.timeoutSeconds == 180
     }
+    !appScript.state.containsKey('playerInitializationLedger')
 
     when:
     String requestId = coordinator.initializationRequests[0]
@@ -898,10 +901,10 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     coordinator.initializationRequests.size() == 2
     String retryRequest = coordinator.initializationRequests[1]
-    appScript.state.playerInitializationLedger[retryRequest].attempt == 2
+    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].attemptNumber == 2
+    appScript.state.playerInitializationActive[coordinator.deviceNetworkId].timeoutSeconds == 600
     appScript.state.playerInitializationActive[coordinator.deviceNetworkId].deadlineAt ==
       appScript.state.playerInitializationActive[coordinator.deviceNetworkId].initializationStartedAt + 600000L
-    appScript.state.playerInitializationLedger[failedRequest].status == 'timed out'
 
     when:
     appScript.playerStateUpdateHandler([value: JsonOutput.toJson([
@@ -911,7 +914,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.state.playerInitializationActive[coordinator.deviceNetworkId].requestId == retryRequest
-    appScript.state.playerInitializationLedger[failedRequest].status == 'timed out'
+    !appScript.state.containsKey('playerInitializationLedger')
   }
 
   def "parent stamps coordinator transfer expectations on each affected player"() {
