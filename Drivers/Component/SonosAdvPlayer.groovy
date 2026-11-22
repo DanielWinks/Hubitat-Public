@@ -5930,8 +5930,8 @@ Map parseZoneGroupTopologySnapshot(String xmlString, String playerId) {
     Map<String, String> batteryData = [:]
     String moreInfo = player['@MoreInfo'].toString()
     if(moreInfo) {
-      for(String part : moreInfo.tokenize(',')) {
-        List<String> entry = part.tokenize(':')
+      for(String part : splitTokens(moreInfo, ',')) {
+        List<String> entry = splitTokens(part, ':')
         if(entry.size() > 1 && (entry[0] == 'BattTmp' || entry[0] == 'BattPct' || entry[0] == 'BattChg')) {
           batteryData[entry[0]] = entry[1]
         }
@@ -6116,7 +6116,7 @@ void processAVTransportMessages(String xmlString, String localUpnpUrl) {
 
     String uri = instanceId['AVTransportURI']['@val']
       // String transportUri = uri ?? Seems to be the same on the built-in driver
-    String audioSource = SOURCES["${(uri.tokenize(':')[0])}"]
+    String audioSource = SOURCES["${(splitTokens(uri, ':')[0])}"]
 
     Map trackData = [:]
     trackData['audioSource'] = audioSource ?: trackData['audioSource']
@@ -7953,7 +7953,7 @@ String getId() { return getDeviceDataValue('id')
 void setId(String id) { setDeviceDataValue('id', id)
 }
 List<String> getSecondaryIds() {
-  return getDeviceDataValue('secondaryIds')?.tokenize(',') ?: []
+  return splitTokens(getDeviceDataValue('secondaryIds')?.toString(), ',')
 }
 void setSecondaryIds(List<String> ids) {
   setDeviceDataValue('secondaryIds', ids.join(','))
@@ -7973,7 +7973,7 @@ void setDeviceIp(String ipAddress) {
   setDeviceDataValue('deviceIp', ipAddress)
 }
 List<String> getSecondaryDeviceIps() {
-  return getDeviceDataValue('secondaryDeviceIps')?.tokenize(',') ?: []
+  return splitTokens(getDeviceDataValue('secondaryDeviceIps')?.toString(), ',')
 }
 void setSecondaryDeviceIps(List<String> ipAddresses) {
   setDeviceDataValue('secondaryDeviceIps', ipAddresses.join(','))
@@ -8128,7 +8128,7 @@ Boolean isGroupedAndNotCoordinator() {
 }
 
 List<String> getGroupPlayerIds() {
-  return getDeviceDataValue('groupPlayerIds')?.tokenize(',') ?: []
+  return splitTokens(getDeviceDataValue('groupPlayerIds')?.toString(), ',')
 }
 void setGroupPlayerIds(List<String> groupPlayerIds) {
   String newValue = groupPlayerIds.join(',')
@@ -8137,7 +8137,7 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   if(coordinatorChanged) { setDeviceDataValue('coordinatorStatusChanged', '') }
   if(newValue == oldValue && !coordinatorChanged) { return }
   if(newValue != oldValue) {
-    Boolean wasGrouped = oldValue ? oldValue.tokenize(',').size() > 1 : false
+    Boolean wasGrouped = oldValue ? splitTokens(oldValue, ',').size() > 1 : false
     Boolean isNowGrouped = groupPlayerIds.size() > 1
     setDeviceDataValue('groupPlayerIds', newValue)
     queueLocalDeviceEvent('isGrouped', isNowGrouped ? 'on' : 'off')
@@ -8158,12 +8158,12 @@ List<String> getGroupFollowerRincons() {
 }
 
 List<String> getGroupFollowerDNIs() {
-  return getGroupFollowerRincons().collect{ it.tokenize('_')[1][0..-6] }
+  return getGroupFollowerRincons().collect{ splitTokens(it, '_')[1][0..-6] }
 }
 
 @CompileStatic
 String getDNIFromRincon(String rincon) {
-  return rincon.tokenize('_')[1][0..-6]
+  return splitTokens(rincon, '_')[1][0..-6]
 }
 
 String getGroupMemberNames() {
@@ -12867,7 +12867,7 @@ void processWebsocketMessage(String message) {
               String serviceId = id?.serviceId
               String accountId = id?.accountId
               if(objectId != null) {
-                List tok = objectId?.tokenize(':')
+                List tok = splitTokens(objectId, ':')
                 if(tok.size() >= 2) { objectId = tok[1] }
               }
               String universalMusicObjectId = "${objectId}${serviceId}${accountId}".toString()
@@ -13703,7 +13703,7 @@ void isFavoritePlaying(Map json) {
   LinkedHashMap id = (LinkedHashMap)container?.id
   String objectId = id?.objectId
   if(objectId != null && objectId != '') {
-    List tok = objectId.tokenize(':')
+    List tok = splitTokens(objectId, ':')
     if(tok.size() >= 2) { objectId = tok[1] }
   }
   String serviceId = id?.serviceId
@@ -13742,7 +13742,7 @@ List<String> getPlaylistObjectIdCandidates(String objectId) {
   List<String> candidates = []
   if(objectId == null || objectId == '') { return candidates }
   candidates.add(objectId)
-  List<String> tokens = objectId.tokenize(':')
+  List<String> tokens = splitTokens(objectId, ':')
   if(tokens.size() >= 2) { candidates.add(tokens.get(1)) }
   if(tokens.size() >= 3) { candidates.add(tokens.get(tokens.size() - 1)) }
   return candidates
@@ -13793,3 +13793,11 @@ void isPlaylistPlaying(Map json) {
 // =============================================================================
 // End Websocket Incoming Data Processing
 // =============================================================================
+
+/** Split using the same character-delimiter and empty-token rules as Groovy tokenize(). */
+List<String> splitTokens(String value, String delimiters) {
+  if(value == null || value.isEmpty()) { return [] }
+  String[] parts = StringUtils.split(value, delimiters)
+  return parts == null ? [] : parts.toList()
+}
+

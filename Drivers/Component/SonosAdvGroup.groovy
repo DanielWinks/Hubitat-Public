@@ -27,7 +27,6 @@ import groovy.json.JsonOutput
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import org.apache.commons.lang3.StringUtils
-import org.apache.commons.lang3.math.NumberUtils
 import java.util.Locale
 
 @Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
@@ -766,7 +765,7 @@ List<String> getAllPlayersInGroupDevice() {
     players.add(coordinatorId)
   }
   if(playerIdsStr) {
-    players.addAll(playerIdsStr.tokenize(','))
+    players.addAll(splitTokens(playerIdsStr, ','))
   }
   return players
 }
@@ -776,7 +775,7 @@ List<String> getAllFollowersInGroupDevice() {
   if(!playerIdsStr) {
     return []
   }
-  return playerIdsStr.tokenize(',')
+  return splitTokens(playerIdsStr, ',')
 }
 
 // Player lookup and command dispatch are owned by the parent app. The group
@@ -1517,3 +1516,11 @@ void loadPlaylistFull(String playlistId, String repeatMode = 'repeat all', Strin
     crossfadeMode: crossfadeMode
   ])
 }
+
+/** Split using the same character-delimiter and empty-token rules as Groovy tokenize(). */
+List<String> splitTokens(String value, String delimiters) {
+  if(value == null || value.isEmpty()) { return [] }
+  String[] parts = StringUtils.split(value, delimiters)
+  return parts == null ? [] : parts.toList()
+}
+

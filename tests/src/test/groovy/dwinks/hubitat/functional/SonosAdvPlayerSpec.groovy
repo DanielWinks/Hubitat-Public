@@ -1584,6 +1584,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.unEscapeMetaData('&amp;lt;title&amp;gt;A&amp;lt;/title&amp;gt;') == '<title>A</title>'
     driver.unescapeIfNeeded('&lt;x&gt;') == '<x>'
     driver.normalizeLogLevel('INFO') == 'info'
+    driver.splitTokens('a,,b,', ',') == ['a', 'b']
+    driver.splitTokens(null, ',').empty
     driver.parseSonosDurationSeconds('1:02:03') == 3723
     driver.parseSonosDurationSeconds('invalid') == null
   }

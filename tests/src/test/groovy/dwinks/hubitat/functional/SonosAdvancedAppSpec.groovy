@@ -262,6 +262,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.escapeNewUiHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
     appScript.escapeSonosXml("A&B <'\"") == 'A&amp;B &lt;&apos;&quot;'
     appScript.normalizeLogLevel('INFO') == 'info'
+    appScript.splitTokens('a,,b,', ',') == ['a', 'b']
+    appScript.groupCommandRequestSequence([sequence: 'invalid']) == Integer.MAX_VALUE
   }
 
   SonosAppPlayerDouble createPlayer(String id, String groupId, String coordinatorId,

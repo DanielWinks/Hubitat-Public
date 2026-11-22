@@ -5025,7 +5025,7 @@ void processMdnsDiscovery() {
       mdnsEntries.each { Map entry ->
         String serviceName = (entry.server ?: entry.name ?: '').toString()
         String addresses = (entry.ip4Addresses ?: entry.ipAddress ?: '').toString()
-        String ipAddress = addresses.tokenize(',')?.first()?.trim()
+        String ipAddress = splitTokens(addresses, ',')?.first()?.trim()
         Integer port = (entry.port ?: 0) as Integer
 
         logPayloadAtTrace("mDNS entry service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}; payload omitted",
@@ -5345,6 +5345,14 @@ void sendFoundSonosEvents() {
 
 
 
+
+/** Split using the same character-delimiter and empty-token rules as Groovy tokenize(). */
+List<String> splitTokens(String value, String delimiters) {
+  if(value == null || value.isEmpty()) { return [] }
+  String[] parts = StringUtils.split(value, delimiters)
+  return parts == null ? [] : parts.toList()
+}
+
 // =============================================================================
 // Helper methods
 // =============================================================================
@@ -5496,7 +5504,7 @@ String renderCustomSelectCard(String settingName, String title, String descripti
 }
 
 void handleNewUiSettingChange(String buttonName) {
-  List<String> parts = buttonName.tokenize('|')
+  List<String> parts = splitTokens(buttonName, '|')
   if(parts.size() != 3) {
     logWarn("Ignored malformed custom setting action '${buttonName}'")
     return
@@ -5566,7 +5574,7 @@ void scheduleMethod(Integer seconds, String methodName) {
 
 @CompileStatic
 String getDNIFromRincon(String rincon) {
-  return rincon.tokenize('_')[1][0..-6]
+  return splitTokens(rincon, '_')[1][0..-6]
 }
 
 /**
@@ -5728,7 +5736,7 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
     // membership confirms that singleton, create the two-player group with
     // the current coordinator first. Never use this fallback for a coordinator
     // that may already lead a larger group.
-    List<String> coordinatorMembers = coordinator.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+    List<String> coordinatorMembers = splitTokens(coordinator.getDataValue('groupPlayerIds')?.toString(), ',')
     if(coordinatorMembers.size() == 1 && coordinatorMembers[0] == coordinatorId &&
         coordinator.currentValue('isGrouped', true) == 'off') {
       logInfo("Creating a group with ${coordinatorId} as coordinator and adding ${targetId}")
@@ -5742,7 +5750,7 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
   }
 
   String targetGroupId = target.getDataValue('groupId')?.toString()
-  List<String> coordinatorMembers = coordinator.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+  List<String> coordinatorMembers = splitTokens(coordinator.getDataValue('groupPlayerIds')?.toString(), ',')
   if(targetGroupId == groupId || coordinatorMembers.contains(targetId)) {
     logDebug("${targetId} is already in group ${groupId}; no group change needed")
     return
@@ -6312,7 +6320,7 @@ Boolean isCurrentGroupFollower(ChildDeviceWrapper coordinator, ChildDeviceWrappe
   if(coordinator == null || follower == null || !coordinatorId) { return false }
   String coordinatorPlayerId = coordinator.getDataValue('id')?.toString()
   String followerPlayerId = follower.getDataValue('id')?.toString()
-  List<String> currentMembers = coordinator.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+  List<String> currentMembers = splitTokens(coordinator.getDataValue('groupPlayerIds')?.toString(), ',')
   return coordinatorPlayerId == coordinatorId && followerPlayerId != null &&
       coordinator.getDataValue('groupCoordinatorId')?.toString() == coordinatorId &&
       currentMembers.contains(coordinatorId) && currentMembers.contains(followerPlayerId)
@@ -8336,22 +8344,14 @@ void drainGroupCommandRequests() {
 
 Integer groupCommandRequestSequence(Map request) {
   if(request?.sequence != null) {
-    try {
-      return request.sequence.toString().toInteger()
-    } catch(Exception ignored) {
-      return Integer.MAX_VALUE
-    }
+    return NumberUtils.toInt(request.sequence.toString(), Integer.MAX_VALUE)
   }
   String requestId = request?.requestId as String
   if(!requestId) { return Integer.MAX_VALUE }
   String sequenceText = requestId.contains('-')
       ? requestId.substring(requestId.lastIndexOf('-') + 1)
       : requestId
-  try {
-    return sequenceText.toInteger()
-  } catch(Exception ignored) {
-    return Integer.MAX_VALUE
-  }
+  return NumberUtils.toInt(sequenceText, Integer.MAX_VALUE)
 }
 
 void processGroupCommandRequest(Map data) {
@@ -11550,22 +11550,14 @@ void drainPlayerCommandRequests() {
 
 Integer playerCommandRequestSequence(Map request) {
   if(request?.sequence != null) {
-    try {
-      return request.sequence.toString().toInteger()
-    } catch(Exception ignored) {
-      return Integer.MAX_VALUE
-    }
+    return NumberUtils.toInt(request.sequence.toString(), Integer.MAX_VALUE)
   }
   String requestId = request?.requestId as String
   if(!requestId) { return Integer.MAX_VALUE }
   String sequenceText = requestId.contains('-')
       ? requestId.substring(requestId.lastIndexOf('-') + 1)
       : requestId
-  try {
-    return sequenceText.toInteger()
-  } catch(Exception ignored) {
-    return Integer.MAX_VALUE
-  }
+  return NumberUtils.toInt(sequenceText, Integer.MAX_VALUE)
 }
 
 void processPlayerCommandRequest(Map data) {
@@ -11606,7 +11598,7 @@ void processPlayerCommandRequest(Map data) {
   try {
     Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
     String configuredCoordinatorId = source.getDataValue('groupCoordinatorId')
-    List<String> candidateIds = source.getDataValue('groupPlayerIds')?.tokenize(',') ?: []
+    List<String> candidateIds = splitTokens(source.getDataValue('groupPlayerIds')?.toString(), ',')
     if(!candidateIds && source.getDataValue('id')) {
       candidateIds.add(source.getDataValue('id'))
     }
@@ -12056,7 +12048,7 @@ List<String> getAllPlayersForGroupDevice(DeviceWrapper device) {
     playerIds.add(coordinatorId)
   }
   if(playerIdsStr) {
-    playerIds.addAll(playerIdsStr.tokenize(','))
+    playerIds.addAll(splitTokens(playerIdsStr, ','))
   } else if(configuredGroup.playerIds != null) {
     playerIds.addAll(normalizeGroupPlayerIds(configuredGroup.playerIds))
   }
@@ -12139,7 +12131,7 @@ void getPlayerInfoLocalCallback(AsyncResponse response, Map data) {
   if(!responseIsValid(response, 'getPlayerInfoLocalCallback')) { return }
   Map respJson = response.getJson()
   String playerName = respJson?.device?.name
-  String playerDni = (respJson?.device?.serialNumber.replace('-','').tokenize(':'))[0]
+  String playerDni = (splitTokens(respJson?.device?.serialNumber?.replace('-', ''), ':'))[0]
   String swGen = respJson?.device?.swGen
   String websocketUrl = respJson?.device?.websocketUrl
   String householdId = respJson?.householdId
@@ -12164,7 +12156,7 @@ List<DeviceWrapper> getCurrentGroupedDevices(DeviceWrapper device) {
   httpPost(params) { resp ->
     if (resp && resp.data && resp.success) {
       GPathResult xml = resp.data
-      groupedRincons = (xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text()).toString().tokenize(',')
+      groupedRincons = splitTokens(xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text()?.toString(), ',')
     }
     else { logError("getCurrentGroupedDevices: unexpected response: ${resp?.data}") }
   }
@@ -12175,12 +12167,12 @@ List<DeviceWrapper> getCurrentGroupedDevices(DeviceWrapper device) {
 List<DeviceWrapper> getGroupedPlayerDevicesFromGetZoneGroupAttributes(GPathResult xml, String rincon) {
   List<DeviceWrapper> groupedDevices = []
   List<String> groupIds = []
-  List<String> groupedRincons = xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text().tokenize(',')
+  List<String> groupedRincons = splitTokens(xml['Body']['GetZoneGroupAttributesResponse']['CurrentZonePlayerUUIDsInGroup'].text()?.toString(), ',')
   if(groupedRincons.size() == 0) {
     logDebug("No grouped rincons found!")
     return
   }
-  groupedRincons.each{groupIds.add("${it}".tokenize('_')[1][0..-6])}
+  groupedRincons.each{groupIds.add(splitTokens("${it}", '_')[1][0..-6])}
   groupIds.each{groupedDevices.add(getChildDevice(it))}
   return groupedDevices
 }
@@ -12219,7 +12211,7 @@ DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
     return null
   }
 
-  List<String> groupIdParts = groupId.tokenize(':')
+  List<String> groupIdParts = splitTokens(groupId, ':')
   if(groupIdParts.size() == 0) {
     logWarn("Unexpected group ID '${groupId}' returned for ${device?.displayName}")
     return null
@@ -13627,8 +13619,8 @@ Integer compareVersions(String version1, String version2) {
   version1 = version1?.replaceAll(/^v/, '') ?: '0.0.0'
   version2 = version2?.replaceAll(/^v/, '') ?: '0.0.0'
 
-  List parts1 = version1.tokenize('.')
-  List parts2 = version2.tokenize('.')
+  List parts1 = splitTokens(version1, '.')
+  List parts2 = splitTokens(version2, '.')
 
   Integer maxLength = Math.max(parts1.size(), parts2.size())
 
