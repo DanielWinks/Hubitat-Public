@@ -2696,11 +2696,47 @@ void rearmPlayerStateUpdateDrainAfterRestart() {
 @Field static final Integer DRIVER_PARENT_POLL_INTERVAL_MS = 100
 
 void scheduleDriverParentPoll() {
-  // Driver outbox retired — no polling; kept for backward-compat no-op
+  runInMillis(DRIVER_PARENT_POLL_INTERVAL_MS, 'pollDriverParentQueues', [overwrite: true])
 }
 
 void pollDriverParentQueues() {
-  // Direct parent calls now handle init/announcement/request; polling removed
+  Integer polled = 0
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String dni = player.getDeviceNetworkId()?.toString()
+    if(!dni) { return }
+    List<Map> updates = []
+    try { updates = (List<Map>)player.drainPendingParentUpdatesForPoll() ?: [] } catch(Exception e) {
+      logWarn("Could not poll parent updates from ${dni}: ${e.message}")
+      updates = []
+    }
+    updates.each { Map payload ->
+      polled++
+      playerStateUpdate(new LinkedHashMap(payload))
+    }
+    List<Map> requests = []
+    try { requests = (List<Map>)player.drainPendingParentRequestsForPoll() ?: [] } catch(Exception e) {
+      logWarn("Could not poll parent requests from ${dni}: ${e.message}")
+      requests = []
+    }
+    requests.each { Map request -> handlePolledPlayerRequest(player, new LinkedHashMap(request)) }
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper group ->
+    String dni = group.getDeviceNetworkId()?.toString()
+    if(!dni) { return }
+    List<Map> requests = []
+    try { requests = (List<Map>)group.drainPendingGroupRequestsForPoll() ?: [] } catch(Exception e) {
+      logWarn("Could not poll group requests from ${dni}: ${e.message}")
+      requests = []
+    }
+    requests.each { Map request ->
+      polled++
+      enqueueGroupCommandRequest(new LinkedHashMap(request))
+    }
+  }
+  if(polled > 0) {
+    logDebug("Driver parent poll delivered ${polled} item(s)")
+  }
+  scheduleDriverParentPoll()
 }
 
 void scheduleHouseholdHealthCheck() {
