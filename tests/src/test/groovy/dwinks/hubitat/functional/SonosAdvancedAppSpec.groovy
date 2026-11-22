@@ -3312,6 +3312,64 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getStoredGrcEvents('RINCON_RELAY').find { Map event -> event.name == 'groupVolume' }.value == 37
   }
 
+  def "SAC UPnP intake debounces then fans out from a one millisecond callback"() {
+    given:
+    List<Map> topology = [
+      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+    ]
+    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': topology])
+
+    when:
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD',
+      events: [[name: 'currentTrackName', value: 'Debounced Song']]])
+
+    then:
+    appScript.scheduled.any { List row -> row[0] == 500 && row[1] == 'processDebouncedUpnpFanout' }
+    appScript.state.pendingChildEvents == null
+
+    when:
+    Long generation = appScript.state.upnpFanoutGeneration as Long
+    appScript.processDebouncedUpnpFanout([generation: generation])
+
+    then:
+    appScript.scheduled.any { List row -> row[0] == 1 && row[1] == 'performUpnpFanout' }
+    appScript.state.pendingChildEvents == null
+
+    when:
+    appScript.performUpnpFanout([generation: generation])
+
+    then:
+    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].currentTrackName == 'Debounced Song'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == 'Debounced Song'
+    coordinator.refreshedPlaybackUpdates.isEmpty()
+    follower.refreshedPlaybackUpdates.isEmpty()
+  }
+
+  def "SAC ZGT departure clears old group AVT and GRC values"() {
+    given:
+    appScript.state.upnpFanoutTopologySnapshot = ['GROUP-OLD': [
+      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+    ]]
+    appScript.state.upnpFanoutGeneration = 1L
+    appScript.putAvtEvents('RINCON_COORD', [[name: 'currentTrackName', value: 'Old Track']])
+    appScript.putGrcEvents('RINCON_COORD', [[name: 'groupVolume', value: 42]])
+    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-NEW': [
+      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+      [name: 'groupPlayerIds', value: 'RINCON_COORD']
+    ]])
+
+    when:
+    appScript.performUpnpFanout([generation: 1L])
+
+    then:
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == ''
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].groupVolume == 0
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].groupMute == 'unmuted'
+    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'stopped'
+  }
+
   def "pure AVT setter merges latest-only without scheduling fanout"() {
     when:
     List<Map> stored = appScript.putAvtEvents('RINCON_COORD', [

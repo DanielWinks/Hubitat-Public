@@ -327,7 +327,7 @@ definition(
   iconX2Url: '',
   installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: true,
+  singleThreaded: false,
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy'
 )
 
@@ -384,6 +384,10 @@ preferences {
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final String GRC_STORE_STATE_KEY = 'grcStoreByCoordinator'
+@Field static final Integer UPNP_FANOUT_DEBOUNCE_MILLIS = 500
+@Field static final String UPNP_FANOUT_GENERATION_STATE_KEY = 'upnpFanoutGeneration'
+@Field static final String UPNP_FANOUT_PENDING_STATE_KEY = 'upnpFanoutPending'
+@Field static final String UPNP_FANOUT_TOPOLOGY_STATE_KEY = 'upnpFanoutTopologySnapshot'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -470,6 +474,9 @@ preferences {
   AVT_STORE_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
   GRC_STORE_STATE_KEY,
+  UPNP_FANOUT_GENERATION_STATE_KEY,
+  UPNP_FANOUT_PENDING_STATE_KEY,
+  UPNP_FANOUT_TOPOLOGY_STATE_KEY,
   GROUP_OPERATION_STATE_KEY,
   GROUPING_CONTEXTS_STATE_KEY,
   GROUP_COMMAND_QUEUE_STATE_KEY,
@@ -5144,7 +5151,7 @@ void sendChildEvent(String dni, Map event) {
 }
 
 /** Queue only changed values and coalesce them by child and attribute. */
-void queueChildStateBatch(String dni, Map attributes, Boolean forceSnapshot = false) {
+ synchronized void queueChildStateBatch(String dni, Map attributes, Boolean forceSnapshot = false) {
   if(!dni || !attributes) { return }
   Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
@@ -5169,7 +5176,7 @@ void queueChildStateBatch(String dni, Map attributes, Boolean forceSnapshot = fa
 }
 
 /** Re-arm pending child delivery even when a persisted marker outlives its job. */
-void scheduleQueuedChildEventDrain(Integer delayMs) {
+ synchronized void scheduleQueuedChildEventDrain(Integer delayMs) {
   Map pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
       ? (Map)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
   if(pending.isEmpty()) {
@@ -5205,7 +5212,7 @@ Boolean sameChildStateValue(Object left, Object right) {
  * returned. This method intentionally performs only the final child event
  * delivery and never calls back into a player or group command.
  */
-void drainQueuedChildEvents() {
+ synchronized void drainQueuedChildEvents() {
   state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
   state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
   Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
@@ -10271,7 +10278,7 @@ void playerDeparted(String rincon, String dni, String name) {
 }
 
 /** Accept the parsed UPnP DTO from a player; event maps are ready for direct replay. */
-void putPlayerUpnpEvents(Map payload) {
+synchronized void putPlayerUpnpEvents(Map payload) {
   String service = payload?.service?.toString()
   if(service == 'AVT' || service == 'GRC') {
     String rincon = payload?.rincon?.toString()
@@ -10284,7 +10291,118 @@ void putPlayerUpnpEvents(Map payload) {
     Map<String, List<Map>> eventsByGroupId = payload?.eventsByGroupId instanceof Map
         ? (Map<String, List<Map>>)payload.eventsByGroupId : [:]
     if(sourceDni && !eventsByGroupId.isEmpty()) { putZgtTopology(sourceDni, eventsByGroupId) }
+  } else {
+    return
   }
+  scheduleUpnpFanout()
+}
+
+/** Restart the 500 ms quiet period after every accepted AVT/GRC/ZGT payload. */
+synchronized void scheduleUpnpFanout() {
+  Long generation = ((state[UPNP_FANOUT_GENERATION_STATE_KEY] ?: 0L) as Long) + 1L
+  state[UPNP_FANOUT_GENERATION_STATE_KEY] = generation
+  state[UPNP_FANOUT_PENDING_STATE_KEY] = true
+  runInMillis(UPNP_FANOUT_DEBOUNCE_MILLIS, 'processDebouncedUpnpFanout',
+      [overwrite: true, data: [generation: generation]])
+}
+
+/** Debounce expiry only queues the required 1 ms parent callback. */
+synchronized void processDebouncedUpnpFanout(Map data = [:]) {
+  Long generation = data?.generation as Long
+  if(generation == null || generation != (state[UPNP_FANOUT_GENERATION_STATE_KEY] as Long) ||
+      state[UPNP_FANOUT_PENDING_STATE_KEY] != true) { return }
+  state.remove(UPNP_FANOUT_PENDING_STATE_KEY)
+  runInMillis(1, 'performUpnpFanout', [overwrite: true, data: [generation: generation]])
+}
+
+/** Apply only from a deferred 1 ms callback, after the 500 ms quiet period. */
+synchronized void performUpnpFanout(Map data = [:]) {
+  Long generation = data?.generation as Long
+  if(generation == null || generation != (state[UPNP_FANOUT_GENERATION_STATE_KEY] as Long)) { return }
+  Map<String, List<Map>> topology = getStoredZgtEventsMap()
+  Map<String, List<Map>> priorTopology = state[UPNP_FANOUT_TOPOLOGY_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[UPNP_FANOUT_TOPOLOGY_STATE_KEY] : [:]
+  Map<String, String> oldGroups = buildPlayerGroupMap(priorTopology)
+  Map<String, String> newGroups = buildPlayerGroupMap(topology)
+
+  topology.each { String groupId, List<Map> events ->
+    Map<String, Object> attrs = upnpEventsToAttributes(events)
+    List<String> members = normalizeGroupPlayerIds(
+        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
+    members.unique().each { String rincon ->
+      ChildDeviceWrapper child = findPlayerBySonosId(rincon)
+      if(child != null && !attrs.isEmpty()) { queueChildStateBatch(child.getDeviceNetworkId(), attrs) }
+    }
+  }
+
+  Set<String> changedPlayers = new LinkedHashSet<String>()
+  (oldGroups.keySet() + newGroups.keySet()).each { String playerId ->
+    if(oldGroups[playerId] != newGroups[playerId]) { changedPlayers.add(playerId) }
+  }
+  changedPlayers.each { String playerId ->
+    ChildDeviceWrapper child = findPlayerBySonosId(playerId)
+    if(child == null) { return }
+    String groupId = newGroups[playerId]
+    Map<String, Object> reconciled = [status: 'stopped', transportStatus: 'stopped', currentTrackName: '',
+        currentArtistName: '', albumArtURI: '', currentAlbumName: '', currentTrackNumber: 0,
+        currentMediaDuration: '00:00:00', currentTrackUri: '', groupVolume: 0, groupMute: 'unmuted']
+    if(groupId) {
+      List<Map> groupEvents = topology[groupId] ?: []
+      String coordinatorId = groupEvents.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+      if(coordinatorId) {
+        reconciled.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId)))
+        reconciled.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId)))
+      }
+    }
+    queueChildStateBatch(child.getDeviceNetworkId(), reconciled)
+  }
+
+  Map<String, List<Map>> snapshot = [:]
+  topology.each { String groupId, List<Map> events ->
+    snapshot[groupId] = events.collect { Map event -> new LinkedHashMap(event) }
+  }
+  state[UPNP_FANOUT_TOPOLOGY_STATE_KEY] = snapshot
+
+  // AVT/GRC snapshots are keyed by their coordinator. Replay each current group snapshot
+  // to the coordinator and every follower after the topology has been reconciled.
+  topology.each { String groupId, List<Map> events ->
+    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(!coordinatorId) { return }
+    Map<String, Object> combined = [:]
+    combined.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId)))
+    combined.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId)))
+    if(combined.isEmpty()) { return }
+    List<String> members = normalizeGroupPlayerIds(
+        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
+    members.unique().each { String rincon ->
+      ChildDeviceWrapper child = findPlayerBySonosId(rincon)
+      if(child != null) { queueChildStateBatch(child.getDeviceNetworkId(), combined) }
+    }
+  }
+}
+
+Map<String, String> buildPlayerGroupMap(Map<String, List<Map>> topology) {
+  Map<String, String> result = [:]
+  topology.each { String groupId, List<Map> events ->
+    List<String> members = normalizeGroupPlayerIds(
+        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(coordinatorId && !members.contains(coordinatorId)) { members.add(coordinatorId) }
+    members.each { String rincon -> result[rincon] = groupId }
+  }
+  return result
+}
+
+Map<String, Object> upnpEventsToAttributes(List<Map> events) {
+  Map<String, Object> attributes = [:]
+  (events ?: []).each { Map event ->
+    String name = event?.name?.toString()
+    if(name && event.containsKey('value')) { attributes[name] = event.value }
+  }
+  return attributes
 }
 
 /** Pure set+return only: merge delta by name into the stored list; no child calls. */
