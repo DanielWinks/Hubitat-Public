@@ -226,6 +226,10 @@ void callbackMethod(AsyncResponse response, Map data) {
 - The `dwinks` namespace across all files
 - Lifecycle hooks: `installed()`, `updated()`, `uninstalled()`, `initialize()`
 
+## App/Driver Version Sync (Never Support Old Versions)
+
+Apps and drivers in this repository are kept in sync by Hubitat Package Manager (HPM) and their versions always match. The driver will never be older than the app, and the app will never be older than the driver. Therefore: **never add code to support an older app/driver version**. Specifically: no deprecated fallback method-chain shims, no bridge-attribute holdovers for old versions, no `MissingMethodException` compatibility fallbacks between sibling app/driver code, and no dual-shape or dual-contract readers. When the contract changes, change both sides in the same commit and delete the old side. The only exception is `settings.*`/`state.*` keys that live on running hubs, which still need a migration-safe read when an intentional migration is part of the task.
+
 ## Testing
 
 Two layers of automation live under `tests/`:

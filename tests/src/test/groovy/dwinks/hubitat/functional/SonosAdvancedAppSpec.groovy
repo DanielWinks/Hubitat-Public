@@ -2289,7 +2289,7 @@ class SonosAdvancedAppSpec extends Specification {
     String body = appScript.sonosAlarmSoapBody('SetAlarm', [ProgramURI: 'x?a=1&b=<two>'])
 
     then:
-    new XmlSlurper().parseText(body).'**'.find { it.name() == 'ProgramURI' }.text() == 'x?a=1&b=<two>'
+    body.contains('<ProgramURI>x?a=1&amp;b=&lt;two&gt;</ProgramURI>')
   }
 
   def "deferred AVT snapshot fanout queues player states without reading the child snapshot"() {
@@ -2298,15 +2298,27 @@ class SonosAdvancedAppSpec extends Specification {
     follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
     coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
     follower.currentValues.groupCoordinatorId = 'RINCON_COORD'
+    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
+      topologyReady: false, initializationComplete: false]
+    List<Map> zgtEvents = []
+    zgtEvents << [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+    zgtEvents << [name: 'groupCoordinatorId', value: 'RINCON_COORD']
+    zgtEvents << [name: 'isGrouped', value: 'on']
+    zgtEvents << [name: 'groupMemberCount', value: 2]
+    List<Map> avtEvents = []
+    avtEvents << [name: 'status', value: 'playing']
+    avtEvents << [name: 'transportStatus', value: 'playing']
+    avtEvents << [name: 'currentTrackName', value: 'Deferred Track']
+    avtEvents << [name: 'currentArtistName', value: 'Deferred Artist']
 
     when:
-    appScript.onAvtReceived([rincon: 'RINCON_COORD', followers: ['RINCON_FOLLOW'],
-      observedAt: 1234L, seq: 5, attributes: [status: 'playing', transportStatus: 'playing',
-        currentTrackName: 'Deferred Track', currentArtistName: 'Deferred Artist']])
-    Map saved = appScript.state.avtStoreByRincon['RINCON_COORD']
-    appScript.forwardAvtToGroup([rincon: 'RINCON_COORD', receivedAt: saved.receivedAt])
+    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': zgtEvents])
+    appScript.putAvtEvents('RINCON_COORD', avtEvents)
+    List<Map> saved = appScript.state.avtStoreByRincon['RINCON_COORD']
+    appScript.forwardAvtToGroup([rincon: 'RINCON_COORD'])
 
     then:
+    saved.find { Map e -> e?.name == 'currentTrackName' }.value == 'Deferred Track'
     appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == 'Deferred Track'
     appScript.state.pendingChildEvents[follower.deviceNetworkId].currentArtistName == 'Deferred Artist'
     appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
@@ -3848,5 +3860,57 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     timerMarkup.contains("<div class='new-ui-discovery-title'>Searching for Sonos speakers</div>")
     timerMarkup ==~ /(?s).*<div class='new-ui-discovery-detail'>About [0-9]+ seconds remaining<\/div>.*/
+  }
+
+  def "pure AVT setter merges latest-only without scheduling fanout"() {
+    when:
+    List<Map> stored = appScript.putAvtEvents('RINCON_COORD', [
+      [name: 'status', value: 'playing'], [name: 'currentTrackName', value: 'Song']])
+    List<Map> stored2 = appScript.putAvtEvents('RINCON_COORD', [
+      [name: 'currentTrackName', value: 'New Song']])
+
+    then:
+    stored2.find { Map e -> e.name == 'currentTrackName' }.value == 'New Song'
+    stored2.find { Map e -> e.name == 'status' }.value == 'playing'
+    stored2.count { Map e -> e.name == 'currentTrackName' } == 1
+    appScript.getStoredAvtEvents('RINCON_COORD') == stored2
+    !appScript.scheduled.any { List item -> item[1] == 'forwardAvtToGroup' }
+  }
+
+  def "pure GRC setter merges latest-only and replays verbatim"() {
+    when:
+    List<Map> stored = appScript.putGrcEvents('RINCON_COORD', [[name: 'groupVolume', value: 25]])
+    List<Map> stored2 = appScript.putGrcEvents('RINCON_COORD', [[name: 'groupMute', value: 'muted']])
+
+    then:
+    stored2.find { Map e -> e.name == 'groupVolume' }.value == 25
+    stored2.find { Map e -> e.name == 'groupMute' }.value == 'muted'
+    stored2.every { Map e -> e.containsKey('name') && e.containsKey('value') && !e.containsKey('isStateChange') }
+  }
+
+  def "pure ZGT setter stores latest-only event lists and gates non-current speaker"() {
+    given:
+    appScript.state.playerInitializationZgt = [candidateDni: coordinator.deviceNetworkId,
+      topologyReady: false, initializationComplete: false]
+    List<Map> events = []
+    events << [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+    events << [name: 'groupCoordinatorId', value: 'RINCON_COORD']
+    events << [name: 'isGrouped', value: 'on']
+    events << [name: 'groupMemberCount', value: 2]
+
+    when:
+    Map stored = appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': events])
+
+    then:
+    appScript.getStoredZgtEvents('GROUP-1') == events
+    appScript.state.playerInitializationZgt.topologyReady == true
+    !appScript.scheduled.any { List item -> item[1] == 'applyHouseholdTopologyBatch' }
+
+    when:
+    Map ignored = appScript.putZgtTopology(follower.deviceNetworkId, ['GROUP-1': events])
+
+    then:
+    ignored.isEmpty()
+    appScript.getStoredZgtEvents('GROUP-1') == events
   }
 }

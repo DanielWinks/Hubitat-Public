@@ -37,13 +37,11 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   void seedGroupTopology(String coordinatorId, Map<String, String> hostByPlayer) {
-    List<Map> members = hostByPlayer.collect { String playerId, String host ->
-      [playerId: playerId, zoneName: playerId, invisible: false,
-       location: "http://${host}:1400/xml/device_description.xml", secondaries: []]
-    }
-    driver.currentZgtByGroupId.clear()
-    driver.currentZgtByGroupId['GROUP-TEST'] = [groupId: 'GROUP-TEST', coordinatorId: coordinatorId,
-      groupName: 'Test Group', coordinatorName: coordinatorId, members: members]
+    // Driver stores no topology; only the transient host cache + coordinator data value remain.
+    // Hosts carry the UPnP port exactly as parsed member Location strings do in production.
+    driver.zgtMemberHostByPlayerId.clear()
+    hostByPlayer.each { String playerId, String host -> driver.zgtMemberHostByPlayerId[playerId] = "${host}:1400" }
+    driver.device.dataValues.groupCoordinatorId = coordinatorId
   }
 
   @Shared HubitatScriptHarness driver
@@ -104,8 +102,6 @@ class SonosAdvPlayerSpec extends Specification {
       enqueuedTransportURIMetaData: driver.parseAvtMetaData(embedded)
     ]
     driver.runtimeState.lastTransportPlaybackSnapshot = playbackSnapshot
-    driver.currentAvtSnapshotByDni[driver.device.getDeviceNetworkId()] = playbackSnapshot
-    driver.device.updateDataValue('avtTransportJson', JsonOutput.toJson(playbackSnapshot))
     driver.favoritesBrowseCallback(new hubitat.scheduling.AsyncResponse(status: 200,
       data: '<BrowseResponse><Result>' + StringEscapeUtils.escapeXml10(didl) +
         '</Result><TotalMatches>1</TotalMatches><UpdateID>5</UpdateID></BrowseResponse>'), request.data)
@@ -1580,7 +1576,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
-    println 'DBG TRANS pending=' + driver.pendingLocalDeviceEvents + ' snap=' + driver.currentAvtSnapshotByDni[dni] + ' logs=' + driver.logs
+    println 'DBG TRANS pending=' + driver.pendingLocalDeviceEvents + ' logs=' + driver.logs
 
     then:
     driver.device.currentValue('status') == 'paused'
@@ -1668,8 +1664,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.binding.setVariable('atomicState', [:])
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
-    driver.currentAvtSnapshotByDni.remove('SONOS-TEST-DNI')
     driver.currentAvtSeqByDni.remove('SONOS-TEST-DNI')
+    driver.pendingGrcByDni.remove('SONOS-TEST-DNI')
+    driver.grcUpdateScheduledDnis.remove('SONOS-TEST-DNI')
     driver.pendingCoordinatorAvtUpdatesByDni.remove('SONOS-TEST-DNI')
     driver.coordinatorAvtUpdateScheduledDnis.remove('SONOS-TEST-DNI')
     driver.device.events.clear()
@@ -1681,7 +1678,9 @@ class SonosAdvPlayerSpec extends Specification {
       initializationStarted: { String reqId -> parentPlayerUpdates << [kind:'initializationStarted', requestId:reqId] },
       initializationComplete: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationComplete', requestId:reqId, detail:detail] },
       initializationFailed: { String reqId, String detail -> parentPlayerUpdates << [kind:'initializationFailed', requestId:reqId, detail:detail] },
-      onAvtReceived: { Map payload -> parentPlayerUpdates << [kind:'avtReceived', payload: new LinkedHashMap(payload)] },
+      putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
+      putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
+      putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
@@ -1692,6 +1691,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.groupId = 'GROUP_TEST'
     driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.isGroupCoordinator = 'true'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
     driver.clearFavoritesMap()
     driver.clearPlaylistsMap()
     driver.favoriteRetryState.clear()
@@ -1699,12 +1699,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.pendingGroupedPlayerVolumes.clear()
     driver.groupDeviceUpdateRetryAttempts.clear()
     driver.pendingGroupDeviceUpdates.clear()
-    driver.pendingTopologyXmlByDni.clear()
-    driver.pendingTopologySnapshotByDni.clear()
     driver.pendingTopologyWebsocketByDni.clear()
     driver.pendingTopologyKindByDni.clear()
-    driver.currentGrcSnapshotByDni.clear()
-    driver.currentGrcSnapshotByCoordinator.clear()
+    driver.pendingGrcByDni.clear()
+    driver.grcUpdateScheduledDnis.clear()
     driver.currentGrcSeqByDni.clear()
     driver.currentGrcSidByDni.clear()
     driver.currentRcSnapshotByDni.clear()
@@ -2309,7 +2307,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "each received ZGT payload is parsed and applied in arrival order"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtByGroupId.clear()
     // Use real full-capture parser (no mock) — feed a minimal valid propertyset
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Living Room"/>' +
@@ -2320,24 +2317,29 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
+    driver.flushPendingZgtNotify()
 
     then:
-    driver.getCurrentZgtTopology().groups.size() == 1
-    driver.currentZgtByGroupId['G1:1'].members*.playerId == ['RINCON_TEST', 'RINCON_MEMBER']
-    driver.events.find { Map e -> e.name == 'zgtCurrentTopology' }?.value?.contains('G1:1') ||
-      driver.currentZgtByGroupId.containsKey('G1:1')
+    Map record = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
+    record != null
+    record.eventsByGroupId.size() == 1
+    record.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_MEMBER'
+    record.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
 
     when:
+    parentPlayerUpdates.clear()
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
+    driver.flushPendingZgtNotify()
 
     then:
-    driver.currentZgtByGroupId['G1:1'].members*.playerId == ['RINCON_TEST', 'RINCON_MEMBER']
+    Map record2 = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
+    record2 != null
+    record2.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_MEMBER'
   }
 
   def "ZGT SEQ header drops stale payloads without applying"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtByGroupId.clear()
     driver.currentZgtSeqByDni.clear()
     String zs = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST"><ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
     String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -2348,31 +2350,33 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body, 20)
+    driver.flushPendingZgtNotify()
 
     then:
-    driver.currentZgtByGroupId.containsKey('G1:1')
+    parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G1:1') } != null
     driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 20
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body2, 19)
+    driver.flushPendingZgtNotify()
 
     then:
-    !driver.currentZgtByGroupId.containsKey('G2:2')
-    driver.currentZgtByGroupId.containsKey('G1:1')
+    !parentPlayerUpdates.any { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G2:2') }
+    parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G1:1') } != null
     driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 20
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body2, 21)
+    driver.flushPendingZgtNotify()
 
     then:
-    driver.currentZgtByGroupId.containsKey('G2:2')
+    parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G2:2') } != null
     driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 21
   }
 
   def "ZGT notification logs header values with SEQ 0"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtByGroupId.clear()
     driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
@@ -2395,7 +2399,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "ZGT notification logs header values with SEQ greater than 0"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtByGroupId.clear()
     driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
@@ -2517,13 +2520,13 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.flushCoordinatorAvtParentUpdate()
-    Map message = playerStateMessages().find { Map item -> item.kind == 'avtReceived' }
+    Map message = playerStateMessages().find { Map item -> item.kind == 'avtEvents' }
 
     then:
-    message.payload.rincon == 'RINCON_TEST'
-    message.payload.attributes.status == 'playing'
-    message.payload.attributes.currentTrackName == 'Deferred Track'
-    message.payload.attributes.currentArtistName == 'Deferred Artist'
+    message.rincon == 'RINCON_TEST'
+    message.events.find { Map e -> e.name == 'status' }.value == 'playing'
+    message.events.find { Map e -> e.name == 'currentTrackName' }.value == 'Deferred Track'
+    message.events.find { Map e -> e.name == 'currentArtistName' }.value == 'Deferred Artist'
   }
 
   def "bounded XML lookups match namespace-prefixed sleep timer and queue fields"() {
@@ -2554,13 +2557,12 @@ class SonosAdvPlayerSpec extends Specification {
     String body = driver.getBaseControlXML(driver.AVTransport, 'SetAVTransportURI', [CurrentURI: 'x?a=1&b=<two>'])
 
     then:
-    new XmlSlurper().parseText(body).'**'.find { it.name() == 'CurrentURI' }.text() == 'x?a=1&b=<two>'
+    body.contains('<CurrentURI>x?a=1&amp;b=&lt;two&gt;</CurrentURI>')
   }
 
   def "ZGT packet without service type header is not applied"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtByGroupId.clear()
     driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
@@ -2576,14 +2578,13 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     !driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') }
-    !driver.currentZgtByGroupId.containsKey('G1:1')
+    !parentPlayerUpdates.any { Map item -> item.kind == 'zgtTopology' }
     driver.logs.any { String entry -> entry.contains('Could not determine service type') || entry.contains('unrecognized service type') }
   }
 
   def "AVT packet without service type header is not applied"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentAvtSnapshotByDni.clear()
     driver.currentAvtSeqByDni.clear()
     String body = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="PLAYING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
     String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:avt-legacy\r\n\r\n' + body
@@ -2596,7 +2597,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     !driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') }
-    driver.currentAvtSnapshotByDni['SONOS-TEST-DNI'] == null
+    !parentPlayerUpdates.any { Map item -> item.kind == 'avtEvents' }
     driver.logs.any { String entry -> entry.contains('Could not determine service type') || entry.contains('unrecognized service type') }
   }
 
@@ -2611,20 +2612,21 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 0, 'uuid:RINCON_TEST_sub0000000105')
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 25
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'unmuted'
-    driver.getCurrentGrcSnapshot().snapshot.groupVolumeChangeable == true
-    driver.getCurrentGrcSnapshot().seq == 0
-    driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000105'
+    Map grcRecord = parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last()
+    grcRecord.rincon == 'RINCON_TEST'
+    grcRecord.events.find { Map e -> e.name == 'groupVolume' }.value == 25
+    grcRecord.events.find { Map e -> e.name == 'groupMute' }.value == 'unmuted'
+    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 0
+    driver.currentGrcSidByDni['SONOS-TEST-DNI'] == 'uuid:RINCON_TEST_sub0000000105'
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
     // Fresh device reports groupMute as 'unmuted' by default, so the first
     // 'unmuted' is vetoed as already-current; the snapshot still records it.
     driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
-    // GRC snapshot is now in-memory + device data only — no Current State publication
     driver.device.events.find { Map e -> e.name == 'grcGroupControl' } == null
-    driver.device.getDataValue('grcSnapshotJson')?.contains('"groupVolume":25')
+    driver.device.getDataValue('grcSnapshotJson') == null
   }
 
   def "GRC single-key update merges without clobbering sibling value"() {
@@ -2642,10 +2644,13 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', muteOnly, 1, 'uuid:RINCON_TEST_sub0000000105')
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 25
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    Map grcMerged = parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last()
+    // Parent merge retains the sibling value: mute-only delta keeps prior groupVolume.
+    grcMerged.events.find { Map e -> e.name == 'groupVolume' }.value == 25
+    grcMerged.events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
     // First 'unmuted' is vetoed as the fresh-device default; only the change to 'muted' emits.
     driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
@@ -2666,16 +2671,18 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', normal, 0, 'uuid:RINCON_TEST_sub0000000105')
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'unmuted'
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'unmuted'
 
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', initial, 1, 'uuid:RINCON_TEST_sub0000000105')
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
     // First 'unmuted' is vetoed as the fresh-device default; only the change to 'muted' emits.
     driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
   }
@@ -2691,19 +2698,21 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
       '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>99</GroupVolume></e:property></e:propertyset>',
       19, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 10
-    driver.getCurrentGrcSnapshot().seq == 20
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 10
+    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 20
 
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
       '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>30</GroupVolume></e:property></e:propertyset>',
       21, 'uuid:RINCON_TEST_sub0000000105')
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 30
-    driver.getCurrentGrcSnapshot().seq == 21
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 30
+    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 21
   }
 
   def "GRC SEQ zero and SID change rebaseline after resubscribe"() {
@@ -2717,21 +2726,23 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
       '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>77</GroupVolume></e:property></e:propertyset>',
       0, 'uuid:RINCON_TEST_sub0000000106')
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 77
-    driver.getCurrentGrcSnapshot().seq == 0
-    driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000106'
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 77
+    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 0
+    driver.currentGrcSidByDni['SONOS-TEST-DNI'] == 'uuid:RINCON_TEST_sub0000000106'
 
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
       '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>88</GroupVolume></e:property></e:propertyset>',
       5, 'uuid:RINCON_TEST_sub0000000107')
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 88
-    driver.getCurrentGrcSnapshot().seq == 5
-    driver.getCurrentGrcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000107'
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 88
+    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 5
+    driver.currentGrcSidByDni['SONOS-TEST-DNI'] == 'uuid:RINCON_TEST_sub0000000107'
   }
 
   def "GRC invalid field is ignored without dropping sibling value"() {
@@ -2744,10 +2755,11 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 0, null)
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == null
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
+    !parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.any { Map e -> e.name == 'groupVolume' }
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }.empty
     driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
   }
@@ -2761,20 +2773,22 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', '   ', 0, null)
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot == null
+    parentPlayerUpdates.any { Map item -> item.kind == 'grcEvents' } == false
     driver.device.events.empty
 
     when:
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 1, null)
     driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 2, null)
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [40]
     driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'unmuted'
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'unmuted'
   }
 
   def "legacy GRC shim without SEQ still applies the current snapshot"() {
@@ -2787,11 +2801,13 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.processGroupRenderingControlMessages(xml)
     driver.flushPendingLocalDeviceEvents()
+    driver.flushPendingGrc()
 
     then:
-    driver.getCurrentGrcSnapshot().snapshot.groupVolume == 55
-    driver.getCurrentGrcSnapshot().snapshot.groupMute == 'muted'
-    driver.getCurrentGrcSnapshot().seq == null
+    Map grcShim = parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last()
+    grcShim.events.find { Map e -> e.name == 'groupVolume' }.value == 55
+    grcShim.events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
+    driver.currentGrcSeqByDni['SONOS-TEST-DNI'] == null
     driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [55]
   }
 
@@ -3041,11 +3057,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parse(raw)
 
     then:
-    driver.currentZgtByGroupId['G1'] != null
-    driver.currentZgtByGroupId['G1'].coordinatorId == 'RINCON_TEST'
-    driver.getCurrentZgtTopology().groups.size() == 1
-    parentPlayerUpdates.isEmpty()  // old zgtTopology publish path removed (pure sendEvent)
-    driver.pendingTopologyXmlByDni.isEmpty()
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.containsKey('G1') == true
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']['G1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
+    parentPlayerUpdates.isEmpty()  // hand-off is queued; parent is called on flush only
   }
 
   def "only app-elected ZGT player subscribes to ZoneGroupTopology"() {
@@ -3088,16 +3102,29 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-INTERMEDIATE', 'RINCON_OTHER', 'RINCON_OTHER', 'Other'))
 
     then:
-    driver.currentZgtByGroupId.keySet() == ['GROUP-INTERMEDIATE'] as Set
-    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.keySet() == ['GROUP-INTERMEDIATE'] as Set
     // expectedGroupTopology is no longer written on the ZGT path (pure sendEvent)
+
+    when:
+    driver.flushPendingZgtNotify()
+
+    then:
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'zgtTopology' }.last().eventsByGroupId.keySet() == ['GROUP-INTERMEDIATE'] as Set
+    parentPlayerUpdates.clear()
 
     when:
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-FINAL', 'RINCON_TEST', 'RINCON_TEST', 'Test'))
 
     then:
-    driver.currentZgtByGroupId.keySet() == ['GROUP-FINAL'] as Set
-    driver.currentZgtByGroupId['GROUP-FINAL'].coordinatorId == 'RINCON_TEST'
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.keySet() == ['GROUP-FINAL'] as Set
+
+    when:
+    driver.flushPendingZgtNotify()
+
+    then:
+    Map finalRecord = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
+    finalRecord.eventsByGroupId.keySet() == ['GROUP-FINAL'] as Set
+    finalRecord.eventsByGroupId['GROUP-FINAL'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
   }
 
   def "coordinator transfer retains the topology expectation stamped by the parent"() {
@@ -3143,8 +3170,9 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     request.params.headers.SOAPAction == 'urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState'
-    driver.currentZgtByGroupId['GROUP-TEST'].coordinatorId == 'RINCON_TEST'
-    driver.currentZgtByGroupId['GROUP-TEST'].members*.playerId == ['RINCON_TEST', 'RINCON_B']
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']['GROUP-TEST'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']['GROUP-TEST'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_B'
+    driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 
   def "group creation adds members with UPnP SetAVTransportURI"() {
@@ -3182,7 +3210,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "unrelated player's topology updates are not held"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtByGroupId.clear()
     String zs = '<ZoneGroups><ZoneGroup ID="G-UNREL" Coordinator="RINCON_UNRELATED"><ZoneGroupMember UUID="RINCON_UNRELATED" ZoneName="Unrelated"/></ZoneGroup></ZoneGroups>'
     String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
     String body = '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
@@ -3191,19 +3218,17 @@ class SonosAdvPlayerSpec extends Specification {
     driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body)
 
     then:
-    driver.currentZgtByGroupId['G-UNREL']?.coordinatorId == 'RINCON_UNRELATED'
-    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
+    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.containsKey('G-UNREL') == true
+    !driver.pendingTopologyWebsocketByDni.containsKey('SONOS-TEST-DNI')
+    !driver.pendingTopologyKindByDni.containsKey('SONOS-TEST-DNI')
   }
 
-  def "expired expected topology releases the most recent pending snapshot"() {
+  def "expired expected topology drops stale zgt hold entries without applying"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     driver.device.dataValues.expectedGroupTopology = groovy.json.JsonOutput.toJson([
       coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: (driver.now() as Long) - 1L
     ])
-    driver.pendingTopologyXmlByDni['SONOS-TEST-DNI'] = '<topology>latest</topology>'
-    driver.pendingTopologySnapshotByDni['SONOS-TEST-DNI'] = [playerFound: true,
-      coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], visibleMemberIds: ['RINCON_TEST'], memberNames: []]
     driver.pendingTopologyKindByDni['SONOS-TEST-DNI'] = 'zgt'
     Integer parseCalls = 0
     driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
@@ -3219,9 +3244,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingTopologyUpdates()
 
     then:
-    driver.runtimeState.appliedTopologyXml == '<topology>latest</topology>'
-    !driver.pendingTopologyXmlByDni.containsKey('SONOS-TEST-DNI')
-    !driver.pendingTopologySnapshotByDni.containsKey('SONOS-TEST-DNI')
+    driver.runtimeState.appliedTopologyXml == null
+    !driver.pendingTopologyKindByDni.containsKey('SONOS-TEST-DNI')
     driver.device.dataValues.expectedGroupTopology == ''
     parseCalls == 0
   }

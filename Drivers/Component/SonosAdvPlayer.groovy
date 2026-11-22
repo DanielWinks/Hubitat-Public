@@ -750,23 +750,27 @@ Boolean hasLineInCapability() {
 @Field static final Striped<java.util.concurrent.locks.Lock> websocketCommandLedgerStripes = Striped.lock(64)
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
-@Field static ConcurrentHashMap<String, String> pendingTopologyXmlByDni = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, Map> pendingTopologySnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyWebsocketByDni = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> pendingTopologyKindByDni = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, Map> currentZgtByGroupId = new ConcurrentHashMap<String, Map>()
+// App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
+// SEQ/SID gate counters remain below: numbers deciding staleness, never payloads.
 @Field static ConcurrentHashMap<String, AtomicInteger> currentZgtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
+// Transient member host cache for group SOAP targeting (playerId -> host); newest-wins, pruned like SEQ counters.
+// Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
+// has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
+@Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, Map> pendingZgtNotifyByDni = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByDni = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, Map> currentAvtSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, Map> pendingCoordinatorAvtUpdatesByDni = new ConcurrentHashMap<String, Map>()
 @Field static final Striped<java.util.concurrent.locks.Lock> coordinatorAvtUpdateStripes = Striped.lock(64)
 @Field static Set<String> coordinatorAvtUpdateScheduledDnis = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>())
-@Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByDni = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, Map> currentGrcSnapshotByCoordinator = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentGrcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, String> currentGrcSidByDni = new ConcurrentHashMap<String, String>()
+// Transient in-flight hand-off only (latest delta per key, cleared on flush) — not storage.
+// Same claim-and-swap pattern as pendingCoordinatorAvtUpdatesByDni; the app holds the canonical list.
+@Field static ConcurrentHashMap<String, Map> pendingGrcByDni = new ConcurrentHashMap<String, Map>()
+@Field static final Striped<java.util.concurrent.locks.Lock> grcUpdateStripes = Striped.lock(64)
+@Field static Set<String> grcUpdateScheduledDnis = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>())
 @Field static ConcurrentHashMap<String, Map> currentRcSnapshotByDni = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, AtomicInteger> currentRcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 @Field static ConcurrentHashMap<String, String> currentRcSidByDni = new ConcurrentHashMap<String, String>()
@@ -1970,18 +1974,15 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
-    clearedEntries += clearStaticMap(pendingTopologyXmlByDni)
-    clearedEntries += clearStaticMap(pendingTopologySnapshotByDni)
     clearedEntries += clearStaticMap(pendingTopologyWebsocketByDni)
     clearedEntries += clearStaticMap(pendingTopologyKindByDni)
+    clearedEntries += clearStaticMap(zgtMemberHostByPlayerId)
     clearedEntries += clearStaticMap(pendingZgtNotifyByDni)
-    clearedEntries += clearStaticMap(currentAvtSnapshotByDni)
-    clearedEntries += clearStaticMap(currentAvtSnapshotByCoordinator)
     clearedEntries += clearStaticMap(currentAvtSeqByDni)
     clearedEntries += clearStaticMap(pendingCoordinatorAvtUpdatesByDni)
     coordinatorAvtUpdateScheduledDnis.clear()
-    clearedEntries += clearStaticMap(currentGrcSnapshotByDni)
-    clearedEntries += clearStaticMap(currentGrcSnapshotByCoordinator)
+    clearedEntries += clearStaticMap(pendingGrcByDni)
+    grcUpdateScheduledDnis.clear()
     clearedEntries += clearStaticMap(currentGrcSeqByDni)
     clearedEntries += clearStaticMap(currentGrcSidByDni)
     clearedEntries += clearStaticMap(currentRcSnapshotByDni)
@@ -2023,17 +2024,15 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingTopologyXmlByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingTopologySnapshotByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyWebsocketByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingTopologyKindByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(zgtMemberHostByPlayerId, activePlayerIds)
   removedEntries += pruneStaticMapKeys(pendingZgtNotifyByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentAvtSnapshotByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentAvtSnapshotByCoordinator, activePlayerIds)
   removedEntries += pruneStaticMapKeys(currentAvtSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingCoordinatorAvtUpdatesByDni, activePlayerDnis)
   coordinatorAvtUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
-  removedEntries += pruneStaticMapKeys(currentGrcSnapshotByDni, activePlayerDnis)
+  removedEntries += pruneStaticMapKeys(pendingGrcByDni, activePlayerDnis)
+  grcUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
   removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentGrcSidByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(currentRcSnapshotByDni, activePlayerDnis)
@@ -2173,6 +2172,7 @@ void clearStaticDriverStateForCurrentDevice() {
       groupVolumeFadeState?.remove(playerId)
       lastVolumeFadeCallTime?.remove(playerId)
       lastGroupVolumeFadeCallTime?.remove(playerId)
+      zgtMemberHostByPlayerId?.remove(playerId)
     }
 
     if(dni != null && dni != '') {
@@ -2187,14 +2187,13 @@ void clearStaticDriverStateForCurrentDevice() {
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
-      currentGrcSnapshotByDni?.remove(dni)
+      pendingGrcByDni?.remove(dni)
+      grcUpdateScheduledDnis?.remove(dni)
       currentGrcSeqByDni?.remove(dni)
       currentGrcSidByDni?.remove(dni)
       currentRcSnapshotByDni?.remove(dni)
       currentRcSeqByDni?.remove(dni)
       currentRcSidByDni?.remove(dni)
-      currentAvtSnapshotByDni?.remove(dni)
-      currentAvtSnapshotByCoordinator?.remove(playerId)
       currentAvtSeqByDni?.remove(dni)
       pendingCoordinatorAvtUpdatesByDni?.remove(dni)
       coordinatorAvtUpdateScheduledDnis?.remove(dni)
@@ -4894,6 +4893,31 @@ void parse(String raw) {
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
 
+// Stale payloads are dropped before enqueue because republished stale state has no value;
+// kept driver-side so concurrent parses cannot reorder the coalescing queue.
+Boolean tryAcceptSeq(String serviceLabel, ConcurrentHashMap seqMap, String dni, Integer incomingSeq) {
+  if(seqMap == null || dni == null || incomingSeq == null) { return true }
+  AtomicInteger ref = seqMap.get(dni)
+  if(ref == null) {
+    AtomicInteger created = new AtomicInteger(incomingSeq)
+    seqMap.putIfAbsent(dni, created)
+    ref = seqMap.get(dni)
+  }
+  if(ref.get() > incomingSeq) {
+    logDebug("Ignoring stale ${serviceLabel} SEQ=${incomingSeq} <= prev=${ref.get()} for ${dni}")
+    return false
+  }
+  Integer prevVal = ref.get()
+  while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
+    prevVal = ref.get()
+    if(incomingSeq <= prevVal) {
+      logDebug("Ignoring stale ${serviceLabel} SEQ=${incomingSeq} <= prev=${prevVal} for ${dni}")
+      return false
+    }
+  }
+  return true
+}
+
 void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody) {
   deferOrProcessZoneGroupTopologyPayload(dni, xmlBody, null)
 }
@@ -4902,38 +4926,7 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
   String deviceDni = dni ?: device.getDeviceNetworkId()
   if(!deviceDni || !xmlBody) { return }
   if(!isPlausibleXmlPayload(xmlBody)) { return }
-  if(incomingSeq != null) {
-    AtomicInteger ref = currentZgtSeqByDni.get(deviceDni)
-    if(ref == null) {
-      AtomicInteger created = new AtomicInteger(incomingSeq)
-      currentZgtSeqByDni.putIfAbsent(deviceDni, created)
-      ref = currentZgtSeqByDni.get(deviceDni)
-      if(ref.get() > incomingSeq) {
-        // another thread stored a newer value while we raced to insert
-        // re-evaluate below
-      } else if(ref.get() == incomingSeq) {
-        // we are the first for this SEQ
-        ref.set(incomingSeq)
-      }
-    }
-    if(ref.get() > incomingSeq) {
-      logDebug("Ignoring stale ZGT SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
-      return
-    }
-    if(ref.get() == incomingSeq) {
-      // already stored (early-insert) — ok, continue to parse
-    } else {
-      // No early insert succeeded — try to CAS to incoming
-      Integer prevVal = ref.get()
-      while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
-        prevVal = ref.get()
-        if(incomingSeq <= prevVal) {
-          logDebug("Ignoring stale ZGT SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}")
-          return
-        }
-      }
-    }
-  }
+  if(!tryAcceptSeq('ZGT', currentZgtSeqByDni, deviceDni, incomingSeq)) { return }
   Map newSnapshot = parseZgtFullSnapshot(xmlBody)
   if(newSnapshot == null) { return }
   if(incomingSeq != null) {
@@ -4942,50 +4935,84 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
       logDebug("Ignoring ZGT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
       return
     }
-    List<Map> groups = (List<Map>)newSnapshot.groups
-    currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
     if(ref2 != null) { ref2.set(incomingSeq) } else { currentZgtSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
-    queueZgtTopologyNotification(deviceDni, groups)
-    return
   }
   List<Map> groups = (List<Map>)newSnapshot.groups
-  currentZgtByGroupId = new ConcurrentHashMap<String, Map>(groups.collectEntries { Map g -> [g.groupId.toString(), new LinkedHashMap(g)] })
-  queueZgtTopologyNotification(deviceDni, groups)
+  cacheZgtMemberHosts(groups)
+  Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
+  if(eventsByGroupId.isEmpty()) { return }
+  queueZgtTopologyNotification(deviceDni, eventsByGroupId)
 }
 
-Map buildMinimalZgtTopologyForParent(List<Map> groups) {
-  List<Map> minimalGroups = []
-  if(groups instanceof List) {
-    groups.each { Map g ->
-      List<String> visibleIds = []
-      List<String> allIds = []
-      if(g?.members instanceof List) {
-        ((List<?>)g.members).each { Object mem ->
-          Map mm = (Map)mem
-          String pid = mm?.playerId?.toString()
-          if(pid) {
-            allIds << pid
-            Boolean isInvisible = (mm?.invisible == true || mm?.invisible?.toString() == '1')
-            if(!isInvisible) { visibleIds << pid }
-          }
+// Refresh the transient host cache (see field comment); parse is otherwise store-free.
+void cacheZgtMemberHosts(List<Map> groups) {
+  if(!(groups instanceof List)) { return }
+  groups.each { Map g ->
+    if(g?.members instanceof List) {
+      ((List<?>)g.members).each { Object mem ->
+        Map mm = (Map)mem
+        String pid = mm?.playerId?.toString()
+        String location = mm?.location?.toString()
+        if(pid && location) {
+          Integer schemeEnd = location.indexOf('://')
+          Integer hostStart = schemeEnd >= 0 ? schemeEnd + 3 : 0
+          Integer hostEnd = location.indexOf('/', hostStart)
+          String host = hostEnd >= 0 ? location.substring(hostStart, hostEnd) : location.substring(hostStart)
+          if(host) { zgtMemberHostByPlayerId.put(pid, host) }
         }
       }
-      if(visibleIds.isEmpty() && allIds.isEmpty() && g?.playerIds instanceof List) {
-        List<String> normalized = ((List<?>)g.playerIds).collect { Object id -> id?.toString() }.findAll { String id -> id }
-        visibleIds = normalized
-        allIds = normalized
-      }
-      List<String> finalIds = visibleIds.isEmpty() ? allIds : visibleIds
-      minimalGroups << [groupId: g?.groupId?.toString(), coordinatorId: g?.coordinatorId?.toString(), playerIds: new ArrayList<String>(finalIds)]
     }
   }
-  return [groups: minimalGroups, observedAt: Instant.now().toEpochMilli()]
 }
 
-void queueZgtTopologyNotification(String deviceDni, List<Map> groups) {
-  if(!deviceDni || groups == null) { return }
-  Map minimal = buildMinimalZgtTopologyForParent(groups)
-  pendingZgtNotifyByDni.put(deviceDni, minimal)
+// Stored already shaped for sendEvent so replay is events.each { device.sendEvent(it) } with no reshaping.
+Map<String, List<Map>> projectZgtEventsByGroupId(List<Map> groups) {
+  Map<String, List<Map>> eventsByGroupId = [:]
+  if(!(groups instanceof List)) { return eventsByGroupId }
+  groups.each { Map g ->
+    String groupId = g?.groupId?.toString()
+    if(!groupId) { return }
+    List<String> visibleIds = []
+    List<String> visibleNames = []
+    if(g?.members instanceof List) {
+      ((List<?>)g.members).each { Object mem ->
+        Map mm = (Map)mem
+        String pid = mm?.playerId?.toString()
+        Boolean isInvisible = (mm?.invisible == true || mm?.invisible?.toString() == '1')
+        if(pid && !isInvisible) {
+          visibleIds << pid
+          String zoneName = mm?.zoneName?.toString()
+          if(zoneName) { visibleNames << zoneName }
+        }
+      }
+    }
+    if(visibleIds.isEmpty() && g?.playerIds instanceof List) {
+      visibleIds = ((List<?>)g.playerIds).collect { Object id -> id?.toString() }.findAll { String id -> id }
+    }
+    String coordinatorId = g?.coordinatorId?.toString()
+    String coordinatorName = g?.coordinatorName?.toString()
+    String groupName = g?.groupName?.toString() ?: coordinatorName
+    List<Map> events = []
+    if(!visibleIds.isEmpty()) {
+      events << [name: 'groupPlayerIds', value: visibleIds.join(',')]
+    }
+    if(coordinatorId) { events << [name: 'groupCoordinatorId', value: coordinatorId] }
+    Integer memberCount = visibleIds.size()
+    events << [name: 'isGrouped', value: (memberCount > 1 ? 'on' : 'off')]
+    events << [name: 'groupMemberCount', value: memberCount]
+    if(groupName) { events << [name: 'groupName', value: groupName] }
+    if(coordinatorName) { events << [name: 'groupCoordinatorName', value: coordinatorName] }
+    if(!visibleNames.isEmpty()) { events << [name: 'groupMemberNames', value: visibleNames.toString()] }
+    if(!events.isEmpty()) { eventsByGroupId[groupId] = events }
+  }
+  return eventsByGroupId
+}
+
+// Transient in-flight hand-off only, not storage: the pending entry lives until the flush claims it.
+// Deferred so parse() returns before the app gate runs; latest put coalesces floods to one setter call.
+void queueZgtTopologyNotification(String deviceDni, Map<String, List<Map>> eventsByGroupId) {
+  if(!deviceDni || eventsByGroupId == null || eventsByGroupId.isEmpty()) { return }
+  pendingZgtNotifyByDni.put(deviceDni, new LinkedHashMap<String, List<Map>>(eventsByGroupId))
   try {
     runInMillis(1, 'flushPendingZgtNotify', [overwrite: false])
   } catch(Exception e) {
@@ -4994,6 +5021,7 @@ void queueZgtTopologyNotification(String deviceDni, List<Map> groups) {
   }
 }
 
+// One contract: the flush calls the pure parent setter directly (no fallback chain).
 void flushPendingZgtNotify() {
   if(pendingZgtNotifyByDni.isEmpty()) { return }
   Map<String, Map> drained = [:]
@@ -5002,32 +5030,17 @@ void flushPendingZgtNotify() {
     pendingZgtNotifyByDni.clear()
   }
   drained.each { String dni, Map topo ->
-    if(topo == null || !(topo.groups instanceof List)) { return }
+    if(!(topo instanceof Map) || topo.isEmpty()) { return }
     try {
       if(parent != null) {
-        try {
-          parent.onZgtTopologyAvailable(dni, topo)
-        } catch(MissingMethodException e) {
-          try {
-            parent.acceptHouseholdTopology(dni, topo)
-          } catch(MissingMethodException ignored) {
-            logDebug("No parent ZGT handler found for ${dni}; storing minimal topology in memory only")
-          }
-        }
+        parent.putZgtTopology(dni, topo)
       } else {
-        logDebug("Standalone ZGT topology (no parent) dni=${dni} groups=${topo.groups?.size() ?: 0}")
+        logDebug("Standalone ZGT topology (no parent) dni=${dni} groups=${topo.size()}")
       }
     } catch(Exception e) {
       logWarn("parent ZGT notification failed for ${dni}: ${e.message}")
       try { logDebug("ZGT notify failure detail: ${e}") } catch(Exception ignored) { }
     }
-  }
-}
-
-void applyZoneGroupTopologyPayload(String dni, String xmlBody, Map topology) {
-  LinkedHashSet<String> previousMembers = new LinkedHashSet<String>(getGroupPlayerIds())
-  if(processZoneGroupTopologySnapshot(topology, previousMembers)) {
-    setLastInboundZgtEvent()
   }
 }
 
@@ -5075,22 +5088,10 @@ void flushPendingTopologyUpdates() {
   }
   setDeviceDataValue('expectedGroupTopology', '')
   String pendingKind = pendingTopologyKindByDni.remove(dni)
-  String pendingXml = pendingTopologyXmlByDni.remove(dni)
-  Map pendingTopology = pendingTopologySnapshotByDni.remove(dni)
   String pendingWs = pendingTopologyWebsocketByDni.remove(dni)
   if(pendingKind == 'ws' && pendingWs) {
     processWebsocketMessage(pendingWs)
     logDebug('Published the latest groups websocket topology snapshot after its hold window elapsed')
-  } else if(pendingKind == 'zgt' && pendingXml) {
-    if(pendingTopology != null) {
-      applyZoneGroupTopologyPayload(dni, pendingXml, pendingTopology)
-    } else {
-      applyZoneGroupTopologyPayload(dni, pendingXml,
-          parseZoneGroupTopologySnapshot(pendingXml, getId()))
-    }
-    logDebug('Published the latest ZoneGroupTopology snapshot after its hold window elapsed')
-  } else {
-    return
   }
 }
 
@@ -5132,8 +5133,6 @@ Boolean evaluateExpectedTopology(Map topology, Boolean holdOnMismatch) {
 void clearPendingTopologyForDevice() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
-  pendingTopologyXmlByDni.remove(dni)
-  pendingTopologySnapshotByDni.remove(dni)
   pendingTopologyWebsocketByDni.remove(dni)
   pendingTopologyKindByDni.remove(dni)
 }
@@ -5228,9 +5227,7 @@ Map parseZgtFullSnapshot(String xmlString) {
   }
 }
 
-Map getCurrentZgtTopology() {
-  return [ groups: new ArrayList(currentZgtByGroupId.values()), observedAt: Instant.now().toEpochMilli() ]
-}
+// App owns the ZGT store; reads go through the parent getters, not a driver copy.
 
 Map<String, Object> parseAvtMetaData(String rawDidl) {
   if(!rawDidl) { return [:] }
@@ -5343,25 +5340,9 @@ String unescapeIfNeeded(String s) {
   return s
 }
 
-Map getCurrentAvtSnapshot() {
-  String dni = device.getDeviceNetworkId()?.toString()
-  return [ snapshot: currentAvtSnapshotByDni[dni], seq: currentAvtSeqByDni[dni]?.get() ]
-}
-
-Map getCurrentAvt() { return getCurrentAvtSnapshot() }
-
+// App owns the AVT store; reads go through the parent getters, not a driver copy.
 void onAvtUpdated() {
-  String myRincon = getId()
-  Map zgt = getCurrentZgtTopology()
-  List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
-  Map myGroup = groups.find { Map g -> (g.coordinatorId?.toString() == myRincon) || ((List<?>)g.members).any { Map m -> m.playerId?.toString() == myRincon } }
-  if(!myGroup) { return }
-  String coordId = myGroup.coordinatorId?.toString()
-  Boolean isFollower = coordId != myRincon
-  if(!isFollower) { return }
-  Map snap = currentAvtSnapshotByCoordinator[coordId]
-  if(!snap) { return }
-  applyAvtSnapshotIfDifferent(snap)
+  // Follower refresh now replays from the app store in the later fanout commit.
 }
 
 void deferOrProcessAvTransportPayload(String dni, String xmlBody) {
@@ -5376,133 +5357,132 @@ void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
   if(!deviceDni || !xmlBody) { return }
   if(!isPlausibleXmlPayload(xmlBody)) { return }
-  if(incomingSeq != null) {
-    AtomicInteger ref = currentAvtSeqByDni.get(deviceDni)
-    if(ref == null) {
-      AtomicInteger created = new AtomicInteger(incomingSeq)
-      currentAvtSeqByDni.putIfAbsent(deviceDni, created)
-      ref = currentAvtSeqByDni.get(deviceDni)
-    }
-    if(ref.get() > incomingSeq) {
-      logDebug("Ignoring stale AVT SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
-      return
-    }
-    Integer prevVal = ref.get()
-    while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
-      prevVal = ref.get()
-      if(incomingSeq <= prevVal) { logDebug("Ignoring stale AVT SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}"); return }
-    }
-  }
+  if(!tryAcceptSeq('AVT', currentAvtSeqByDni, deviceDni, incomingSeq)) { return }
   Map newSnapshot = parseAvtFullSnapshot(xmlBody)
   if(newSnapshot == null) { return }
-  String myRincon = getId()
-  String coordinatorRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni) ?: myRincon
-  Map previousSnapshot = currentAvtSnapshotByDni[deviceDni] instanceof Map
-      ? (Map)currentAvtSnapshotByDni[deviceDni] : [:]
-  Map mergedSnapshot = mergeAvtSnapshot(previousSnapshot, newSnapshot)
   if(incomingSeq != null) {
     AtomicInteger ref2 = currentAvtSeqByDni.get(deviceDni)
     if(ref2 != null && incomingSeq < ref2.get()) {
       logDebug("Ignoring AVT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
       return
     }
-    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(mergedSnapshot)
-    if(ref2 != null) { ref2.set(incomingSeq) } else { currentAvtSeqByDni[deviceDni] = new AtomicInteger(incomingSeq) }
-  } else {
-    currentAvtSnapshotByDni[deviceDni] = new LinkedHashMap(mergedSnapshot)
+    if(ref2 != null) { ref2.set(incomingSeq) } else { currentAvtSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
   }
-  if(myRincon && coordinatorRincon == myRincon) {
-    currentAvtSnapshotByCoordinator[coordinatorRincon] = new LinkedHashMap(mergedSnapshot)
-    applyAvtSnapshotIfDifferent(mergedSnapshot)
-    List<String> followers = resolveFollowersRinconsForAvt(coordinatorRincon)
-    Map<String, Object> attributes = buildAvtPlaybackStateAttributes(mergedSnapshot, newSnapshot, previousSnapshot)
-    if(!attributes.isEmpty()) {
-      queueCoordinatorAvtParentUpdate(deviceDni, [rincon: coordinatorRincon, followers: followers,
-        attributes: attributes, observedAt: mergedSnapshot.observedAt, seq: incomingSeq])
-    }
+  String myRincon = getId()
+  String coordinatorRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni) ?: myRincon
+  if(!(myRincon && coordinatorRincon == myRincon)) { return }
+  // Capture previous before local apply replaces it, so track-change detection stays exact.
+  Map previous = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+      ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
+  applyAvtSnapshotIfDifferent(newSnapshot)
+  List<Map> events = buildAvtEvents(newSnapshot, previous)
+  if(!events.isEmpty()) {
+    queueCoordinatorAvtParentUpdate(deviceDni, [rincon: coordinatorRincon,
+      events: events, seq: incomingSeq])
   }
 }
 
-Map mergeAvtSnapshot(Map previous, Map incoming) {
-  Map merged = previous != null ? new LinkedHashMap(previous) : [:]
-  ['transportState', 'playMode', 'crossfadeMode', 'numberOfTracks', 'section',
-   'nextTrackURI', 'nextTrackMetaData', 'enqueuedTransportURI',
-   'enqueuedTransportURIMetaData', 'avTransportURI', 'avTransportURIMetaDataRaw',
-   'playbackStorageMedium', 'currentTransportActions', 'currentValidPlayModes',
-   'directControlClientID', 'directControlIsSuspended', 'directControlAccountID',
-   'transportStatus', 'sleepTimerGeneration', 'sleepTimerState', 'alarmRunning',
-   'snoozeRunning', 'restartPending', 'transportPlaySpeed', 'currentMediaDuration'].each { String key ->
-    Object value = incoming[key]
-    if(value != null && value.toString() != '') { merged[key] = value }
-  }
-  if(incoming.hasCurrentTrackURI == true) { merged.currentTrackURI = incoming.currentTrackURI }
-  if(incoming.hasCurrentTrackDuration == true) { merged.currentTrackDuration = incoming.currentTrackDuration }
-  if(incoming.hasTrack == true) { merged.track = incoming.track }
-  if(incoming.hasCurrentTrackMetaData == true) {
-    merged.currentTrackMetaDataRaw = incoming.currentTrackMetaDataRaw
-    merged.currentTrackMetaData = incoming.currentTrackMetaData
-  }
-  ['hasTransportState', 'hasPlayMode', 'hasCrossfadeMode', 'hasTrack',
-   'hasCurrentTrackURI', 'hasCurrentTrackDuration', 'hasCurrentTrackMetaData'].each { String key ->
-    merged[key] = incoming[key] == true
-  }
-  merged.observedAt = incoming.observedAt ?: now()
-  return merged
-}
-
-Map<String, Object> buildAvtPlaybackStateAttributes(Map snapshot, Map incoming, Map previous) {
-  Map<String, Object> attributes = [:]
-  String status = normalizeTransportStatus(snapshot.transportState?.toString())
+// Stored already shaped for sendEvent so replay is events.each { device.sendEvent(it) } with no reshaping.
+List<Map> buildAvtEvents(Map incoming, Map previous) {
+  List<Map> events = []
+  String status = normalizeTransportStatus(incoming.transportState?.toString())
   if(incoming.hasTransportState == true && status) {
-    attributes.status = status
-    attributes.transportStatus = status
+    events << [name: 'status', value: status]
+    events << [name: 'transportStatus', value: status]
   }
   Boolean trackUriChanged = incoming.hasCurrentTrackURI == true &&
-      snapshot.currentTrackURI?.toString() != previous.currentTrackURI?.toString()
-  Boolean trackCleared = incoming.hasCurrentTrackURI == true && !snapshot.currentTrackURI?.toString()
+      incoming.currentTrackURI?.toString() != (previous?.currentTrackURI?.toString())
+  Boolean trackCleared = incoming.hasCurrentTrackURI == true && !incoming.currentTrackURI?.toString()
   Boolean metadataPresent = incoming.hasCurrentTrackMetaData == true
   Boolean metadataEmpty = metadataPresent && !incoming.currentTrackMetaDataRaw?.toString()
-  Map metadata = snapshot.currentTrackMetaData instanceof Map ? (Map)snapshot.currentTrackMetaData : [:]
+  Map metadata = incoming.currentTrackMetaData instanceof Map ? (Map)incoming.currentTrackMetaData : [:]
   Boolean clearMetadata = trackCleared || metadataEmpty ||
       (trackUriChanged && (!metadataPresent || metadata.isEmpty()))
   if(clearMetadata) {
-    attributes.currentTrackName = 'Not Available'
-    attributes.currentArtistName = 'Not Available'
-    attributes.currentAlbumName = 'Not Available'
-    attributes.trackDescription = 'Not Available'
-    if(trackCleared) { attributes.currentTrackNumber = 0 }
-    if(incoming.hasCurrentTrackDuration == true || trackCleared || trackUriChanged) {
-      attributes.currentTrackDuration = incoming.currentTrackDuration?.toString() ?: ''
-    }
+    events << [name: 'currentTrackName', value: 'Not Available']
+    events << [name: 'currentArtistName', value: 'Not Available']
+    events << [name: 'currentAlbumName', value: 'Not Available']
+    events << [name: 'trackDescription', value: 'Not Available']
   } else if(metadataPresent && !metadata.isEmpty()) {
     String title = metadata.title?.toString() ?: 'Not Available'
     String artist = metadata.creator?.toString() ?: 'Not Available'
-    attributes.currentTrackName = title
-    attributes.currentArtistName = artist
-    attributes.currentAlbumName = metadata.album?.toString() ?: 'Not Available'
-    attributes.trackDescription = metadata.title && metadata.creator
-        ? "${metadata.title} by ${metadata.creator}" : (metadata.streamContent?.toString() ?: title)
-  }
-  if(incoming.hasCurrentTrackDuration == true) {
-    attributes.currentTrackDuration = incoming.currentTrackDuration?.toString() ?: ''
+    events << [name: 'currentTrackName', value: title]
+    events << [name: 'currentArtistName', value: artist]
+    events << [name: 'currentAlbumName', value: metadata.album?.toString() ?: 'Not Available']
+    events << [name: 'trackDescription', value: metadata.title && metadata.creator
+        ? "${metadata.title} by ${metadata.creator}" : (metadata.streamContent?.toString() ?: title)]
   }
   if(incoming.hasTrack == true) {
     String track = incoming.track?.toString()
-    if(track?.isInteger()) { attributes.currentTrackNumber = Integer.parseInt(track) }
-    else { attributes.currentTrackNumber = 0 }
+    if(track?.isInteger()) { events << [name: 'currentTrackNumber', value: Integer.parseInt(track)] }
+    else { events << [name: 'currentTrackNumber', value: 0] }
+  } else if(trackCleared) {
+    events << [name: 'currentTrackNumber', value: 0]
   }
-  return attributes
+  if(incoming.hasCurrentTrackDuration == true || (clearMetadata && (trackCleared || trackUriChanged))) {
+    events << [name: 'currentTrackDuration', value: incoming.currentTrackDuration?.toString() ?: '']
+  }
+  // Play-mode reaches the store as its three device attributes, matching setPlayMode.
+  if(incoming.hasPlayMode == true && incoming.playMode) {
+    String repeatOne = null
+    String repeatAll = null
+    String shuffle = null
+    switch(incoming.playMode?.toString()) {
+      case 'NORMAL': repeatOne = 'off'; repeatAll = 'off'; shuffle = 'off'; break
+      case 'REPEAT_ALL': repeatOne = 'off'; repeatAll = 'on'; shuffle = 'off'; break
+      case 'REPEAT_ONE': repeatOne = 'on'; repeatAll = 'off'; shuffle = 'off'; break
+      case 'SHUFFLE_NOREPEAT': repeatOne = 'off'; repeatAll = 'off'; shuffle = 'on'; break
+      case 'SHUFFLE': repeatOne = 'off'; repeatAll = 'on'; shuffle = 'on'; break
+      case 'SHUFFLE_REPEAT_ONE': repeatOne = 'on'; repeatAll = 'off'; shuffle = 'on'; break
+    }
+    if(repeatOne != null) {
+      events << [name: 'currentRepeatOneMode', value: repeatOne]
+      events << [name: 'currentRepeatAllMode', value: repeatAll]
+      events << [name: 'currentShuffleMode', value: shuffle]
+    }
+  }
+  if(incoming.hasCrossfadeMode == true && incoming.crossfadeMode?.toString()?.trim()) {
+    events << [name: 'currentCrossfadeMode', value: (incoming.crossfadeMode.toString().trim() == '1' ? 'on' : 'off')]
+  }
+  if(!clearMetadata && metadataPresent && !metadata.isEmpty() && metadata.albumArtURI?.toString()) {
+    events << [name: 'albumArtURI', value: metadata.albumArtURI.toString()]
+  }
+  return events
 }
 
 Object getCoordinatorAvtUpdateLock(String dni) {
   return coordinatorAvtUpdateStripes.get(dni)
 }
 
+// Transient in-flight hand-off only, not storage: deltas merge by name until the flush claims them.
+// Deferred so parse() returns before the app gate runs; SEQ prevents an older delta reordering a newer one.
 void queueCoordinatorAvtParentUpdate(String dni, Map update) {
   if(!dni || update == null || parent == null) { return }
   Object lock = getCoordinatorAvtUpdateLock(dni)
   synchronized(lock) {
-    pendingCoordinatorAvtUpdatesByDni.put(dni, new LinkedHashMap(update))
+    Map pending = pendingCoordinatorAvtUpdatesByDni.get(dni)
+    Integer incomingSeq = update.seq as Integer
+    Integer pendingSeq = pending?.seq as Integer
+    if(pending != null && incomingSeq != null && pendingSeq != null && incomingSeq < pendingSeq) { return }
+    Map<String, Object> merged = [:]
+    if(pending != null) { merged.putAll(pending) }
+    merged.putAll(update)
+    List<Map> mergedEvents = []
+    // A coordinator change starts a fresh list so one group's playback never merges into another's.
+    if(pending?.events instanceof List && pending?.rincon?.toString() == update.rincon?.toString()) {
+      mergedEvents.addAll((List<Map>)pending.events)
+    }
+    if(update.events instanceof List) {
+      ((List<Map>)update.events).each { Map incomingEvent ->
+        String incomingName = incomingEvent?.name?.toString()
+        if(incomingName) {
+          mergedEvents.removeAll { Map existing -> existing?.name?.toString() == incomingName }
+        }
+        mergedEvents << new LinkedHashMap(incomingEvent)
+      }
+    }
+    merged.events = mergedEvents
+    pendingCoordinatorAvtUpdatesByDni.put(dni, merged)
     if(coordinatorAvtUpdateScheduledDnis.add(dni)) {
       try { runInMillis(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true]) }
       catch(Exception e) {
@@ -5513,6 +5493,7 @@ void queueCoordinatorAvtParentUpdate(String dni, Map update) {
   }
 }
 
+// One contract: the flush calls the pure parent setter directly (no fallback chain).
 void flushCoordinatorAvtParentUpdate() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
@@ -5523,13 +5504,18 @@ void flushCoordinatorAvtParentUpdate() {
     coordinatorAvtUpdateScheduledDnis.remove(dni)
   }
   if(update == null) { return }
+  String rincon = update.rincon?.toString()
+  List<Map> events = update.events instanceof List ? (List<Map>)update.events : []
+  if(!rincon || events.isEmpty()) { return }
   try {
-    parent.onAvtReceived(update)
+    parent.putAvtEvents(rincon, events)
   } catch(Exception e) {
     logWarn("Deferred parent AVT update failed for ${dni}: ${e.message}")
     synchronized(lock) {
       Map newer = pendingCoordinatorAvtUpdatesByDni.get(dni)
-      if(newer == null || ((update.observedAt ?: 0L) as Long) > ((newer.observedAt ?: 0L) as Long)) {
+      Integer updateSeq = update.seq as Integer
+      Integer newerSeq = newer?.seq as Integer
+      if(newer == null || updateSeq == null || newerSeq == null || updateSeq > newerSeq) {
         pendingCoordinatorAvtUpdatesByDni.put(dni, update)
       }
       if(coordinatorAvtUpdateScheduledDnis.add(dni)) {
@@ -5539,56 +5525,22 @@ void flushCoordinatorAvtParentUpdate() {
   }
 }
 
+// Coordinator key comes from device data, not a stored topology; the app re-keys if it moved.
 String resolveCurrentCoordinatorRinconForAvt(String dni) {
   String myRincon = getId()
-  try {
-    Map zgt = getCurrentZgtTopology()
-    List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
-    Map g = groups.find { Map gg ->
-      (gg.coordinatorId?.toString() == myRincon) || ((List<?>)gg.members).any { Map m -> m.playerId?.toString() == myRincon }
-    }
-    if(g != null) { return g.coordinatorId?.toString() ?: myRincon }
-  } catch(Exception ignored) {}
   String cur = device.getDataValue('groupCoordinatorId')?.toString()
   return cur ?: myRincon
 }
 
-List<String> resolveFollowersRinconsForAvt(String coordinatorRincon) {
-  try {
-    Map zgt = getCurrentZgtTopology()
-    List<Map> groups = zgt?.groups instanceof List ? (List<Map>)zgt.groups : []
-    Map g = groups.find { Map gg -> gg.coordinatorId?.toString() == coordinatorRincon }
-    if(g != null) {
-      return ((List<?>)g.members).collect { Map m -> m.playerId?.toString() }.findAll { String id -> id && id != coordinatorRincon }
-    }
-    // fallback: group device data followers for coordinator device
-    String dni = device.getDeviceNetworkId()
-    return []
-  } catch(Exception e) { return [] }
-}
-
 Boolean applyAvtSnapshotIfDifferent(Map snap) {
-  logDebug("applyAvtSnapshotIfDifferent called: snapshot=${snap ? snap.transportState : 'null'} currentAvtMapSize=${currentAvtSnapshotByDni?.size()}")
+  logDebug("applyAvtSnapshotIfDifferent called: snapshot=${snap ? snap.transportState : 'null'}")
   if(snap == null) { return false }
   observeUpnpPlaybackSource(snap)
-  Map prior = null
-  try {
-    String json = device.getDataValue('avtTransportJson')?.toString()
-    if(json) { prior = (Map)new JsonSlurper().parseText(json) }
-  } catch(Exception ignored) { prior = null }
-  // Shallow diff on key transport fields
-  if(prior != null && prior.transportState?.toString() == snap.transportState?.toString() &&
-     prior.currentTrackURI?.toString() == snap.currentTrackURI?.toString() &&
-     prior.currentTrackMetaData?.toString() == snap.currentTrackMetaData?.toString() &&
-     prior.observedAt?.toString() == snap.observedAt?.toString()) {
-    return false
-  }
+  // Diffs are against device.currentValue below (set* dedupes); the app holds the snapshot.
   // Discard transient TRANSITIONING like legacy process (preserve last valid)
   if(snap.transportState?.toString()?.trim()?.equalsIgnoreCase('TRANSITIONING')) {
-    try { device.updateDataValue('avtTransportJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
     return false
   }
-  try { device.updateDataValue('avtTransportJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
   // Apply minimal presentation fields from snapshot (status/track)
   // Sleep timer (still presentation — parse is pure, apply may fan to child)
   try {
@@ -5779,12 +5731,7 @@ Map parseGrcFullSnapshot(String xmlString) {
   }
 }
 
-Map getCurrentGrcSnapshot() {
-  String dni = device.getDeviceNetworkId()?.toString()
-  return [snapshot: currentGrcSnapshotByDni[dni], seq: currentGrcSeqByDni[dni]?.get(), sid: currentGrcSidByDni[dni]]
-}
-
-Map getCurrentGrc() { return getCurrentGrcSnapshot() }
+// App owns the GRC store; reads go through the parent getters, not a driver copy.
 
 void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody) {
   deferOrProcessGroupRenderingControlPayload(dni, xmlBody, null, null)
@@ -5808,25 +5755,15 @@ void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incom
   Boolean sidChanged = sidKey != null && storedSid != null && storedSid != sidKey
   Boolean isReset = (incomingSeq != null && incomingSeq == 0) || sidChanged
   if(incomingSeq != null) {
-    AtomicInteger ref = currentGrcSeqByDni.get(deviceDni)
-    if(ref == null) {
-      AtomicInteger created = new AtomicInteger(incomingSeq)
-      currentGrcSeqByDni.putIfAbsent(deviceDni, created)
-      ref = currentGrcSeqByDni.get(deviceDni)
-    }
     if(isReset) {
+      AtomicInteger ref = currentGrcSeqByDni.get(deviceDni)
+      if(ref == null) {
+        AtomicInteger created = new AtomicInteger(incomingSeq)
+        currentGrcSeqByDni.putIfAbsent(deviceDni, created)
+        ref = currentGrcSeqByDni.get(deviceDni)
+      }
       ref.set(incomingSeq)
-    } else {
-      if(ref.get() > incomingSeq) {
-        logDebug("Ignoring stale GRC SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
-        return
-      }
-      Integer prevVal = ref.get()
-      while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
-        prevVal = ref.get()
-        if(incomingSeq <= prevVal) { logDebug("Ignoring stale GRC SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}"); return }
-      }
-    }
+    } else if(!tryAcceptSeq('GRC', currentGrcSeqByDni, deviceDni, incomingSeq)) { return }
   }
   Map newSnapshot = parseGrcFullSnapshot(xmlBody)
   if(newSnapshot == null) { return }
@@ -5837,39 +5774,28 @@ void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incom
       return
     }
   }
-  Map prior = currentGrcSnapshotByDni.get(deviceDni)
-  Map merged = new LinkedHashMap()
-  if(prior != null) { merged.putAll(prior) }
-  newSnapshot.each { Object key, Object value -> if(value != null) { merged[key] = value } }
-  currentGrcSnapshotByDni[deviceDni] = new LinkedHashMap(merged)
-  String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
-  if(coordRincon) { currentGrcSnapshotByCoordinator[coordRincon] = new LinkedHashMap(merged) }
   if(incomingSeq != null) {
     AtomicInteger ref2 = currentGrcSeqByDni.get(deviceDni)
     if(ref2 != null) { ref2.set(incomingSeq) } else { currentGrcSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
   }
   if(sidKey != null) { currentGrcSidByDni[deviceDni] = sidKey }
-  applyGrcSnapshotIfDifferent(merged)
-  // GRC snapshot is canonical in currentGrcSnapshotByDni + device data (grcSnapshotJson); no Current State publication
+  String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
+  applyGrcSnapshotIfDifferent(newSnapshot)
+  List<Map> events = buildGrcEvents(newSnapshot)
+  if(coordRincon && !events.isEmpty()) {
+    queueGrcParentUpdate(deviceDni, [rincon: coordRincon, events: events, seq: incomingSeq, reset: isReset])
+  }
 }
 
 Boolean applyGrcSnapshotIfDifferent(Map snap) {
   if(snap == null) { return false }
-  Map prior = null
-  try {
-    String json = device.getDataValue('grcSnapshotJson')?.toString()
-    if(json) { prior = (Map)new JsonSlurper().parseText(json) }
-  } catch(Exception ignored) { prior = null }
   Integer newVolume = snap.groupVolume as Integer
-  Integer priorVolume = prior?.groupVolume != null ? (prior.groupVolume as Integer) : null
+  Integer priorVolume = getGroupVolumeState()
   String newMute = snap.groupMute?.toString()
-  String priorMute = prior?.groupMute?.toString()
-  Boolean changeableChanged = snap.groupVolumeChangeable != null &&
-      (snap.groupVolumeChangeable as Boolean) != (prior?.groupVolumeChangeable != null ? (prior.groupVolumeChangeable as Boolean) : null)
+  String priorMute = getGroupMuteState()
   Boolean volumeChanged = newVolume != null && newVolume != priorVolume
   Boolean muteChanged = newMute != null && newMute != priorMute
-  try { device.updateDataValue('grcSnapshotJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
-  if(!volumeChanged && !muteChanged && !changeableChanged) { return false }
+  if(!volumeChanged && !muteChanged) { return false }
   if(volumeChanged) {
     setGroupVolumeState(newVolume)
     queueGroupDeviceUpdate([_groupVolume: newVolume])
@@ -5879,6 +5805,89 @@ Boolean applyGrcSnapshotIfDifferent(Map snap) {
     queueGroupDeviceUpdate([_groupMute: newMute])
   }
   return true
+}
+
+// Stored already shaped for sendEvent so replay is events.each { device.sendEvent(it) } with no reshaping.
+List<Map> buildGrcEvents(Map snap) {
+  List<Map> events = []
+  if(snap?.groupVolume != null) { events << [name: 'groupVolume', value: snap.groupVolume as Integer] }
+  if(snap?.groupMute != null) { events << [name: 'groupMute', value: snap.groupMute?.toString()] }
+  return events
+}
+
+Object getGrcUpdateLock(String dni) {
+  return grcUpdateStripes.get(dni)
+}
+
+// Transient in-flight hand-off only, not storage: deltas merge by name until the flush claims them.
+// Deferred so parse() returns before the app gate runs; SEQ prevents an older delta reordering a newer one.
+void queueGrcParentUpdate(String dni, Map update) {
+  if(!dni || update == null || parent == null) { return }
+  Object lock = getGrcUpdateLock(dni)
+  synchronized(lock) {
+    Map pending = pendingGrcByDni.get(dni)
+    Integer incomingSeq = update.seq as Integer
+    Integer pendingSeq = pending?.seq as Integer
+    // A SEQ-0/SID reset starts a new epoch; never drop it behind the old epoch's SEQ.
+    if(pending != null && incomingSeq != null && pendingSeq != null && incomingSeq < pendingSeq && update.reset != true) { return }
+    Map<String, Object> merged = [:]
+    if(pending != null) { merged.putAll(pending) }
+    merged.putAll(update)
+    List<Map> mergedEvents = []
+    if(pending?.events instanceof List && pending?.rincon?.toString() == update.rincon?.toString()) {
+      mergedEvents.addAll((List<Map>)pending.events)
+    }
+    if(update.events instanceof List) {
+      ((List<Map>)update.events).each { Map incomingEvent ->
+        String incomingName = incomingEvent?.name?.toString()
+        if(incomingName) {
+          mergedEvents.removeAll { Map existing -> existing?.name?.toString() == incomingName }
+        }
+        mergedEvents << new LinkedHashMap(incomingEvent)
+      }
+    }
+    merged.events = mergedEvents
+    pendingGrcByDni.put(dni, merged)
+    if(grcUpdateScheduledDnis.add(dni)) {
+      try { runInMillis(1, 'flushPendingGrc', [overwrite: true]) }
+      catch(Exception e) {
+        grcUpdateScheduledDnis.remove(dni)
+        runIn(1, 'flushPendingGrc', [overwrite: true])
+      }
+    }
+  }
+}
+
+// One contract: the flush calls the pure parent setter directly (no fallback chain).
+void flushPendingGrc() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  Object lock = getGrcUpdateLock(dni)
+  Map update
+  synchronized(lock) {
+    update = pendingGrcByDni.remove(dni)
+    grcUpdateScheduledDnis.remove(dni)
+  }
+  if(update == null) { return }
+  String rincon = update.rincon?.toString()
+  List<Map> events = update.events instanceof List ? (List<Map>)update.events : []
+  if(!rincon || events.isEmpty()) { return }
+  try {
+    parent.putGrcEvents(rincon, events)
+  } catch(Exception e) {
+    logWarn("Deferred parent GRC update failed for ${dni}: ${e.message}")
+    synchronized(lock) {
+      Map newer = pendingGrcByDni.get(dni)
+      Integer updateSeq = update.seq as Integer
+      Integer newerSeq = newer?.seq as Integer
+      if(newer == null || updateSeq == null || newerSeq == null || updateSeq > newerSeq) {
+        pendingGrcByDni.put(dni, update)
+      }
+      if(grcUpdateScheduledDnis.add(dni)) {
+        runIn(1, 'flushPendingGrc', [overwrite: true])
+      }
+    }
+  }
 }
 
 @CompileStatic
@@ -6352,183 +6361,8 @@ String renderHeaderValues(Map headers) {
 
 @CompileStatic
 void processAVTransportMessages(String xmlString, String localUpnpUrl) {
+  // Thin shim over handleAvtFull (kept for existing callers/tests).
   handleAvtFull(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString, null)
-  return
-  // LEGACY: below kept for reference — unreachable after return due to new pure path
-  if(xmlString.contains('&lt;CurrentTrackURI val=&quot;x-rincon:')) { return } //Bail out if this AVTransport message is just "I'm now playing a stream from a coordinator..."
-
-  XmlSlurper xmlParser = new XmlSlurper()
-  GPathResult propertyset = xmlParser.parseText(xmlString)
-  String lastChange = ((GPathResult)propertyset['property']['LastChange']).text().toString()
-  if(!lastChange) {return}
-  GPathResult event = xmlParser.parseText(lastChange)
-  GPathResult instanceId = (GPathResult)event['InstanceID']
-  String transportState = instanceId['TransportState']['@val']?.toString()
-  String status = normalizeTransportStatus(transportState)
-  if(transportState?.trim()?.equalsIgnoreCase('TRANSITIONING')) {
-    logDebug("Ignoring transient Sonos TransportState=TRANSITIONING from AVTransport event at ${localUpnpUrl}")
-    return
-  }
-
-  String sleepTimerGeneration = instanceId['SleepTimerGeneration']['@val']?.toString()
-  String sleepTimerState = instanceId['SleepTimerState']['@val']?.toString()
-  ChildDeviceWrapper sleepTimerChild = getSleepTimerChild()
-  if(sleepTimerChild) {
-    Map<String, Object> sleepTimerAttributes = [:]
-    if(sleepTimerState) {
-      String normalizedSleepTimerState = sleepTimerState.toUpperCase()
-      Boolean sleepTimerActive = normalizedSleepTimerState in ['ACTIVE', 'RUNNING', 'SLEEP_TIMER_RUNNING']
-      sleepTimerAttributes.sleepTimerState = sleepTimerActive ? 'active' : 'inactive'
-    }
-    if(sleepTimerGeneration) {
-      sleepTimerAttributes.generation = sleepTimerGeneration
-      getSleepTimer()
-    }
-    if(!sleepTimerAttributes.isEmpty()) {
-      applyChildStateBatch(sleepTimerChild, JsonOutput.toJson(sleepTimerAttributes))
-    }
-  }
-
-  // A grouped follower's local AVTransport state describes its own queue, not
-  // the currently playing group transport. The coordinator is authoritative
-  // until topology says this player has left the group. Its local subscription
-  // will publish a fresh standalone snapshot after it becomes coordinator.
-  if(isGroupedFollowerForPlayback()) {
-    logTrace("Ignoring follower-local AVTransport playback state while grouped: ${device.getDeviceNetworkId()}")
-    return
-  }
-
-  String trackUri = ((instanceId['CurrentTrackURI']['@val']).toString()).replace('&amp;','&').replace('&amp;','&')
-  String enqueuedUri = instanceId['EnqueuedTransportURI']['@val']
-  String enqueuedTransportURIMetaDataString = instanceId['EnqueuedTransportURIMetaData']['@val']
-  String avTransportURI = instanceId['AVTransportURI']['@val']
-  Map<String, Object> playbackSnapshot = new LinkedHashMap<String, Object>()
-  playbackSnapshot.put('currentUri', avTransportURI?.replace('&amp;', '&'))
-  playbackSnapshot.put('currentUriMetaData', instanceId['AVTransportURIMetaData']['@val']?.toString())
-  playbackSnapshot.put('trackUri', trackUri)
-  playbackSnapshot.put('trackMetaData', instanceId['CurrentTrackMetaData']['@val']?.toString())
-  playbackSnapshot.put('track', instanceId['CurrentTrack']['@val']?.toString())
-  playbackSnapshot.put('playMode', instanceId['CurrentPlayMode']['@val']?.toString())
-  playbackSnapshot.put('transportState', instanceId['TransportState']['@val']?.toString())
-  playbackSnapshot.put('observedAt', new Date().getTime())
-  Map<String, Object> positionSnapshot = runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] instanceof Map
-      ? (Map<String, Object>)runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] : [:]
-  if(positionSnapshot.get('positionMillis') != null) { playbackSnapshot.put('positionMillis', positionSnapshot.get('positionMillis')) }
-  runtimeState.lastTransportPlaybackSnapshot = playbackSnapshot
-
-  Boolean isPlayingLocalTrack = false
-  if(trackUri.startsWith('http') && trackUri == enqueuedUri && trackUri == avTransportURI) {
-    isPlayingLocalTrack = true
-    logDebug("Playing Local Track")
-  }
-
-  setStatusTransportStatus(transportState, "AVTransport event from ${localUpnpUrl}")
-
-  String currentPlayMode = instanceId['CurrentPlayMode']['@val']
-  setPlayMode(currentPlayMode)
-
-  String numberOfTracks = instanceId['NumberOfTracks']['@val']
-  String trackNumber = instanceId['CurrentTrack']['@val']
-
-  Boolean isAirPlay = trackUri.toLowerCase(Locale.ROOT).contains('airplay')
-  String currentTrackDuration = instanceId['CurrentTrackDuration']['@val']
-  setCurrentTrackDuration(currentTrackDuration)
-
-  String currentCrossfadeMode = instanceId['CurrentCrossfadeMode']['@val']
-  setCrossfadeMode(currentCrossfadeMode == '1' ? 'on' : 'off')
-
-  String currentTrackMetaDataString = (instanceId['CurrentTrackMetaData']['@val']).toString()
-  if(currentTrackMetaDataString) {
-    GPathResult currentTrackMetaData = xmlParser.parseText(unEscapeMetaData(currentTrackMetaDataString))
-    String albumArtURI = (((GPathResult)currentTrackMetaData['item']['albumArtURI']).text()).toString()
-    while(albumArtURI.contains('&amp;')) { albumArtURI = albumArtURI.replace('&amp;','&') }
-    String currentArtistName = currentTrackMetaData['item']['creator']
-    String currentAlbumName = currentTrackMetaData['item']['album']
-    String currentTrackName = currentTrackMetaData['item']['title']
-    String streamContent = currentTrackMetaData['item']['streamContent'].toString()
-
-    String trackDescription = currentTrackName && currentArtistName ? "${currentTrackName} by ${currentArtistName}" : null
-    streamContent = streamContent == 'ZPSTR_BUFFERING' ? 'Starting...' : streamContent
-    streamContent = streamContent == 'ZPSTR_CONNECTING' ? 'Connecting...' : streamContent
-    streamContent = !streamContent ? 'Not Available' : streamContent
-    if(streamContent && (!currentArtistName && !currentTrackName)) { trackDescription = streamContent }
-    else if(isPlayingLocalTrack) { trackDescription = 'Not Available' }
-
-    String trackDataAlbumArtUri
-    if(albumArtURI.startsWith('/') && !isPlayingLocalTrack) {
-      trackDataAlbumArtUri = "${localUpnpUrl}${albumArtURI}"
-    } else if (!isPlayingLocalTrack) { trackDataAlbumArtUri = "${albumArtURI}" }
-
-    String uri = instanceId['AVTransportURI']['@val']
-      // String transportUri = uri ?? Seems to be the same on the built-in driver
-    String audioSource = SOURCES["${(splitTokens(uri, ':')[0])}"]
-
-    Map trackData = [:]
-    trackData['audioSource'] = audioSource ?: trackData['audioSource']
-    trackData['station'] = null
-    trackData['name'] = currentTrackName
-    trackData['artist'] = currentArtistName
-    trackData['album'] = currentAlbumName
-    trackData['albumArtUrl'] = trackDataAlbumArtUri ?: trackData['albumArtUrl']
-    trackData['trackNumber'] = trackNumber ?: trackData['trackNumber']
-    trackData['status'] = status ?: trackData['status']
-    trackData['uri'] = uri ?: trackData['uri']
-    trackData['trackUri'] = trackUri ?: trackData['trackUri']
-    trackData['transportUri'] = uri ?: trackData['transportUri']
-    trackData['enqueuedUri'] = enqueuedUri ?: trackData['enqueuedUri']
-    if(getIncludeTrackDataMetaData()) {
-      trackData['metaData'] = enqueuedTransportURIMetaDataString
-      trackData['trackMetaData'] =  currentTrackMetaDataString ?: trackData['trackMetaData']
-    }
-    if(!getDisableTrackDataEvents()) {
-      setTrackDataEvents(trackData)
-    }
-
-
-    setCurrentArtistName(currentArtistName)
-    setCurrentAlbumName(currentAlbumName)
-    setCurrentTrackName(currentTrackName)
-    setCurrentTrackNumber(trackNumber as Integer)
-    setTrackDescription(trackDescription)
-    setAlbumArtURI(albumArtURI, isPlayingLocalTrack)
-    setAudioSource(trackUri, isPlayingLocalTrack)
-
-  } else {
-    setCurrentArtistName('Not Available')
-    setCurrentAlbumName('Not Available')
-    setCurrentTrackName('Not Available')
-    setCurrentTrackNumber(0)
-    setTrackDataEvents([:])
-  }
-
-  String nextTrackMetaData = instanceId['NextTrackMetaData']['@val']
-  if(nextTrackMetaData != null && nextTrackMetaData != '') {
-    GPathResult nextTrackMetaDataXML = xmlParser.parseText(nextTrackMetaData)
-    if(nextTrackMetaDataXML) {
-      String nextArtistName = nextTrackMetaDataXML['item']['creator']
-      if(nextArtistName != null && nextArtistName != '') { setNextArtistName(nextArtistName) }
-      else { setNextArtistName('Not Available') }
-
-      String nextAlbumName = nextTrackMetaDataXML['item']['album']
-      if(nextAlbumName != null && nextAlbumName != '') { setNextAlbumName(nextAlbumName) }
-      else { setNextAlbumName('Not Available') }
-
-      String nextTrackName = nextTrackMetaDataXML['item']['title']
-      if(nextTrackName != null && nextTrackName != '') { setNextTrackName(nextTrackName) }
-      else { setNextTrackName('Not Available') }
-
-      String nextAlbumArtURI = (((GPathResult)nextTrackMetaDataXML['item']['albumArtURI']).text()).toString()
-      while(nextAlbumArtURI.contains('&amp;')) { nextAlbumArtURI = nextAlbumArtURI.replace('&amp;','&') }
-      if(nextAlbumArtURI != null && nextAlbumArtURI != '') { setNextTrackAlbumArtURI(nextAlbumArtURI, isPlayingLocalTrack) }
-      else { setNextTrackAlbumArtURI('Not Available', isPlayingLocalTrack) }
-
-    }
-  } else {
-    setNextArtistName('Not Available')
-    setNextAlbumName('Not Available')
-    setNextTrackName('Not Available')
-    setNextTrackAlbumArtURI('Not Available', isPlayingLocalTrack)
-  }
 }
 
 @CompileStatic
@@ -11411,15 +11245,9 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
 
 void rematchLatestUpnpPlaybackSnapshot() {
   String dni = device.getDeviceNetworkId()?.toString()
+  // App owns playback storage; use only the transient runtime snapshot here.
   Map snapshot = null
-  try {
-    String snapshotJson = device.getDataValue('avtTransportJson')?.toString()
-    if(snapshotJson) { snapshot = (Map)new JsonSlurper().parseText(snapshotJson) }
-  } catch(Exception ignored) { snapshot = null }
-  if(snapshot == null && dni && currentAvtSnapshotByDni.get(dni) instanceof Map) {
-    snapshot = (Map)currentAvtSnapshotByDni.get(dni)
-  }
-  if(snapshot == null && runtimeState.lastTransportPlaybackSnapshot instanceof Map) {
+  if(runtimeState.lastTransportPlaybackSnapshot instanceof Map) {
     snapshot = (Map)runtimeState.lastTransportPlaybackSnapshot
   }
   if(snapshot != null) {
@@ -12334,20 +12162,10 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
 
 @CompileStatic
 String getTopologyMemberHost(String playerId) {
+  // Sibling hosts come from the transient cache (see field comment); self is always local.
   if(!playerId) { return null }
   if(playerId == getId()) { return getLocalUpnpHostForGroupOperation() }
-  for(Map group : currentZgtByGroupId.values()) {
-    List<Map> members = group?.members instanceof List ? (List<Map>)group.members : []
-    Map member = members.find { Map candidate -> candidate?.playerId?.toString() == playerId }
-    String location = member?.location?.toString()
-    if(location) {
-      Integer schemeEnd = location.indexOf('://')
-      Integer hostStart = schemeEnd >= 0 ? schemeEnd + 3 : 0
-      Integer hostEnd = location.indexOf('/', hostStart)
-      return hostEnd >= 0 ? location.substring(hostStart, hostEnd) : location.substring(hostStart)
-    }
-  }
-  return null
+  return zgtMemberHostByPlayerId.get(playerId)
 }
 
 @CompileStatic
@@ -13834,9 +13652,9 @@ void handleHtControlPayload(String xmlBody) {
   if(!(connected in ['0', '1'])) { return }
   state.htControlTosLinkConnected = connected
   state.htControlObservedAt = now()
-  Map currentSnapshot = currentAvtSnapshotByDni[device.getDeviceNetworkId()?.toString()] instanceof Map
-      ? (Map)currentAvtSnapshotByDni[device.getDeviceNetworkId()?.toString()]
-      : (runtimeState.lastTransportPlaybackSnapshot instanceof Map ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:])
+  // App owns playback storage; fall back to the transient runtime snapshot.
+  Map currentSnapshot = runtimeState.lastTransportPlaybackSnapshot instanceof Map
+      ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
   observeUpnpPlaybackSource(currentSnapshot)
   logDebug("UPnP HTControl TOSLinkConnected=${connected} player=${getId()}")
 }

@@ -319,9 +319,10 @@ preferences {
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String GROUP_FAVORITE_OPERATION_ATTRIBUTE = 'groupFavoriteOperation'
 @Field static final String ZGT_IN_PROGRESS_ATTRIBUTE = 'zgtInProgress'
-@Field static final String ZGT_CURRENT_TOPOLOGY_EVENT = 'zgtCurrentTopology' // Deprecated bridge event — driver now notifies via onZgtTopologyAvailable; kept for migration unsubscribe
 @Field static final String PARENT_APP_REQUEST_ATTRIBUTE = 'parentAppRequest'
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
+@Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
+@Field static final String GRC_STORE_STATE_KEY = 'grcStoreByCoordinator'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -4472,7 +4473,6 @@ void subscribeToGroupCommandRequests() {
     unsubscribe(playerDevice, 'sonosPlayerAppRequest', 'playerAppRequestHandler')
     unsubscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     unsubscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
-    unsubscribe(playerDevice, ZGT_CURRENT_TOPOLOGY_EVENT, 'zgtCurrentTopologyHandler')
     unsubscribe(playerDevice, 'groupCoordinatorId', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
@@ -4483,7 +4483,7 @@ void subscribeToGroupCommandRequests() {
     subscribe(playerDevice, 'groupPlayerIds', 'topologyAttributeHandler')
     subscribe(playerDevice, PLAYER_COMMAND_REQUEST_ATTRIBUTE, 'playerCommandRequestHandler')
     subscribe(playerDevice, GROUP_FAVORITE_OPERATION_ATTRIBUTE, 'groupFavoriteOperationEventHandler')
-    // ZGT household topology now delivered via parent.onZgtTopologyAvailable() (deferred in-memory DTO) — no Current State publication or subscription
+    // ZGT household topology now delivered via parent.putZgtTopology() (in-memory DTO) — no Current State publication or subscription
     subscribedPlayers++
   }
   getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
@@ -11052,109 +11052,154 @@ void zgtInProgressHandler(Event event) {
   logDebug("ZGT In Progress ${event?.value?.toString() ?: ''} from ${event?.device?.deviceNetworkId?.toString() ?: ''}")
 }
 
-/** Deprecated bridge handler for legacy drivers that still publish zgtCurrentTopology as a Current State. New drivers use onZgtTopologyAvailable() with a minimal in-memory DTO and never publish an attribute. */
-void zgtCurrentTopologyHandler(Event event) {
-  logDebug("Received deprecated zgtCurrentTopology event (legacy bridge); new path is onZgtTopologyAvailable")
-  ChildDeviceWrapper player = resolveTopologyEventPlayer(event)
-  String playerDni = event?.device?.getDeviceNetworkId()?.toString() ?: event?.deviceId?.toString()
-      ?: player?.getDeviceNetworkId()?.toString()
-  String raw = stripHiddenBridgeValue(event?.value?.toString())
-  if(!playerDni || !raw) { return }
-  Map rawTopology
-  try {
-    rawTopology = (Map)parseJson(raw)
-  } catch(Exception e) {
-    logWarn("Ignoring malformed ZGT current topology event: ${e.message}")
-    return
+/** Pure set+return only: no child calls, so the flush→setter call cannot deadlock the single-threaded gate. */
+Map<String, List<Map>> putZgtTopology(String sourceDni, Map<String, List<Map>> eventsByGroupId) {
+  Map zgt = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY]) : [:]
+  if(!sourceDni || zgt.candidateDni?.toString() != sourceDni) {
+    logDebug("Ignoring household topology from non-current ZGT speaker ${sourceDni ?: 'unknown'}")
+    return [:]
   }
-  List<Map> groups = []
-  if(rawTopology?.groups instanceof List) {
-    ((List)rawTopology.groups).each { Object item ->
-      Map m = (Map)item
-      List<String> visibleIds = []
-      List<String> allIds = []
-      if(m?.members instanceof List) {
-        ((List)m.members).each { Object mem ->
-          Map mm = (Map)mem
-          String pid = mm?.playerId?.toString()
-          if(pid) {
-            allIds << pid
-            if(mm?.invisible != true && mm?.invisible?.toString() != '1') { visibleIds << pid }
-          }
-        }
+  Map<String, List<Map>> stored = [:]
+  if(eventsByGroupId instanceof Map) {
+    eventsByGroupId.each { Object key, Object value ->
+      String groupId = key?.toString()
+      List<Map> events = value instanceof List ? (List<Map>)value : []
+      if(groupId && !events.isEmpty()) {
+        stored[groupId] = events.collect { Map e -> new LinkedHashMap(e) }
       }
-      if(visibleIds.isEmpty() && allIds.isEmpty() && m?.playerIds instanceof List) {
-        visibleIds = normalizeGroupPlayerIds(m.playerIds)
-        allIds = visibleIds
-      }
-      groups << [groupId: m?.groupId?.toString(), coordinatorId: m?.coordinatorId?.toString(),
-        playerIds: normalizeGroupPlayerIds(visibleIds.isEmpty() ? allIds : visibleIds)]
     }
   }
-  acceptHouseholdTopology(playerDni, [groups: groups])
+  if(stored.isEmpty()) {
+    failZgtInitializationCandidate(sourceDni, 'ZGT speaker supplied an incomplete household topology snapshot')
+    return [:]
+  }
+  state[ZGT_EVENTS_STATE_KEY] = stored
+  List<Map> groups = stored.collect { String groupId, List<Map> events ->
+    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    String playerIdsValue = events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString()
+    [groupId: groupId, coordinatorId: coordinatorId, playerIds: normalizeGroupPlayerIds(playerIdsValue)]
+  }
+  String topologyFingerprint = groups.collect { Map item ->
+    "${item.groupId}:${item.coordinatorId}:${normalizeGroupPlayerIds(item.playerIds).join(',')}"
+  }.sort().join('|')
+  Boolean sameAcceptedTopology = zgt.topologyFingerprint?.toString() == topologyFingerprint &&
+      zgt.topologyReady == true
+  Long observedAt = now()
+  state[HOUSEHOLD_TOPOLOGY_STATE_KEY] = [groups: groups, schemaVersion: 1, sourcePlayerDni: sourceDni, observedAt: observedAt]
+  zgt.topologyFingerprint = topologyFingerprint
+  zgt.lastInboundAt = observedAt
+  // Latest only: mark ready without scheduling child delivery; fanout later replays via getters.
+  zgt.topologyReady = true
+  zgt.status = zgt.initializationComplete == true ? 'ready' : 'awaiting-init-complete'
+  state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] = zgt
+  if(sameAcceptedTopology) {
+    logDebug("Ignoring unchanged household topology fingerprint=${topologyFingerprint}")
+  }
+  return stored
 }
 
-/** In-memory parent entry point for new drivers: deferred minimal ZGT DTO [groups: [groupId, coordinatorId, playerIds]] — no Current State, no large JSON. Called via driver's flushPendingZgtNotify runIn after gate release. */
-void onZgtTopologyAvailable(String dni, Map topology) {
-  if(!dni || topology == null) { return }
-  List<Map> groups = []
-  if(topology?.groups instanceof List) {
-    ((List)topology.groups).each { Object item ->
-      Map m = (Map)item
-      List<String> playerIds = []
-      if(m?.playerIds instanceof List) {
-        playerIds = normalizeGroupPlayerIds(m.playerIds)
-      } else if(m?.members instanceof List) {
-        List<String> visible = []
-        List<String> all = []
-        ((List)m.members).each { Object mem ->
-          Map mm = (Map)mem
-          String pid = mm?.playerId?.toString()
-          if(pid) {
-            all << pid
-            if(mm?.invisible != true && mm?.invisible?.toString() != '1') { visible << pid }
-          }
-        }
-        playerIds = normalizeGroupPlayerIds(visible.isEmpty() ? all : visible)
-      }
-      groups << [groupId: m?.groupId?.toString(), coordinatorId: m?.coordinatorId?.toString(), playerIds: playerIds]
+/** Pure set+return only: merge delta by name into the stored list; no child calls. */
+List<Map> putAvtEvents(String coordinatorRincon, List<Map> events) {
+  String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()
+  Map<String, List<Map>> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[AVT_STORE_STATE_KEY]) : [:]
+  List<Map> stored = snapshots[rincon] instanceof List ? new ArrayList<Map>((List<Map>)snapshots[rincon]) : []
+  if(events instanceof List) {
+    events.each { Map incoming ->
+      String incomingName = incoming?.name?.toString()
+      if(!incomingName) { return }
+      stored.removeAll { Map existing -> existing?.name?.toString() == incomingName }
+      stored.add(new LinkedHashMap(incoming))
     }
   }
-  if(groups.isEmpty()) {
-    logDebug("onZgtTopologyAvailable empty groups for ${dni}; ignoring")
-    return
-  }
-  acceptHouseholdTopology(dni, [groups: groups])
-}
-
-void onHouseholdTopologyAvailable(String dni, Map topology) {
-  onZgtTopologyAvailable(dni, topology)
-}
-
-void onAvtReceived(Map payload) {
-  String rincon = payload?.rincon?.toString()
-  Map<String, Object> attributes = payload?.attributes instanceof Map
-      ? new LinkedHashMap<String, Object>((Map<String, Object>)payload.attributes) : [:]
-  if(!rincon || attributes.isEmpty()) { return }
-  Long receivedAt = now()
-  Map<String, Map> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[AVT_STORE_STATE_KEY]) : [:]
-  snapshots[rincon] = [rincon: rincon, followers: normalizeGroupPlayerIds(payload?.followers),
-    attributes: attributes, sourceObservedAt: payload.observedAt, seq: payload.seq, receivedAt: receivedAt]
-  while(snapshots.size() > 32) { snapshots.remove(snapshots.keySet().iterator().next()) }
+  if(!stored.isEmpty()) { snapshots[rincon] = stored }
   state[AVT_STORE_STATE_KEY] = snapshots
-  runInMillis(1, 'forwardAvtToGroup', [data: [rincon: rincon, receivedAt: receivedAt], overwrite: false])
+  return stored
+}
+
+/** Pure set+return only: merge delta by name into the stored list; no child calls. */
+List<Map> putGrcEvents(String coordinatorRincon, List<Map> events) {
+  String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()
+  Map<String, List<Map>> snapshots = state[GRC_STORE_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[GRC_STORE_STATE_KEY]) : [:]
+  List<Map> stored = snapshots[rincon] instanceof List ? new ArrayList<Map>((List<Map>)snapshots[rincon]) : []
+  if(events instanceof List) {
+    events.each { Map incoming ->
+      String incomingName = incoming?.name?.toString()
+      if(!incomingName) { return }
+      stored.removeAll { Map existing -> existing?.name?.toString() == incomingName }
+      stored.add(new LinkedHashMap(incoming))
+    }
+  }
+  if(!stored.isEmpty()) { snapshots[rincon] = stored }
+  state[GRC_STORE_STATE_KEY] = snapshots
+  return stored
+}
+
+String resolveStoredCoordinatorRincon(String rincon) {
+  if(!rincon) { return null }
+  Map<String, List<Map>> zgtEvents = state[ZGT_EVENTS_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[ZGT_EVENTS_STATE_KEY] : [:]
+  for(Map.Entry<String, List<Map>> entry : zgtEvents.entrySet()) {
+    String coordinatorId = entry.value?.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(coordinatorId == rincon) { return rincon }
+  }
+  for(Map.Entry<String, List<Map>> entry : zgtEvents.entrySet()) {
+    List<String> members = normalizeGroupPlayerIds(
+        entry.value?.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    if(members.contains(rincon)) {
+      String coordinatorId = entry.value?.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+      if(coordinatorId) { return coordinatorId }
+    }
+  }
+  return null
+}
+
+List<Map> getStoredAvtEvents(String rincon) {
+  Map<String, List<Map>> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[AVT_STORE_STATE_KEY] : [:]
+  List<Map> stored = snapshots[rincon?.toString()] as List<Map>
+  return stored != null ? new ArrayList<Map>(stored) : []
+}
+
+List<Map> getStoredGrcEvents(String rincon) {
+  Map<String, List<Map>> snapshots = state[GRC_STORE_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[GRC_STORE_STATE_KEY] : [:]
+  List<Map> stored = snapshots[rincon?.toString()] as List<Map>
+  return stored != null ? new ArrayList<Map>(stored) : []
+}
+
+List<Map> getStoredZgtEvents(String groupId) {
+  Map<String, List<Map>> snapshots = state[ZGT_EVENTS_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[ZGT_EVENTS_STATE_KEY] : [:]
+  List<Map> stored = snapshots[groupId?.toString()] as List<Map>
+  return stored != null ? new ArrayList<Map>(stored) : []
+}
+
+Map<String, List<Map>> getStoredZgtEventsMap() {
+  return state[ZGT_EVENTS_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[ZGT_EVENTS_STATE_KEY]) : [:]
 }
 
 void forwardAvtToGroup(Map data = [:]) {
   String rincon = data?.rincon?.toString()
   if(rincon == null) { return }
-  Map<String, Map> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[AVT_STORE_STATE_KEY] : [:]
-  Map snapshot = snapshots[rincon]
-  if(snapshot == null || ((snapshot.receivedAt ?: 0L) as Long) != ((data.receivedAt ?: 0L) as Long)) { return }
-  List<String> followerIds = normalizeGroupPlayerIds(snapshot.followers)
-  Map attributes = snapshot.attributes instanceof Map ? (Map)snapshot.attributes : [:]
+  List<Map> events = getStoredAvtEvents(rincon)
+  if(events.isEmpty()) { return }
+  Map<String, Object> attributes = [:]
+  events.each { Map event -> if(event?.name) { attributes[event.name.toString()] = event.value } }
+  List<String> followerIds = []
+  Map<String, List<Map>> zgtEvents = getStoredZgtEventsMap()
+  for(Map.Entry<String, List<Map>> entry : zgtEvents.entrySet()) {
+    String coordinatorId = entry.value?.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(coordinatorId == rincon) {
+      followerIds = normalizeGroupPlayerIds(
+          entry.value?.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+          .findAll { String id -> id && id != rincon }
+      break
+    }
+  }
   ChildDeviceWrapper coordinator = findPlayerBySonosId(rincon)
   Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
   followerIds.unique().each { String fid ->
@@ -11166,44 +11211,22 @@ void forwardAvtToGroup(Map data = [:]) {
 }
 
 Map getCurrentReceivedZgtTopology() {
-  Map zgtState = state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] instanceof Map
-      ? (Map)state[PLAYER_INITIALIZATION_ZGT_STATE_KEY] : [:]
-  String candidateDni = zgtState.candidateDni?.toString()
-  if(!candidateDni) { return [:] }
-  ChildDeviceWrapper elected = null
-  try { elected = getChildDevice(candidateDni) } catch(Exception ignored) { elected = null }
-  if(elected == null) {
-    elected = getCurrentPlayerDevices().find { ChildDeviceWrapper d -> d.getDeviceNetworkId()?.toString() == candidateDni }
-  }
-  if(elected == null) { return [:] }
+  // Reads the app's own ZGT events store (the driver keeps no topology copy).
   try {
-    Map raw = (Map)elected.getCurrentZgtTopology()
-    if(raw == null || !(raw.groups instanceof List)) { return [:] }
-    List<Map> converted = ((List<?>)raw.groups).collect { Object g ->
-      Map m = (Map)g
-      List<String> visibleIds = []
-      List<String> allIds = []
-      if(m.members instanceof List) {
-        ((List<?>)m.members).each { Object mem ->
-          Map mm = (Map)mem
-          String pid = mm.playerId?.toString()
-          if(pid) {
-            allIds << pid
-            if(mm.invisible != true && mm.invisible?.toString() != '1') { visibleIds << pid }
-          }
-        }
-      }
-      if(visibleIds.isEmpty() && allIds.isEmpty() && m.playerIds instanceof List) {
-        visibleIds = normalizeGroupPlayerIds(m.playerIds)
-        allIds = visibleIds
-      }
-      [ groupId: m.groupId?.toString(), coordinatorId: m.coordinatorId?.toString(),
-        playerIds: normalizeGroupPlayerIds(visibleIds.isEmpty() ? allIds : visibleIds),
-        memberIds: normalizeGroupPlayerIds(allIds),
-        coordinatorName: m.coordinatorName?.toString(), groupName: m.groupName?.toString(),
-        satellites: m.secondaries ?: [], channelMap: m.channelMap ?: [:] ]
+    Map<String, List<Map>> stored = getStoredZgtEventsMap()
+    if(stored.isEmpty()) { return [:] }
+    List<Map> converted = stored.collect { String groupId, List<Map> events ->
+      String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+      List<String> memberIds = normalizeGroupPlayerIds(
+          events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+      [ groupId: groupId, coordinatorId: coordinatorId,
+        playerIds: memberIds,
+        memberIds: memberIds,
+        coordinatorName: events.find { Map e -> e?.name?.toString() == 'groupCoordinatorName' }?.value?.toString(),
+        groupName: events.find { Map e -> e?.name?.toString() == 'groupName' }?.value?.toString(),
+        satellites: [], channelMap: [:] ]
     }
-    return [groups: converted, observedAt: (raw.observedAt ?: now()) as Long]
+    return [groups: converted, observedAt: now() as Long]
   } catch(Exception e) {
     logDebug("getCurrentReceivedZgtTopology failed: ${e.message}")
     return [:]
