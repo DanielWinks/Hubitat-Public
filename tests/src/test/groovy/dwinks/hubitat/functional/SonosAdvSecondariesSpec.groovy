@@ -8,10 +8,6 @@ import spock.lang.Specification
 class SonosAdvSecondariesSpec extends Specification {
   @Shared Class<? extends HubitatScriptHarness> driverClass
   HubitatScriptHarness driver
-  List<Map> connections = []
-  List<String> sentMessages = []
-  List<String> sendAttempts = []
-  Integer sendFailuresRemaining = 0
 
   def setupSpec() {
     File file = new File('../Drivers/Component/SonosAdvSecondaries.groovy')
@@ -21,60 +17,21 @@ class SonosAdvSecondariesSpec extends Specification {
 
   def setup() {
     driver = ScriptLoader.instantiate(driverClass)
-    driver.binding.setVariable('interfaces', [webSocket: new Expando(
-      connect: { Map options, String url -> connections.add([url: url, options: options]) },
-      sendMessage: { String message ->
-        sendAttempts << message
-        if(sendFailuresRemaining > 0) {
-          sendFailuresRemaining--
-          throw new RuntimeException('simulated send failure')
-        }
-        sentMessages << message
-      },
-      close: { }
-    )])
   }
 
-  def "connect uses the child IP when discovery did not supply a websocket URL"() {
+  def "secondary initialization removes secondary websocket data without opening a socket"() {
     given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.deviceNetworkId = 'parent-right-channel'
-    driver.state.websocketReconnectAttempts = 3
-    driver.state.websocketReconnectScheduled = true
+    driver.device.dataValues = [id: 'RIGHT', deviceIp: '192.168.1.51', websocketUrl: 'wss://192.168.1.51:1443/websocket/api',
+      websocketStatus: 'open', householdId: 'HOUSE']
 
     when:
     driver.initialize()
 
     then:
-    connections*.url == ['wss://192.168.1.51:1443/websocket/api']
-    driver.device.getDataValue('websocketStatus') == 'connecting'
-    driver.state.websocketReconnectAttempts == 0
-    !driver.scheduled.any { List job -> job[1] == 'retryWebsocketConnection' }
-
-    when: 'discovery updates the existing child IP'
-    driver.device.dataValues.deviceIp = '192.168.1.52'
-    driver.renewWebsocketConnection()
-
-    then:
-    connections.last().url == 'wss://192.168.1.52:1443/websocket/api'
-
-    when:
-    driver.webSocketStatus('status: open')
-
-    then:
-    driver.scheduled.any { List job -> job[1] == 'renewWebsocketConnection' }
-  }
-
-  def "explicit websocket URL takes precedence over the IP fallback"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.dataValues.websocketUrl = 'wss://192.168.1.60:1443/websocket/api'
-
-    when:
-    driver.wsConnect()
-
-    then:
-    connections*.url == ['wss://192.168.1.60:1443/websocket/api']
+    driver.device.dataValues == [id: 'RIGHT', deviceIp: '192.168.1.51', householdId: 'HOUSE']
+    driver.state.isEmpty()
+    driver.events.isEmpty()
+    driver.scheduled.isEmpty()
   }
 
   def "info logging helper accepts GString messages"() {
@@ -82,199 +39,9 @@ class SonosAdvSecondariesSpec extends Specification {
     Integer retryCount = 3
 
     when:
-    driver.logInfo("Requesting secondary WebSocket connection; previousStatus=error, retryCount=${retryCount}")
+    driver.logInfo("Requesting secondary status; retryCount=${retryCount}")
 
     then:
-    driver.logs.any { String entry ->
-      entry.contains('INFO') && entry.contains('Requesting secondary WebSocket connection; previousStatus=error, retryCount=3')
-    }
-  }
-
-  def "open status notifies the parent player directly"() {
-    given:
-    List<List> parentStatuses = []
-    Expando mockParent = new Expando()
-    mockParent.rightChannelWebsocketStatusChanged = { String status, String dni ->
-      parentStatuses << [status, dni]
-    }
-    driver.binding.setVariable('parent', mockParent)
-    driver.device.deviceNetworkId = 'parent-right-channel'
-
-    when:
-    driver.webSocketStatus('status: open')
-
-    then:
-    driver.events.any { Map e -> e.name == 'websocketStatus' && e.value == 'open' }
-    driver.logs.any { it.toString().contains('Notified parent player of secondary WebSocket status') }
-  }
-
-  def "duplicate open callback does not increment connection generation"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'open'
-    driver.state.websocketConnectionGeneration = 3L
-
-    when:
-    driver.webSocketStatus('status: open')
-
-    then:
-    driver.state.websocketConnectionGeneration == 3L
-    driver.state.websocketConnectPending == null
-    driver.logs.any { it.toString().contains('Ignoring duplicate secondary WebSocket open callback') }
-  }
-
-  def "closing callback from replaced socket preserves pending connection"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'connecting'
-    driver.state.websocketConnectPending = true
-
-    when:
-    driver.webSocketStatus('status: closing')
-
-    then:
-    driver.device.getDataValue('websocketStatus') == 'connecting'
-    driver.state.websocketConnectPending == true
-    !driver.scheduled.any { List job -> job[1] == 'retryWebsocketConnection' }
-  }
-
-  def "missing connection data does not open a socket or schedule renewal"() {
-    when:
-    driver.wsConnect()
-
-    then:
-    connections.empty
-    driver.scheduled.empty
-  }
-
-  def "secondary sends while disconnected do not start a local message queue"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.dataValues.websocketStatus = 'closed'
-
-    when:
-    Boolean firstSent = driver.sendWsMessage('first')
-    Boolean secondSent = driver.sendWsMessage('second')
-
-    then:
-    !firstSent
-    !secondSent
-    sentMessages.empty
-    driver.state.websocketOutboundQueue == null
-    connections.size() == 1
-    driver.state.websocketConnectPending == true
-
-    when:
-    driver.webSocketStatus('status: open')
-
-    then:
-    sentMessages.empty
-    driver.device.getDataValue('websocketStatus') == 'open'
-  }
-
-
-
-  def "secondary sends while opening wait for the parent coordinated release"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.dataValues.websocketStatus = 'connecting'
-    driver.state.websocketConnectPending = true
-
-    when:
-    Boolean firstSent = driver.sendWsMessage('one')
-    Boolean secondSent = driver.sendWsMessage('two')
-
-    then:
-    !firstSent
-    !secondSent
-    sentMessages.empty
-    connections.empty
-    driver.state.websocketOutboundQueue == null
-
-    when:
-    driver.webSocketStatus('status: open')
-
-    then:
-    sentMessages.empty
-  }
-
-  def "an open secondary sends directly and reports send failure without retaining a child queue"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.dataValues.websocketStatus = 'open'
-    sendFailuresRemaining = 1
-
-    when:
-    Boolean sent = driver.sendWsMessage('[{"namespace":"audioClip","command":"loadAudioClip","playerId":"RIGHT"},{"name":"retry-me"}]')
-
-    then:
-    !sent
-    driver.state.websocketOutboundQueue == null
-    driver.device.getDataValue('websocketStatus') == 'error'
-    driver.scheduled.any { List job -> job[1] == 'retryWebsocketConnection' }
-  }
-
-  def "synchronized release completion logs a send without introducing a secondary queue"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'open'
-    String message = '[{"namespace":"audioClip","command":"loadAudioClip","playerId":"RIGHT"},{"name":"corr-1"}]'
-
-    when:
-    driver.playerLoadAudioClipForSynchronizedRelease(message, 'corr-1')
-    driver.completeSynchronizedAudioClipRelease('corr-1')
-
-    then:
-    sentMessages == [message]
-    driver.state.websocketOutboundQueue == null
-    driver.state.synchronizedAudioClipReleases == [:]
-    driver.logs.any { it.toString().contains('sent during synchronized release pass') }
-  }
-
-  def "secondary audio clip ACK clears its response ledger by correlation ID"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'open'
-    String message = '[{"namespace":"audioClip","command":"loadAudioClip","playerId":"RIGHT"},{"name":"corr-ack"}]'
-
-    when:
-    driver.sendWsMessage(message)
-    driver.websocketMessage('[{"namespace":"audioClip","response":"loadAudioClip","success":true,"type":"audioClip"},{"name":"corr-ack"}]')
-
-    then:
-    sentMessages == [message]
-    driver.state.websocketCommandLedger == null
-    driver.logs.any { it.toString().contains('Secondary WebSocket command ledger success') }
-  }
-
-  def "paired release while disconnected requests connection but does not retain a child message"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.dataValues.websocketStatus = 'closed'
-
-    when:
-    driver.playerLoadAudioClipForSynchronizedRelease('paired-clip', 'corr-2')
-    driver.completeSynchronizedAudioClipRelease('corr-2')
-
-    then:
-    driver.state.websocketOutboundQueue == null
-    connections.size() == 1
-    driver.logs.any { it.toString().contains('Secondary socket was not open during paired release') }
-  }
-
-  def "secondary reconnect attempts stop after three failures"() {
-    given:
-    driver.device.dataValues.deviceIp = '192.168.1.51'
-    driver.device.dataValues.websocketStatus = 'closed'
-
-    when:
-    driver.initializeWebsocketConnection()
-    (1..3).each {
-      driver.webSocketStatus('failure: connect timed out')
-        driver.retryWebsocketConnection()
-    }
-    driver.webSocketStatus('failure: connect timed out')
-
-    then:
-    driver.device.getDataValue('websocketStatus') == 'connect timed out'
-    driver.state.websocketReconnectAttempts == 3
-    driver.scheduled.findAll { List job -> job[1] == 'retryWebsocketConnection' }.collect { List job -> job[0] } == [5, 15, 60]
-    connections.size() == 4
+    driver.logs.any { String entry -> entry.contains('INFO') && entry.contains('retryCount=3') }
   }
 }

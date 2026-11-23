@@ -405,6 +405,9 @@ preferences {
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
 @Field static final String DEFERRED_GROUP_COMMANDS_STATE_KEY = 'deferredGroupOperationCommands'
 @Field static final String GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY = 'groupAnnouncementQueues'
+@Field static final String AUDIO_CLIP_QUEUES_STATE_KEY = 'audioClipQueuesByPlayer'
+@Field static final String AUDIO_CLIP_APP_ID = 'com.dwinks.sonos.advanced'
+@Field static final String AUDIO_CLIP_ENDPOINT = '/players/local/audioClip'
 @Field static final String DEFERRED_PLAYER_COMMANDS_STATE_KEY = 'deferredGroupPlayerCommands'
 @Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
@@ -484,6 +487,7 @@ preferences {
   GROUP_COMMAND_QUEUE_STATE_KEY,
   DEFERRED_GROUP_COMMANDS_STATE_KEY,
   GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY,
+  AUDIO_CLIP_QUEUES_STATE_KEY,
   DEFERRED_PLAYER_COMMANDS_STATE_KEY,
   PENDING_GROUP_STATE_QUEUE_KEY,
   PENDING_CHILD_EVENT_QUEUE_KEY,
@@ -3611,6 +3615,8 @@ void subscribeToGroupCommandRequests() {
   getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
     unsubscribe(playerDevice, 'sonosPlayerStateUpdate', 'playerStateUpdateHandler')
     unsubscribe(playerDevice, 'sonosPlayerAppRequest', 'playerAppRequestHandler')
+    unsubscribe(playerDevice, 'audioClipStatus', 'audioClipStatusHandler')
+    subscribe(playerDevice, 'audioClipStatus', 'audioClipStatusHandler')
     unsubscribe(playerDevice, 'groupCoordinatorId', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
@@ -5374,6 +5380,9 @@ Boolean playerAppRequestHandler(Object event) {
         data: [playerDni: playerDni]
       ])
       return true
+    case 'enqueueAudioClip':
+      enqueuePlayerAudioClip(player, args)
+      return true
     default:
       logWarn("Ignoring unsupported player app request action '${request.action}'")
       return false
@@ -5391,6 +5400,220 @@ void republishCurrentlyPlayingStates(Map data = null) {
   String coordinatorId = coordinators[playerId] ?: playerId
   List<Map> events = getStoredAvtEvents(coordinatorId)
   if(events) { deliverUpnpEventsToGroup(coordinatorId, events, true) }
+}
+
+/** Accept an individual player's audioClip request into the app-owned scheduler. */
+void enqueuePlayerAudioClip(ChildDeviceWrapper player, Map args) {
+  String playerId = player?.getDataValue('id')?.toString()
+  String uri = args?.uri?.toString()
+  String clipType = args?.clipType?.toString()
+  if(!playerId || (!uri && clipType != 'CHIME')) {
+    logWarn("Ignoring audioClip request from ${player?.deviceNetworkId ?: 'unknown'}: player ID or URI is missing")
+    return
+  }
+  Map item = [correlationId: args.correlationId?.toString() ?: UUID.randomUUID().toString(),
+    groupCorrelationId: args.groupCorrelationId?.toString(), playerId: playerId,
+    uri: uri, volume: args.volume, duration: toBigDecimal(args.duration)?.intValue() ?: 0,
+    priority: args.priority?.toString() == 'HIGH' ? 'HIGH' : 'REGULAR',
+    clipType: clipType, origin: args.origin?.toString() ?: 'player-request',
+    submittedAt: now()]
+  if(args.chimeBeforeTTS == true) {
+    enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(), playerId: playerId,
+      volume: item.volume, duration: 8, priority: item.priority, clipType: 'CHIME',
+      origin: 'player-chime', submittedAt: now()])
+  }
+  enqueuePlayerAudioClipItem(item)
+}
+
+/** All player and group clips pass through this app-owned per-player queue. */
+void enqueuePlayerAudioClipItem(Map item) {
+  Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
+  String playerId = item?.playerId?.toString()
+  if(!playerId) { return }
+  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : [regular: [], high: []]
+  List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
+  List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
+  if(item.priority == 'HIGH') { high.add(item) } else { regular.add(item) }
+  queue.high = high
+  queue.regular = regular
+  queues[playerId] = queue
+  state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+  dispatchNextPlayerAudioClip(playerId)
+}
+
+void dispatchNextPlayerAudioClip(String playerId) {
+  Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+  if(queue == null) { return }
+  List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
+  List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
+  Map active = queue.active instanceof Map ? (Map)queue.active : null
+  if(active != null) {
+    if(active.priority == 'HIGH' || high.isEmpty()) { return }
+    queue.suspended = active
+    queue.remove('active')
+  }
+  Map next = high ? high.remove(0) : (regular ? regular.remove(0) : null)
+  queue.high = high
+  queue.regular = regular
+  if(next == null) {
+    queues.remove(playerId)
+    state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+    return
+  }
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDataValue('id')?.toString() == playerId
+  }
+  String ip = player?.getDataValue('deviceIp')?.toString()
+  String name = UUID.randomUUID().toString()
+  next.name = name
+  if(player?.currentValue('mute')?.toString() == 'muted') {
+    queue.active = next
+    queues[playerId] = queue
+    state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+    logInfo("Skipping audioClip for muted player ${playerId}, correlation=${next.correlationId}")
+    completePlayerAudioClip(playerId, next, 'DISMISSED')
+    return
+  }
+  if(!player || !ip) {
+    logWarn("Cannot POST audioClip for ${playerId}: player device or IP is unavailable")
+    queue.active = next
+    queues[playerId] = queue
+    state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+    completePlayerAudioClip(playerId, next, 'FAILED')
+    return
+  }
+  String priority = next.priority == 'HIGH' ? 'HIGH' : null
+  BigDecimal requestedVolume = toBigDecimal(next.volume)
+  Integer currentVolume = toBigDecimal(player.currentValue('volume')?.toString())?.intValue() ?: 0
+  Integer boost = toBigDecimal(player.getSetting('ttsBoostAmount')?.toString())?.intValue() ?: 10
+  BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
+  Integer resolvedVolume = requestedVolume != null && (requestedVolume.compareTo(BigDecimal.ZERO) == 0 ||
+      requestedVolume.compareTo(BigDecimal.valueOf(-1L)) == 0)
+      ? 0 : Math.max(0, Math.min(baseVolume.add(new BigDecimal(boost)).setScale(0, RoundingMode.HALF_UP).intValue(), 100))
+  Map body = [name: name, appId: AUDIO_CLIP_APP_ID,
+    volume: resolvedVolume]
+  if(priority) { body.priority = priority }
+  if(next.uri) { body.streamUrl = next.uri }
+  if(next.clipType) { body.clipType = next.clipType }
+  Map params = [uri: "${getLocalApiPrefix("${ip}:1443")}${AUDIO_CLIP_ENDPOINT}",
+    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    requestContentType: 'application/json', contentType: 'application/json',
+    ignoreSSLIssues: true, timeout: 5, body: JsonOutput.toJson(body)]
+  next.appId = AUDIO_CLIP_APP_ID
+  next.dispatchedAt = now()
+  next.phase = 'POST_PENDING'
+  queue.active = next
+  queues[playerId] = queue
+  state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+  logInfo("POST audioClip ${name} to player ${playerId}, priority=${priority}, origin=${next.origin}")
+  asynchttpPost('audioClipPostCallback', params, [playerId: playerId, name: name,
+    appId: AUDIO_CLIP_APP_ID, correlationId: next.correlationId])
+}
+
+void dispatchNextPlayerAudioClipCallback(Map data = [:]) {
+  if(data?.playerId) { dispatchNextPlayerAudioClip(data.playerId.toString()) }
+}
+
+void audioClipPostCallback(AsyncResponse response, Map data) {
+  String playerId = data?.playerId?.toString()
+  String name = data?.name?.toString()
+  Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+  Map active = queue?.active instanceof Map ? (Map)queue.active : null
+  if(active?.name?.toString() != name) { logDebug("Ignoring stale audioClip POST callback name=${name}"); return }
+  Integer statusCode = response?.status as Integer
+  if(response == null || response.hasError() || statusCode == null || statusCode < 200 || statusCode >= 300) {
+    logWarn("audioClip POST failed for player ${playerId}, name=${name}, status=${response?.status}, error=${response?.getErrorMessage()}")
+    active.phase = 'FAILED'
+    completePlayerAudioClip(playerId, active, 'FAILED')
+    return
+  }
+  try {
+    Object raw = response.getJson()
+    Map result = raw instanceof Map ? (Map)raw : [:]
+    if(result.id != null) { active.sonosId = result.id.toString() }
+    active.postResponseReceivedAt = now()
+    active.phase = active.phase == 'ACTIVE' ? 'ACTIVE' : 'POSTED'
+    queues[playerId] = queue
+    state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+  } catch(Exception e) {
+    logWarn("Could not parse audioClip POST response for player ${playerId}: ${e.message}")
+  }
+}
+
+void completePlayerAudioClip(String playerId, Map completed, String phase) {
+  Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+  if(queue?.active?.name?.toString() != completed?.name?.toString()) { return }
+  queue.remove('active')
+  Map suspended = queue.suspended instanceof Map ? (Map)queue.suspended : null
+  if(completed.priority == 'HIGH' && suspended != null) {
+    queue.remove('suspended')
+    // A resumed clip gets a fresh Sonos name so late status messages cannot complete it.
+    suspended.remove('name')
+    List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
+    regular.add(0, suspended)
+    queue.regular = regular
+  }
+  queues[playerId] = queue
+  state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+  if(completed.groupCorrelationId) {
+    ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+      candidate.getDataValue('id')?.toString() == playerId
+    }
+    handleGroupAnnouncementProgress(player, [correlationId: completed.groupCorrelationId, playerId: playerId,
+      phase: phase == 'FAILED' || phase == 'TIMEOUT' ? 'FAILED' : phase])
+  }
+  runInMillis(1, 'dispatchNextPlayerAudioClipCallback', [data: [playerId: playerId], overwrite: false])
+}
+
+void audioClipStatusHandler(Object event) {
+  Map payload
+  try {
+    String raw = event?.value?.toString()
+    payload = raw?.trim()?.startsWith('{') ? (Map)new JsonSlurper().parseText(raw) : [:]
+  } catch(Exception e) {
+    logWarn("Ignoring malformed audioClipStatus event: ${e.message}")
+    return
+  }
+  if(!(payload instanceof Map) || payload.appId?.toString() != AUDIO_CLIP_APP_ID) { return }
+  ChildDeviceWrapper player = resolveEventPlayer(event)
+  String playerId = player?.getDataValue('id')?.toString()
+  String name = payload.name?.toString()
+  String phase = payload.status?.toString()
+  Map queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map ? (Map)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+  Map active = queue?.active instanceof Map ? (Map)queue.active : null
+  if(active?.name?.toString() != name || !phase) { return }
+  if(payload.id != null) { active.sonosId = payload.id.toString() }
+  active.phase = phase
+  queues[playerId] = queue
+  state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
+  logDebug("audioClip status player=${playerId}, name=${name}, id=${payload.id ?: 'pending'}, status=${phase}")
+  if(phase == 'ACTIVE' && active.groupCorrelationId) {
+    handleGroupAnnouncementProgress(player, [correlationId: active.groupCorrelationId, phase: 'ACTIVE'])
+  } else if(phase in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) {
+    completePlayerAudioClip(playerId, active, phase in ['ERROR', 'INTERRUPTED'] ? 'FAILED' : phase)
+  }
+}
+
+void audioClipStatusEventHandler(Event event) { audioClipStatusHandler(event) }
+
+ChildDeviceWrapper resolveEventPlayer(Object event) {
+  if(event instanceof Event) { return resolveTopologyEventPlayer((Event)event) }
+  String dni = event?.device?.getDeviceNetworkId()?.toString() ?: event?.deviceNetworkId?.toString()
+  if(!dni && event?.deviceId != null) {
+    dni = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
+      player.id?.toString() == event.deviceId.toString()
+    }?.deviceNetworkId?.toString()
+  }
+  if(dni) { return getChildDevice(dni) }
+  return null
 }
 
 /** Queue group announcements so a coordinator stream and subsequent messages cannot race. */
@@ -5458,9 +5681,6 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
         queues[groupDni] = queue
         state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
         dispatchGroupAnnouncementClip(item, players, true)
-        Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(item)
-        runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
-          correlationId: correlationId], overwrite: false])
         return
       }
       // Native audioClip HIGH priority can overlay an in-flight announcement or
@@ -5546,26 +5766,12 @@ void startNextGroupAnnouncement(String groupDni) {
       logInfo("Play Text command ${item.correlationId} is forcing synchronized audioClip for all group members")
       item.mode = 'AUDIO_CLIP'
       dispatchGroupAnnouncementClip(item, players, false)
-      scheduleGroupAnnouncementWatchdog(groupDni, item)
       return
     }
     logWarn("Play Text command ${item.correlationId} includes a player without audioClip support; falling back to a coordinator stream")
     item.forceCoordinatorStream = true
   }
   dispatchGroupAnnouncementByPolicy(groupDni, queue, item, players, coordinator)
-}
-
-/** Resume any group queues that include a speaker whose WebSocket has reconnected. */
-void resumeAnnouncementsForPlayer(String playerDni) {
-  Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
-  queues.each { String groupDni, Map queue ->
-    List<Map> pending = queue.pending instanceof List ? (List<Map>)queue.pending : []
-    Boolean targetsPlayer = pending.any { Map item ->
-      normalizeGroupPlayerIds(item.playerIds).contains(getChildDevice(playerDni)?.getDataValue('id')?.toString())
-    }
-    if(targetsPlayer && !(queue.active instanceof Map)) { runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true]) }
-  }
 }
 
 /** Return the configured queued-TTS age limit, or null when retention is unlimited. */
@@ -5615,7 +5821,6 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
   }
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-  scheduleGroupAnnouncementWatchdog(groupDni, item)
 }
 
 String getAnnouncementMode(Boolean highPriority = false) {
@@ -5692,18 +5897,7 @@ Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = nu
 
 
 
-void scheduleGroupAnnouncementWatchdog(String groupDni, Map item) {
-  Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(item)
-  runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
-    correlationId: item.correlationId], overwrite: false])
-}
-
 /** Allow extra time for synchronized stream startup and delayed completion callbacks. */
-Integer getGroupAnnouncementWatchdogTimeoutSeconds(Map item) {
-  Integer duration = (item?.duration ?: 0) as Integer
-  return duration > 0 ? Math.max(duration + 90, 120) : 360
-}
-
 /** Resolve the shared announcement policy for an individual player. */
 
 
@@ -5711,35 +5905,33 @@ void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, B
   String correlationId = item.correlationId as String
   Integer duration = (item.duration ?: 0) as Integer
   String chimeSettingKey = highPriority ? 'chimeBeforeHighPriorityTTS' : 'chimeBeforeStandardPriorityTTS'
-  Boolean chimeBeforeTTS = item.containsKey(chimeSettingKey)
-      ? item[chimeSettingKey] == true
-      : (item.isTts == true && players.any { ChildDeviceWrapper player ->
-          highPriority ? player.getChimeBeforeHighPriorityTTS() == true : player.getChimeBeforeStandardPriorityTTS() == true
-        })
+  Boolean chimeBeforeTTS = item.isTts == true && item.containsKey(chimeSettingKey) &&
+      item[chimeSettingKey] == true
   Boolean separateChimeEnabled = settings.queueChimeSeparatelyFromTTS == true ||
       settings.queueChimeSeparatelyFromTTS?.toString() == 'true'
-  Boolean separateChime = separateChimeEnabled && item.isTts == true && chimeBeforeTTS &&
-      players.every { ChildDeviceWrapper player -> player.canPrepareSynchronizedGroupChime(highPriority) == true }
+  Boolean separateChime = separateChimeEnabled && item.isTts == true && chimeBeforeTTS
   item.chimePhase = separateChime
   String playerNames = players.collect { ChildDeviceWrapper player ->
     "${player.displayName} (${player.getDataValue('id')})"
   }.join(', ')
-  logDebug("Preparing group audioClip ${correlationId} for players: ${playerNames}")
+  logDebug("Queueing group audioClip ${correlationId} for players: ${playerNames}")
   players.each { ChildDeviceWrapper player ->
-    if(highPriority) {
-      player.playerLoadAudioClipHighPriority(item.uri as String, toBigDecimal(item.volume), correlationId,
-          duration, true, chimeBeforeTTS, separateChime)
-    } else {
-      player.playerPrepareAudioClipForSynchronizedStart(item.uri as String, toBigDecimal(item.volume), correlationId,
-          duration, true, chimeBeforeTTS, separateChime)
+    String playerId = player.getDataValue('id')?.toString()
+    if(chimeBeforeTTS) {
+      enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(),
+        groupCorrelationId: separateChime ? correlationId : null, playerId: playerId,
+        uri: null, volume: toBigDecimal(item.volume), duration: 8,
+        priority: highPriority ? 'HIGH' : 'REGULAR', clipType: 'CHIME',
+        origin: 'group-chime', submittedAt: now()])
+    }
+    if(!separateChime) {
+      enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(),
+        groupCorrelationId: correlationId, playerId: playerId, uri: item.uri?.toString(),
+        volume: toBigDecimal(item.volume), duration: duration,
+        priority: highPriority ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()])
     }
   }
-  players.each { ChildDeviceWrapper player -> player.prepareAudioClipForDispatch() }
-  logDebug("Releasing group audioClip ${correlationId} to players: ${playerNames}")
-  players.each { ChildDeviceWrapper player ->
-    player.startPreparedAudioClip()
-  }
-  players.each { ChildDeviceWrapper player -> player.completePreparedAudioClipDispatch() }
+  logDebug("Queued group audioClip ${correlationId} on ${players.size()} players")
 }
 
 void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
@@ -5748,6 +5940,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   if(!correlationId || !phase) { return }
   Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
+  String playerId = payload.playerId?.toString() ?: player?.getDataValue('id')?.toString()
   String groupDni = payload.groupDni?.toString()
   if(!groupDni) {
     groupDni = queues.find { String dni, Map q ->
@@ -5755,7 +5948,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
       Map priorityItem = q?.priorityActive instanceof Map ? (Map)q.priorityActive : null
       Map matchedItem = activeItem?.correlationId?.toString() == correlationId ? activeItem : priorityItem
       matchedItem?.correlationId?.toString() == correlationId &&
-          normalizeGroupPlayerIds(matchedItem.playerIds).contains(player.getDataValue('id')?.toString())
+          normalizeGroupPlayerIds(matchedItem.playerIds).contains(playerId)
     }?.key
   }
   if(!groupDni) { return }
@@ -5764,13 +5957,12 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
   Boolean isPrioritySidecar = priorityActive?.correlationId?.toString() == correlationId
   Map active = isPrioritySidecar ? priorityActive : (queue?.active instanceof Map ? (Map)queue.active : null)
   if(active == null || active.correlationId?.toString() != correlationId) {
-    logDebug("Ignoring stale group announcement callback ${correlationId} from ${player.getDataValue('id')}")
+    logDebug("Ignoring stale group announcement callback ${correlationId} from ${playerId ?: 'unknown player'}")
     return
   }
   if(phase == 'INTERRUPTED' && payload.externalPlayback == true) {
     if(isPrioritySidecar) {
       logInfo("High priority audioClip announcement ${correlationId} was interrupted by external playback")
-      clearGroupSynchronizedAudioClipHolds(active)
       queue.remove('priorityActive')
       queues[groupDni] = queue
       state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
@@ -5790,13 +5982,9 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
     return
   }
   Map<String, String> statuses = active.playerStatuses instanceof Map ? (Map<String, String>)active.playerStatuses : [:]
-  String playerId = player.getDataValue('id')?.toString()
   if(playerId) { statuses[playerId] = phase; active.playerStatuses = statuses }
-  logDebug("Group announcement ${correlationId} callback from ${playerId}: ${phase}; observed=${statuses}")
+  logDebug("Group announcement ${correlationId} callback from ${playerId ?: 'unknown player'}: ${phase}; observed=${statuses}")
   if(phase == 'ACTIVE') {
-    Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(active)
-    runIn(timeoutSeconds, 'groupAnnouncementWatchdog', [data: [groupDni: groupDni,
-      correlationId: correlationId], overwrite: false])
   }
   String mode = active.mode?.toString()
   String coordinatorId = active.coordinatorId?.toString()
@@ -5826,8 +6014,7 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
         return
       }
       if(isPrioritySidecar) {
-        clearGroupSynchronizedAudioClipHolds(active)
-        queue.remove('priorityActive')
+          queue.remove('priorityActive')
         queues[groupDni] = queue
         state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
         if(!(queue.active instanceof Map)) {
@@ -5861,7 +6048,6 @@ void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
   if(!correlationId || !players) {
     logWarn("Cannot release synchronized TTS after chime for ${correlationId ?: groupDni}; group players are unavailable")
     if(prioritySidecar) {
-      clearGroupSynchronizedAudioClipHolds(item)
       queue.remove('priorityActive')
       queues[groupDni] = queue
       state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
@@ -5869,36 +6055,15 @@ void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
     else { finishGroupAnnouncement(groupDni, correlationId, 'FAILED') }
     return
   }
-  players.each { ChildDeviceWrapper player -> player.prepareSynchronizedAudioClipAfterChime(correlationId) }
   logDebug("Releasing synchronized TTS ${correlationId} after all group chimes completed")
-  players.each { ChildDeviceWrapper player -> player.startPreparedAudioClip() }
-  players.each { ChildDeviceWrapper player -> player.completePreparedAudioClipDispatch() }
+  players.each { ChildDeviceWrapper player ->
+    enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(),
+      groupCorrelationId: correlationId, playerId: player.getDataValue('id')?.toString(),
+      uri: item.uri?.toString(), volume: toBigDecimal(item.volume), duration: item.duration,
+      priority: prioritySidecar ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()])
+  }
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-}
-
-void groupAnnouncementWatchdog(Map data = null) {
-  String groupDni = data?.groupDni?.toString()
-  String correlationId = data?.correlationId?.toString()
-  if(!groupDni || !correlationId) { return }
-  Map queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
-      ? (Map)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
-  Map groupQueue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
-  Map active = groupQueue?.active instanceof Map ? (Map)groupQueue.active : null
-  Map priorityActive = groupQueue?.priorityActive instanceof Map ? (Map)groupQueue.priorityActive : null
-  if(priorityActive?.correlationId?.toString() == correlationId) {
-    logWarn("High priority group announcement ${correlationId} timed out; releasing its group queue hold")
-    clearGroupSynchronizedAudioClipHolds(priorityActive)
-    groupQueue.remove('priorityActive')
-    queues[groupDni] = groupQueue
-    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-    if(!(groupQueue.active instanceof Map)) {
-      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
-    }
-  } else if(active?.correlationId?.toString() == correlationId) {
-    logWarn("Group announcement ${correlationId} timed out; advancing queue")
-    finishGroupAnnouncement(groupDni, correlationId, 'TIMEOUT')
-  }
 }
 
 void finishGroupAnnouncement(String groupDni, String correlationId, String reason) {
@@ -5908,7 +6073,6 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
   if(queue?.active?.correlationId?.toString() != correlationId) { return }
   Map active = queue.active instanceof Map ? (Map)queue.active : null
   logInfo("Group announcement ${correlationId} finished (${reason}) for ${groupDni}")
-  clearGroupSynchronizedAudioClipHolds(active)
   if(active.mode?.toString() != 'AUDIO_CLIP' && reason != 'INTERRUPTED_BY_EXTERNAL_PLAYBACK' &&
       reason != 'SUPERSEDED_BY_HIGH_PRIORITY_ANNOUNCEMENT') {
     ChildDeviceWrapper coordinator = buildRinconMap()[active.coordinatorId?.toString()]
@@ -5923,16 +6087,6 @@ void finishGroupAnnouncement(String groupDni, String correlationId, String reaso
     logWarn("Cannot restore playback for ${correlationId}: coordinator is unavailable")
   }
   completeGroupAnnouncementPlaybackRestore(groupDni, correlationId, [restored: false, skipped: reason])
-}
-
-void clearGroupSynchronizedAudioClipHolds(Map item) {
-  String correlationId = item?.correlationId?.toString()
-  if(!correlationId) { return }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  normalizeGroupPlayerIds(item.playerIds).each { String id ->
-    ChildDeviceWrapper player = rinconMap[id]
-    player?.clearSynchronizedAudioClipHold(correlationId)
-  }
 }
 
 void completeGroupAnnouncementPlaybackRestore(String groupDni, String correlationId, Map payload = [:]) {
@@ -6011,7 +6165,7 @@ Boolean enqueueGroupCommandRequest(Map request) {
   // request-sequence order. Inline dispatch under the app gate held the gate
   // while calling player/group devices, which deadlocks against child
   // executions waiting for the same gate (120 s timeout). The 1 s drain hop
-  // keeps announcement timing within budget via chime/watchdog releases.
+  // preserves queue ordering without waiting on child-device execution.
 
   Map<String, List<Map>> pending = state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map
       ? (Map<String, List<Map>>)state[GROUP_COMMAND_QUEUE_STATE_KEY]
@@ -6121,15 +6275,32 @@ void clearPendingCommandsForDevice(String deviceDni) {
 
 void clearPendingAnnouncementCommands(Map item) {
   if(!(item instanceof Map)) { return }
-  clearGroupSynchronizedAudioClipHolds(item)
   String correlationId = item.correlationId?.toString()
   if(!correlationId) { return }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
+  Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
   normalizeGroupPlayerIds(item.playerIds).each { String playerId ->
-    ChildDeviceWrapper player = rinconMap[playerId]
-    try { player?.clearPendingAudioClipCorrelation(correlationId) }
-    catch(Exception e) { logDebug("Could not clear queued announcement ${correlationId} on ${playerId}: ${e.message}") }
+    Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+    if(queue == null) { return }
+    ['regular', 'high'].each { String priorityQueue ->
+      List<Map> pending = queue[priorityQueue] instanceof List ? (List<Map>)queue[priorityQueue] : []
+      queue[priorityQueue] = pending.findAll { Map queued ->
+        queued?.correlationId?.toString() != correlationId &&
+            queued?.groupCorrelationId?.toString() != correlationId
+      }
+    }
+    ['active', 'suspended'].each { String slot ->
+      Map active = queue[slot] instanceof Map ? (Map)queue[slot] : null
+      if(active?.correlationId?.toString() == correlationId ||
+          active?.groupCorrelationId?.toString() == correlationId) { queue.remove(slot) }
+    }
+    if(!(queue.active instanceof Map) && !(queue.suspended instanceof Map) &&
+        ((List)queue.regular).isEmpty() && ((List)queue.high).isEmpty()) {
+      queues.remove(playerId)
+    } else { queues[playerId] = queue }
   }
+  if(queues.isEmpty()) { state.remove(AUDIO_CLIP_QUEUES_STATE_KEY) }
+  else { state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues }
 }
 
 Boolean isRequestOlderThanDeviceCommandClear(String deviceDni, Object createdAt) {

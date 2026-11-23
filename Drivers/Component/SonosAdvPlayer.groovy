@@ -25,7 +25,6 @@ import com.hubitat.app.ChildDeviceWrapper
 import com.hubitat.app.DeviceWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.hub.domain.Event
-import com.google.common.util.concurrent.Striped
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import groovy.transform.CompileStatic
@@ -152,10 +151,8 @@ void logZgtXmlAtTrace(String dni, String xmlBody) {
   }
 }
 
-void logWebSocketCommandPayload(Map command, String json) {
-  String namespace = command?.get('namespace')?.toString() ?: 'unknown'
-  String commandName = command?.get('command')?.toString() ?: 'unknown'
-  logPayloadAtTrace("Sending Sonos WebSocket command ${namespace}.${commandName}; payload omitted", json)
+void logWebSocketSubscriptionPayload(String json) {
+  logPayloadAtTrace('Sending Sonos audioClip status subscription; payload omitted', json)
 }
 
 // The shared utilities library is intentionally not included in this driver.
@@ -603,8 +600,6 @@ metadata {
     [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
     [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
   ]
-  command 'stopAnnouncement'
-  command 'stopHighPriorityAnnouncement'
 
   attribute 'groupVolume', 'number'
   attribute 'groupMute', 'string'
@@ -774,11 +769,8 @@ Boolean hasLineInCapability() {
 // =============================================================================
 // Fields
 // =============================================================================
-@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
-@Field static ConcurrentHashMap<String, Map<String, Map>> audioClipProgressByCorrelationIdByDni = new ConcurrentHashMap<String, Map<String, Map>>()
 // Fixed stripes bound lock storage while preserving per-DNI mutual exclusion.
-@Field static final Striped<java.util.concurrent.locks.Lock> websocketCommandLedgerStripes = Striped.lock(64)
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
 // App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
@@ -788,19 +780,8 @@ Boolean hasLineInCapability() {
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
-@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
-@Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
-@Field static final String WS_OUTBOUND_QUEUE_STATE_KEY = 'websocketOutboundQueue'
-@Field static final String WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY = 'websocketOutboundQueueExpiryAt'
-@Field static final String WS_COMMAND_LEDGER_STATE_KEY = 'websocketCommandLedger'
-@Field static final String WS_CONNECTION_GENERATION_STATE_KEY = 'websocketConnectionGeneration'
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
-@Field static final Integer WS_OUTBOUND_MAX_ATTEMPTS = 3
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
-@Field static final Integer WS_COMMAND_LEDGER_EXPIRY_SECONDS = 60
-@Field static final Integer WS_COMMAND_MAX_AGE_SECONDS = 60
-@Field static final Integer WS_OUTBOUND_QUEUE_MAX_SIZE = 128
-@Field static final Integer PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS = 30
 @Field static final Integer WS_CONNECT_TIMEOUT_SECONDS = 20
 @Field static final Integer WS_HEALTH_CHECK_SECONDS = 300
 @Field static final String WS_DISCONNECTED_SINCE_KEY = 'wsDisconnectedSince'
@@ -897,8 +878,6 @@ Boolean hasLineInCapability() {
 @Field static ConcurrentHashMap<String, Integer> pendingGroupedPlayerVolumes = new ConcurrentHashMap<String, Integer>()
 @Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
 
-@Field static final Integer AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS = 15
-@Field static final Integer AUDIO_CLIP_DONE_GRACE_SECONDS = 15
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
@@ -925,8 +904,6 @@ Boolean hasLineInCapability() {
   'lastError',
   'lastErrorReason',
   'lastErrorObservedAt',
-  'currentlyPlayingClip',
-  'activeAudioClipMessage',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -1168,9 +1145,7 @@ void handleSettingsUpdate() {
   synchronizeTrackPositionPreference()
   migrationCleanup()
   pruneOrphanedDriverPersistence()
-  cancelAudioClipWatchdog()
   if(getId()) {
-    audioClipQueueInitialization()
     groupsRegistryInitialization()
     favoritesMapInitialization()
   }
@@ -1201,7 +1176,6 @@ void performImmediateInitialization() {
   pruneOrphanedDriverPersistence()
   cacheBatteryCapability()
   clearLegacyBridgeAttributesForInitialization()
-  cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
   reconcileChildDevices()
 
@@ -1263,10 +1237,6 @@ void clearPendingCommandsForInitialization() {
   String playerId = getId()
   String dni = device.getDeviceNetworkId()
   if(playerId) {
-    audioClipQueueInitialization()
-    getDeviceAudioClipQueue().clear()
-    getDeviceAudioClipQueueHighPriority().clear()
-    getDeviceAudioClipQueueTimers().clear()
     pendingGroupedPlayerVolumes.remove(playerId)
   }
   cancelVolumeFade()
@@ -1276,20 +1246,11 @@ void clearPendingCommandsForInitialization() {
   ['pendingParentAppTtsRequests', 'pendingParentCoordinatorCommands',
    'activeParentCoordinatorCommand', 'parentCommandSequence',
    TRANSPORT_QUEUE_KEY, TRANSPORT_ACTIVE_KEY,
-   WS_OUTBOUND_QUEUE_STATE_KEY,
-   'activeAudioClipCorrelationId', 'activeAudioClipSonosId', 'audioClipPlaying',
-   'audioClipCommandSent', 'audioClipHadDisconnectAfterSend',
-   'audioClipProgressByCorrelationId', 'audioClipQueueStartTime',
-   'audioClipQueueTotalDuration', 'groupSynchronizedAudioClipHold',
    'groupAnnouncementStream', 'announcementPlaybackRestore', 'directStreamTtsRestore',
-   ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY, 'streamTransportIntentGuid',
-   'activeAudioClipMessage', 'currentlyPlayingClip'].each { String key ->
+   ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY, 'streamTransportIntentGuid'].each { String key ->
     state.remove(key)
     atomicState.remove(key)
     runtimeState.remove(key)
-  }
-  synchronized(getWebsocketCommandLedgerLock()) {
-    runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY)
   }
   unschedule('drainParentCoordinatorCommandQueue')
   unschedule('retryParentCoordinatorCommand')
@@ -1297,69 +1258,19 @@ void clearPendingCommandsForInitialization() {
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
 
-  unschedule('expireWebsocketCommandLedgerEntry')
-  unschedule('expireWebsocketOutboundQueueEntry')
   invalidateUpnpRequestsForDevice()
 
   device.deleteCurrentState('sonosPlayerStateUpdate')
   device.deleteCurrentState('sonosPlayerAppRequest')
-  cancelAudioClipWatchdog()
-  removeHiddenJsonRuntimeState('activeAudioClipMessage')
-  removeHiddenJsonRuntimeState('currentlyPlayingClip')
-  removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
   logInfo("Cleared pending player commands for initialization (${dni})")
 }
 
-/** Remove one parent-owned announcement clip from this player's local queues. */
-void clearPendingAudioClipCorrelation(String correlationId) {
-  if(!correlationId || !getId()) { return }
-  audioClipQueueInitialization()
-  getDeviceAudioClipQueue().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
-  getDeviceAudioClipQueueHighPriority().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
-  Map currentRegular = runtimeState.currentlyPlayingClip instanceof Map
-      ? (Map)runtimeState.currentlyPlayingClip : null
-  if(currentRegular?.correlationId?.toString() == correlationId) {
-    removeHiddenJsonRuntimeState('currentlyPlayingClip')
-  }
-  List<Map> outbound = getWebsocketOutboundQueue()
-  outbound.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
-  if(outbound.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = outbound }
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    ledger.removeAll { Map item -> item?.correlationId?.toString() == correlationId }
-    if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
-    else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
-  }
-  Map active = (Map)getAtomicStateValue('activeAudioClipMessage')
-  if(active?.correlationId?.toString() == correlationId) {
-    cancelAudioClipWatchdog()
-    runtimeState.remove('activeAudioClipCorrelationId')
-    runtimeState.remove('activeAudioClipSonosId')
-    runtimeState.remove('audioClipHadDisconnectAfterSend')
-    removeHiddenJsonRuntimeState('activeAudioClipMessage')
-    removeHiddenJsonRuntimeState('currentlyPlayingClip')
-  }
-  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
-      ? (Map)runtimeState.groupAnnouncementStream : null
-  if(announcement?.correlationId?.toString() == correlationId) {
-    runtimeState.remove('groupAnnouncementStream')
-    runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
-  }
-  Map restore = runtimeState.announcementPlaybackRestore instanceof Map
-      ? (Map)runtimeState.announcementPlaybackRestore : null
-  if(restore?.correlationId?.toString() == correlationId) {
-    runtimeState.remove('announcementPlaybackRestore')
-  }
-}
 
 
 void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
   pruneOrphanedDriverPersistence()
-  cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
   migrationCleanup()
   synchronizeTrackPositionPreference()
@@ -1380,7 +1291,6 @@ void reconcileChildDevices() {
   clearLegacyBridgeCurrentStates()
   // Remove the retired audio clip progress state from devices upgraded from
   // versions that exposed it as a current state.
-  clearAudioClipPlaybackProgressCurrentState()
   // These diagnostics are stored in State Variables and are not exposed as
   // device Current States. Remove values created by earlier development builds.
   ['playbackState', 'playbackStateObservedAt', 'lastError'].each { String name ->
@@ -1406,7 +1316,6 @@ void reconcileChildDevices() {
   // Guard: these methods use getId() as a ConcurrentHashMap key, which throws NPE if null.
   // On fresh install, device data isn't set yet — secondaryConfigurationPhase4() will handle this.
   if(getId()) {
-    audioClipQueueInitialization()
     groupsRegistryInitialization()
     favoritesMapInitialization()
     if(getCreateSleepTimerChildDevice()) { getSleepTimer() }
@@ -1430,11 +1339,6 @@ ConcurrentHashMap<String, Object> getRuntimeState() {
   return existing ?: created
 }
 
-Object getWebsocketCommandLedgerLock() {
-  String dni = getDeviceDNI()
-  if(!dni) { return this }
-  return websocketCommandLedgerStripes.get(dni)
-}
 
 void migrateLegacyRuntimeState() {
   Map<String, Object> legacy = [:]
@@ -1457,18 +1361,7 @@ void migrateLegacyRuntimeState() {
 }
 
 Boolean isHiddenJsonStateKey(String name) {
-  return name in ['currentlyPlayingClip', 'activeAudioClipMessage']
-}
-
-String summarizeHiddenJsonState(String name, Object value) {
-  if(name == 'audioClipProgressByCorrelationId') {
-    Integer count = value instanceof Map ? ((Map)value).size() : 0
-    return "${count} clip progress entr${count == 1 ? 'y' : 'ies'}"
-  }
-  Map clip = value instanceof Map ? (Map)value : [:]
-  String origin = clip.origin?.toString() ?: 'audio clip'
-  String correlationId = clip.correlationId?.toString() ?: 'pending'
-  return "${origin} (${correlationId})"
+  return false
 }
 
 String escapeHiddenStateHtml(String value) {
@@ -1498,19 +1391,6 @@ Object fetchHiddenJsonStateValue(Object storedValue) {
 }
 
 void setHiddenJsonRuntimeState(String name, Object value) {
-  if(name == 'audioClipProgressByCorrelationId') {
-    String dni = getDeviceDNI()
-    if(dni) {
-      if(value instanceof Map && !((Map)value).isEmpty()) {
-        audioClipProgressByCorrelationIdByDni.put(dni, new LinkedHashMap<String, Map>((Map<String, Map>)value))
-      } else {
-        audioClipProgressByCorrelationIdByDni.remove(dni)
-      }
-    }
-    state.remove(name)
-    runtimeState.remove(name)
-    return
-  }
   if(value == null) {
     runtimeState.remove(name)
     state.remove(name)
@@ -1521,20 +1401,11 @@ void setHiddenJsonRuntimeState(String name, Object value) {
 }
 
 void removeHiddenJsonRuntimeState(String name) {
-  if(name == 'audioClipProgressByCorrelationId') {
-    String dni = getDeviceDNI()
-    if(dni) { audioClipProgressByCorrelationIdByDni.remove(dni) }
-  }
   runtimeState.remove(name)
   state.remove(name)
 }
 
-Map<String, Map> getAudioClipProgressByCorrelationId() {
-  String dni = getDeviceDNI()
-  if(!dni) { return [:] }
-  Map<String, Map> progress = audioClipProgressByCorrelationIdByDni.get(dni)
-  return progress ?: [:]
-}
+
 
 void registerRinconId() {
   unschedule('registerRinconId')
@@ -1563,7 +1434,6 @@ void websocketHealthCheck() {
       return
     }
 
-    // The socket is retained for audioClip only, so ordinary inactivity is expected.
   } finally {
     scheduleWebsocketHealthCheck()
   }
@@ -1630,7 +1500,6 @@ void secondaryConfigurationPhase4() {
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  audioClipQueueInitialization()
   groupsRegistryInitialization()
   favoritesMapInitialization()
 
@@ -1752,11 +1621,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   }
 
   if(activePlayerIds.isEmpty() && activePlayerDnis.isEmpty()) {
-    Integer clearedEntries = clearStaticMap(audioClipQueue)
-    clearedEntries += clearStaticMap(runtimeStateByDni)
-    clearedEntries += clearStaticMap(audioClipProgressByCorrelationIdByDni)
-    clearedEntries += clearStaticMap(audioClipQueueHighPriority)
-    clearedEntries += clearStaticMap(audioClipQueueTimers)
+    Integer clearedEntries = clearStaticMap(runtimeStateByDni)
     clearedEntries += clearStaticMap(groupsRegistry)
     clearedEntries += clearStaticMap(statesRegistry)
     clearedEntries += clearStaticMap(favoritesMap)
@@ -1782,11 +1647,7 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   if(activePlayerIds.isEmpty() || activePlayerDnis.isEmpty()) { return }
 
   Integer removedEntries = 0
-  removedEntries += pruneStaticMapKeys(audioClipQueue, activePlayerIds)
   removedEntries += pruneStaticMapKeys(runtimeStateByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(audioClipProgressByCorrelationIdByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(audioClipQueueHighPriority, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(audioClipQueueTimers, activePlayerIds)
   removedEntries += pruneStaticMapKeys(groupsRegistry, activePlayerIds)
   removedEntries += pruneStaticMapKeys(statesRegistry, activePlayerIds)
   removedEntries += pruneStaticMapKeys(favoritesMap, activePlayerIds)
@@ -1920,9 +1781,6 @@ void clearStaticDriverStateForCurrentDevice() {
 
   try {
     if(playerId != null && playerId != '') {
-      audioClipQueue?.remove(playerId)
-      audioClipQueueHighPriority?.remove(playerId)
-      audioClipQueueTimers?.remove(playerId)
       groupsRegistry?.remove(playerId)
       statesRegistry?.remove(playerId)
       favoritesMap?.remove(playerId)
@@ -1937,7 +1795,6 @@ void clearStaticDriverStateForCurrentDevice() {
 
     if(dni != null && dni != '') {
       runtimeStateByDni?.remove(dni)
-      audioClipProgressByCorrelationIdByDni?.remove(dni)
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
@@ -1964,21 +1821,6 @@ void onUninstalled() {
 }
 
 
-void audioClipQueueInitialization() {
-  maybeCleanupStaticDriverState()
-  if(!(audioClipQueue instanceof ConcurrentHashMap)) { audioClipQueue = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
-  if(!audioClipQueue.containsKey(getId())) {
-    audioClipQueue[getId()] = new ConcurrentLinkedQueue<Map>()
-  }
-  if(!(audioClipQueueHighPriority instanceof ConcurrentHashMap)) { audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>() }
-  if(!audioClipQueueHighPriority.containsKey(getId())) {
-    audioClipQueueHighPriority[getId()] = new ConcurrentLinkedQueue<Map>()
-  }
-  if(!(audioClipQueueTimers instanceof ConcurrentHashMap)) { audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>() }
-  if(!audioClipQueueTimers.containsKey(getId())) {
-    audioClipQueueTimers[getId()] = new LinkedHashMap()
-  }
-}
 
 
 void groupsRegistryInitialization() {
@@ -2137,7 +1979,7 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     return
   }
   if(useAudioClip) {
-    playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
+    playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString(), getChimeBeforeStandardPriorityTTS())
   } else {
     volume = getAnnouncementVolume(volume)
     componentPlayStreamWithRestoreLocal(streamUrl, ttsDuration, volume)
@@ -2166,7 +2008,7 @@ void devicePlayTextWithAudioClip(String text, BigDecimal volume = null, String v
   if(hasAudioClipCapability() == true) {
     LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
-    playerLoadAudioClip(tts.uri as String, volume, ttsDuration, UUID.randomUUID().toString())
+    playerLoadAudioClip(tts.uri as String, volume, ttsDuration, UUID.randomUUID().toString(), getChimeBeforeStandardPriorityTTS())
   } else {
     logDebug("${device} does not support audioClip; using the streaming TTS fallback")
     volume = getAnnouncementVolume(volume)
@@ -2218,8 +2060,8 @@ void playHighPriorityTTS(String text, Object volume = null, String voice = null)
   if(hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(true)) {
     LinkedHashMap tts = textToSpeech(text, voice)
     Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 0
-    playerLoadAudioClipHighPriority(tts.uri as String, normalizedVolume, UUID.randomUUID().toString(), ttsDuration,
-        false, getChimeBeforeHighPriorityTTS())
+    playerLoadAudioClipHighPriority(tts.uri as String, normalizedVolume, UUID.randomUUID().toString(),
+        ttsDuration, getChimeBeforeHighPriorityTTS())
   } else {
     BigDecimal announcementVolume = getAnnouncementVolume(normalizedVolume) as BigDecimal
     componentPlayTextWithRestoreLocal(text, announcementVolume, voice)
@@ -3071,45 +2913,6 @@ void stop() {
   playerStop()
 }
 
-void stopAnnouncement() {
-  stopAudioClipAnnouncement(false)
-}
-
-void stopHighPriorityAnnouncement() {
-  stopAudioClipAnnouncement(true)
-}
-
-void stopAudioClipAnnouncement(Boolean highPriority) {
-  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  if(runtimeState.audioClipPlaying != true || activeClip == null) {
-    logDebug("No active ${highPriority ? 'high-priority ' : ''}announcement to stop")
-    return
-  }
-
-  Boolean activeClipIsHighPriority = activeClip.priority?.toString() == 'HIGH'
-  if(activeClipIsHighPriority != highPriority) {
-    logDebug("Active announcement priority does not match requested stop (${highPriority ? 'HIGH' : 'regular'})")
-    return
-  }
-
-  String sonosClipId = runtimeState.activeAudioClipSonosId?.toString()
-  String correlationId = activeClip.correlationId?.toString()
-  if(!sonosClipId) {
-    logWarn("Cannot stop announcement ${correlationId ?: 'unknown'} because Sonos has not reported its audioClip ID yet")
-    return
-  }
-
-  Map<String, String> command = [
-    'namespace': 'audioClip:1',
-    'command': 'cancelAudioClip',
-    'playerId': getId()
-  ]
-  Map<String, String> args = ['id': sonosClipId]
-  String message = JsonOutput.toJson([command, args])
-  sendWsMessage(message, [kind: 'audioClipCancel', correlationId: correlationId])
-  logInfo("Requested cancelAudioClip for ${highPriority ? 'high-priority ' : ''}announcement ${correlationId ?: sonosClipId}")
-}
-
 @CompileStatic
 void pause() {
   if(deferCommandToParentDuringGroupOperation('pause')) { return }
@@ -3927,12 +3730,10 @@ void createRemoveRightChannelChildDevice(Boolean create) {
       child = addChildDevice('dwinks', 'Sonos Advanced Secondaries', dni,
         [name: 'Sonos Secondaries', label: "Sonos Right Channel - ${getDeviceDataValue('name')}"])
     }
-    String websocketUrl = "wss://${companionIp}:1443/websocket/api"
     Boolean changed = child.getDataValue('deviceIp') != companionIp ||
-      child.getDataValue('id') != companionId || child.getDataValue('websocketUrl') != websocketUrl
+      child.getDataValue('id') != companionId
     child.updateDataValue('deviceIp', companionIp)
     child.updateDataValue('id', companionId)
-    child.updateDataValue('websocketUrl', websocketUrl)
     if(created || changed) { child.initialize() }
   } catch (UnknownDeviceTypeException e) {
     logException('createRemoveRightChannelChildDevice', e)
@@ -6259,7 +6060,7 @@ Boolean isDebugLoggingEnabled() {
   return loggingEnabled('debug')
 }
 
-// Retain WS namespace bookkeeping for the commands and event streams still in use.
+// Track whether the inbound audioClip status subscription is active.
 @Field static final List<String> WS_NAMESPACES = ['audioClip']
 @Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
@@ -6346,8 +6147,6 @@ void setSecondaryDeviceIps(List<String> ipAddresses) {
   setDeviceDataValue('secondaryDeviceIps', ipAddresses.join(','))
 }
 
-@CompileStatic
-Boolean isCurrentlySubcribedToAudioClipWS() { return getWsSubscriptionValue('audioClip') == 'Subscribed' }
 String getGroupId() {
   return this.device.currentValue('groupId', true)?.toString() ?: getDeviceDataValue('groupId')
 }
@@ -6822,169 +6621,24 @@ void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocal
 String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
 
 @CompileStatic
-ConcurrentLinkedQueue<Map> getDeviceAudioClipQueue() {
-  audioClipQueueInitialization()
-  return audioClipQueue[getId()]
-}
-
-@CompileStatic
-ConcurrentLinkedQueue<Map> getDeviceAudioClipQueueHighPriority() {
-  audioClipQueueInitialization()
-  return audioClipQueueHighPriority[getId()]
-}
-
-@CompileStatic
-LinkedHashMap getDeviceAudioClipQueueTimers() {
-  audioClipQueueInitialization()
-  return audioClipQueueTimers[getId()]
-}
-
-@CompileStatic
-void addTimerToAudioClipQueueTimers(Long clipDuration, String clipUri) {
-  LinkedHashMap timers = getDeviceAudioClipQueueTimers()
-  timers[clipUri] = Instant.now().getEpochSecond() + clipDuration
-  // runIn(clipDuration + 10, 'dequeueAudioClip')
-}
-
-@CompileStatic
-Integer getAudioClipQueueLength() {
-  audioClipQueueInitialization()
-  return getDeviceAudioClipQueue().size() as Integer
-}
-
-@CompileStatic
-Boolean getAudioClipQueueIsEmpty() {
-  audioClipQueueInitialization()
-  return getDeviceAudioClipQueue().size() == 0
-}
-
-/** Does the regular queue contain work that has not started yet? */
-Boolean hasQueuedRegularAudioClip() {
-  ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
-  Map currentRegular = runtimeState.currentlyPlayingClip instanceof Map
-      ? (Map)runtimeState.currentlyPlayingClip : null
-  Map head = queue.peek()
-  Boolean retainedActiveHead = currentRegular?.correlationId != null &&
-      currentRegular.correlationId.toString() == head?.correlationId?.toString()
-  return retainedActiveHead ? queue.size() > 1 : !queue.isEmpty()
-}
-
-// Correlation IDs capture queue ownership without logging clip URLs or speech text.
-void traceAudioClipQueues(String stage) {
-  if(!loggingEnabled('trace')) { return }
-  Map active = runtimeState.activeAudioClipMessage as Map
-  logDebug("AudioClipQueue ${stage}: playing=${runtimeState.audioClipPlaying}, active=${runtimeState.activeAudioClipCorrelationId}, activePriority=${active?.priority ?: 'REGULAR'}, currentRegular=${(runtimeState.currentlyPlayingClip as Map)?.correlationId}, regular=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, high=${getDeviceAudioClipQueueHighPriority().collect { Map clip -> clip.correlationId }}")
-}
-
-Boolean removeActiveRegularAudioClipFromQueue(String correlationId, String outcome) {
-  if(!correlationId) { return false }
-  ConcurrentLinkedQueue<Map> regularQueue = getDeviceAudioClipQueue()
-  Map head = regularQueue.peek()
-  if(head?.correlationId?.toString() != correlationId) {
-    logWarn("Cannot remove ${outcome} regular audio clip ${correlationId}; queue head is ${head?.correlationId ?: 'empty'}")
-    return false
-  }
-  Boolean removed = regularQueue.remove(head)
-  if(removed) {
-    logDebug("Removed ${outcome} regular audio clip ${correlationId} from queue; remaining=${regularQueue.collect { Map clip -> clip.correlationId }}")
-  }
-  return removed
-}
-
-void rotateAudioClipCorrelationId(Map clipMessage) {
-  if(!(clipMessage instanceof Map)) { return }
-  String nextGuid = UUID.randomUUID().toString()
-  ['leftChannel', 'rightChannel'].each { String channel ->
-    String rawCommand = clipMessage[channel] as String
-    if(!rawCommand) { return }
-    try {
-      List commandEnvelope = (List)getSharedJsonSlurper().parseText(rawCommand)
-      if(commandEnvelope.size() >= 2 && commandEnvelope[1] instanceof Map) {
-        ((Map)commandEnvelope[1]).name = nextGuid
-        clipMessage[channel] = JsonOutput.toJson(commandEnvelope)
-      }
-    } catch(Exception e) {
-      logWarn("Could not assign a fresh clip GUID for replay: ${e.message}")
-    }
-  }
-  clipMessage.correlationId = nextGuid
-  logDebug("Assigned new clip GUID ${nextGuid} for resumed ${clipMessage.origin ?: 'audio clip'}")
-}
-
-void interruptActiveAudioClipForHighPriority() {
-  String activeGuid = runtimeState.activeAudioClipCorrelationId as String
-  if(!activeGuid) { return }
-  removeQueuedAudioClipCommand(activeGuid)
-  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
-      : new LinkedHashMap<String, Map>()
-  Map progress = clipProgress[activeGuid]
-  if(progress instanceof Map) {
-    progress.phase = 'INTERRUPTED_BY_HIGH_PRIORITY'
-    progress.interruptedAt = now()
-    clipProgress[activeGuid] = progress
-    setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-    publishAudioClipProgressEvent(progress, null)
-  }
-  logInfo("Suspending regular audio clip ${activeGuid} for high-priority playback")
-}
-
-void removeQueuedAudioClipCommand(String correlationId) {
-  if(!correlationId) { return }
-  List<Map> queued = getWebsocketOutboundQueue()
-  List<Map> retained = queued.findAll { Map entry ->
-    !(entry?.kind == 'audioClip' && entry?.correlationId?.toString() == correlationId)
-  }
-  if(retained.size() != queued.size()) {
-    if(retained.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-    else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained }
-    logDebug("Removed unsent audio clip ${correlationId} from the WebSocket outbound queue for priority preemption")
-  }
-}
-
-@CompileStatic
 Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 'open' }
-
-Boolean isWebsocketSendAllowed() {
-  return isWebsocketConnected() && runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true
-}
 
 @CompileStatic
 String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
 
 void setWebSocketStatus(String status) {
   String previousStatus = getWebSocketStatus()
-  logDebug("Primary WebSocket status transition: previous=${previousStatus}, next=${status}, outboundQueue=${getWebsocketOutboundQueue().size()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+  logDebug("Primary WebSocket status transition: previous=${previousStatus}, next=${status}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
-    Long generation = ((runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long) + 1L
-    runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] = generation
-    // The player WebSocket is reserved for audioClip commands. Re-establish
-    // only that subscription after reconnecting.
-    List<Map> pendingCommands = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue())
-    runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
-    runtimeState.audioClipSubscriptionRequestPending = false
+    // Re-establish the audioClip status subscription after reconnecting.
     subscribeToAudioClip()
-    List<Map> subscriptionCommands = getWebsocketOutboundQueue()
-    if(!pendingCommands.isEmpty()) {
-      subscriptionCommands.addAll(pendingCommands)
-      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = subscriptionCommands
-    }
-    scheduleNextWebsocketOutboundQueueExpiry()
-    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
   }
   else {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
-    runtimeState.audioClipSubscriptionRequestPending = false
-    cancelWebsocketCommandLedgerForClosedConnection(status)
-    if(runtimeState.audioClipCommandSent == true && runtimeState.activeAudioClipCorrelationId) {
-      runtimeState.audioClipHadDisconnectAfterSend = true
-      pauseAudioClipWatchdog()
-      logWarn("WebSocket disconnected while audio clip ${runtimeState.activeAudioClipCorrelationId} awaited playback status; command will not be resent")
-    }
   }
 }
 
@@ -7124,7 +6778,7 @@ void clearPlaylistsMap() {
 // Websocket Connection and Initialization
 // =============================================================================
 void webSocketStatus(String message) {
-  logDebug("Primary WebSocket status callback received: message=${message}, currentStatus=${getWebSocketStatus()}, outboundQueue=${getWebsocketOutboundQueue().size()}")
+  logDebug("Primary WebSocket status callback received: message=${message}, currentStatus=${getWebSocketStatus()}")
   if(message == 'failure: null') {
     setWebSocketStatus('closed')
     scheduleWebSocketReconnect()
@@ -7220,8 +6874,7 @@ void wsConnect() {
   runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
     logInfo("Requesting primary WebSocket connection; previousStatus=${getWebSocketStatus()}, retryCount=${runtimeState.wsRetryCount ?: 0}")
-    // Hubitat's native ping detects a half-open transport independently of
-    // command responses. A missing application ACK must not cycle the socket.
+    // Hubitat's native ping detects a half-open transport independently of application events.
     interfaces.webSocket.connect(websocketUrl, headers: headers,
         ignoreSSLIssues: true, pingInterval: WS_PING_INTERVAL_SECONDS)
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
@@ -7248,447 +6901,6 @@ void websocketConnectWatchdog() {
 void wsClose() {
   logInfo("Closing primary WebSocket; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
   interfaces.webSocket.close()
-}
-
-List<Map> getWebsocketOutboundQueue() {
-  return runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] instanceof List
-      ? (List<Map>)runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY]
-      : []
-}
-
-void queueWebsocketMessage(String message, Integer attempts = 0, Map metadata = [:]) {
-  if(!message) { return }
-  Map descriptor = describeWebSocketCommand(message)
-  if(descriptor.namespace != 'audioClip' || !(descriptor.wireCommand in ['subscribe', 'loadAudioClip', 'cancelAudioClip'])) {
-    logWarn('Dropping a WebSocket message outside the audioClip namespace')
-    return
-  }
-  List<Map> queue = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue())
-  Map entry = [message: message, attempts: attempts ?: 0,
-      createdAt: metadata?.createdAt ?: now(),
-      expiresAt: metadata?.expiresAt ?: now() + WS_COMMAND_MAX_AGE_SECONDS * 1000L]
-  if(metadata instanceof Map) { entry.putAll(metadata) }
-  entry.putAll(descriptor)
-  if(entry.correlationId) {
-    queue = queue.findAll { Map queued -> queued.correlationId?.toString() != entry.correlationId.toString() || queued.kind == 'audioClipSubscribe' }
-  }
-  if(queue.size() >= WS_OUTBOUND_QUEUE_MAX_SIZE) {
-    logWarn('Dropping newest audioClip WebSocket message because the queue is full')
-    return
-  }
-  queue.add(entry)
-  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-  scheduleNextWebsocketOutboundQueueExpiry()
-}
-
-List<Map> removeExpiredWebsocketQueueEntries(List<Map> queue) {
-  Long currentTime = now()
-  List<Map> retained = []
-  (queue ?: []).each { Map entry ->
-    if(entry?.expiresAt != null && (entry.expiresAt as Long) <= currentTime) {
-      logDebug("Dropping expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${entry.queueId}")
-    } else if(entry != null) { retained.add(entry) }
-  }
-  return retained
-}
-
-/** One timer services all queued-command expirations, ordered by expiresAt. */
-void scheduleNextWebsocketOutboundQueueExpiry() {
-  List<Map> queue = getWebsocketOutboundQueue()
-  List<Long> deadlines = queue.collect { Map entry ->
-    entry.expiresAt == null ? null : (entry.expiresAt as Long)
-  }.findAll { Long deadline -> deadline != null }
-  Long nextDeadline = deadlines.isEmpty() ? null : deadlines.min()
-  Long scheduledDeadline = (runtimeState[WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY] ?: 0L) as Long
-  if(nextDeadline == null) {
-    if(scheduledDeadline > 0L) { unschedule('expireWebsocketOutboundQueueEntry') }
-    runtimeState.remove(WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY)
-    return
-  }
-  if(scheduledDeadline > 0L && scheduledDeadline <= nextDeadline) { return }
-  unschedule('expireWebsocketOutboundQueueEntry')
-  runtimeState[WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY] = nextDeadline
-  runInMillis(Math.max(1L, nextDeadline - now()), 'expireWebsocketOutboundQueueEntry', [overwrite: true])
-}
-
-void expireWebsocketOutboundQueueEntry(Map data = [:]) {
-  runtimeState.remove(WS_OUTBOUND_QUEUE_EXPIRY_AT_STATE_KEY)
-  Long currentTime = now()
-  List<Map> queue = getWebsocketOutboundQueue()
-  List<Map> retained = queue.findAll { Map entry ->
-    Long deadline = (entry?.expiresAt ?: 0L) as Long
-    if(deadline <= currentTime) {
-      logDebug("Expired queued WebSocket command ${entry.namespace ?: 'unknown'}.${entry.wireCommand ?: 'unknown'} queueId=${entry.queueId}; it will not be replayed")
-      return false
-    }
-    return true
-  }
-  if(retained.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = retained }
-  scheduleNextWebsocketOutboundQueueExpiry()
-}
-
-Map describeWebSocketCommand(String message) {
-  try {
-    List payload = (List)getSharedJsonSlurper().parseText(message)
-    Map command = payload && payload[0] instanceof Map ? (Map)payload[0] : [:]
-    Map args = payload.size() > 1 && payload[1] instanceof Map ? (Map)payload[1] : [:]
-    String namespace = command.namespace?.toString()
-    String wireCommand = command.command?.toString()
-    String targetKind = command.playerId != null ? 'playerId' :
-        (command.groupId != null ? 'groupId' : (command.householdId != null ? 'householdId' : null))
-    String targetId = targetKind ? command[targetKind]?.toString() : null
-    String responseType = expectedWebsocketResponseType(namespace, wireCommand)
-    return [namespace: namespace, wireCommand: wireCommand, targetKind: targetKind,
-        targetId: targetId, args: args, expectedResponseType: responseType]
-  } catch(Exception e) {
-    logDebug("Could not describe outbound WebSocket command: ${e.message}")
-    return [:]
-  }
-}
-
-String expectedWebsocketResponseType(String namespace, String wireCommand) {
-  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'subscribe') { return 'none' }
-  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'loadAudioClip') { return 'audioClip' }
-  if(namespace in ['audioClip', 'audioClip:1'] && wireCommand == 'cancelAudioClip') { return 'none' }
-  return null
-}
-
-Map registerWebsocketCommandLedgerEntry(String message, Map outbound, Long createdAt = null) {
-  Map descriptor = describeWebSocketCommand(message)
-  if(descriptor.isEmpty()) { return [:] }
-  Long sentAt = now()
-  Long generation = (runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long
-  String entryId = UUID.randomUUID().toString()
-  Map entry = new LinkedHashMap(descriptor)
-  entry.putAll([entryId: entryId, connectionGeneration: generation, message: message,
-      createdAt: createdAt ?: sentAt, sentAt: sentAt,
-      expiresAt: (createdAt ?: sentAt) + WS_COMMAND_MAX_AGE_SECONDS * 1000L,
-      ])
-  entry.args = descriptor.args instanceof Map ? new LinkedHashMap((Map)descriptor.args) : [:]
-  entry.kind = outbound?.kind
-  entry.correlationId = outbound?.correlationId ?: entry.args?.name
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    ledger.add(entry)
-    runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger
-  }
-  outbound.ledgerEntryId = entryId
-  runIn(WS_COMMAND_LEDGER_EXPIRY_SECONDS, 'expireWebsocketCommandLedgerEntry',
-      [data: [entryId: entryId, connectionGeneration: generation], overwrite: false])
-  logDebug("WebSocket command ledger armed id=${entryId} generation=${generation} fingerprint=${entry.namespace}.${entry.wireCommand} target=${entry.targetId ?: 'n/a'} expectedType=${entry.expectedResponseType ?: 'unspecified'}")
-  return entry
-}
-
-void removeWebsocketCommandLedgerEntryById(String entryId, String reason) {
-  if(!entryId) { return }
-  Map removed = null
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    removed = ledger.find { Map item -> item.entryId?.toString() == entryId } as Map
-    if(removed != null) {
-      ledger.remove(removed)
-      if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
-      else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
-    }
-  }
-  if(removed != null) { logDebug("Removed WebSocket command ledger entry id=${entryId} fingerprint=${removed.namespace}.${removed.wireCommand}; reason=${reason}") }
-}
-
-void observeWebsocketCommandResponse(Map eventType, Map eventData) {
-  String response = eventType?.response?.toString()
-  String namespace = eventType?.namespace?.toString()
-  if(!response || !namespace) { return }
-  Long generation = (runtimeState[WS_CONNECTION_GENERATION_STATE_KEY] ?: 0L) as Long
-  Map matched = null
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    matched = ledger.find { Map entry ->
-      if(entry.connectionGeneration != generation || entry.namespace?.toString() != namespace ||
-          entry.wireCommand?.toString() != response) { return false }
-      String returnedTarget = eventType.playerId?.toString() ?: eventType.groupId?.toString() ?: eventType.householdId?.toString()
-      if(returnedTarget && entry.targetId && returnedTarget != entry.targetId.toString()) { return false }
-      if(namespace == 'audioClip' && response == 'loadAudioClip') {
-        String returnedCorrelation = eventData?.name?.toString()
-        if(eventType.success == true && (!returnedCorrelation || !entry.correlationId || returnedCorrelation != entry.correlationId.toString())) { return false }
-        if(returnedCorrelation && entry.correlationId && returnedCorrelation != entry.correlationId.toString()) { return false }
-      }
-      if(eventType.success == true && entry.expectedResponseType && eventType.type?.toString() != entry.expectedResponseType.toString()) { return false }
-      return true
-    } as Map
-    if(matched != null) {
-      ledger.remove(matched)
-      if(ledger.isEmpty()) { runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY) }
-      else { runtimeState[WS_COMMAND_LEDGER_STATE_KEY] = ledger }
-    }
-  }
-  if(matched == null) { return }
-  Boolean success = eventType.success == true
-  String outcome = success ? 'success' : 'failure'
-  String detail = success ? "type=${eventType.type}" : "type=${eventType.type}, error=${eventData?.errorCode ?: eventData?.reason ?: 'unspecified'}"
-  logDebug("WebSocket command ledger ${outcome}: id=${matched.entryId}, fingerprint=${namespace}.${response}, target=${matched.targetId ?: 'n/a'}, ${detail}")
-}
-
-/** Expire correlation state only. Command response silence is not transport evidence. */
-void expireWebsocketCommandLedgerEntry(Map data = [:]) {
-  String entryId = data?.entryId?.toString()
-  Long generation = data?.connectionGeneration != null ? (data.connectionGeneration as Long) : -1L
-  Map entry
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> ledger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    Map pending = ledger.find { Map item -> item.entryId?.toString() == entryId } as Map
-    if(pending != null) { entry = new LinkedHashMap(pending) }
-  }
-  if(entry == null || entry.connectionGeneration != generation) { return }
-  removeWebsocketCommandLedgerEntryById(entryId, 'response correlation expired; transport state unchanged')
-  if(entry.namespace == 'audioClip' && entry.wireCommand == 'subscribe') {
-    logWarn('WebSocket audioClip subscription response was not received before correlation expiry')
-  }
-}
-
-List<Map> takeWebsocketCommandLedgerBatch() {
-  List<Map> ledger = []
-  synchronized(getWebsocketCommandLedgerLock()) {
-    List<Map> activeLedger = runtimeState[WS_COMMAND_LEDGER_STATE_KEY] instanceof List
-        ? (List<Map>)runtimeState[WS_COMMAND_LEDGER_STATE_KEY] : []
-    ledger = activeLedger.collect { Map entry -> new LinkedHashMap(entry) }
-    runtimeState.remove(WS_COMMAND_LEDGER_STATE_KEY)
-  }
-  return ledger
-}
-
-void cancelWebsocketCommandLedgerForClosedConnection(String status) {
-  if(status == 'open') { return }
-  List<Map> pending = takeWebsocketCommandLedgerBatch()
-  if(!pending.isEmpty()) { logWarn("Cleared ${pending.size()} pending audioClip WebSocket acknowledgement(s) after socket status ${status}; clips will not be replayed") }
-}
-
-void flushWebsocketOutboundQueue() {
-  if(!isWebsocketSendAllowed()) {
-    logDebug("Outbound WebSocket queue drain deferred; primary websocketStatus=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
-    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
-    return
-  }
-
-  List<Map> queue = removeExpiredWebsocketQueueEntries(getWebsocketOutboundQueue())
-  if(queue.isEmpty()) { runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY) }
-  else { runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue }
-  logDebug("Starting outbound WebSocket queue drain: queued=${queue.size()}, primaryStatus=${getWebSocketStatus()}")
-  runtimeState.remove(WS_OUTBOUND_QUEUE_STATE_KEY)
-  while(!queue.isEmpty()) {
-    if(!isWebsocketSendAllowed()) {
-      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-      scheduleNextWebsocketOutboundQueueExpiry()
-      logDebug("Stopping outbound WebSocket drain because transport is no longer sendable; remaining=${queue.size()}")
-      if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
-      return
-    }
-    Map entry = (Map)queue.remove(0)
-    String message = entry?.message as String
-    Integer attempts = (entry?.attempts ?: 0) as Integer
-    if(!message) { continue }
-    if(entry?.kind == 'audioClip' && !isCurrentlySubcribedToAudioClipWS()) {
-      logDebug("Holding audioClip queue entry until primary audioClip subscription is active: correlation=${entry?.correlationId}, queueRemaining=${queue.size() + 1}")
-      queue.add(0, entry)
-      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-      scheduleNextWebsocketOutboundQueueExpiry()
-      if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
-      return
-    }
-    String pairedRightMessage = entry?.pairedRightChannelMessage?.toString()
-    ChildDeviceWrapper pairedRightChannel = pairedRightMessage ? getRightChannelChild() : null
-    Boolean secondaryExpired = entry.pairedSecondaryExpired == true
-    if(pairedRightMessage && !secondaryExpired && (!pairedRightChannel || pairedRightChannel.getDataValue('websocketStatus') != 'open')) {
-      logDebug("Holding paired audioClip before either channel send: correlation=${entry.correlationId}, primary=open, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}, timeoutExpired=${secondaryExpired}")
-      queue.add(0, entry)
-      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-      scheduleNextWebsocketOutboundQueueExpiry()
-      if(pairedRightChannel) {
-        watchRightChannelWebsocket(pairedRightChannel)
-        pairedRightChannel.initializeWebsocketConnection()
-      } else {
-        logInfo('Paired audio clip is waiting for the right-channel socket before dispatch.')
-      }
-      schedulePairedAudioClipSecondaryTimeout(entry)
-      return
-    }
-    Boolean primarySendReturned = false
-    try {
-      logDebug("Dispatching audioClip primary channel: correlation=${entry?.correlationId}, paired=${pairedRightMessage != null}, secondaryStatus=${pairedRightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, secondaryExpired=${secondaryExpired}, attempts=${attempts}")
-      registerWebsocketCommandLedgerEntry(message, entry, entry.createdAt as Long)
-      interfaces.webSocket.sendMessage(message)
-      primarySendReturned = true
-      Boolean rightSent = false
-      if(pairedRightMessage && !secondaryExpired) {
-        rightSent = pairedRightChannel.playerLoadAudioClipForSynchronizedRelease(
-          pairedRightMessage, entry.correlationId?.toString()) == true
-        pairedRightChannel.completeSynchronizedAudioClipRelease(entry.correlationId?.toString())
-        if(!rightSent) {
-          logInfo("Secondary audio clip send failed after primary dispatch for ${entry.correlationId}; not replaying the secondary clip")
-        }
-      }
-      logDebug("AudioClip channel dispatch completed: correlation=${entry?.correlationId}, primary=sent, secondary=${!pairedRightMessage ? 'not paired' : (secondaryExpired ? 'timed out; skipped' : (rightSent ? 'sent' : 'failed'))}")
-      if(entry?.kind == 'audioClip') { audioClipCommandSent(entry.correlationId as String) }
-    } catch(Exception e) {
-      removeWebsocketCommandLedgerEntryById(entry?.ledgerEntryId?.toString(), 'send threw')
-      logDebug("Outbound WebSocket send threw for correlation=${entry?.correlationId ?: 'n/a'}, kind=${entry?.kind ?: 'unknown'}, attempt=${attempts + 1}: ${e.message}")
-      if(primarySendReturned && pairedRightMessage) {
-        logInfo("Secondary audio clip dispatch threw after primary dispatch for ${entry.correlationId}; not replaying either channel")
-        try {
-          pairedRightChannel?.completeSynchronizedAudioClipRelease(entry.correlationId?.toString())
-        } catch(Exception completionError) {
-          logDebug("Could not complete secondary release logging for ${entry.correlationId}: ${completionError.message}")
-        }
-        audioClipCommandSent(entry.correlationId as String)
-        continue
-      }
-        Integer nextAttempt = attempts + 1
-      if(nextAttempt >= WS_OUTBOUND_MAX_ATTEMPTS) {
-        if(entry?.kind in ['audioClip', 'audioClipSubscribe']) {
-          entry.attempts = nextAttempt
-          queue.add(0, entry)
-          runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-          scheduleNextWebsocketOutboundQueueExpiry()
-          logWarn("Keeping unsent audio clip WebSocket message (${entry.kind}, ${entry.correlationId ?: 'subscription'}) queued after ${nextAttempt} send attempts: ${e.message}")
-          setWebSocketStatus('closed')
-          scheduleWebSocketReconnect()
-          return
-        }
-        logError("Dropping WebSocket message after ${WS_OUTBOUND_MAX_ATTEMPTS} attempts: ${e.message}")
-        continue
-      }
-      entry.attempts = nextAttempt
-      queue.add(0, entry)
-      runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-      scheduleNextWebsocketOutboundQueueExpiry()
-      setWebSocketStatus('closed')
-      scheduleWebSocketReconnect()
-      return
-    }
-  }
-  scheduleNextWebsocketOutboundQueueExpiry()
-  logDebug("Outbound WebSocket queue drain completed: remaining=${getWebsocketOutboundQueue().size()}, primaryStatus=${getWebSocketStatus()}")
-}
-
-void watchRightChannelWebsocket(ChildDeviceWrapper rightChannel) {
-  logDebug("Tracking right-channel WebSocket status through child-to-parent callbacks: child=${rightChannel?.displayName}, dni=${rightChannel?.getDeviceNetworkId()}, status=${rightChannel?.getDataValue('websocketStatus')}")
-}
-
-void rightChannelWebsocketStatusChanged(String status, String childDeviceNetworkId) {
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(rightChannel?.getDeviceNetworkId()?.toString() != childDeviceNetworkId) {
-    logDebug("Ignoring right-channel WebSocket status from unexpected child: dni=${childDeviceNetworkId}, expected=${rightChannel?.getDeviceNetworkId()}")
-    return
-  }
-  String statusDetail = "value=${status}, child=${childDeviceNetworkId}, primaryStatus=${getWebSocketStatus()}, queued=${getWebsocketOutboundQueue().size()}"
-  if(status in ['error', 'connect timed out', 'unknown']) {
-    logWarn("Best-effort right-channel WebSocket failure: ${statusDetail}")
-  } else {
-    logDebug("Right-channel WebSocket status callback: ${statusDetail}")
-  }
-  if(status == 'open') {
-    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
-    else { logDebug('Right-channel socket opened first; paired entry remains queued until the primary socket opens') }
-  }
-}
-
-/** Authorize a right-channel-only connection without restarting the primary player. */
-
-
-void rightChannelWebsocketCommandResponse(String result, String correlationId, String errorCode, String childDeviceNetworkId) {
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(rightChannel?.getDeviceNetworkId()?.toString() != childDeviceNetworkId) { return }
-  logDebug("Paired right-channel WebSocket audioClip response: result=${result}, correlation=${correlationId ?: 'n/a'}, error=${errorCode ?: 'n/a'}, child=${childDeviceNetworkId}")
-}
-
-void schedulePairedAudioClipSecondaryTimeout(Map entry) {
-  if(!entry?.pairedRightChannelMessage || entry.pairedSecondaryExpired == true || !entry.correlationId) { return }
-  if(entry.pairedSecondaryDeadline == null) {
-    entry.pairedSecondaryDeadline = now() + (PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS * 1000L)
-  }
-  if(entry.pairedSecondaryTimeoutScheduled == true) { return }
-  Long remainingMillis = Math.max(0L, (entry.pairedSecondaryDeadline as Long) - now())
-  Integer delaySeconds = Math.max(1, Math.ceil(remainingMillis / 1000.0d) as Integer)
-  entry.pairedSecondaryTimeoutScheduled = true
-  logDebug("Scheduled secondary-open timeout: correlation=${entry.correlationId}, delay=${delaySeconds}s, deadline=${entry.pairedSecondaryDeadline}, secondaryStatus=${getRightChannelChild()?.getDataValue('websocketStatus') ?: 'child unavailable'}")
-  runIn(delaySeconds, 'expirePairedAudioClipSecondary',
-      [data: [correlationId: entry.correlationId.toString()], overwrite: false])
-}
-
-void expirePairedAudioClipSecondary(Map data) {
-  String correlationId = data?.correlationId?.toString()
-  if(!correlationId) {
-    logDebug('Ignored secondary-open timeout without a correlation ID')
-    return
-  }
-  List<Map> queue = getWebsocketOutboundQueue()
-  Map entry = queue.find { Map queued -> queued?.correlationId?.toString() == correlationId }
-  if(entry == null || entry.pairedSecondaryExpired == true) {
-    logDebug("Secondary-open timeout is stale; no pending paired queue entry remains for ${correlationId}")
-    return
-  }
-  ChildDeviceWrapper rightChannel = getRightChannelChild()
-  if(rightChannel?.getDataValue('websocketStatus') == 'open') {
-    logDebug("Secondary socket reported open before timeout handling for ${correlationId}; preserving paired dispatch")
-    if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
-    else { logDebug("Secondary opened before timeout for ${correlationId}, but primary remains ${getWebSocketStatus()}; preserving paired entry") }
-    return
-  }
-  entry.pairedSecondaryExpired = true
-  entry.remove('pairedSecondaryTimeoutScheduled')
-  runtimeState[WS_OUTBOUND_QUEUE_STATE_KEY] = queue
-  logDebug("Secondary-open timeout expired: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, queued=${queue.size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'child unavailable'}")
-  logInfo("Secondary socket did not report open within ${PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS} seconds for ${correlationId}; continuing with primary only")
-  if(isWebsocketConnected()) { flushWebsocketOutboundQueue() }
-  else { logDebug("Primary-only fallback remains queued until primary socket opens: correlation=${correlationId}") }
-}
-
-Boolean sendWsMessage(String message, Map metadata = [:]) {
-  if(!message) { return false }
-  Map descriptor = describeWebSocketCommand(message)
-  if(!descriptor.namespace || !descriptor.wireCommand || !descriptor.expectedResponseType) {
-    logWarn('Refusing to send a WebSocket command without a known response fingerprint')
-    return false
-  }
-  if(!isWebsocketSendAllowed()) {
-    queueWebsocketMessage(message, 0, metadata)
-    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) { wsConnect() }
-    return false
-  }
-
-  List<Map> queued = getWebsocketOutboundQueue()
-  if(!queued.isEmpty() && metadata?.kind != 'audioClipSubscribe') {
-    queueWebsocketMessage(message, 0, metadata)
-    flushWebsocketOutboundQueue()
-    return false
-  }
-  if(metadata?.kind == 'audioClip' && !isCurrentlySubcribedToAudioClipWS()) {
-    queueWebsocketMessage(message, 0, metadata)
-    if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
-    return false
-  }
-  Map outbound = new LinkedHashMap(metadata ?: [:])
-  outbound.message = message
-  outbound.createdAt = outbound.createdAt ?: now()
-  outbound.expiresAt = outbound.expiresAt ?: ((outbound.createdAt as Long) + WS_COMMAND_MAX_AGE_SECONDS * 1000L)
-  outbound.putAll(describeWebSocketCommand(message))
-  try {
-    registerWebsocketCommandLedgerEntry(message, outbound, outbound.createdAt as Long)
-    interfaces.webSocket.sendMessage(message)
-    if(metadata?.kind == 'audioClip') { audioClipCommandSent(metadata.correlationId as String) }
-    return true
-  } catch(Exception e) {
-    removeWebsocketCommandLedgerEntryById(outbound.ledgerEntryId?.toString(), 'send threw')
-    queueWebsocketMessage(message, 1, metadata)
-    setWebSocketStatus('closed')
-    logWarn("WebSocket send failed; queued message for retry: ${e.message}")
-    scheduleWebSocketReconnect()
-    return false
-  }
 }
 
 void initializeWebsocketConnection() { wsConnect() }
@@ -7731,23 +6943,14 @@ void handleContentDirectoryPayload(String xmlBody) {
 
 @CompileStatic
 void subscribeToAudioClip() {
-  if(runtimeState.audioClipSubscriptionRequestPending == true) { return }
-  Map command = [
-    'namespace':'audioClip',
-    'command':'subscribe',
-    'playerId':"${getId()}"
-  ]
-  Map args = [:]
-  String json = JsonOutput.toJson([command,args])
-  logWebSocketCommandPayload(command, json)
-  runtimeState.audioClipSubscriptionRequestPending = true
-  sendWsMessage(json, [kind: 'audioClipSubscribe'])
-}
-
-void retryAudioClipSubscription() {
-  if(runtimeState.audioClipPlaying == true && runtimeState.activeAudioClipCorrelationId &&
-      isCurrentlySubcribedToAudioClipWS() != true && runtimeState.audioClipSubscriptionRequestPending != true && isWebsocketConnected()) {
-    subscribeToAudioClip()
+  Map command = [namespace: 'audioClip', command: 'subscribe', playerId: getId()]
+  String json = JsonOutput.toJson([command, [:]])
+  logWebSocketSubscriptionPayload(json)
+  try {
+    interfaces.webSocket.sendMessage(json)
+  } catch(Exception e) {
+    setWsSubscriptionValue('audioClip', 'Unsubscribed')
+    logWarn("Could not subscribe to audioClip status events: ${e.message}")
   }
 }
 
@@ -8527,531 +7730,24 @@ Integer getAnnouncementVolume(BigDecimal requestedVolume) {
 
 @CompileStatic
 void playerLoadAudioClipHighPriority(String uri = null, BigDecimal volume = null, String correlationId = null,
-    Integer duration = 0, Boolean deferStart = false, Boolean chimeBeforeTTS = false,
-    Boolean holdAfterChime = false) {
+    Integer duration = 0, Boolean chimeBeforeTTS = false) {
   if(deferCommandToParentDuringGroupOperation('loadHighPriorityAudioClip', [uri, volume, correlationId, duration])) { return }
-  logDebug('playerLoadAudioClipHighPriority')
-  String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
-
-  Map<String,String> command = [
-    'namespace':'audioClip',
-    'command':'loadAudioClip',
-    'playerId':"${getId()}".toString()
-  ]
-  Map args = ['name': clipCorrelationId, 'appId': 'com.hubitat.sonos', 'priority': 'HIGH']
-  if(uri) {args.streamUrl = uri}
-  args.volume = getAnnouncementVolume(volume)
-  String json = JsonOutput.toJson([command,args])
-  Map audioClip = [ leftChannel: json, priority: 'HIGH' ]
-  if(duration != null && duration > 0) { audioClip.duration = duration }
-  if(loadAudioClipOnRightChannel()) {
-    command.playerId = "${getRightChannelId()}".toString()
-    audioClip.rightChannel = JsonOutput.toJson([command,args])
-  }
-  audioClip.uri = uri
-  audioClip.origin = 'high-priority-player-tts'
-  audioClip.correlationId = clipCorrelationId
-  audioClip.groupAnnouncementCorrelationId = correlationId
-  addAudioClipCorrelation(audioClip)
-
-  // A dispatched priority clip has already left the queue. Include the active
-  // payload so another priority request cannot overwrite the suspended queue
-  // or release the dispatcher while that clip is still playing.
-  ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
-  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  Boolean audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
-  Boolean highPriorityActive = audioClipPlaying == true && activeClip?.priority == 'HIGH'
-  Boolean isFirstHighPriority = highPriorityQueue.isEmpty() && !highPriorityActive
-
-  traceAudioClipQueues("priority-admission incoming=${clipCorrelationId}, first=${isFirstHighPriority}, volume=${args.volume}")
-  if(isFirstHighPriority) {
-    // Leave the unfinished regular queue intact. Its head may be the active
-    // clip, which must resume ahead of regular clips submitted during priority playback.
-    interruptActiveAudioClipForHighPriority()
-    // Cancel the regular clip timer and release the dispatcher for priority audio.
-    cancelAudioClipWatchdog()
-  }
-
-  if(chimeBeforeTTS == true) {
-    String chimeCorrelationId = UUID.randomUUID().toString()
-    Map<String,String> chimeCommand = [
-      'namespace':'audioClip',
-      'command':'loadAudioClip',
-      'playerId':"${getId()}".toString()
-    ]
-    Map chimeArgs = [
-      'name': chimeCorrelationId,
-      'appId': 'com.hubitat.sonos',
-      'clipType': 'CHIME',
-      'priority': 'HIGH',
-      'volume': args.volume
-    ]
-    Map<String,Object> highPriorityChime = new LinkedHashMap<String,Object>()
-    highPriorityChime.put('leftChannel', JsonOutput.toJson([chimeCommand, chimeArgs]))
-    highPriorityChime.put('priority', 'HIGH')
-    highPriorityChime.put('duration', 8)
-    highPriorityChime.put('origin', 'high-priority-player-chime')
-    highPriorityChime.put('correlationId', chimeCorrelationId)
-    highPriorityChime.put('groupAnnouncementCorrelationId', holdAfterChime == true ? correlationId : null)
-    highPriorityChime.put('synchronizedGroupChime', holdAfterChime == true)
-    if(loadAudioClipOnRightChannel()) {
-      chimeCommand.playerId = "${getRightChannelId()}".toString()
-      highPriorityChime.put('rightChannel', JsonOutput.toJson([chimeCommand, chimeArgs]))
-    }
-    addAudioClipCorrelation(highPriorityChime)
-    highPriorityQueue.add(highPriorityChime)
-    if(holdAfterChime == true && correlationId) {
-      Map<String,Object> synchronizedHold = new LinkedHashMap<String,Object>()
-      synchronizedHold.put('correlationId', correlationId)
-      synchronizedHold.put('allowChimeDispatch', true)
-      runtimeState.put('groupSynchronizedAudioClipHold', synchronizedHold)
-    }
-  }
-
-  // Add to high-priority queue
-  highPriorityQueue.add(audioClip)
-  traceAudioClipQueues('priority-enqueued')
-
-  // If first high-priority or nothing playing, start immediately
-  audioClipPlaying = getAtomicStateValue('audioClipPlaying') as Boolean
-  if(!deferStart && (isFirstHighPriority || audioClipPlaying != true)) {
-    dequeueAudioClip()
-  }
+  if(!uri || getIsMuted()) { return }
+  sendParentAppRequest('enqueueAudioClip', [uri: uri, volume: volume, duration: duration ?: 0,
+    correlationId: correlationId ?: UUID.randomUUID().toString(), priority: 'HIGH',
+    chimeBeforeTTS: chimeBeforeTTS == true, origin: 'player-high-priority-tts'])
 }
 
 @CompileStatic
-void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0, String correlationId = null) {
+void playerLoadAudioClip(String uri = null, BigDecimal volume = null, Integer duration = 0, String correlationId = null,
+    Boolean chimeBeforeTTS = false) {
   if(deferCommandToParentDuringGroupOperation('loadAudioClip', [uri, volume, duration, correlationId])) { return }
-  logDebug('playerLoadAudioClip')
-  if(getIsMuted()) {
-    logDebug('Skipping loadAudioClip notification because player is muted.')
-    return
-  }
-  String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
-  Map<String,String> command = [
-    'namespace':'audioClip',
-    'command':'loadAudioClip',
-    'playerId':"${getId()}".toString()
-  ]
-  Map args = ['name': clipCorrelationId, 'appId': 'com.hubitat.sonos']
-  if(uri) {args.streamUrl = uri}
-  args.volume = getAnnouncementVolume(volume)
-  String json = JsonOutput.toJson([command,args])
-  Map audioClip = [ leftChannel: json ]
-  if(loadAudioClipOnRightChannel()) {
-    command.playerId = "${getRightChannelId()}".toString()
-    audioClip.rightChannel = JsonOutput.toJson([command,args])
-  }
-  if(!hasQueuedRegularAudioClip() && getChimeBeforeStandardPriorityTTS()) {playerLoadAudioClipChime(volume)}
-  if(duration > 0) { audioClip.duration = duration }
-  audioClip.uri = uri
-  audioClip.origin = 'player-tts'
-  audioClip.correlationId = clipCorrelationId
-  logDebug("Enqueuing audio clip with URI: ${uri}, volume: ${args.volume}, duration: ${duration}")
-  enqueueAudioClip(audioClip)
-  logDebug('Enqueued')
+  if(!uri || getIsMuted()) { return }
+  sendParentAppRequest('enqueueAudioClip', [uri: uri, volume: volume, duration: duration ?: 0,
+    correlationId: correlationId ?: UUID.randomUUID().toString(), priority: 'REGULAR',
+    chimeBeforeTTS: chimeBeforeTTS == true, origin: 'player-tts'])
 }
 
-/** Queue a clip without starting it immediately so a parent can release several
- * ungrouped players on the same Hubitat scheduler tick.
- */
-void playerPrepareAudioClipForSynchronizedStart(String uri = null, BigDecimal volume = null, String correlationId = null,
-    Integer duration = 0, Boolean deferStart = false, Boolean chimeBeforeTTS = null,
-    Boolean holdAfterChime = false) {
-  if(getIsMuted()) {
-    logDebug('Skipping synchronized audio clip because player is muted.')
-    if(correlationId) { publishGroupAnnouncementProgress(correlationId, 'DISMISSED', [reason: 'muted']) }
-    return
-  }
-  String clipCorrelationId = correlationId ?: UUID.randomUUID().toString()
-  ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
-  Boolean shouldChime = chimeBeforeTTS != null ? chimeBeforeTTS : getChimeBeforeStandardPriorityTTS()
-  if(!hasQueuedRegularAudioClip() && shouldChime) {
-    String chimeCorrelationId = UUID.randomUUID().toString()
-    Map<String,String> chimeCommand = [
-      'namespace':'audioClip',
-      'command':'loadAudioClip',
-      'playerId':"${getId()}".toString()
-    ]
-    Map chimeArgs = ['name': chimeCorrelationId, 'appId': 'com.hubitat.sonos', 'clipType': 'CHIME']
-    if(volume != null) { chimeArgs.volume = volume }
-    Map chimeClip = [leftChannel: JsonOutput.toJson([chimeCommand,chimeArgs]), duration: 8]
-    chimeClip.origin = 'synchronized-player-chime'
-    chimeClip.correlationId = chimeCorrelationId
-    if(holdAfterChime == true) { chimeClip.groupAnnouncementCorrelationId = correlationId }
-    chimeClip.synchronizedGroupChime = holdAfterChime == true
-    addAudioClipCorrelation(chimeClip)
-    if(loadAudioClipOnRightChannel()) {
-      chimeCommand.playerId = "${getRightChannelId()}".toString()
-      chimeClip.rightChannel = JsonOutput.toJson([chimeCommand,chimeArgs])
-    }
-    queue.add(chimeClip)
-    if(holdAfterChime == true && correlationId) {
-      Map<String,Object> synchronizedHold = new LinkedHashMap<String,Object>()
-      synchronizedHold.put('correlationId', correlationId)
-      synchronizedHold.put('allowChimeDispatch', true)
-      runtimeState.put('groupSynchronizedAudioClipHold', synchronizedHold)
-    }
-  }
-  Map<String,String> command = [
-    'namespace':'audioClip',
-    'command':'loadAudioClip',
-    'playerId':"${getId()}".toString()
-  ]
-  Map args = ['name': clipCorrelationId, 'appId': 'com.hubitat.sonos']
-  if(uri) { args.streamUrl = uri }
-  args.volume = getAnnouncementVolume(volume)
-  String json = JsonOutput.toJson([command,args])
-  Map audioClip = [leftChannel: json, uri: uri]
-  if(duration != null && duration > 0) { audioClip.duration = duration }
-  audioClip.origin = 'synchronized-player-tts'
-  audioClip.correlationId = clipCorrelationId
-  audioClip.groupAnnouncementCorrelationId = correlationId
-  addAudioClipCorrelation(audioClip)
-  if(loadAudioClipOnRightChannel()) {
-    command.playerId = "${getRightChannelId()}".toString()
-    audioClip.rightChannel = JsonOutput.toJson([command,args])
-  }
-  queue.add(audioClip)
-  logDebug("Prepared loadAudioClip for Sonos player ${getId()}, correlation=${clipCorrelationId}, resolvedVolume=${args.volume}, queued=${queue.size()}, deferStart=${deferStart}")
-  if(!deferStart && runtimeState.audioClipPlaying != true) {
-    runInMillis(100, 'prepareAndStartAudioClip', [overwrite: true])
-  }
-}
-
-/** Select and fully track the next queued clip before a synchronized release pass. */
-void prepareAudioClipForDispatch() {
-  if(runtimeState.audioClipPlaying != true) { prepareNextAudioClipForDispatch() }
-}
-
-Boolean canPrepareSynchronizedGroupChime(Boolean highPriority) {
-  return highPriority ? getDeviceAudioClipQueueHighPriority().isEmpty() : !hasQueuedRegularAudioClip()
-}
-
-void prepareAndStartAudioClip() {
-  prepareAudioClipForDispatch()
-  startPreparedAudioClip()
-  completePreparedAudioClipDispatch()
-}
-
-/** Called in the tight group release loop; keep the two socket writes adjacent. */
-void startPreparedAudioClip() {
-  if(runtimeState.audioClipPlaying != true) {
-    logDebug("No active prepared audioClip to release for Sonos player ${getId()}")
-    return
-  }
-  Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
-  String message = clipMessage?.leftChannel?.toString()
-  String correlationId = clipMessage?.correlationId?.toString()
-  if(!message || !correlationId) {
-    logDebug("Prepared audioClip is missing its primary message or correlation ID: player=${getId()}, hasMessage=${message != null}, correlation=${correlationId}")
-    runtimeState.preparedAudioClipDispatchResult = 'missing'
-    return
-  }
-
-  ChildDeviceWrapper rightChannel = clipMessage.rightChannel ? getRightChannelChild() : null
-  String pairedRightMessage = clipMessage.rightChannel?.toString()
-  if(pairedRightMessage && rightChannel) {
-    watchRightChannelWebsocket(rightChannel)
-    if(rightChannel.getDataValue('websocketStatus') != 'open') {
-      rightChannel.initializeWebsocketConnection()
-    }
-  } else if(pairedRightMessage) {
-    runtimeState.preparedAudioClipRightChannelMissing = true
-    logDebug("Paired audioClip has no right-channel child: correlation=${correlationId}; proceeding with primary only")
-    pairedRightMessage = null
-  }
-
-  Map metadata = [kind: 'audioClip', correlationId: correlationId]
-  if(pairedRightMessage) { metadata.pairedRightChannelMessage = pairedRightMessage }
-  Boolean primaryReady = isWebsocketConnected() && getWebsocketOutboundQueue().isEmpty() && isCurrentlySubcribedToAudioClipWS()
-  Boolean rightReady = !pairedRightMessage || rightChannel?.getDataValue('websocketStatus') == 'open'
-  logDebug("AudioClip paired-send readiness: correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, primaryQueue=${getWebsocketOutboundQueue().size()}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: (pairedRightMessage ? 'child unavailable' : 'not paired')}, primaryReady=${primaryReady}, secondaryReady=${rightReady}")
-  if(!primaryReady || !rightReady) {
-    if(pairedRightMessage && !rightReady) {
-      metadata.pairedSecondaryDeadline = now() + (PAIRED_AUDIO_CLIP_SECONDARY_TIMEOUT_SECONDS * 1000L)
-    }
-    queueWebsocketMessage(message, 0, metadata)
-    if(pairedRightMessage && !rightReady) {
-      Map queuedPair = getWebsocketOutboundQueue().find { Map entry ->
-        entry?.correlationId?.toString() == correlationId
-      }
-      if(queuedPair) { schedulePairedAudioClipSecondaryTimeout(queuedPair) }
-    }
-    logDebug("Queued audioClip dispatch as ${pairedRightMessage ? 'one paired entry' : 'primary-only entry'}: correlation=${correlationId}, reason=${!primaryReady ? 'primary socket/queue/subscription not ready' : 'secondary socket not open'}, queueSize=${getWebsocketOutboundQueue().size()}")
-    runtimeState.preparedAudioClipDispatchResult = 'queued'
-    runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
-    if(!isWebsocketConnected()) { wsConnect() }
-    else if(!isCurrentlySubcribedToAudioClipWS() && runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
-    return
-  } else {
-    Boolean primarySendReturned = false
-    Map audioOutbound = new LinkedHashMap(metadata)
-    audioOutbound.message = message
-    audioOutbound.createdAt = now()
-    audioOutbound.expiresAt = (audioOutbound.createdAt as Long) + WS_COMMAND_MAX_AGE_SECONDS * 1000L
-    audioOutbound.putAll(describeWebSocketCommand(message))
-    try {
-      logDebug("Starting tight paired audioClip send pass: correlation=${correlationId}, primaryStatus=open, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}")
-      registerWebsocketCommandLedgerEntry(message, audioOutbound, audioOutbound.createdAt as Long)
-      interfaces.webSocket.sendMessage(message)
-      primarySendReturned = true
-      if(pairedRightMessage && rightChannel) {
-        Boolean rightSent = rightChannel.playerLoadAudioClipForSynchronizedRelease(
-          pairedRightMessage, correlationId) == true
-        rightChannel.completeSynchronizedAudioClipRelease(correlationId)
-        logDebug("Tight paired audioClip send pass returned: correlation=${correlationId}, primary=sent, secondary=${rightSent ? 'sent' : 'failed'}")
-        if(!rightSent) {
-          logInfo("Secondary audio clip send failed after primary dispatch for ${correlationId}; not replaying the secondary clip")
-          runtimeState.preparedAudioClipDispatchResult = 'primaryOnly'
-        } else {
-          runtimeState.preparedAudioClipDispatchResult = 'sent'
-        }
-      } else {
-        logDebug("Primary audioClip send returned successfully without a paired channel: correlation=${correlationId}")
-        runtimeState.preparedAudioClipDispatchResult = 'sent'
-      }
-      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
-    } catch(Exception e) {
-      logDebug("Tight audioClip send pass threw: correlation=${correlationId}, primarySendReturned=${primarySendReturned}, secondaryStatus=${rightChannel?.getDataValue('websocketStatus') ?: 'not paired'}, error=${e.message}")
-      if(!primarySendReturned) { removeWebsocketCommandLedgerEntryById(audioOutbound.ledgerEntryId?.toString(), 'primary audioClip send threw') }
-      if(primarySendReturned && pairedRightMessage) {
-        try {
-          rightChannel?.completeSynchronizedAudioClipRelease(correlationId)
-        } catch(Exception completionError) {
-          logDebug("Could not complete secondary release logging for ${correlationId}: ${completionError.message}")
-        }
-        logInfo("Secondary audio clip dispatch threw after primary dispatch for ${correlationId}; not replaying either channel")
-        runtimeState.preparedAudioClipDispatchResult = 'primaryOnly'
-      } else {
-        queueWebsocketMessage(message, 1, metadata)
-        runtimeState.preparedAudioClipDispatchResult = 'failed'
-      }
-      runtimeState.preparedAudioClipDispatchCorrelationId = correlationId
-      if(!primarySendReturned) { runtimeState.preparedAudioClipDispatchError = e.message?.toString() }
-    }
-  }
-}
-
-/** Run acknowledgements, reconnect handling, and diagnostic logs after the group send pass. */
-void completePreparedAudioClipDispatch() {
-  String result = runtimeState.preparedAudioClipDispatchResult?.toString()
-  String correlationId = runtimeState.preparedAudioClipDispatchCorrelationId?.toString()
-  String error = runtimeState.preparedAudioClipDispatchError?.toString()
-  Boolean rightChannelMissing = runtimeState.preparedAudioClipRightChannelMissing == true
-  runtimeState.remove('preparedAudioClipDispatchResult')
-  runtimeState.remove('preparedAudioClipDispatchCorrelationId')
-  runtimeState.remove('preparedAudioClipDispatchError')
-  runtimeState.remove('preparedAudioClipRightChannelMissing')
-
-  if(result == 'sent') {
-    logDebug("Sent prepared audioClip to Sonos player ${getId()}, correlation=${correlationId}")
-    audioClipCommandSent(correlationId)
-  } else if(result == 'queued') {
-    logDebug("Queued prepared audioClip for Sonos player ${getId()}, correlation=${correlationId}, primaryStatus=${getWebSocketStatus()}, primarySubscribed=${isCurrentlySubcribedToAudioClipWS()}, queueSize=${getWebsocketOutboundQueue().size()}")
-    if(!isWebsocketConnected()) { wsConnect() }
-    else if(!isCurrentlySubcribedToAudioClipWS()) {
-      if(runtimeState.audioClipSubscriptionRequestPending != true) { subscribeToAudioClip() }
-    } else if(getWebsocketOutboundQueue().size() > 0) { flushWebsocketOutboundQueue() }
-  } else if(result == 'primaryOnly') {
-    logDebug("Completing primary-only audioClip dispatch: player=${getId()}, correlation=${correlationId}; secondary will not be replayed")
-    logInfo("Primary audio clip sent for ${getId()}, correlation=${correlationId}; secondary dispatch failed and will not be replayed")
-    audioClipCommandSent(correlationId)
-  } else if(result == 'failed') {
-    logWarn("Prepared audioClip send failed for Sonos player ${getId()}, correlation=${correlationId}: ${error ?: 'unknown error'}; queued for retry")
-    setWebSocketStatus('closed')
-    scheduleWebSocketReconnect()
-  } else if(result == 'missing') {
-    logWarn("No prepared audioClip was available to release for Sonos player ${getId()}")
-  }
-
-  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  if(rightChannelMissing || activeClip?.rightChannel && !getRightChannelChild()) {
-    logWarn('Right channel audio clip requested but no right channel child device is available. Playing clip on left channel only.')
-  }
-}
-
-
-@CompileStatic
-void playerLoadAudioClipChime(BigDecimal volume = null) {
-  logDebug('playerLoadAudioClipChime')
-  if(getIsMuted()) {
-    logDebug('Skipping loadAudioClip notification because player is muted.')
-    return
-  }
-  Map<String,String> command = [
-    'namespace':'audioClip',
-    'command':'loadAudioClip',
-    'playerId':"${getId()}".toString()
-  ]
-  String correlationId = UUID.randomUUID().toString()
-  Map args = ['name': correlationId, 'appId': 'com.hubitat.sonos', "clipType": "CHIME"]
-  if(volume != null) {args.volume = volume}
-  String json = JsonOutput.toJson([command,args])
-  Map audioClip = [ leftChannel: json ]
-  if(loadAudioClipOnRightChannel()) {
-    command.playerId = "${getRightChannelId()}".toString()
-    audioClip.rightChannel = JsonOutput.toJson([command,args])
-  }
-  audioClip.duration = 8
-  audioClip.origin = 'player-chime'
-  audioClip.correlationId = correlationId
-  enqueueAudioClip(audioClip)
-}
-
-void enqueueAudioClip(Map clipMessage) {
-  logDebug('enqueueAudioClip')
-  addAudioClipCorrelation(clipMessage)
-  ConcurrentLinkedQueue<Map> queue = getDeviceAudioClipQueue()
-  Boolean alreadyPlaying = runtimeState.audioClipPlaying == true
-  logDebug("Audio clip enqueue decision correlation=${clipMessage.correlationId}, origin=${clipMessage.origin}, priority=${clipMessage.priority ?: 'REGULAR'}, alreadyPlaying=${alreadyPlaying}, active=${runtimeState.activeAudioClipCorrelationId ?: 'none'}, synchronizedHold=${runtimeState.groupSynchronizedAudioClipHold instanceof Map ? ((Map)runtimeState.groupSynchronizedAudioClipHold).correlationId : 'none'}, regularBefore=${queue.size()}, highBefore=${getDeviceAudioClipQueueHighPriority().size()}")
-
-  // Regular priority clips go to regular queue
-  // High priority clips are now handled separately via playerLoadAudioClipHighPriority
-  queue.add(clipMessage)
-  logDebug("Queued audio clip ${clipMessage.correlationId} (${clipMessage.origin}) at ${clipMessage.enqueuedAt}; regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
-
-  if(!alreadyPlaying) {
-    logDebug("Starting audio clip drain after enqueue correlation=${clipMessage.correlationId}")
-    dequeueAudioClip()
-  } else {
-    logDebug("Audio clip remains queued behind active correlation=${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}; newCorrelation=${clipMessage.correlationId}, regular=${queue.size()}, high=${getDeviceAudioClipQueueHighPriority().size()}")
-  }
-}
-
-void dequeueAudioClip() {
-  if(!prepareNextAudioClipForDispatch()) { return }
-  dispatchPreparedAudioClip()
-}
-
-Boolean prepareNextAudioClipForDispatch() {
-  traceAudioClipQueues('dequeue-entry')
-  logDebug('dequeueAudioClip')
-
-  Boolean alreadyPlaying = runtimeState.audioClipPlaying == true
-  Map activeClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  ConcurrentLinkedQueue<Map> highPriorityQueue = getDeviceAudioClipQueueHighPriority()
-  Boolean preemptingRegularClip = alreadyPlaying && activeClip?.priority != 'HIGH' && !highPriorityQueue.isEmpty()
-  if(alreadyPlaying && !preemptingRegularClip) {
-    logDebug("Ignoring redundant audio clip dequeue while ${activeClip?.priority == 'HIGH' ? 'high-priority' : 'regular'} clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'} is active")
-    return false
-  }
-
-  Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
-      ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
-  if(synchronizedHold != null) {
-    if(synchronizedHold.allowChimeDispatch == true) {
-      synchronizedHold.allowChimeDispatch = false
-      runtimeState.groupSynchronizedAudioClipHold = synchronizedHold
-    } else {
-      logDebug("Holding queued audioClip for synchronized group TTS ${synchronizedHold.correlationId}")
-      return false
-    }
-  }
-
-  // Check high-priority queue first
-  Map clipMessage = highPriorityQueue.poll()
-  if(preemptingRegularClip && !clipMessage) {
-    logDebug('High-priority audio clip was removed before dispatch; leaving the active regular clip unchanged')
-    return false
-  }
-
-  // Keep regular clips in the FIFO until their playback reaches a terminal state.
-  if(!clipMessage) {
-    clipMessage = getDeviceAudioClipQueue().peek()
-  }
-
-  if(!clipMessage) {
-    logDebug('No more audio clips to dequeue.')
-    removeHiddenJsonRuntimeState('currentlyPlayingClip')
-    runtimeState.remove('activeAudioClipCorrelationId')
-    runtimeState.remove('activeAudioClipSonosId')
-    removeHiddenJsonRuntimeState('activeAudioClipMessage')
-    runtimeState.remove('audioClipPlaying')
-    runtimeState.remove('audioClipCommandSent')
-    runtimeState.remove('audioClipHadDisconnectAfterSend')
-    runtimeState.remove('audioClipSentAt')
-    removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
-    return false
-  }
-
-  Integer previousDispatchCount = (clipMessage.dispatchCount ?: 0) as Integer
-  if(previousDispatchCount > 0) {
-    rotateAudioClipCorrelationId(clipMessage)
-  }
-  clipMessage.dispatchCount = previousDispatchCount + 1
-
-  // The regular queue head owns any unfinished regular clip. Keep this marker
-  // through high-priority playback so diagnostics and interruption state remain clear.
-  if(clipMessage?.priority != 'HIGH') {
-    setHiddenJsonRuntimeState('currentlyPlayingClip', clipMessage)
-  }
-
-  runtimeState.activeAudioClipCorrelationId = clipMessage.correlationId
-  setHiddenJsonRuntimeState('activeAudioClipMessage', clipMessage)
-  runtimeState.remove('activeAudioClipSonosId')
-  runtimeState.audioClipCommandSent = false
-  runtimeState.audioClipHadDisconnectAfterSend = false
-  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
-      : new LinkedHashMap<String, Map>()
-  clipProgress[clipMessage.correlationId as String] = [
-    correlationId: clipMessage.correlationId,
-    groupAnnouncementCorrelationId: clipMessage.groupAnnouncementCorrelationId,
-    origin: clipMessage.origin ?: 'audio-clip',
-    phase: 'QUEUED_FOR_WEBSOCKET',
-    duration: coerceClipDuration(clipMessage.duration),
-    dispatchCount: clipMessage.dispatchCount,
-    enqueuedAt: clipMessage.enqueuedAt,
-    queuedForSendAt: now()
-  ]
-  while(clipProgress.size() > 50) {
-    String oldestGuid = clipProgress.find { String guid, Map item ->
-      guid != (clipMessage.correlationId as String) && guid != (runtimeState.activeAudioClipCorrelationId as String)
-    }?.key as String
-    if(!oldestGuid) { break }
-    clipProgress.remove(oldestGuid)
-  }
-  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-  publishAudioClipProgressEvent(clipProgress[clipMessage.correlationId as String], null)
-  logInfo("Prepared audio clip ${clipMessage.correlationId} (${clipMessage.origin ?: 'unknown'}), queuedAt=${clipMessage.enqueuedAt ?: 'unknown'}, preparedAt=${now()}, regular=${getDeviceAudioClipQueue().size()}, high=${highPriorityQueue.size()}")
-  logDebug("Audio clip dispatch selected correlation=${clipMessage.correlationId}, priority=${clipMessage.priority ?: 'REGULAR'}, dispatchCount=${clipMessage.dispatchCount}, regularQueue=${getDeviceAudioClipQueue().collect { Map clip -> clip.correlationId }}, highQueue=${highPriorityQueue.collect { Map clip -> clip.correlationId }}")
-  runtimeState.audioClipPlaying = true
-  traceAudioClipQueues('dispatch-prepared')
-  if(!isCurrentlySubcribedToAudioClipWS()) { subscribeToAudioClip() }
-  return true
-}
-
-/** Release the queued TTS clip after every group member's separate chime has completed. */
-void prepareSynchronizedAudioClipAfterChime(String correlationId) {
-  Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
-      ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
-  if(!correlationId || synchronizedHold?.correlationId?.toString() != correlationId) { return }
-  runtimeState.remove('groupSynchronizedAudioClipHold')
-  prepareAudioClipForDispatch()
-}
-
-void clearSynchronizedAudioClipHold(String correlationId) {
-  Map synchronizedHold = runtimeState.groupSynchronizedAudioClipHold instanceof Map
-      ? (Map)runtimeState.groupSynchronizedAudioClipHold : null
-  if(correlationId && synchronizedHold?.correlationId?.toString() == correlationId) {
-    runtimeState.remove('groupSynchronizedAudioClipHold')
-  }
-}
-
-void dispatchPreparedAudioClip() {
-  startPreparedAudioClip()
-  completePreparedAudioClipDispatch()
-}
-// =============================================================================
-// End Websocket Commands
-// =============================================================================
-
-
-
-// =============================================================================
-// Grouping and Ungrouping
-// =============================================================================
 @CompileStatic
 void playerGetGroupsFull() {
   String host = getLocalUpnpHostForGroupOperation()
@@ -10314,186 +9010,33 @@ void processWebsocketMessage(String message) {
   if(eventType?.type == 'none' && eventType?.response == 'subscribe') {
     logDebug("WebSocket subscription response processing beginning; namespace=${eventType?.namespace}, success=${eventType?.success}")
     logDebug("Subscription to ${eventType?.namespace} ${eventType?.success ? 'was successful' : 'failed'}")
-    if(eventType?.namespace == 'audioClip' && eventType?.success == true) {
-      setWsSubscriptionValue('audioClip', 'Subscribed')
-    }
     if(eventType?.namespace == 'audioClip') {
-      runtimeState.audioClipSubscriptionRequestPending = false
       if(eventType?.success == true) {
-        runtimeState.audioClipSubscriptionRetryCount = 0
-        flushWebsocketOutboundQueue()
-        resumeAudioClipAfterSubscription()
-      } else if(runtimeState.activeAudioClipCorrelationId && runtimeState.audioClipPlaying == true) {
-        logWarn("Audio clip subscription failed while clip ${runtimeState.activeAudioClipCorrelationId} is pending; retrying subscription")
-        runIn(5, 'retryAudioClipSubscription', [overwrite: true])
+        setWsSubscriptionValue('audioClip', 'Subscribed')
+      } else {
+        setWsSubscriptionValue('audioClip', 'Unsubscribed')
       }
     }
     logDebug('WebSocket subscription response processing completed')
   }
 
-  logDebug('WebSocket command-response observation beginning')
-  observeWebsocketCommandResponse(eventType, eventData)
-  logDebug('WebSocket command-response observation completed')
 
   if(eventType?.type == 'audioClipStatus' && eventType?.name == 'audioClipStatus') {
-    logDebug("WebSocket audio-clip status processing beginning; dataKeys=${eventData.keySet().join(',')}")
-    String stage = 'read audioClips payload'
-    String callbackId = null
-    String activeClipId = null
-    List<Map> audioClips = []
-    Map<String, Map> clipProgress = null
-    Boolean matchedCurrentClip = false
-    String matchedCurrentStatus = null
-    String callbackActiveClipId = null
-    try {
-      Object rawAudioClips = eventData?.audioClips
-      if(rawAudioClips instanceof Collection) {
-        ((Collection)rawAudioClips).each { Object item ->
-          if(item instanceof Map) {
-            audioClips.add(new LinkedHashMap((Map)item))
-          } else {
-            logDebug("Audio clip callback ${callbackId ?: 'pending'}: skipping non-map audioClips entry")
-          }
+    Object rawAudioClips = eventData?.audioClips
+    if(rawAudioClips instanceof Collection) {
+      ((Collection)rawAudioClips).each { Object rawClip ->
+        if(rawClip instanceof Map) {
+          Map clip = (Map)rawClip
+          Map statusEvent = [appId: clip.appId, name: clip.name, id: clip.id,
+            priority: clip.priority, clipType: clip.clipType, status: clip.status]
+          sendEvent(name: 'audioClipStatus', value: JsonOutput.toJson(statusEvent))
         }
-      } else if(rawAudioClips != null) {
-        logDebug('Audio clip callback payload has an unexpected audioClips value; treating as empty')
-      }
-      callbackId = UUID.randomUUID().toString()
-      activeClipId = runtimeState.activeAudioClipCorrelationId as String ?: 'none'
-      callbackActiveClipId = runtimeState.activeAudioClipCorrelationId as String
-      List<String> statuses = audioClips?.collect { Map clip ->
-        "${clip?.status ?: 'unknown'}:sonosId=${clip?.id ?: 'unknown'}:name=${clip?.name ?: 'unknown'}"
-      } ?: []
-      logDebug("Audio clip status callback ${callbackId} receivedAt=${now()}, activeClip=${activeClipId}, statuses=${statuses}")
-      logDebug("Audio clip callback ${callbackId}: payload decoded; count=${audioClips?.size() ?: 0}, activeCorrelation=${callbackActiveClipId ?: 'none'}")
-
-      stage = 'copy correlation progress state'
-      clipProgress = new LinkedHashMap<String, Map>()
-      Object rawClipProgress = getAudioClipProgressByCorrelationId()
-      if(rawClipProgress instanceof Map) {
-        ((Map)rawClipProgress).each { Object rawGuid, Object rawProgress ->
-          String guid = rawGuid?.toString()
-          if(guid && rawProgress instanceof Map) {
-            clipProgress[guid] = new LinkedHashMap((Map)rawProgress)
-          } else {
-            logDebug("Audio clip callback ${callbackId}: discarding malformed saved progress entry; guid=${guid ?: 'missing'}")
-          }
-        }
-      }
-
-      stage = 'correlate and update clip status entries'
-      audioClips?.each { Map clip ->
-        String clipGuid = clip?.name?.toString()
-        if(!clipGuid) {
-          logDebug("Audio clip callback ${callbackId}: skipping status without a clip GUID")
-          return
-        }
-        logDebug("Audio clip callback ${callbackId}: processing guid=${clipGuid}, status=${clip?.status ?: 'unknown'}")
-        String clipStatus = clip?.status?.toString()
-        if(!clipStatus) {
-          logDebug("Audio clip callback ${callbackId}: skipping status for guid=${clipGuid} because status is missing")
-          return
-        }
-        Map progress = clipProgress[clipGuid]
-        if(progress == null && clipGuid == callbackActiveClipId) {
-          progress = [correlationId: clipGuid, origin: 'audio-clip', phase: 'DISPATCHED',
-            dispatchedAt: runtimeState.audioClipQueueStartTime ?: now()]
-        }
-        if(progress == null) {
-          logDebug("Audio clip callback ${callbackId}: no tracked progress entry for guid=${clipGuid}; skipping")
-          return
-        }
-        Long observedAt = now()
-        progress.lastStatus = clipStatus
-        progress.lastCallbackId = callbackId
-        progress.lastObservedAt = observedAt
-        if(clip?.id != null) { progress.sonosClipId = clip.id.toString() }
-        if(clipStatus == 'ACTIVE') {
-          if(progress.activeAt == null) { progress.activeAt = observedAt }
-          progress.phase = 'ACTIVE'
-        } else if(clipStatus == 'DONE') {
-          progress.phase = 'DONE'
-          progress.completedAt = observedAt
-        } else if(clipStatus in ['ERROR', 'DISMISSED', 'INTERRUPTED']) {
-          progress.phase = clipStatus
-          progress.completedAt = observedAt
-        }
-        clipProgress[clipGuid] = progress
-
-        stage = "publish progress for clip ${clipGuid}"
-        publishAudioClipProgressEvent(progress, callbackId)
-        String groupAnnouncementId = progress.groupAnnouncementCorrelationId?.toString() ?: clipGuid
-        if(progress.groupAnnouncementCorrelationId || clipGuid == callbackActiveClipId) {
-          publishGroupAnnouncementProgress(groupAnnouncementId, clipStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']
-              ? (clipStatus == 'ERROR' ? 'FAILED' : clipStatus) : clipStatus)
-        }
-        logDebug("Audio clip GUID ${clipGuid} received Sonos status ${clipStatus ?: 'unknown'} callback=${callbackId} sonosId=${clip?.id ?: 'unknown'} observedAt=${observedAt}")
-
-        stage = "record active clip match for ${clipGuid}"
-        // Only the currently playing GUID may advance or finish the queue. A late
-        // DONE for an older clip is recorded, but cannot dequeue over a newer clip.
-        if(clipGuid == callbackActiveClipId) {
-          matchedCurrentClip = true
-          matchedCurrentStatus = clipStatus
-          if(clip?.id != null) { runtimeState.activeAudioClipSonosId = clip.id.toString() }
-          if(clipStatus == 'ERROR') { logWarn("Audio clip ${clipGuid} returned ERROR status: ${clip}") }
-        }
-        stage = 'correlate and update clip status entries'
-      }
-
-      stage = 'trim old correlation progress entries'
-      while(clipProgress.size() > 50) {
-        String oldestGuid = clipProgress.find { String guid, Map item ->
-          guid != (runtimeState.activeAudioClipCorrelationId as String) && item?.phase != 'DISPATCHED'
-        }?.key as String
-        if(!oldestGuid) { break }
-        clipProgress.remove(oldestGuid)
-      }
-
-      stage = 'update in-memory correlation progress'
-      setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-
-      stage = 'apply ACTIVE status transition'
-      if(matchedCurrentStatus == 'ACTIVE') {
-        setAudioClipPlaying(true)
-        runtimeState.audioClipHadDisconnectAfterSend = false
-        Map activeProgress = clipProgress[callbackActiveClipId]
-        Integer activeDuration = coerceClipDuration(activeProgress?.duration)
-        if(activeDuration != null && activeDuration > 0) {
-          stage = 'schedule ACTIVE clip completion watchdog'
-          scheduleAudioClipDoneWatchdog(callbackActiveClipId, (activeProgress?.activeAt ?: now()) as Long, activeDuration)
-        } else {
-          stage = 'pause watchdog for ACTIVE clip without duration'
-          pauseAudioClipWatchdog()
-        }
-      } else if(matchedCurrentStatus in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) {
-        stage = "advance queue after terminal status ${matchedCurrentStatus}"
-        setAudioClipPlaying(false)
-      }
-      if(!matchedCurrentClip) {
-        logDebug("Audio clip callback ${callbackId}: no status matched active clip GUID ${activeClipId}; queue state unchanged")
-      }
-      stage = 'log audio clip callback completion'
-      logDebug("Audio clip callback ${callbackId}: processing completed; matched=${matchedCurrentClip}, matchedStatus=${matchedCurrentStatus ?: 'none'}")
-    } catch(Exception e) {
-      logException("Audio clip status callback ${callbackId ?: 'unassigned'} failed at stage '${stage}' (active=${callbackActiveClipId ?: activeClipId ?: 'none'})", e)
-      return
-    }
-  }
-
-  if(eventType?.type == 'globalError' && eventType?.success == false) {
-    logDebug("WebSocket global-error processing beginning; namespace=${eventType?.namespace}, response=${eventType?.response}, errorCode=${eventData?.errorCode}")
-    if(eventType?.namespace == 'audioClip') {
-      logWarn("Audio clip command '${eventType?.response}' failed for active clip ${runtimeState.activeAudioClipCorrelationId ?: 'unknown'}: ${eventData}")
-      String failedCorrelationId = runtimeState.activeAudioClipCorrelationId as String
-      if(failedCorrelationId) {
-        retryAudioClipAfterCommandFailure(failedCorrelationId,
-          "Sonos rejected audioClip command: ${eventData?.errorCode ?: eventData?.reason ?: 'unknown error'}")
       }
     }
+    return
   }
 
-  logDebug('WebSocket message dispatch completed all matching handlers')
+  logDebug('WebSocket status message processing completed')
 }
 
 void observeUpnpPlaybackSource(Map snapshot) {
@@ -10554,72 +9097,12 @@ void setChildPlaylists(String html) {
   }
 }
 
-void setAudioClipPlaying(Boolean s) {
-  runtimeState.audioClipPlaying = s
-  if(s == false) {
-    String completedCorrelationId = runtimeState.activeAudioClipCorrelationId as String
-    Map completedClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-    Boolean completedHighPriority = completedClip?.priority == 'HIGH'
-    logDebug("Audio clip completion/reset for ${completedCorrelationId ?: 'unknown'} priority=${completedHighPriority ? 'HIGH' : 'REGULAR'} at ${now()}")
-    pauseAudioClipWatchdog()
-    // A regular clip remains at the queue head while it plays; remove only the
-    // matching completed regular clip. A high-priority completion must leave
-    // the suspended regular head in place for replay.
-    if(completedHighPriority != true && completedCorrelationId) {
-      removeActiveRegularAudioClipFromQueue(completedCorrelationId, 'completed')
-      removeHiddenJsonRuntimeState('currentlyPlayingClip')
-    }
-    runtimeState.remove('activeAudioClipCorrelationId')
-    runtimeState.remove('activeAudioClipSonosId')
-    removeHiddenJsonRuntimeState('activeAudioClipMessage')
-    runtimeState.remove('audioClipSentAt')
-    removeHiddenJsonRuntimeState('audioClipProgressByCorrelationId')
-    runtimeState.remove('audioClipCommandSent')
-    runtimeState.remove('audioClipHadDisconnectAfterSend')
-    dequeueAudioClip()
-  }
-}
-
-@CompileStatic
-void addAudioClipCorrelation(Map clipMessage) {
-  if(clipMessage == null) { return }
-  if(!clipMessage.get('correlationId')) { clipMessage.put('correlationId', UUID.randomUUID().toString()) }
-  if(!clipMessage.get('enqueuedAt')) { clipMessage.put('enqueuedAt', Instant.now().toEpochMilli()) }
-  if(!clipMessage.get('origin')) { clipMessage.put('origin', 'audio-clip') }
-}
-
-void publishAudioClipProgressEvent(Map progress, String callbackId) {
-  if(!(progress instanceof Map) || !progress.correlationId) { return }
-  logDebug("Audio clip ${progress.correlationId} progress: phase=${progress.phase}, status=${progress.lastStatus}, callback=${callbackId ?: progress.lastCallbackId ?: 'n/a'}")
-}
-
 void publishGroupAnnouncementProgress(String correlationId, String phase, Map details = null) {
   if(!correlationId || !phase) { return }
   Map payload = [kind: 'groupAnnouncementProgress', correlationId: correlationId,
     phase: phase, playerId: getId()]
   if(details instanceof Map) { payload.putAll(details) }
   publishPlayerStateUpdate(payload)
-}
-
-void clearAudioClipPlaybackProgressCurrentState() {
-  try {
-    device.deleteCurrentState('audioClipPlaybackProgress')
-  } catch(Exception e) {
-    logDebug("Could not remove retired audio clip progress state: ${e.message}")
-  }
-}
-
-void cancelAudioClipWatchdog() {
-  pauseAudioClipWatchdog()
-  runtimeState.audioClipPlaying = false
-  runtimeState.audioClipCommandSent = false
-}
-
-void pauseAudioClipWatchdog() {
-  unschedule('audioClipWatchdog')
-  runtimeState.remove('audioClipWatchdogRequestId')
-  runtimeState.remove('audioClipQueueStartTime')
-  runtimeState.remove('audioClipQueueTotalDuration')
 }
 
 // textToSpeech() returns duration as a String on some TTS providers, so a raw
@@ -10639,178 +9122,6 @@ private Integer parseSonosDurationSeconds(String rawDuration) {
     List<String> parts = rawDuration.split(':') as List<String>
     return (NumberUtils.toInt(parts[0]) * 3600) + (NumberUtils.toInt(parts[1]) * 60) + NumberUtils.toInt(parts[2])
   } catch(Exception ignored) { return null }
-}
-
-void audioClipCommandSent(String correlationId) {
-  if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
-  if(runtimeState.audioClipCommandSent == true) { return }
-  Long sentAt = now()
-  runtimeState.audioClipCommandSent = true
-  runtimeState.audioClipSentAt = sentAt
-  runtimeState.audioClipQueueStartTime = sentAt
-  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
-      : new LinkedHashMap<String, Map>()
-  Map progress = clipProgress[correlationId]
-  if(progress == null) { progress = [correlationId: correlationId] }
-  progress.phase = 'WAITING_FOR_ACTIVE'
-  progress.dispatchedAt = sentAt
-  progress.sentAt = sentAt
-  clipProgress[correlationId] = progress
-  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-  publishAudioClipProgressEvent(progress, null)
-  logInfo("Sent audioClip.loadAudioClip to Sonos player ${getId()} over WebSocket, correlation=${correlationId}, at ${sentAt}; waiting ${AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS}s for matching ACTIVE status")
-  if(runtimeState.audioClipHadDisconnectAfterSend != true) {
-    scheduleAudioClipWatchdog(correlationId, 'WAITING_FOR_ACTIVE', sentAt + (AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS * 1000L))
-  }
-}
-
-void scheduleAudioClipDoneWatchdog(String correlationId, Long startAt, Integer durationSeconds) {
-  if(!correlationId || durationSeconds == null || durationSeconds <= 0) { return }
-  Long deadline = (startAt ?: now()) + ((durationSeconds + AUDIO_CLIP_DONE_GRACE_SECONDS) * 1000L)
-  scheduleAudioClipWatchdog(correlationId, 'WAITING_FOR_DONE', deadline)
-}
-
-void scheduleAudioClipWatchdog(String correlationId, String phase, Long deadline) {
-  if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
-  String watchdogId = UUID.randomUUID().toString()
-  Long deadlineAt = deadline ?: now()
-  Integer delaySeconds = Math.max(1, (int)Math.ceil((deadlineAt - now()) / 1000.0d))
-  runtimeState.audioClipWatchdogRequestId = watchdogId
-  Long queueStart = phase == 'WAITING_FOR_ACTIVE'
-      ? (runtimeState.audioClipSentAt as Long) : (runtimeState.audioClipQueueStartTime as Long)
-  if(queueStart != null) { runtimeState.audioClipQueueStartTime = queueStart }
-  runtimeState.audioClipQueueTotalDuration = delaySeconds
-  logDebug("Scheduled audio clip watchdog guid=${correlationId} phase=${phase} watchdog=${watchdogId} deadline=${deadlineAt} firesIn=${delaySeconds}s")
-  runIn(delaySeconds, 'audioClipWatchdog', [overwrite: true,
-    data: [correlationId: correlationId, watchdogId: watchdogId, phase: phase]])
-}
-
-void resumeAudioClipAfterSubscription() {
-  String correlationId = runtimeState.activeAudioClipCorrelationId as String
-  if(!correlationId || runtimeState.audioClipPlaying != true || runtimeState.audioClipCommandSent != true) { return }
-  Long connectedAt = now()
-  Boolean wasDisconnectedAfterSend = runtimeState.audioClipHadDisconnectAfterSend == true
-  runtimeState.audioClipHadDisconnectAfterSend = false
-  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
-      : new LinkedHashMap<String, Map>()
-  Map progress = clipProgress[correlationId] ?: [:]
-  Integer duration = coerceClipDuration(progress.duration)
-  if(progress.phase == 'ACTIVE') {
-    if(duration != null && duration > 0) {
-      scheduleAudioClipDoneWatchdog(correlationId, (progress.activeAt ?: connectedAt) as Long, duration)
-    } else {
-      pauseAudioClipWatchdog()
-    }
-    return
-  }
-  // A clip that was queued while offline may have been sent by the outbound
-  // queue immediately before this acknowledgement. Its normal ACTIVE timer
-  // was already started by audioClipCommandSent(); do not replace it here.
-  if(!wasDisconnectedAfterSend) { return }
-  if(duration != null && duration > 0) {
-    // The command was already sent before disconnection. Reconcile by GUID,
-    // then wait through its expected playback window; never resend it.
-    scheduleAudioClipDoneWatchdog(correlationId, (runtimeState.audioClipSentAt ?: connectedAt) as Long, duration)
-  } else {
-    scheduleAudioClipWatchdog(correlationId, 'WAITING_FOR_ACTIVE',
-      connectedAt + (AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS * 1000L))
-  }
-}
-
-void audioClipWatchdog(Map data = [:]) {
-  String correlationId = data?.correlationId as String
-  String watchdogId = data?.watchdogId as String
-  String phase = data?.phase as String
-  if(runtimeState.audioClipPlaying != true || !correlationId ||
-      correlationId != (runtimeState.activeAudioClipCorrelationId as String) ||
-      !watchdogId || watchdogId != runtimeState.audioClipWatchdogRequestId) {
-    logDebug("Ignoring stale audio clip watchdog guid=${correlationId ?: 'unknown'} watchdog=${watchdogId ?: 'unknown'}")
-    return
-  }
-  if(!isWebsocketConnected()) {
-    runtimeState.audioClipHadDisconnectAfterSend = runtimeState.audioClipCommandSent == true
-    pauseAudioClipWatchdog()
-    logDebug("Pausing audio clip watchdog for ${correlationId} while WebSocket is disconnected")
-    return
-  }
-  if(phase == 'WAITING_FOR_ACTIVE') {
-    Map<String, Map> progressMap = getAudioClipProgressByCorrelationId() instanceof Map
-        ? (Map<String, Map>)getAudioClipProgressByCorrelationId() : [:]
-    Map progress = progressMap[correlationId]
-    if(progress?.phase in ['ACTIVE', 'DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) { return }
-    markAudioClipWatchdogFailure(correlationId, 'FAILED_ACTIVE_TIMEOUT',
-      "No matching ACTIVE status within ${AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS}s of WebSocket delivery")
-    return
-  }
-  if(phase == 'WAITING_FOR_DONE') {
-    Map<String, Map> progressMap = getAudioClipProgressByCorrelationId() instanceof Map
-        ? (Map<String, Map>)getAudioClipProgressByCorrelationId() : [:]
-    Map progress = progressMap[correlationId]
-    if(progress?.phase in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) { return }
-    markAudioClipWatchdogFailure(correlationId, 'FAILED_DONE_TIMEOUT', 'No matching DONE status before the expected-duration deadline')
-  }
-}
-
-void markAudioClipWatchdogFailure(String correlationId, String phase, String detail) {
-  Map failedClip = (Map)getAtomicStateValue('activeAudioClipMessage')
-  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
-      : new LinkedHashMap<String, Map>()
-  Map progress = clipProgress[correlationId] ?: [correlationId: correlationId]
-  progress.phase = phase
-  progress.failureReason = detail
-  progress.completedAt = now()
-  clipProgress[correlationId] = progress
-  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-  publishAudioClipProgressEvent(progress, null)
-  logWarn("Audio clip ${correlationId} ${phase}: ${detail}; pausing queue to prevent queued clips from playing back-to-back")
-  pauseAudioClipWatchdog()
-  runtimeState.audioClipPlaying = false
-  runtimeState.audioClipCommandSent = false
-  runtimeState.remove('audioClipHadDisconnectAfterSend')
-  if(failedClip?.priority != 'HIGH') {
-    removeActiveRegularAudioClipFromQueue(correlationId, 'failed')
-    removeHiddenJsonRuntimeState('currentlyPlayingClip')
-  }
-  runtimeState.remove('activeAudioClipCorrelationId')
-  runtimeState.remove('activeAudioClipSonosId')
-  removeHiddenJsonRuntimeState('activeAudioClipMessage')
-}
-
-void retryAudioClipAfterCommandFailure(String correlationId, String detail) {
-  if(!correlationId || correlationId != (runtimeState.activeAudioClipCorrelationId as String)) { return }
-  Map<String, Map> clipProgress = getAudioClipProgressByCorrelationId() instanceof Map
-      ? new LinkedHashMap<String, Map>((Map<String, Map>)getAudioClipProgressByCorrelationId())
-      : new LinkedHashMap<String, Map>()
-  Map progress = clipProgress[correlationId] ?: [correlationId: correlationId]
-  Integer retryCount = (progress.commandRetryCount ?: 0) as Integer
-  if(retryCount >= 1) {
-    markAudioClipWatchdogFailure(correlationId, 'FAILED_COMMAND',
-      "${detail}; one reconnect retry already failed")
-    return
-  }
-  Map clipMessage = (Map)getAtomicStateValue('activeAudioClipMessage')
-  String message = clipMessage?.leftChannel?.toString()
-  if(!message) {
-    markAudioClipWatchdogFailure(correlationId, 'FAILED_COMMAND', "${detail}; active command payload is unavailable")
-    return
-  }
-  progress.commandRetryCount = retryCount + 1
-  progress.phase = 'RETRY_PENDING'
-  progress.failureReason = detail
-  progress.retryQueuedAt = now()
-  clipProgress[correlationId] = progress
-  setHiddenJsonRuntimeState('audioClipProgressByCorrelationId', clipProgress)
-  publishAudioClipProgressEvent(progress, null)
-  runtimeState.audioClipHadDisconnectAfterSend = false
-  runtimeState.audioClipCommandSent = false
-  pauseAudioClipWatchdog()
-  queueWebsocketMessage(message, 1, [kind: 'audioClip', correlationId: correlationId])
-  setWebSocketStatus('closed')
-  logWarn("Audio clip ${correlationId} failed; queued one retry after WebSocket reconnect: ${detail}")
-  scheduleWebSocketReconnect()
 }
 
 // =============================================================================

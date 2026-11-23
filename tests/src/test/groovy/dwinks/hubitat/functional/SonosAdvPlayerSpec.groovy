@@ -39,11 +39,6 @@ class SonosAdvPlayerSpec extends Specification {
       upnpMetadata: '<DIDL-Lite><item id="SQ:' + playlistId + '"><dc:title>Playlist ' + playlistId + '</dc:title></item></DIDL-Lite>']
   }
 
-  void queueTestGroupSocketCommand(Integer marker = 10) {
-    driver.device.dataValues.websocketStatus = 'open'
-    driver.sendWsMessage(JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RINCON_TEST'],
-      [name: "clip-${marker}", clipType: 'CUSTOM', appId: 'test', priority: 'HIGH', streamUrl: 'http://example.test/clip.mp3']]))
-  }
 
   void seedGroupTopology(String coordinatorId, Map<String, String> hostByPlayer) {
     driver.zgtMemberHostByPlayerId.clear()
@@ -162,95 +157,17 @@ class SonosAdvPlayerSpec extends Specification {
     parentPlayerRequests.collect { Map event -> new LinkedHashMap(event) }
   }
 
+  void captureParentAudioClipRequests() {
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload ->
+      parentPlayerRequests << new LinkedHashMap(payload)
+      true
+    }) }
+  }
+
   String avtBody(String instanceProperties) {
     String event = "<Event><InstanceID val=\"0\">${instanceProperties}</InstanceID></Event>"
     return '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(event) +
       '</LastChange></property></propertyset>'
-  }
-
-  void appendAudioClipAdmissionSchedules(Integer regularRemaining, Integer highRemaining,
-      List<String> prefix, List<List<String>> schedules) {
-    if(regularRemaining == 0 && highRemaining == 0) {
-      schedules.add(new ArrayList<String>(prefix))
-      return
-    }
-    if(regularRemaining > 0) {
-      prefix.add('R')
-      appendAudioClipAdmissionSchedules(regularRemaining - 1, highRemaining, prefix, schedules)
-      prefix.remove(prefix.size() - 1)
-    }
-    if(highRemaining > 0) {
-      prefix.add('H')
-      appendAudioClipAdmissionSchedules(regularRemaining, highRemaining - 1, prefix, schedules)
-      prefix.remove(prefix.size() - 1)
-    }
-  }
-
-  List<String> expectedAudioClipDispatches(List<Map> operations) {
-    List<Map> regularQueue = []
-    List<Map> highQueue = []
-    List<String> dispatches = []
-    Map active = null
-
-    Closure dispatchNext = { ->
-      if(!highQueue.isEmpty()) {
-        active = highQueue.remove(0)
-      } else if(!regularQueue.isEmpty()) {
-        active = regularQueue[0]
-      } else {
-        active = null
-      }
-      if(active != null) { dispatches.add(active.uri as String) }
-    }
-
-    operations.each { Map operation ->
-      if(operation.kind == 'regular') {
-        regularQueue.add(operation)
-        if(active == null) { dispatchNext.call() }
-      } else if(operation.kind == 'high') {
-        highQueue.add(operation)
-        if(active == null || active.priority != 'HIGH') { dispatchNext.call() }
-      } else if(operation.kind == 'complete' && active != null) {
-        if(active.priority != 'HIGH' && !regularQueue.isEmpty()) { regularQueue.remove(0) }
-        active = null
-        dispatchNext.call()
-      }
-    }
-    return dispatches
-  }
-
-  void resetAudioClipQueueModel() {
-    driver.metaClass.getParent = { -> null }
-    driver.runtimeState.clear()
-    driver.state.clear()
-    driver.binding.setVariable('atomicState', [:])
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.getDeviceAudioClipQueueTimers().clear()
-    driver.scheduled.clear()
-    driver.unschedules.clear()
-    driver.asyncCalls.clear()
-    driver.events.clear()
-    driver.logs.clear()
-    driver.settings.chimeBeforeTTS = false
-    driver.settings.ttsBoostAmount = 0
-    driver.device.currentValues.mute = 'unmuted'
-    driver.device.currentValues.volume = 10
-    driver.device.currentValues.level = 10
-  }
-
-  void captureActiveAudioClipDispatch(List<String> dispatches, List<String> lastCorrelationId) {
-    Map active = driver.runtimeState.activeAudioClipMessage instanceof Map
-        ? (Map)driver.runtimeState.activeAudioClipMessage : null
-    String correlationId = active?.correlationId?.toString()
-    if(!correlationId) {
-      lastCorrelationId[0] = null
-      return
-    }
-    if(correlationId != lastCorrelationId[0]) {
-      dispatches.add(active.uri?.toString() ?: active.origin?.toString() ?: correlationId)
-      lastCorrelationId[0] = correlationId
-    }
   }
 
   def "delayed stream callback cannot supersede a newer transport command"() {
@@ -346,9 +263,6 @@ class SonosAdvPlayerSpec extends Specification {
       currentUriMetaData: '<DIDL-Lite><title>Jazz &amp; Blues</title></DIDL-Lite>',
       transportState: 'STOPPED', track: '1', positionMillis: 1000L, playMode: 'NORMAL'
     ]
-    driver.runtimeState.audioClipPlaying = true
-    driver.runtimeState.audioClipWatchdogRequestId = 'regular-watchdog'
-    driver.getDeviceAudioClipQueue().add([correlationId: 'regular-head'])
     driver.playHighPriorityTTS('restore test', 10, null)
     Map timer = driver.scheduled.find { List job -> job[1] == 'restoreDirectStreamTts' }[2].data
     driver.restoreDirectStreamTts(timer)
@@ -377,10 +291,6 @@ class SonosAdvPlayerSpec extends Specification {
     first.data.attempt == 1
     second.data.attempt == 2
     driver.asyncCalls.size() == callCount
-    driver.getDeviceAudioClipQueue()*.correlationId == ['regular-head']
-    driver.runtimeState.audioClipPlaying == true
-    driver.runtimeState.audioClipWatchdogRequestId == 'regular-watchdog'
-    !driver.unschedules.contains('audioClipWatchdog')
     driver.runtimeState.announcementPlaybackSnapshot == null
     playerStateMessages().findAll { it.phase == 'PLAYBACK_RESTORED' }*.restored == [true]
   }
@@ -966,7 +876,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     created == 1
     initialized == 1
-    child.dataValues == [deviceIp: '192.168.1.51', id: 'OTHER', websocketUrl: 'wss://192.168.1.51:1443/websocket/api']
+    child.dataValues == [deviceIp: '192.168.1.51', id: 'OTHER']
 
     when: 'an existing child needs its endpoint repaired'
     childDriver.device.dataValues.secondaryDeviceIps = '192.168.1.52'
@@ -975,7 +885,7 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     initialized == 2
     child.getDataValue('deviceIp') == '192.168.1.52'
-    child.getDataValue('websocketUrl') == 'wss://192.168.1.52:1443/websocket/api'
+    child.getDataValue('deviceIp') == '192.168.1.52'
 
     when:
     childDriver.createRemoveRightChannelChildDevice(false)
@@ -1184,6 +1094,26 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
 
+  def "audioClip websocket statuses are forwarded as undeclared JSON events"() {
+    given:
+    driver.device.events.clear()
+    String message = JsonOutput.toJson([
+      [namespace: 'audioClip:1', name: 'audioClipStatus', type: 'audioClipStatus'],
+      [_objectType: 'audioClipStatus', audioClips: [[_objectType: 'audioClip',
+        id: 'sonos-clip-id', name: 'request-name', appId: 'com.dwinks.sonos.advanced',
+        priority: 'HIGH', clipType: 'CUSTOM', status: 'ACTIVE']]]
+    ])
+
+    when:
+    driver.processWebsocketMessage(message)
+
+    then:
+    Map event = driver.events.find { Map item -> item.name == 'audioClipStatus' }
+    event != null
+    new JsonSlurper().parseText(event.value as String) == [appId: 'com.dwinks.sonos.advanced',
+      name: 'request-name', id: 'sonos-clip-id', priority: 'HIGH', clipType: 'CUSTOM', status: 'ACTIVE']
+  }
+
   def "every primary websocket open subscribes to audioClip"() {
     when:
     driver.setWebSocketStatus('open')
@@ -1193,22 +1123,6 @@ class SonosAdvPlayerSpec extends Specification {
       List parsed = (List)new JsonSlurper().parseText(message)
       ((Map)parsed[0]).namespace == 'audioClip' && ((Map)parsed[0]).command == 'subscribe'
     }
-  }
-
-  def "audioClip subscription is sent ahead of queued clips"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'open'
-    String clip = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RINCON_TEST'],
-      [name: 'queued-clip', clipType: 'CUSTOM', appId: 'test', priority: 'HIGH', streamUrl: 'http://example.test/clip.mp3']])
-    driver.queueWebsocketMessage(clip, 0, [kind: 'audioClip', correlationId: 'queued-clip'])
-
-    when:
-    driver.subscribeToAudioClip()
-
-    then:
-    websocketMessages.size() == 1
-    ((List)new JsonSlurper().parseText(websocketMessages[0]))[0].command == 'subscribe'
-    driver.runtimeState.websocketOutboundQueue*.correlationId == ['queued-clip']
   }
 
   def "player initialization starts subscriptions and websocket locally"() {
@@ -1278,38 +1192,6 @@ class SonosAdvPlayerSpec extends Specification {
 
 
 
-
-  def "parent announcement purge removes only the matching clip correlation"() {
-    given:
-    driver.audioClipQueueInitialization()
-    driver.getDeviceAudioClipQueue().addAll([
-      [correlationId: 'announcement'], [correlationId: 'unrelated']
-    ])
-    driver.getDeviceAudioClipQueueHighPriority().add([correlationId: 'announcement'])
-    driver.runtimeState.websocketOutboundQueue = [
-      [kind: 'audioClip', correlationId: 'announcement'],
-      [kind: 'audioClip', correlationId: 'unrelated']
-    ]
-    driver.runtimeState.activeAudioClipMessage = [correlationId: 'announcement']
-    driver.runtimeState.activeAudioClipCorrelationId = 'announcement'
-    driver.runtimeState.audioClipPlaying = true
-
-    when:
-    driver.clearPendingAudioClipCorrelation('announcement')
-
-    then:
-    driver.getDeviceAudioClipQueue()*.correlationId == ['unrelated']
-    driver.getDeviceAudioClipQueueHighPriority().isEmpty()
-    driver.runtimeState.websocketOutboundQueue*.correlationId == ['unrelated']
-    !driver.runtimeState.activeAudioClipCorrelationId
-    driver.runtimeState.audioClipPlaying == false
-  }
-
-
-  def cleanup() {
-    GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
-    driver.metaClass = null
-  }
 
   def "retargeting a fade to the reported volume cancels queued steps"() {
     given:
@@ -2210,244 +2092,26 @@ class SonosAdvPlayerSpec extends Specification {
       .every { String entry -> entry.length() < 1400 }
   }
 
-  def "second priority clip waits while unfinished regular clips stay in FIFO order"() {
+  def "player audioClip commands are handed to the parent app with priority metadata"() {
     given:
-    driver.metaClass.getParent = { -> null }
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
+    captureParentAudioClipRequests()
     driver.settings.ttsBoostAmount = 10
-    driver.playerLoadAudioClip('http://example.test/a.mp3', 15G, 30, 'A')
-    driver.playerLoadAudioClip('http://example.test/b.mp3', 15G, 10, 'B')
-    driver.playerLoadAudioClipHighPriority('http://example.test/h1.mp3', 15G, 'H1', 20)
-    List<Map> watchdogs = new ArrayList<Map>(driver.scheduled)
+    driver.settings.chimeBeforeTTS = false
 
     when:
-    driver.playerLoadAudioClipHighPriority('http://example.test/h2.mp3', 15G, 'H2', 10)
-    driver.dequeueAudioClip()
+    driver.playerLoadAudioClip('http://example.test/a.mp3', 15G, 30, 'regular-A')
+    driver.playerLoadAudioClipHighPriority('http://example.test/h.mp3', 20G, 'high-H', 10)
 
     then:
-    driver.runtimeState.activeAudioClipCorrelationId == 'H1'
-    driver.runtimeState.audioClipPlaying == true
-    driver.getDeviceAudioClipQueueHighPriority()*.correlationId == ['H2']
-    driver.getDeviceAudioClipQueue()*.correlationId == ['A', 'B']
-    driver.runtimeState.currentlyPlayingClip.correlationId == 'A'
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/h1.mp3'
-    driver.logs.any { String entry -> entry.contains('Ignoring redundant audio clip dequeue while high-priority clip H1 is active') }
-    driver.scheduled == watchdogs
-
-    when:
-    driver.setAudioClipPlaying(false)
-
-    then:
-    driver.runtimeState.activeAudioClipCorrelationId == 'H2'
-    driver.getDeviceAudioClipQueue()*.correlationId == ['A', 'B']
-    driver.runtimeState.currentlyPlayingClip.correlationId == 'A'
-
-    when:
-    driver.setAudioClipPlaying(false)
-
-    then:
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/a.mp3'
-    driver.runtimeState.activeAudioClipMessage.dispatchCount == 2
-    driver.runtimeState.activeAudioClipCorrelationId != 'A'
-    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3', 'http://example.test/b.mp3']
-    driver.getDeviceAudioClipQueue().peek().correlationId == driver.runtimeState.activeAudioClipCorrelationId
-
-    when:
-    driver.setAudioClipPlaying(false)
-
-    then:
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/b.mp3'
-    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/b.mp3']
-
-    when:
-    driver.setAudioClipPlaying(false)
-
-    then:
-    driver.getDeviceAudioClipQueue().empty
-    driver.runtimeState.audioClipPlaying == null
-  }
-
-  def "regular clip interrupted by high priority resumes before regular clips enqueued during interruption"() {
-    given:
-    driver.metaClass.getParent = { -> null }
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.settings.ttsBoostAmount = 0
-    driver.playerLoadAudioClip('http://example.test/a.mp3', 10G, 5, 'A')
-    driver.playerLoadAudioClipHighPriority('http://example.test/h.mp3', 10G, 'H', 2)
-
-    when:
-    driver.playerLoadAudioClip('http://example.test/b.mp3', 10G, 5, 'B')
-
-    then:
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/h.mp3'
-    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3', 'http://example.test/b.mp3']
-
-    when: 'the high-priority clip finishes'
-    driver.setAudioClipPlaying(false)
-
-    then: 'the interrupted regular head resumes first'
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/a.mp3'
-    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3', 'http://example.test/b.mp3']
-
-    when: 'the resumed regular clip finishes'
-    driver.setAudioClipPlaying(false)
-
-    then: 'the newer regular clip plays next'
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/b.mp3'
-    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/b.mp3']
-
-    when:
-    driver.setAudioClipPlaying(false)
-
-    then:
-    driver.getDeviceAudioClipQueue().empty
-  }
-
-  def "final regular clip failure drops only the active queue head and leaves the tail queued"() {
-    given:
-    driver.metaClass.getParent = { -> null }
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.playerLoadAudioClip('http://example.test/a.mp3', 10G, 5, 'A')
-    driver.playerLoadAudioClip('http://example.test/b.mp3', 10G, 5, 'B')
-
-    when:
-    driver.markAudioClipWatchdogFailure('A', 'FAILED_ACTIVE_TIMEOUT', 'regression test')
-
-    then:
-    driver.getDeviceAudioClipQueue()*.correlationId == ['B']
-    driver.runtimeState.audioClipPlaying == false
-    !driver.runtimeState.containsKey('activeAudioClipCorrelationId')
-    !driver.runtimeState.containsKey('currentlyPlayingClip')
-  }
-
-  def "final high-priority failure preserves the unfinished regular queue head"() {
-    given:
-    driver.metaClass.getParent = { -> null }
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.playerLoadAudioClip('http://example.test/a.mp3', 10G, 5, 'A')
-    driver.playerLoadAudioClipHighPriority('http://example.test/h1.mp3', 10G, 'H1', 2)
-    driver.playerLoadAudioClipHighPriority('http://example.test/h2.mp3', 10G, 'H2', 2)
-
-    when:
-    driver.markAudioClipWatchdogFailure('H1', 'FAILED_ACTIVE_TIMEOUT', 'regression test')
-    driver.dequeueAudioClip()
-
-    then:
-    driver.runtimeState.activeAudioClipMessage.uri == 'http://example.test/h2.mp3'
-    driver.getDeviceAudioClipQueue()*.uri == ['http://example.test/a.mp3']
-    driver.runtimeState.currentlyPlayingClip.correlationId == 'A'
-  }
-
-  def "bounded standard and high-priority admission schedules preserve dispatch order at varied completion times"() {
-    given:
-    List<String> timingModes = ['drain-after-admission', 'complete-each-admission', 'complete-at-midpoint']
-    Integer scenarioCount = 0
-
-    when:
-    for(Integer regularCount = 0; regularCount <= 3; regularCount++) {
-      for(Integer highCount = 0; highCount <= 3; highCount++) {
-        if(regularCount + highCount == 0) { continue }
-        List<List<String>> admissionSchedules = []
-        appendAudioClipAdmissionSchedules(regularCount, highCount, [], admissionSchedules)
-        admissionSchedules.each { List<String> admissionSchedule ->
-          timingModes.each { String timingMode ->
-            resetAudioClipQueueModel()
-            List<Map> operations = []
-            List<String> actualDispatches = []
-            List<String> lastCorrelationId = [null]
-            Integer regularIndex = 0
-            Integer highIndex = 0
-
-            admissionSchedule.eachWithIndex { String kind, Integer index ->
-              String prefix = kind == 'R' ? 'R' : 'H'
-              Integer messageIndex = kind == 'R' ? regularIndex++ : highIndex++
-              String correlationId = "${prefix}${messageIndex}"
-              String uri = "http://example.test/${correlationId}.mp3"
-              Map operation = [kind: kind == 'R' ? 'regular' : 'high', priority: kind == 'H' ? 'HIGH' : 'REGULAR',
-                correlationId: correlationId, uri: uri]
-              operations.add(operation)
-
-              if(kind == 'R') {
-                driver.playerLoadAudioClip(uri, 1G, 1, correlationId)
-              } else {
-                driver.playerLoadAudioClipHighPriority(uri, 1G, correlationId, 1)
-              }
-              captureActiveAudioClipDispatch(actualDispatches, lastCorrelationId)
-
-              Boolean completeNow = timingMode == 'complete-each-admission' ||
-                (timingMode == 'complete-at-midpoint' && index == Math.floor(admissionSchedule.size() / 2.0d) as Integer)
-              if(completeNow) {
-                operations.add([kind: 'complete'])
-                driver.setAudioClipPlaying(false)
-                captureActiveAudioClipDispatch(actualDispatches, lastCorrelationId)
-              }
-            }
-
-            Integer drainCount = 0
-            Integer maxDrainCount = (regularCount + (highCount * 2) + 1) * 2
-            while(driver.runtimeState.audioClipPlaying == true && drainCount < maxDrainCount) {
-              operations.add([kind: 'complete'])
-              driver.setAudioClipPlaying(false)
-              captureActiveAudioClipDispatch(actualDispatches, lastCorrelationId)
-              drainCount++
-            }
-
-            List<String> expectedDispatches = expectedAudioClipDispatches(operations)
-            assert actualDispatches == expectedDispatches:
-              "regularDepth=${regularCount}, highDepth=${highCount}, arrivals=${admissionSchedule}, timing=${timingMode}, expected=${expectedDispatches}, actual=${actualDispatches}"
-            assert driver.getDeviceAudioClipQueue().isEmpty():
-              "regular queue not drained: arrivals=${admissionSchedule}, timing=${timingMode}, queue=${driver.getDeviceAudioClipQueue()*.correlationId}"
-            assert driver.getDeviceAudioClipQueueHighPriority().isEmpty():
-              "high queue not drained: arrivals=${admissionSchedule}, timing=${timingMode}, queue=${driver.getDeviceAudioClipQueueHighPriority()*.correlationId}"
-            scenarioCount++
-          }
-        }
-      }
-    }
-
-    then:
-    scenarioCount == 204
-  }
-
-  def "stale audio clip watchdog does not reset active playback state"() {
-    given:
-    driver.runtimeState.audioClipPlaying = true
-    driver.runtimeState.remove('audioClipQueueStartTime')
-    driver.runtimeState.remove('audioClipQueueTotalDuration')
-
-    when:
-    driver.audioClipWatchdog()
-
-    then:
-    driver.runtimeState.audioClipPlaying == true
-    driver.logs.any { String entry -> entry.contains('Ignoring stale audio clip watchdog guid=unknown watchdog=unknown') }
-    driver.logs.every { String entry -> !entry.contains('Audio clip watchdog fired') }
-  }
-
-  def "done watchdog schedules when queue start time is missing"() {
-    given:
-    driver.runtimeState.activeAudioClipCorrelationId = 'active-clip'
-    driver.runtimeState.remove('audioClipQueueStartTime')
-
-    when:
-    driver.scheduleAudioClipDoneWatchdog('active-clip', 1000L, 10)
-
-    then:
-    driver.scheduled.size() == 1
-    driver.scheduled[0][1] == 'audioClipWatchdog'
-    driver.scheduled[0][2].data.correlationId == 'active-clip'
-    driver.scheduled[0][2].data.phase == 'WAITING_FOR_DONE'
-    !driver.runtimeState.containsKey('audioClipQueueStartTime')
-    driver.runtimeState.audioClipQueueTotalDuration > 0
+    List<Map> requests = playerRequestMessages().findAll { Map request -> request.action == 'enqueueAudioClip' }
+    requests*.args*.correlationId == ['regular-A', 'high-H']
+    requests*.args*.priority == ['REGULAR', 'HIGH']
+    requests*.args*.uri == ['http://example.test/a.mp3', 'http://example.test/h.mp3']
+    websocketMessages.every { String message -> !message.contains('loadAudioClip') }
   }
 
   def "legacy player state migrates to the DNI runtime map and is cleared from Hubitat state"() {
     given:
-    driver.state.audioClipPlaying = true
     driver.state.parentCommandSequence = 4
     driver.binding.setVariable('atomicState', [wsRetryCount: 2])
 
@@ -2455,7 +2119,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.migrateLegacyRuntimeState()
 
     then:
-    driver.runtimeState.audioClipPlaying == true
     driver.runtimeState.parentCommandSequence == 4
     driver.runtimeState.wsRetryCount == 2
     driver.state.isEmpty()
@@ -2751,212 +2414,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.isEmpty()
   }
 
-  def "paired audio clip waits for both sockets and never replays secondary after primary dispatch"() {
-    given:
-    String leftMessage = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'LEFT'], [name: 'pair-1']])
-    String rightMessage = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RIGHT'], [name: 'pair-1']])
-    driver.device.dataValues.websocketStatus = 'open'
-    driver.setWsSubscriptionValue('audioClip', 'Subscribed')
-    driver.children.clear()
-    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
-      deviceNetworkId: driver.getRightChannelChildDNI())
-    rightChannel.dataValues.websocketStatus = 'closed'
-    Integer childConnects = 0
-    Boolean failRightSendOnce = true
-    rightChannel.metaClass.initializeWebsocketConnection = { -> childConnects++ }
-    rightChannel.metaClass.playerLoadAudioClipForSynchronizedRelease = { String message, String correlationId ->
-      if(failRightSendOnce) {
-        failRightSendOnce = false
-        rightChannel.updateDataValue('websocketStatus', 'error')
-        return false
-      }
-      websocketMessages << "right:${message}"
-      true
-    }
-    rightChannel.metaClass.completeSynchronizedAudioClipRelease = { String correlationId -> }
-    driver.children << rightChannel
-    driver.queueWebsocketMessage(leftMessage, 0, [kind: 'audioClip', correlationId: 'pair-1',
-      pairedRightChannelMessage: rightMessage])
-
-    when:
-    driver.flushWebsocketOutboundQueue()
-
-    then:
-    websocketMessages.empty
-    driver.runtimeState.websocketOutboundQueue.size() == 1
-    driver.runtimeState.websocketOutboundQueue[0].message == leftMessage
-    driver.runtimeState.websocketOutboundQueue[0].pairedRightChannelMessage == rightMessage
-    childConnects == 1
-
-    when:
-    rightChannel.updateDataValue('websocketStatus', 'open')
-    driver.flushWebsocketOutboundQueue()
-
-    then:
-    websocketMessages == [leftMessage]
-    driver.runtimeState.websocketOutboundQueue == null
-    driver.logs.any { it.toString().contains('Holding paired audioClip before either channel send') }
-    driver.logs.any { it.toString().contains('AudioClip channel dispatch completed') }
-
-    when:
-    rightChannel.updateDataValue('websocketStatus', 'open')
-    driver.flushWebsocketOutboundQueue()
-
-    then:
-    websocketMessages == [leftMessage]
-    driver.runtimeState.websocketOutboundQueue == null
-
-    cleanup:
-    driver.children.clear()
-    driver.subscriptions.clear()
-  }
-
-  def "paired clip falls back to primary only after secondary open timeout"() {
-    given:
-    String leftMessage = JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'LEFT'], [name: 'timeout-pair']])
-    driver.device.dataValues.websocketStatus = 'open'
-    driver.setWsSubscriptionValue('audioClip', 'Subscribed')
-    driver.children.clear()
-    dwinks.hubitat.stubs.MockDevice rightChannel = new dwinks.hubitat.stubs.MockDevice(
-      deviceNetworkId: driver.getRightChannelChildDNI())
-    rightChannel.dataValues.websocketStatus = 'closed'
-    rightChannel.metaClass.initializeWebsocketConnection = { -> }
-    rightChannel.metaClass.playerLoadAudioClipForSynchronizedRelease = { String message, String correlationId ->
-      websocketMessages << "right:${message}"
-      true
-    }
-    rightChannel.metaClass.completeSynchronizedAudioClipRelease = { String correlationId -> }
-    driver.children << rightChannel
-    Map pair = [kind: 'audioClip', correlationId: 'timeout-pair', pairedRightChannelMessage: JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RIGHT'], [name: 'timeout-pair']]),
-      pairedSecondaryDeadline: driver.now() + 30000L]
-    driver.queueWebsocketMessage(leftMessage, 0, pair)
-    driver.schedulePairedAudioClipSecondaryTimeout(driver.getWebsocketOutboundQueue()[0])
-
-    when:
-    driver.expirePairedAudioClipSecondary([correlationId: 'timeout-pair'])
-
-    then:
-    websocketMessages == [leftMessage]
-    driver.runtimeState.websocketOutboundQueue == null
-    driver.logs.any { it.toString().contains('did not report open within 30 seconds') }
-    driver.logs.any { it.toString().contains('Secondary-open timeout expired') }
-    driver.scheduled.any { List job -> job[1] == 'expirePairedAudioClipSecondary' && job[0] == 30 }
-
-    cleanup:
-    driver.children.clear()
-    driver.subscriptions.clear()
-  }
-
-  def "non audioClip websocket commands are rejected"() {
-    given:
-    String firstMessage = JsonOutput.toJson([[namespace: 'favorites', command: 'loadFavorite', groupId: 'GROUP_TEST'], [favoriteId: '24']])
-    String secondMessage = JsonOutput.toJson([[namespace: 'playlists', command: 'loadPlaylist', groupId: 'GROUP_TEST'], [playlistId: '963']])
-    driver.device.dataValues.websocketStatus = 'open'
-
-    when:
-    driver.sendWsMessage(firstMessage)
-    driver.sendWsMessage(secondMessage)
-
-    then:
-    websocketMessages.empty
-    driver.runtimeState.websocketOutboundQueue == null
-    driver.logs.any { String entry -> entry.contains('Refusing to send a WebSocket command without a known response fingerprint') }
-  }
-
-  def "matching websocket response clears the command ledger with trace success"() {
-    given:
-    queueTestGroupSocketCommand()
-    List<Map> pending = driver.runtimeState.websocketCommandLedger as List<Map>
-    Integer pendingCount = pending.size()
-
-    when:
-    driver.processWebsocketMessage('[{"namespace":"audioClip","response":"loadAudioClip","success":true,"type":"audioClip"},{"name":"clip-10"}]')
-
-    then:
-    pendingCount == 1
-    driver.runtimeState.websocketCommandLedger == null
-    driver.logs.any { it.toString().contains('WebSocket command ledger success') && it.toString().contains('audioClip.loadAudioClip') }
-  }
-
-  def "primary websocket ledger expiry cleans correlation without reconnecting"() {
-    given:
-    driver.device.dataValues.websocketStatus = 'open'
-
-    when:
-    queueTestGroupSocketCommand()
-    Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
-    driver.expireWebsocketCommandLedgerEntry([entryId: pending.entryId,
-      connectionGeneration: pending.connectionGeneration])
-
-    then:
-    driver.runtimeState.websocketCommandLedger == null
-    driver.runtimeState.websocketOutboundQueue == null
-    driver.device.getDataValue('websocketStatus') == 'open'
-    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
-  }
-
-  def "claimed websocket ledger batch is detached from commands registered afterward"() {
-    given:
-    queueTestGroupSocketCommand(10)
-    Map original = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
-
-    when:
-    List<Map> claimed = driver.takeWebsocketCommandLedgerBatch()
-    queueTestGroupSocketCommand(20)
-
-    then:
-    claimed.size() == 1
-    claimed[0].entryId == original.entryId
-    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).entryId != original.entryId
-    claimed[0].message.contains('clip-10')
-    ((driver.runtimeState.websocketCommandLedger as List<Map>)[0]).message.contains('clip-20')
-  }
-
-  def "websocket ledger locks are stable per device and distinct across devices"() {
-    given:
-    Object firstDeviceLock = driver.getWebsocketCommandLedgerLock()
-
-    when:
-    driver.device.deviceNetworkId = 'SONOS-OTHER-DNI'
-    Object secondDeviceLock = driver.getWebsocketCommandLedgerLock()
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-
-    then:
-    firstDeviceLock.is(driver.getWebsocketCommandLedgerLock())
-    !firstDeviceLock.is(secondDeviceLock)
-  }
-
-  def "explicit websocket command rejection clears the ledger as failure without declaring socket stale"() {
-    given:
-    queueTestGroupSocketCommand()
-    Integer generation = (driver.runtimeState.websocketConnectionGeneration ?: 0) as Integer
-
-    when:
-    driver.processWebsocketMessage('[{"namespace":"audioClip","response":"loadAudioClip","success":false,"type":"globalError"},{"errorCode":"ERROR_INVALID_ARGUMENT","reason":"invalid request","name":"clip-10"}]')
-
-    then:
-    driver.runtimeState.websocketCommandLedger == null
-    driver.device.getDataValue('websocketStatus') == 'open'
-    (driver.runtimeState.websocketConnectionGeneration ?: 0) == generation
-    driver.logs.any { it.toString().contains('WebSocket command ledger failure') && it.toString().contains('ERROR_INVALID_ARGUMENT') }
-  }
-
-  def "command response silence expires correlation without queueing or reconnecting"() {
-    given:
-    queueTestGroupSocketCommand()
-    Map pending = (driver.runtimeState.websocketCommandLedger as List<Map>)[0]
-
-    when:
-    driver.expireWebsocketCommandLedgerEntry([entryId: pending.entryId,
-      connectionGeneration: pending.connectionGeneration])
-
-    then:
-    driver.runtimeState.websocketCommandLedger == null
-    driver.runtimeState.websocketOutboundQueue == null
-    driver.device.getDataValue('websocketStatus') == 'open'
-    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
-  }
-
   def "websocket connection enables native ping liveness checks"() {
     given:
     driver.device.dataValues.websocketStatus = 'closed'
@@ -3085,117 +2542,41 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.device.events.isEmpty()
   }
-  def "announcement volume preserves explicit zero across paths and boosts"() {
+  def "player TTS uses priority-specific chime settings and tracks do not chime"() {
     given:
-    driver.metaClass.getParent = { -> null }
-    driver.device.currentValues.volume = 5
-    driver.device.currentValues.mute = 'unmuted'
-    driver.settings.ttsBoostAmount = boost
-    driver.settings.chimeBeforeTTS = false
-    driver.settings.createRightChannelChildDevice = true
-    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.runtimeState.audioClipPlaying = true
+    captureParentAudioClipRequests()
+    driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
+    driver.metaClass.textToSpeech = { String text, String voice ->
+      [uri: "http://example.test/${text}.mp3", duration: 2] as LinkedHashMap
+    }
+    driver.device.dataValues.capabilities = 'AUDIO_CLIP'
+    driver.settings.chimeBeforeStandardPriorityTTS = true
+    driver.settings.chimeBeforeHighPriorityTTS = true
 
     when:
-    if (path == 'regular') {
-      driver.playerLoadAudioClip('http://example.test/volume.mp3', volume, 2, 'V')
-    } else if (path == 'priority') {
-      driver.playerLoadAudioClipHighPriority('http://example.test/volume.mp3', volume, 'V', 2)
-    } else {
-      driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/volume.mp3', volume, 'V', 2)
-    }
-    Map clip = path == 'priority' ? driver.runtimeState.activeAudioClipMessage : driver.getDeviceAudioClipQueue().peek()
-    List payload = (List)new JsonSlurper().parseText(clip.leftChannel as String)
+    driver.devicePlayText('standard', 10G, null)
+    driver.playHighPriorityTTS('high', 10G, null)
+    driver.playTrack('track', 10G)
 
     then:
-    payload[1].volume == (volume == 0 ? 0 : Math.max(0, Math.min((volume == null ? 5 : volume) + boost, 100)))
-    ((List)new JsonSlurper().parseText(clip.rightChannel as String))[1].volume == payload[1].volume
-
-    where:
-    [path, volume, boost] << [['regular', 'priority', 'synchronized'], [null, 0G, 1G, 95G], [0, 10, -5]].combinations()
+    List<Map> requests = playerRequestMessages().findAll { Map request -> request.action == 'enqueueAudioClip' }
+    requests*.args*.chimeBeforeTTS == [true, true, false]
+    requests*.args*.priority == ['REGULAR', 'HIGH', 'REGULAR']
   }
-  def "chimes preserve explicit zero and omit unspecified volume"() {
+
+  def "player audioClip requests forward volume and priority to the parent app"() {
     given:
-    driver.metaClass.getParent = { -> null }
-    driver.device.currentValues.mute = 'unmuted'
-    driver.settings.chimeBeforeTTS = true
-    driver.settings.createRightChannelChildDevice = true
-    driver.device.dataValues.rightChannelId = 'RINCON_RIGHT'
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.runtimeState.audioClipPlaying = true
+    captureParentAudioClipRequests()
 
     when:
-    if (synchronizedClip) {
-      driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/test.mp3', volume, 'C', 2)
-    } else {
-      driver.playerLoadAudioClipChime(volume)
-    }
-    Map clip = driver.getDeviceAudioClipQueue().peek()
-    List payload = (List)new JsonSlurper().parseText(clip.leftChannel as String)
+    driver.playerLoadAudioClip('http://example.test/volume.mp3', 15G, 2, 'regular-V')
+    driver.playerLoadAudioClipHighPriority('http://example.test/high.mp3', 0G, 'high-H', 2)
 
     then:
-    payload[1].clipType == 'CHIME'
-    payload[1].containsKey('volume') == (volume != null)
-    ((List)new JsonSlurper().parseText(clip.rightChannel as String))[1] == payload[1]
-    if (volume != null) { assert payload[1].volume == volume }
-
-    where:
-    [synchronizedClip, volume] << [[false, true], [null, 0G, 1G]].combinations()
-  }
-
-  def "retained active regular head does not count as waiting work for synchronized chime readiness"() {
-    given:
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-    driver.getDeviceAudioClipQueue().add([correlationId: 'A'])
-    driver.runtimeState.currentlyPlayingClip = [correlationId: 'A']
-    driver.runtimeState.audioClipPlaying = true
-    driver.runtimeState.activeAudioClipMessage = [correlationId: 'A', priority: 'REGULAR']
-
-    expect:
-    driver.getAudioClipQueueIsEmpty() == false
-    driver.hasQueuedRegularAudioClip() == false
-    driver.canPrepareSynchronizedGroupChime(false) == true
-
-    when: 'another regular clip is waiting behind the retained active head'
-    driver.getDeviceAudioClipQueue().add([correlationId: 'B'])
-
-    then:
-    driver.hasQueuedRegularAudioClip() == true
-    driver.canPrepareSynchronizedGroupChime(false) == false
-
-    when: 'the active head is interrupted by a high-priority clip'
-    driver.runtimeState.activeAudioClipMessage = [correlationId: 'H', priority: 'HIGH']
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueue().add([correlationId: 'A'])
-
-    then: 'the suspended head remains unfinished but does not count as newly waiting work'
-    driver.getAudioClipQueueIsEmpty() == false
-    driver.hasQueuedRegularAudioClip() == false
-    driver.canPrepareSynchronizedGroupChime(false) == true
-  }
-
-  def "muted synchronized group member reports terminal progress"() {
-    given:
-    driver.events.clear()
-    driver.device.currentValues.mute = 'muted'
-    driver.getDeviceAudioClipQueue().clear()
-    driver.getDeviceAudioClipQueueHighPriority().clear()
-
-    when:
-    driver.playerPrepareAudioClipForSynchronizedStart('http://example.test/muted.mp3', 10G,
-      'muted-group-announcement', 2)
-
-    then:
-    driver.getDeviceAudioClipQueue().empty
-    playerStateMessages().any { Map event ->
-      event.kind == 'groupAnnouncementProgress' &&
-        event.correlationId == 'muted-group-announcement' &&
-        event.phase == 'DISMISSED' && event.reason == 'muted'
-    }
+    List<Map> requests = playerRequestMessages().findAll { Map request -> request.action == 'enqueueAudioClip' }
+    requests*.args*.volume == [15G, 0G]
+    requests*.args*.priority == ['REGULAR', 'HIGH']
+    requests*.args*.correlationId == ['regular-V', 'high-H']
   }
 
   def "public volume coercion preserves zero"() {
@@ -3205,31 +2586,22 @@ class SonosAdvPlayerSpec extends Specification {
     where:
     input << [0, 0L, 0G, '0', ' 0 ']
   }
-  def "public restore resume and speak commands preserve zero volume"() {
+  def "public restore resume and speak commands send audioClip requests to the parent app"() {
     given:
-    driver.metaClass.getParent = { -> null }
+    captureParentAudioClipRequests()
     driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
     driver.metaClass.textToSpeech = { String text, String voice -> [uri: 'http://example.test/zero.mp3', duration: 1] as LinkedHashMap }
     driver.device.dataValues.capabilities = 'AUDIO_CLIP'
     driver.device.currentValues.volume = 5
-    driver.settings.ttsBoostAmount = 10
-    driver.getDeviceAudioClipQueue().clear()
-    driver.runtimeState.audioClipPlaying = true
-    List<BigDecimal> streamVolumes = []
-    driver.metaClass.componentPlayStreamWithRestoreLocal = { String uri, Integer duration, BigDecimal volume ->
-      streamVolumes << volume
-    }
 
     when:
     driver.invokeMethod(command, ['zero', input] as Object[])
-    Map clip = driver.getDeviceAudioClipQueue().peek()
 
     then:
-    if(command == 'speak') {
-      streamVolumes == [0G]
-    } else {
-      ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].volume == 0
-    }
+    Map request = playerRequestMessages().find { Map entry -> entry.action == 'enqueueAudioClip' }
+    request.args.uri == 'http://example.test/zero.mp3'
+    request.args.volume == null
+    request.args.priority == 'REGULAR'
 
     where:
     [command, input] << [['playTextAndRestore', 'playTextAndResume', 'speak'], [0, 0L, 0G, '0', ' 0 ']].combinations()
@@ -3265,29 +2637,25 @@ class SonosAdvPlayerSpec extends Specification {
     driver.shouldUseAnnouncementAudioClip(false)
   }
 
-  def "paused AirPlay current source routes speak through local audioClip"() {
+  def "paused AirPlay current source routes speak through the parent audioClip scheduler"() {
     given:
-    driver.metaClass.getParent = { -> null }
-    driver.getDeviceAudioClipQueue().clear()
+    captureParentAudioClipRequests()
     driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
     driver.metaClass.textToSpeech = { String text, String voice ->
       [uri: 'http://example.test/airplay.mp3', duration: 2] as LinkedHashMap
     }
-    driver.device.currentValues.audioSource = 'Not Available'
     driver.device.currentValues.audioSource = 'airplay:current-stream'
     driver.device.dataValues.capabilities = 'AUDIO_CLIP'
     driver.device.dataValues.normalAnnouncementMode = 'automatic'
     driver.device.currentValues.status = 'paused'
-    driver.runtimeState.audioClipPlaying = true
 
     when:
     driver.devicePlayText('AirPlay clip test', 1G, null)
-    Map clip = driver.getDeviceAudioClipQueue().peek()
 
     then:
-    driver.asyncCalls.empty
-    clip != null
-    ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].streamUrl == 'http://example.test/airplay.mp3'
+    Map request = playerRequestMessages().find { Map entry -> entry.action == 'enqueueAudioClip' }
+    request.args.uri == 'http://example.test/airplay.mp3'
+    request.args.priority == 'REGULAR'
   }
 
   def "AirPlay detection uses only the current audioSource attribute"() {
