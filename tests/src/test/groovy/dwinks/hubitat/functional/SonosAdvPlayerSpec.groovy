@@ -1146,6 +1146,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.groupId = 'GROUP_TEST'
     driver.device.dataValues.websocketStatus = 'open'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
+    driver.device.currentValues.isGroupCoordinator = 'on'
     driver.metaClass.getParent = { -> new Expando(
       playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
       flushGroupDeviceState: { String coordinatorId, Map volumeAttrs, Map playbackAttrs ->
@@ -1215,6 +1216,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
     driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_OTHER'
+    driver.device.currentValues.isGroupCoordinator = 'off'
 
     when:
     driver.initialize()
@@ -1307,16 +1309,6 @@ class SonosAdvPlayerSpec extends Specification {
   def cleanup() {
     GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
     driver.metaClass = null
-  }
-
-  def "local player attribute updates apply immediately without a pending publication drain"() {
-    when:
-    driver.setGroupMemberCount(2)
-
-    then:
-    driver.device.currentValues.groupMemberCount == 2
-    driver.device.events.any { Map event -> event.name == 'groupMemberCount' && event.value == 2 }
-    !driver.scheduled.any { List item -> item[1] == 'flushPendingLocalDeviceEvents' }
   }
 
   def "retargeting a fade to the reported volume cancels queued steps"() {
@@ -1886,35 +1878,37 @@ class SonosAdvPlayerSpec extends Specification {
     topology.batteryData == [BattTmp: '23', BattPct: '80', BattChg: 'NOT_CHARGING']
   }
 
-  def "unchanged coordinator ID repairs a stale coordinator role flag"() {
-    given:
-    driver.device.dataValues.id = 'RINCON_FOLLOW'
-    driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
-
-    when:
-    driver.setGroupCoordinatorId('RINCON_COORD')
-
-    then:
-    driver.device.dataValues.groupCoordinatorId == 'RINCON_COORD'
-    !driver.device.dataValues.containsKey('isGroupCoordinator')
-    !driver.getIsGroupCoordinator()
-  }
-
-  def "coordinator changes publish local device events immediately"() {
+  def "player reads app-published coordinator role without deriving it from topology IDs"() {
     given:
     driver.device.dataValues.id = 'RINCON_TEST'
-    driver.device.dataValues.groupCoordinatorId = 'RINCON_OLD_COORD'
-    driver.device.currentValues.currentTrackName = 'Mama, I\'m Coming Home'
-    driver.device.currentValues.currentArtistName = 'Ozzy Osbourne'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
 
     when:
-    driver.setGroupCoordinatorId('RINCON_TEST')
+    driver.device.currentValues.isGroupCoordinator = 'off'
 
     then:
-    driver.device.currentValues.groupCoordinatorId == 'RINCON_TEST'
-    driver.device.currentValues.currentTrackName == 'Mama, I\'m Coming Home'
-    driver.device.currentValues.currentArtistName == 'Ozzy Osbourne'
-    !driver.scheduled.any { List call -> call[1] == 'flushPendingLocalDeviceEvents' }
+    !driver.getIsGroupCoordinator()
+
+    when:
+    driver.device.currentValues.isGroupCoordinator = 'on'
+
+    then:
+    driver.getIsGroupCoordinator()
+  }
+
+  def "player driver has no topology attribute setters or coordinator change marker"() {
+    given:
+    String source = new File('../Drivers/Component/SonosAdvPlayer.groovy').text
+
+    expect:
+    !source.contains('coordinatorStatusChanged')
+    !source.contains('void setGroupCoordinatorId(')
+    !source.contains('void setGroupPlayerIds(')
+    !source.contains('void setGroupId(')
+    !source.contains('void setIsGroupCoordinator(')
+    !source.contains("device.sendEvent(name: 'groupCoordinatorId'")
+    !source.contains("device.sendEvent(name: 'groupPlayerIds'")
+    !source.contains("device.sendEvent(name: 'groupMemberCount'")
   }
 
   def "obsolete local publication queue and lastUpdated machinery are absent"() {
@@ -2656,6 +2650,7 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
     driver.device.currentValues.isGrouped = 'on'
+    driver.device.currentValues.isGroupCoordinator = 'off'
 
     when:
     driver.setGroupVolume(40G)

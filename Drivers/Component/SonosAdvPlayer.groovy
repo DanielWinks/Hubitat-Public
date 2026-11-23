@@ -941,7 +941,6 @@ Boolean hasLineInCapability() {
   'groupCoordinatorId',
   'groupId',
   'groupPlayerIds',
-  'coordinatorStatusChanged',
   'deviceIp',
   'secondaryIds',
   'secondaryDeviceIps',
@@ -1212,7 +1211,9 @@ void performImmediateInitialization() {
   subscribeToMrGrcEvents()
   if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
   subscribeToZgtEvents()
-  if(getIsGroupCoordinator() == true) { subscribeToAVTransport() }
+  // AVTransport remains subscribed regardless of group role. The parent filters
+  // follower AVT payloads using its own ZGT topology.
+  subscribeToAVTransport()
   subscribeToContentDirectory()
   wsConnect()
   refreshUpnpMediaCatalogs()
@@ -5033,31 +5034,16 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   return true
 }
 
-@CompileStatic
-void updateZoneGroupName(String groupName) {
-  if(groupName != null) { device.sendEvent(name: 'groupName', value: groupName) }
-}
-
 void processGroupRenderingControlMessages(String xmlString) {
   deferOrProcessGroupRenderingControlPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString)
 }
 
-@CompileStatic
-void setGroupVolumeState(Integer groupVolume) {
-  if(!(groupVolume != getGroupVolumeState())) { return }
-  if(groupVolume != null) { device.sendEvent(name: 'groupVolume', value: groupVolume) }
-}
 @CompileStatic
 Integer getGroupVolumeState() {
   Object raw = getDevice().currentValue('groupVolume', true)
   return raw != null ? raw as Integer : null
 }
 
-@CompileStatic
-void setGroupMuteState(String groupMute) {
-  if(!(groupMute != getGroupMuteState())) { return }
-  if(groupMute != null) { device.sendEvent(name: 'groupMute', value: groupMute) }
-}
 @CompileStatic
 String getGroupMuteState() {
   Object raw = getDevice().currentValue('groupMute', true)
@@ -6360,107 +6346,22 @@ void setSecondaryDeviceIps(List<String> ipAddresses) {
   setDeviceDataValue('secondaryDeviceIps', ipAddresses.join(','))
 }
 
-String getGroupId() {
-  return getDeviceDataValue('groupId')
-}
-void setGroupId(String groupId) {
-  String oldGroupId = getGroupId()
-  if(oldGroupId == groupId) { return }
-  setDeviceDataValue('groupId', groupId)
-  if(groupId != null) { device.sendEvent(name: 'groupId', value: groupId) }
-}
-
 @CompileStatic
 Boolean isCurrentlySubcribedToAudioClipWS() { return getWsSubscriptionValue('audioClip') == 'Subscribed' }
-String getGroupName() {
-  return this.device.currentValue('groupName',true)
-}
-void setGroupName(String groupName) {
-  if(!(groupName != getGroupName())) { return }
-  if(groupName != null) { device.sendEvent(name: 'groupName', value: groupName) }
+String getGroupId() {
+  return this.device.currentValue('groupId', true)?.toString() ?: getDeviceDataValue('groupId')
 }
 
 Boolean getIsGrouped() {
   return this.device.currentValue('isGrouped') == 'on'
 }
-void setIsGrouped(Boolean isGrouped) {
-  String newValue = isGrouped ? 'on' : 'off'
-  if(!(newValue != this.device.currentValue('isGrouped'))) { return }
-  if(newValue != null) { device.sendEvent(name: 'isGrouped', value: newValue) }
-}
-
-Integer getGroupMemberCount() {
-  return this.device.currentValue('groupMemberCount') as Integer
-}
-void setGroupMemberCount(Integer groupMemberCount) {
-  if(!(groupMemberCount != this.device.currentValue('groupMemberCount') as Integer)) { return }
-  if(groupMemberCount != null) { device.sendEvent(name: 'groupMemberCount', value: groupMemberCount) }
-}
 
 String getGroupCoordinatorId() {
-  return getDeviceDataValue('groupCoordinatorId')
-}
-@CompileStatic
-void setGroupCoordinatorId(String groupCoordinatorId) {
-  String previousGroupCoordinator = getGroupCoordinatorId()
-  Boolean previouslyWasGroupCoordinator = getIsGroupCoordinator()
-  if(groupCoordinatorId != previousGroupCoordinator) {
-    logDebug("setGroupCoordinatorId ${groupCoordinatorId}")
-    setDeviceDataValue('groupCoordinatorId', groupCoordinatorId)
-  }
-  // Internal device data can be correct while Hubitat's published Current
-  // State is stale (for example after a lost local-event drain callback).
-  if(groupCoordinatorId != previousGroupCoordinator ||
-      this.device.currentValue('groupCoordinatorId', true) != groupCoordinatorId) {
-    if(groupCoordinatorId != null) { device.sendEvent(name: 'groupCoordinatorId', value: groupCoordinatorId) }
-  }
-  Boolean isGroupCoordinator = getId() == groupCoordinatorId
-  // Keep the persisted coordinator role derived from the ID on every topology
-  // update, even when the ID itself did not change.
-  setIsGroupCoordinator(isGroupCoordinator)
-
-  // Signal setGroupPlayerIds() to re-evaluate group devices even when the
-  // player list is unchanged, so the parent observes the coordinator change
-  // through the topology attribute events in the same update.
-  if(isGroupCoordinator != previouslyWasGroupCoordinator) {
-    setDeviceDataValue('coordinatorStatusChanged', 'true')
-  }
-
-  if(isGroupCoordinator && !previouslyWasGroupCoordinator) {
-    if(!subValid('sid1')) {
-      subscribeToCoordinatorSubs()
-      logDebug('Just became group coordinator, subscribing to AVT; parent topology reconciliation owns playback state clearing.')
-    }
-  } else if(!isGroupCoordinator && previouslyWasGroupCoordinator) {
-      logDebug("Just added to group!")
-      unsubscribeFromAVTransport()
-  } else {logDebug("Group coordinator status has not changed.")}
-}
-
-void subscribeToCoordinatorSubs() {
-  runIn(2, 'subscribeToAVTransport', [overwrite: true])
-  runIn(2, 'playerGetGroupsFull', [overwrite: true])
-}
-
-String getGroupCoordinatorName() {
-  return this.device.currentValue('groupCoordinatorName')
-}
-void setGroupCoordinatorName(String groupCoordinatorName) {
-  if((groupCoordinatorName != getGroupCoordinatorName())) {
-    if(groupCoordinatorName != null) { device.sendEvent(name: 'groupCoordinatorName', value: groupCoordinatorName) }
-  }
+  return this.device.currentValue('groupCoordinatorId', true)?.toString() ?: getDeviceDataValue('groupCoordinatorId')
 }
 
 Boolean getIsGroupCoordinator() {
-  String playerId = getId()
-  String coordinatorId = getGroupCoordinatorId()
-  return playerId != null && playerId != '' && playerId == coordinatorId
-}
-void setIsGroupCoordinator(Boolean isGroupCoordinator) {
-  String publicValue = isGroupCoordinator ? 'on' : 'off'
-  if(this.device.currentValue('isGroupCoordinator', true) != publicValue) {
-    if(publicValue != null) { device.sendEvent(name: 'isGroupCoordinator', value: publicValue) }
-  }
+  return this.device.currentValue('isGroupCoordinator', true)?.toString() == 'on'
 }
 
 Boolean isGroupedAndCoordinator() {
@@ -6472,23 +6373,8 @@ Boolean isGroupedAndNotCoordinator() {
 }
 
 List<String> getGroupPlayerIds() {
-  return splitTokens(getDeviceDataValue('groupPlayerIds')?.toString(), ',')
-}
-void setGroupPlayerIds(List<String> groupPlayerIds) {
-  String newValue = groupPlayerIds.join(',')
-  String oldValue = getDeviceDataValue('groupPlayerIds')
-  Boolean coordinatorChanged = getDeviceDataValue('coordinatorStatusChanged') == 'true'
-  if(coordinatorChanged) { setDeviceDataValue('coordinatorStatusChanged', '') }
-  if(newValue == oldValue && !coordinatorChanged) { return }
-  if(newValue != oldValue) {
-    Boolean isNowGrouped = groupPlayerIds.size() > 1
-    setDeviceDataValue('groupPlayerIds', newValue)
-    device.sendEvent(name: 'isGrouped', value: isNowGrouped ? 'on' : 'off')
-    device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
-    if(newValue != null) { device.sendEvent(name: 'groupPlayerIds', value: newValue) }
-    // sid4 remains subscribed per device across group membership transitions.
-  }
-  logDebug('Updating group device with new group membership information')
+  String currentIds = this.device.currentValue('groupPlayerIds', true)?.toString()
+  return splitTokens(currentIds ?: getDeviceDataValue('groupPlayerIds')?.toString(), ',')
 }
 
 List<String> getGroupFollowerRincons() {
@@ -6507,15 +6393,6 @@ String getDNIFromRincon(String rincon) {
 String safeDniFromRincon(String rincon) {
   if(!rincon) { return '' }
   try { return getDNIFromRincon(rincon) ?: '' } catch(Exception ignored) { return '' }
-}
-
-String getGroupMemberNames() {
-  return this.device.currentValue('groupMemberNames')
-}
-void setGroupMemberNames(List<String> groupPlayerNames) {
-  String newValue = groupPlayerNames.toString()
-  if(!(newValue != getGroupMemberNames())) { return }
-  if(newValue != null) { device.sendEvent(name: 'groupMemberNames', value: newValue) }
 }
 
 @CompileStatic

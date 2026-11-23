@@ -2651,7 +2651,7 @@ class SonosAdvancedAppSpec extends Specification {
     group.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
   }
 
-  def "ZGT changes topology only, drops follower AVT, and accepts the speaker's own AVT after departure"() {
+  def "follower AVT is cached and applied after ZGT promotes it to coordinator"() {
     given:
     appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
       'GROUP-1': [
@@ -2660,10 +2660,11 @@ class SonosAdvancedAppSpec extends Specification {
       ]
     ]])
     appScript.drainUpnpNotificationQueue()
+    follower.currentValues.currentTrackName = 'Arc track'
     coordinator.events.clear()
     follower.events.clear()
 
-    when: 'the follower AVT is ignored while grouped'
+    when: 'the follower AVT is cached while grouped'
     appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
       [name: 'currentTrackName', value: 'Leader stream URI']
     ]])
@@ -2671,7 +2672,19 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     follower.events.isEmpty()
-    appScript.getStoredAvtEvents('RINCON_FOLLOW').isEmpty()
+    appScript.getStoredAvtEvents('RINCON_FOLLOW') == [[name: 'currentTrackName', value: 'Leader stream URI']]
+
+    when: 'a newer AVT arrives just before the delayed ZGT split report'
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
+      [name: 'status', value: 'playing'], [name: 'currentTrackName', value: 'Fresh solo track']
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    follower.events.isEmpty()
+    appScript.getStoredAvtEvents('RINCON_FOLLOW') == [
+      [name: 'status', value: 'playing'], [name: 'currentTrackName', value: 'Fresh solo track']
+    ]
 
     when: 'ZGT splits the group'
     coordinator.events.clear()
@@ -2689,19 +2702,27 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainUpnpNotificationQueue()
 
     then:
+    coordinator.currentValues.groupCoordinatorId == 'RINCON_COORD'
+    coordinator.currentValues.groupPlayerIds == 'RINCON_COORD'
+    coordinator.currentValues.isGroupCoordinator == 'on'
+    follower.currentValues.groupCoordinatorId == 'RINCON_FOLLOW'
+    follower.currentValues.groupPlayerIds == 'RINCON_FOLLOW'
+    follower.currentValues.isGroupCoordinator == 'on'
+    !follower.events.any { Map event -> event.name in ['currentTrackName', 'currentArtistName', 'currentAlbumName', 'status', 'transportStatus'] }
+    follower.currentValues.currentTrackName == 'Arc track'
+    appScript.scheduled.any { List job -> job[0] == 1000 && job[1] == 'applyCachedAvtForPromotedCoordinators' }
+    appScript.scheduled.any { List job -> job[0] == 500 && job[1] == 'applyCachedAvtForPromotedCoordinators' }
+    !appScript.scheduled.any { List job -> job[1] == 'drainPlayerAvtSubscriptionUpdates' }
     !coordinator.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
-    !follower.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
 
-    when: 'the now-solo Kids Room reports its own empty AVT'
+    when: 'the post-ZGT cache settling window completes'
     coordinator.events.clear()
     follower.events.clear()
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
-      [name: 'status', value: 'stopped'], [name: 'currentTrackName', value: 'Not Available']
-    ]])
-    appScript.drainUpnpNotificationQueue()
+    appScript.applyCachedAvtForPromotedCoordinators()
 
     then:
-    follower.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Not Available'
+    follower.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Fresh solo track'
+    follower.events.find { Map event -> event.name == 'status' }?.value == 'playing'
     !coordinator.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
   }
 
@@ -2724,6 +2745,27 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Latest leader track']
+  }
+
+  def "ZGT coordinator changes do not alter player AVT subscriptions"() {
+    given:
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
+      'GROUP-1': [
+        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+      ]
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    when:
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
+      'GROUP-COORD': [[name: 'groupCoordinatorId', value: 'RINCON_COORD'], [name: 'groupPlayerIds', value: 'RINCON_COORD']],
+      'GROUP-FOLLOW': [[name: 'groupCoordinatorId', value: 'RINCON_FOLLOW'], [name: 'groupPlayerIds', value: 'RINCON_FOLLOW']]
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    !appScript.scheduled.any { List job -> job[1] == 'drainPlayerAvtSubscriptionUpdates' }
   }
 
   def "AVT artwork is rendered and group preference controls only group size attributes"() {

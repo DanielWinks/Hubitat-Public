@@ -396,6 +396,7 @@ preferences {
 @Field static final String GROUP_TOPOLOGY_EVENT_DRAIN_SCHEDULED_STATE_KEY = 'groupTopologyEventDrainScheduled'
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
+@Field static final String PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY = 'pendingPromotedAvtPlayers'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
@@ -475,6 +476,7 @@ preferences {
   PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY,
   DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY,
   AVT_STORE_STATE_KEY,
+  PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
   PENDING_UPNP_NOTIFICATION_QUEUE_KEY,
   GROUP_OPERATION_STATE_KEY,
@@ -7961,6 +7963,9 @@ synchronized void putPlayerUpnpEvents(Map payload) {
   pending.add(copy)
   state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] = pending
   runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'drainUpnpNotificationQueue', [overwrite: true])
+  if(service == 'ZGT') {
+    runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS * 2, 'applyCachedAvtForPromotedCoordinators', [overwrite: true])
+  }
 }
 
 /** Apply each notification in arrival order after the 500 ms parent debounce. */
@@ -7981,9 +7986,12 @@ void processUpnpNotification(Map notification) {
   Map<String, String> coordinators = buildPlayerCoordinatorMap(topology)
   String coordinatorId = coordinators[sourceId] ?: sourceId
   if(service == 'AVT') {
-    if(coordinatorId != sourceId) { logDebug("Dropping follower AVT from ${sourceId}; coordinator is ${coordinatorId}"); return }
     putAvtEvents(sourceId, events)
-    deliverUpnpEventsToGroup(sourceId, events, true)
+    if(coordinatorId == sourceId) {
+      deliverUpnpEventsToGroup(sourceId, events, true)
+    } else {
+      logDebug("Caching follower AVT from ${sourceId}; coordinator is ${coordinatorId}")
+    }
   } else if(service == 'GRC') {
     deliverUpnpEventsToGroup(coordinatorId, events, false)
   }
@@ -7997,11 +8005,27 @@ void processUpnpTopologyNotification(Map notification) {
   if(!sourceDni || next.isEmpty()) { return }
   Map<String, String> oldCoordinators = buildPlayerCoordinatorMap(previous)
   putZgtTopology(sourceDni, next)
+  Set<String> promotedPlayers = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
+      ? new LinkedHashSet<String>((Collection<String>)state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY]) : new LinkedHashSet<String>()
+  buildPlayerCoordinatorMap(next).each { String playerId, String coordinatorId ->
+    if(coordinatorId == playerId && oldCoordinators[playerId] && oldCoordinators[playerId] != playerId) {
+      promotedPlayers.add(playerId)
+    }
+  }
+  if(!promotedPlayers.isEmpty()) {
+    state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] = promotedPlayers.toList()
+    runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'applyCachedAvtForPromotedCoordinators', [overwrite: true])
+  }
   next.each { String groupId, List<Map> events ->
     String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
     List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
     if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
-    members.unique().each { String id -> deliverUpnpEventsToPlayer(id, events) }
+    members.unique().each { String id ->
+      List<Map> playerTopologyEvents = new ArrayList<Map>(events.collect { Map event -> new LinkedHashMap(event) })
+      playerTopologyEvents << [name: 'groupId', value: groupId]
+      playerTopologyEvents << [name: 'isGroupCoordinator', value: id == coordinatorId ? 'on' : 'off']
+      deliverUpnpEventsToPlayer(id, playerTopologyEvents)
+    }
   }
   next.each { String groupId, List<Map> events ->
     String leader = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
@@ -8009,6 +8033,19 @@ void processUpnpTopologyNotification(Map notification) {
     List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
     members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
         .each { String follower -> replayLatestLeaderAvt(leader, follower) }
+  }
+}
+
+/** Apply a newly promoted coordinator's latest cached AVT after the ZGT debounce and settling window. */
+void applyCachedAvtForPromotedCoordinators() {
+  Set<String> pending = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
+      ? new LinkedHashSet<String>((Collection<String>)state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY]) : new LinkedHashSet<String>()
+  state.remove(PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY)
+  Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
+  pending.each { String playerId ->
+    if(coordinators[playerId] != playerId) { return }
+    List<Map> latest = getStoredAvtEvents(playerId)
+    if(latest) { deliverUpnpEventsToGroup(playerId, latest, true) }
   }
 }
 
