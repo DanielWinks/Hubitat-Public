@@ -287,6 +287,9 @@ metadata {
       input 'enableTrackPositionUpdates', 'bool',
         title: 'Enable track position updates',
         required: false, defaultValue: false
+      input 'disableAlbumArtEvents', 'bool',
+        title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)',
+        required: false, defaultValue: true
       input 'onlyUpdateWhenActive', 'bool',
         title: 'Only update state when group is active',
         description: 'When enabled, playback state updates are skipped when the group\'s configured speakers are not all grouped together in Sonos. Reduces hub load when many groups share a coordinator.',

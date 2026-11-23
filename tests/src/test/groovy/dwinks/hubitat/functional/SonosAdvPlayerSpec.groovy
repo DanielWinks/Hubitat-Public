@@ -1579,6 +1579,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
     driver.metaClass.getParent = { -> new Expando(
       playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
+      flushGroupDeviceState: { String coordinatorId, Map volumeAttrs, Map playbackAttrs ->
+        parentPlayerUpdates << [kind: 'groupDeviceState', coordinatorId: coordinatorId,
+          volumeAttrs: volumeAttrs ? new LinkedHashMap(volumeAttrs) : null,
+          playbackAttrs: playbackAttrs ? new LinkedHashMap(playbackAttrs) : [:]]
+      },
       playerCommandRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload); true },
       playerGroupFavoriteOperationUpdate: { Map payload -> parentPlayerUpdates << [kind: 'groupFavoriteOperation', payload: new LinkedHashMap(payload)] },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
@@ -2455,6 +2460,7 @@ class SonosAdvPlayerSpec extends Specification {
     nameAfterPartial == 'First Track'
     driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName == 'Not Available'
     driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentArtistName == 'Not Available'
+    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackData == '{}'
     driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackDuration == ''
     driver.runtimeState.lastTransportPlaybackSnapshot.currentTrackURI == 'http://media.test/second'
   }
@@ -3862,7 +3868,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
   }
 
-  def "group state flush publishes one batched location event"() {
+  def "group state flush forwards a complete batch to the parent app"() {
     given:
     driver.queueGroupDeviceUpdate([status: 'playing', _groupVolume: 25, _groupMute: 'unmuted'])
 
@@ -3870,12 +3876,15 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingGroupDeviceUpdates()
 
     then:
-    // state now via attribute subscription, not outbox
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
-    playerStateMessages().isEmpty()
+    playerStateMessages().findAll { Map item -> item.kind != 'groupDeviceState' }.isEmpty()
+    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'groupDeviceState' }
+    update.coordinatorId == 'RINCON_TEST'
+    update.volumeAttrs == [volume: 25, mute: 'unmuted']
+    update.playbackAttrs.status == 'playing'
   }
 
-  def "unchanged coordinator metadata is still batched to followers and group devices"() {
+  def "unchanged coordinator metadata is still forwarded to the parent group state path"() {
     given:
     driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_FOLLOW'
     driver.device.currentValues.currentTrackName = 'Peepers On Crane Pond'
@@ -3901,9 +3910,15 @@ class SonosAdvPlayerSpec extends Specification {
     driver.flushPendingGroupDeviceUpdates()
 
     then:
-    // state now via attribute subscription, not outbox
-    playerStateMessages().isEmpty()
+    playerStateMessages().findAll { Map item -> item.kind != 'groupDeviceState' }.isEmpty()
     driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
+    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'groupDeviceState' }
+    update.playbackAttrs.currentTrackName == 'Peepers On Crane Pond'
+    update.playbackAttrs.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
+    update.playbackAttrs.currentTrackDuration == '0:41:03'
+    update.playbackAttrs.trackData == JsonOutput.toJson([
+      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
+    ])
   }
 
   def "grouped follower ignores its local AVTransport playback stream"() {

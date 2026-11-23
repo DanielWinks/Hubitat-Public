@@ -2834,13 +2834,25 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
     appScript.drainQueuedChildEvents()
-    appScript.queueGroupDeviceState('GROUP-DNI', [switch: 'on', currentlyJoinedPlayers: 'Kitchen, Kids Room'])
+    appScript.queueGroupDeviceState('GROUP-DNI', [
+      switch: 'on', currentlyJoinedPlayers: 'Kitchen, Kids Room',
+      currentTrackName: 'B.Y.O.B.', currentArtistName: 'System Of A Down',
+      currentAlbumName: 'Mezmerize', trackDescription: 'No More Tears by Ozzy Osbourne',
+      currentTrackDuration: '0:04:16', currentTrackNumber: 3, trackData: '{}'
+    ])
     appScript.drainGroupStateUpdates()
 
     then:
     coordinator.emittedAttributes().transportStatus == 'playing'
     group.emittedAttributes().switch == 'on'
     group.emittedAttributes().currentlyJoinedPlayers == 'Kitchen, Kids Room'
+    group.emittedAttributes().currentTrackName == 'B.Y.O.B.'
+    group.emittedAttributes().currentArtistName == 'System Of A Down'
+    group.emittedAttributes().trackDescription == 'B.Y.O.B. by System Of A Down'
+    group.emittedAttributes().currentTrackNumber == 3
+    group.emittedAttributes().trackData == JsonOutput.toJson([
+      name: 'B.Y.O.B.', artist: 'System Of A Down', album: 'Mezmerize'
+    ])
     coordinator.refreshedPlaybackUpdates.isEmpty()
     group.refreshedPlaybackUpdates.isEmpty()
   }
@@ -2954,6 +2966,54 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.currentTrackName == 'Peepers On Crane Pond'
     attributes.currentArtistName == 'Adirondack Environments'
     attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
+  }
+
+  def "group album art preference is independent of the coordinator preference"() {
+    given:
+    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
+    coordinator.updatedSettings.disableAlbumArtEvents = true
+    group.updatedSettings.disableAlbumArtEvents = false
+    group.currentValues.switch = 'on'
+    appScript.putAvtEvents('RINCON_COORD', [
+      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
+    ])
+
+    when:
+    appScript.flushGroupDeviceState('RINCON_COORD', null, [
+      albumArtURI: 'Disabled in preferences',
+      albumArtSmall: 'Disabled in preferences',
+      albumArtMedium: 'Disabled in preferences',
+      albumArtLarge: 'Disabled in preferences'
+    ])
+    appScript.drainGroupStateUpdates()
+    Map<String, Object> attributes = group.emittedAttributes()
+
+    then:
+    attributes.albumArtSmall == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=60&y=60'
+    attributes.albumArtMedium == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=200&y=200'
+    attributes.albumArtLarge == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=600&y=600'
+  }
+
+  def "disabled group album art preference publishes disabled markers"() {
+    given:
+    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
+    group.updatedSettings.disableAlbumArtEvents = true
+    group.currentValues.switch = 'on'
+    appScript.putAvtEvents('RINCON_COORD', [
+      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
+    ])
+
+    when:
+    appScript.flushGroupDeviceState('RINCON_COORD', null, [
+      albumArtSmall: 'http://player-preference-enabled.test/art.jpg'
+    ])
+    appScript.drainGroupStateUpdates()
+    Map<String, Object> attributes = group.emittedAttributes()
+
+    then:
+    attributes.albumArtSmall == 'Disabled in preferences'
+    attributes.albumArtMedium == 'Disabled in preferences'
+    attributes.albumArtLarge == 'Disabled in preferences'
   }
 
   def "ungrouped group refresh reflects only the coordinator when individual control is disabled"() {
@@ -3486,6 +3546,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "SAC UPnP intake debounces then fans out from a one millisecond callback"() {
     given:
+    group.currentValues.switch = 'on'
     List<Map> topology = [
       [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
       [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
@@ -3494,7 +3555,13 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD',
-      events: [[name: 'currentTrackName', value: 'Debounced Song']]])
+      events: [
+        [name: 'currentTrackName', value: 'Debounced Song'],
+        [name: 'currentArtistName', value: 'Debounced Artist'],
+        [name: 'currentAlbumName', value: 'Debounced Album'],
+        [name: 'trackDescription', value: 'Stale description from another track'],
+        [name: 'trackData', value: '{}']
+      ]])
 
     then:
     appScript.scheduled.any { List row -> row[0] == 500 && row[1] == 'processDebouncedUpnpFanout' }
@@ -3510,10 +3577,18 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.performUpnpFanout([generation: generation])
+    appScript.drainGroupStateUpdates()
 
     then:
     appScript.state.pendingChildEvents[coordinator.deviceNetworkId].currentTrackName == 'Debounced Song'
     appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == 'Debounced Song'
+    group.emittedAttributes().currentTrackName == 'Debounced Song'
+    group.emittedAttributes().currentArtistName == 'Debounced Artist'
+    group.emittedAttributes().currentAlbumName == 'Debounced Album'
+    group.emittedAttributes().trackDescription == 'Debounced Song by Debounced Artist'
+    group.emittedAttributes().trackData == JsonOutput.toJson([
+      name: 'Debounced Song', artist: 'Debounced Artist', album: 'Debounced Album'
+    ])
     coordinator.refreshedPlaybackUpdates.isEmpty()
     follower.refreshedPlaybackUpdates.isEmpty()
   }

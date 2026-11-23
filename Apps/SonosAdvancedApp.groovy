@@ -5455,6 +5455,16 @@ void playerAlbumArtPreferenceUpdate(Map payload) {
   List<Map> events = getStoredAvtEvents(coordinatorId)
   Map artEvent = events.find { Map event -> event?.name?.toString() == 'albumArtURI' }
   String rawAlbumArtURI = artEvent?.value?.toString() ?: 'Not Available'
+  if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') {
+    String previousAlbumArtURI = payload?.currentAlbumArtURI?.toString()
+    def imageMatcher = previousAlbumArtURI =~ /<img[^>]*src=["']([^"']+)["']/
+    if(imageMatcher.find()) {
+      rawAlbumArtURI = StringEscapeUtils.unescapeHtml4(imageMatcher.group(1))
+    } else if(previousAlbumArtURI && previousAlbumArtURI.startsWith('http')) {
+      rawAlbumArtURI = previousAlbumArtURI
+    }
+  }
+  if(!rawAlbumArtURI) { rawAlbumArtURI = 'Not Available' }
   Map<String, Object> attributes = albumArtAttributesForFanout(rawAlbumArtURI, coordinatorId)
   queueChildStateBatch(playerDni, attributes)
   if(coordinatorId == playerId) { flushGroupDeviceState(coordinatorId, null, attributes) }
@@ -10551,6 +10561,15 @@ synchronized void performUpnpFanout(Map data = [:]) {
       ChildDeviceWrapper child = findPlayerBySonosId(rincon)
       if(child != null) { queueChildStateBatch(child.getDeviceNetworkId(), combined) }
     }
+    Map<String, Object> groupPlayback = new LinkedHashMap<String, Object>(combined)
+    Map<String, Object> groupVolume = [:]
+    if(groupPlayback.containsKey('groupVolume')) {
+      groupVolume.volume = groupPlayback.remove('groupVolume')
+    }
+    if(groupPlayback.containsKey('groupMute')) {
+      groupVolume.mute = groupPlayback.remove('groupMute')
+    }
+    flushGroupDeviceState(coordinatorId, groupVolume.isEmpty() ? null : groupVolume, groupPlayback)
   }
 }
 
@@ -10583,10 +10602,15 @@ Map<String, Object> upnpEventsToAttributes(List<Map> events, String coordinatorI
 }
 
 Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String playerId) {
+  return albumArtAttributesForFanout(rawAlbumArtURI, playerId, null)
+}
+
+Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String playerId, Boolean disableArtEventsOverride) {
   String resolvedUri = resolveAlbumArtUrl(rawAlbumArtURI, playerId)
   Map<String, Object> attributes = [albumArtURI: formatAlbumArtForFanout(resolvedUri, playerId)]
   ChildDeviceWrapper player = findPlayerBySonosId(playerId)
-  Boolean disabled = player?.getSetting('disableAlbumArtEvents') as Boolean
+  Boolean disabled = disableArtEventsOverride
+  if(disabled == null) { disabled = player?.getSetting('disableAlbumArtEvents') as Boolean }
   if(disabled == null) { disabled = true }
   if(disabled) {
     attributes.albumArtSmall = 'Disabled in preferences'
@@ -12209,7 +12233,44 @@ Map<String, Object> prepareGroupDeviceAttributeEvents(ChildDeviceWrapper groupDe
   if(publishable.containsKey('mute') && !publishable.containsKey('groupMute')) {
     publishable.groupMute = publishable.mute
   }
+  Boolean disableAlbumArtEvents = groupDevice.getSetting('disableAlbumArtEvents') as Boolean
+  if(disableAlbumArtEvents == null) { disableAlbumArtEvents = true }
+  if(disableAlbumArtEvents) {
+    publishable.albumArtSmall = 'Disabled in preferences'
+    publishable.albumArtMedium = 'Disabled in preferences'
+    publishable.albumArtLarge = 'Disabled in preferences'
+  } else if(['albumArtSmall', 'albumArtMedium', 'albumArtLarge'].any { String name ->
+    publishable[name] == 'Disabled in preferences'
+  }) {
+    String artMarkup = publishable.albumArtURI?.toString()
+    def imageMatcher = artMarkup =~ /<img[^>]*src=["']([^"']+)["']/
+    if(imageMatcher.find()) {
+      String imageUrl = imageMatcher.group(1).replace('&amp;', '&')
+      String coordinatorId = groupDevice.getDataValue('groupCoordinatorId')?.toString()
+      if(coordinatorId) {
+        Map<String, Object> artAttributes = albumArtAttributesForFanout(imageUrl, coordinatorId, false)
+        ['albumArtSmall', 'albumArtMedium', 'albumArtLarge'].each { String name ->
+          if(artAttributes.containsKey(name)) { publishable[name] = artAttributes[name] }
+        }
+      }
+    }
+  }
+  String trackName = publishable.currentTrackName?.toString()?.trim()
+  String artistName = publishable.currentArtistName?.toString()?.trim()
+  if(trackName && artistName && !isUnavailableGroupTrackValue(trackName) &&
+      !isUnavailableGroupTrackValue(artistName)) {
+    publishable.trackDescription = "${trackName} by ${artistName}"
+    publishable.trackData = JsonOutput.toJson([
+      name: trackName,
+      artist: artistName,
+      album: publishable.currentAlbumName?.toString()?.trim() ?: 'Not Available'
+    ])
+  }
   return publishable
+}
+
+Boolean isUnavailableGroupTrackValue(String value) {
+  return !value || value.equalsIgnoreCase('Not Available') || value.equalsIgnoreCase('n/a')
 }
 
 /**
@@ -12233,12 +12294,25 @@ void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAt
   if(combined.isEmpty()) { return }
 
   List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
+  Object rawAlbumArt = getStoredAvtEvents(coordinatorId).find { Map event ->
+    event?.name?.toString() == 'albumArtURI' && event.containsKey('value')
+  }?.value
   groupsForCoord.each { ChildDeviceWrapper groupDevice ->
-    Boolean playbackStateOutOfSync = combined.any { Object rawName, Object value ->
+    Map groupAttributes = new LinkedHashMap(combined)
+    Boolean disableArtEvents = groupDevice.getSetting('disableAlbumArtEvents') as Boolean
+    if(disableArtEvents == null) { disableArtEvents = true }
+    if(rawAlbumArt != null) {
+      groupAttributes.putAll(albumArtAttributesForFanout(rawAlbumArt.toString(), coordinatorId, disableArtEvents))
+    } else if(disableArtEvents) {
+      groupAttributes.albumArtSmall = 'Disabled in preferences'
+      groupAttributes.albumArtMedium = 'Disabled in preferences'
+      groupAttributes.albumArtLarge = 'Disabled in preferences'
+    }
+    Boolean playbackStateOutOfSync = groupAttributes.any { Object rawName, Object value ->
       String name = rawName?.toString()
       name != null && value != null && !sameChildStateValue(value, groupDevice.currentValue(name, true))
     }
-    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), combined, playbackStateOutOfSync)
+    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), groupAttributes, playbackStateOutOfSync)
   }
 }
 

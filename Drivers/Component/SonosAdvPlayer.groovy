@@ -5690,6 +5690,7 @@ Boolean applyAvtSnapshotIfDifferent(Map snap) {
       setCurrentTrackName(trackName)
       setCurrentArtistName(artist)
       setCurrentAlbumName(album)
+      setTrackDataEvents([name: trackName, artist: artist, album: album])
       String desc = meta.title && meta.creator
           ? "${meta.title} by ${meta.creator}"
           : (meta.streamContent?.toString() ?: trackName)
@@ -5791,6 +5792,7 @@ void clearCurrentAvtTrackMetadata() {
   setCurrentTrackName('Not Available')
   setCurrentArtistName('Not Available')
   setCurrentAlbumName('Not Available')
+  setTrackDataEvents([:])
   setTrackDescription('Not Available')
 }
 
@@ -7566,7 +7568,10 @@ void scheduleAlbumArtPreferenceRefresh() {
 
 void notifyParentAlbumArtPreferenceUpdate() {
   try {
-    parent.playerAlbumArtPreferenceUpdate([playerDni: device.getDeviceNetworkId()])
+    parent.playerAlbumArtPreferenceUpdate([
+      playerDni: device.getDeviceNetworkId(),
+      currentAlbumArtURI: device.currentValue('albumArtURI', true)?.toString()
+    ])
   } catch(Exception e) {
     logWarn("Could not notify parent of album art preference update: ${e.message}")
   }
@@ -9110,8 +9115,10 @@ void flushPendingGroupDeviceUpdates() {
       logWarn("Error preparing volume state for group devices: ${e.message}")
     }
 
-    // Group snapshot now sourced by parent via attribute subscriptions (groupVolume/groupMute/status etc.)
-    // No outbox publish — keep local flush accounting only
+    // Publish the full playback snapshot through the parent app. The app owns
+    // all group device sendEvent calls; subscriptions cover only a small subset
+    // of attributes and cannot replace this complete batch.
+    parent.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrs)
     clearFlushedGroupDeviceUpdates(dni, pendingSnapshot)
     groupDeviceUpdateRetryAttempts.remove(dni)
     ConcurrentHashMap<String, Object> remaining = pendingGroupDeviceUpdates[dni]
