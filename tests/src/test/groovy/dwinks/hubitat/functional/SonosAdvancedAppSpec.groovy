@@ -13,9 +13,12 @@ import spock.lang.Specification
 
 class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Long id = 101L
+  Map<String, Object> settings = [:]
   List<Map> commands = []
   List<Map> pendingParentUpdatePoll = []
   List<Map> pendingParentRequestPoll = []
+
+  Object getSetting(String name) { return settings[name] }
 
   List<Map> drainPendingParentUpdatesForPoll() {
     List<Map> batch = []
@@ -179,7 +182,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
 class SonosAppGroupDouble extends ChildDeviceWrapper {
   Long id = 201L
-  List<Map> statuses = []
   List<Map> pendingGroupRequestPoll = []
 
   List<Map> drainPendingGroupRequestsForPoll() {
@@ -214,12 +216,6 @@ class SonosAppGroupDouble extends ChildDeviceWrapper {
 
   void updateBatchPlaybackState(String json) {
     refreshedPlaybackUpdates << json
-  }
-
-  void updateGroupOperationStatus(String statusJson, String groupingMode = null) {
-    Map status = (Map)new JsonSlurper().parseText(statusJson)
-    statuses << [status: status, groupingMode: groupingMode]
-    if(groupingMode) { currentValues.groupingMode = groupingMode }
   }
 
   void applyAppHouseholdTopology(String json) { refreshedPlaybackUpdates << json }
@@ -1202,7 +1198,7 @@ class SonosAdvancedAppSpec extends Specification {
     topology.authorityPlayerId == 'RINCON_COORD'
     topology.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW']
     appScript.getActiveGroupOperation() == null
-    group.statuses.last().status.status == 'SUCCEEDED'
+    appScript.getFreshGroupingContext('GROUP-DNI').mode == 'EXPLICIT'
     coordinator.commands.findAll { it.name == 'playerCreateGroup' }.empty
   }
 
@@ -2604,12 +2600,22 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.state.clear()
-    group.currentValues.groupingMode = 'ADDITIVE'
+    appScript.storeGroupingContext([groupDni: 'GROUP-DNI', groupingMode: 'ADDITIVE',
+      requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW'], resolvedCoordinatorId: 'RINCON_COORD'])
     appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'])
 
     then:
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'on'
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
+  }
+
+  def "track position preference is read from player settings instead of device data"() {
+    given:
+    coordinator.settings.enableTrackPositionUpdates = true
+    coordinator.dataValues.enableTrackPositionUpdates = 'false'
+
+    expect:
+    appScript.isPlayerTrackPositionUpdatesEnabled(coordinator)
   }
 
   def "group membership does not infer a missing coordinator from the callback"() {
@@ -3262,6 +3268,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "AVT artwork is rendered and group preference controls only group size attributes"() {
     given:
     coordinator.dataValues.localUpnpUrl = 'http://192.0.2.10:1400'
+    coordinator.settings.disableAlbumArtEvents = false
     coordinator.updatedSettings.disableAlbumArtEvents = false
     group.updatedSettings.disableAlbumArtEvents = true
     List<Map> events = [

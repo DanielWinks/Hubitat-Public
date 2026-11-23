@@ -93,8 +93,6 @@ void logTrace(String message) {
   'groupCoordinatorId',
   'playerIds',
   'householdTopology',
-  'lastGroupingMode',
-  'enableTrackPositionUpdates',
 ]))
 
 @Field static final Set<String> ACTIVE_GROUP_CURRENT_STATE_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>([
@@ -401,16 +399,6 @@ List<String> pruneOrphanSettings(Set<String> active) {
   return toRemove
 }
 
-void setLastGroupingMode(String groupingMode) {
-  if(groupingMode != GROUPING_MODE_EXPLICIT && groupingMode != GROUPING_MODE_ADDITIVE) {
-    return
-  }
-  runtimeState.lastGroupingMode = groupingMode
-  // Keep the mode available to the parent app without creating a device
-  // current-state attribute. Data values are not rendered as current states.
-  device.updateDataValue('lastGroupingMode', groupingMode)
-}
-
 void removeStaleGroupStates() {
   DEPRECATED_GROUP_STATE_ATTRIBUTES.each { String attributeName ->
     try {
@@ -592,12 +580,6 @@ void configure() {
   migrateLegacyRuntimeState()
   pruneOrphanedGroupPersistence()
   removeStaleGroupStates()
-  synchronizeTrackPositionPreference()
-}
-
-void synchronizeTrackPositionPreference() {
-  Boolean isEnabled = getEnableTrackPositionUpdates()
-  device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
 }
 
 ConcurrentHashMap<String, Object> getRuntimeState() {
@@ -625,7 +607,6 @@ void migrateLegacyRuntimeState() {
   state.clear()
 }
 void on() {
-  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   Map args = getGroupCommandSettings()
   args.groupingMode = GROUPING_MODE_EXPLICIT
   requestGroupCommand('on', args)
@@ -772,7 +753,6 @@ void joinPlayersToCoordinator() {
     logWarn('No followers found to join to coordinator')
     return
   }
-  setLastGroupingMode(GROUPING_MODE_ADDITIVE)
   requestGroupCommand('joinPlayersToCoordinator', [groupingMode: GROUPING_MODE_ADDITIVE])
 }
 
@@ -804,7 +784,6 @@ void groupPlayers() {
   // Exact grouping is owned by the parent app's operation coordinator. Keeping
   // the mode in the request means this command cannot accidentally take the
   // additive join path when the current group contains extra players.
-  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   requestGroupCommand('groupPlayers', [groupingMode: GROUPING_MODE_EXPLICIT])
 }
 
@@ -823,22 +802,10 @@ void evictUnlistedPlayers() {
     logWarn('No players found to manage')
     return
   }
-  setLastGroupingMode(GROUPING_MODE_EXPLICIT)
   requestGroupCommand('evictUnlistedPlayers', [
     groupingMode: GROUPING_MODE_EXPLICIT,
     evictUnlistedOnly: true
   ])
-}
-
-/**
- * Receive operation status from the parent app without making the group
- * driver responsible for orchestration. The JSON value is intentionally kept
- * opaque so status additions remain backward compatible.
- */
-void updateGroupOperationStatus(String statusJson, String groupingMode = null) {
-  if(groupingMode == GROUPING_MODE_EXPLICIT || groupingMode == GROUPING_MODE_ADDITIVE) {
-    setLastGroupingMode(groupingMode)
-  }
 }
 
 // =============================================================================

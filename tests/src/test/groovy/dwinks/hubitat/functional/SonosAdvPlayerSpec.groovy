@@ -584,6 +584,30 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.settings.enableTrackPositionUpdates == false
+    !driver.device.dataValues.containsKey('enableTrackPositionUpdates')
+  }
+
+  def "legacy track position preference data is pruned while the settings preference remains authoritative"() {
+    given:
+    driver.settings.enableTrackPositionUpdates = true
+    driver.device.dataValues.enableTrackPositionUpdates = 'false'
+    driver.device.dataValues.hasBattery = 'true'
+
+    when:
+    driver.pruneOrphanedDriverPersistence()
+
+    then:
+    driver.getEnableTrackPositionUpdates()
+    !driver.device.dataValues.containsKey('enableTrackPositionUpdates')
+    !driver.device.dataValues.containsKey('hasBattery')
+  }
+
+  def "battery status capability requires a numeric battery level"() {
+    expect:
+    !driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo><LocalBatteryStatus/></ZPSupportInfo>'))
+    !driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo><LocalBatteryStatus><Data name="Level">unknown</Data></LocalBatteryStatus></ZPSupportInfo>'))
+    driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo><LocalBatteryStatus><Data name="Level">87</Data></LocalBatteryStatus></ZPSupportInfo>'))
+    !driver.device.dataValues.containsKey('hasBattery')
   }
 
   def "AVTransport and HTControl UPnP report home theater source and input connection"() {

@@ -944,7 +944,6 @@ Boolean hasLineInCapability() {
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
-@Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -990,7 +989,6 @@ Boolean hasLineInCapability() {
   'websocketUrl',
   'capabilities',
   'householdId',
-  'hasBattery',
   'groupCoordinatorId',
   'groupId',
   'groupPlayerIds',
@@ -1001,11 +999,9 @@ Boolean hasLineInCapability() {
   'secondaryDeviceIps',
   'rightChannelId',
   'rightChannelDeviceIp',
-  'enableTrackPositionUpdates',
   'zgtSub',
   'zgtSubExpires',
   'zgtSubExpiresEpoch',
-  'hasBattery',
   'rcSnapshotJson',
   'staticDriverActivePlayerRoster',
   'sid1',
@@ -1277,7 +1273,6 @@ void performImmediateInitialization() {
   resetPendingStatePublicationForInitialization()
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
-  cacheBatteryCapability()
   reconcileChildDevices()
 
   // Issue UPnP subscriptions first. These calls enqueue async requests locally;
@@ -1330,24 +1325,6 @@ void clearPlayerSubscriptionsForInitialization() {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'sid3', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
   }
 }
-
-void cacheBatteryCapability() {
-  if(device.getDataValue(HAS_BATTERY_DEVICE_KEY) != null) { return }
-  try {
-    Boolean hasBatt = deviceHasBattery()
-    device.updateDataValue(HAS_BATTERY_DEVICE_KEY, hasBatt.toString())
-  } catch(Exception e) {
-    logDebug("cacheBatteryCapability failed: ${e.message}")
-  }
-}
-
-
-
-
-
-
-
-
 
 /** Clear work owned by this player only at an explicit device initialization. */
 void clearPendingCommandsForInitialization() {
@@ -1518,10 +1495,7 @@ void reconcileChildDevices() {
 }
 
 void synchronizeTrackPositionPreference() {
-  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase(Locale.ROOT) == 'true'
-  Boolean isEnabled = getEnableTrackPositionUpdates()
-  device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
-  if(wasEnabled && !isEnabled) {
+  if(!getEnableTrackPositionUpdates()) {
     queuePlayerAttributeUpdate('trackPosition', 0L)
     queuePlayerAttributeUpdate('trackPositionUpdated', 0L)
   }
@@ -4394,13 +4368,37 @@ Boolean deviceHasBattery() {
     ]
     httpGet(params) {resp ->
       if(resp.status == 200) {
-        hasBattery = resp.data.children().find{it.name() == 'LocalBatteryStatus'} != null
+        hasBattery = hasBatteryStatusData(resp.data)
       }
     }
   } catch(Exception e) {
     logDebug("deviceHasBattery: Could not check battery status: ${e.message}")
   }
   return hasBattery
+}
+
+Boolean hasBatteryStatusData(Object responseData) {
+  if(responseData == null) { return false }
+  GPathResult root
+  if(responseData instanceof String) {
+    try { root = new XmlSlurper().parseText(responseData.toString()) }
+    catch(Exception e) { return false }
+  } else if(responseData instanceof GPathResult) {
+    root = (GPathResult)responseData
+  } else {
+    return false
+  }
+  GPathResult batteryStatus = (GPathResult)root.children().find { GPathResult node -> node.name() == 'LocalBatteryStatus' }
+  if(batteryStatus == null) { return false }
+  return batteryStatus.children().any { GPathResult node ->
+    if(node.name() != 'Data') { return false }
+    try {
+      Integer level = node.text()?.trim()?.toInteger()
+      return level != null && level >= 0 && level <= 100
+    } catch(Exception ignored) {
+      return false
+    }
+  }
 }
 
 void createRemoveFavoritesChildDevice(Boolean create) {

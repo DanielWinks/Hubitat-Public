@@ -8557,9 +8557,7 @@ void startGroupFavoriteOperation(ChildDeviceWrapper groupDevice, Map rawSpec) {
 
   Map context = getFreshGroupingContext(groupDni)
   String contextMode = normalizeGroupOperationMode(context?.mode, GROUPING_MODE_CURRENT)
-  Object storedMode = groupDevice.getDataValue('lastGroupingMode') ?: groupDevice.currentValue('groupingMode', true)
-  String deviceMode = normalizeGroupOperationMode(storedMode, GROUPING_MODE_CURRENT)
-  String groupingMode = contextMode != GROUPING_MODE_CURRENT ? contextMode : deviceMode
+  String groupingMode = contextMode
   Map target = buildGroupOperationTarget(groupDevice, groupingMode)
   if(!target.requiredPlayerIds || target.requiredPlayerIds.isEmpty()) {
     logWarn("Group Favorite ${favoriteSpec.favoriteId} has no configured players for ${groupDni}")
@@ -10607,63 +10605,6 @@ void publishGroupOperationStatus(Map operation, String status, String errorCode 
   if(errorCode != null) { operation.errorCode = errorCode }
   if(detail != null) { operation.detail = detail }
   saveActiveGroupOperation(operation)
-  Map statusData = [
-    operationId: operation.operationId,
-    status: status,
-    groupingMode: operation.groupingMode,
-    phase: operation.phase,
-    favoriteId: operation.favoriteId,
-    groupId: operation.observedGroupId,
-    coordinatorId: operation.observedCoordinatorId ?: operation.resolvedCoordinatorId,
-    playerIds: normalizeGroupPlayerIds(operation.observedPlayerIds),
-    observations: operation.lastTopologyObservations ?: [],
-    playbackStates: operation.playerPlaybackStates ?: [:],
-    favoriteAcknowledged: operation.loadAcknowledged == true,
-    favoriteAcknowledgedAt: operation.loadAcknowledgedAt ?: 0L,
-    metadataConfirmed: operation.metadataConfirmed == true,
-    metadataObservedAt: operation.metadataObservedAt ?: 0L,
-    exactFavoriteId: operation.exactFavoriteId,
-    favoriteCommandDeliveredAt: operation.favoriteCommandDeliveredAt ?: 0L,
-    favoriteCommandAt: operation.favoriteCommandAt ?: 0L,
-    createdAt: operation.createdAt ?: 0L,
-    elapsedMs: Math.max(0L, now() - ((operation.createdAt as Long) ?: now())),
-    deadlineAt: operation.deadlineAt ?: 0L,
-    topologyDeadlineAt: operation.topologyDeadlineAt ?: 0L,
-    favoriteDeadlineAt: operation.favoriteDeadlineAt ?: 0L,
-    topologyAttempt: operation.topologyAttempt ?: 0,
-    stableObservations: operation.stableObservations ?: 0,
-    topologyLastObservedAt: operation.topologyLastObservedAt ?: 0L,
-    favoriteAttempt: operation.favoriteAttempt ?: 0,
-    favoriteAttemptId: operation.favoriteAttemptId,
-    favoriteRequestId: operation.favoriteRequestId,
-    favoriteCommandDelivered: operation.favoriteCommandDelivered == true,
-    playRequestId: operation.playRequestId,
-    playCommandDelivered: operation.playCommandDelivered == true,
-    topologyRequestId: operation.topologyRequestId,
-    topologyCheckRequestId: operation.topologyCheckRequestId,
-    favoriteTopologyRequestId: null,
-    registrationRequestIds: operation.registrationRequestIds ?: [:],
-    registrationEventPlayerIds: operation.registrationEventPlayerIds ?: [],
-    favoriteTopologyAttempt: 0,
-    favoriteTopologyVerified: operation.favoriteTopologyVerified == true,
-    playAttempt: operation.playAttempt ?: 0,
-    loadErrorCode: operation.loadErrorCode,
-    loadErrorReason: operation.loadErrorReason,
-    lastCommand: operation.lastCommand,
-    errorCode: operation.errorCode,
-    detail: operation.detail,
-    updatedAt: now()
-  ]
-  ChildDeviceWrapper groupDevice = getChildDevice(operation.groupDni as String)
-  if(groupDevice == null) { return }
-  try {
-    String mode = operation.groupingMode in [GROUPING_MODE_EXPLICIT, GROUPING_MODE_ADDITIVE]
-        ? operation.groupingMode as String
-        : null
-    groupDevice.updateGroupOperationStatus(JsonOutput.toJson(statusData), mode)
-  } catch(Exception e) {
-    logWarn("Could not publish group operation status for ${operation.groupDni}: ${e.message}")
-  }
 }
 
 void clearRegisteredGroupOperations(Map operation) {
@@ -11234,7 +11175,9 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
 }
 
 Boolean isPlayerTrackPositionUpdatesEnabled(ChildDeviceWrapper player) {
-  return player?.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase(Locale.ROOT) == 'true'
+  Object raw = player?.getSetting('enableTrackPositionUpdates')
+  if(raw instanceof Boolean) { return (Boolean)raw }
+  return raw?.toString()?.trim()?.toLowerCase(Locale.ROOT) in ['true', '1', 'on', 'yes']
 }
 
 /**
@@ -11616,8 +11559,7 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
     HashSet<String> configuredPlayers = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
     String rememberedMode = getFreshGroupingContext(gd.getDeviceNetworkId())?.mode as String
-    String deviceMode = (gd.getDataValue('lastGroupingMode') ?: gd.currentValue('groupingMode', true))?.toString()
-    String groupingMode = normalizeGroupOperationMode(rememberedMode ?: deviceMode, GROUPING_MODE_EXPLICIT)
+    String groupingMode = normalizeGroupOperationMode(rememberedMode, GROUPING_MODE_EXPLICIT)
     Boolean membershipSatisfied = groupingMode == GROUPING_MODE_EXPLICIT
         ? configuredPlayers.equals(observedPlayers)
         : observedPlayers.containsAll(configuredPlayers)

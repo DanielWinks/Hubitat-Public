@@ -283,6 +283,7 @@ class SonosAdvGroupSpec extends Specification {
     then:
     groupRequests()[0].command == 'groupPlayers'
     groupRequests()[0].args.groupingMode == 'EXPLICIT'
+    !driver.device.dataValues.containsKey('lastGroupingMode')
   }
 
   def "evictUnlistedPlayers marks the request as removal-only"() {
@@ -355,15 +356,18 @@ class SonosAdvGroupSpec extends Specification {
     groupRequests()[0].args.level == 0
   }
 
-  def "group operation status records the selected grouping mode"() {
+  def "legacy grouping mode and track position preference data are pruned"() {
+    given:
+    driver.device.dataValues.lastGroupingMode = 'ADDITIVE'
+    driver.device.dataValues.enableTrackPositionUpdates = 'false'
+
     when:
-    driver.updateGroupOperationStatus('{"status":"SUCCEEDED"}', 'ADDITIVE')
+    driver.initialize()
 
     then:
-    driver.runtimeState.lastGroupingMode == 'ADDITIVE'
-    driver.device.dataValues.lastGroupingMode == 'ADDITIVE'
-    driver.events.find { Map event -> event.name == 'groupingMode' } == null
-    driver.events.find { Map event -> event.name == 'groupOperationStatus' } == null
+    !driver.device.dataValues.containsKey('lastGroupingMode')
+    !driver.device.dataValues.containsKey('enableTrackPositionUpdates')
+    driver.settings.enableTrackPositionUpdates == false
   }
 
   def "legacy group state migrates to the DNI runtime map and is cleared from Hubitat state"() {
