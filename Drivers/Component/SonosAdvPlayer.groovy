@@ -634,6 +634,7 @@ metadata {
       input name: 'ttsBoostAmount', title: 'TTS Volume boost/cut default:(+10%)', type: 'enum', required: false, defaultValue: 10,
       options: [(-10):'-10%', (-5):'-5%', 0:'No Change', 5:'+5%', 10:'+10%', 15:'+15%', 20:'+20%']
       input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
+      input 'disableAlbumArtEvents', 'bool', title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)', required: false, defaultValue: true
       input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
@@ -696,6 +697,7 @@ Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != nu
 Integer getVolumeAdjustAmount() { return settings.volumeAdjustAmount != null ? settings.volumeAdjustAmount as Integer : 5 }
 Integer getTTSBoostAmount() { return settings.ttsBoostAmount != null ? settings.ttsBoostAmount as Integer : 10 }
 Boolean getDisableArtistAlbumTrackEvents() { return settings.disableArtistAlbumTrackEvents != null ? settings.disableArtistAlbumTrackEvents : false }
+Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
 Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDevice != null ? settings.createCrossfadeChildDevice : false }
 Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
 Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
@@ -1083,6 +1085,7 @@ Boolean hasLineInCapability() {
   'volumeAdjustAmount',
   'ttsBoostAmount',
   'disableArtistAlbumTrackEvents',
+  'disableAlbumArtEvents',
   'createCrossfadeChildDevice',
   'createShuffleChildDevice',
   'createRepeatOneChildDevice',
@@ -1235,6 +1238,7 @@ void handleSettingsUpdate() {
     groupsRegistryInitialization()
     favoritesMapInitialization()
   }
+  sendParentAppRequest('needCurrentlyPlayingStates')
 }
 
 
@@ -1767,6 +1771,7 @@ void migrationCleanup() {
   if(settings.volumeAdjustAmount == null) { settings.volumeAdjustAmount = 5 }
   if(settings.ttsBoostAmount == null) { settings.ttsBoostAmount = 10 }
   if(settings.disableArtistAlbumTrackEvents == null) { settings.disableArtistAlbumTrackEvents = false }
+  if(settings.disableAlbumArtEvents == null) { settings.disableAlbumArtEvents = true }
   if(settings.createCrossfadeChildDevice == null) { settings.createCrossfadeChildDevice = false }
   if(settings.createShuffleChildDevice == null) { settings.createShuffleChildDevice = false }
   if(settings.createRepeatOneChildDevice == null) { settings.createRepeatOneChildDevice = false }
@@ -5022,6 +5027,9 @@ Map parseAvtFullSnapshot(String xmlString) {
     if(iid.size() == 0) { return null }
     def normalizeUri = { Object v -> v != null && v.toString() != '' ? StringEscapeUtils.unescapeXml(v.toString()) : null }
     String curUriRaw = iid['CurrentTrackURI']['@val']?.toString()
+    GPathResult nextTrackUriNode = findDirectXmlChild(iid, 'NextTrackURI')
+    GPathResult nextTrackMetaDataNode = findDirectXmlChild(iid, 'NextTrackMetaData')
+    String nextTrackMetaDataRaw = xmlAttribute(nextTrackMetaDataNode, 'val')
     return [
       hasTransportState: iid['TransportState'].size() > 0,
       transportState: iid['TransportState']['@val']?.toString(),
@@ -5040,8 +5048,11 @@ Map parseAvtFullSnapshot(String xmlString) {
       hasCurrentTrackMetaData: iid['CurrentTrackMetaData'].size() > 0,
       currentTrackMetaDataRaw: iid['CurrentTrackMetaData']['@val']?.toString(),
       currentTrackMetaData: parseAvtMetaData(iid['CurrentTrackMetaData']['@val']?.toString()),
-      nextTrackURI: iid['NextTrackURI']['@val']?.toString(),
-      nextTrackMetaData: parseAvtMetaData(iid['NextTrackMetaData']['@val']?.toString()),
+      hasNextTrackURI: nextTrackUriNode != null,
+      nextTrackURI: normalizeUri(xmlAttribute(nextTrackUriNode, 'val')),
+      hasNextTrackMetaData: nextTrackMetaDataNode != null,
+      nextTrackMetaDataRaw: nextTrackMetaDataRaw,
+      nextTrackMetaData: parseAvtMetaData(nextTrackMetaDataRaw),
       enqueuedTransportURI: normalizeUri(iid['EnqueuedTransportURI']['@val']?.toString()),
       enqueuedTransportURIMetaData: parseAvtMetaData(iid['EnqueuedTransportURIMetaData']['@val']?.toString()),
       avTransportURI: iid['AVTransportURI']['@val']?.toString(),
@@ -5128,6 +5139,7 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
     events << [name: 'currentAlbumName', value: metadata.album?.toString() ?: 'Not Available']
     events << [name: 'trackDescription', value: metadata.title && metadata.creator
         ? "${metadata.title} by ${metadata.creator}" : (metadata.streamContent?.toString() ?: title)]
+    events << [name: 'albumArtURI', value: metadata.albumArtURI?.toString() ?: 'Not Available']
   }
   if(incoming.hasTrack == true) {
     String track = incoming.track?.toString()
@@ -5161,8 +5173,20 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
   if(incoming.hasCrossfadeMode == true && incoming.crossfadeMode?.toString()?.trim()) {
     events << [name: 'currentCrossfadeMode', value: (incoming.crossfadeMode.toString().trim() == '1' ? 'on' : 'off')]
   }
-  if(!clearMetadata && metadataPresent && !metadata.isEmpty() && metadata.albumArtURI?.toString()) {
-    events << [name: 'albumArtURI', value: metadata.albumArtURI.toString()]
+  if(incoming.hasNextTrackMetaData == true || (incoming.hasNextTrackURI == true && !incoming.nextTrackURI?.toString())) {
+    Boolean nextMetadataEmpty = incoming.hasNextTrackMetaData == true && !incoming.nextTrackMetaDataRaw?.toString()
+    Map nextMetadata = incoming.nextTrackMetaData instanceof Map ? (Map)incoming.nextTrackMetaData : [:]
+    if(nextMetadataEmpty || nextMetadata.isEmpty()) {
+      events << [name: 'nextTrackName', value: 'Not Available']
+      events << [name: 'nextArtistName', value: 'Not Available']
+      events << [name: 'nextAlbumName', value: 'Not Available']
+      events << [name: 'nextTrackAlbumArtURI', value: 'Not Available']
+    } else {
+      events << [name: 'nextTrackName', value: nextMetadata.title?.toString() ?: 'Not Available']
+      events << [name: 'nextArtistName', value: nextMetadata.creator?.toString() ?: 'Not Available']
+      events << [name: 'nextAlbumName', value: nextMetadata.album?.toString() ?: 'Not Available']
+      events << [name: 'nextTrackAlbumArtURI', value: nextMetadata.albumArtURI?.toString() ?: 'Not Available']
+    }
   }
   return events
 }

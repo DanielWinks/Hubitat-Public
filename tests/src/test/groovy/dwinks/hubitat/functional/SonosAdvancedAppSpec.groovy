@@ -3259,4 +3259,45 @@ class SonosAdvancedAppSpec extends Specification {
     follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Latest leader track']
   }
 
+  def "AVT artwork is rendered and group preference controls only group size attributes"() {
+    given:
+    coordinator.dataValues.localUpnpUrl = 'http://192.0.2.10:1400'
+    coordinator.updatedSettings.disableAlbumArtEvents = false
+    group.updatedSettings.disableAlbumArtEvents = true
+    List<Map> events = [
+      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3asong%253a123.mp4%3fsid%3d204%26flags%3d8232%26sn%3d9'],
+      [name: 'nextTrackAlbumArtURI', value: '/getaa?s=1&u=x-sonos-http%3asong%253a456.mp4%3fsid%3d204%26flags%3d73768%26sn%3d9'],
+      [name: 'nextTrackName', value: 'Man in the Box'],
+      [name: 'nextArtistName', value: 'Alice In Chains'],
+      [name: 'nextAlbumName', value: 'Facelift']
+    ]
+
+    when:
+    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events, true)
+
+    then:
+    coordinator.emittedAttributes().albumArtURI.contains('<img')
+    coordinator.emittedAttributes().albumArtURI.contains('http://192.0.2.10:1400/getaa?')
+    coordinator.emittedAttributes().albumArtSmall == 'http://192.0.2.10:1400/getaa?s=1&u=x-sonos-http%3asong%253a123.mp4%3fsid%3d204%26flags%3d8232%26sn%3d9&x=60&y=60'
+    coordinator.emittedAttributes().albumArtLarge.endsWith('&x=600&y=600')
+    group.emittedAttributes().albumArtURI == coordinator.emittedAttributes().albumArtURI
+    group.emittedAttributes().albumArtSmall == 'Disabled in Preferences'
+    group.emittedAttributes().albumArtMedium == 'Disabled in Preferences'
+    group.emittedAttributes().albumArtLarge == 'Disabled in Preferences'
+    group.emittedAttributes().nextTrackAlbumArtURI.contains('<img')
+    group.emittedAttributes().nextTrackName == 'Man in the Box'
+    group.emittedAttributes().nextArtistName == 'Alice In Chains'
+    group.emittedAttributes().nextAlbumName == 'Facelift'
+
+    when:
+    group.updatedSettings.disableAlbumArtEvents = false
+    group.events.clear()
+    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events, true)
+
+    then:
+    group.emittedAttributes().albumArtSmall == coordinator.emittedAttributes().albumArtSmall
+    group.emittedAttributes().albumArtMedium == coordinator.emittedAttributes().albumArtMedium
+    group.emittedAttributes().albumArtLarge == coordinator.emittedAttributes().albumArtLarge
+  }
+
 }

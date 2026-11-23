@@ -1890,6 +1890,50 @@ class SonosAdvPlayerSpec extends Specification {
     metadata.class == 'object.item.audioItem.musicTrack'
   }
 
+  def "AVT parser emits next track metadata from r-prefixed LastChange elements"() {
+    given:
+    String current = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><dc:title>My Own Prison</dc:title><dc:creator>Creed</dc:creator><upnp:album>My Own Prison</upnp:album><upnp:albumArtURI>/current.jpg</upnp:albumArtURI></item></DIDL-Lite>'
+    String next = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><dc:title>Man in the Box</dc:title><dc:creator>Alice In Chains</dc:creator><upnp:album>Facelift</upnp:album><upnp:albumArtURI>/getaa?s=1&amp;u=next</upnp:albumArtURI></item></DIDL-Lite>'
+    String fragment = '<r:NextTrackURI val="x-sonos-http:song%3a274953022.mp4?sid=204&amp;flags=73768"/>' +
+      '<r:NextTrackMetaData val="' + StringEscapeUtils.escapeXml10(next) + '"/>' +
+      '<CurrentTrackMetaData val="' + StringEscapeUtils.escapeXml10(current) + '"/>'
+    String xml = '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/"><InstanceID val="0">' + fragment +
+      '</InstanceID></Event>') + '</LastChange></property></propertyset>'
+
+    when:
+    Map snapshot = driver.parseAvtFullSnapshot(xml)
+    List<Map> events = driver.buildAvtEvents(snapshot, [:])
+
+    then:
+    snapshot.hasNextTrackMetaData
+    snapshot.nextTrackMetaData.title == 'Man in the Box'
+    snapshot.nextTrackMetaData.creator == 'Alice In Chains'
+    snapshot.nextTrackMetaData.album == 'Facelift'
+    snapshot.nextTrackMetaData.albumArtURI == '/getaa?s=1&u=next'
+    events.find { Map event -> event.name == 'nextTrackName' }?.value == 'Man in the Box'
+    events.find { Map event -> event.name == 'nextArtistName' }?.value == 'Alice In Chains'
+    events.find { Map event -> event.name == 'nextAlbumName' }?.value == 'Facelift'
+    events.find { Map event -> event.name == 'nextTrackAlbumArtURI' }?.value == '/getaa?s=1&u=next'
+  }
+
+  def "AVT explicitly clears next-track fields when NextTrackMetaData is empty"() {
+    given:
+    String fragment = '<r:NextTrackMetaData val=""/>'
+    String xml = '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/"><InstanceID val="0">' + fragment +
+      '</InstanceID></Event>') + '</LastChange></property></propertyset>'
+
+    when:
+    List<Map> events = driver.buildAvtEvents(driver.parseAvtFullSnapshot(xml), [:])
+
+    then:
+    events.find { Map event -> event.name == 'nextTrackName' }?.value == 'Not Available'
+    events.find { Map event -> event.name == 'nextArtistName' }?.value == 'Not Available'
+    events.find { Map event -> event.name == 'nextAlbumName' }?.value == 'Not Available'
+    events.find { Map event -> event.name == 'nextTrackAlbumArtURI' }?.value == 'Not Available'
+  }
+
   def "bounded XML lookups match namespace-prefixed sleep timer and queue fields"() {
     given:
     String didlXml = '<DIDL-Lite xmlns:dc="urn:dc"><item id="Q:0/1"><dc:title>Queue Title</dc:title>' +

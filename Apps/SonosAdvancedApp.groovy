@@ -5704,6 +5704,12 @@ Boolean playerAppRequestHandler(Object event) {
       refreshPlayerAnnouncementPolicySnapshot(player)
       rememberAnnouncementPolicyTopology(player)
       break
+    case 'needCurrentlyPlayingStates':
+      runInMillis(1, 'republishCurrentlyPlayingStates', [
+        overwrite: true,
+        data: [playerDni: playerDni]
+      ])
+      return true
     case 'activeStreamTts':
       String requestId = args.requestId?.toString()
       Integer duration = args.duration != null ? args.duration.toString().toInteger() : 0
@@ -5721,6 +5727,18 @@ Boolean playerAppRequestHandler(Object event) {
       return false
   }
   return activeStreamAccepted
+}
+
+/** Republish the complete latest leader AVT after a low-frequency settings save. */
+void republishCurrentlyPlayingStates(Map data = null) {
+  String playerDni = data?.playerDni?.toString()
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  String playerId = player?.getDataValue('id')?.toString()
+  if(!playerId) { return }
+  Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
+  String coordinatorId = coordinators[playerId] ?: playerId
+  List<Map> events = getStoredAvtEvents(coordinatorId)
+  if(events) { deliverUpnpEventsToGroup(coordinatorId, events, true) }
 }
 
 /** Queue group announcements so a coordinator stream and subsequent messages cannot race. */
@@ -10215,9 +10233,10 @@ void deliverUpnpEventsToGroup(String coordinatorId, List<Map> events, Boolean pl
         groupEvents.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString()) }
   }
   if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
-  members.unique().each { String id -> deliverUpnpEventsToPlayer(id, events) }
+  members.unique().each { String id -> deliverUpnpEventsToPlayer(id, events, coordinatorId) }
   getGroupDevicesForCoordinator(coordinatorId).each { ChildDeviceWrapper groupDevice ->
-    events.each { Map event ->
+    List<Map> targetEvents = formatUpnpEventsForChild(events, coordinatorId, groupDevice)
+    targetEvents.each { Map event ->
       if(event?.name && event.containsKey('value')) {
         String name = event.name.toString()
         if(!playback && name == 'groupVolume') { name = 'volume' }
@@ -10228,13 +10247,133 @@ void deliverUpnpEventsToGroup(String coordinatorId, List<Map> events, Boolean pl
   }
 }
 
-void deliverUpnpEventsToPlayer(String rincon, List<Map> events) {
+void deliverUpnpEventsToPlayer(String rincon, List<Map> events, String artworkSourceId = null) {
   ChildDeviceWrapper player = findPlayerBySonosId(rincon)
   if(player == null || !events) { return }
-  events.each { Map event ->
+  List<Map> targetEvents = formatUpnpEventsForChild(events, artworkSourceId ?: rincon, player)
+  targetEvents.each { Map event ->
     String name = event?.name?.toString()
     if(name && event.containsKey('value')) { sendParentChildEvent(player, name, event.value) }
   }
+}
+
+/** Apply the artwork display preference and Hubitat image markup at the parent fanout boundary. */
+List<Map> formatUpnpEventsForChild(List<Map> events, String artworkSourceId, ChildDeviceWrapper target) {
+  List<Map> formatted = []
+  Boolean disableArtEvents = isAlbumArtEventsDisabled(target)
+  (events ?: []).each { Map event ->
+    String name = event?.name?.toString()
+    if(!name || !event.containsKey('value')) { return }
+    if(name == 'albumArtURI') {
+      Map<String, Object> art = albumArtAttributesForFanout(event.value?.toString(), artworkSourceId, disableArtEvents)
+      art.each { String attributeName, Object value -> formatted << [name: attributeName, value: value] }
+    } else if(name == 'nextTrackAlbumArtURI') {
+      String uri = event.value?.toString()
+      String resolved = resolveAlbumArtUrl(uri, artworkSourceId)
+      formatted << [name: name, value: formatAlbumArtForFanout(resolved)]
+    } else {
+      formatted << [name: name, value: event.value]
+    }
+  }
+  return formatted
+}
+
+Boolean isAlbumArtEventsDisabled(ChildDeviceWrapper target) {
+  Object raw = target?.getSetting('disableAlbumArtEvents')
+  if(raw == null) { return true }
+  if(raw instanceof Boolean) { return (Boolean)raw }
+  return raw.toString().trim().toLowerCase(Locale.ROOT) in ['true', '1', 'on', 'yes']
+}
+
+Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String artworkSourceId,
+    Boolean disableArtEvents) {
+  String resolvedUri = resolveAlbumArtUrl(rawAlbumArtURI, artworkSourceId)
+  Map<String, Object> attributes = [albumArtURI: formatAlbumArtForFanout(resolvedUri)]
+  if(disableArtEvents == true) {
+    attributes.albumArtSmall = 'Disabled in Preferences'
+    attributes.albumArtMedium = 'Disabled in Preferences'
+    attributes.albumArtLarge = 'Disabled in Preferences'
+    return attributes
+  }
+  if(!resolvedUri || resolvedUri == 'Not Available') {
+    attributes.albumArtSmall = 'Not Available'
+    attributes.albumArtMedium = 'Not Available'
+    attributes.albumArtLarge = 'Not Available'
+    return attributes
+  }
+  List<String> urls = parseConcatenatedAlbumArtUrls(resolvedUri)
+  if(urls.size() > 1) {
+    List<String> filtered = urls.findAll { String url -> !url.contains('/AArt/') }
+    if(filtered) { urls = filtered }
+    String large = urls.find { String url -> url.contains('/AArl/') } ?: urls[0]
+    String medium = urls.find { String url -> url.contains('/AArm/') } ?: large
+    String small = urls.find { String url -> url.contains('/AArs/') } ?: medium
+    attributes.albumArtSmall = small
+    attributes.albumArtMedium = medium
+    attributes.albumArtLarge = large
+    attributes.albumArtURI = formatAlbumArtForFanout(medium)
+    return attributes
+  }
+  if(resolvedUri.contains('/getaa?') || resolvedUri.contains('/getaa/')) {
+    attributes.albumArtSmall = appendAlbumArtSize(resolvedUri, 60)
+    attributes.albumArtMedium = appendAlbumArtSize(resolvedUri, 200)
+    attributes.albumArtLarge = appendAlbumArtSize(resolvedUri, 600)
+  } else {
+    attributes.albumArtSmall = resolvedUri
+    attributes.albumArtMedium = resolvedUri
+    attributes.albumArtLarge = resolvedUri
+  }
+  return attributes
+}
+
+String resolveAlbumArtUrl(String rawAlbumArtURI, String artworkSourceId) {
+  if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') { return 'Not Available' }
+  if(!rawAlbumArtURI.startsWith('/')) { return rawAlbumArtURI }
+  ChildDeviceWrapper source = findPlayerBySonosId(artworkSourceId)
+  String baseUrl = source?.getDataValue('localUpnpUrl')?.toString()?.trim()
+  if(!baseUrl) {
+    String host = source?.getDataValue('localUpnpHost')?.toString()?.trim()
+    if(!host) {
+      String ip = source?.getDataValue('deviceIp')?.toString()?.trim()
+      if(ip) { host = ip.contains(':') ? ip : "${ip}:1400" }
+    } else if(!host.contains(':')) {
+      host = "${host}:1400"
+    }
+    if(host) { baseUrl = "http://${host}" }
+  }
+  if(baseUrl?.endsWith('/')) { baseUrl = baseUrl[0..-2] }
+  return baseUrl ? "${baseUrl}${rawAlbumArtURI}" : rawAlbumArtURI
+}
+
+String formatAlbumArtForFanout(String albumArtURI) {
+  if(!albumArtURI || albumArtURI == 'Not Available') { return 'Not Available' }
+  return "<br><img src=\"${escapeNewUiHtml(albumArtURI)}\" width=\"200\" height=\"200\" >"
+}
+
+String appendAlbumArtSize(String url, Integer size) {
+  String separator = url.contains('?') ? '&' : '?'
+  return "${url}${separator}x=${size}&y=${size}"
+}
+
+List<String> parseConcatenatedAlbumArtUrls(String value) {
+  if(!value || !(value.contains('http://') || value.contains('https://'))) { return value ? [value] : [] }
+  List<String> urls = []
+  Integer start = 0
+  while(start < value.length()) {
+    Integer offset = value.substring(start).startsWith('https://') ? 8 : 7
+    Integer nextHttp = value.indexOf('http://', start + offset)
+    Integer nextHttps = value.indexOf('https://', start + offset)
+    Integer next = nextHttp > 0 && nextHttps > 0 ? Math.min(nextHttp, nextHttps) :
+        (nextHttp > 0 ? nextHttp : nextHttps)
+    if(next > 0) {
+      urls.add(value.substring(start, next))
+      start = next
+    } else {
+      urls.add(value.substring(start))
+      break
+    }
+  }
+  return urls
 }
 
 void sendParentChildEvent(ChildDeviceWrapper child, String name, Object value) {
@@ -11071,6 +11210,18 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
     if(name in ['trackPosition', 'trackPositionUpdated'] && !isPlayerTrackPositionUpdatesEnabled(coordinator)) { return }
     Object value = coordinator.currentValue(name, true)
     if(value != null) { attributes[name] = value }
+  }
+
+  String coordinatorId = coordinator.getDataValue('id')?.toString()
+  List<Map> latestAvt = getStoredAvtEvents(coordinatorId)
+  Map artEvent = latestAvt.find { Map event -> event?.name?.toString() == 'albumArtURI' && event.containsKey('value') }
+  if(artEvent) {
+    attributes.putAll(albumArtAttributesForFanout(artEvent.value?.toString(), coordinatorId,
+        isAlbumArtEventsDisabled(groupDevice)))
+  } else if(isAlbumArtEventsDisabled(groupDevice)) {
+    attributes.albumArtSmall = 'Disabled in Preferences'
+    attributes.albumArtMedium = 'Disabled in Preferences'
+    attributes.albumArtLarge = 'Disabled in Preferences'
   }
 
   Object memberNames = coordinator.currentValue('groupMemberNames', true)

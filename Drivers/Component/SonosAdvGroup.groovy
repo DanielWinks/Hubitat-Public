@@ -154,6 +154,7 @@ void logTrace(String message) {
   'controlUngroupedIndividually',
   'useProportionalVolume',
   'enableTrackPositionUpdates',
+  'disableAlbumArtEvents',
   'onlyUpdateWhenActive',
   'resetAttributesWhenInactive',
 ]))
@@ -287,6 +288,9 @@ metadata {
       input 'enableTrackPositionUpdates', 'bool',
         title: 'Enable track position updates',
         required: false, defaultValue: false
+      input 'disableAlbumArtEvents', 'bool',
+        title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)',
+        required: false, defaultValue: true
     }
     section('Logging Settings') {
       input 'logLevel', 'enum',
