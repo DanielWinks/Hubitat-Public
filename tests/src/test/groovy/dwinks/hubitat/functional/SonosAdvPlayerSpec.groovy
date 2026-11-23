@@ -149,9 +149,6 @@ class SonosAdvPlayerSpec extends Specification {
     List<Map> requests = driver.flushPendingParentRequests() ?: []
     requests.each { Map request ->
       parentPlayerRequests << new LinkedHashMap(request)
-      if(request?.action == 'activeStreamTts' && request?.args?.requestId) {
-        driver.completeParentAppActiveStreamTts(request.args.requestId.toString(), 'false')
-      }
     }
   }
 
