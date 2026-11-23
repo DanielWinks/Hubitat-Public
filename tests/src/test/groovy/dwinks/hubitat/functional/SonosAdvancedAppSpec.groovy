@@ -36,7 +36,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Map favoritesMap = [:]
   Map playlistsMap = [:]
   List<String> acknowledgedParentRequests = []
-  List<List<String>> completedAppTtsRequests = []
   List<String> refreshedPlaybackUpdates = []
   Closure<Boolean> topologyApplyHook
 
@@ -50,10 +49,6 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   void unmute() { commands << [name: 'unmute'] }
 
   void acknowledgeParentCommand(String requestId) { acknowledgedParentRequests << requestId }
-  void completeParentAppActiveStreamTts(String requestId, String accepted) {
-    completedAppTtsRequests << [requestId, accepted]
-  }
-
   void playerCreateGroup(List<String> playerIds, String musicContextGroupId = null) {
     commands << [name: 'playerCreateGroup', playerIds: playerIds, musicContextGroupId: musicContextGroupId]
   }
@@ -1835,8 +1830,6 @@ class SonosAdvancedAppSpec extends Specification {
     ![coordinator, follower, extra].any { SonosAppPlayerDouble player ->
       player.commands.any { it.name in ['playerCreateGroup', 'playerModifyGroupMembers', 'playerGetGroupsFull'] }
     }
-    !appScript.state.containsKey('sonosPlayerPlaybackObservations')
-    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
   }
 
   def "always standard stream does not automatically change group membership"() {

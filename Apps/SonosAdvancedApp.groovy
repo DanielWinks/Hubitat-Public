@@ -353,8 +353,6 @@ preferences {
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
 @Field static final String ZGT_LAST_REPORT_STATE_KEY = 'zgtLastReport'
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
-@Field static final Integer HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS = 300
-@Field static final List<String> PLAYER_STATE_ATTRIBUTES = ['groupVolume','groupMute','groupPlayerIds','groupCoordinatorId','isGroupCoordinator','isGrouped','status','transportStatus','audioSource','currentTrackName','currentArtistName']
 @Field static final String GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY = 'groupAnnouncementProgressQueue'
 @Field static final String GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY = 'groupAnnouncementDueAt'
 @Field static final Integer GROUP_ANNOUNCEMENT_PROGRESS_MAX = 64
@@ -7954,10 +7952,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       operation.lastCommand = 'createExactGroup'
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-      // Sonos keeps the coordinator of the largest existing subset group.
-      // Announcement topology transactions split conflicting source groups
-      // first, so the existing groups are singletons and this ordering makes
-      // the configured coordinator win Sonos' equal-size tie-break.
+      // Put the configured coordinator first so it wins Sonos' equal-size tie-break.
       List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
           requiredPlayerIds.findAll { String playerId -> playerId != coordinatorId }
       coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [playerIdsInCoordinatorOrder, operation.musicContextGroupId as String]]))
