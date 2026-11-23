@@ -563,6 +563,7 @@ metadata {
   attribute 'albumArtMedium', 'string'
   attribute 'albumArtLarge', 'string'
   attribute 'audioSource', 'string'
+  attribute 'audioSourceSignalStatus', 'enum', ['not-ht', 'unknown', 'signal', 'no-signal']
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
   attribute 'currentFavorite', 'string'
@@ -887,30 +888,7 @@ Boolean hasLineInCapability() {
 @Field private final String HTCONTROL_EVENTS_CALLBACK = 'subscribeResubscribeToHtControlCallback'
 @Field private final String HTCONTROL_EVENTS_UNSUB_CALLBACK = 'unsubscribeFromHtControlEventsCallback'
 
-@Field static final List<Integer> FAVORITE_RETRY_INTERVALS = [5, 15, 30]
-@Field static ConcurrentHashMap<String, Map> favoriteRetryState = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, Map> playlistRetryState = new ConcurrentHashMap<String, Map>()
-@Field private final String FAVORITE_RETRY_CALLBACK = 'checkFavoritePlaybackAndRetry'
-@Field private final String FAVORITE_RETRY_EVALUATION_CALLBACK = 'evaluateFavoritePlaybackAndRetry'
-@Field static final Integer FAVORITE_INITIAL_CHECK_DELAY_SECONDS = 5
-@Field static final Integer AMAZON_FAVORITE_INITIAL_CHECK_DELAY_SECONDS = 12
-
-@Field static final List<Integer> PLAYLIST_RETRY_INTERVALS = [5, 15, 30]
 @Field static final List<String> PLAYLIST_QUEUE_ACTIONS = ['REPLACE', 'APPEND', 'INSERT', 'INSERT_NEXT']
-@Field static final List<String> NON_RETRYABLE_PLAYLIST_ERROR_CODES = [
-  'ERROR_INVALID_PARAMETER',
-  'ERROR_INVALID_OBJECT_ID',
-  'ERROR_MISSING_PARAMETERS',
-  'ERROR_UNSUPPORTED_COMMAND',
-  'ERROR_UNSUPPORTED_NAMESPACE',
-  'ERROR_INVALID_SYNTAX'
-]
-@Field private final String PLAYLIST_RETRY_CALLBACK = 'checkPlaylistPlaybackAndRetry'
-@Field private final String PLAYLIST_RETRY_EVALUATION_CALLBACK = 'evaluatePlaylistPlaybackAndRetry'
-@Field static final Integer PLAYLIST_INITIAL_CHECK_DELAY_SECONDS = 5
-@Field static final Integer PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS = 2
-@Field static final Integer MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES = 2
-@Field static final Integer MAX_PLAYLIST_PLAY_COMMAND_ATTEMPTS = 1
 
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 // Sonos recommends avoiding a burst of individual player-volume commands when
@@ -928,8 +906,6 @@ Boolean hasLineInCapability() {
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
-@Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
@@ -938,7 +914,6 @@ Boolean hasLineInCapability() {
 // Whitelisted persistence — pruning helper surfaces (standalone copy, no #include)
 // =============================================================================
 @Field static final Set<String> ACTIVE_PLAYER_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'pendingParentAppTtsRequests',
   'favoriteLoadRequestId',
   'playlistLoadRequestId',
   'playlistAddRequestId',
@@ -947,7 +922,6 @@ Boolean hasLineInCapability() {
   'playbackStateObservedAt',
   'audioSourceMetadataType',
   'audioSourceMetadataObservedAt',
-  'audioSourceSignalStatus',
   'audioSourceSignalObservedAt',
   'htControlTosLinkConnected',
   'htControlObservedAt',
@@ -1294,8 +1268,6 @@ void clearPendingCommandsForInitialization() {
     getDeviceAudioClipQueueTimers().clear()
     pendingGroupedPlayerVolumes.remove(playerId)
   }
-  clearFavoriteRetryState()
-  clearPlaylistRetryState()
   cancelVolumeFade()
 
   // Older releases persisted command queues in state/atomicState. Remove them
@@ -1340,13 +1312,6 @@ void clearPendingCommandsForInitialization() {
 /** Remove one parent-owned announcement clip from this player's local queues. */
 void clearPendingAudioClipCorrelation(String correlationId) {
   if(!correlationId || !getId()) { return }
-  Map<String, Object> pendingTts = state.pendingParentAppTtsRequests instanceof Map
-      ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
-  pendingTts.entrySet().removeAll { Map.Entry<String, Object> entry ->
-    ((Map)entry.value)?.correlationId?.toString() == correlationId
-  }
-  if(pendingTts.isEmpty()) { state.remove('pendingParentAppTtsRequests') }
-  else { state.pendingParentAppTtsRequests = pendingTts }
   audioClipQueueInitialization()
   getDeviceAudioClipQueue().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
   getDeviceAudioClipQueueHighPriority().removeAll { Map item -> item?.correlationId?.toString() == correlationId }
@@ -1417,7 +1382,7 @@ void reconcileChildDevices() {
   clearAudioClipPlaybackProgressCurrentState()
   // These diagnostics are stored in State Variables and are not exposed as
   // device Current States. Remove values created by earlier development builds.
-  ['playbackState', 'playbackStateObservedAt', 'audioSourceSignalStatus', 'audioSourceSignalObservedAt', 'lastError'].each { String name ->
+  ['playbackState', 'playbackStateObservedAt', 'audioSourceSignalObservedAt', 'lastError'].each { String name ->
     device.deleteCurrentState(name)
   }
   // Apply child device preferences synchronously (no-ops when devices already exist)
@@ -1800,10 +1765,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(groupVolumeFadeState)
     clearedEntries += clearStaticMap(lastVolumeFadeCallTime)
     clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
-    clearedEntries += clearStaticMap(favoriteRetryState)
-    clearedEntries += clearStaticMap(playlistRetryState)
-    clearedEntries += clearStaticMap(lastMetadataContainerId)
-    clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
     clearedEntries += clearStaticMap(zgtMemberHostByPlayerId)
     clearedEntries += clearStaticMap(wsSubscriptionStatus)
@@ -1834,10 +1795,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(groupVolumeFadeState, activePlayerIds)
   removedEntries += pruneStaticMapKeys(lastVolumeFadeCallTime, activePlayerIds)
   removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(favoriteRetryState, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(playlistRetryState, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(zgtMemberHostByPlayerId, activePlayerIds)
   removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
@@ -1980,10 +1937,6 @@ void clearStaticDriverStateForCurrentDevice() {
     if(dni != null && dni != '') {
       runtimeStateByDni?.remove(dni)
       audioClipProgressByCorrelationIdByDni?.remove(dni)
-      favoriteRetryState?.remove(dni)
-      playlistRetryState?.remove(dni)
-      lastMetadataContainerId?.remove(dni)
-      lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
@@ -2170,56 +2123,23 @@ void devicePlayText(String text, BigDecimal volume = null, String voice = null) 
     logDebug('Speak request deferred to the parent app during an active group operation')
     return
   }
+  LinkedHashMap tts = textToSpeech(text, voice)
+  String streamUrl = tts?.uri?.toString()
+  Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
   Boolean airPlaySource = isCurrentAirPlayAudioSource()
   Boolean useAudioClip = hasAudioClipCapability() == true && shouldUseAnnouncementAudioClip(false)
-  if(airPlaySource && hasAudioClipCapability() == true) {
-    try {
-      useAudioClip = readParentAppPolicy('useAudioClipForAirPlay', false)
-    } catch(Exception e) {
-      logWarn("Could not read AirPlay announcement policy; using the standard stream method: ${e.message}")
-    }
+  if(airPlaySource && hasAudioClipCapability() == true) { useAudioClip = true }
+  logDebug("Speak TTS generated; route=${useAudioClip ? 'local-audioClip' : 'local-stream-restore'}, hasUri=${streamUrl != null && streamUrl != ''}, duration=${ttsDuration}")
+  if(!streamUrl) {
+    volume = getAnnouncementVolume(volume)
+    componentPlayTextWithRestoreLocal(text, volume, voice)
+    return
   }
-  // AirPlay cannot be transferred to a temporary holder. Keep the existing
-  // audioClip route when policy requests it; only non-AirPlay streams may use
-  // Sonos Advanced's coordinator handoff path.
-  if(airPlaySource && useAudioClip) {
-    LinkedHashMap tts = textToSpeech(text, voice)
-    String streamUrl = tts?.uri?.toString()
-    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
-    logDebug("Speak TTS generated; route=local-airplay-audioClip, hasUri=${streamUrl != null && streamUrl != ''}, duration=${ttsDuration}")
+  if(useAudioClip) {
     playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
   } else {
-    LinkedHashMap tts = textToSpeech(text, voice)
-    String streamUrl = tts?.uri?.toString()
-    Integer ttsDuration = coerceClipDuration(tts?.duration) ?: 30
-    if(!airPlaySource && streamUrl) {
-      String requestId = UUID.randomUUID().toString()
-      Map<String, Object> pending = state.pendingParentAppTtsRequests instanceof Map
-          ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
-      Long requestCreatedAt = now()
-      pending[requestId] = [uri: streamUrl, volume: volume?.toString(), duration: ttsDuration,
-        correlationId: UUID.randomUUID().toString(), useAudioClip: useAudioClip, createdAt: requestCreatedAt]
-      state.pendingParentAppTtsRequests = pending
-      logDebug("Speak TTS generated; route=parent-activeStreamTts, requestId=${requestId}, correlation=${pending[requestId].correlationId}, duration=${ttsDuration}, activeRequests=${pending.size()}")
-      sendParentAppRequest('activeStreamTts', [requestId: requestId, uri: streamUrl,
-        volume: volume?.toString(), duration: ttsDuration, correlationId: pending[requestId].correlationId,
-        createdAt: requestCreatedAt])
-      logDebug("Parent active-stream TTS decision deferred to drain; request will complete when flush returns")
-      return
-    } else {
-      logDebug("Speak TTS generated; route=${airPlaySource ? 'local-airplay' : 'local-fallback'}, hasUri=${streamUrl != null && streamUrl != ''}, useAudioClip=${useAudioClip}, duration=${ttsDuration}")
-      if(streamUrl) {
-        if(useAudioClip) {
-          playerLoadAudioClip(streamUrl, volume, ttsDuration, UUID.randomUUID().toString())
-        } else {
-          volume = getAnnouncementVolume(volume)
-          componentPlayStreamWithRestoreLocal(streamUrl, ttsDuration, volume)
-        }
-      } else {
-        volume = getAnnouncementVolume(volume)
-        componentPlayTextWithRestoreLocal(text, volume, voice)
-      }
-    }
+    volume = getAnnouncementVolume(volume)
+    componentPlayStreamWithRestoreLocal(streamUrl, ttsDuration, volume)
   }
 }
 
@@ -2260,7 +2180,18 @@ void devicePlayTextWithAudioClip(String text, BigDecimal volume = null, String v
 
 /** Ask the controller app for the shared group/player announcement policy. */
 Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
-  return readParentAppPolicy(highPriority ? 'useAudioClipForHighPriorityTts' : 'useAudioClipForPlayer', false)
+  String key = highPriority ? 'highPriorityAnnouncementMode' : 'normalAnnouncementMode'
+  String mode = device.getDataValue(key)?.toString()
+  if(mode == 'alwaysNonInterrupting') { return true }
+  if(mode == 'alwaysCoordinatorStream') { return false }
+  String audioSource = device.currentValue('audioSource')?.toString()
+  if(isAirPlayAudioSource(audioSource)) { return true }
+  String status = device.currentValue('status')?.toString()?.toLowerCase(Locale.ROOT)
+  String transportStatus = device.currentValue('transportStatus')?.toString()?.toLowerCase(Locale.ROOT)
+  Boolean hdmiSource = audioSource?.startsWith('x-sonos-htastream:') == true
+  String signalStatus = hdmiSource ? device.currentValue('audioSourceSignalStatus')?.toString() : null
+  if(signalStatus in ['signal', 'no-signal']) { return signalStatus == 'signal' }
+  return status in ['playing', 'buffering'] || transportStatus == 'playing'
 }
 
 Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
@@ -2292,35 +2223,7 @@ List<Map> flushPendingParentRequests() { return [] }
 
 
 /** Complete the asynchronous parent-app decision for an active-stream TTS request. */
-void completeParentAppActiveStreamTts(String requestId, String accepted) {
-  Map<String, Object> pending = state.pendingParentAppTtsRequests instanceof Map
-      ? (Map<String, Object>)state.pendingParentAppTtsRequests : [:]
-  Map request = pending[requestId] instanceof Map ? (Map)pending[requestId] : null
-  if(request == null) {
-    logDebug("Ignoring parent active-stream TTS response for unknown or expired requestId=${requestId ?: 'none'}, accepted=${accepted}")
-    return
-  }
-  pending.remove(requestId)
-  state.pendingParentAppTtsRequests = pending
-  Long ageMs = request.createdAt != null ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
-  logDebug("Parent active-stream TTS response received; requestId=${requestId}, accepted=${accepted}, ageMs=${ageMs}, remainingRequests=${pending.size()}")
-  if(accepted == 'true') { return }
 
-  String uri = request.uri?.toString()
-  if(!uri) { return }
-  BigDecimal volume = null
-  try { volume = request.volume != null ? new BigDecimal(request.volume.toString()) : null }
-  catch(Exception e) { logWarn("Could not restore TTS volume for parent response ${requestId}: ${e.message}") }
-  Integer duration = (request.duration ?: 30) as Integer
-  if(request.useAudioClip == true && hasAudioClipCapability() == true) {
-    logDebug("Parent declined active-stream TTS; using local audioClip fallback requestId=${requestId}, correlation=${request.correlationId}")
-    playerLoadAudioClip(uri, volume, duration, request.correlationId?.toString())
-  } else {
-    BigDecimal announcementVolume = getAnnouncementVolume(volume)
-    logDebug("Parent declined active-stream TTS; using local stream fallback requestId=${requestId}, duration=${duration}")
-    componentPlayStreamWithRestoreLocal(uri, duration, announcementVolume)
-  }
-}
 
 void playHighPriorityTTS(String text, Object volume = null, String voice = null) {
   BigDecimal normalizedVolume = normalizePublicPlaybackVolume(volume)
@@ -3187,8 +3090,6 @@ void play() {
 void stop() {
   if(deferCommandToParentDuringGroupOperation('stop')) { return }
   if(routeGroupedPlaybackCommandToCoordinator('stop')) { return }
-  clearFavoriteRetryState()
-  clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
   playerStop()
 }
@@ -3236,8 +3137,6 @@ void stopAudioClipAnnouncement(Boolean highPriority) {
 void pause() {
   if(deferCommandToParentDuringGroupOperation('pause')) { return }
   if(routeGroupedPlaybackCommandToCoordinator('pause')) { return }
-  clearFavoriteRetryState()
-  clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
   playerPause()
 }
@@ -3327,45 +3226,8 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   Boolean shuffle = shuffleMode == 'unchanged' ? null : shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
-    // A new media request supersedes all pending confirmation/retry work.
-    clearFavoriteRetryState()
-    clearPlaylistRetryState()
     cancelPendingAmazonMusicAutoPlay()
-
-    if(playOnCompletion) {
-      String deviceId = device.getDeviceNetworkId()
-      Boolean wasPlayingAtStart = isPlaybackCurrentlyActive(deviceId)
-      String operationId = createMediaLoadOperationId('favorite', favoriteId)
-      lastPlaybackState.remove(deviceId)
-      lastMetadataContainerId.remove(deviceId)
-      Map favorite = findFavoriteById(favoriteId)
-      Boolean isAmazon = isAmazonMusicService(favorite?.service as String)
-      favoriteRetryState.put(deviceId, [
-        operationId: operationId,
-        favoriteId: favoriteId,
-        action: action,
-        repeat: repeat,
-        repeatOne: repeatOne,
-        shuffle: shuffle,
-        crossfade: crossfade,
-        playOnCompletion: playOnCompletion,
-        attemptNumber: 0,
-        wasPlayingAtStart: wasPlayingAtStart,
-        playbackObserved: false,
-        metadataConfirmed: false,
-        loadAcknowledged: false,
-        ambiguousConfirmationPasses: 0,
-        isAmazon: isAmazon
-      ])
-    }
-
     playerLoadFavorite(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-
-    if(playOnCompletion) {
-      Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
-      Integer initialDelay = retryState?.isAmazon == true ? AMAZON_FAVORITE_INITIAL_CHECK_DELAY_SECONDS : FAVORITE_INITIAL_CHECK_DELAY_SECONDS
-      scheduleFavoriteRetryCallback(initialDelay, retryState?.operationId as String)
-    }
   } else if(isGroupedAndNotCoordinator() == true) {
     requestParentCoordinatorCommand('loadFavoriteFull', [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
@@ -3373,9 +3235,8 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 
 /**
  * Load a Favorite as part of the parent app's serialized group operation.
- * Individual-player Favorite commands retain the existing retry mechanism;
- * this path deliberately leaves retry ownership with the parent so grouping
- * and playback cannot race or retry independently.
+ * Playback confirmation and retry ownership remain with the parent so
+ * grouping and playback cannot race or retry independently.
  */
 void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
     String shuffleMode, String autoPlay, String crossfadeMode, String operationId,
@@ -3398,8 +3259,6 @@ void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String 
     return
   }
 
-  clearFavoriteRetryState()
-  clearPlaylistRetryState()
   cancelPendingAmazonMusicAutoPlay()
 
   String action = queueMode.toUpperCase()
@@ -3631,45 +3490,8 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
   Boolean shuffle = shuffleMode == 'unchanged' ? null : shuffleMode == 'on'
   Boolean crossfade = crossfadeMode == 'on'
   if(getIsGroupCoordinator() == true) {
-    // A new media request supersedes all pending confirmation/retry work.
-    clearFavoriteRetryState()
-    clearPlaylistRetryState()
     cancelPendingAmazonMusicAutoPlay()
-
-    if(playOnCompletion) {
-      String deviceId = device.getDeviceNetworkId()
-      Boolean wasPlayingAtStart = isPlaybackCurrentlyActive(deviceId)
-      String operationId = createMediaLoadOperationId('playlist', playlistId)
-      lastPlaybackState.remove(deviceId)
-      lastMetadataContainerId.remove(deviceId)
-      playlistRetryState.put(deviceId, [
-        operationId: operationId,
-        playlistId: playlistId,
-        action: action,
-        repeat: repeat,
-        repeatOne: repeatOne,
-        shuffle: shuffle,
-        crossfade: crossfade,
-        playOnCompletion: playOnCompletion,
-        attemptNumber: 0,
-        wasPlayingAtStart: wasPlayingAtStart,
-        playbackObserved: false,
-        metadataConfirmed: false,
-        loadAcknowledged: false,
-        ambiguousConfirmationPasses: 0,
-        bufferingObserved: false,
-        playCommandAttempts: 0,
-        loadErrorCode: null,
-        loadErrorReason: null
-      ])
-    }
-
     playerLoadPlaylist(playlistId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion)
-
-    if(playOnCompletion) {
-      Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
-      schedulePlaylistRetryCallback(PLAYLIST_INITIAL_CHECK_DELAY_SECONDS, retryState?.operationId as String)
-    }
   } else if(isGroupedAndNotCoordinator() == true) {
     requestParentCoordinatorCommand('loadPlaylistFull', [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])
   }
@@ -3688,274 +3510,6 @@ String normalizePlaylistQueueAction(String queueMode) {
 
 
 
-// =============================================================================
-// Favorite Retry Mechanism
-// =============================================================================
-
-void clearFavoriteRetryState() {
-  String deviceId = device.getDeviceNetworkId()
-  favoriteRetryState.remove(deviceId)
-  unschedule(FAVORITE_RETRY_CALLBACK)
-  unschedule(FAVORITE_RETRY_EVALUATION_CALLBACK)
-}
-
-void scheduleNextFavoriteRetryCheck() {
-  String deviceId = device.getDeviceNetworkId()
-  Map retryState = favoriteRetryState.get(deviceId)
-  if(retryState == null) { return }
-  Integer attemptNumber = retryState.attemptNumber as Integer
-  Integer intervalIndex = Math.max(attemptNumber - 1, 0)
-  Integer delaySeconds = FAVORITE_RETRY_INTERVALS[Math.min(intervalIndex, FAVORITE_RETRY_INTERVALS.size() - 1)]
-  logDebug("Scheduling favorite playback confirmation in ${delaySeconds} seconds after retry ${attemptNumber}/${FAVORITE_RETRY_INTERVALS.size()}")
-  scheduleFavoriteRetryCallback(delaySeconds, retryState.operationId as String)
-}
-
-void scheduleFavoriteRetryCallback(Integer delaySeconds, String operationId = null) {
-  runIn(delaySeconds, FAVORITE_RETRY_CALLBACK, [overwrite: true, data: [operationId: operationId]])
-}
-
-void checkFavoritePlaybackAndRetry() {
-  checkFavoritePlaybackAndRetry([:])
-}
-
-void checkFavoritePlaybackAndRetry(Map data) {
-  String deviceId = device.getDeviceNetworkId()
-  Map retryState = favoriteRetryState.get(deviceId)
-  if(retryState == null || !isRetryOperationCurrent(retryState, data)) {
-    logDebug("No retry state found, skipping playback check")
-    return
-  }
-
-  retryState.playbackObserved = false
-  getPlaybackStatus()
-  runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, FAVORITE_RETRY_EVALUATION_CALLBACK,
-    [overwrite: true, data: [operationId: retryState.operationId]])
-}
-
-void evaluateFavoritePlaybackAndRetry(Map data) {
-  String deviceId = device.getDeviceNetworkId()
-  Map retryState = favoriteRetryState.get(deviceId)
-  if(retryState == null || !isRetryOperationCurrent(retryState, data)) { return }
-
-  Boolean playbackActive = retryState.playbackObserved == true ||
-    (retryState.wasPlayingAtStart != true && getTransportStatus() == 'playing')
-
-  if(playbackActive && retryState.metadataConfirmed == true) {
-    logInfo("Favorite '${retryState.favoriteId}' is now playing successfully")
-    clearFavoriteRetryState()
-    return
-  }
-
-  if(playbackActive && (retryState.loadAcknowledged == true || retryState.wasPlayingAtStart != true)) {
-    logInfo("Playback is active after loading favorite '${retryState.favoriteId}'; stopping retries while metadata confirmation completes")
-    clearFavoriteRetryState()
-    return
-  }
-
-  if(playbackActive) {
-    Integer confirmationPasses = retryState.ambiguousConfirmationPasses as Integer
-    if(confirmationPasses < MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES) {
-      retryState.ambiguousConfirmationPasses = confirmationPasses + 1
-      logDebug("Playback is active but favorite '${retryState.favoriteId}' is not identified yet; polling again before retrying")
-      scheduleFavoriteRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
-      return
-    }
-    logWarn("Playback is active but favorite '${retryState.favoriteId}' could not be confirmed; stopping retries to avoid interrupting active playback")
-    clearFavoriteRetryState()
-    return
-  }
-
-  Integer attemptNumber = retryState.attemptNumber as Integer
-  if(attemptNumber >= FAVORITE_RETRY_INTERVALS.size()) {
-    logWarn("Failed to confirm favorite '${retryState.favoriteId}' after ${FAVORITE_RETRY_INTERVALS.size()} retry attempts. The favorite may not have loaded correctly.")
-    clearFavoriteRetryState()
-    return
-  }
-
-  attemptNumber++
-  retryState.attemptNumber = attemptNumber
-  logInfo("Favorite '${retryState.favoriteId}' not playing yet, retrying (attempt ${attemptNumber}/${FAVORITE_RETRY_INTERVALS.size()})")
-  resetRetryConfirmationSignals(retryState)
-  playerLoadFavorite(
-    retryState.favoriteId as String,
-    retryState.action as String,
-    retryState.repeat as Boolean,
-    retryState.repeatOne as Boolean,
-    retryState.shuffle as Boolean,
-    retryState.crossfade as Boolean,
-    retryState.playOnCompletion as Boolean
-  )
-  scheduleNextFavoriteRetryCheck()
-}
-
-// =============================================================================
-// End Favorite Retry Mechanism
-// =============================================================================
-
-
-
-// =============================================================================
-// Playlist Retry Mechanism
-// =============================================================================
-
-void clearPlaylistRetryState() {
-  String deviceId = device.getDeviceNetworkId()
-  playlistRetryState.remove(deviceId)
-  unschedule(PLAYLIST_RETRY_CALLBACK)
-  unschedule(PLAYLIST_RETRY_EVALUATION_CALLBACK)
-}
-
-void scheduleNextPlaylistRetryCheck() {
-  String deviceId = device.getDeviceNetworkId()
-  Map retryState = playlistRetryState.get(deviceId)
-  if(retryState == null) { return }
-  Integer attemptNumber = retryState.attemptNumber as Integer
-  Integer intervalIndex = Math.max(attemptNumber - 1, 0)
-  Integer delaySeconds = PLAYLIST_RETRY_INTERVALS[Math.min(intervalIndex, PLAYLIST_RETRY_INTERVALS.size() - 1)]
-  logDebug("Scheduling playlist playback confirmation in ${delaySeconds} seconds after retry ${attemptNumber}/${PLAYLIST_RETRY_INTERVALS.size()}")
-  schedulePlaylistRetryCallback(delaySeconds, retryState.operationId as String)
-}
-
-void schedulePlaylistRetryCallback(Integer delaySeconds, String operationId = null) {
-  runIn(delaySeconds, PLAYLIST_RETRY_CALLBACK, [overwrite: true, data: [operationId: operationId]])
-}
-
-void checkPlaylistPlaybackAndRetry() {
-  checkPlaylistPlaybackAndRetry([:])
-}
-
-void checkPlaylistPlaybackAndRetry(Map data) {
-  String deviceId = device.getDeviceNetworkId()
-  Map retryState = playlistRetryState.get(deviceId)
-  if(retryState == null || !isRetryOperationCurrent(retryState, data)) {
-    logDebug("No retry state found, skipping playback check")
-    return
-  }
-
-  retryState.playbackObserved = false
-  retryState.bufferingObserved = false
-  getPlaybackStatus()
-  runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, PLAYLIST_RETRY_EVALUATION_CALLBACK,
-    [overwrite: true, data: [operationId: retryState.operationId]])
-}
-
-void evaluatePlaylistPlaybackAndRetry(Map data) {
-  String deviceId = device.getDeviceNetworkId()
-  Map retryState = playlistRetryState.get(deviceId)
-  if(retryState == null || !isRetryOperationCurrent(retryState, data)) { return }
-
-  Boolean playbackActive = retryState.playbackObserved == true ||
-    retryState.bufferingObserved == true ||
-    (retryState.wasPlayingAtStart != true && getTransportStatus() == 'playing')
-
-  String loadErrorCode = retryState.loadErrorCode as String
-  if(loadErrorCode != null && !isRetryablePlaylistError(loadErrorCode)) {
-    reportPlaylistLoadError(
-      retryState.playlistId as String,
-      loadErrorCode,
-      retryState.loadErrorReason as String
-    )
-    clearPlaylistRetryState()
-    return
-  }
-
-  if(playbackActive && retryState.metadataConfirmed == true) {
-    logInfo("Playlist '${retryState.playlistId}' is now playing successfully")
-    clearPlaylistRetryState()
-    return
-  }
-
-  if(playbackActive && (retryState.loadAcknowledged == true || retryState.wasPlayingAtStart != true)) {
-    logInfo("Playback is active after loading playlist '${retryState.playlistId}'; stopping retries while metadata confirmation completes")
-    clearPlaylistRetryState()
-    return
-  }
-
-  if(retryState.loadAcknowledged == true) {
-    Integer playCommandAttempts = (retryState.playCommandAttempts ?: 0) as Integer
-    if(playCommandAttempts < MAX_PLAYLIST_PLAY_COMMAND_ATTEMPTS) {
-      retryState.playCommandAttempts = playCommandAttempts + 1
-      logInfo("Playlist '${retryState.playlistId}' was accepted but playback is not active; issuing a play command without reloading it")
-      playerPlay()
-      schedulePlaylistRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
-      return
-    }
-
-    String notPlayingReason = 'Sonos acknowledged the playlist load, but playback did not become active after the follow-up play command.'
-    reportPlaylistLoadError(retryState.playlistId as String, 'PLAYBACK_NOT_STARTED', notPlayingReason)
-    clearPlaylistRetryState()
-    return
-  }
-
-  if(playbackActive) {
-    Integer confirmationPasses = retryState.ambiguousConfirmationPasses as Integer
-    if(confirmationPasses < MAX_AMBIGUOUS_PLAYBACK_CONFIRMATION_PASSES) {
-      retryState.ambiguousConfirmationPasses = confirmationPasses + 1
-      logDebug("Playback is active but playlist '${retryState.playlistId}' is not identified yet; polling again before retrying")
-      schedulePlaylistRetryCallback(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, retryState.operationId as String)
-      return
-    }
-    logWarn("Playback is active but playlist '${retryState.playlistId}' could not be confirmed; stopping retries to avoid interrupting active playback")
-    clearPlaylistRetryState()
-    return
-  }
-
-  Integer attemptNumber = retryState.attemptNumber as Integer
-  if(attemptNumber >= PLAYLIST_RETRY_INTERVALS.size()) {
-    logWarn("Failed to confirm playlist '${retryState.playlistId}' after ${PLAYLIST_RETRY_INTERVALS.size()} retry attempts. The playlist may not have loaded correctly.")
-    clearPlaylistRetryState()
-    return
-  }
-
-  attemptNumber++
-  retryState.attemptNumber = attemptNumber
-  logInfo("Playlist '${retryState.playlistId}' not playing yet, retrying (attempt ${attemptNumber}/${PLAYLIST_RETRY_INTERVALS.size()})")
-  resetRetryConfirmationSignals(retryState)
-  playerLoadPlaylist(
-    retryState.playlistId as String,
-    retryState.action as String,
-    retryState.repeat as Boolean,
-    retryState.repeatOne as Boolean,
-    retryState.shuffle as Boolean,
-    retryState.crossfade as Boolean,
-    retryState.playOnCompletion as Boolean
-  )
-  scheduleNextPlaylistRetryCheck()
-}
-
-String createMediaLoadOperationId(String mediaType, String mediaId) {
-  return "${mediaType}:${device.getDeviceNetworkId()}:${mediaId}:${now()}"
-}
-
-Boolean isRetryOperationCurrent(Map retryState, Map callbackData) {
-  if(retryState == null) { return false }
-  String callbackOperationId = callbackData?.operationId as String
-  return callbackOperationId == null || callbackOperationId == retryState.operationId?.toString()
-}
-
-Boolean isPlaybackCurrentlyActive(String deviceId) {
-  return getTransportStatus() == 'playing' || lastPlaybackState.get(deviceId) == 'PLAYBACK_STATE_PLAYING'
-}
-
-void resetRetryConfirmationSignals(Map retryState) {
-  retryState.playbackObserved = false
-  retryState.bufferingObserved = false
-  retryState.metadataConfirmed = false
-  retryState.loadAcknowledged = false
-  retryState.playCommandAttempts = 0
-  retryState.loadErrorCode = null
-  retryState.loadErrorReason = null
-  retryState.ambiguousConfirmationPasses = 0
-  lastPlaybackState.remove(device.getDeviceNetworkId())
-  lastMetadataContainerId.remove(device.getDeviceNetworkId())
-}
-
-@CompileStatic
-Boolean isRetryablePlaylistError(String errorCode) {
-  if(errorCode == null || errorCode == '') { return true }
-  return !NON_RETRYABLE_PLAYLIST_ERROR_CODES.contains(errorCode)
-}
-
 void reportPlaylistLoadError(String playlistId, String errorCode, String reason) {
   String safePlaylistId = playlistId ?: '(unknown)'
   String safeErrorCode = errorCode ?: 'UNKNOWN'
@@ -3970,10 +3524,6 @@ void recordLastError(String message, String reason = null) {
   state.lastErrorReason = reason
   state.lastErrorObservedAt = now()
 }
-
-// =============================================================================
-// End Playlist Retry Mechanism
-// =============================================================================
 
 
 
@@ -5159,20 +4709,12 @@ void updateCurrentFavoriteFromUpnp(Map snapshot) {
   Boolean isPlaylist = matchedPlaylist != null
   setCurrentPlaylist(playlistId, matchedPlaylist?.name?.toString(), isPlaylist)
 
-  Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
-  if(retryState != null && favoriteId) {
-    retryState.metadataConfirmed = favoriteId == retryState.favoriteId?.toString()
-  }
   String operationId = runtimeState.groupFavoriteOperationId?.toString()
   String expectedFavoriteId = runtimeState.groupFavoriteOperationFavoriteId?.toString()
   if(operationId && expectedFavoriteId && getIsGroupCoordinator() == true) {
     emitGroupFavoriteOperationEvent('metadataConfirmed', [favoriteId: favoriteId,
       confirmed: isFavorite && favoriteId == expectedFavoriteId,
       groupId: runtimeState.groupFavoriteOperationGroupId as String])
-  }
-  Map playlistRetry = playlistRetryState.get(device.getDeviceNetworkId())
-  if(playlistRetry != null && playlistId) {
-    playlistRetry.metadataConfirmed = playlistId == playlistRetry.playlistId?.toString()
   }
 }
 
@@ -7262,7 +6804,7 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
   }
   String normalizedState = transportState.trim().toUpperCase(Locale.US)
   if(normalizedState == 'TRANSITIONING') {
-    logDebug("Ignoring transient Sonos TransportState=TRANSITIONING from ${source}; preserving ${getTransportStatus() ?: 'unknown'}")
+    logDebug("Ignoring transient Sonos TransportState=TRANSITIONING from ${source}; preserving ${this.device.currentValue('transportStatus') ?: 'unknown'}")
     return
   }
   String status = normalizeTransportStatus(transportState)
@@ -7271,15 +6813,11 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
     return
   }
   if(!(status != this.device.currentValue('status')) &&
-      !(status != getTransportStatus())) { return }
+      !(status != this.device.currentValue('transportStatus'))) { return }
   if(status != null) { device.sendEvent(name: 'status', value: status) }
   if(status != null) { device.sendEvent(name: 'transportStatus', value: status) }
   // Queue for batched group device update
 }
-String getTransportStatus() {
-  return this.device.currentValue('transportStatus')
-}
-
 Integer getPlayerVolume() {
   return (this.device.currentValue('volume') as Integer) ?: 0
 }
@@ -9161,15 +8699,7 @@ void loadFavoriteOverUpnp(Map request) {
 void favoriteLoadSoapCallback(AsyncResponse response, Map data = null) {
   if(data?.requestId?.toString() != state.favoriteLoadRequestId?.toString()) { return }
   state.remove('favoriteLoadRequestId')
-  Map retryState = favoriteRetryState.get(device.getDeviceNetworkId())
   Boolean accepted = response?.status == 200 && !response.hasError()
-  if(retryState != null && retryState.favoriteId?.toString() == data?.favoriteId?.toString()) {
-    retryState.loadAcknowledged = accepted
-    if(!accepted) {
-      retryState.loadErrorCode = 'UPNP_LOAD_FAILED'
-      retryState.loadErrorReason = response?.getErrorMessage()?.toString()
-    }
-  }
   emitGroupFavoriteOperationEvent('favoriteLoadAck', [success: accepted,
       errorCode: accepted ? null : 'UPNP_LOAD_FAILED', reason: response?.getErrorMessage()?.toString(),
       groupId: getGroupId()])
@@ -9243,14 +8773,6 @@ void loadPlaylistOverUpnp(Map request) {
 void playlistLoadSoapCallback(AsyncResponse response, Map data = null) {
   if(data?.requestId?.toString() != state.playlistLoadRequestId?.toString()) { return }
   state.remove('playlistLoadRequestId')
-  Map retryState = playlistRetryState.get(device.getDeviceNetworkId())
-  if(retryState != null && retryState.playlistId?.toString() == data?.playlistId?.toString()) {
-    retryState.loadAcknowledged = response?.status == 200 && !response.hasError()
-    if(response?.status != 200 || response.hasError()) {
-      retryState.loadErrorCode = 'UPNP_LOAD_FAILED'
-      retryState.loadErrorReason = response?.getErrorMessage()?.toString()
-    }
-  }
   if(response?.status != 200 || response.hasError()) {
     reportPlaylistLoadError(data?.playlistId?.toString(), 'UPNP_LOAD_FAILED',
         "UPnP load failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
@@ -11278,6 +10800,7 @@ void observeUpnpPlaybackSource(Map snapshot) {
     signalStatus = connected == null ? 'unknown' : (connected.toString() == '1' ? 'signal' : 'no-signal')
   }
   state.audioSourceSignalStatus = signalStatus
+  sendEvent(name: 'audioSourceSignalStatus', value: signalStatus)
   state.audioSourceSignalObservedAt = now()
   logDebug("UPnP playback-source observation player=${getId()}, uri=${uri}, itemClass=${itemClass}, signalStatus=${signalStatus}")
 }

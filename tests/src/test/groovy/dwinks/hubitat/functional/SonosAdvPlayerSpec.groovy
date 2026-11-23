@@ -1177,11 +1177,7 @@ class SonosAdvPlayerSpec extends Specification {
     ) }
     driver.clearFavoritesMap()
     driver.clearPlaylistsMap()
-    driver.favoriteRetryState.clear()
-    driver.playlistRetryState.clear()
     driver.pendingGroupedPlayerVolumes.clear()
-    driver.lastPlaybackState.clear()
-    driver.lastMetadataContainerId.clear()
   }
 
   def "player escaping helpers handle HTML, XML, and layered XML entities consistently"() {
@@ -1948,6 +1944,14 @@ class SonosAdvPlayerSpec extends Specification {
     !source.contains('lastComponentChildEvents')
     !source.contains('drainComponentChildEvents')
     !source.contains('queueComponentChildEvent')
+    !source.contains('lastPlaybackState')
+    !source.contains('getTransportStatus')
+    !source.contains('favoriteRetryState')
+    !source.contains('checkFavoritePlaybackAndRetry')
+    !source.contains('evaluateFavoritePlaybackAndRetry')
+    !source.contains('playlistRetryState')
+    !source.contains('checkPlaylistPlaybackAndRetry')
+    !source.contains('evaluatePlaylistPlaybackAndRetry')
     !appSource.contains('pollLastUpdatedHealth')
     !appSource.contains('lastUpdated')
   }
@@ -2571,80 +2575,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Play')
   }
 
-  def "favorite confirmation polls first and does not immediately reload"() {
-    given:
-    seedUpnpFavorite('42')
-    driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
-    Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
-    driver.asyncCalls.clear()
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.scheduled.clear()
-
-    when:
-    driver.checkFavoritePlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    driver.asyncCalls.collect { it.params.headers.SOAPAction }.containsAll([
-      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'])
-    driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
-    driver.scheduled.last() == [
-      2,
-      'evaluateFavoritePlaybackAndRetry',
-      [overwrite: true, data: [operationId: retryState.operationId]]
-    ]
-  }
-
-  def "favorite evaluation performs one bounded reload only after confirmation fails"() {
-    given:
-    seedUpnpFavorite('42')
-    driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
-    Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
-    driver.asyncCalls.clear()
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.scheduled.clear()
-
-    when:
-    driver.evaluateFavoritePlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    driver.asyncCalls.count { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') } == 1
-    retryState.attemptNumber == 1
-    driver.scheduled.last() == [
-      5,
-      'checkFavoritePlaybackAndRetry',
-      [overwrite: true, data: [operationId: retryState.operationId]]
-    ]
-  }
-
-  def "active pre-existing playback is not interrupted while target confirmation is ambiguous"() {
-    given:
-    driver.device.currentValues.transportStatus = 'playing'
-    driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
-    Map retryState = driver.favoriteRetryState['SONOS-TEST-DNI']
-    retryState.playbackObserved = true
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.scheduled.clear()
-
-    when:
-    driver.evaluateFavoritePlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    websocketMessages.every { String message -> !message.contains('loadFavorite') }
-    retryState.attemptNumber == 0
-    retryState.ambiguousConfirmationPasses == 1
-    driver.scheduled.last() == [
-      2,
-      'checkFavoritePlaybackAndRetry',
-      [overwrite: true, data: [operationId: retryState.operationId]]
-    ]
-  }
-
   def "stop is queued even when the reported playback state is stopped"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50'
@@ -2671,41 +2601,6 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.asyncCalls.last().params.headers.SOAPAction.endsWith('#Stop')
-  }
-
-  def "playlist confirmation also polls before performing a bounded reload"() {
-    given:
-    seedUpnpPlaylist('playlist-7')
-    driver.loadPlaylistFull('playlist-7', 'repeat all', 'replace', 'off', 'true', 'on')
-    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
-    driver.asyncCalls.clear()
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.scheduled.clear()
-
-    when:
-    driver.checkPlaylistPlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    driver.asyncCalls.collect { it.params.headers.SOAPAction }.containsAll([
-      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'])
-    driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
-
-    when:
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    driver.asyncCalls.count { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') } == 1
-    retryState.attemptNumber == 1
-    driver.scheduled.last() == [
-      5,
-      'checkPlaylistPlaybackAndRetry',
-      [overwrite: true, data: [operationId: retryState.operationId]]
-    ]
   }
 
   def "short media load overloads enable crossfade in the outgoing command"() {
@@ -2741,6 +2636,8 @@ class SonosAdvPlayerSpec extends Specification {
   def "append-and-play sends INSERT with the unchanged Sonos playlist ID"() {
     given:
     seedUpnpPlaylist('playlist-963')
+    driver.asyncCalls.clear()
+    driver.scheduled.clear()
 
     when:
     driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
@@ -2749,53 +2646,13 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#AddURIToQueue') &&
       it.params.body.contains('<EnqueuedURI>x-rincon-cpcontainer:SQ:playlist-963</EnqueuedURI>') &&
       it.params.body.contains('<EnqueueAsNext>true</EnqueueAsNext>') }
-  }
-
-  def "acknowledged playlist load issues play instead of duplicating the playlist request"() {
-    given:
-    seedUpnpPlaylist('playlist-963')
-    driver.loadPlaylistFull('playlist-963', 'repeat all', 'insert', 'off', 'true', 'on')
-    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
-    Map request = driver.asyncCalls.find { it.params.headers.SOAPAction.endsWith('#AddURIToQueue') }
-    driver.playlistLoadSoapCallback(new hubitat.scheduling.AsyncResponse(status: 200, data: ''), request.data)
-    driver.asyncCalls.clear()
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.scheduled.clear()
-
-    when:
-    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
-    driver.drainTransportCommandQueue()
-
-    then:
-    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#Play') }
-    driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
-    retryState.playCommandAttempts == 1
-    driver.scheduled.contains([
-      2,
-      'checkPlaylistPlaybackAndRetry',
-      [overwrite: true, data: [operationId: retryState.operationId]]
-    ])
-
-    when:
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.evaluatePlaylistPlaybackAndRetry([operationId: retryState.operationId])
-
-    then:
-    websocketMessages.empty
-    driver.playlistRetryState.isEmpty()
-    driver.state.lastError?.contains('PLAYBACK_NOT_STARTED')
-    !driver.events.any { Map event -> event.name == 'lastError' }
+    !driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#GetTransportInfo') }
+    !driver.scheduled.any { List call -> call[1] in ['checkPlaylistPlaybackAndRetry', 'evaluatePlaylistPlaybackAndRetry'] }
   }
 
   def "UPnP playback metadata confirms the exact saved playlist resource ID"() {
     given:
     driver.getPlaylistsMap()['playlist-963'] = [id: 'playlist-963', name: 'Morning Mix', upnpUri: 'x-rincon-cpcontainer:playlist-963']
-    driver.loadPlaylistFull('playlist-963', 'repeat all', 'replace', 'off', 'true', 'on')
-    Map retryState = driver.playlistRetryState['SONOS-TEST-DNI']
 
     when:
     driver.updateCurrentFavoriteFromUpnp([
@@ -2804,26 +2661,7 @@ class SonosAdvPlayerSpec extends Specification {
     ])
 
     then:
-    retryState.metadataConfirmed == true
-  }
-
-  def "stale favorite callbacks cannot act on a newer load operation"() {
-    given:
-    driver.loadFavoriteFull('42', 'repeat all', 'replace', 'off', 'true', 'on')
-    String staleOperationId = driver.favoriteRetryState['SONOS-TEST-DNI'].operationId
-    driver.loadFavoriteFull('43', 'repeat all', 'replace', 'off', 'true', 'on')
-    websocketMessages.clear()
-    rawConnections.clear()
-    rawRequests.clear()
-    driver.scheduled.clear()
-
-    when:
-    driver.evaluateFavoritePlaybackAndRetry([operationId: staleOperationId])
-
-    then:
-    websocketMessages.empty
-    driver.scheduled.empty
-    driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
+    driver.device.currentValues.currentPlaylist == 'Playlist #playlist-963 Morning Mix'
   }
 
   def "follower group volume forwarding is deferred through the parent boundary"() {
