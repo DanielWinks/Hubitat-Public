@@ -315,10 +315,6 @@ class SonosAdvancedAppSpec extends Specification {
         pending: [[correlationId: 'follower-pending', playerIds: ['RINCON_FOLLOW']]]],
       'OTHER-GROUP': [active: [correlationId: 'extra-active', playerIds: ['RINCON_EXTRA']], pending: []]
     ]
-    appScript.state.groupAnnouncementTopologyTransactions = [
-      'follower-active': [correlationId: 'follower-active', targetPlayerIds: ['RINCON_FOLLOW']],
-      'extra-active': [correlationId: 'extra-active', targetPlayerIds: ['RINCON_EXTRA']]
-    ]
 
     when:
     appScript.clearPendingCommandsForDevice(follower.deviceNetworkId)
@@ -330,8 +326,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.deferredGroupPlayerCommands*.playerDni == [extra.deviceNetworkId]
     !appScript.state.groupAnnouncementQueues.containsKey('GROUP-DNI')
     appScript.state.groupAnnouncementQueues['OTHER-GROUP'].active.correlationId == 'extra-active'
-    !appScript.state.groupAnnouncementTopologyTransactions.containsKey('follower-active')
-    appScript.state.groupAnnouncementTopologyTransactions.containsKey('extra-active')
     appScript.state.deviceCommandClearTimes[follower.deviceNetworkId] != null
 
     when:
@@ -354,9 +348,6 @@ class SonosAdvancedAppSpec extends Specification {
         pending: [[correlationId: 'queued-tts', isTts: true]]],
       'OTHER-GROUP': [active: null, pending: []]
     ]
-    appScript.state.groupAnnouncementTopologyTransactions = [
-      'active-tts': [groupDni: 'GROUP-DNI'], 'other': [groupDni: 'OTHER-GROUP']
-    ]
 
     when:
     appScript.enqueueGroupCommandRequest([action: 'initializationPurge', groupDni: 'GROUP-DNI', createdAt: appScript.now()])
@@ -366,8 +357,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupCommandRequests.containsKey('OTHER-GROUP')
     !appScript.state.groupAnnouncementQueues.containsKey('GROUP-DNI')
     appScript.state.groupAnnouncementQueues.containsKey('OTHER-GROUP')
-    !appScript.state.groupAnnouncementTopologyTransactions.containsKey('active-tts')
-    appScript.state.groupAnnouncementTopologyTransactions.containsKey('other')
 
     when:
     appScript.enqueueGroupCommandRequest([groupDni: 'GROUP-DNI', requestId: 'late-group-command',
@@ -379,12 +368,29 @@ class SonosAdvancedAppSpec extends Specification {
 
 
 
+  def "legacy in-flight announcement topology is queued for one-time restoration"() {
+    given:
+    appScript.state.groupAnnouncementTopologyTransactions = [old: [
+      correlationId: 'legacy-announcement', groupDni: 'GROUP-DNI', phase: 'STREAMING',
+      originalGroups: [[groupId: 'G1', coordinatorId: 'RINCON_COORD',
+        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]]
+    ]]
+
+    when:
+    appScript.migrateLegacyAnnouncementTopologyTransactions()
+
+    then:
+    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
+    appScript.state.legacyAnnouncementTopologyRecovery.transactions.size() == 1
+    appScript.scheduled.any { List job -> job[1] == 'recoverLegacyAnnouncementTopologies' }
+  }
+
   def "system start re-arms persisted player state updates after reboot"() {
     given:
     appScript.state.playerStateUpdateDrainScheduled = true
     appScript.state.pendingPlayerStateUpdates = [[
-      kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
-      playbackState: 'PLAYBACK_STATE_PLAYING'
+      kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
+      playbackAttrs: [transportStatus: 'playing']
     ]]
 
     when:
@@ -1527,18 +1533,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.childStateDrainScheduled == true
   }
 
-  def "player device state event carries its JSON payload in the event value"() {
-    given:
-    Map batch = [kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
-      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()]
-
-    when:
-    appScript.playerStateUpdateHandler([value: JsonOutput.toJson(batch)] as Event)
-
-    then:
-    appScript.state.sonosPlayerPlaybackObservations.RINCON_COORD.playbackState == 'PLAYBACK_STATE_PLAYING'
-  }
-
   def "alarm device request event dispatches through the parent app handler"() {
     given:
     SonosAppPlayerDouble alarmManager = new SonosAppPlayerDouble(
@@ -1647,26 +1641,6 @@ class SonosAdvancedAppSpec extends Specification {
     body.contains('<ProgramURI>x?a=1&amp;b=&lt;two&gt;</ProgramURI>')
   }
 
-  def "player app request callback returns the active-stream decision"() {
-    given:
-    appScript.metaClass.handlePlayerActiveStreamTts = { String playerDni, String uri,
-        BigDecimal volume, Integer duration, String correlationId ->
-      playerDni == coordinator.deviceNetworkId && uri == 'http://example.test/tts.mp3' &&
-        volume == 5G && duration == 3 && correlationId == 'tts-correlation'
-    }
-
-    when:
-    Boolean accepted = appScript.playerAppRequest([
-      version: 1, channel: 'playerAppRequest', action: 'activeStreamTts',
-      sourceDni: coordinator.deviceNetworkId, requestId: 'event-request-1',
-      args: [requestId: 'tts-request-1', uri: 'http://example.test/tts.mp3', volume: '5',
-        duration: 3, correlationId: 'tts-correlation']
-    ])
-
-    then:
-    accepted == true
-  }
-
   def "player app cache refresh requests update driver roster and policy snapshots"() {
     given:
     List<String> refreshed = []
@@ -1686,9 +1660,9 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     refreshed == ['roster']
-    coordinator.dataValues.useAudioClipForPlayer == 'true'
-    coordinator.dataValues.useAudioClipForHighPriorityTts == 'false'
-    coordinator.dataValues.useAudioClipForAirPlay == 'true'
+    coordinator.dataValues.normalAnnouncementMode == 'alwaysNonInterrupting'
+    coordinator.dataValues.highPriorityAnnouncementMode == 'alwaysCoordinatorStream'
+    !coordinator.dataValues.containsKey('useAudioClipForAirPlay')
   }
 
   def "unrelated player state updates do not refresh announcement policies"() {
@@ -1703,42 +1677,8 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
-    !coordinator.dataValues.containsKey('useAudioClipForPlayer')
+    !coordinator.dataValues.containsKey('normalAnnouncementMode')
     !appScript.logs.any { String message -> message.contains('Player announcement policy evaluated') }
-  }
-
-  def "playback policy refresh coalesces and updates only the affected coordinator group"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.highPriorityAnnouncementMode = 'alwaysCoordinatorStream'
-    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
-    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
-
-    when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
-      kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
-      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()
-    ])] as Event)
-    appScript.drainAnnouncementPolicyRefreshQueue()
-
-    then:
-    appScript.scheduled.count { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' } == 1
-    coordinator.dataValues.useAudioClipForPlayer == 'true'
-    follower.dataValues.useAudioClipForPlayer == 'true'
-    coordinator.dataValues.useAudioClipForHighPriorityTts == 'false'
-    follower.dataValues.useAudioClipForHighPriorityTts == 'false'
-    !extra.dataValues.containsKey('useAudioClipForPlayer')
-    !appScript.logs.any { String message -> message.contains('Player announcement route check') }
-
-    when:
-    appScript.scheduled.clear()
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
-      kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
-      playbackState: 'PLAYBACK_STATE_BUFFERING', playbackObservedAt: appScript.now() + 1000L
-    ])] as Event)
-
-    then:
-    !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
   }
 
   def "changing one announcement priority refreshes its policy without changing the other"() {
@@ -1751,10 +1691,10 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.handleNewUiSettingChange('newUiSetting|highPriorityAnnouncementMode|alwaysCoordinatorStream')
 
     then:
-    coordinator.dataValues.useAudioClipForPlayer == 'true'
-    coordinator.dataValues.useAudioClipForHighPriorityTts == 'false'
-    follower.dataValues.useAudioClipForPlayer == 'true'
-    follower.dataValues.useAudioClipForHighPriorityTts == 'false'
+    coordinator.dataValues.normalAnnouncementMode == 'alwaysNonInterrupting'
+    coordinator.dataValues.highPriorityAnnouncementMode == 'alwaysCoordinatorStream'
+    follower.dataValues.normalAnnouncementMode == 'alwaysNonInterrupting'
+    follower.dataValues.highPriorityAnnouncementMode == 'alwaysCoordinatorStream'
   }
 
   def "duplicate enum setting selection is ignored without updating or firing an event"() {
@@ -1777,90 +1717,12 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.app.events.count { Map event -> event.name == 'newUiSettings' } == 1
   }
 
-  def "duplicate boolean setting toggle is ignored without updating or firing an event"() {
-    given:
-    appScript.settings.automaticTtsTopologyChanges = true
-
-    when:
-    appScript.handleNewUiSettingChange('newUiSetting|automaticTtsTopologyChanges|true')
-
-    then:
-    appScript.app.updatedSettings.isEmpty()
-    appScript.app.events.isEmpty()
-    appScript.logs.any { String message -> message.contains('Ignoring duplicate custom setting') }
-
-    when:
-    appScript.handleNewUiSettingChange('newUiSetting|automaticTtsTopologyChanges|false')
-
-    then:
-    appScript.app.updatedSettings['automaticTtsTopologyChanges'] == false
-    appScript.app.events.count { Map event -> event.name == 'newUiSettings' } == 1
-  }
-
-  def "unchanged topology reports do not recalculate announcement policies"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.highPriorityAnnouncementMode = 'automatic'
-    appScript.refreshPlayerAnnouncementPolicySnapshots(true)
-    appScript.scheduled.clear()
-    appScript.logs.clear()
-
-    when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson([
-      kind: 'topology', playerDni: coordinator.deviceNetworkId, groupId: 'GROUP-1',
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
-    ])] as Event)
-
-    then:
-    !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
-    !appScript.logs.any { String message -> message.contains('Player announcement policy evaluated') }
-  }
-
-  def "player playback observations are cached in app State Variables"() {
-    given:
-    Map batch = [kind: 'playbackObservation', playerDni: coordinator.deviceNetworkId,
-      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now(),
-      audioSource: 'x-sonos-htastream:RINCON_COORD:spdif',
-      signalStatus: 'no-signal', signalObservedAt: appScript.now()]
-
-    when:
-    appScript.playerStateUpdate(batch)
-    appScript.drainQueuedPlayerStateUpdates()
-
-    then:
-    appScript.state.sonosPlayerPlaybackObservations.RINCON_COORD.playbackState == 'PLAYBACK_STATE_PLAYING'
-    appScript.state.sonosPlayerPlaybackObservations.RINCON_COORD.signalStatus == 'no-signal'
-    appScript.getPlayerPlaybackActivity(coordinator).active == false
-    appScript.getPlayerPlaybackActivity(coordinator).signal == 'fresh-hdmi-no-signal'
-  }
-
-  def "temporary topology comparison ignores a Sonos group ID rotation for the same roster"() {
-    expect:
-    appScript.announcementTopologyObservationMatches(
-      [groupId: 'RINCON_COORD:2727180016', coordinatorId: 'RINCON_COORD',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-      [groupId: 'RINCON_COORD:2727180017', coordinatorId: 'RINCON_COORD',
-        playerIds: ['RINCON_FOLLOW', 'RINCON_COORD']])
-    !appScript.announcementTopologyObservationMatches(
-      [groupId: 'RINCON_COORD:2727180016', coordinatorId: 'RINCON_COORD',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-      [groupId: 'RINCON_OTHER:2727180017', coordinatorId: 'RINCON_OTHER',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']])
-    !appScript.announcementTopologyObservationMatches(
-      [groupId: 'RINCON_COORD:2727180016', coordinatorId: 'RINCON_COORD',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-      [groupId: 'RINCON_COORD:2727180017', coordinatorId: 'RINCON_COORD',
-        playerIds: ['RINCON_COORD']])
-  }
-
   def "active group TTS prepares every player before releasing synchronized playback"() {
     given:
     makeAnnouncementRosterExact()
     coordinator.currentValues.isGrouped = 'on'
     coordinator.currentValues.isGroupCoordinator = 'on'
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    appScript.state.sonosPlayerPlaybackObservations = [RINCON_COORD: [
-      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()]]
+    coordinator.currentValues.status = 'playing'
     String correlationId = 'test-tts-correlation'
 
     when:
@@ -1927,9 +1789,7 @@ class SonosAdvancedAppSpec extends Specification {
     makeAnnouncementRosterExact()
     coordinator.currentValues.isGrouped = 'on'
     coordinator.currentValues.isGroupCoordinator = 'on'
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    appScript.state.sonosPlayerPlaybackObservations = [RINCON_COORD: [
-      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now()]]
+    coordinator.currentValues.status = 'playing'
     Map groupRequest = request('playAudioClip', [uri: 'http://example.test/tts.mp3', volume: '15', duration: 2])
 
     when:
@@ -1953,7 +1813,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "idle group announcement starts one stream on its coordinator"() {
     given:
     makeAnnouncementRosterExact()
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_IDLE'
+    coordinator.currentValues.status = 'stopped'
     coordinator.currentValues.transportStatus = 'stopped'
     Map groupRequest = request('playAudioClip', [uri: 'http://example.test/tts.mp3', volume: '15',
       duration: 42, correlationId: 'idle-announcement'])
@@ -1969,6 +1829,60 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'COORDINATOR_STREAM'
   }
 
+  def "automatic announcements use current attributes and never regroup a mismatched target roster"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.settings.groupAnnouncementMode = 'automatic'
+    coordinator.currentValues.status = 'playing'
+    coordinator.currentValues.transportStatus = 'playing'
+    coordinator.currentValues.audioSource = 'x-sonos-http:active-track'
+    follower.dataValues.groupId = 'OTHER-GROUP'
+    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
+    Map item = [correlationId: 'no-regroup-auto', command: 'playAudioClip',
+      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
+    Map queue = [active: item, pending: []]
+
+    when:
+    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item, [coordinator, follower], coordinator)
+
+    then:
+    [coordinator, follower].every { SonosAppPlayerDouble player ->
+      player.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
+    }
+    ![coordinator, follower, extra].any { SonosAppPlayerDouble player ->
+      player.commands.any { it.name in ['playerCreateGroup', 'playerModifyGroupMembers', 'playerGetGroupsFull'] }
+    }
+    !appScript.state.containsKey('sonosPlayerPlaybackObservations')
+    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
+  }
+
+  def "always standard stream does not automatically change group membership"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
+    coordinator.currentValues.status = 'stopped'
+    coordinator.currentValues.transportStatus = 'stopped'
+    follower.dataValues.groupId = 'OTHER-GROUP'
+    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
+    Map item = [correlationId: 'no-regroup-standard', command: 'playAudioClip',
+      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
+    Map queue = [active: item, pending: []]
+
+    when:
+    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item, [coordinator, follower], coordinator)
+
+    then:
+    coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
+    !follower.commands.any { it.name in ['playerPlayGroupAnnouncementStream', 'playerPrepareAudioClipForSynchronizedStart'] }
+    ![coordinator, follower, extra].any { SonosAppPlayerDouble player ->
+      player.commands.any { it.name in ['playerCreateGroup', 'playerModifyGroupMembers', 'playerGetGroupsFull'] }
+    }
+  }
+
   def "group announcement watchdog doubles the playback allowance and uses a bounded unknown-duration fallback"() {
     expect:
     appScript.getGroupAnnouncementWatchdogTimeoutSeconds(item) == timeoutSeconds
@@ -1982,369 +1896,15 @@ class SonosAdvancedAppSpec extends Specification {
     [duration: 200]       | 290
   }
 
-  def "automatic topology disabled uses synchronized clips for an ungrouped target roster"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.automaticTtsTopologyChanges = false
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_IDLE'
-    coordinator.currentValues.transportStatus = 'stopped'
-    Map item = [correlationId: 'auto-off-clip', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    Map queue = [pending: [], active: item]
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'G1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
-      RINCON_FOLLOW: [groupId: 'G2', coordinatorId: 'RINCON_FOLLOW', playerIds: ['RINCON_FOLLOW']]
-    ]]
-
-    when:
-    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item, [coordinator, follower], coordinator, snapshot)
-
-    then:
-    [coordinator, follower].every { SonosAppPlayerDouble player ->
-      player.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
-    }
-    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
-  }
-
-  def "Always standard stream with topology changes off only targets the current coordinator"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
-    appScript.settings.automaticTtsTopologyChanges = false
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_IDLE'
-    coordinator.currentValues.transportStatus = 'stopped'
-    Map groupRequest = request('playAudioClip', [uri: 'http://example.test/tts.mp3', volume: '10',
-      duration: 22, correlationId: 'coordinator-only'])
-    appScript.state.pendingGroupCommandRequests = [:]
-
-    when:
-    appScript.processGroupCommandRequest([request: groupRequest])
-
-    then:
-    coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-    !follower.commands.any { it.name in ['playerPlayGroupAnnouncementStream', 'playerPrepareAudioClipForSynchronizedStart'] }
-    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
-  }
-
-  def "disabling temporary stream holders preserves an active Sonos stream with audioClip"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
-    appScript.settings.automaticTtsTopologyChanges = true
-    appScript.settings.useTemporaryStreamHolder = false
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    coordinator.currentValues.transportStatus = 'playing'
-    coordinator.currentValues.audioSource = 'x-sonos-http:song%3a12345.mp4?sid=204&flags=8232&sn=9'
-    Map item = [correlationId: 'holder-disabled-fallback', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '14', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]
-    Map queue = [active: item, pending: []]
-
-    when:
-    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item,
-      [coordinator], coordinator, null)
-
-    then:
-    item.mode == 'AUDIO_CLIP'
-    coordinator.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
-    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
-    appScript.logs.any { it.contains('Temporary stream holder handoff is unavailable or disabled') }
-  }
-
-  def "Automatic mode permits pulling an active follower when its coordinator remains outside the target"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.automaticTtsTopologyChanges = true
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_IDLE'
-    coordinator.currentValues.transportStatus = 'stopped'
-    extra.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    extra.currentValues.transportStatus = 'playing'
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'G1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
-      RINCON_FOLLOW: [groupId: 'G2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA', 'RINCON_FOLLOW']],
-      RINCON_EXTRA: [groupId: 'G2', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA', 'RINCON_FOLLOW']]
-    ]]
-
-    when:
-    Boolean safe = appScript.canSafelyRegroupForAutomaticAnnouncement([coordinator, follower],
-      'RINCON_COORD', snapshot)
-
-    then:
-    safe
-  }
-
-  def "fresh no-signal HDMI metadata overrides playing transport and Playback API state"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.automaticTtsTopologyChanges = true
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    coordinator.currentValues.transportStatus = 'playing'
-    coordinator.currentValues.audioSource = 'x-sonos-htastream:RINCON_COORD:spdif'
-    appScript.state.sonosPlayerPlaybackObservations = [RINCON_COORD: [
-      playbackState: 'PLAYBACK_STATE_PLAYING', playbackObservedAt: appScript.now(),
-      audioSource: 'x-sonos-htastream:RINCON_COORD:spdif',
-      signalStatus: 'no-signal', signalObservedAt: appScript.now()]]
-    Map item = [correlationId: 'hdmi-tv-off', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    Map queue = [active: item, pending: []]
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'G1', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
-      RINCON_FOLLOW: [groupId: 'G2', coordinatorId: 'RINCON_FOLLOW', playerIds: ['RINCON_FOLLOW']]
-    ]]
-
-    when:
-    Boolean active = appScript.isPlayerActivelyPlaying(coordinator)
-    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item,
-      [coordinator, follower], coordinator, snapshot)
-
-    then:
-    !active
-    appScript.state.groupAnnouncementTopologyTransactions['hdmi-tv-off'] != null
-    appScript.state.groupAnnouncementTopologyTransactions['hdmi-tv-off'].forced == false
-    ![coordinator, follower].any { SonosAppPlayerDouble player ->
-      player.commands.any { it.name in ['playerPlayGroupAnnouncementStream', 'playerPrepareAudioClipForSynchronizedStart'] }
-    }
-    appScript.logs.any { it.toString().contains('playbackSignal=fresh-hdmi-no-signal') }
-  }
-
-  def "fresh topology snapshot gates automatic regrouping before standard stream dispatch"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.automaticTtsTopologyChanges = true
-    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    follower.dataValues.groupId = 'GROUP-2'
-    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
-    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
-    Map groupRequest = request('playAudioClip', [uri: 'http://example.test/tts.mp3', volume: '10',
-      duration: 25, correlationId: 'fresh-topology'])
-    Long observedAt = appScript.now() + 1000L
-
-    when:
-    appScript.processGroupCommandRequest([request: groupRequest])
-    appScript.processTopologyPayload(coordinator, [groupId: 'GROUP-1', coordinatorId: 'RINCON_COORD',
-      playerIds: ['RINCON_COORD'], observedAt: observedAt, playerDni: coordinator.deviceNetworkId])
-    appScript.processTopologyPayload(follower, [groupId: 'GROUP-2', coordinatorId: 'RINCON_FOLLOW',
-      playerIds: ['RINCON_FOLLOW'], observedAt: observedAt + 1L, playerDni: follower.deviceNetworkId])
-    appScript.processTopologyPayload(extra, [groupId: 'GROUP-3', coordinatorId: 'RINCON_EXTRA',
-      playerIds: ['RINCON_EXTRA'], observedAt: observedAt + 2L, playerDni: extra.deviceNetworkId])
-
-    then:
-    appScript.state.groupAnnouncementTopologyTransactions['fresh-topology'].phase == 'GROUPING_TARGET'
-    appScript.getActiveGroupOperation().announcementTransactionId == 'fresh-topology'
-    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-    !follower.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
-  }
-
-  def "automatic topology transaction splits a conflicting target subgroup before createGroup"() {
-    given:
-    appScript.settings.groupAnnouncementMode = 'automatic'
-    appScript.settings.automaticTtsTopologyChanges = true
-    coordinator.dataValues.groupId = 'SUBGROUP'
-    coordinator.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
-    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
-    follower.dataValues.groupId = 'SUBGROUP'
-    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
-    follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
-    extra.dataValues.groupId = 'EXTRA-SINGLE'
-    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
-    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
-    Map item = [correlationId: 'split-largest-subgroup', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA']]
-    Map queue = [active: item, pending: []]
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'SUBGROUP', coordinatorId: 'RINCON_FOLLOW',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-      RINCON_FOLLOW: [groupId: 'SUBGROUP', coordinatorId: 'RINCON_FOLLOW',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']],
-      RINCON_EXTRA: [groupId: 'EXTRA-SINGLE', coordinatorId: 'RINCON_EXTRA',
-        playerIds: ['RINCON_EXTRA']]
-    ]]
-
-    when:
-    appScript.beginGroupAnnouncementTopologyTransaction('GROUP-DNI', queue, item,
-      [coordinator, follower, extra], snapshot, false)
-
-    then:
-    Map transaction = appScript.state.groupAnnouncementTopologyTransactions['split-largest-subgroup']
-    transaction.steps*.phase == ['PREPARE_SOURCE_GROUP', 'GROUP_TARGET']
-    transaction.steps[0].playerIds == ['RINCON_FOLLOW']
-    transaction.steps[0].coordinatorId == 'RINCON_FOLLOW'
-    transaction.phase == 'PREPARING_SOURCE_GROUP'
-    appScript.getActiveGroupOperation().announcementTopologyPhase == 'PREPARE_SOURCE_GROUP'
-    ![coordinator, follower, extra].any { SonosAppPlayerDouble player ->
-      player.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-    }
-  }
-
-  def "stream handoff carries the captured audio source into its restoration transaction"() {
-    given:
-    String originalAudioSource = 'x-sonos-http:song%3a12345.mp4?sid=204&flags=8232&sn=9'
-    coordinator.dataValues.groupId = 'SOURCE-GROUP'
-    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
-    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    extra.dataValues.groupId = 'HOLDER-GROUP'
-    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
-    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
-    Map item = [correlationId: 'stream-source-captured', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '14', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD'],
-      coordinatorAudioSource: originalAudioSource]
-    Map queue = [active: item, pending: []]
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'SOURCE-GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
-      RINCON_EXTRA: [groupId: 'HOLDER-GROUP', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
-    ]]
-
-    when:
-    appScript.beginGroupAnnouncementTopologyTransaction('GROUP-DNI', queue, item,
-      [coordinator], snapshot, false, [playerId: 'RINCON_EXTRA'])
-
-    then:
-    appScript.state.groupAnnouncementTopologyTransactions['stream-source-captured'].coordinatorAudioSource == originalAudioSource
-  }
-
-  def "stream handoff mutes an unmuted holder and restores its prior unmuted state"() {
-    given:
-    coordinator.dataValues.groupId = 'SOURCE-GROUP'
-    coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
-    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    extra.dataValues.groupId = 'HOLDER-GROUP'
-    extra.dataValues.groupCoordinatorId = 'RINCON_EXTRA'
-    extra.dataValues.groupPlayerIds = 'RINCON_EXTRA'
-    extra.currentValues.mute = 'unmuted'
-    Map item = [correlationId: 'stream-holder-unmuted', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '14', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']]
-    Map queue = [active: item, pending: []]
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'SOURCE-GROUP', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD']],
-      RINCON_EXTRA: [groupId: 'HOLDER-GROUP', coordinatorId: 'RINCON_EXTRA', playerIds: ['RINCON_EXTRA']]
-    ]]
-
-    when:
-    appScript.beginGroupAnnouncementTopologyTransaction('GROUP-DNI', queue, item,
-      [coordinator], snapshot, false, [playerId: 'RINCON_EXTRA', previousMuteState: 'unmuted'])
-
-    then:
-    extra.commands.findAll { it.name in ['mute', 'unmute'] }*.name == ['mute']
-    appScript.state.groupAnnouncementTopologyTransactions['stream-holder-unmuted'].holderPreviousMuteState == 'unmuted'
-
-    when:
-    appScript.restoreStreamHolderMuteState(appScript.state.groupAnnouncementTopologyTransactions['stream-holder-unmuted'])
-
-    then:
-    extra.commands.findAll { it.name in ['mute', 'unmute'] }*.name == ['mute', 'unmute']
-  }
-
-  def "stream handoff leaves a holder muted when it was muted before use"() {
-    given:
-    extra.currentValues.mute = 'muted'
-    Map transaction = [holderId: 'RINCON_EXTRA', holderPreviousMuteState: 'muted']
-
-    when:
-    appScript.restoreStreamHolderMuteState(transaction)
-
-    then:
-    extra.commands*.name == ['mute']
-  }
-
-  def "failed automatic source subgroup split falls back to clips for all target players"() {
-    given:
-    Map item = [correlationId: 'split-fallback', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    Map queue = [active: item, pending: []]
-    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': queue]
-    Map transaction = [correlationId: 'split-fallback', groupDni: 'GROUP-DNI',
-      phase: 'PREPARING_SOURCE_GROUP', forced: false, item: item, originalGroups: [],
-      steps: [[phase: 'PREPARE_SOURCE_GROUP', playerIds: ['RINCON_FOLLOW']]],
-      currentStep: 0, operationId: 'split-op']
-    appScript.state.groupAnnouncementTopologyTransactions = ['split-fallback': transaction]
-    Map operation = [operationId: 'split-op', announcementTransactionId: 'split-fallback']
-    appScript.saveActiveGroupOperation(operation)
-
-    when:
-    appScript.handleAnnouncementTopologyOperationFinished(operation, 'FAILED')
-
-    then:
-    appScript.state.groupAnnouncementTopologyTransactions['split-fallback'].phase == 'STREAMING'
-    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'AUDIO_CLIP'
-    [coordinator, follower].every { SonosAppPlayerDouble player ->
-      player.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' } &&
-        player.commands.any { it.name == 'startPreparedAudioClip' }
-    }
-    appScript.logs.any { it.contains('falling back to audioClip') }
-  }
-
-  def "verified temporary topology promotes the active queue item to coordinator stream"() {
-    given:
-    Map item = [correlationId: 'verified-topology', mode: 'TOPOLOGY_PREPARING',
-      uri: 'http://example.test/tts.mp3', volume: '10', duration: 22,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    Map queue = [active: [correlationId: 'verified-topology', mode: 'TOPOLOGY_PREPARING',
-      uri: item.uri, volume: item.volume, duration: item.duration,
-      coordinatorId: item.coordinatorId, playerIds: item.playerIds], pending: []]
-    Map transaction = [correlationId: 'verified-topology', groupDni: 'GROUP-DNI',
-      coordinatorId: 'RINCON_COORD', targetPlayerIds: item.playerIds,
-      originalGroups: [], steps: [], currentStep: 0, phase: 'GROUPING_TARGET', item: item]
-    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': queue]
-    appScript.state.groupAnnouncementTopologyTransactions = ['verified-topology': transaction]
-
-    when:
-    appScript.startNextAnnouncementTopologyStep(transaction)
-
-    then:
-    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'COORDINATOR_STREAM'
-    appScript.state.groupAnnouncementTopologyTransactions['verified-topology'].phase == 'STREAMING'
-    coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-  }
-
-  def "Always standard stream prepares a replacement coordinator for an active outside group"() {
-    given:
-    SonosAppPlayerDouble outsideTwo = createPlayer('RINCON_OUTSIDE2', 'G2', 'RINCON_COORD',
-      'RINCON_COORD,RINCON_EXTRA,RINCON_OUTSIDE2', false)
-    appScript.children = [group, coordinator, follower, extra, outsideTwo]
-    appScript.app.children = appScript.children
-    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
-    appScript.settings.automaticTtsTopologyChanges = true
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
-    coordinator.currentValues.transportStatus = 'playing'
-    Map item = [correlationId: 'forced-topology', command: 'playAudioClip',
-      uri: 'http://example.test/tts.mp3', volume: '10', duration: 20,
-      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    Map queue = [pending: [], active: item]
-    Map snapshot = [observations: [
-      RINCON_COORD: [groupId: 'G2', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_OUTSIDE2']],
-      RINCON_EXTRA: [groupId: 'G2', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_OUTSIDE2']],
-      RINCON_OUTSIDE2: [groupId: 'G2', coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_EXTRA', 'RINCON_OUTSIDE2']],
-      RINCON_FOLLOW: [groupId: 'G3', coordinatorId: 'RINCON_FOLLOW', playerIds: ['RINCON_FOLLOW']]
-    ]]
-
-    when:
-    appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item,
-      [coordinator, follower], coordinator, snapshot)
-
-    then:
-    Map transaction = appScript.state.groupAnnouncementTopologyTransactions['forced-topology']
-    transaction.forced == true
-    transaction.steps[0].phase == 'PREPARE_OUTSIDE_GROUP'
-    transaction.steps[0].coordinatorId == 'RINCON_EXTRA'
-    transaction.steps[0].playerIds == ['RINCON_EXTRA', 'RINCON_OUTSIDE2']
-    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
-  }
-
   def "queued announcement stays on coordinator stream after the previous restore reports completion"() {
     given:
     makeAnnouncementRosterExact()
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_IDLE'
+    coordinator.currentValues.status = 'stopped'
     coordinator.currentValues.transportStatus = 'stopped'
     Map firstRequest = request('playAudioClip', [uri: 'http://example.test/first.mp3', volume: '15',
       duration: 42, correlationId: 'first-announcement'])
     appScript.processGroupCommandRequest([request: firstRequest])
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    coordinator.currentValues.status = 'playing'
     coordinator.currentValues.transportStatus = 'playing'
     coordinator.currentValues.audioSource = 'http://example.test/first.mp3'
     Map queue = appScript.state.groupAnnouncementQueues['GROUP-DNI'] as Map
@@ -2367,7 +1927,6 @@ class SonosAdvancedAppSpec extends Specification {
       !player.commands.any { it.name == 'playerPrepareAudioClipForSynchronizedStart' }
     }
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.mode == 'COORDINATOR_STREAM'
-    appScript.logs.any { it.contains('treating the group as otherwise idle') }
     coordinator.commands.any { it.name == 'restoreGroupAnnouncementPlayback' && it.correlationId == 'first-announcement' }
 
     where:
@@ -2429,7 +1988,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "queued announcement uses audioClip when an external source replaces prior TTS"() {
     given:
     makeAnnouncementRosterExact()
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    coordinator.currentValues.status = 'playing'
     coordinator.currentValues.transportStatus = 'playing'
     coordinator.currentValues.audioSource = 'https://music.example.test/external.mp3'
     appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [ownStreamUri: 'http://example.test/first.mp3', pending: [[
@@ -2451,7 +2010,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "interrupted coordinator stream routes queued Automatic announcement to audioClip despite stale source state"() {
     given:
     makeAnnouncementRosterExact()
-    coordinator.currentValues.playbackState = 'PLAYBACK_STATE_PLAYING'
+    coordinator.currentValues.status = 'playing'
     coordinator.currentValues.transportStatus = 'playing'
     coordinator.currentValues.audioSource = 'http://example.test/first.mp3'
     appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [ownStreamUri: 'http://example.test/first.mp3',

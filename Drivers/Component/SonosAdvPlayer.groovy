@@ -920,9 +920,6 @@ Boolean hasLineInCapability() {
   'queueBrowseRequestId',
   'playbackState',
   'playbackStateObservedAt',
-  'audioSourceMetadataType',
-  'audioSourceMetadataObservedAt',
-  'audioSourceSignalObservedAt',
   'htControlTosLinkConnected',
   'htControlObservedAt',
   'lastError',
@@ -954,6 +951,8 @@ Boolean hasLineInCapability() {
   'zgtSubExpires',
   'zgtSubExpiresEpoch',
   'staticDriverActivePlayerRoster',
+  'normalAnnouncementMode',
+  'highPriorityAnnouncementMode',
   'sid1',
   'sid2',
   'sid3',
@@ -1018,6 +1017,7 @@ Boolean hasLineInCapability() {
   'groupMemberNames',
   'status',
   'transportStatus',
+  'audioSourceSignalStatus',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -1382,7 +1382,7 @@ void reconcileChildDevices() {
   clearAudioClipPlaybackProgressCurrentState()
   // These diagnostics are stored in State Variables and are not exposed as
   // device Current States. Remove values created by earlier development builds.
-  ['playbackState', 'playbackStateObservedAt', 'audioSourceSignalObservedAt', 'lastError'].each { String name ->
+  ['playbackState', 'playbackStateObservedAt', 'lastError'].each { String name ->
     device.deleteCurrentState(name)
   }
   // Apply child device preferences synchronously (no-ops when devices already exist)
@@ -2150,12 +2150,7 @@ Boolean isAirPlayAudioSource(String audioSource) {
 
 Boolean isCurrentAirPlayAudioSource() {
   if(isAirPlayAudioSource(device.currentValue('audioSource')?.toString())) { return true }
-  String observedType = state.audioSourceMetadataType?.toString()
-  Long observedAt = null
-  try { observedAt = state.audioSourceMetadataObservedAt?.toString()?.toLong() }
-  catch(Exception ignored) { observedAt = null }
-  return observedType?.equalsIgnoreCase('linein.airplay') == true && observedAt != null &&
-      now() >= observedAt && now() - observedAt <= 180000L
+  return false
 }
 
 /** Explicit Play Text And Restore/Resume commands always prefer Sonos audioClip,
@@ -2194,13 +2189,7 @@ Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
   return status in ['playing', 'buffering'] || transportStatus == 'playing'
 }
 
-Boolean readParentAppPolicy(String dataKey, Boolean fallback) {
-  String value = device.getDataValue(dataKey)
-  if(value == 'true') { return true }
-  if(value == 'false') { return false }
-  sendParentAppRequest('refreshPolicy')
-  return fallback
-}
+
 
 Boolean sendParentAppRequest(String action, Map args = [:]) {
   Map payload = [version: 1, channel: 'playerAppRequest', action: action,
@@ -2220,9 +2209,6 @@ List<Map> drainPendingParentUpdatesForPoll() { return [] }
 List<Map> flushPendingParentUpdates() { return [] }
 List<Map> drainPendingParentRequestsForPoll() { return [] }
 List<Map> flushPendingParentRequests() { return [] }
-
-
-/** Complete the asynchronous parent-app decision for an active-stream TTS request. */
 
 
 void playHighPriorityTTS(String text, Object volume = null, String voice = null) {
@@ -2571,16 +2557,7 @@ void completeAnnouncementPlaybackRestore(String correlationId, Boolean success, 
   publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', result)
 }
 
-void completeGroupAnnouncementPlaybackHandoff(String correlationId, Boolean restored = true) {
-  Map announcement = runtimeState.groupAnnouncementStream instanceof Map
-      ? (Map)runtimeState.groupAnnouncementStream : null
-  if(announcement?.correlationId?.toString() != correlationId) { return }
-  runtimeState.remove('announcementPlaybackRestore')
-  runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
-  runtimeState.remove('groupAnnouncementStream')
-  if(restored != true) { logWarn("Stream handoff for ${correlationId} completed without verifying the original audio source") }
-  publishGroupAnnouncementProgress(correlationId, 'PLAYBACK_RESTORED', [restored: restored == true, handoff: true])
-}
+
 
 @CompileStatic
 void devicePlayTrack(String uri, BigDecimal volume = null) {
@@ -10790,18 +10767,14 @@ void observeUpnpPlaybackSource(Map snapshot) {
   Boolean isHomeTheater = uri?.startsWith('x-sonos-htastream:') == true ||
       itemClass?.contains('linein.homeTheater') == true
   Boolean isAirPlay = isAirPlayAudioSource(uri) || itemClass?.contains('linein.airplay') == true
-  String containerType = isHomeTheater ? 'linein.homeTheater' : (isAirPlay ? 'linein.airplay' : itemClass)
-  if(!containerType) { return }
-  state.audioSourceMetadataType = containerType
-  state.audioSourceMetadataObservedAt = now()
+  if(!isHomeTheater && !isAirPlay && !itemClass) { return }
+  if(uri) { sendEvent(name: 'audioSource', value: uri) }
   String signalStatus = 'not-ht'
   if(isHomeTheater) {
     Object connected = state.htControlTosLinkConnected
     signalStatus = connected == null ? 'unknown' : (connected.toString() == '1' ? 'signal' : 'no-signal')
   }
-  state.audioSourceSignalStatus = signalStatus
   sendEvent(name: 'audioSourceSignalStatus', value: signalStatus)
-  state.audioSourceSignalObservedAt = now()
   logDebug("UPnP playback-source observation player=${getId()}, uri=${uri}, itemClass=${itemClass}, signalStatus=${signalStatus}")
 }
 

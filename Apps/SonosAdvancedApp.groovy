@@ -510,6 +510,7 @@ preferences {
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
   ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY,
+  LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY,
   'userGroups',
   'alarmManagementPreferencesApplied',
   'sonosAlarmRefreshRequestIds',
@@ -715,6 +716,7 @@ Map mainPage() {
         input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method',
           options: [automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting', alwaysCoordinatorStream: 'Always standard stream'],
           required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
+        paragraph 'Automatic uses synchronized audio clips while the coordinator is playing or when the target players are not already grouped together. Always standard stream plays through the current coordinator group without changing group membership.'
         input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync',
           required: false, defaultValue: false, submitOnChange: true
         if(settings.queueChimeSeparatelyFromTTS == true || settings.queueChimeSeparatelyFromTTS?.toString() == 'true') {
@@ -2806,6 +2808,8 @@ void initialize() { configure(true) }
 @Field static final String STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY = 'staticDriverActivePlayerRoster'
 @Field static final Integer STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION = 1
 @Field static final String ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY = 'announcementPolicySettings'
+@Field static final String LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY = 'groupAnnouncementTopologyTransactions'
+@Field static final String LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY = 'legacyAnnouncementTopologyRecovery'
 
 /** Return the player roster published during app lifecycle/device changes. */
 Map<String, Object> getStaticDriverActivePlayerRoster() {
@@ -2851,7 +2855,6 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
       roster.findAll { Map<String, String> row -> !previousDnis.contains(row.dni) }.each { Map<String, String> row ->
         ChildDeviceWrapper addedPlayer = getChildDevice(row.dni)
         refreshPlayerAnnouncementPolicySnapshot(addedPlayer)
-        rememberAnnouncementPolicyTopology(addedPlayer)
       }
     }
   } catch(Exception e) {
@@ -2859,11 +2862,113 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
   }
 }
 
+/** Restore topologies captured by the retired announcement regrouping flow before pruning its saved state. */
+void migrateLegacyAnnouncementTopologyTransactions() {
+  Map legacy = state[LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY]) : [:]
+  if(legacy.isEmpty()) { return }
+  List<Map> recoveryTransactions = []
+  legacy.values().each { Map transaction ->
+    if(transaction?.userTopologyChanged == true || !(transaction?.originalGroups instanceof List)) { return }
+    List<Map> originalGroups = ((List<Map>)transaction.originalGroups).findAll { Map group ->
+      group?.coordinatorId && normalizeGroupPlayerIds(group.playerIds)
+    }
+    if(transaction.phase != 'SNAPSHOTTING' && !originalGroups.isEmpty()) {
+      recoveryTransactions.add([groupDni: transaction.groupDni?.toString(),
+        correlationId: transaction.correlationId?.toString(), originalGroups: originalGroups, groupIndex: 0])
+    }
+  }
+  state.remove(LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY)
+  if(recoveryTransactions.isEmpty()) {
+    logInfo('Removed stale announcement topology snapshots; no regrouping recovery was needed')
+    return
+  }
+  state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = [transactions: recoveryTransactions,
+    transactionIndex: 0, operationId: null]
+  logWarn("Recovering ${recoveryTransactions.size()} in-flight announcement topology change(s) before resuming announcements")
+  runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
+}
+
+void recoverLegacyAnnouncementTopologies() {
+  Map recovery = state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] instanceof Map
+      ? (Map)state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] : null
+  if(recovery == null) { return }
+  if(getActiveGroupOperation() != null) {
+    runIn(2, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
+    return
+  }
+  List<Map> transactions = recovery.transactions instanceof List ? (List<Map>)recovery.transactions : []
+  Integer transactionIndex = (recovery.transactionIndex ?: 0) as Integer
+  if(transactionIndex >= transactions.size()) {
+    state.remove(LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY)
+    return
+  }
+  Map transaction = transactions[transactionIndex]
+  List<Map> originalGroups = transaction.originalGroups instanceof List ? (List<Map>)transaction.originalGroups : []
+  Integer groupIndex = (transaction.groupIndex ?: 0) as Integer
+  if(groupIndex >= originalGroups.size()) {
+    Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
+        ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
+    Map queue = queues[transaction.groupDni?.toString()] instanceof Map ? (Map)queues[transaction.groupDni.toString()] : null
+    if(queue?.active?.correlationId?.toString() == transaction.correlationId?.toString()) { queue.active = null }
+    if(queue != null) {
+      queues[transaction.groupDni.toString()] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: transaction.groupDni], overwrite: false])
+    }
+    recovery.transactionIndex = transactionIndex + 1
+    recovery.operationId = null
+    state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
+    runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
+    return
+  }
+  ChildDeviceWrapper groupDevice = getChildDevice(transaction.groupDni?.toString())
+  Map original = originalGroups[groupIndex]
+  String coordinatorId = original.coordinatorId?.toString()
+  List<String> requiredIds = normalizeGroupPlayerIds(original.playerIds)
+  if(groupDevice == null || !coordinatorId || !requiredIds.contains(coordinatorId)) {
+    logWarn("Skipping legacy announcement topology recovery step ${groupIndex + 1}; group or coordinator is unavailable")
+    transaction.groupIndex = groupIndex + 1
+    state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
+    runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
+    return
+  }
+  Map target = [requiredPlayerIds: [coordinatorId] + requiredIds.findAll { String id -> id != coordinatorId }.sort(),
+    configuredCoordinatorId: coordinatorId, desiredCoordinatorId: coordinatorId,
+    resolvedCoordinatorId: coordinatorId, missingPlayerIds: []]
+  Map operation = buildNewGroupOperation(groupDevice, GROUPING_MODE_EXPLICIT, target)
+  operation.legacyAnnouncementRecovery = true
+  recovery.operationId = operation.operationId
+  state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
+  saveActiveGroupOperation(operation)
+  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
+  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
+  refreshGroupOperationTopology([operationId: operation.operationId])
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [overwrite: true,
+    data: [operationId: operation.operationId]])
+}
+
+void advanceLegacyAnnouncementTopologyRecovery(Map operation) {
+  Map recovery = state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] instanceof Map
+      ? (Map)state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] : null
+  if(recovery == null) { return }
+  List<Map> transactions = recovery.transactions instanceof List ? (List<Map>)recovery.transactions : []
+  Integer transactionIndex = (recovery.transactionIndex ?: 0) as Integer
+  if(transactionIndex < transactions.size()) {
+    Map transaction = transactions[transactionIndex]
+    transaction.groupIndex = ((transaction.groupIndex ?: 0) as Integer) + 1
+  }
+  recovery.operationId = null
+  state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
+  runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
+}
+
 void configure(Boolean startup = false) {
   applyLogLevelChange()
   logInfo("${app.name} updated")
   // Copy-then-prune: migrate legacy keys before whitelist removal deletes them.
   migrateLegacyAppStateOnce()
+  migrateLegacyAnnouncementTopologyTransactions()
   Map<String, Object> pruneResult = pruneOrphanedAppPersistence()
   // Log summary is already emitted by prune; keep reference for debugging.
   logDebug("App persistence prune completed: ${pruneResult}")
@@ -2887,7 +2992,6 @@ void configure(Boolean startup = false) {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
-  clearDisabledGroupTrackPositions()
   try { configureAlarmManagement() }
   catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
   refreshStaticDriverActivePlayerRoster(false)
@@ -2978,22 +3082,7 @@ void drainGroupAnnouncementProgress() {
 
 /** Clear stale track positions from groups when that feature is disabled, from the app event path. */
 
-void subscribeToPlayerStateAttributes() {
-  getCurrentPlayerDevices().each { ChildDeviceWrapper d ->
-    PLAYER_STATE_ATTRIBUTES.each { String attr ->
-      try { subscribe(d, attr, 'handleGroupStateAttribute') } catch(Exception e) { logDebug("subscribe to ${d} ${attr} failed: ${e.message}") }
-    }
-  }
-}
 
-void handleGroupStateAttribute(Event event) {
-  ChildDeviceWrapper player = event?.device instanceof ChildDeviceWrapper ? (ChildDeviceWrapper)event.device : null
-  if(!player) {
-    String dni = event?.deviceId?.toString() ?: event?.device?.getDeviceNetworkId()?.toString()
-    player = dni ? getChildDevice(dni) : null
-  }
-  if(!player) { return }
-}
 
 
 
@@ -4573,18 +4662,13 @@ String renderCustomSettingsMarkup() {
     'alwaysCoordinatorStream': 'Always standard stream'
   ]
   html.append(renderCustomSelectCard('maximumTtsRetention', 'Maximum TTS retention', 'Maximum time a queued TTS message can wait before it is sent.', retentionOptions, '60'))
-  html.append(renderCustomSelectCard('groupAnnouncementMode', 'Normal priority announcement method', 'Choose how standard announcements are routed.', announcementOptions, 'alwaysNonInterrupting'))
-  html.append(renderCustomSelectCard('highPriorityAnnouncementMode', 'High priority announcement method', 'Choose how high priority announcements are routed.', announcementOptions, 'alwaysNonInterrupting'))
+  html.append(renderCustomSelectCard('groupAnnouncementMode', 'Normal priority announcement method', 'Automatic uses synchronized clips when playback is active or the target players are not already grouped. Standard stream uses the current coordinator group without changing membership.', announcementOptions, 'alwaysNonInterrupting'))
+  html.append(renderCustomSelectCard('highPriorityAnnouncementMode', 'High priority announcement method', 'Automatic uses synchronized clips when playback is active or the target players are not already grouped. Standard stream uses the current coordinator group without changing membership.', announcementOptions, 'alwaysNonInterrupting'))
   html.append(renderCustomSettingCard('queueChimeSeparatelyFromTTS', 'Queue chime separately from TTS for better sync', 'Coordinate the chime release across group members, then prepare and release the TTS clips together.'))
   if(settings.queueChimeSeparatelyFromTTS == true || settings.queueChimeSeparatelyFromTTS?.toString() == 'true') {
     html.append("<div class='sonos-setting-warning'><b>Warning:</b> This may cause a slight delay between chime and TTS start.</div>")
   }
   html.append(renderCustomSettingCard('suppressChimeOnSuccessiveTTS', 'Suppress chime on successive TTS messages', 'Skip a chime when another TTS announcement is active or already waiting in the group queue.'))
-  if(getAnnouncementMode(false) == 'alwaysCoordinatorStream' || getAnnouncementMode(true) == 'alwaysCoordinatorStream') {
-        } else {
-      html.append("<div class='sonos-setting-warning'><b>Warning:</b> Always standard stream with automatic topology changes can force temporary regrouping, including changes to active outside groups. Playback in those groups may be interrupted. The app attempts to restore their original topology after the announcement.</div>")
-    }
-  }
   html.append('</div>')
   return html.toString()
 }
@@ -5721,7 +5805,6 @@ Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = nu
 
 
 
-/** Restore a temporary holder's mute state after it has been removed from the transferred stream. */
 
 void scheduleGroupAnnouncementWatchdog(String groupDni, Map item) {
   Integer timeoutSeconds = getGroupAnnouncementWatchdogTimeoutSeconds(item)
@@ -5736,23 +5819,7 @@ Integer getGroupAnnouncementWatchdogTimeoutSeconds(Map item) {
 }
 
 /** Resolve the shared announcement policy for an individual player. */
-Boolean shouldUseAudioClipForAirPlay() {
-  return getAnnouncementMode(false) != 'alwaysCoordinatorStream'
-}
 
-Boolean shouldUseAudioClipForPlayer(String playerDni, Boolean highPriority = false) {
-  String mode = getAnnouncementMode(highPriority)
-  if(mode == 'alwaysNonInterrupting') { return true }
-  if(mode == 'alwaysCoordinatorStream') { return false }
-  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
-  if(player == null) { return false }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  String coordinatorId = player.getDataValue('groupCoordinatorId')?.toString() ?: player.getDataValue('id')?.toString()
-  ChildDeviceWrapper coordinator = coordinatorId ? rinconMap[coordinatorId] : player
-  if(coordinator == null) { coordinator = player }
-  String audioSource = coordinator.currentValue('audioSource', true)?.toString()
-  return isAirPlayAudioSource(audioSource) || getPlayerPlaybackActivity(coordinator, audioSource).active == true
-}
 
 void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, Boolean highPriority) {
   String correlationId = item.correlationId as String
@@ -7962,14 +8029,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
           memberIds: requiredPlayerIds
         ]
       }
-      if(operation.handoffRemoveCurrentCoordinator == true) {
-        // In a stream handoff, the current coordinator leaves the shared
-        // group so the holder already following its stream becomes coordinator.
-        previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [topology.coordinatorId as String],
-            finalTopologyExpectation]]))
-      } else {
-        previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalTopologyExpectation]]))
-      }
+      previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalTopologyExpectation]]))
       operation.coordinatorTransferStarted = true
       operation.topologyMutationSent = true
       operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
@@ -9173,10 +9233,16 @@ void finishGroupOperation(Map operation, String status, String errorCode = null,
   operation.completedAt = now()
   publishGroupOperationStatus(operation, status, errorCode, detail)
   clearRegisteredGroupOperations(operation)
-  if(status == 'SUCCEEDED' && !operation.favoriteId && !operation.announcementTransactionId) {
+  if(status == 'SUCCEEDED' && !operation.favoriteId) {
     storeGroupingContext(operation)
   }
   state.remove(GROUP_OPERATION_STATE_KEY)
+  Map recovery = state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] instanceof Map ? (Map)state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] : null
+  if(operation.legacyAnnouncementRecovery == true && recovery?.operationId?.toString() == operation.operationId?.toString()) {
+    advanceLegacyAnnouncementTopologyRecovery(operation)
+  } else if(recovery != null) {
+    runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
+  }
   if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List) {
     runIn(1, 'drainDeferredGroupOperationCommands', [overwrite: true])
   }

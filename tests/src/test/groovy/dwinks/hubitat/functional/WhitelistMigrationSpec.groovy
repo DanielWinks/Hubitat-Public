@@ -115,7 +115,7 @@ class WhitelistMigrationSpec extends Specification {
     given:
     ['logLevel', 'useOldUi', 'maximumTtsRetention', 'groupAnnouncementMode',
      'highPriorityAnnouncementMode', 'queueChimeSeparatelyFromTTS', 'suppressChimeOnSuccessiveTTS',
-     'automaticTtsTopologyChanges', 'useTemporaryStreamHolder', 'enableAlarmManagement',
+     'enableAlarmManagement',
      'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates', 'updateCheckFrequency',
      'autoInstallTime', 'autoInstallNextOccurrence', 'autoInstallDayOfWeek',
      'hubSecurityUsername', 'hubSecurityPassword', 'libraryIdSMAPI', 'libraryIdUtilities',

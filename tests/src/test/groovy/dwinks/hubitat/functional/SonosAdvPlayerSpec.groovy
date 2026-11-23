@@ -648,18 +648,15 @@ class SonosAdvPlayerSpec extends Specification {
     driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>0</TOSLinkConnected></property></propertyset>')
 
     then:
-    driver.state.audioSourceMetadataType == 'linein.homeTheater'
-    driver.state.audioSourceSignalStatus == 'no-signal'
-    (driver.state.audioSourceSignalObservedAt as Long) > 0L
+    driver.device.currentValues.audioSource == 'x-sonos-htastream:RINCON_TEST:spdif'
+    driver.device.currentValues.audioSourceSignalStatus == 'no-signal'
     driver.device.currentValues.htControlTosLinkConnected == '0'
     playerStateMessages().isEmpty()
   }
 
   def "UPnP HTControl connection event updates source signal without WebSocket metadata"() {
     given:
-    driver.state.audioSourceMetadataType = 'linein.homeTheater'
-    driver.state.audioSourceSignalStatus = 'no-signal'
-    driver.state.audioSourceSignalObservedAt = driver.now() - 1000L
+    driver.device.currentValues.audioSourceSignalStatus = 'no-signal'
     String metadata = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><upnp:class>object.item.audioItem.linein.homeTheater</upnp:class></item></DIDL-Lite>'
     driver.observeUpnpPlaybackSource([avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
       avTransportURIMetaData: driver.parseAvtMetaData(metadata)])
@@ -670,14 +667,12 @@ class SonosAdvPlayerSpec extends Specification {
     driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>1</TOSLinkConnected></property></propertyset>')
 
     then:
-    driver.state.audioSourceSignalStatus == 'signal'
+    driver.device.currentValues.audioSourceSignalStatus == 'signal'
   }
 
   def "WebSocket playback metadata no longer drives home theater signal observations"() {
     given:
-    driver.state.audioSourceSignalStatus = 'no-signal'
-    Long observedAt = driver.now() - 1000L
-    driver.state.audioSourceSignalObservedAt = observedAt
+    driver.device.currentValues.audioSourceSignalStatus = 'no-signal'
 
     when:
     driver.processWebsocketMessage(JsonOutput.toJson([
@@ -686,8 +681,7 @@ class SonosAdvPlayerSpec extends Specification {
     ]))
 
     then:
-    driver.state.audioSourceSignalStatus == 'no-signal'
-    driver.state.audioSourceSignalObservedAt == observedAt
+    driver.device.currentValues.audioSourceSignalStatus == 'no-signal'
   }
 
   def "only the latest stream callback plays and duplicate callbacks are ignored"() {
@@ -3292,28 +3286,49 @@ class SonosAdvPlayerSpec extends Specification {
     [command, input] << [['playTextAndRestore', 'playTextAndResume', 'speak'], [0, 0L, 0G, '0', ' 0 ']].combinations()
   }
 
-  def "paused AirPlay metadata never routes speak through the stream holder"() {
+  def "automatic announcement policy reads current playback and HDMI signal attributes"() {
+    given:
+    driver.device.dataValues.normalAnnouncementMode = 'automatic'
+    driver.device.currentValues.audioSource = 'x-sonos-http:active-track'
+    driver.device.currentValues.status = 'paused'
+    driver.device.currentValues.transportStatus = 'stopped'
+
+    expect:
+    !driver.shouldUseAnnouncementAudioClip(false)
+
+    when:
+    driver.device.currentValues.status = 'playing'
+
+    then:
+    driver.shouldUseAnnouncementAudioClip(false)
+
+    when:
+    driver.device.currentValues.audioSource = 'x-sonos-htastream:RINCON_TEST:spdif'
+    driver.device.currentValues.audioSourceSignalStatus = 'no-signal'
+
+    then:
+    !driver.shouldUseAnnouncementAudioClip(false)
+
+    when:
+    driver.device.currentValues.audioSourceSignalStatus = 'signal'
+
+    then:
+    driver.shouldUseAnnouncementAudioClip(false)
+  }
+
+  def "paused AirPlay current source routes speak through local audioClip"() {
     given:
     driver.metaClass.getParent = { -> null }
     driver.getDeviceAudioClipQueue().clear()
-    Boolean routedToHolder = false
-    com.hubitat.app.InstalledAppWrapper parent = new com.hubitat.app.InstalledAppWrapper()
-    parent.metaClass.shouldUseAudioClipForAirPlay = { -> true }
-    parent.metaClass.handlePlayerActiveStreamTts = { String dni, String uri, BigDecimal volume,
-        Integer duration, String correlationId ->
-      routedToHolder = dni == 'SONOS-TEST-DNI' && uri == 'http://example.test/airplay.mp3'
-      return routedToHolder
-    }
-    driver.metaClass.getParentApp = { -> parent }
     driver.metaClass.shouldUseAnnouncementAudioClip = { Boolean highPriority -> true }
     driver.metaClass.textToSpeech = { String text, String voice ->
       [uri: 'http://example.test/airplay.mp3', duration: 2] as LinkedHashMap
     }
     driver.device.currentValues.audioSource = 'Not Available'
-    driver.state.audioSourceMetadataType = 'linein.airplay'
-    driver.state.audioSourceMetadataObservedAt = driver.now()
+    driver.device.currentValues.audioSource = 'airplay:current-stream'
     driver.device.dataValues.capabilities = 'AUDIO_CLIP'
-    driver.device.dataValues.useAudioClipForAirPlay = 'true'
+    driver.device.dataValues.normalAnnouncementMode = 'automatic'
+    driver.device.currentValues.status = 'paused'
     driver.runtimeState.audioClipPlaying = true
 
     when:
@@ -3321,16 +3336,14 @@ class SonosAdvPlayerSpec extends Specification {
     Map clip = driver.getDeviceAudioClipQueue().peek()
 
     then:
-    !routedToHolder
     driver.asyncCalls.empty
     clip != null
     ((List)new JsonSlurper().parseText(clip.leftChannel as String))[1].streamUrl == 'http://example.test/airplay.mp3'
   }
 
-  def "stale AirPlay metadata does not trigger holder routing"() {
+  def "AirPlay detection uses only the current audioSource attribute"() {
     given:
-    driver.state.audioSourceMetadataType = 'linein.airplay'
-    driver.state.audioSourceMetadataObservedAt = driver.now() - 180001L
+    driver.device.currentValues.audioSource = 'Not Available'
 
     expect:
     !driver.isCurrentAirPlayAudioSource()
