@@ -232,10 +232,6 @@ String formatEpoch(Long epochSeconds) {
       arguments: [InstanceID: 0],
       outputs: [CurrentTransportState: '', CurrentTransportStatus: '', CurrentSpeed: '']
     ],
-    GetPositionInfo: [
-      arguments: [InstanceID: 0],
-      outputs: [Track: '', TrackDuration: '', TrackMetaData: '', TrackURI: '', RelTime: '', AbsTime: '', RelCount: '', AbsCount: '']
-    ],
     GetDeviceCapabilities: [
       arguments: [InstanceID: 0],
       outputs: [PlayMedia: '', RecMedia: '', RecQualityModes: '']
@@ -638,7 +634,6 @@ metadata {
       input name: 'ttsBoostAmount', title: 'TTS Volume boost/cut default:(+10%)', type: 'enum', required: false, defaultValue: 10,
       options: [(-10):'-10%', (-5):'-5%', 0:'No Change', 5:'+5%', 10:'+10%', 15:'+15%', 20:'+20%']
       input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
-      input 'disableAlbumArtEvents', 'bool', title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)', required: false, defaultValue: true
       input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
       input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
@@ -701,7 +696,6 @@ Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != nu
 Integer getVolumeAdjustAmount() { return settings.volumeAdjustAmount != null ? settings.volumeAdjustAmount as Integer : 5 }
 Integer getTTSBoostAmount() { return settings.ttsBoostAmount != null ? settings.ttsBoostAmount as Integer : 10 }
 Boolean getDisableArtistAlbumTrackEvents() { return settings.disableArtistAlbumTrackEvents != null ? settings.disableArtistAlbumTrackEvents : false }
-Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
 Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDevice != null ? settings.createCrossfadeChildDevice : false }
 Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
 Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
@@ -786,31 +780,10 @@ Boolean hasLineInCapability() {
 // so driver instances can coordinate without exposing it in Current States.
 // App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
 // SEQ/SID gate counters remain below: numbers deciding staleness, never payloads.
-@Field static ConcurrentHashMap<String, AtomicInteger> currentZgtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
 // Transient member host cache for group SOAP targeting (playerId -> host); newest-wins, pruned like SEQ counters.
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
-@Field static ConcurrentHashMap<String, List<Map>> pendingZgtNotifyByDni = new ConcurrentHashMap<String, List<Map>>()
-// Transient presence transition baseline (per originating DNI): visible playerId -> zoneName,
-// plus vanished-already-notified dedup set. Used only to diff arrived/departed; pruned like SEQ counters.
-@Field static ConcurrentHashMap<String, Map> lastZgtPresenceByDni = new ConcurrentHashMap<String, Map>()
-// Transient in-flight hand-off for arrived/departed notifications; claimed on flush like pendingZgtNotifyByDni.
-@Field static ConcurrentHashMap<String, List<Map>> pendingZgtPresenceByDni = new ConcurrentHashMap<String, List<Map>>()
-@Field static ConcurrentHashMap<String, AtomicInteger> currentAvtSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
-@Field static ConcurrentHashMap<String, Map> pendingCoordinatorAvtUpdatesByDni = new ConcurrentHashMap<String, Map>()
-@Field static final Striped<java.util.concurrent.locks.Lock> coordinatorAvtUpdateStripes = Striped.lock(64)
-@Field static Set<String> coordinatorAvtUpdateScheduledDnis = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>())
-@Field static ConcurrentHashMap<String, AtomicInteger> currentGrcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
-@Field static ConcurrentHashMap<String, String> currentGrcSidByDni = new ConcurrentHashMap<String, String>()
-// Transient in-flight hand-off only (latest delta per key, cleared on flush) — not storage.
-// Same claim-and-swap pattern as pendingCoordinatorAvtUpdatesByDni; the app holds the canonical list.
-@Field static ConcurrentHashMap<String, Map> pendingGrcByDni = new ConcurrentHashMap<String, Map>()
-@Field static final Striped<java.util.concurrent.locks.Lock> grcUpdateStripes = Striped.lock(64)
-@Field static Set<String> grcUpdateScheduledDnis = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>())
-@Field static ConcurrentHashMap<String, Map> currentRcSnapshotByDni = new ConcurrentHashMap<String, Map>()
-@Field static ConcurrentHashMap<String, AtomicInteger> currentRcSeqByDni = new ConcurrentHashMap<String, AtomicInteger>()
-@Field static ConcurrentHashMap<String, String> currentRcSidByDni = new ConcurrentHashMap<String, String>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> audioClipQueueHighPriority = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 @Field static ConcurrentHashMap<String, LinkedHashMap> audioClipQueueTimers = new ConcurrentHashMap<String, LinkedHashMap>()
@@ -958,17 +931,12 @@ Boolean hasLineInCapability() {
 @Field static final Integer COMPONENT_CHILD_EVENTS_PER_DRAIN = 8
 @Field static final Integer COMPONENT_CHILD_DRAIN_INTERVAL_MS = 200
 @Field static final Integer COMPONENT_CHILD_RETRY_MAX_MS = 30000
-@Field static final String GROUP_DEVICE_UPDATE_SCHEDULED_KEY = 'groupDeviceUpdateScheduled'
-@Field static final Integer GROUP_DEVICE_UPDATE_MAX_WAIT_MS = 500
-@Field static final Integer GROUP_DEVICE_UPDATE_RETRY_MS = 1000
 
 @Field static final Integer AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS = 15
 @Field static final Integer AUDIO_CLIP_DONE_GRACE_SECONDS = 15
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
-@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingGroupDeviceUpdates = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
-@Field static ConcurrentHashMap<String, Integer> groupDeviceUpdateRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> lastLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
@@ -992,7 +960,6 @@ Boolean hasLineInCapability() {
   'componentChildDrainDueAt',
   'componentChildRetryAttempts',
   'lastComponentChildEvents',
-  'groupDeviceUpdateScheduled',
   'pendingParentAppTtsRequests',
   'favoriteLoadRequestId',
   'playlistLoadRequestId',
@@ -1027,7 +994,6 @@ Boolean hasLineInCapability() {
   'groupPlayerIds',
   'isGroupCoordinator',
   'coordinatorStatusChanged',
-  'expectedGroupTopology',
   'deviceIp',
   'secondaryIds',
   'secondaryDeviceIps',
@@ -1117,7 +1083,6 @@ Boolean hasLineInCapability() {
   'volumeAdjustAmount',
   'ttsBoostAmount',
   'disableArtistAlbumTrackEvents',
-  'disableAlbumArtEvents',
   'createCrossfadeChildDevice',
   'createShuffleChildDevice',
   'createRepeatOneChildDevice',
@@ -1264,15 +1229,12 @@ void handleSettingsUpdate() {
   resetComponentChildEventRetries()
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
   scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
-  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
-  scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS)
   cancelAudioClipWatchdog()
   if(getId()) {
     audioClipQueueInitialization()
     groupsRegistryInitialization()
     favoritesMapInitialization()
   }
-  getPlaybackMetadataStatus()
 }
 
 
@@ -1284,7 +1246,6 @@ void resetPendingStatePublicationForInitialization() {
   String dni = device.getDeviceNetworkId()
   unschedule('flushPendingLocalDeviceEvents')
   unschedule('drainComponentChildEvents')
-  unschedule('flushPendingGroupDeviceUpdates')
   state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
   state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
@@ -1292,11 +1253,8 @@ void resetPendingStatePublicationForInitialization() {
   state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
   state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
   state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY)
-  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
   pendingLocalDeviceEvents.remove(dni)
   lastLocalDeviceEvents.remove(dni)
-  pendingGroupDeviceUpdates.remove(dni)
-  groupDeviceUpdateRetryAttempts.remove(dni)
   clearLegacyBridgeCurrentStates()
   logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
 }
@@ -1327,7 +1285,6 @@ void performImmediateInitialization() {
   if(getIsGroupCoordinator() == true) { subscribeToAVTransport() }
   subscribeToContentDirectory()
   wsConnect()
-  getPlaybackMetadataStatus()
   refreshUpnpMediaCatalogs()
   scheduleWebsocketHealthCheck()
 }
@@ -1502,8 +1459,6 @@ void configure() {
   resetComponentChildEventRetries()
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
   scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
-  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
-  scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS)
   cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
   migrationCleanup()
@@ -1812,7 +1767,6 @@ void migrationCleanup() {
   if(settings.volumeAdjustAmount == null) { settings.volumeAdjustAmount = 5 }
   if(settings.ttsBoostAmount == null) { settings.ttsBoostAmount = 10 }
   if(settings.disableArtistAlbumTrackEvents == null) { settings.disableArtistAlbumTrackEvents = false }
-  if(settings.disableAlbumArtEvents == null) { settings.disableAlbumArtEvents = true }
   if(settings.createCrossfadeChildDevice == null) { settings.createCrossfadeChildDevice = false }
   if(settings.createShuffleChildDevice == null) { settings.createShuffleChildDevice = false }
   if(settings.createRepeatOneChildDevice == null) { settings.createRepeatOneChildDevice = false }
@@ -1922,27 +1876,12 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
     clearedEntries += clearStaticMap(favoriteRetryState)
     clearedEntries += clearStaticMap(playlistRetryState)
-    clearedEntries += clearStaticMap(pendingGroupDeviceUpdates)
-    clearedEntries += clearStaticMap(groupDeviceUpdateRetryAttempts)
     clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
     clearedEntries += clearStaticMap(zgtMemberHostByPlayerId)
-    clearedEntries += clearStaticMap(pendingZgtNotifyByDni)
-    clearedEntries += clearStaticMap(pendingZgtPresenceByDni)
-    clearedEntries += clearStaticMap(lastZgtPresenceByDni)
-    clearedEntries += clearStaticMap(currentAvtSeqByDni)
-    clearedEntries += clearStaticMap(pendingCoordinatorAvtUpdatesByDni)
-    coordinatorAvtUpdateScheduledDnis.clear()
-    clearedEntries += clearStaticMap(pendingGrcByDni)
-    grcUpdateScheduledDnis.clear()
-    clearedEntries += clearStaticMap(currentGrcSeqByDni)
-    clearedEntries += clearStaticMap(currentGrcSidByDni)
-    clearedEntries += clearStaticMap(currentRcSnapshotByDni)
-    clearedEntries += clearStaticMap(currentRcSeqByDni)
-    clearedEntries += clearStaticMap(currentRcSidByDni)
     clearedEntries += clearStaticMap(wsSubscriptionStatus)
     clearedEntries += clearStaticMap(jsonSlurpers)
     clearedEntries += clearStaticMap(eventTimestamps)
@@ -1973,27 +1912,12 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
   removedEntries += pruneStaticMapKeys(favoriteRetryState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(playlistRetryState, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingGroupDeviceUpdates, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(groupDeviceUpdateRetryAttempts, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(zgtMemberHostByPlayerId, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(pendingZgtNotifyByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingZgtPresenceByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(lastZgtPresenceByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentAvtSeqByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingCoordinatorAvtUpdatesByDni, activePlayerDnis)
-  coordinatorAvtUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
-  removedEntries += pruneStaticMapKeys(pendingGrcByDni, activePlayerDnis)
-  grcUpdateScheduledDnis.removeAll { String dni -> !activePlayerDnis.contains(dni) }
-  removedEntries += pruneStaticMapKeys(currentGrcSeqByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentGrcSidByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentRcSnapshotByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentRcSeqByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(currentRcSidByDni, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
   removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
   removedEntries += pruneEventTimestampKeys(activePlayerDnis)
@@ -2136,24 +2060,12 @@ void clearStaticDriverStateForCurrentDevice() {
       audioClipProgressByCorrelationIdByDni?.remove(dni)
       favoriteRetryState?.remove(dni)
       playlistRetryState?.remove(dni)
-      pendingGroupDeviceUpdates?.remove(dni)
-      groupDeviceUpdateRetryAttempts?.remove(dni)
       pendingLocalDeviceEvents?.remove(dni)
       lastLocalDeviceEvents?.remove(dni)
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
-      pendingGrcByDni?.remove(dni)
-      grcUpdateScheduledDnis?.remove(dni)
-      currentGrcSeqByDni?.remove(dni)
-      currentGrcSidByDni?.remove(dni)
-      currentRcSnapshotByDni?.remove(dni)
-      currentRcSeqByDni?.remove(dni)
-      currentRcSidByDni?.remove(dni)
-      currentAvtSeqByDni?.remove(dni)
-      pendingCoordinatorAvtUpdatesByDni?.remove(dni)
-      coordinatorAvtUpdateScheduledDnis?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
       eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
       Map upnpEntry = upnpRequestQueues?.get(dni)
@@ -3896,7 +3808,6 @@ void checkFavoritePlaybackAndRetry(Map data) {
 
   retryState.playbackObserved = false
   getPlaybackStatus()
-  getPlaybackMetadataStatus()
   runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, FAVORITE_RETRY_EVALUATION_CALLBACK,
     [overwrite: true, data: [operationId: retryState.operationId]])
 }
@@ -4004,7 +3915,6 @@ void checkPlaylistPlaybackAndRetry(Map data) {
   retryState.playbackObserved = false
   retryState.bufferingObserved = false
   getPlaybackStatus()
-  getPlaybackMetadataStatus()
   runIn(PLAYBACK_STATUS_RESPONSE_GRACE_SECONDS, PLAYLIST_RETRY_EVALUATION_CALLBACK,
     [overwrite: true, data: [operationId: retryState.operationId]])
 }
@@ -4826,7 +4736,7 @@ void parse(String raw) {
             Map snapshot = parseAvtFullSnapshot(xmlBody)
             if(snapshot == null) { return }
             String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            String rincon = resolveCurrentCoordinatorRinconForAvt(sourceDni) ?: getId()
+            String rincon = getId()
             List<Map> events = buildAvtEvents(snapshot, [:])
             queueParsedUpnpRelay([service: 'AVT', sourceDni: sourceDni, rincon: rincon, events: events])
           } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
@@ -4849,7 +4759,7 @@ void parse(String raw) {
             Map snapshot = parseGrcFullSnapshot(xmlBody)
             if(snapshot == null) { return }
             String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            String rincon = resolveCurrentCoordinatorRinconForAvt(sourceDni) ?: getId()
+            String rincon = getId()
             List<Map> events = buildGrcEvents(snapshot)
             queueParsedUpnpRelay([service: 'GRC', sourceDni: sourceDni, rincon: rincon, events: events])
           } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
@@ -4892,53 +4802,19 @@ void relayParsedUpnpToParent(Map data) {
 
 // Stale payloads are dropped before enqueue because republished stale state has no value;
 // kept driver-side so concurrent parses cannot reorder the coalescing queue.
-Boolean tryAcceptSeq(String serviceLabel, ConcurrentHashMap seqMap, String dni, Integer incomingSeq) {
-  if(seqMap == null || dni == null || incomingSeq == null) { return true }
-  AtomicInteger ref = seqMap.get(dni)
-  if(ref == null) {
-    AtomicInteger created = new AtomicInteger(incomingSeq)
-    seqMap.putIfAbsent(dni, created)
-    ref = seqMap.get(dni)
-  }
-  if(ref.get() > incomingSeq) {
-    logDebug("Ignoring stale ${serviceLabel} SEQ=${incomingSeq} <= prev=${ref.get()} for ${dni}")
-    return false
-  }
-  Integer prevVal = ref.get()
-  while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
-    prevVal = ref.get()
-    if(incomingSeq <= prevVal) {
-      logDebug("Ignoring stale ${serviceLabel} SEQ=${incomingSeq} <= prev=${prevVal} for ${dni}")
-      return false
-    }
-  }
-  return true
-}
-
 void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody) {
   deferOrProcessZoneGroupTopologyPayload(dni, xmlBody, null)
 }
 
 void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer incomingSeq) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
-  if(!deviceDni || !xmlBody) { return }
-  if(!isPlausibleXmlPayload(xmlBody)) { return }
-  if(!tryAcceptSeq('ZGT', currentZgtSeqByDni, deviceDni, incomingSeq)) { return }
-  Map newSnapshot = parseZgtFullSnapshot(xmlBody)
-  if(newSnapshot == null) { return }
-  if(incomingSeq != null) {
-    AtomicInteger ref2 = currentZgtSeqByDni.get(deviceDni)
-    if(ref2 != null && incomingSeq < ref2.get()) {
-      logDebug("Ignoring ZGT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
-      return
-    }
-    if(ref2 != null) { ref2.set(incomingSeq) } else { currentZgtSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
-  }
-  List<Map> groups = (List<Map>)newSnapshot.groups
+  if(!deviceDni || !isPlausibleXmlPayload(xmlBody)) { return }
+  Map snapshot = parseZgtFullSnapshot(xmlBody)
+  if(snapshot == null) { return }
+  List<Map> groups = (List<Map>)snapshot.groups
   cacheZgtMemberHosts(groups)
-  queueZgtPresenceTransitions(deviceDni, groups, (List<Map>)newSnapshot.vanishedDevices)
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
-  queueZgtTopologyNotification(deviceDni, eventsByGroupId)
+  queueParsedUpnpRelay([service: 'ZGT', sourceDni: deviceDni, eventsByGroupId: eventsByGroupId])
 }
 
 // Refresh the transient host cache (see field comment); parse is otherwise store-free.
@@ -5003,233 +4879,6 @@ Map<String, List<Map>> projectZgtEventsByGroupId(List<Map> groups) {
     if(!events.isEmpty()) { eventsByGroupId[groupId] = events }
   }
   return eventsByGroupId
-}
-
-// Transient ordered hand-off only, not storage. Preserve each notification until
-// the deferred flush calls the app so concurrent parse executions do not coalesce reports.
-void queueZgtTopologyNotification(String deviceDni, Map<String, List<Map>> eventsByGroupId) {
-  if(!deviceDni || eventsByGroupId == null) { return }
-  Map<String, List<Map>> snapshot = new LinkedHashMap<String, List<Map>>()
-  eventsByGroupId.each { String groupId, List<Map> events ->
-    snapshot[groupId] = events.collect { Map event -> new LinkedHashMap(event) }
-  }
-  synchronized(pendingZgtNotifyByDni) {
-    List<Map> pending = pendingZgtNotifyByDni.get(deviceDni) ?: []
-    pending.add(snapshot)
-    pendingZgtNotifyByDni.put(deviceDni, pending)
-  }
-  try {
-    runInMillis(1, 'flushPendingZgtNotify', [overwrite: false])
-  } catch(Exception e) {
-    logWarn("Could not schedule ZGT parent notification for ${deviceDni}: ${e.message}")
-    pendingZgtNotifyByDni.remove(deviceDni)
-  }
-}
-
-// Presence transitions are reported for each player's own notification stream.
-void queueZgtPresenceTransitions(String deviceDni, List<Map> groups, List<Map> vanishedDevices) {
-  if(!deviceDni) { return }
-  List<Map> groupList = (groups instanceof List) ? groups : []
-  List<Map> vanishedList = (vanishedDevices instanceof List) ? vanishedDevices : []
-  if(groupList.isEmpty() && vanishedList.isEmpty()) { return }
-  Map<String, String> currentVisible = [:]
-  groupList.each { Map g ->
-    if(g?.members instanceof List) {
-      ((List<?>)g.members).each { Object mem ->
-        Map mm = (Map)mem
-        String pid = mm?.playerId?.toString()
-        Boolean isInvisible = (mm?.invisible == true || mm?.invisible?.toString() == '1')
-        if(pid && !isInvisible) { currentVisible[pid] = mm?.zoneName?.toString() ?: '' }
-      }
-    }
-  }
-  Map<String, Map> vanishedByUuid = [:]
-  vanishedList.each { Map vd -> String uuid = vd?.uuid?.toString(); if(uuid) { vanishedByUuid[uuid] = vd } }
-  Map prev = lastZgtPresenceByDni.get(deviceDni)
-  Boolean initialized = prev != null && prev['initialized'] == true
-  Map<String, String> prevVisible = [:]
-  Set<String> vanishedNotified = new HashSet<String>()
-  if(prev != null) {
-    if(prev['visible'] instanceof Map) { prevVisible.putAll((Map<String, String>)prev['visible']) }
-    if(prev['vanishedNotified'] instanceof Collection) { (prev['vanishedNotified'] as Collection).each { Object v -> if(v) { vanishedNotified.add(v.toString()) } } }
-  }
-  List<Map> arrived = []
-  List<Map> departed = []
-  if(!initialized) {
-    vanishedByUuid.keySet().each { String uuid ->
-      if(!currentVisible.containsKey(uuid)) {
-        Map vd = vanishedByUuid[uuid]
-        String name = vd?.zoneName?.toString() ?: ''
-        departed << [rincon: uuid, dni: safeDniFromRincon(uuid), name: name]
-      }
-    }
-  } else {
-    currentVisible.keySet().each { String pid ->
-      if(!prevVisible.containsKey(pid)) {
-        arrived << [rincon: pid, dni: safeDniFromRincon(pid), name: currentVisible[pid]]
-      }
-    }
-    prevVisible.keySet().each { String pid ->
-      if(!currentVisible.containsKey(pid)) {
-        String name = prevVisible[pid]
-        Map vd = vanishedByUuid[pid]
-        if(vd?.zoneName) { name = vd.zoneName.toString() }
-        departed << [rincon: pid, dni: safeDniFromRincon(pid), name: name]
-      }
-    }
-    vanishedByUuid.keySet().each { String uuid ->
-      if(!currentVisible.containsKey(uuid) && !prevVisible.containsKey(uuid) && !vanishedNotified.contains(uuid)) {
-        Map vd = vanishedByUuid[uuid]
-        departed << [rincon: uuid, dni: safeDniFromRincon(uuid), name: vd?.zoneName?.toString() ?: '']
-      }
-    }
-  }
-  Set<String> nextVanishedNotified = new HashSet<String>(vanishedNotified)
-  nextVanishedNotified.addAll(vanishedByUuid.keySet())
-  departed.each { Map d -> if(d?.rincon) { nextVanishedNotified.add(d.rincon.toString()) } }
-  arrived.each { Map a -> if(a?.rincon) { nextVanishedNotified.remove(a.rincon.toString()) } }
-  lastZgtPresenceByDni.put(deviceDni, [initialized: true, visible: new LinkedHashMap<String, String>(currentVisible), vanishedNotified: nextVanishedNotified])
-  if(arrived.isEmpty() && departed.isEmpty()) { return }
-  Map pending = [arrived: new ArrayList<Map>(arrived), departed: new ArrayList<Map>(departed)]
-  synchronized(pendingZgtPresenceByDni) {
-    List<Map> pendingReports = pendingZgtPresenceByDni.get(deviceDni) ?: []
-    pendingReports.add(pending)
-    pendingZgtPresenceByDni.put(deviceDni, pendingReports)
-  }
-  try {
-    runInMillis(1, 'flushPendingZgtPresence', [overwrite: false])
-  } catch(Exception e) {
-    logWarn("Could not schedule ZGT presence notification for ${deviceDni}: ${e.message}")
-    pendingZgtPresenceByDni.remove(deviceDni)
-  }
-}
-
-// Deferred so parse() returns before the app gate runs; mirrors flushPendingZgtNotify.
-void flushPendingZgtPresence() {
-  if(pendingZgtPresenceByDni.isEmpty()) { return }
-  Map<String, List<Map>> drained = [:]
-  synchronized(pendingZgtPresenceByDni) {
-    drained.putAll(pendingZgtPresenceByDni)
-    pendingZgtPresenceByDni.clear()
-  }
-  drained.each { String dni, List<Map> reports ->
-    reports.each { Map transitions ->
-      if(!(transitions instanceof Map)) { return }
-      List<Map> departed = (transitions['departed'] instanceof List) ? (List<Map>)transitions['departed'] : []
-      List<Map> arrived = (transitions['arrived'] instanceof List) ? (List<Map>)transitions['arrived'] : []
-      departed.each { Map d -> notifyParentPresence('departed', dni, d) }
-      arrived.each { Map a -> notifyParentPresence('arrived', dni, a) }
-    }
-  }
-}
-
-void notifyParentPresence(String kind, String sourceDni, Map entry) {
-  String rincon = entry?.rincon?.toString()
-  if(!rincon) { return }
-  String dni = entry?.dni?.toString() ?: safeDniFromRincon(rincon)
-  String name = entry?.name?.toString() ?: ''
-  try {
-    if(parent != null) {
-      if(kind == 'arrived') { parent.playerArrived(rincon, dni, name) } else { parent.playerDeparted(rincon, dni, name) }
-    } else {
-      logDebug("Standalone ZGT presence (no parent) kind=${kind} dni=${dni} rincon=${rincon} name=${name}")
-    }
-  } catch(Exception e) {
-    logWarn("parent ZGT presence notification failed kind=${kind} for ${rincon}: ${e.message}")
-    try { logDebug("ZGT presence failure detail: ${e}") } catch(Exception ignored) { }
-  }
-}
-
-// One contract: the flush calls the pure parent setter directly (no fallback chain).
-void flushPendingZgtNotify() {
-  if(pendingZgtNotifyByDni.isEmpty()) { return }
-  Map<String, List<Map>> drained = [:]
-  synchronized(pendingZgtNotifyByDni) {
-    drained.putAll(pendingZgtNotifyByDni)
-    pendingZgtNotifyByDni.clear()
-  }
-  drained.each { String dni, List<Map> reports ->
-    reports.each { Map topo ->
-      if(!(topo instanceof Map)) { return }
-      try {
-        if(parent != null) {
-          parent.putZgtTopology(dni, topo)
-        } else {
-          logDebug("Standalone ZGT topology (no parent) dni=${dni} groups=${topo.size()}")
-        }
-      } catch(Exception e) {
-        logWarn("parent ZGT notification failed for ${dni}: ${e.message}")
-        try { logDebug("ZGT notify failure detail: ${e}") } catch(Exception ignored) { }
-      }
-    }
-  }
-}
-
-
-void flushPendingZoneGroupTopology() {
-  flushPendingTopologyUpdates()
-}
-
-void flushPendingTopologyUpdates() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  String expectedJson = getDeviceDataValue('expectedGroupTopology')
-  if(expectedJson) {
-    try {
-      Map expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
-      Long expiresAt = expected.expiresAt as Long
-      if(expiresAt != null && expiresAt > (getHubitatCurrentTime() as Long)) {
-        scheduleTopologyTimeoutFlush()
-        return
-      }
-    } catch(Exception ignored) { }
-  }
-  setDeviceDataValue('expectedGroupTopology', '')
-}
-
-Boolean shouldHoldTopologyUpdate(Map topology) {
-  return evaluateExpectedTopology(topology, true)
-}
-
-void recordExpectedTopologyObservation(Map topology) {
-  evaluateExpectedTopology(topology, false)
-}
-
-Boolean evaluateExpectedTopology(Map topology, Boolean holdOnMismatch) {
-  String expectedJson = getDeviceDataValue('expectedGroupTopology')
-  if(!expectedJson) { return false }
-  Map expected
-  try {
-    expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
-  } catch(Exception e) {
-    setDeviceDataValue('expectedGroupTopology', '')
-    return false
-  }
-  Long expiresAt = expected.expiresAt as Long
-  if(expiresAt == null || expiresAt <= (getHubitatCurrentTime() as Long)) {
-    setDeviceDataValue('expectedGroupTopology', '')
-    return false
-  }
-  if(topology != null && topology.coordinatorId == expected.coordinatorId &&
-     topology.memberIds == expected.memberIds) {
-    setDeviceDataValue('expectedGroupTopology', '')
-    logDebug('Observed expected topology for this player; releasing the update')
-    return false
-  }
-  return holdOnMismatch == true
-}
-
-void scheduleTopologyTimeoutFlush() {
-  String expectedJson = getDeviceDataValue('expectedGroupTopology')
-  if(!expectedJson) { return }
-  try {
-    Map expected = (Map)getSharedJsonSlurper().parseText(expectedJson)
-    Long expiresAt = expected.expiresAt as Long
-    Integer remaining = Math.max(1, Math.ceil((expiresAt - (getHubitatCurrentTime() as Long)) / 1000.0d) as Integer)
-    runIn(remaining, 'flushPendingTopologyUpdates', [overwrite: true])
-  } catch(Exception e) {
-    runIn(1, 'flushPendingTopologyUpdates', [overwrite: true])
-  }
 }
 
 Map<String, List<String>> parseChannelMap(String raw) {
@@ -5443,30 +5092,12 @@ void deferOrProcessAvTransportPayload(String dni, String xmlBody, Integer incomi
 
 void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
-  if(!deviceDni || !xmlBody) { return }
-  if(!isPlausibleXmlPayload(xmlBody)) { return }
-  if(!tryAcceptSeq('AVT', currentAvtSeqByDni, deviceDni, incomingSeq)) { return }
-  Map newSnapshot = parseAvtFullSnapshot(xmlBody)
-  if(newSnapshot == null) { return }
-  if(incomingSeq != null) {
-    AtomicInteger ref2 = currentAvtSeqByDni.get(deviceDni)
-    if(ref2 != null && incomingSeq < ref2.get()) {
-      logDebug("Ignoring AVT that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
-      return
-    }
-    if(ref2 != null) { ref2.set(incomingSeq) } else { currentAvtSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
-  }
-  String myRincon = getId()
-  String coordinatorRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni) ?: myRincon
-  if(!(myRincon && coordinatorRincon == myRincon)) { return }
-  // Capture previous before local apply replaces it, so track-change detection stays exact.
-  Map previous = runtimeState.lastTransportPlaybackSnapshot instanceof Map
-      ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
-  applyAvtSnapshotIfDifferent(newSnapshot)
-  List<Map> events = buildAvtEvents(newSnapshot, previous)
-  if(!events.isEmpty()) {
-    queueCoordinatorAvtParentUpdate(deviceDni, [rincon: coordinatorRincon,
-      events: events, seq: incomingSeq])
+  if(!deviceDni || !isPlausibleXmlPayload(xmlBody)) { return }
+  Map notification = parseAvtFullSnapshot(xmlBody)
+  if(notification == null) { return }
+  List<Map> events = buildAvtEvents(notification, [:])
+  if(events) {
+    queueParsedUpnpRelay([service: 'AVT', sourceDni: deviceDni, rincon: getId(), events: events])
   }
 }
 
@@ -5478,14 +5109,11 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
     events << [name: 'status', value: status]
     events << [name: 'transportStatus', value: status]
   }
-  Boolean trackUriChanged = incoming.hasCurrentTrackURI == true &&
-      incoming.currentTrackURI?.toString() != (previous?.currentTrackURI?.toString())
   Boolean trackCleared = incoming.hasCurrentTrackURI == true && !incoming.currentTrackURI?.toString()
   Boolean metadataPresent = incoming.hasCurrentTrackMetaData == true
   Boolean metadataEmpty = metadataPresent && !incoming.currentTrackMetaDataRaw?.toString()
   Map metadata = incoming.currentTrackMetaData instanceof Map ? (Map)incoming.currentTrackMetaData : [:]
-  Boolean clearMetadata = trackCleared || metadataEmpty ||
-      (trackUriChanged && (!metadataPresent || metadata.isEmpty()))
+  Boolean clearMetadata = trackCleared || metadataEmpty
   if(clearMetadata) {
     events << [name: 'currentTrackName', value: 'Not Available']
     events << [name: 'currentArtistName', value: 'Not Available']
@@ -5508,7 +5136,7 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
   } else if(trackCleared) {
     events << [name: 'currentTrackNumber', value: 0]
   }
-  if(incoming.hasCurrentTrackDuration == true || (clearMetadata && (trackCleared || trackUriChanged))) {
+  if(incoming.hasCurrentTrackDuration == true) {
     events << [name: 'currentTrackDuration', value: incoming.currentTrackDuration?.toString() ?: '']
   }
   // Play-mode reaches the store as its three device attributes, matching setPlayMode.
@@ -5539,168 +5167,7 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
   return events
 }
 
-Object getCoordinatorAvtUpdateLock(String dni) {
-  return coordinatorAvtUpdateStripes.get(dni)
-}
-
-// Transient in-flight hand-off only, not storage: deltas merge by name until the flush claims them.
-// Deferred so parse() returns before the app gate runs; SEQ prevents an older delta reordering a newer one.
-void queueCoordinatorAvtParentUpdate(String dni, Map update) {
-  if(!dni || update == null || parent == null) { return }
-  Object lock = getCoordinatorAvtUpdateLock(dni)
-  synchronized(lock) {
-    Map pending = pendingCoordinatorAvtUpdatesByDni.get(dni)
-    Integer incomingSeq = update.seq as Integer
-    Integer pendingSeq = pending?.seq as Integer
-    if(pending != null && incomingSeq != null && pendingSeq != null && incomingSeq < pendingSeq) { return }
-    Map<String, Object> merged = [:]
-    if(pending != null) { merged.putAll(pending) }
-    merged.putAll(update)
-    List<Map> mergedEvents = []
-    // A coordinator change starts a fresh list so one group's playback never merges into another's.
-    if(pending?.events instanceof List && pending?.rincon?.toString() == update.rincon?.toString()) {
-      mergedEvents.addAll((List<Map>)pending.events)
-    }
-    if(update.events instanceof List) {
-      ((List<Map>)update.events).each { Map incomingEvent ->
-        String incomingName = incomingEvent?.name?.toString()
-        if(incomingName) {
-          mergedEvents.removeAll { Map existing -> existing?.name?.toString() == incomingName }
-        }
-        mergedEvents << new LinkedHashMap(incomingEvent)
-      }
-    }
-    merged.events = mergedEvents
-    pendingCoordinatorAvtUpdatesByDni.put(dni, merged)
-    if(coordinatorAvtUpdateScheduledDnis.add(dni)) {
-      try { runInMillis(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true]) }
-      catch(Exception e) {
-        coordinatorAvtUpdateScheduledDnis.remove(dni)
-        runIn(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true])
-      }
-    }
-  }
-}
-
-// One contract: the flush calls the pure parent setter directly (no fallback chain).
-void flushCoordinatorAvtParentUpdate() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = getCoordinatorAvtUpdateLock(dni)
-  Map update
-  synchronized(lock) {
-    update = pendingCoordinatorAvtUpdatesByDni.remove(dni)
-    coordinatorAvtUpdateScheduledDnis.remove(dni)
-  }
-  if(update == null) { return }
-  String rincon = update.rincon?.toString()
-  List<Map> events = update.events instanceof List ? (List<Map>)update.events : []
-  if(!rincon || events.isEmpty()) { return }
-  try {
-    parent.putAvtEvents(rincon, events)
-  } catch(Exception e) {
-    logWarn("Deferred parent AVT update failed for ${dni}: ${e.message}")
-    synchronized(lock) {
-      Map newer = pendingCoordinatorAvtUpdatesByDni.get(dni)
-      Integer updateSeq = update.seq as Integer
-      Integer newerSeq = newer?.seq as Integer
-      if(newer == null || updateSeq == null || newerSeq == null || updateSeq > newerSeq) {
-        pendingCoordinatorAvtUpdatesByDni.put(dni, update)
-      }
-      if(coordinatorAvtUpdateScheduledDnis.add(dni)) {
-        runIn(1, 'flushCoordinatorAvtParentUpdate', [overwrite: true])
-      }
-    }
-  }
-}
-
-// Coordinator key comes from device data, not a stored topology; the app re-keys if it moved.
-String resolveCurrentCoordinatorRinconForAvt(String dni) {
-  String myRincon = getId()
-  String cur = device.getDataValue('groupCoordinatorId')?.toString()
-  return cur ?: myRincon
-}
-
-Boolean applyAvtSnapshotIfDifferent(Map snap) {
-  logDebug("applyAvtSnapshotIfDifferent called: snapshot=${snap ? snap.transportState : 'null'}")
-  if(snap == null) { return false }
-  observeUpnpPlaybackSource(snap)
-  // Diffs are against device.currentValue below (set* dedupes); the app holds the snapshot.
-  // Discard transient TRANSITIONING like legacy process (preserve last valid)
-  if(snap.transportState?.toString()?.trim()?.equalsIgnoreCase('TRANSITIONING')) {
-    return false
-  }
-  // Apply minimal presentation fields from snapshot (status/track)
-  // Sleep timer (still presentation — parse is pure, apply may fan to child)
-  try {
-    String sleepTimerState = snap.sleepTimerState?.toString()
-    String sleepTimerGeneration = snap.sleepTimerGeneration?.toString()
-    ChildDeviceWrapper sleepTimerChild = getSleepTimerChild()
-    if(sleepTimerChild) {
-      Map<String, Object> sleepTimerAttributes = [:]
-      if(sleepTimerState) {
-        String normalizedSleepTimerState = sleepTimerState.toUpperCase()
-        Boolean sleepTimerActive = normalizedSleepTimerState in ['ACTIVE', 'RUNNING', 'SLEEP_TIMER_RUNNING']
-        sleepTimerAttributes.sleepTimerState = sleepTimerActive ? 'active' : 'inactive'
-      }
-      if(sleepTimerGeneration) {
-        sleepTimerAttributes.generation = sleepTimerGeneration
-        getSleepTimer()
-      }
-      if(!sleepTimerAttributes.isEmpty()) {
-        applyChildStateBatch(sleepTimerChild, JsonOutput.toJson(sleepTimerAttributes))
-      }
-    }
-  } catch(Exception ignored) {}
-  try {
-    Map previousPlayback = runtimeState.lastTransportPlaybackSnapshot instanceof Map
-        ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
-    Boolean trackUriPresent = snap.hasCurrentTrackURI == true
-    Boolean metadataPresent = snap.hasCurrentTrackMetaData == true
-    String trackUri = snap.currentTrackURI?.toString()
-    String rawMetadata = snap.currentTrackMetaDataRaw?.toString()
-    Boolean trackChanged = trackUriPresent && trackUri != previousPlayback.currentTrackURI?.toString()
-    Boolean trackCleared = trackUriPresent && !trackUri
-    Boolean metadataCleared = metadataPresent && !rawMetadata
-    Map meta = snap.currentTrackMetaData instanceof Map ? (Map)snap.currentTrackMetaData : [:]
-    Boolean metadataParsed = !meta.isEmpty()
-    Boolean clearTrackMetadata = trackCleared || metadataCleared ||
-        (trackChanged && (!metadataPresent || !metadataParsed))
-
-    String ts = snap.transportState?.toString()
-    if(ts) { setStatusTransportStatus(ts, 'AVT event') }
-    String pm = snap.playMode?.toString()
-    if(pm) { setPlayMode(pm) }
-    if(snap.hasCurrentTrackDuration == true) {
-      setCurrentTrackDuration(snap.currentTrackDuration?.toString() ?: '')
-    } else if(trackChanged || trackCleared) {
-      setCurrentTrackDuration('')
-    }
-    String cf = snap.crossfadeMode?.toString()?.trim()
-    if(cf) { setCrossfadeMode(cf == '1' ? 'on' : 'off') }
-    if(clearTrackMetadata) {
-      clearCurrentAvtTrackMetadata()
-    } else if(metadataPresent && metadataParsed) {
-      String trackName = meta.title?.toString() ?: 'Not Available'
-      String artist = meta.creator?.toString() ?: 'Not Available'
-      String album = meta.album?.toString() ?: 'Not Available'
-      setCurrentTrackName(trackName)
-      setCurrentArtistName(artist)
-      setCurrentAlbumName(album)
-      setTrackDataEvents([name: trackName, artist: artist, album: album])
-      String desc = meta.title && meta.creator
-          ? "${meta.title} by ${meta.creator}"
-          : (meta.streamContent?.toString() ?: trackName)
-      setTrackDescription(desc)
-    }
-    updateCurrentFavoriteFromUpnp(snap)
-    String num = snap.track?.toString()
-    if(num?.isInteger()) { setCurrentTrackNumber(Integer.parseInt(num)) }
-    else if(snap.containsKey('track') || trackCleared) { setCurrentTrackNumber(0) }
-  } catch(Exception e) { logDebug("applyAvtSnapshotIfDifferent failed: ${e.message}") }
-  runtimeState.lastTransportPlaybackSnapshot = new LinkedHashMap(snap)
-  return true
-}
+// The parent notification queue preserves complete AVT batches in arrival order.
 
 String normalizeFavoriteUri(String uri) {
   if(!uri) { return null }
@@ -5836,74 +5303,27 @@ void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody) {
   deferOrProcessGroupRenderingControlPayload(dni, xmlBody, null, null)
 }
 
-void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq) {
-  deferOrProcessGroupRenderingControlPayload(dni, xmlBody, incomingSeq, null)
+void deferOrProcessRenderingControlPayload(String dni, String xmlBody) {
+  deferOrProcessRenderingControlPayload(dni, xmlBody, null, null)
 }
 
-void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
-  handleGrcFull(dni, xmlBody, incomingSeq, incomingSid)
+void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
+  Map snapshot = parseRcFullSnapshot(xmlBody)
+  if(snapshot == null) { return }
+  List<Map> events = buildRcEvents(snapshot)
+  if(events) {
+    queueParsedUpnpRelay([service: 'RC', sourceDni: dni ?: device.getDeviceNetworkId()?.toString() ?: 'unknown',
+      rincon: getId(), events: events])
+  }
 }
 
 void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
   String deviceDni = dni ?: device.getDeviceNetworkId()
-  if(!deviceDni || !xmlBody) { return }
-  if(!isPlausibleXmlPayload(xmlBody)) { return }
-  String sidKey = incomingSid?.toString()?.trim() ?: null
-  if(sidKey == '') { sidKey = null }
-  String storedSid = currentGrcSidByDni.get(deviceDni)
-  Boolean sidChanged = sidKey != null && storedSid != null && storedSid != sidKey
-  Boolean isReset = (incomingSeq != null && incomingSeq == 0) || sidChanged
-  if(incomingSeq != null) {
-    if(isReset) {
-      AtomicInteger ref = currentGrcSeqByDni.get(deviceDni)
-      if(ref == null) {
-        AtomicInteger created = new AtomicInteger(incomingSeq)
-        currentGrcSeqByDni.putIfAbsent(deviceDni, created)
-        ref = currentGrcSeqByDni.get(deviceDni)
-      }
-      ref.set(incomingSeq)
-    } else if(!tryAcceptSeq('GRC', currentGrcSeqByDni, deviceDni, incomingSeq)) { return }
-  }
-  Map newSnapshot = parseGrcFullSnapshot(xmlBody)
-  if(newSnapshot == null) { return }
-  if(incomingSeq != null && !isReset) {
-    AtomicInteger ref2 = currentGrcSeqByDni.get(deviceDni)
-    if(ref2 != null && incomingSeq < ref2.get()) {
-      logDebug("Ignoring GRC that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
-      return
-    }
-  }
-  if(incomingSeq != null) {
-    AtomicInteger ref2 = currentGrcSeqByDni.get(deviceDni)
-    if(ref2 != null) { ref2.set(incomingSeq) } else { currentGrcSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
-  }
-  if(sidKey != null) { currentGrcSidByDni[deviceDni] = sidKey }
-  String coordRincon = resolveCurrentCoordinatorRinconForAvt(deviceDni)
-  applyGrcSnapshotIfDifferent(newSnapshot)
-  List<Map> events = buildGrcEvents(newSnapshot)
-  if(coordRincon && !events.isEmpty()) {
-    queueGrcParentUpdate(deviceDni, [rincon: coordRincon, events: events, seq: incomingSeq, reset: isReset])
-  }
-}
-
-Boolean applyGrcSnapshotIfDifferent(Map snap) {
-  if(snap == null) { return false }
-  Integer newVolume = snap.groupVolume as Integer
-  Integer priorVolume = getGroupVolumeState()
-  String newMute = snap.groupMute?.toString()
-  String priorMute = getGroupMuteState()
-  Boolean volumeChanged = newVolume != null && newVolume != priorVolume
-  Boolean muteChanged = newMute != null && newMute != priorMute
-  if(!volumeChanged && !muteChanged) { return false }
-  if(volumeChanged) {
-    setGroupVolumeState(newVolume)
-    queueGroupDeviceUpdate([_groupVolume: newVolume])
-  }
-  if(muteChanged) {
-    setGroupMuteState(newMute)
-    queueGroupDeviceUpdate([_groupMute: newMute])
-  }
-  return true
+  if(!deviceDni || !isPlausibleXmlPayload(xmlBody)) { return }
+  Map snapshot = parseGrcFullSnapshot(xmlBody)
+  if(snapshot == null) { return }
+  List<Map> events = buildGrcEvents(snapshot)
+  if(events) { queueParsedUpnpRelay([service: 'GRC', sourceDni: deviceDni, rincon: getId(), events: events]) }
 }
 
 // Stored as sendEvent-ready attribute maps for parent-app delivery.
@@ -5914,80 +5334,23 @@ List<Map> buildGrcEvents(Map snap) {
   return events
 }
 
-Object getGrcUpdateLock(String dni) {
-  return grcUpdateStripes.get(dni)
+/** Convert only values represented in this RC notification to the player's event names. */
+List<Map> buildRcEvents(Map snap) {
+  List<Map> events = []
+  if(snap?.volumeMaster != null) {
+    events << [name: 'volume', value: snap.volumeMaster]
+    events << [name: 'level', value: snap.volumeMaster]
+  }
+  if(snap?.muteMaster != null) { events << [name: 'mute', value: snap.muteMaster] }
+  if(snap?.bass != null) { events << [name: 'bass', value: snap.bass] }
+  if(snap?.treble != null) { events << [name: 'treble', value: snap.treble] }
+  if(snap?.loudness != null) { events << [name: 'loudness', value: snap.loudness] }
+  if(snap?.nightMode != null) { events << [name: 'nightMode', value: snap.nightMode] }
+  if(snap?.dialogLevel != null) { events << [name: 'speechEnhancement', value: snap.dialogLevel] }
+  return events
 }
 
-// Transient in-flight hand-off only, not storage: deltas merge by name until the flush claims them.
-// Deferred so parse() returns before the app gate runs; SEQ prevents an older delta reordering a newer one.
-void queueGrcParentUpdate(String dni, Map update) {
-  if(!dni || update == null || parent == null) { return }
-  Object lock = getGrcUpdateLock(dni)
-  synchronized(lock) {
-    Map pending = pendingGrcByDni.get(dni)
-    Integer incomingSeq = update.seq as Integer
-    Integer pendingSeq = pending?.seq as Integer
-    // A SEQ-0/SID reset starts a new epoch; never drop it behind the old epoch's SEQ.
-    if(pending != null && incomingSeq != null && pendingSeq != null && incomingSeq < pendingSeq && update.reset != true) { return }
-    Map<String, Object> merged = [:]
-    if(pending != null) { merged.putAll(pending) }
-    merged.putAll(update)
-    List<Map> mergedEvents = []
-    if(pending?.events instanceof List && pending?.rincon?.toString() == update.rincon?.toString()) {
-      mergedEvents.addAll((List<Map>)pending.events)
-    }
-    if(update.events instanceof List) {
-      ((List<Map>)update.events).each { Map incomingEvent ->
-        String incomingName = incomingEvent?.name?.toString()
-        if(incomingName) {
-          mergedEvents.removeAll { Map existing -> existing?.name?.toString() == incomingName }
-        }
-        mergedEvents << new LinkedHashMap(incomingEvent)
-      }
-    }
-    merged.events = mergedEvents
-    pendingGrcByDni.put(dni, merged)
-    if(grcUpdateScheduledDnis.add(dni)) {
-      try { runInMillis(1, 'flushPendingGrc', [overwrite: true]) }
-      catch(Exception e) {
-        grcUpdateScheduledDnis.remove(dni)
-        runIn(1, 'flushPendingGrc', [overwrite: true])
-      }
-    }
-  }
-}
-
-// One contract: the flush calls the pure parent setter directly (no fallback chain).
-void flushPendingGrc() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = getGrcUpdateLock(dni)
-  Map update
-  synchronized(lock) {
-    update = pendingGrcByDni.remove(dni)
-    grcUpdateScheduledDnis.remove(dni)
-  }
-  if(update == null) { return }
-  String rincon = update.rincon?.toString()
-  List<Map> events = update.events instanceof List ? (List<Map>)update.events : []
-  if(!rincon || events.isEmpty()) { return }
-  try {
-    parent.putGrcEvents(rincon, events)
-  } catch(Exception e) {
-    logWarn("Deferred parent GRC update failed for ${dni}: ${e.message}")
-    synchronized(lock) {
-      Map newer = pendingGrcByDni.get(dni)
-      Integer updateSeq = update.seq as Integer
-      Integer newerSeq = newer?.seq as Integer
-      if(newer == null || updateSeq == null || newerSeq == null || updateSeq > newerSeq) {
-        pendingGrcByDni.put(dni, update)
-      }
-      if(grcUpdateScheduledDnis.add(dni)) {
-        runIn(1, 'flushPendingGrc', [overwrite: true])
-      }
-    }
-  }
-}
+// GRC payloads use the same complete-batch relay as RC, ZGT, and AVT.
 
 @CompileStatic
 Map parseRcFullSnapshot(String xmlString) {
@@ -6126,152 +5489,6 @@ Map parseRcFullSnapshot(String xmlString) {
     logDebug("Could not parse RC snapshot: ${e.message}")
     return null
   }
-}
-
-Map getCurrentRcSnapshot() {
-  String dni = device.getDeviceNetworkId()?.toString()
-  return [snapshot: currentRcSnapshotByDni[dni], seq: currentRcSeqByDni[dni]?.get(), sid: currentRcSidByDni[dni]]
-}
-
-String getRcDeviceControlJson() {
-  try {
-    String stored = device.getDataValue('rcSnapshotJson')?.toString()
-    if(stored) { return stored }
-  } catch(Exception ignored) { }
-  String dni = device.getDeviceNetworkId()?.toString()
-  Map snap = currentRcSnapshotByDni[dni]
-  return JsonOutput.toJson(snap ?: [:])
-}
-
-Map getCurrentRc() { return getCurrentRcSnapshot() }
-
-void deferOrProcessRenderingControlPayload(String dni, String xmlBody) {
-  deferOrProcessRenderingControlPayload(dni, xmlBody, null, null)
-}
-
-void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq) {
-  deferOrProcessRenderingControlPayload(dni, xmlBody, incomingSeq, null)
-}
-
-void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
-  handleRcFull(dni, xmlBody, incomingSeq, incomingSid)
-}
-
-void handleRcFull(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
-  String deviceDni = dni ?: device.getDeviceNetworkId()
-  if(!deviceDni || !xmlBody) { return }
-  if(!isPlausibleXmlPayload(xmlBody)) { return }
-  String sidKey = incomingSid?.toString()?.trim() ?: null
-  if(sidKey == '') { sidKey = null }
-  String storedSid = currentRcSidByDni.get(deviceDni)
-  Boolean sidChanged = sidKey != null && storedSid != null && storedSid != sidKey
-  Boolean isReset = (incomingSeq != null && incomingSeq == 0) || sidChanged
-  if(incomingSeq != null) {
-    AtomicInteger ref = currentRcSeqByDni.get(deviceDni)
-    if(ref == null) {
-      AtomicInteger created = new AtomicInteger(incomingSeq)
-      currentRcSeqByDni.putIfAbsent(deviceDni, created)
-      ref = currentRcSeqByDni.get(deviceDni)
-    }
-    if(isReset) {
-      ref.set(incomingSeq)
-    } else {
-      if(ref.get() > incomingSeq) {
-        logDebug("Ignoring stale RC SEQ=${incomingSeq} <= prev=${ref.get()} for ${deviceDni}")
-        return
-      }
-      Integer prevVal = ref.get()
-      while(incomingSeq > prevVal && !ref.compareAndSet(prevVal, incomingSeq)) {
-        prevVal = ref.get()
-        if(incomingSeq <= prevVal) { logDebug("Ignoring stale RC SEQ=${incomingSeq} <= prev=${prevVal} for ${deviceDni}"); return }
-      }
-    }
-  }
-  Map newSnapshot = parseRcFullSnapshot(xmlBody)
-  if(newSnapshot == null) { return }
-  if(incomingSeq != null && !isReset) {
-    AtomicInteger ref2 = currentRcSeqByDni.get(deviceDni)
-    if(ref2 != null && incomingSeq < ref2.get()) {
-      logDebug("Ignoring RC that became stale during parse SEQ=${incomingSeq} < prev=${ref2.get()} for ${deviceDni}")
-      return
-    }
-  }
-  Map prior = currentRcSnapshotByDni.get(deviceDni)
-  Map merged = new LinkedHashMap()
-  if(prior != null) { merged.putAll(prior) }
-  newSnapshot.each { Object key, Object value -> if(value != null) { merged[key] = value } }
-  currentRcSnapshotByDni[deviceDni] = new LinkedHashMap(merged)
-  if(incomingSeq != null) {
-    AtomicInteger ref2 = currentRcSeqByDni.get(deviceDni)
-    if(ref2 != null) { ref2.set(incomingSeq) } else { currentRcSeqByDni.put(deviceDni, new AtomicInteger(incomingSeq)) }
-  }
-  if(sidKey != null) { currentRcSidByDni[deviceDni] = sidKey }
-  applyRcSnapshotIfDifferent(merged)
-  // RC snapshot canonical in currentRcSnapshotByDni + device data (rcSnapshotJson); no Current State publication
-}
-
-Integer deriveBalanceFromStereo(Integer lf, Integer rf) {
-  if(lf == null && rf == null) { return null }
-  Integer effectiveLF = lf != null ? lf : 100
-  Integer effectiveRF = rf != null ? rf : 100
-  if(effectiveLF < 100) { return ((100 - effectiveLF) / 5) as Integer }
-  else if(effectiveRF < 100) { return -((100 - effectiveRF) / 5) as Integer }
-  return 0
-}
-
-Boolean applyRcSnapshotIfDifferent(Map snap) {
-  if(snap == null) { return false }
-  Map prior = null
-  try {
-    String json = device.getDataValue('rcSnapshotJson')?.toString()
-    if(json) { prior = (Map)getSharedJsonSlurper().parseText(json) }
-  } catch(Exception ignored) { prior = null }
-  Integer newVolume = snap.volumeMaster != null ? (snap.volumeMaster as Integer) : null
-  Integer priorVolume = prior?.volumeMaster != null ? (prior.volumeMaster as Integer) : null
-  Integer newLF = snap.volumeLF != null ? (snap.volumeLF as Integer) : null
-  Integer newRF = snap.volumeRF != null ? (snap.volumeRF as Integer) : null
-  Integer priorLF = prior?.volumeLF != null ? (prior.volumeLF as Integer) : null
-  Integer priorRF = prior?.volumeRF != null ? (prior.volumeRF as Integer) : null
-  Integer newBalance = deriveBalanceFromStereo(newLF, newRF)
-  Integer priorBalance = deriveBalanceFromStereo(priorLF, priorRF)
-  String newMute = snap.muteMaster?.toString()
-  String priorMute = prior?.muteMaster?.toString()
-  Integer newBass = snap.bass != null ? (snap.bass as Integer) : null
-  Integer priorBass = prior?.bass != null ? (prior.bass as Integer) : null
-  Integer newTreble = snap.treble != null ? (snap.treble as Integer) : null
-  Integer priorTreble = prior?.treble != null ? (prior.treble as Integer) : null
-  String newLoudness = snap.loudness?.toString()
-  String priorLoudness = prior?.loudness?.toString()
-  String newNightMode = snap.nightMode?.toString()
-  String priorNightMode = prior?.nightMode?.toString()
-  String newDialogLevel = snap.dialogLevel?.toString()
-  String priorDialogLevel = prior?.dialogLevel?.toString()
-  Boolean volumeChanged = newVolume != null && newVolume != priorVolume
-  Boolean balanceChanged = newBalance != null && newBalance != priorBalance
-  Boolean muteChanged = newMute != null && newMute != priorMute
-  Boolean bassChanged = newBass != null && newBass != priorBass
-  Boolean trebleChanged = newTreble != null && newTreble != priorTreble
-  Boolean loudnessChanged = newLoudness != null && newLoudness != priorLoudness
-  Boolean nightModeChanged = newNightMode != null && newNightMode != priorNightMode
-  Boolean dialogLevelChanged = newDialogLevel != null && newDialogLevel != priorDialogLevel
-  Boolean captureChanged = false
-  List<String> captureKeys = ['muteLF', 'muteRF', 'outputFixed', 'speakerSize', 'subGain',
-    'subCrossover', 'subPolarity', 'subEnabled', 'sonarEnabled', 'sonarCalibrationAvailable', 'presetNameList']
-  for(String key : captureKeys) {
-    if(!captureChanged && snap[key] != null && snap[key].toString() != (prior?.get(key)?.toString())) { captureChanged = true }
-  }
-  try { device.updateDataValue('rcSnapshotJson', JsonOutput.toJson(snap)) } catch(Exception ignored) {}
-  if(!volumeChanged && !balanceChanged && !muteChanged && !bassChanged && !trebleChanged &&
-    !loudnessChanged && !nightModeChanged && !dialogLevelChanged && !captureChanged) { return false }
-  if(volumeChanged) { setPlayerVolume(newVolume) }
-  if(balanceChanged) { setBalanceState(newBalance) }
-  if(muteChanged) { setMuteState(newMute) }
-  if(bassChanged) { setBassState(newBass) }
-  if(trebleChanged) { setTrebleState(newTreble) }
-  if(loudnessChanged) { setLoudnessState(newLoudness) }
-  if(nightModeChanged) { setNightModeState(newNightMode) }
-  if(dialogLevelChanged) { setDialogLevelState(newDialogLevel) }
-  return true
 }
 
 @CompileStatic
@@ -6471,97 +5688,22 @@ Boolean isPlausibleXmlPayload(String payload) {
   return normalized != '' && normalized.startsWith('<')
 }
 
-@CompileStatic
 Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGroupedRincons) {
-  if(!isPlausibleXmlPayload(xmlString)) {
-    logDebug('Ignoring blank or non-XML ZGT property set')
-    return false
-  }
-  Map topology = parseZoneGroupTopologySnapshot(xmlString, getId())
-  return processZoneGroupTopologySnapshot(topology, oldGroupedRincons)
-}
-
-@CompileStatic
-Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
-  if(topology == null) { return false }
-  if(topology.playerFound != true) {
-    logDebug("Player ${getId()} not found in ZoneGroupTopology!")
-    return true
-  }
-
-  List<String> memberIds = topology.visibleMemberIds as List<String>
-  LinkedHashSet<String> groupedRincons = new LinkedHashSet<String>(memberIds ?: [])
-  logDebug("Reconciling topology snapshot; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, coordinator=${topology.coordinatorId}, groupId=${topology.groupId}, groupName=${topology.groupName}, memberNames=${topology.memberNames}, priorMembers=${oldGroupedRincons}, currentCount=${this.device.currentValue('groupMemberCount', true)}, currentIsGrouped=${this.device.currentValue('isGrouped', true)}, currentNames=${this.device.currentValue('groupMemberNames', true)}")
-  if(groupedRincons.size() == 0) {
-    logDebug("No grouped rincons found!")
-  }
-
-  String currentGroupCoordinatorRincon = topology.coordinatorId as String
-  String currentGroupCoordinatorName = topology.coordinatorName as String
-  if(currentGroupCoordinatorName) {setGroupCoordinatorName(currentGroupCoordinatorName)}
-  if(currentGroupCoordinatorRincon) {setGroupCoordinatorId(currentGroupCoordinatorRincon)}
-
-  Boolean isGroupCoordinator = currentGroupCoordinatorRincon == getId()
-
-  if(groupedRincons != oldGroupedRincons) {
-    logDebug('ZGT message parsed, group member changes found.')
-  } else {
-    logDebug('ZGT message parsed, no group member changes.')
-  }
-
-  setGroupPlayerIds(groupedRincons.toList())
-
-  List<String> currentGroupMemberNames = topology.memberNames as List<String>
-  Integer currentGroupMemberCount = groupedRincons.size()
-
-  String groupName = topology.groupName as String
-  if(groupName && groupedRincons) {
-    updateZoneGroupName(groupName)
-  }
-
-  setIsGrouped(currentGroupMemberCount > 1)
-  setGroupMemberCount(currentGroupMemberCount)
-  if(currentGroupMemberNames.size() > 0) {setGroupMemberNames(currentGroupMemberNames.toList())}
-  if(groupName) {setGroupName(groupName)}
-
-  logDebug("Topology reconciliation queued; dni=${device.getDeviceNetworkId()}, members=${groupedRincons}, expectedCount=${currentGroupMemberCount}, expectedIsGrouped=${currentGroupMemberCount > 1 ? 'on' : 'off'}, expectedNames=${currentGroupMemberNames}, expectedGroupName=${groupName}, pendingLocalEvents=${pendingLocalDeviceEvents.get(device.getDeviceNetworkId())?.size() ?: 0}")
-
-  if(processBatteryStatusChildDeviceMessages()) {
-    Map<String, String> batteryData = topology.batteryData as Map<String, String>
-    if(batteryData != null && batteryData.containsKey('BattTmp') && batteryData.containsKey('BattPct') && batteryData.containsKey('BattChg')) {
-      Integer battery = batteryData['BattPct'] as Integer
-      String powerSource = batteryData['BattChg'] == 'NOT_CHARGING' ? 'battery' : 'mains'
-      BigDecimal temperature = new BigDecimal(batteryData['BattTmp'])
-      updateChildBatteryStatus(battery, powerSource, temperature)
-    }
-  }
+  if(!isPlausibleXmlPayload(xmlString)) { return false }
+  Map snapshot = parseZgtFullSnapshot(xmlString)
+  if(snapshot == null) { return false }
+  Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
+  String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+  queueParsedUpnpRelay([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
   return true
 }
 
-@CompileStatic
-void clearCurrentPlayingStates() {
-  String playerDni = device.getDeviceNetworkId()
-  lastMetadataContainerId.remove(playerDni)
-  lastPlaybackState.remove(playerDni)
-  setCurrentArtistName('Not Available')
-  setCurrentAlbumName('Not Available')
-  setCurrentTrackName('Not Available')
-  setCurrentTrackNumber(0)
-  setTrackDataEvents([:])
-  setNextArtistName('Not Available')
-  setNextAlbumName('Not Available')
-  setNextTrackName('Not Available')
-  setNextTrackAlbumArtURI('Not Available', false)
-  // Artwork attributes are owned by the app's UPnP fanout.
-  if(shouldQueuePlayerAttributeUpdate('audioSource', 'Not Available', this.device.currentValue('audioSource'))) {
-    queuePlayerAttributeUpdate('audioSource', 'Not Available')
-  }
-  if(shouldQueuePlayerAttributeUpdate('currentFavorite', 'Not Available', this.device.currentValue('currentFavorite'))) {
-    queuePlayerAttributeUpdate('currentFavorite', 'Not Available')
-  }
-  if(shouldQueuePlayerAttributeUpdate('trackDescription', 'Not Available', this.device.currentValue('trackDescription'))) {
-    queuePlayerAttributeUpdate('trackDescription', 'Not Available')
-  }
+Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
+  if(topology == null || !(topology.groups instanceof List)) { return false }
+  Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)topology.groups)
+  String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
+  queueParsedUpnpRelay([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
+  return true
 }
 
 @CompileStatic
@@ -7025,20 +6167,6 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
         logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
-        if(request.sidKey == 'sid4' && request.operation == 'subscribe') {
-          String grcDni = device.getDeviceNetworkId()?.toString()
-          if(grcDni) {
-            currentGrcSeqByDni.remove(grcDni)
-            currentGrcSidByDni.remove(grcDni)
-          }
-        }
-        if(request.sidKey == 'sid2' && request.operation == 'subscribe') {
-          String rcDni = device.getDeviceNetworkId()?.toString()
-          if(rcDni) {
-            currentRcSeqByDni.remove(rcDni)
-            currentRcSidByDni.remove(rcDni)
-          }
-        }
         if(request.sidKey == 'sid3') {
           logDebug("ZGT subscription ${request.operation} accepted with SID, device-data zgtSub updated")
         }
@@ -7827,9 +6955,7 @@ Boolean shouldQueuePlayerAttributeUpdate(String name, Object value, Object curre
   String dni = device.getDeviceNetworkId()
   ConcurrentHashMap<String, Object> localPending = pendingLocalDeviceEvents.get(dni)
   if(localPending?.containsKey(name) && localPending.get(name) != value) { return true }
-  ConcurrentHashMap<String, Object> groupPending = pendingGroupDeviceUpdates.get(dni)
-  String groupAttribute = name == 'groupVolume' ? '_groupVolume' : (name == 'groupMute' ? '_groupMute' : name)
-  return groupPending?.containsKey(groupAttribute) && groupPending.get(groupAttribute) != value
+  return false
 }
 
 /** Ensure a callback exists for all pending local events. A stale state flag
@@ -8137,7 +7263,6 @@ void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
 void verifyPendingPublicationDrains() {
   String dni = device?.getDeviceNetworkId()
   ConcurrentHashMap<String, Object> local = dni ? pendingLocalDeviceEvents.get(dni) : null
-  ConcurrentHashMap<String, Object> group = dni ? pendingGroupDeviceUpdates.get(dni) : null
   Map component = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
   if(local == null || local.isEmpty()) {
@@ -8145,10 +7270,8 @@ void verifyPendingPublicationDrains() {
     state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
   }
   if(local != null && !local.isEmpty()) { scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS) }
-  if(group != null && !group.isEmpty()) { scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS) }
   if(!component.isEmpty()) { scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS) }
-  if((local != null && !local.isEmpty()) ||
-      (group != null && !group.isEmpty()) || !component.isEmpty()) {
+  if((local != null && !local.isEmpty()) || !component.isEmpty()) {
     runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
   }
 }
@@ -8213,24 +7336,8 @@ void setGroupId(String groupId) {
   if(oldGroupId == groupId) { return }
   setDeviceDataValue('groupId', groupId)
   queuePlayerAttributeUpdate('groupId', groupId)
-  // Refresh coordinator AVTransport state after the topology transition.
-  if(getIsGroupCoordinator() == true) {
-    runIn(1, 'refreshCoordinatorPlaybackState', [data:[groupId:groupId], overwrite:true])
-  }
 }
 
-void refreshCoordinatorPlaybackState(Map data = null) {
-  if(getIsGroupCoordinator() != true) {
-    logDebug('Skipping delayed group subscription because this player is no longer the coordinator')
-    return
-  }
-  String groupId = data?.groupId
-  if(groupId != null && groupId != '') {
-    subscribeToAVTransport()
-    getPlaybackStatus()
-    getPlaybackMetadataStatus()
-  }
-}
 @CompileStatic
 Boolean isCurrentlySubcribedToAudioClipWS() { return getWsSubscriptionValue('audioClip') == 'Subscribed' }
 String getGroupName() {
@@ -8290,9 +7397,8 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
 
   if(isGroupCoordinator && !previouslyWasGroupCoordinator) {
     if(!subValid('sid1')) {
-      clearCurrentPlayingStates()
       subscribeToCoordinatorSubs()
-      logDebug('Just became group coordinator, subscribing to AVT.')
+      logDebug('Just became group coordinator, subscribing to AVT; parent topology reconciliation owns playback state clearing.')
     }
   } else if(!isGroupCoordinator && previouslyWasGroupCoordinator) {
       logDebug("Just added to group!")
@@ -8302,7 +7408,6 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
 
 void subscribeToCoordinatorSubs() {
   runIn(2, 'subscribeToAVTransport', [overwrite: true])
-  runIn(2, 'getPlaybackMetadataStatus', [overwrite: true])
   runIn(2, 'playerGetGroupsFull', [overwrite: true])
 }
 
@@ -8458,7 +7563,6 @@ void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
   if(!audioSourceChanged) { return }
   queuePlayerAttributeUpdate('audioSource', audioSourceUrl)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([audioSource: audioSourceUrl])
 }
 
 String getAlbumArtURI() {
@@ -8469,7 +7573,6 @@ void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String found
   if(isFav) {
     Map<String, Object> value = [label: "Favorite #${foundFavId} ${foundFavName}", imageUrl: foundFavImageUrl ?: '']
     queuePlayerAttributeUpdate('currentFavorite', value)
-    queueGroupDeviceUpdate([currentFavorite: value])
   } else {
     setCurrentFavorite('No favorite playing')
   }
@@ -8479,7 +7582,6 @@ void setCurrentFavorite(String uri) {
   if(!shouldQueuePlayerAttributeUpdate('currentFavorite', uri, getCurrentFavorite())) { return }
   queuePlayerAttributeUpdate('currentFavorite', uri)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentFavorite: uri])
 }
 String getCurrentFavorite() {
   return this.device.currentValue('currentFavorite', true)
@@ -8498,7 +7600,6 @@ void setCurrentPlaylist(String uri) {
   if(!shouldQueuePlayerAttributeUpdate('currentPlaylist', uri, getCurrentPlaylist())) { return }
   queuePlayerAttributeUpdate('currentPlaylist', uri)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentPlaylist: uri])
 }
 
 String getCurrentPlaylist() {
@@ -8536,7 +7637,6 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
   queuePlayerAttributeUpdate('status', status)
   queuePlayerAttributeUpdate('transportStatus', status)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([status: status, transportStatus: status])
 }
 String getTransportStatus() {
   return this.device.currentValue('transportStatus')
@@ -8634,11 +7734,6 @@ void setPlayMode(String playMode){
   sendChildEvent(getRepeatAllControlChild(), 'switch', newRepeatAll)
   sendChildEvent(getShuffleControlChild(), 'switch', newShuffle)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([
-    currentRepeatOneMode: newRepeatOne,
-    currentRepeatAllMode: newRepeatAll,
-    currentShuffleMode: newShuffle
-  ])
 }
 
 String getCurrentRepeatOneMode() { return this.device.currentValue('currentRepeatOneMode') }
@@ -8651,7 +7746,6 @@ void setCrossfadeMode(String currentCrossfadeMode) {
   queuePlayerAttributeUpdate('currentCrossfadeMode', currentCrossfadeMode)
   sendChildEvent(getCrossfadeControlChild(), 'switch', currentCrossfadeMode)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentCrossfadeMode: currentCrossfadeMode])
 }
 String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMode') }
 
@@ -8661,7 +7755,6 @@ void setCurrentTrackDuration(String currentTrackDuration){
     queuePlayerAttributeUpdate('currentTrackDuration', currentTrackDuration)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentTrackDuration: currentTrackDuration])
 }
 String getCurrentTrackDuration() { return this.device.currentValue('currentTrackDuration') }
 
@@ -8711,7 +7804,6 @@ void setTrackPosition(Long positionSeconds, Long updatedAt) {
   }
   // Keep group devices independent: their own preference decides whether they
   // apply these coordinator updates, even when this player suppresses its event.
-  queueGroupDeviceUpdate([trackPosition: positionSeconds, trackPositionUpdated: updatedAt])
 }
 
 Long getTrackPosition() { return this.device.currentValue('trackPosition') as Long }
@@ -8724,7 +7816,6 @@ void setCurrentArtistName(String currentArtistName) {
     queuePlayerAttributeUpdate('currentArtistName', value)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentArtistName: value])
 }
 String getCurrentArtistName() { return this.device.currentValue('currentArtistName') }
 
@@ -8735,7 +7826,6 @@ void setCurrentAlbumName(String currentAlbumName) {
     queuePlayerAttributeUpdate('currentAlbumName', value)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentAlbumName: value])
 }
 String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName') }
 
@@ -8746,7 +7836,6 @@ void setCurrentTrackName(String currentTrackName) {
     queuePlayerAttributeUpdate('currentTrackName', value)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentTrackName: value])
 }
 String getCurrentTrackName() { return this.device.currentValue('currentTrackName') }
 
@@ -8757,7 +7846,6 @@ void setCurrentTrackNumber(Integer currentTrackNumber) {
     queuePlayerAttributeUpdate('currentTrackNumber', value)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([currentTrackNumber: value])
   observeTransportTrackNumber(value)
 }
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
@@ -8781,7 +7869,6 @@ void setTrackDescription(String trackDescription) {
     queuePlayerAttributeUpdate('trackDescription', trackDescription)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([trackDescription: trackDescription])
 
 }
 String getTrackDescription() { return this.device.currentValue('trackDescription') }
@@ -8793,7 +7880,6 @@ void setTrackDataEvents(Map trackData) {
     queuePlayerAttributeUpdate('trackData', trackDataJson)
   }
   // Queue for batched group device update
-  queueGroupDeviceUpdate([trackData: trackDataJson])
 }
 String getTrackDataEvents() {return this.device.currentValue('trackData')}
 
@@ -8803,7 +7889,6 @@ void setNextArtistName(String nextArtistName) {
   if(!shouldQueuePlayerAttributeUpdate('nextArtistName', value, getNextArtistName())) { return }
   queuePlayerAttributeUpdate('nextArtistName', value)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([nextArtistName: value])
 }
 String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 
@@ -8813,7 +7898,6 @@ void setNextAlbumName(String nextAlbumName) {
   if(!shouldQueuePlayerAttributeUpdate('nextAlbumName', value, getNextAlbumName())) { return }
   queuePlayerAttributeUpdate('nextAlbumName', value)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([nextAlbumName: value])
 }
 String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 
@@ -8823,7 +7907,6 @@ void setNextTrackName(String nextTrackName) {
   if(!shouldQueuePlayerAttributeUpdate('nextTrackName', value, getNextTrackName())) { return }
   queuePlayerAttributeUpdate('nextTrackName', value)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([nextTrackName: value])
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 
@@ -8833,7 +7916,6 @@ void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocal
   if(!shouldQueuePlayerAttributeUpdate('nextTrackAlbumArtURI', rawUri, getNextTrackAlbumArtURI())) { return }
   queuePlayerAttributeUpdate('nextTrackAlbumArtURI', rawUri)
   // Queue for batched group device update
-  queueGroupDeviceUpdate([nextTrackAlbumArtURI: rawUri])
 }
 String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
 
@@ -9005,116 +8087,6 @@ void setWebSocketStatus(String status) {
 }
 
 /** Queue latest group-facing values behind a fixed maximum-wait drain. */
-synchronized void queueGroupDeviceUpdate(Map attributes) {
-  String dni = device.getDeviceNetworkId()
-  if(!attributes || attributes.isEmpty()) { return }
-  groupDeviceUpdateRetryAttempts.remove(dni)
-  if(!pendingGroupDeviceUpdates.containsKey(dni)) {
-    pendingGroupDeviceUpdates[dni] = new ConcurrentHashMap<String, Object>()
-  }
-  ConcurrentHashMap<String, Object> pending = pendingGroupDeviceUpdates[dni]
-  attributes.each { k, v -> if(v != null) { pending.put(k as String, v) } }
-  scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS)
-}
-
-private void scheduleGroupDeviceUpdateDrain(Integer delayMs) {
-  // The persisted marker can outlive its Hubitat job (for example, across a
-  // driver update or scheduler recovery). Always replace/create the job when
-  // new work arrives so a stale true marker cannot strand playback state.
-  state[GROUP_DEVICE_UPDATE_SCHEDULED_KEY] = true
-  runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
-  runInMillis(delayMs, 'flushPendingGroupDeviceUpdates', [overwrite: true])
-}
-
-Map<String, Object> getPendingGroupDeviceUpdateSnapshot(String dni) {
-  ConcurrentHashMap<String, Object> pending = pendingGroupDeviceUpdates[dni]
-  if(pending == null || pending.isEmpty()) {
-    return [:]
-  }
-  return new LinkedHashMap<String, Object>(pending)
-}
-
-void clearFlushedGroupDeviceUpdates(String dni, Map<String, Object> flushedAttributes) {
-  if(flushedAttributes == null || flushedAttributes.isEmpty()) { return }
-
-  ConcurrentHashMap<String, Object> pending = pendingGroupDeviceUpdates[dni]
-  if(pending == null || pending.isEmpty()) { return }
-
-  flushedAttributes.each { String attrName, Object attrValue ->
-    if(pending[attrName] == attrValue) {
-      pending.remove(attrName)
-    }
-  }
-}
-
-/**
- * Flush all pending group device updates in a single consolidated path.
- * Forwards queued attributes to BOTH follower player devices AND group devices,
- * replacing the former dual-path architecture (sendGroupEvents + queueGroupDeviceUpdate).
- * Called at a fixed maximum-wait deadline, then at a bounded cadence if needed.
- */
-void flushPendingGroupDeviceUpdates() {
-  String dni = device.getDeviceNetworkId()
-  state.remove(GROUP_DEVICE_UPDATE_SCHEDULED_KEY)
-  Boolean isCoordinator = getIsGroupCoordinator()
-  if(!isCoordinator) {
-    pendingGroupDeviceUpdates.remove(dni)
-    groupDeviceUpdateRetryAttempts.remove(dni)
-    return
-  }
-  Map<String, Object> pendingSnapshot = getPendingGroupDeviceUpdateSnapshot(dni)
-  if(!pendingSnapshot || pendingSnapshot.isEmpty()) {
-    pendingGroupDeviceUpdates.remove(dni)
-    return
-  }
-  String coordinatorId = getId()
-  logDebug("flushPendingGroupDeviceUpdates: Forwarding ${pendingSnapshot.size()} attributes to followers and group devices")
-
-  try {
-    // Collect follower updates for one asynchronous delivery to the app.
-    List<String> followerDNIs = getGroupFollowerDNIs()
-    Map<String, Object> followerAttrs = new LinkedHashMap<String, Object>(pendingSnapshot)
-    if(followerAttrs.containsKey('_groupVolume')) { followerAttrs['groupVolume'] = followerAttrs.remove('_groupVolume') }
-    if(followerAttrs.containsKey('_groupMute')) { followerAttrs['groupMute'] = followerAttrs.remove('_groupMute') }
-
-    // Extract volume-specific keys and build volume attrs map for group devices
-    Map<String, Object> playbackAttrs = new LinkedHashMap<String, Object>(pendingSnapshot)
-    Map volumeAttrs = null
-    try {
-      Object rawVol = playbackAttrs.remove('_groupVolume')
-      Object rawMute = playbackAttrs.remove('_groupMute')
-      if(rawVol != null || rawMute != null) {
-        Integer vol = rawVol != null ? rawVol as Integer : (getGroupVolumeState() ?: 0)
-        String mute = rawMute != null ? rawMute as String : getGroupMuteState()
-        // Do not include 'switch' here — the parent app's updateGroupDevices() is the
-        // sole authority on group device switch state because it checks exact membership.
-        // Including switch here caused the player's broad "isGrouped" check to override
-        // the parent's more precise determination, leaking playback attributes through
-        // the guard when the group device should be inactive.
-        volumeAttrs = [volume: vol, mute: mute]
-      }
-    } catch(Exception e) {
-      logWarn("Error preparing volume state for group devices: ${e.message}")
-    }
-
-    // Publish the full playback snapshot through the parent app. The app owns
-    // all group device sendEvent calls; subscriptions cover only a small subset
-    // of attributes and cannot replace this complete batch.
-    parent.flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrs)
-    clearFlushedGroupDeviceUpdates(dni, pendingSnapshot)
-    groupDeviceUpdateRetryAttempts.remove(dni)
-    ConcurrentHashMap<String, Object> remaining = pendingGroupDeviceUpdates[dni]
-    if(remaining != null && !remaining.isEmpty()) {
-      scheduleGroupDeviceUpdateDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
-    }
-  } catch(Exception e) {
-    logWarn("Error flushing pending group device updates for ${device.displayName}: ${e.message}")
-    Integer attempt = groupDeviceUpdateRetryAttempts.get(dni) ?: 0
-    groupDeviceUpdateRetryAttempts.put(dni, attempt + 1)
-    scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_RETRY_MS)
-  }
-}
-
 @CompileStatic
 Boolean isGroupedFollowerForPlayback() {
   return getGroupPlayerIds().size() > 1 && !getIsGroupCoordinator()
@@ -9876,37 +8848,6 @@ void retryAudioClipSubscription() {
   if(runtimeState.audioClipPlaying == true && runtimeState.activeAudioClipCorrelationId &&
       isCurrentlySubcribedToAudioClipWS() != true && runtimeState.audioClipSubscriptionRequestPending != true && isWebsocketConnected()) {
     subscribeToAudioClip()
-  }
-}
-
-@CompileStatic
-void getPlaybackMetadataStatus() {
-  String host = getLocalUpnpHostForGroupOperation()
-  if(!host) { logWarn('Cannot query playback metadata: local UPnP host is unavailable'); return }
-  Map params = getSoapActionParams(host, AVTransport, 'GetPositionInfo')
-  postAsyncHttp('playbackMetadataSoapCallback', params)
-}
-
-void playbackMetadataSoapCallback(AsyncResponse response, Map data = null) {
-  if(response?.status != 200 || response.hasError()) {
-    logWarn("UPnP playback-metadata query failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
-    String metadata = findSoapBodyField(envelope, 'TrackMetaData')
-    Map snapshot = [hasTrack: true, track: findSoapBodyField(envelope, 'Track'),
-        hasCurrentTrackURI: true, currentTrackURI: findSoapBodyField(envelope, 'TrackURI'),
-        hasCurrentTrackDuration: true, currentTrackDuration: findSoapBodyField(envelope, 'TrackDuration'),
-        hasCurrentTrackMetaData: true, currentTrackMetaDataRaw: metadata,
-        currentTrackMetaData: parseAvtMetaData(metadata), observedAt: now()]
-    Map prior = runtimeState.lastTransportPlaybackSnapshot instanceof Map
-        ? (Map)runtimeState.lastTransportPlaybackSnapshot : [:]
-    snapshot.transportState = prior.transportState
-    snapshot.enqueuedTransportURI = prior.enqueuedTransportURI
-    applyAvtSnapshotIfDifferent(snapshot)
-  } catch(Exception e) {
-    logWarn("Could not parse UPnP playback-metadata response: ${e.message}")
   }
 }
 

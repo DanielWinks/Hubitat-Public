@@ -287,17 +287,6 @@ metadata {
       input 'enableTrackPositionUpdates', 'bool',
         title: 'Enable track position updates',
         required: false, defaultValue: false
-      input 'disableAlbumArtEvents', 'bool',
-        title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)',
-        required: false, defaultValue: true
-      input 'onlyUpdateWhenActive', 'bool',
-        title: 'Only update state when group is active',
-        description: 'When enabled, playback state updates are skipped when the group\'s configured speakers are not all grouped together in Sonos. Reduces hub load when many groups share a coordinator.',
-        required: false, defaultValue: true
-      input 'resetAttributesWhenInactive', 'bool',
-        title: 'Reset attributes when group becomes inactive',
-        description: 'When enabled, playback attributes (track name, artist, album art, etc.) are cleared when the group\'s speakers are no longer grouped together. Shows a clean state on dashboards.',
-        required: false, defaultValue: true
     }
     section('Logging Settings') {
       input 'logLevel', 'enum',
@@ -335,8 +324,6 @@ Boolean getChimeBeforeStandardPriorityTTSSetting() {
 Boolean getChimeBeforeHighPriorityTTSSetting() { return settings.chimeBeforeHighPriorityTTS != null ? settings.chimeBeforeHighPriorityTTS : false }
 Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
-Boolean getOnlyUpdateWhenActiveSetting() { return settings.onlyUpdateWhenActive != null ? settings.onlyUpdateWhenActive : true }
-Boolean getResetAttributesWhenInactiveSetting() { return settings.resetAttributesWhenInactive != null ? settings.resetAttributesWhenInactive : true }
 Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
 
 // =============================================================================
@@ -540,8 +527,6 @@ void applyInitializationDefaults() {
     settings.chimeBeforeStandardPriorityTTS = settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
   }
   if(settings.chimeBeforeHighPriorityTTS == null) { settings.chimeBeforeHighPriorityTTS = false }
-  if(settings.onlyUpdateWhenActive == null) { settings.onlyUpdateWhenActive = true }
-  if(settings.resetAttributesWhenInactive == null) { settings.resetAttributesWhenInactive = true }
   if(settings.enableTrackPositionUpdates == null) { settings.enableTrackPositionUpdates = false }
 }
 

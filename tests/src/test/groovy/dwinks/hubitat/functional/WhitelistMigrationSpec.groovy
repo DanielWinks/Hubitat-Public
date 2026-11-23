@@ -181,7 +181,7 @@ class WhitelistMigrationSpec extends Specification {
 
     then:
     playerDriver.state.containsKey('pendingParentAppTtsRequests')
-    playerDriver.state.containsKey('pendingBatchEvents')
+    !playerDriver.state.containsKey('pendingBatchEvents')
     playerDriver.state.containsKey('lastError')
     !playerDriver.state.containsKey('orphanState')
   }
@@ -269,7 +269,7 @@ class WhitelistMigrationSpec extends Specification {
     groupDriver.pruneOrphanedGroupPersistence()
 
     then:
-    groupDriver.state.containsKey('pendingBatchEvents')
+    !groupDriver.state.containsKey('pendingBatchEvents')
     !groupDriver.state.containsKey('orphanState')
     groupDriver.device.dataValues.containsKey('groupCoordinatorId')
     !groupDriver.device.dataValues.containsKey('orphanData')

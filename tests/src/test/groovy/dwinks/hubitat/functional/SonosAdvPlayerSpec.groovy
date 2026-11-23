@@ -14,6 +14,16 @@ import spock.lang.Specification
 
 class SonosAdvPlayerSpec extends Specification {
 
+  @Shared HubitatScriptHarness driver
+  @Shared List<String> websocketMessages = []
+  @Shared List<Map> rawConnections = []
+  @Shared List<Map> parentPlayerUpdates = []
+  @Shared List<Map> parentPlayerRequests = []
+  @Shared List<Map> parentPlayerPresence = []
+  @Shared List<List> websocketConnections = []
+  @Shared List<String> rawRequests = []
+  @Shared Object rawSocket
+
   void seedUpnpFavorite(String favoriteId, String uri = "x-sonos-http:song%3a${favoriteId}.mp4?sid=204&flags=8232&sn=9") {
     driver.device.dataValues.localUpnpHost = '192.168.1.50'
     driver.device.dataValues.isGroupCoordinator = 'true'
@@ -31,20 +41,6 @@ class SonosAdvPlayerSpec extends Specification {
       upnpMetadata: '<DIDL-Lite><item id="SQ:' + playlistId + '"><dc:title>Playlist ' + playlistId + '</dc:title></item></DIDL-Lite>']
   }
 
-  def "settings save requests the full current playback metadata snapshot"() {
-    given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
-    driver.asyncCalls.clear()
-
-    when:
-    driver.handleSettingsUpdate()
-
-    then:
-    driver.asyncCalls.any { Map call ->
-      call.params?.headers?.SOAPAction == 'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo'
-    }
-  }
-
   void queueTestGroupSocketCommand(Integer marker = 10) {
     driver.device.dataValues.websocketStatus = 'open'
     driver.sendWsMessage(JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RINCON_TEST'],
@@ -52,22 +48,10 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   void seedGroupTopology(String coordinatorId, Map<String, String> hostByPlayer) {
-    // Driver stores no topology; only the transient host cache + coordinator data value remain.
-    // Hosts carry the UPnP port exactly as parsed member Location strings do in production.
     driver.zgtMemberHostByPlayerId.clear()
     hostByPlayer.each { String playerId, String host -> driver.zgtMemberHostByPlayerId[playerId] = "${host}:1400" }
     driver.device.dataValues.groupCoordinatorId = coordinatorId
   }
-
-  @Shared HubitatScriptHarness driver
-  @Shared List<String> websocketMessages = []
-  @Shared List<Map> rawConnections = []
-  @Shared List<Map> parentPlayerUpdates = []
-  @Shared List<Map> parentPlayerRequests = []
-  @Shared List<Map> parentPlayerPresence = []
-  @Shared List<List> websocketConnections = []
-  @Shared List<String> rawRequests = []
-  @Shared Object rawSocket
 
   def "local SOAP helpers build requests without mutating service defaults"() {
     given:
@@ -588,57 +572,6 @@ class SonosAdvPlayerSpec extends Specification {
     !playerStateMessages().any { Map update -> update.kind != 'deviceAttributes' }
   }
 
-  def "track position publishes on playback changes and seek but ignores normal progress heartbeats"() {
-    given:
-    driver.settings.enableTrackPositionUpdates = true
-    driver.device.dataValues.isGroupCoordinator = 'true'
-    Long firstObservedAt = 100000L
-    driver.metaClass.now = { -> firstObservedAt }
-
-    when: 'the first playing status establishes the position'
-    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
-      itemId: 'item-1', positionMillis: 12345L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
-
-    then:
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPosition == 12L
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPositionUpdated == firstObservedAt
-    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPosition == 12L
-
-    when: 'ordinary elapsed progress matches the elapsed wall time'
-    driver.pendingLocalDeviceEvents.remove('SONOS-TEST-DNI')
-    driver.pendingGroupDeviceUpdates.remove('SONOS-TEST-DNI')
-    firstObservedAt = 105000L
-    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
-      itemId: 'item-1', positionMillis: 17345L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
-
-    then:
-    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
-    !driver.pendingGroupDeviceUpdates.containsKey('SONOS-TEST-DNI')
-
-    when: 'a seek is reported while playback remains active'
-    firstObservedAt = 106000L
-    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
-      itemId: 'item-1', positionMillis: 45000L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
-
-    then:
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPosition == 45L
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPositionUpdated == firstObservedAt
-
-    when: 'the track changes'
-    driver.pendingLocalDeviceEvents.remove('SONOS-TEST-DNI')
-    firstObservedAt = 107000L
-    driver.setTrackPositionFromPlaybackStatus([playbackState: 'PLAYBACK_STATE_PLAYING',
-      itemId: 'item-2', positionMillis: 800L], 'PLAYBACK_STATE_PLAYING', firstObservedAt)
-
-    then:
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPosition == 0L
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].trackPositionUpdated == firstObservedAt
-
-    cleanup:
-    GroovySystem.metaClassRegistry.removeMetaClass(driver.getClass())
-    driver.metaClass = null
-  }
-
   def "track position updates default off when the preference is null"() {
     given:
     driver.settings.remove('enableTrackPositionUpdates')
@@ -651,37 +584,6 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.settings.enableTrackPositionUpdates == false
-  }
-
-  def "disabling track position updates clears existing player attributes"() {
-    given:
-    driver.settings.enableTrackPositionUpdates = false
-    driver.device.dataValues.enableTrackPositionUpdates = 'true'
-    driver.device.currentValues.trackPosition = 84L
-    driver.device.currentValues.trackPositionUpdated = 123456L
-
-    when:
-    driver.synchronizeTrackPositionPreference()
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.device.currentValues.trackPosition == 0L
-    driver.device.currentValues.trackPositionUpdated == 0L
-    driver.device.dataValues.enableTrackPositionUpdates == 'false'
-  }
-
-  def "disabled player position preference suppresses its events while retaining group updates"() {
-    given:
-    driver.settings.enableTrackPositionUpdates = false
-    driver.device.dataValues.isGroupCoordinator = 'true'
-
-    when:
-    driver.setTrackPosition(64L, 123456L)
-
-    then:
-    !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
-    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPosition == 64L
-    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackPositionUpdated == 123456L
   }
 
   def "AVTransport and HTControl UPnP report home theater source and input connection"() {
@@ -836,225 +738,6 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     requests.empty
     driver.device.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
-  }
-
-  def "rendering control event updates master volume stereo balance mute and loudness"() {
-    given:
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
-      '&lt;Volume channel="Master" val="42"/&gt;&lt;Volume channel="LF" val="70"/&gt;' +
-      '&lt;Volume channel="RF" val="100"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
-      '&lt;Loudness channel="Master" val="1"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>' +
-      '</property></propertyset>'
-
-    when:
-    driver.processRenderingControlMessages(event)
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [42]
-    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [6]
-    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
-    driver.device.events.findAll { Map item -> item.name == 'loudness' }*.value == ['on']
-  }
-
-  def "partial rendering control event preserves absent values and existing missing channel behavior"() {
-    given:
-    driver.device.currentValues.volume = 25
-    driver.device.currentValues.level = 25
-    driver.device.currentValues.mute = 'unmuted'
-    driver.device.currentValues.loudness = 'off'
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
-      '&lt;Volume channel="LF" val="80"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
-      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.processRenderingControlMessages(event)
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.device.currentValue('volume') == 25
-    driver.device.currentValue('mute') == 'muted'
-    driver.device.currentValue('loudness') == 'off'
-    driver.device.events.findAll { Map item -> item.name == 'volume' }.empty
-    driver.device.events.findAll { Map item -> item.name == 'loudness' }.empty
-    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [4]
-  }
-
-  def "rendering control event with absent stereo channels leaves balance untouched"() {
-    given:
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
-      '&lt;Mute channel="Master" val="0"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>' +
-      '</property></propertyset>'
-
-    when:
-    driver.processRenderingControlMessages(event)
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    // Mute-only payloads carry no stereo channels, so no balance is derived.
-    driver.device.events.findAll { Map item -> item.name == 'balance' }.empty
-    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['unmuted']
-  }
-
-  def "RC initial subscription snapshot captures full control state and emits bridged snapshot"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String sub = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Volume channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Volume channel=&quot;LF&quot; val=&quot;100&quot;/&gt;&lt;Volume channel=&quot;RF&quot; val=&quot;100&quot;/&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Mute channel=&quot;LF&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;RF&quot; val=&quot;0&quot;/&gt;&lt;Bass val=&quot;0&quot;/&gt;&lt;Treble val=&quot;0&quot;/&gt;&lt;Loudness channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;OutputFixed val=&quot;0&quot;/&gt;&lt;SpeakerSize val=&quot;5&quot;/&gt;&lt;SubGain val=&quot;0&quot;/&gt;&lt;SubCrossover val=&quot;0&quot;/&gt;&lt;SubPolarity val=&quot;0&quot;/&gt;&lt;SubEnabled val=&quot;1&quot;/&gt;&lt;SonarEnabled val=&quot;0&quot;/&gt;&lt;SonarCalibrationAvailable val=&quot;0&quot;/&gt;&lt;PresetNameList val=&quot;FactoryDefaults&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', sub, 0, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 1
-    driver.getCurrentRcSnapshot().snapshot.volumeLF == 100
-    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'muted'
-    driver.getCurrentRcSnapshot().snapshot.loudness == 'on'
-    driver.getCurrentRcSnapshot().snapshot.outputFixed == '0'
-    driver.getCurrentRcSnapshot().snapshot.speakerSize == '5'
-    driver.getCurrentRcSnapshot().snapshot.presetNameList == 'FactoryDefaults'
-    driver.getCurrentRcSnapshot().seq == 0
-    driver.getCurrentRcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000105'
-    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [1]
-    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [0]
-    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
-    driver.device.events.findAll { Map item -> item.name == 'loudness' }*.value == ['on']
-    driver.getRcDeviceControlJson().contains('"volumeMaster"')
-    driver.device.getDataValue('rcSnapshotJson')?.contains('"volumeMaster":1')
-  }
-
-  def "RC mute-only update merges without clobbering volume or balance"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String sub = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Volume channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Volume channel=&quot;LF&quot; val=&quot;100&quot;/&gt;&lt;Volume channel=&quot;RF&quot; val=&quot;100&quot;/&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;Mute channel=&quot;LF&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;RF&quot; val=&quot;0&quot;/&gt;&lt;Bass val=&quot;0&quot;/&gt;&lt;Treble val=&quot;0&quot;/&gt;&lt;Loudness channel=&quot;Master&quot; val=&quot;1&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
-    String normal = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;LF&quot; val=&quot;0&quot;/&gt;&lt;Mute channel=&quot;RF&quot; val=&quot;0&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>'
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', sub, 0, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', normal, 1, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 1
-    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'unmuted'
-    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [1]
-    driver.device.events.findAll { Map item -> item.name == 'balance' }*.value == [0]
-    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted', 'unmuted']
-  }
-
-  def "RC SEQ header drops stale payloads without applying"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="10"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
-      20, 'uuid:RINCON_TEST_sub0000000105')
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="99"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
-      19, 'uuid:RINCON_TEST_sub0000000105')
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 10
-    driver.getCurrentRcSnapshot().seq == 20
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="30"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
-      21, 'uuid:RINCON_TEST_sub0000000105')
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 30
-    driver.getCurrentRcSnapshot().seq == 21
-  }
-
-  def "RC SEQ zero and SID change rebaseline after resubscribe"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="10"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
-      20, 'uuid:RINCON_TEST_sub0000000105')
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="77"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
-      0, 'uuid:RINCON_TEST_sub0000000106')
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 77
-    driver.getCurrentRcSnapshot().seq == 0
-    driver.getCurrentRcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000106'
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="88"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>',
-      5, 'uuid:RINCON_TEST_sub0000000107')
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 88
-    driver.getCurrentRcSnapshot().seq == 5
-    driver.getCurrentRcSnapshot().sid == 'uuid:RINCON_TEST_sub0000000107'
-  }
-
-  def "RC invalid field is ignored without dropping sibling value"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
-      '&lt;Volume channel="Master" val="notanumber"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
-      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', event, 0, null)
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == null
-    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'muted'
-    driver.device.events.findAll { Map item -> item.name == 'volume' }.empty
-    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['muted']
-  }
-
-  def "RC blank and duplicate payloads do not requeue local events"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
-      '&lt;Volume channel="Master" val="40"/&gt;&lt;Mute channel="Master" val="0"/&gt;' +
-      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', '   ', 0, null)
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot == null
-    driver.device.events.empty
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', event, 1, null)
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI', event, 2, null)
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [40]
-    driver.device.events.findAll { Map item -> item.name == 'mute' }*.value == ['unmuted']
-  }
-
-  def "legacy RC shim without SEQ still applies the current snapshot"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;' +
-      '&lt;Volume channel="Master" val="55"/&gt;&lt;Mute channel="Master" val="1"/&gt;' +
-      '&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.processRenderingControlMessages(event)
-    driver.flushPendingLocalDeviceEvents()
-
-    then:
-    driver.getCurrentRcSnapshot().snapshot.volumeMaster == 55
-    driver.getCurrentRcSnapshot().snapshot.muteMaster == 'muted'
-    driver.getCurrentRcSnapshot().seq == null
-    driver.device.events.findAll { Map item -> item.name == 'volume' }*.value == [55]
   }
 
   def "unmute skips AirPlay volume restore when saved level is missing or invalid"() {
@@ -1413,84 +1096,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.children[0].currentValues.generation == '0'
   }
 
-  def "sleep timer AVTransport events normalize running state and generation"() {
-    given:
-    driver.children.clear()
-    driver.createRemoveSleepTimerChildDevice(true)
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;SleepTimerState val="SLEEP_TIMER_RUNNING"/&gt;&lt;SleepTimerGeneration val="9"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
-
-    then:
-    driver.children[0].currentValues.sleepTimerState == 'active'
-    driver.children[0].currentValues.generation == '9'
-  }
-
-  def "AVTransport states publish only supported normalized local and group values"() {
-    given:
-    String dni = driver.device.getDeviceNetworkId()
-    driver.pendingLocalDeviceEvents.remove(dni)
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="' +
-      sonosState + '"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
-
-    then:
-    println 'PENDING-DUMP: ' + driver.pendingLocalDeviceEvents
-    println 'LOGS-DUMP: ' + driver.logs
-    driver.pendingLocalDeviceEvents[dni].status == expectedStatus
-    driver.pendingLocalDeviceEvents[dni].transportStatus == expectedStatus
-    driver.pendingGroupDeviceUpdates[dni].status == expectedStatus
-    driver.pendingGroupDeviceUpdates[dni].transportStatus == expectedStatus
-
-    where:
-    sonosState       | expectedStatus
-    'PLAYING'        | 'playing'
-    'PAUSED_PLAYBACK'| 'paused'
-    'STOPPED'        | 'stopped'
-    'NO_MEDIA_PRESENT' | 'stopped'
-  }
-
-  def "TRANSITIONING preserves the last valid local and group transport state"() {
-    given:
-    String dni = driver.device.getDeviceNetworkId()
-    driver.device.currentValues.status = 'paused'
-    driver.device.currentValues.transportStatus = 'paused'
-    driver.pendingLocalDeviceEvents.remove(dni)
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="TRANSITIONING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
-    println 'DBG TRANS pending=' + driver.pendingLocalDeviceEvents + ' logs=' + driver.logs
-
-    then:
-    driver.device.currentValue('status') == 'paused'
-    driver.device.currentValue('transportStatus') == 'paused'
-    driver.pendingLocalDeviceEvents[dni] == null
-    driver.pendingGroupDeviceUpdates[dni] == null
-  }
-
-  def "unknown AVTransport state is logged and not sent to local or group devices"() {
-    given:
-    String dni = driver.device.getDeviceNetworkId()
-    driver.device.currentValues.status = 'playing'
-    driver.device.currentValues.transportStatus = 'playing'
-    driver.pendingLocalDeviceEvents.remove(dni)
-    String event = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="BUFFERING_UNKNOWN"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
-
-    when:
-    driver.processAVTransportMessages(event, 'http://192.168.1.50:1400')
-
-    then:
-    driver.pendingLocalDeviceEvents[dni]?.containsKey('status') != true
-    driver.pendingLocalDeviceEvents[dni]?.containsKey('transportStatus') != true
-    driver.pendingGroupDeviceUpdates[dni]?.containsKey('status') != true
-    driver.pendingGroupDeviceUpdates[dni]?.containsKey('transportStatus') != true
-    driver.logs.any { it.toString().contains("unsupported Sonos TransportState='BUFFERING_UNKNOWN'") }
-  }
-
   def "incomplete stereo discovery waits without creating a child or clearing preference"() {
     given:
     driver.settings.createRightChannelChildDevice = true
@@ -1563,11 +1168,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.binding.setVariable('atomicState', [:])
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
-    driver.currentAvtSeqByDni.remove('SONOS-TEST-DNI')
-    driver.pendingGrcByDni.remove('SONOS-TEST-DNI')
-    driver.grcUpdateScheduledDnis.remove('SONOS-TEST-DNI')
-    driver.pendingCoordinatorAvtUpdatesByDni.remove('SONOS-TEST-DNI')
-    driver.coordinatorAvtUpdateScheduledDnis.remove('SONOS-TEST-DNI')
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.zgtMemberHostByPlayerId.clear()
@@ -1613,22 +1213,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.favoriteRetryState.clear()
     driver.playlistRetryState.clear()
     driver.pendingGroupedPlayerVolumes.clear()
-    driver.groupDeviceUpdateRetryAttempts.clear()
-    driver.pendingGroupDeviceUpdates.clear()
-    driver.pendingGrcByDni.clear()
-    driver.grcUpdateScheduledDnis.clear()
-    driver.currentGrcSeqByDni.clear()
-    driver.currentGrcSidByDni.clear()
-    driver.currentRcSnapshotByDni.clear()
-    driver.currentRcSeqByDni.clear()
-    driver.currentRcSidByDni.clear()
     driver.pendingLocalDeviceEvents.clear()
     driver.lastLocalDeviceEvents.clear()
     driver.lastPlaybackState.clear()
     driver.lastMetadataContainerId.clear()
-    driver.pendingZgtPresenceByDni.clear()
-    driver.lastZgtPresenceByDni.clear()
-    driver.currentZgtSeqByDni.clear()
   }
 
   def "player escaping helpers handle HTML, XML, and layered XML entities consistently"() {
@@ -2176,154 +1764,6 @@ class SonosAdvPlayerSpec extends Specification {
     )
   }
 
-  def "each received ZGT payload is parsed and applied in arrival order"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    // Use real full-capture parser (no mock) — feed a minimal valid propertyset
-    String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
-      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Living Room"/>' +
-      '<ZoneGroupMember UUID="RINCON_MEMBER" ZoneName="Kitchen"/>' +
-      '</ZoneGroup></ZoneGroups>'
-    String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-    String xml = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
-    Integer queuedReports = driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].size()
-    driver.flushPendingZgtNotify()
-
-    then:
-    queuedReports == 2
-    parentPlayerUpdates.count { Map item -> item.kind == 'zgtTopology' } == 2
-    Map record = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
-    record != null
-    record.eventsByGroupId.size() == 1
-    record.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_MEMBER'
-    record.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
-
-    when:
-    parentPlayerUpdates.clear()
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', xml)
-    driver.flushPendingZgtNotify()
-
-    then:
-    Map record2 = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
-    record2 != null
-    record2.eventsByGroupId['G1:1'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_MEMBER'
-  }
-
-  def "ZGT presence emits departed then arrived for vanished and returning player"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtSeqByDni.clear()
-    String kitchenRincon = 'RINCON_542A1B66F5B201400'
-    String coordRincon = 'RINCON_542A1B67195401400'
-    String innerWithoutKitchen = '<ZoneGroupState><ZoneGroups>' +
-      '<ZoneGroup ID="G1:1" Coordinator="' + coordRincon + '">' +
-      '<ZoneGroupMember UUID="' + coordRincon + '" ZoneName="Living Room" Location="http://192.168.1.34:1400/xml/device_description.xml"/>' +
-      '</ZoneGroup></ZoneGroups>' +
-      '<VanishedDevices><Device UUID="' + kitchenRincon + '" ZoneName="Kitchen" LastKnownIP="192.168.1.33" Mac="54:2A:1B:66:F5:B2" ModelInfo="S21" Reason="UNKNOWN" LastSeenUTC="2026-11-22T01:03:57Z"/></VanishedDevices></ZoneGroupState>'
-    String withKitchen = '<ZoneGroupState><ZoneGroups>' +
-      '<ZoneGroup ID="G1:1" Coordinator="' + coordRincon + '">' +
-      '<ZoneGroupMember UUID="' + coordRincon + '" ZoneName="Living Room" Location="http://192.168.1.34:1400/xml/device_description.xml"/>' +
-      '</ZoneGroup>' +
-      '<ZoneGroup ID="G2:1" Coordinator="' + kitchenRincon + '">' +
-      '<ZoneGroupMember UUID="' + kitchenRincon + '" ZoneName="Kitchen" Location="http://192.168.1.33:1400/xml/device_description.xml"/>' +
-      '</ZoneGroup></ZoneGroups><VanishedDevices/></ZoneGroupState>'
-    String bodyWithout = '<propertyset><property><ZoneGroupState>' + innerWithoutKitchen.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;') + '</ZoneGroupState></property></propertyset>'
-    String bodyWith = '<propertyset><property><ZoneGroupState>' + withKitchen.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;') + '</ZoneGroupState></property></propertyset>'
-
-    when: 'first snapshot with Kitchen vanished emits departed only'
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 0)
-    driver.flushPendingZgtPresence()
-
-    then:
-    parentPlayerPresence.size() == 1
-    parentPlayerPresence[0].kind == 'departed'
-    parentPlayerPresence[0].rincon == kitchenRincon
-    parentPlayerPresence[0].dni == '542A1B66F5B2'
-    parentPlayerPresence[0].name == 'Kitchen'
-
-    when: 'Kitchen returns and duplicate snapshot emits arrived once then nothing'
-    parentPlayerPresence.clear()
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWith, 1)
-    driver.flushPendingZgtPresence()
-
-    then:
-    parentPlayerPresence.any { it.kind == 'arrived' && it.rincon == kitchenRincon && it.dni == '542A1B66F5B2' && it.name == 'Kitchen' }
-    !parentPlayerPresence.any { it.kind == 'departed' }
-
-    when:
-    parentPlayerPresence.clear()
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWith, 2)
-    driver.flushPendingZgtPresence()
-
-    then:
-    parentPlayerPresence.isEmpty()
-
-    when: 'stale SEQ emits nothing'
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 1)
-    driver.flushPendingZgtPresence()
-
-    then:
-    parentPlayerPresence.isEmpty()
-
-    when: 'new SEQ without Kitchen emits departed again'
-    parentPlayerPresence.clear()
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 3)
-    driver.flushPendingZgtPresence()
-
-    then:
-    parentPlayerPresence.any { it.kind == 'departed' && it.rincon == kitchenRincon }
-    !parentPlayerPresence.any { it.kind == 'arrived' }
-
-    when: 'repeated vanished snapshot dedups the vanished-not-in-prev path'
-    parentPlayerPresence.clear()
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', bodyWithout, 4)
-    driver.flushPendingZgtPresence()
-
-    then:
-    parentPlayerPresence.isEmpty()
-  }
-
-  def "ZGT SEQ header drops stale payloads without applying"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtSeqByDni.clear()
-    String zs = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST"><ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
-    String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-    String body = '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
-    String zs2 = '<ZoneGroups><ZoneGroup ID="G2:2" Coordinator="RINCON_OTHER"><ZoneGroupMember UUID="RINCON_OTHER" ZoneName="Other"/></ZoneGroup></ZoneGroups>'
-    String esc2 = zs2.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-    String body2 = '<propertyset><property><ZoneGroupState>' + esc2 + '</ZoneGroupState></property></propertyset>'
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body, 20)
-    driver.flushPendingZgtNotify()
-
-    then:
-    parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G1:1') } != null
-    driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 20
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body2, 19)
-    driver.flushPendingZgtNotify()
-
-    then:
-    !parentPlayerUpdates.any { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G2:2') }
-    parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G1:1') } != null
-    driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 20
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body2, 21)
-    driver.flushPendingZgtNotify()
-
-    then:
-    parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' && item.eventsByGroupId.containsKey('G2:2') } != null
-    driver.currentZgtSeqByDni['SONOS-TEST-DNI']?.get() == 21
-  }
-
   def "AVT parse relays sendEvent maps without publishing player events"() {
     given:
     String body = avtBody('<TransportState val="PLAYING"/>')
@@ -2340,13 +1780,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.events.empty
     driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' && row[2].data.service == 'AVT' &&
       row[2].data.events.any { Map event -> event.name == 'status' && event.value == 'playing' } }
-    driver.pendingGroupDeviceUpdates[driver.device.deviceNetworkId] == null
   }
 
   def "ZGT notification logs header values with SEQ 0"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker" Location="http://192.168.1.50:1400/xml/device_description.xml"/>' +
       '<ZoneGroupMember UUID="RINCON_B" ZoneName="Bedroom" Location="http://192.168.1.51:1400/xml/device_description.xml"/>' +
@@ -2372,7 +1810,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "ZGT notification logs header values with SEQ greater than 0"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -2453,56 +1890,6 @@ class SonosAdvPlayerSpec extends Specification {
     metadata.class == 'object.item.audioItem.musicTrack'
   }
 
-  def "partial AVT events preserve track metadata and changed URI clears stale values"() {
-    given:
-    String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/"><item><dc:title>First Track</dc:title></item></DIDL-Lite>'
-    String metadata = StringEscapeUtils.escapeXml10(didl)
-    String first = avtBody('<TransportState val="PLAYING"/><CurrentTrackURI val="http://media.test/first"/>' +
-      '<CurrentTrackMetaData val="' + metadata + '"/><CurrentTrackDuration val="0:03:00"/><CurrentTrack val="1"/>')
-    String transportOnly = avtBody('<TransportState val="PAUSED_PLAYBACK"/>')
-    String nextTrack = avtBody('<CurrentTrackURI val="http://media.test/second"/>')
-
-    when:
-    driver.handleAvtFull('SONOS-TEST-DNI', first, null)
-    String firstName = driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName
-    driver.handleAvtFull('SONOS-TEST-DNI', transportOnly, null)
-    String nameAfterPartial = driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName
-    driver.handleAvtFull('SONOS-TEST-DNI', nextTrack, null)
-
-    then:
-    firstName == 'First Track'
-    nameAfterPartial == 'First Track'
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackName == 'Not Available'
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentArtistName == 'Not Available'
-    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'].trackData == '{}'
-    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].currentTrackDuration == ''
-    driver.runtimeState.lastTransportPlaybackSnapshot.currentTrackURI == 'http://media.test/second'
-  }
-
-  def "AVT parent fanout is scheduled after parse and carries current playback state"() {
-    given:
-    String body = avtBody('<TransportState val="PLAYING"/><CurrentTrackURI val="http://media.test/track"/>' +
-      '<CurrentTrackMetaData val="' + StringEscapeUtils.escapeXml10(
-        '<DIDL-Lite><item><title>Deferred Track</title><creator>Deferred Artist</creator></item></DIDL-Lite>') + '"/>')
-
-    when:
-    driver.handleAvtFull('SONOS-TEST-DNI', body, 0)
-
-    then:
-    parentPlayerUpdates.isEmpty()
-    driver.scheduled.any { List job -> job[1] == 'flushCoordinatorAvtParentUpdate' }
-
-    when:
-    driver.flushCoordinatorAvtParentUpdate()
-    Map message = playerStateMessages().find { Map item -> item.kind == 'avtEvents' }
-
-    then:
-    message.rincon == 'RINCON_TEST'
-    message.events.find { Map e -> e.name == 'status' }.value == 'playing'
-    message.events.find { Map e -> e.name == 'currentTrackName' }.value == 'Deferred Track'
-    message.events.find { Map e -> e.name == 'currentArtistName' }.value == 'Deferred Artist'
-  }
-
   def "bounded XML lookups match namespace-prefixed sleep timer and queue fields"() {
     given:
     String didlXml = '<DIDL-Lite xmlns:dc="urn:dc"><item id="Q:0/1"><dc:title>Queue Title</dc:title>' +
@@ -2537,7 +1924,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "ZGT packet without service type header is not applied"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
       '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -2559,7 +1945,6 @@ class SonosAdvPlayerSpec extends Specification {
   def "AVT packet without service type header is not applied"() {
     given:
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.currentAvtSeqByDni.clear()
     String body = '<propertyset><property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;TransportState val="PLAYING"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></property></propertyset>'
     String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\nSEQ: 3\r\nSID: uuid:avt-legacy\r\n\r\n' + body
     driver.metaClass.getMapForRaw = { String rawMessage ->
@@ -2573,216 +1958,6 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') }
     !parentPlayerUpdates.any { Map item -> item.kind == 'avtEvents' }
     driver.logs.any { String entry -> entry.contains('Could not determine service type') || entry.contains('unrecognized service type') }
-  }
-
-  def "GRC full property set applies volume mute changeable and emits bridged snapshot"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>25</GroupVolume></e:property>' +
-      '<e:property><GroupMute>0</GroupMute></e:property>' +
-      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 0, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    Map grcRecord = parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last()
-    grcRecord.rincon == 'RINCON_TEST'
-    grcRecord.events.find { Map e -> e.name == 'groupVolume' }.value == 25
-    grcRecord.events.find { Map e -> e.name == 'groupMute' }.value == 'unmuted'
-    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 0
-    driver.currentGrcSidByDni['SONOS-TEST-DNI'] == 'uuid:RINCON_TEST_sub0000000105'
-    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
-    // Fresh device reports groupMute as 'unmuted' by default, so the first
-    // 'unmuted' is vetoed as already-current; the snapshot still records it.
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
-    driver.device.events.find { Map e -> e.name == 'grcGroupControl' } == null
-    driver.device.getDataValue('grcSnapshotJson') == null
-  }
-
-  def "GRC single-key update merges without clobbering sibling value"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String full = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>25</GroupVolume></e:property>' +
-      '<e:property><GroupMute>0</GroupMute></e:property>' +
-      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
-    String muteOnly = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupMute>1</GroupMute></e:property></e:propertyset>'
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', full, 0, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', muteOnly, 1, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    Map grcMerged = parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last()
-    // Parent merge retains the sibling value: mute-only delta keeps prior groupVolume.
-    grcMerged.events.find { Map e -> e.name == 'groupVolume' }.value == 25
-    grcMerged.events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
-    // First 'unmuted' is vetoed as the fresh-device default; only the change to 'muted' emits.
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
-    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [25]
-  }
-
-  def "GRC captured normal and initial subscription bodies map to unmuted and muted"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String normal = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>1</GroupVolume></e:property>' +
-      '<e:property><GroupMute>0</GroupMute></e:property>' +
-      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
-    String initial = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>1</GroupVolume></e:property>' +
-      '<e:property><GroupMute>1</GroupMute></e:property>' +
-      '<e:property><GroupVolumeChangeable>1</GroupVolumeChangeable></e:property></e:propertyset>'
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', normal, 0, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'unmuted'
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', initial, 1, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
-    // First 'unmuted' is vetoed as the fresh-device default; only the change to 'muted' emits.
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
-  }
-
-  def "GRC SEQ header drops stale payloads without applying"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
-      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>10</GroupVolume></e:property></e:propertyset>',
-      20, 'uuid:RINCON_TEST_sub0000000105')
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
-      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>99</GroupVolume></e:property></e:propertyset>',
-      19, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 10
-    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 20
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
-      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>30</GroupVolume></e:property></e:propertyset>',
-      21, 'uuid:RINCON_TEST_sub0000000105')
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 30
-    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 21
-  }
-
-  def "GRC SEQ zero and SID change rebaseline after resubscribe"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
-      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>10</GroupVolume></e:property></e:propertyset>',
-      20, 'uuid:RINCON_TEST_sub0000000105')
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
-      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>77</GroupVolume></e:property></e:propertyset>',
-      0, 'uuid:RINCON_TEST_sub0000000106')
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 77
-    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 0
-    driver.currentGrcSidByDni['SONOS-TEST-DNI'] == 'uuid:RINCON_TEST_sub0000000106'
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI',
-      '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><GroupVolume>88</GroupVolume></e:property></e:propertyset>',
-      5, 'uuid:RINCON_TEST_sub0000000107')
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupVolume' }.value == 88
-    driver.currentGrcSeqByDni['SONOS-TEST-DNI']?.get() == 5
-    driver.currentGrcSidByDni['SONOS-TEST-DNI'] == 'uuid:RINCON_TEST_sub0000000107'
-  }
-
-  def "GRC invalid field is ignored without dropping sibling value"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>notanumber</GroupVolume></e:property>' +
-      '<e:property><GroupMute>1</GroupMute></e:property></e:propertyset>'
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 0, null)
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
-    !parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.any { Map e -> e.name == 'groupVolume' }
-    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }.empty
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }*.value == ['muted']
-  }
-
-  def "GRC blank and duplicate payloads do not requeue local events"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>40</GroupVolume></e:property>' +
-      '<e:property><GroupMute>0</GroupMute></e:property></e:propertyset>'
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', '   ', 0, null)
-    driver.flushPendingGrc()
-
-    then:
-    parentPlayerUpdates.any { Map item -> item.kind == 'grcEvents' } == false
-    driver.device.events.empty
-
-    when:
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 1, null)
-    driver.deferOrProcessGroupRenderingControlPayload('SONOS-TEST-DNI', xml, 2, null)
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [40]
-    driver.device.events.findAll { Map item -> item.name == 'groupMute' }.empty
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last().events.find { Map e -> e.name == 'groupMute' }.value == 'unmuted'
-  }
-
-  def "legacy GRC shim without SEQ still applies the current snapshot"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String xml = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
-      '<e:property><GroupVolume>55</GroupVolume></e:property>' +
-      '<e:property><GroupMute>1</GroupMute></e:property></e:propertyset>'
-
-    when:
-    driver.processGroupRenderingControlMessages(xml)
-    driver.flushPendingLocalDeviceEvents()
-    driver.flushPendingGrc()
-
-    then:
-    Map grcShim = parentPlayerUpdates.findAll { Map item -> item.kind == 'grcEvents' }.last()
-    grcShim.events.find { Map e -> e.name == 'groupVolume' }.value == 55
-    grcShim.events.find { Map e -> e.name == 'groupMute' }.value == 'muted'
-    driver.currentGrcSeqByDni['SONOS-TEST-DNI'] == null
-    driver.device.events.findAll { Map item -> item.name == 'groupVolume' }*.value == [55]
   }
 
   def "topology snapshot extracts visible roster names coordinator group and battery once"() {
@@ -2822,6 +1997,25 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.device.dataValues.groupCoordinatorId == 'RINCON_COORD'
     driver.device.dataValues.isGroupCoordinator == 'false'
+  }
+
+  def "becoming coordinator does not clear playback attributes in the player driver"() {
+    given:
+    driver.device.dataValues.id = 'RINCON_TEST'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_OLD_COORD'
+    driver.device.dataValues.isGroupCoordinator = 'false'
+    driver.device.currentValues.currentTrackName = 'Mama, I\'m Coming Home'
+    driver.device.currentValues.currentArtistName = 'Ozzy Osbourne'
+
+    when:
+    driver.setGroupCoordinatorId('RINCON_TEST')
+
+    then:
+    driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].groupCoordinatorId == 'RINCON_TEST'
+    !driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].containsKey('currentTrackName')
+    !driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'].containsKey('currentArtistName')
+    driver.device.currentValues.currentTrackName == 'Mama, I\'m Coming Home'
+    driver.device.currentValues.currentArtistName == 'Ozzy Osbourne'
   }
 
   def "unchanged internal coordinator values repair stale public attributes"() {
@@ -2865,16 +2059,13 @@ class SonosAdvPlayerSpec extends Specification {
     String otherDni = 'SONOS-OTHER-DNI'
     driver.state.pendingComponentChildEvents = ['child-dni': [switch: 'on']]
     driver.state.componentChildDrainScheduled = true
-    driver.state.groupDeviceUpdateScheduled = true
     driver.state.localDeviceEventDrainScheduled = true
     driver.state.localDeviceEventDrainDueAt = 123L
     driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'] = [groupCoordinatorId: 'RINCON_OLD']
     driver.lastLocalDeviceEvents['SONOS-TEST-DNI'] = [isGroupCoordinator: 'on']
     driver.pendingLocalDeviceEvents[otherDni] = [status: 'playing']
-    driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'] = [status: 'stopped']
     driver.scheduled << [1000, 'flushPendingLocalDeviceEvents']
     driver.scheduled << [1000, 'drainComponentChildEvents']
-    driver.scheduled << [1000, 'flushPendingGroupDeviceUpdates']
 
     when:
     driver.resetPendingStatePublicationForInitialization()
@@ -2882,14 +2073,12 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     !driver.state.containsKey('pendingComponentChildEvents')
     !driver.state.containsKey('componentChildDrainScheduled')
-    !driver.state.containsKey('groupDeviceUpdateScheduled')
     !driver.state.containsKey('localDeviceEventDrainScheduled')
     !driver.pendingLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
     !driver.lastLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
-    !driver.pendingGroupDeviceUpdates.containsKey('SONOS-TEST-DNI')
     driver.pendingLocalDeviceEvents[otherDni].status == 'playing'
     ['flushPendingLocalDeviceEvents', 'drainComponentChildEvents',
-     'flushPendingGroupDeviceUpdates'].every { String method -> driver.unschedules.contains(method) }
+     'drainComponentChildEvents'].every { String method -> driver.unschedules.contains(method) }
   }
 
   def "topology snapshot includes every household group for the app ZGT source"() {
@@ -2993,76 +2182,6 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.device.dataValues.containsKey('zgtLeaderGeneration')
   }
 
-  def "every ZGT snapshot applies in order while a topology mutation is pending"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    // With singleThreaded:true and pure handleZgtFull, pending snapshots are
-    // no longer held by expectedTopology — the map update is immediate.
-
-    def mk = { String gid, String coord, String uuid, String zn ->
-      String zs = "<ZoneGroups><ZoneGroup ID=\"$gid\" Coordinator=\"$coord\"><ZoneGroupMember UUID=\"$uuid\" ZoneName=\"$zn\"/></ZoneGroup></ZoneGroups>"
-      String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-      return '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
-    }
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-INTERMEDIATE', 'RINCON_OTHER', 'RINCON_OTHER', 'Other'))
-
-    then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.keySet() == ['GROUP-INTERMEDIATE'] as Set
-    // expectedGroupTopology is no longer written on the ZGT path (pure sendEvent)
-
-    when:
-    driver.flushPendingZgtNotify()
-
-    then:
-    parentPlayerUpdates.findAll { Map item -> item.kind == 'zgtTopology' }.last().eventsByGroupId.keySet() == ['GROUP-INTERMEDIATE'] as Set
-    parentPlayerUpdates.clear()
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', mk('GROUP-FINAL', 'RINCON_TEST', 'RINCON_TEST', 'Test'))
-
-    then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.keySet() == ['GROUP-FINAL'] as Set
-
-    when:
-    driver.flushPendingZgtNotify()
-
-    then:
-    Map finalRecord = parentPlayerUpdates.find { Map item -> item.kind == 'zgtTopology' }
-    finalRecord.eventsByGroupId.keySet() == ['GROUP-FINAL'] as Set
-    finalRecord.eventsByGroupId['GROUP-FINAL'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
-  }
-
-  def "coordinator transfer retains the topology expectation stamped by the parent"() {
-    given:
-    driver.device.dataValues.id = 'RINCON_OLD_COORD'
-    driver.device.dataValues.groupCoordinatorId = 'RINCON_OLD_COORD'
-    driver.device.dataValues.groupPlayerIds = 'RINCON_OLD_COORD,RINCON_NEW_COORD'
-    Map<String, Map> finalTopology = [
-      'RINCON_OLD_COORD': [coordinatorId: 'RINCON_NEW_COORD', memberIds: ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']],
-      'RINCON_NEW_COORD': [coordinatorId: 'RINCON_NEW_COORD', memberIds: ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']]
-    ]
-
-    driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson(
-      finalTopology.RINCON_OLD_COORD + [expiresAt: driver.now() + 30000L]
-    )
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
-    seedGroupTopology('RINCON_OLD_COORD', [RINCON_OLD_COORD: '192.168.1.50', RINCON_NEW_COORD: '192.168.1.51'])
-
-    when:
-    driver.playerModifyGroupMembers([], ['RINCON_NEW_COORD'], finalTopology)
-
-    then:
-    Map expected = new JsonSlurper().parseText(driver.device.dataValues.expectedGroupTopology) as Map
-    expected.coordinatorId == 'RINCON_NEW_COORD'
-    expected.memberIds == ['RINCON_OLD_COORD', 'RINCON_NEW_COORD']
-    expected.expiresAt > driver.now()
-    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#DelegateGroupCoordinationTo') &&
-      it.params.body.contains('<NewCoordinator>RINCON_NEW_COORD</NewCoordinator>') &&
-      it.params.body.contains('<RejoinGroup>true</RejoinGroup>') }
-  }
-
   def "group topology is queried through ZoneGroupTopology UPnP"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50'
@@ -3077,8 +2196,10 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     request.params.headers.SOAPAction == 'urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState'
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].last()['GROUP-TEST'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI'].last()['GROUP-TEST'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_B'
+    Map relay = driver.scheduled.find { List job -> job[1] == 'relayParsedUpnpToParent' }[2].data
+    relay.service == 'ZGT'
+    relay.eventsByGroupId['GROUP-TEST'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
+    relay.eventsByGroupId['GROUP-TEST'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_B'
     driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 
@@ -3130,53 +2251,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls[0].params.headers.SOAPAction.endsWith('#BecomeCoordinatorOfStandaloneGroup')
   }
 
-  def "unrelated player's topology updates are not held"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    String zs = '<ZoneGroups><ZoneGroup ID="G-UNREL" Coordinator="RINCON_UNRELATED"><ZoneGroupMember UUID="RINCON_UNRELATED" ZoneName="Unrelated"/></ZoneGroup></ZoneGroups>'
-    String esc = zs.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-    String body = '<propertyset><property><ZoneGroupState>' + esc + '</ZoneGroupState></property></propertyset>'
-
-    when:
-    driver.deferOrProcessZoneGroupTopologyPayload('SONOS-TEST-DNI', body)
-
-    then:
-    driver.pendingZgtNotifyByDni['SONOS-TEST-DNI']?.last()?.containsKey('G-UNREL') == true
-  }
-
-  def "expired expected topology drops stale zgt hold entries without applying"() {
-    given:
-    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
-    driver.device.dataValues.expectedGroupTopology = groovy.json.JsonOutput.toJson([
-      coordinatorId: 'RINCON_TEST', memberIds: ['RINCON_TEST'], expiresAt: (driver.now() as Long) - 1L
-    ])
-    Integer parseCalls = 0
-    driver.metaClass.parseZoneGroupTopologySnapshot = { String xml, String playerId ->
-      parseCalls++
-      null
-    }
-    driver.metaClass.processZoneGroupTopologySnapshot = { Map topology, LinkedHashSet oldMembers ->
-      driver.runtimeState.appliedTopologyXml = '<topology>latest</topology>'
-      true
-    }
-
-    when:
-    driver.flushPendingTopologyUpdates()
-
-    then:
-    driver.runtimeState.appliedTopologyXml == null
-    driver.device.dataValues.expectedGroupTopology == ''
-    parseCalls == 0
-  }
-
   def "groups websocket messages are ignored because topology arrives over UPnP"() {
     given:
     driver.device.currentValues.groupCoordinatorId = 'RINCON_OLD_COORD'
     driver.device.currentValues.isGrouped = 'on'
-    driver.device.dataValues.expectedGroupTopology = JsonOutput.toJson([
-      coordinatorId: 'RINCON_OTHER', memberIds: ['RINCON_OTHER', 'RINCON_TEST'],
-      expiresAt: (driver.now() as Long) + 15000L
-    ])
     String message = JsonOutput.toJson([
       [namespace: 'groups', name: 'groups', type: 'groups'],
       [groups: [[id: 'RINCON_TEST:100', coordinatorId: 'RINCON_TEST',
@@ -3641,8 +2719,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.asyncCalls.collect { it.params.headers.SOAPAction }.containsAll([
-      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo',
-      'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo'])
+      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'])
     driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
     driver.scheduled.last() == [
       2,
@@ -3744,8 +2821,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     driver.asyncCalls.collect { it.params.headers.SOAPAction }.containsAll([
-      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo',
-      'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo'])
+      'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'])
     driver.asyncCalls.every { !it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
 
     when:
@@ -3880,98 +2956,6 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.empty
     driver.scheduled.empty
     driver.favoriteRetryState['SONOS-TEST-DNI'].favoriteId == '43'
-  }
-
-  def "group state flush forwards a complete batch to the parent app"() {
-    given:
-    driver.queueGroupDeviceUpdate([status: 'playing', _groupVolume: 25, _groupMute: 'unmuted'])
-
-    when:
-    driver.flushPendingGroupDeviceUpdates()
-
-    then:
-    driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
-    playerStateMessages().findAll { Map item -> item.kind != 'groupDeviceState' }.isEmpty()
-    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'groupDeviceState' }
-    update.coordinatorId == 'RINCON_TEST'
-    update.volumeAttrs == [volume: 25, mute: 'unmuted']
-    update.playbackAttrs.status == 'playing'
-  }
-
-  def "unchanged coordinator metadata is still forwarded to the parent group state path"() {
-    given:
-    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_FOLLOW'
-    driver.device.currentValues.currentTrackName = 'Peepers On Crane Pond'
-    driver.device.currentValues.currentArtistName = 'Adirondack Environments'
-    driver.device.currentValues.currentAlbumName = 'Peepers On Crane Pond'
-    driver.device.currentValues.currentTrackDuration = '0:41:03'
-    driver.device.currentValues.currentTrackNumber = 1
-    driver.device.currentValues.trackDescription = 'Peepers On Crane Pond by Adirondack Environments'
-    driver.device.currentValues.trackData = JsonOutput.toJson([
-      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
-    ])
-
-    when:
-    driver.setCurrentTrackName('Peepers On Crane Pond')
-    driver.setCurrentArtistName('Adirondack Environments')
-    driver.setCurrentAlbumName('Peepers On Crane Pond')
-    driver.setCurrentTrackDuration('0:41:03')
-    driver.setCurrentTrackNumber(1)
-    driver.setTrackDescription('Peepers On Crane Pond by Adirondack Environments')
-    driver.setTrackDataEvents([
-      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
-    ])
-    driver.flushPendingGroupDeviceUpdates()
-
-    then:
-    playerStateMessages().findAll { Map item -> item.kind != 'groupDeviceState' }.isEmpty()
-    driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').isEmpty()
-    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'groupDeviceState' }
-    update.playbackAttrs.currentTrackName == 'Peepers On Crane Pond'
-    update.playbackAttrs.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
-    update.playbackAttrs.currentTrackDuration == '0:41:03'
-    update.playbackAttrs.trackData == JsonOutput.toJson([
-      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
-    ])
-  }
-
-  def "grouped follower ignores its local AVTransport playback stream"() {
-    given:
-    driver.device.dataValues.id = 'RINCON_TEST'
-    driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_COORD'
-    driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
-    driver.device.dataValues.isGroupCoordinator = 'false'
-
-    expect:
-    driver.isGroupedFollowerForPlayback()
-  }
-
-  def "becoming coordinator invalidates cached playback metadata for restored queue"() {
-    given:
-    String dni = driver.device.getDeviceNetworkId()
-    driver.lastMetadataContainerId.put(dni, 'shared-group-container')
-    driver.lastPlaybackState.put(dni, 'PLAYBACK_STATE_PAUSED')
-
-    when:
-    driver.clearCurrentPlayingStates()
-
-    then:
-    !driver.lastMetadataContainerId.containsKey(dni)
-    !driver.lastPlaybackState.containsKey(dni)
-  }
-
-  def "group update enqueue re-arms a flush when its scheduled marker is stale"() {
-    given:
-    driver.scheduled.clear()
-    driver.state.groupDeviceUpdateScheduled = true
-
-    when:
-    driver.queueGroupDeviceUpdate([currentTrackName: 'My Wave'])
-
-    then:
-    driver.scheduled.any { List item -> item[1] == 'flushPendingGroupDeviceUpdates' }
-    driver.state.groupDeviceUpdateScheduled == true
-    driver.getPendingGroupDeviceUpdateSnapshot('SONOS-TEST-DNI').currentTrackName == 'My Wave'
   }
 
   def "follower group volume forwarding is deferred through the parent boundary"() {
@@ -4748,6 +3732,34 @@ class SonosAdvPlayerSpec extends Specification {
     12.49G | 12
     12.5G  | 13
     12.51G | 13
+  }
+
+  def "AVT event translation contains only fields represented in the payload"() {
+    when:
+    List<Map> events = driver.buildAvtEvents([
+      hasTransportState: true, transportState: 'STOPPED',
+      hasTrack: true, track: '0', hasCurrentTrackURI: true, currentTrackURI: '',
+      hasCurrentTrackDuration: true, currentTrackDuration: '0:00:00',
+      hasCurrentTrackMetaData: true, currentTrackMetaDataRaw: '', currentTrackMetaData: [:]
+    ], [:])
+
+    then:
+    events.collect { Map event -> [event.name, event.value] }.containsAll([
+      ['status', 'stopped'], ['transportStatus', 'stopped'], ['currentTrackName', 'Not Available'],
+      ['currentArtistName', 'Not Available'], ['currentAlbumName', 'Not Available'],
+      ['albumArtURI', 'Not Available'], ['trackDescription', 'Not Available'],
+      ['currentTrackNumber', 0], ['currentTrackDuration', '0:00:00']
+    ])
+    !events.any { Map event -> event.name == 'nextTrackName' }
+  }
+
+  def "GRC and RC event translation emits only present reported values"() {
+    expect:
+    driver.buildGrcEvents([groupVolume: 0, groupMute: 'unmuted']) == [
+      [name: 'groupVolume', value: 0], [name: 'groupMute', value: 'unmuted']]
+    driver.buildRcEvents([volumeMaster: 0, muteMaster: 'unmuted', bass: 2]) == [
+      [name: 'volume', value: 0], [name: 'level', value: 0], [name: 'mute', value: 'unmuted'], [name: 'bass', value: 2]]
+    driver.buildRcEvents([treble: 1]) == [[name: 'treble', value: 1]]
   }
 
 }

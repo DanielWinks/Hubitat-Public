@@ -327,7 +327,7 @@ definition(
   iconX2Url: '',
   installOnOpen: false,
   iconX3Url: '',
-  singleThreaded: false,
+  singleThreaded: true,
   importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Apps/SonosAdvancedApp.groovy'
 )
 
@@ -369,7 +369,6 @@ preferences {
 @Field static final String PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY = 'playerStateUpdateDrainActive'
 @Field static final String PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY = 'pendingPlayerAttributeUpdates'
 @Field static final String PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerAttributeUpdateDrainScheduled'
-@Field static final String PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY = 'playerAttributeSnapshotsByRincon'
 @Field static final List<String> SHARED_PLAYER_PLAYBACK_ATTRIBUTES = [
   'status', 'transportStatus', 'audioSource', 'currentTrackName', 'currentArtistName',
   'currentAlbumName', 'albumArtURI', 'currentFavorite', 'currentPlaylist', 'currentTrackNumber',
@@ -379,6 +378,17 @@ preferences {
   'currentRepeatOneMode', 'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
   'groupVolume', 'groupMute'
 ]
+@Field static final Set<String> SOAP_EVENT_OWNED_ATTRIBUTES = [
+  'status', 'transportStatus', 'audioSource', 'currentTrackName', 'currentArtistName',
+  'currentAlbumName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
+  'currentFavorite', 'currentPlaylist', 'currentTrackNumber', 'currentTrackDuration',
+  'currentRepeatOneMode', 'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
+  'trackDescription', 'trackData', 'nextArtistName', 'nextAlbumName', 'nextTrackName',
+  'nextTrackAlbumArtURI', 'groupVolume', 'groupMute', 'volume', 'level', 'mute', 'balance',
+  'bass', 'treble', 'loudness', 'nightMode', 'speechEnhancement', 'groupId', 'groupName',
+  'groupCoordinatorId', 'groupCoordinatorName', 'groupPlayerIds', 'groupMemberCount',
+  'groupMemberNames', 'isGrouped', 'isGroupCoordinator'
+] as Set<String>
 @Field static final Integer PLAYER_STATE_UPDATE_DRAIN_MAX_ITEMS = 12
 @Field static final Long PLAYER_STATE_UPDATE_DRAIN_BUDGET_MS = 200L
 @Field static final Integer PLAYER_STATE_UPDATE_QUEUE_MAX_ITEMS = 512
@@ -393,11 +403,8 @@ preferences {
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
-@Field static final String GRC_STORE_STATE_KEY = 'grcStoreByCoordinator'
-@Field static final Integer UPNP_FANOUT_DEBOUNCE_MILLIS = 500
-@Field static final String UPNP_FANOUT_GENERATION_STATE_KEY = 'upnpFanoutGeneration'
-@Field static final String UPNP_FANOUT_PENDING_STATE_KEY = 'upnpFanoutPending'
-@Field static final String UPNP_FANOUT_TOPOLOGY_STATE_KEY = 'upnpFanoutTopologySnapshot'
+@Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
+@Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -483,10 +490,7 @@ preferences {
   DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY,
   AVT_STORE_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
-  GRC_STORE_STATE_KEY,
-  UPNP_FANOUT_GENERATION_STATE_KEY,
-  UPNP_FANOUT_PENDING_STATE_KEY,
-  UPNP_FANOUT_TOPOLOGY_STATE_KEY,
+  PENDING_UPNP_NOTIFICATION_QUEUE_KEY,
   GROUP_OPERATION_STATE_KEY,
   GROUPING_CONTEXTS_STATE_KEY,
   GROUP_COMMAND_QUEUE_STATE_KEY,
@@ -3038,7 +3042,6 @@ void handleGroupStateAttribute(Event event) {
     player = dni ? getChildDevice(dni) : null
   }
   if(!player) { return }
-  updateGroupDevicesFromAttributes(player)
   updatePlaybackObservationsFromAttributes(player)
 }
 
@@ -3080,44 +3083,7 @@ void pollLastUpdatedHealth() {
 
 void pollPlayerAttributesForState() {
   getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    updateGroupDevicesFromAttributes(player)
     updatePlaybackObservationsFromAttributes(player)
-  }
-}
-
-void updateGroupDevicesFromAttributes(ChildDeviceWrapper player) {
-  if(!player) { return }
-  String coordinatorId = player.currentValue('groupCoordinatorId', true)?.toString() ?: player.getDataValue('groupCoordinatorId')?.toString()
-  String playerId = player.getDataValue('id')?.toString()
-  if(!coordinatorId || !playerId) { return }
-  String groupPlayerIdsRaw = player.currentValue('groupPlayerIds', true)?.toString()
-  List<String> playerIds = normalizeGroupPlayerIds(groupPlayerIdsRaw)
-  Map<String, Object> volumeAttrs = null
-  Integer vol = player.currentValue('groupVolume', true) as Integer
-  String mute = player.currentValue('groupMute', true)?.toString()
-  if(vol != null || mute != null) {
-    volumeAttrs = [volume: vol ?: 0, mute: mute ?: 'unmuted']
-  }
-  Map<String, Object> playbackAttrs = [:]
-  ['status','transportStatus','audioSource','currentTrackName','currentArtistName','currentAlbumName','albumArtURI'].each { String attr ->
-    Object v = player.currentValue(attr, true)
-    if(v != null) { playbackAttrs[attr] = v }
-  }
-  if(!playbackAttrs.isEmpty()) {
-    flushGroupDeviceState(coordinatorId, volumeAttrs, playbackAttrs.isEmpty() ? null : playbackAttrs)
-  }
-  if(playerIds.size() > 0) {
-    ChildDeviceWrapper coordinator = findPlayerBySonosId(coordinatorId) ?: player
-    List<String> followerDNIs = getGroupFollowerDNIsForCoordinator(coordinatorId)
-    Map<String, Object> followerAttrs = [:]
-    followerAttrs['groupVolume'] = vol
-    followerAttrs['groupMute'] = mute
-    followerDNIs.each { String dni ->
-      ChildDeviceWrapper follower = getChildDevice(dni)
-      if(follower && dni != player.getDeviceNetworkId()?.toString()) {
-        queueFollowerStateBatch(coordinator, follower, coordinatorId, followerAttrs)
-      }
-    }
   }
 }
 
@@ -5134,7 +5100,6 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
     if(coordinatorMembers.size() == 1 && coordinatorMembers[0] == coordinatorId &&
         coordinator.currentValue('isGrouped', true) == 'off') {
       logInfo("Creating a group with ${coordinatorId} as coordinator and adding ${targetId}")
-      prepareExpectedTopologyForCreateGroup(coordinator, [coordinatorId, targetId])
       coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [[coordinatorId, targetId]]]))
       return
     }
@@ -5151,7 +5116,6 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
   }
 
   logInfo("Adding ${targetId} to group ${groupId} through coordinator ${coordinatorId}")
-  prepareExpectedTopologyForMutation(coordinator, [targetId], [])
   coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[targetId], []]]))
 }
 
@@ -5349,7 +5313,8 @@ void playerStateUpdate(Map payload) {
 /** Receive driver observations and make the app the only owner of player attributes. */
 synchronized void playerAttributeUpdate(Map payload) {
   String playerDni = payload?.playerDni?.toString()
-  Map incoming = payload?.attributes instanceof Map ? (Map)payload.attributes : [:]
+  Map incoming = payload?.attributes instanceof Map ? new LinkedHashMap((Map)payload.attributes) : [:]
+  incoming.keySet().removeAll { Object name -> name?.toString() in SOAP_EVENT_OWNED_ATTRIBUTES }
   if(!playerDni || incoming.isEmpty()) { return }
   Map<String, Map<String, Object>> pending = state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] : [:]
@@ -5387,61 +5352,12 @@ synchronized void drainPlayerAttributeUpdates() {
 void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes) {
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || attributes == null || attributes.isEmpty()) { return }
-  String playerId = player.getDataValue('id')?.toString()
-  Map<String, Object> fanoutAttributes = new LinkedHashMap<String, Object>(attributes)
-  if(fanoutAttributes.containsKey('albumArtURI')) {
-    fanoutAttributes.putAll(albumArtAttributesForFanout(fanoutAttributes.albumArtURI?.toString(), playerId))
-  }
-  if(fanoutAttributes.containsKey('nextTrackAlbumArtURI')) {
-    fanoutAttributes.nextTrackAlbumArtURI = formatAlbumArtForFanout(fanoutAttributes.nextTrackAlbumArtURI?.toString(), playerId)
-  }
-  if(fanoutAttributes.containsKey('currentFavorite')) {
-    fanoutAttributes.currentFavorite = formatFavoriteForFanout(fanoutAttributes.currentFavorite, playerId)
-  }
-  queueChildStateBatch(playerDni, fanoutAttributes)
-
-  if(!playerId) { return }
-  Map<String, Map<String, Object>> snapshots = state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] : [:]
-  Map<String, Object> playerSnapshot = snapshots[playerId] instanceof Map
-      ? new LinkedHashMap<String, Object>(snapshots[playerId]) : [:]
-  playerSnapshot.putAll(fanoutAttributes)
-  snapshots[playerId] = playerSnapshot
-  state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] = snapshots
-  if(fanoutAttributes.keySet().any { Object name ->
+  queueChildStateBatch(playerDni, attributes)
+  if(attributes.keySet().any { Object name ->
       name?.toString() in ['audioSource', 'status', 'transportStatus'] } &&
-      (player.getDataValue('groupCoordinatorId')?.toString() ?: playerId) == playerId &&
+      (player.getDataValue('groupCoordinatorId')?.toString() ?: player.getDataValue('id')?.toString()) == player.getDataValue('id')?.toString() &&
       hasAutomaticAnnouncementPolicy()) {
     queueAnnouncementPolicyRefreshForPlayer(playerDni)
-  }
-  Map<String, List<Map>> topology = getStoredZgtEventsMap()
-  Map.Entry<String, List<Map>> topologyEntry = topology.entrySet().find { Map.Entry<String, List<Map>> entry ->
-    normalizeGroupPlayerIds(entry.value?.find { Map event -> event?.name?.toString() == 'groupPlayerIds' }?.value?.toString()).contains(playerId)
-  }
-  List<Map> topologyEvents = topologyEntry?.value ?: []
-  String coordinatorId = topologyEvents.find { Map event -> event?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-  if(!coordinatorId) { coordinatorId = player.getDataValue('groupCoordinatorId')?.toString() ?: playerId }
-  if(coordinatorId != playerId) { return }
-
-  Map<String, Object> sharedPlayback = [:]
-  fanoutAttributes.each { String name, Object value ->
-    if(name in SHARED_PLAYER_PLAYBACK_ATTRIBUTES) { sharedPlayback[name] = value }
-  }
-  Map<String, Object> volumeAttrs = [:]
-  ['volume', 'mute', 'level', 'groupVolume', 'groupMute'].each { String name ->
-    if(attributes.containsKey(name)) { volumeAttrs[name] = attributes[name] }
-  }
-  if(!sharedPlayback.isEmpty() || !volumeAttrs.isEmpty()) {
-    List<String> memberIds = topologyEntry != null ? normalizeGroupPlayerIds(
-        topologyEvents.find { Map event -> event?.name?.toString() == 'groupPlayerIds' }?.value?.toString()) : [playerId]
-    if(!memberIds.contains(playerId)) { memberIds.add(0, playerId) }
-    memberIds.unique().each { String memberId ->
-      ChildDeviceWrapper member = findPlayerBySonosId(memberId)
-      if(member != null && member.getDeviceNetworkId() != playerDni) {
-        queueChildStateBatch(member.getDeviceNetworkId(), sharedPlayback)
-      }
-    }
-    flushGroupDeviceState(coordinatorId, volumeAttrs.isEmpty() ? null : volumeAttrs, sharedPlayback)
   }
 }
 
@@ -5623,19 +5539,6 @@ void playerStateUpdateHandler(Object event) {
       }) {
     queueAnnouncementPolicyRefreshForPlayer(playerDni)
   }
-  if(payload.followerDNIs instanceof List && payload.followerAttrs instanceof Map) {
-    ChildDeviceWrapper coordinator = coordinatorId ? findPlayerBySonosId(coordinatorId) : null
-    ((List)payload.followerDNIs).each { Object dni ->
-      ChildDeviceWrapper follower = dni != null ? getChildDevice(dni.toString()) : null
-      if(follower != null) {
-        queueFollowerStateBatch(coordinator, follower, coordinatorId, (Map)payload.followerAttrs)
-      }
-    }
-  }
-  if(kind == 'state' && coordinatorId == player.getDataValue('id')) {
-    flushGroupDeviceState(coordinatorId, payload.volumeAttrs instanceof Map ? (Map)payload.volumeAttrs : null,
-      payload.playbackAttrs instanceof Map ? (Map)payload.playbackAttrs : null)
-  }
 }
 
 /** Rebuild one player's topology from its current attribute values. A single
@@ -5662,7 +5565,6 @@ void topologyAttributeHandler(Event event) {
   Map payload = [groupId: player.currentValue('groupId', true)?.toString(),
     coordinatorId: coordinatorId, playerIds: playerIds, observedAt: now(), playerDni: playerDni]
   processTopologyPayload(player, payload)
-  queueNewMemberPlaybackSnapshot(player, previous, coordinatorId, playerIds)
 }
 
 ChildDeviceWrapper resolveTopologyEventPlayer(Event event) {
@@ -5704,97 +5606,6 @@ void processTopologyPayload(ChildDeviceWrapper player, Map payload) {
       data: [operationId: operation.operationId]
     ])
   }
-}
-
-/** Queue one coordinator attribute batch to a follower (join snapshot or
- * incremental fanout), dropping stale membership and disabled track data. */
-void queueFollowerStateBatch(ChildDeviceWrapper coordinator, ChildDeviceWrapper follower,
-    String coordinatorId, Map followerAttrs) {
-  if(coordinator == null || follower == null || !(followerAttrs instanceof Map)) { return }
-  if(!isCurrentGroupFollower(coordinator, follower, coordinatorId)) {
-    logDebug("Ignoring stale fanout from coordinator=${coordinatorId ?: 'unknown'} to ${follower.deviceNetworkId}; current membership no longer matches")
-    return
-  }
-  Boolean trackPositionEnabled = isPlayerTrackPositionUpdatesEnabled(follower)
-  Map<String, Object> followerAttributes = [:]
-  ((Map)followerAttrs).each { Object name, Object value ->
-    String attributeName = name?.toString()
-    Boolean isTrackPositionAttribute = attributeName in ['trackPosition', 'trackPositionUpdated']
-    if(name != null && value != null && (!isTrackPositionAttribute || trackPositionEnabled)) {
-      followerAttributes[attributeName] = value
-    }
-  }
-  // These attributes describe the same transport state. A partial or
-  // coalesced fanout must not leave status and transportStatus split.
-  Object transportState = followerAttributes.containsKey('transportStatus')
-      ? followerAttributes.transportStatus : followerAttributes.status
-  if(transportState != null) {
-    followerAttributes.status = transportState
-    followerAttributes.transportStatus = transportState
-  }
-  Boolean followerOutOfSync = followerAttributes.any { String name, Object value ->
-    !sameChildStateValue(value, follower.currentValue(name, true))
-  }
-  queueChildStateBatch(follower.getDeviceNetworkId()?.toString(), followerAttributes, followerOutOfSync)
-}
-
-/** Send the coordinator's current playback snapshot to newly joined followers. */
-void queueNewMemberPlaybackSnapshot(ChildDeviceWrapper player, Map previous,
-    String coordinatorId, List<String> playerIds) {
-  String playerId = player?.getDataValue('id')?.toString()
-  if(!playerId || playerId != coordinatorId || playerIds == null) { return }
-  List<String> previousIds = previous?.playerIds ? normalizeGroupPlayerIds(previous.playerIds) : []
-  List<String> newIds = playerIds.findAll { String id -> !previousIds.contains(id) && id != playerId }
-  if(newIds.isEmpty()) { return }
-  List<ChildDeviceWrapper> followers = newIds.collect { String id -> findPlayerBySonosId(id) }
-      .findAll { ChildDeviceWrapper follower -> follower != null }
-  if(!followers.isEmpty()) { queueCoordinatorPlaybackSnapshot(player, followers) }
-}
-
-/** Build the coordinator snapshot from the driver and queue it to followers. */
-void queueCoordinatorPlaybackSnapshot(ChildDeviceWrapper coordinator,
-    List<ChildDeviceWrapper> followerDevices) {
-  if(coordinator == null || !followerDevices) { return }
-  String coordinatorId = coordinator.getDataValue('id')?.toString()
-  if(!coordinatorId) { return }
-  Map<String, Object> attributes = coordinatorPlaybackAttributes(coordinatorId)
-  if(attributes.isEmpty()) { return }
-  followerDevices.each { ChildDeviceWrapper follower ->
-      queueFollowerStateBatch(coordinator, follower, coordinatorId, attributes) }
-}
-
-Map<String, Object> coordinatorPlaybackAttributes(String coordinatorId) {
-  Map<String, Map<String, Object>> snapshots = state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PLAYER_ATTRIBUTE_SNAPSHOT_STATE_KEY] : [:]
-  Map<String, Object> attributes = [
-    status: 'stopped', transportStatus: 'stopped', currentTrackName: 'Not Available',
-    currentArtistName: 'Not Available', currentAlbumName: 'Not Available', albumArtURI: 'Not Available',
-    currentFavorite: 'No favorite playing', currentPlaylist: 'No playlist playing',
-    currentTrackNumber: 0, currentTrackDuration: '00:00:00', trackDescription: 'Not Available',
-    trackData: JsonOutput.toJson([name: 'Not Available', artist: 'Not Available', album: 'Not Available']),
-    currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'off',
-    currentCrossfadeMode: 'off', audioSource: 'Not Available', nextArtistName: 'Not Available',
-    nextAlbumName: 'Not Available', nextTrackName: 'Not Available', nextTrackAlbumArtURI: 'Not Available',
-    trackPosition: 0L, trackPositionUpdated: 0L, groupVolume: 0, groupMute: 'unmuted'
-  ]
-  if(snapshots[coordinatorId] instanceof Map) {
-    attributes.putAll((Map<String, Object>)snapshots[coordinatorId])
-  }
-  attributes.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId), coordinatorId))
-  attributes.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId), coordinatorId))
-  return attributes
-}
-
-/** Reject delayed coordinator snapshots after topology has moved the player. */
-Boolean isCurrentGroupFollower(ChildDeviceWrapper coordinator, ChildDeviceWrapper follower,
-    String coordinatorId) {
-  if(coordinator == null || follower == null || !coordinatorId) { return false }
-  String coordinatorPlayerId = coordinator.getDataValue('id')?.toString()
-  String followerPlayerId = follower.getDataValue('id')?.toString()
-  List<String> currentMembers = splitTokens(coordinator.getDataValue('groupPlayerIds')?.toString(), ',')
-  return coordinatorPlayerId == coordinatorId && followerPlayerId != null &&
-      coordinator.getDataValue('groupCoordinatorId')?.toString() == coordinatorId &&
-      currentMembers.contains(coordinatorId) && currentMembers.contains(followerPlayerId)
 }
 
 ChildDeviceWrapper findPlayerBySonosId(String playerId) {
@@ -7888,7 +7699,6 @@ void processGroupCommandRequest(Map data) {
       case 'ungroupPlayers':
         cancelActiveGroupOperation(groupDni, "${command.toUpperCase()}_REQUESTED")
         if(coordinator && followerIds) {
-          prepareExpectedTopologyForMutation(coordinator, [], followerIds)
           coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], followerIds]]))
         } else if(!coordinator) {
           logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
@@ -8387,7 +8197,6 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
         finalExpectation[pid] = [coordinatorId: coordinatorId, memberIds: requiredIds]
       }
       logInfo("on() removing coordinator ${coordinatorId} from ${coordinatorOfDesired} before exact assembly for ${groupDevice.getDeviceNetworkId()}")
-      prepareExpectedTopologyForMutation(prevCoordinator, [], [coordinatorId], finalExpectation)
       prevCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalExpectation]]))
       runInMillis(1, 'onAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: 0]])
       return
@@ -8421,7 +8230,6 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
     ChildDeviceWrapper detachDevice = rinconMap[oldCoordId]
     if(detachDevice != null) {
       logInfo("on() detaching requested followers ${toDetach} from old group ${oldCoordId} before exact assembly for ${groupDevice.getDeviceNetworkId()}")
-      prepareExpectedTopologyForMutation(detachDevice, [], toDetach)
       detachDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], toDetach]]))
       runInMillis(1, 'onAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: retries+1]])
       return
@@ -8432,7 +8240,6 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     if(ordered.size() > 1) {
       logInfo("on() creating exact group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
-      prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
       desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     } else {
       logDebug("on() already exact singleton for ${groupDevice.getDeviceNetworkId()}")
@@ -8443,7 +8250,6 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
     // coordinator claims coordinatorId but isGroupCoordinator still off — treat as detached, assemble by create
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     logInfo("on() creating exact group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
-    prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
     desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     return
   }
@@ -8454,15 +8260,12 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
   }
   if(extras && missing) {
     logInfo("on() evicting ${extras} and adding ${missing} in one step for ${groupDevice.getDeviceNetworkId()}")
-    prepareExpectedTopologyForMutation(desiredDevice, missing, extras)
     desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missing, extras]]))
   } else if(extras) {
     logInfo("on() evicting extras ${extras} for ${groupDevice.getDeviceNetworkId()}")
-    prepareExpectedTopologyForMutation(desiredDevice, [], extras)
     desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], extras]]))
   } else if(missing) {
     logInfo("on() adding missing ${missing} for ${groupDevice.getDeviceNetworkId()}")
-    prepareExpectedTopologyForMutation(desiredDevice, missing, [])
     desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missing, []]]))
   }
 }
@@ -8480,7 +8283,6 @@ void onAssemblyAfterDetach(Map data = [:]) {
     ChildDeviceWrapper desiredDevice = coordinatorId ? rinconMap[coordinatorId] : null
     if(desiredDevice != null && requiredIds.size() > 1) {
       List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
-      prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
       desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     }
     return
@@ -8523,7 +8325,6 @@ void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
         finalExpectation[pid] = [coordinatorId: coordinatorId, memberIds: preservedMembers]
       }
       logInfo("joinPlayersToCoordinator() removing coordinator ${coordinatorId} from ${coordinatorOfDesired} before join for ${groupDevice.getDeviceNetworkId()}")
-      prepareExpectedTopologyForMutation(prevCoordinator, [], [coordinatorId], finalExpectation)
       prevCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalExpectation]]))
       runInMillis(1, 'joinAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: 0]])
       return
@@ -8539,19 +8340,16 @@ void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
   if(isSolo) {
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     logInfo("joinPlayersToCoordinator() creating group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
-    prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
     desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     return
   }
   if(!desiredIsCoordinator) {
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     logInfo("joinPlayersToCoordinator() creating group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
-    prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
     desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     return
   }
   logInfo("joinPlayersToCoordinator() adding ${missing} to coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
-  prepareExpectedTopologyForMutation(desiredDevice, missing, [])
   desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missing, []]]))
 }
 
@@ -8568,7 +8366,6 @@ void joinAssemblyAfterDetach(Map data = [:]) {
     ChildDeviceWrapper desiredDevice = coordinatorId ? rinconMap[coordinatorId] : null
     if(desiredDevice != null && requiredIds.size() > 1) {
       List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
-      prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
       desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     }
     return
@@ -8682,93 +8479,6 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
  * values are shared with that device's driver instance and are hidden from the
  * Current States table.
  */
-void setExpectedTopologyForPlayers(Map<String, Map> expectedByRincon, String operationId, Long expiresAt) {
-  if(expectedByRincon == null || expectedByRincon.isEmpty()) { return }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  Map<String, Map> completeExpectation = [:]
-  expectedByRincon.each { String playerId, Map topology ->
-    if(playerId && topology != null) {
-      completeExpectation[playerId] = new LinkedHashMap(topology)
-    }
-  }
-
-  // When moving one or more members out of their previous groups, retain an
-  // expectation for the members left behind too. Their remaining group should
-  // not be held open or briefly published with the moved players still listed.
-  Set<String> transitioningPlayers = new LinkedHashSet<String>(completeExpectation.keySet())
-  transitioningPlayers.toList().each { String playerId ->
-    ChildDeviceWrapper player = rinconMap[playerId]
-    if(player == null) { return }
-    List<String> previousMembers = normalizeGroupPlayerIds(player.getDataValue('groupPlayerIds'))
-    List<String> remainingMembers = previousMembers.findAll { String memberId ->
-      !transitioningPlayers.contains(memberId)
-    }
-    if(remainingMembers.isEmpty()) { return }
-    String previousCoordinatorId = player.getDataValue('groupCoordinatorId')?.toString()
-    String remainingCoordinator = remainingMembers.contains(previousCoordinatorId)
-        ? previousCoordinatorId
-        : remainingMembers[0]
-    remainingMembers.each { String remainingPlayerId ->
-      if(!completeExpectation.containsKey(remainingPlayerId)) {
-        completeExpectation[remainingPlayerId] = [
-          coordinatorId: remainingCoordinator,
-          memberIds: remainingMembers
-        ]
-      }
-    }
-  }
-
-  completeExpectation.each { String playerId, Map topology ->
-    ChildDeviceWrapper player = rinconMap[playerId]
-    if(player != null && topology != null) {
-      Map expected = [
-        operationId: operationId,
-        expiresAt: expiresAt,
-        coordinatorId: topology.coordinatorId,
-        memberIds: ((Collection<String>)topology.memberIds).toList().sort()
-      ]
-      try {
-        player.updateDataValue('expectedGroupTopology', JsonOutput.toJson(expected))
-      } catch(Exception e) {
-        logWarn("Could not store expected topology for ${playerId}: ${e.message}")
-      }
-    }
-  }
-}
-
-void prepareExpectedTopologyForMutation(ChildDeviceWrapper coordinator, List<String> addIds,
-    List<String> removeIds, Map<String, Map> suppliedExpectation = null) {
-  if(coordinator == null) { return }
-  List<String> currentMembers = normalizeGroupPlayerIds(coordinator.getDataValue('groupPlayerIds'))
-  if(!currentMembers) {
-    String coordinatorId = coordinator.getDataValue('id') as String
-    if(coordinatorId) { currentMembers = [coordinatorId] }
-  }
-  List<String> resultingMembers = normalizeGroupPlayerIds((currentMembers - (removeIds ?: [])) + (addIds ?: []))
-  String coordinatorId = coordinator.getDataValue('groupCoordinatorId') as String ?: coordinator.getDataValue('id') as String
-  if(!resultingMembers.contains(coordinatorId)) { coordinatorId = resultingMembers ? resultingMembers[0] : coordinator.getDataValue('id') as String }
-  Map<String, Map> expected = suppliedExpectation != null ? suppliedExpectation : [:]
-  if(suppliedExpectation == null) {
-    resultingMembers.each { String playerId -> expected[playerId] = [coordinatorId: coordinatorId, memberIds: resultingMembers] }
-    (removeIds ?: []).each { String playerId -> if(!expected.containsKey(playerId)) { expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]] } }
-  }
-  setExpectedTopologyForPlayers(expected, UUID.randomUUID().toString(),
-      (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L)
-}
-
-void prepareExpectedTopologyForCreateGroup(ChildDeviceWrapper coordinator, List<String> playerIds) {
-  if(coordinator == null) { return }
-  List<String> requested = normalizeGroupPlayerIds(playerIds)
-  String coordinatorId = requested ? requested[0] : coordinator.getDataValue('id') as String
-  Map<String, Map> expected = [:]
-  requested.each { String playerId -> expected[playerId] = [coordinatorId: coordinatorId, memberIds: requested] }
-  normalizeGroupPlayerIds(coordinator.getDataValue('groupPlayerIds')).each { String playerId ->
-    if(!expected.containsKey(playerId)) { expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]] }
-  }
-  setExpectedTopologyForPlayers(expected, UUID.randomUUID().toString(),
-      (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L)
-}
-
 void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map args = [:]) {
   String groupDni = groupDevice?.getDeviceNetworkId()
   if(!groupDni) { return }
@@ -9369,7 +9079,6 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
         operation.lastCommand = 'createAdditiveGroupAfterTransfer'
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching additive coordinator restoration ${operation.topologyRequestId} for group operation ${operation.operationId}")
-        prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
         coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [playerIdsInCoordinatorOrder, operation.musicContextGroupId as String]]))
         operation.coordinatorTransferGroupCreated = true
         operation.topologyMutationSent = true
@@ -9404,7 +9113,6 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
     operation.topologyRequestId = UUID.randomUUID().toString()
     logInfo("Moving additive group coordination from ${topology.coordinatorId} to configured coordinator ${coordinatorId}")
     logDebug("Dispatching additive coordinator transfer ${operation.topologyRequestId} for group operation ${operation.operationId}")
-    prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
       previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalTopologyExpectation]]))
     operation.topologyMutationSent = true
   } else {
@@ -9421,7 +9129,6 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Sending additive group mutation for ${operation.operationId}: configuredCoordinator=${coordinatorId}, add=${followersToAdd}")
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-      prepareExpectedTopologyForMutation(coordinator, followersToAdd, [])
       coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [followersToAdd, []]]))
       operation.topologyMutationSent = true
     } else {
@@ -9472,7 +9179,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         logInfo("Evicting unlisted players ${extras} from group ${topology.groupId} using configured coordinator ${configuredCoordinatorId}")
-        prepareExpectedTopologyForMutation(configuredCoordinator, [], extras)
         configuredCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], extras]]))
         topologyMutationSentNow = true
       } else {
@@ -9534,7 +9240,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
             operation.topologyRequestId = UUID.randomUUID().toString()
             logInfo("Detaching requested followers ${followersToDetach} from old group ${detachCoordinatorId} before creating exact group with ${coordinatorId} for group operation ${operation.operationId}")
             logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-            prepareExpectedTopologyForMutation(detachCoordinator, [], followersToDetach)
             detachCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], followersToDetach]]))
             operation.topologyMutationSent = true
             operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
@@ -9631,7 +9336,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         operation.topologyRequestId = UUID.randomUUID().toString()
         logInfo("Expanding target subgroup ${coordinatorLedTargetSubset.memberIds} under its configured coordinator ${coordinatorId}; adding ${missingPlayers} for group operation ${operation.operationId}")
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-        prepareExpectedTopologyForMutation(coordinator, missingPlayers, [])
         coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missingPlayers, []]]))
         operation.topologyMutationSent = true
         operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
@@ -9657,7 +9361,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         logInfo("Splitting existing target subgroup ${conflictingTargetGroup.memberIds} from coordinator ${currentCoordinatorId} before creating the exact group with ${coordinatorId}")
-        prepareExpectedTopologyForMutation(currentCoordinator, [], followersToSplit)
         currentCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], followersToSplit]]))
         operation.topologyMutationSent = true
         operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
@@ -9696,12 +9399,9 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       if(operation.handoffRemoveCurrentCoordinator == true) {
         // In a stream handoff, the current coordinator leaves the shared
         // group so the holder already following its stream becomes coordinator.
-        prepareExpectedTopologyForMutation(previousCoordinator, [], [topology.coordinatorId as String],
-            finalTopologyExpectation)
         previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [topology.coordinatorId as String],
             finalTopologyExpectation]]))
       } else {
-        prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
         previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalTopologyExpectation]]))
       }
       operation.coordinatorTransferStarted = true
@@ -9723,7 +9423,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       operation.lastCommand = 'removeExtraPlayers'
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
-      prepareExpectedTopologyForMutation(coordinator, [], extras)
       coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], extras]]))
       operation.topologyMutationSent = true
     } else {
@@ -9736,7 +9435,6 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       // the configured coordinator win Sonos' equal-size tie-break.
       List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
           requiredPlayerIds.findAll { String playerId -> playerId != coordinatorId }
-      prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
       coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [playerIdsInCoordinatorOrder, operation.musicContextGroupId as String]]))
       operation.topologyMutationSent = true
     }
@@ -10432,334 +10130,146 @@ void playerDeparted(String rincon, String dni, String name) {
   logInfo("Sonos player departed: ${name} (${rincon}, ${dni})")
 }
 
-/** Accept the parsed UPnP DTO from a player; event maps are ready for direct replay. */
+/** Queue complete UPnP notification batches; never coalesce their event lists. */
 synchronized void putPlayerUpnpEvents(Map payload) {
   String service = payload?.service?.toString()
-  if(service == 'AVT' || service == 'GRC') {
-    String rincon = payload?.rincon?.toString()
-    List<Map> events = payload?.events instanceof List ? (List<Map>)payload.events : []
-    if(!rincon || events.isEmpty()) { return }
-    if(service == 'AVT') { putAvtEvents(rincon, events) }
-    else { putGrcEvents(rincon, events) }
-  } else if(service == 'ZGT') {
-    String sourceDni = payload?.sourceDni?.toString()
-    Map<String, List<Map>> eventsByGroupId = payload?.eventsByGroupId instanceof Map
-        ? (Map<String, List<Map>>)payload.eventsByGroupId : [:]
-    if(sourceDni && !eventsByGroupId.isEmpty()) { putZgtTopology(sourceDni, eventsByGroupId) }
-  } else {
-    return
+  if(!(service in ['RC', 'GRC', 'ZGT', 'AVT'])) { return }
+  Map copy = new LinkedHashMap(payload)
+  if(payload.events instanceof List) { copy.events = ((List<Map>)payload.events).collect { Map e -> new LinkedHashMap(e) } }
+  if(payload.eventsByGroupId instanceof Map) {
+    Map<String, List<Map>> groups = [:]
+    ((Map)payload.eventsByGroupId).each { Object id, Object rawEvents ->
+      if(rawEvents instanceof List) { groups[id.toString()] = ((List<Map>)rawEvents).collect { Map e -> new LinkedHashMap(e) } }
+    }
+    copy.eventsByGroupId = groups
   }
-  scheduleUpnpFanout()
+  List<Map> pending = state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] instanceof List
+      ? (List<Map>)state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] : []
+  pending.add(copy)
+  state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] = pending
+  runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'drainUpnpNotificationQueue', [overwrite: true])
 }
 
-/** Restart the 500 ms quiet period after every accepted AVT/GRC/ZGT payload. */
-synchronized void scheduleUpnpFanout() {
-  Long generation = ((state[UPNP_FANOUT_GENERATION_STATE_KEY] ?: 0L) as Long) + 1L
-  state[UPNP_FANOUT_GENERATION_STATE_KEY] = generation
-  state[UPNP_FANOUT_PENDING_STATE_KEY] = true
-  runInMillis(UPNP_FANOUT_DEBOUNCE_MILLIS, 'processDebouncedUpnpFanout',
-      [overwrite: true, data: [generation: generation]])
+/** Apply each notification in arrival order after the 500 ms parent debounce. */
+synchronized void drainUpnpNotificationQueue() {
+  List<Map> pending = state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY]) : []
+  state.remove(PENDING_UPNP_NOTIFICATION_QUEUE_KEY)
+  pending.each { Map notification -> processUpnpNotification(notification) }
 }
 
-/** Debounce expiry only queues the required 1 ms parent callback. */
-synchronized void processDebouncedUpnpFanout(Map data = [:]) {
-  Long generation = data?.generation as Long
-  if(generation == null || generation != (state[UPNP_FANOUT_GENERATION_STATE_KEY] as Long) ||
-      state[UPNP_FANOUT_PENDING_STATE_KEY] != true) { return }
-  state.remove(UPNP_FANOUT_PENDING_STATE_KEY)
-  runInMillis(1, 'performUpnpFanout', [overwrite: true, data: [generation: generation]])
-}
-
-/** Apply only from a deferred 1 ms callback, after the 500 ms quiet period. */
-synchronized void performUpnpFanout(Map data = [:]) {
-  Long generation = data?.generation as Long
-  if(generation == null || generation != (state[UPNP_FANOUT_GENERATION_STATE_KEY] as Long)) { return }
+void processUpnpNotification(Map notification) {
+  String service = notification?.service?.toString()
+  if(service == 'ZGT') { processUpnpTopologyNotification(notification); return }
+  String sourceId = notification?.rincon?.toString()
+  List<Map> events = notification?.events instanceof List ? (List<Map>)notification.events : []
+  if(!sourceId || events.isEmpty()) { return }
   Map<String, List<Map>> topology = getStoredZgtEventsMap()
-  Map<String, List<Map>> priorTopology = state[UPNP_FANOUT_TOPOLOGY_STATE_KEY] instanceof Map
-      ? (Map<String, List<Map>>)state[UPNP_FANOUT_TOPOLOGY_STATE_KEY] : [:]
-  Map<String, String> oldGroups = buildPlayerGroupMap(priorTopology)
-  Map<String, String> newGroups = buildPlayerGroupMap(topology)
+  Map<String, String> coordinators = buildPlayerCoordinatorMap(topology)
+  String coordinatorId = coordinators[sourceId] ?: sourceId
+  if(service == 'AVT') {
+    if(coordinatorId != sourceId) { logDebug("Dropping follower AVT from ${sourceId}; coordinator is ${coordinatorId}"); return }
+    putAvtEvents(sourceId, events)
+    deliverUpnpEventsToGroup(sourceId, events, true)
+  } else if(service == 'GRC') {
+    deliverUpnpEventsToGroup(coordinatorId, events, false)
+  } else if(service == 'RC') {
+    deliverUpnpEventsToPlayer(sourceId, events)
+  }
+}
 
-  topology.each { String groupId, List<Map> events ->
+void processUpnpTopologyNotification(Map notification) {
+  Map<String, List<Map>> previous = getStoredZgtEventsMap()
+  String sourceDni = notification?.sourceDni?.toString()
+  Map<String, List<Map>> next = notification?.eventsByGroupId instanceof Map
+      ? (Map<String, List<Map>>)notification.eventsByGroupId : [:]
+  if(!sourceDni || next.isEmpty()) { return }
+  Map<String, String> oldCoordinators = buildPlayerCoordinatorMap(previous)
+  putZgtTopology(sourceDni, next)
+  next.each { String groupId, List<Map> events ->
     String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    Map<String, Object> attrs = upnpEventsToAttributes(events, coordinatorId)
-    List<String> members = normalizeGroupPlayerIds(
-        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
     if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
-    members.unique().each { String rincon ->
-      ChildDeviceWrapper child = findPlayerBySonosId(rincon)
-      if(child != null && !attrs.isEmpty()) { queueChildStateBatch(child.getDeviceNetworkId(), attrs) }
-    }
+    members.unique().each { String id -> deliverUpnpEventsToPlayer(id, events) }
   }
+  next.each { String groupId, List<Map> events ->
+    String leader = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(!leader) { return }
+    List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
+        .each { String follower -> replayLatestLeaderAvt(leader, follower) }
+  }
+}
 
-  Set<String> changedPlayers = new LinkedHashSet<String>()
-  (oldGroups.keySet() + newGroups.keySet()).each { String playerId ->
-    if(oldGroups[playerId] != newGroups[playerId]) { changedPlayers.add(playerId) }
+void replayLatestLeaderAvt(String leaderId, String followerId) {
+  List<Map> latest = getStoredAvtEvents(leaderId)
+  if(latest) { deliverUpnpEventsToPlayer(followerId, latest) }
+}
+
+void deliverUpnpEventsToGroup(String coordinatorId, List<Map> events, Boolean playback) {
+  Map<String, List<Map>> topology = getStoredZgtEventsMap()
+  List<String> members = []
+  topology.each { String groupId, List<Map> groupEvents ->
+    String leader = groupEvents.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(leader == coordinatorId) { members = normalizeGroupPlayerIds(
+        groupEvents.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString()) }
   }
-  changedPlayers.each { String playerId ->
-    ChildDeviceWrapper child = findPlayerBySonosId(playerId)
-    if(child == null) { return }
-    String groupId = newGroups[playerId]
-    Map<String, Object> reconciled = [status: 'stopped', transportStatus: 'stopped', currentTrackName: '',
-        currentArtistName: '', albumArtURI: '', currentAlbumName: '', currentTrackNumber: 0,
-        currentMediaDuration: '00:00:00', currentTrackUri: '', groupVolume: 0, groupMute: 'unmuted']
-    if(groupId) {
-      List<Map> groupEvents = topology[groupId] ?: []
-      String coordinatorId = groupEvents.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-      if(coordinatorId) {
-        reconciled.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId), coordinatorId))
-        reconciled.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId)))
+  if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
+  members.unique().each { String id -> deliverUpnpEventsToPlayer(id, events) }
+  getGroupDevicesForCoordinator(coordinatorId).each { ChildDeviceWrapper groupDevice ->
+    events.each { Map event ->
+      if(event?.name && event.containsKey('value')) {
+        String name = event.name.toString()
+        if(!playback && name == 'groupVolume') { name = 'volume' }
+        else if(!playback && name == 'groupMute') { name = 'mute' }
+        if(playback || name in ['volume', 'mute']) { sendParentChildEvent(groupDevice, name, event.value) }
       }
     }
-    queueChildStateBatch(child.getDeviceNetworkId(), reconciled)
-  }
-
-  Map<String, List<Map>> snapshot = [:]
-  topology.each { String groupId, List<Map> events ->
-    snapshot[groupId] = events.collect { Map event -> new LinkedHashMap(event) }
-  }
-  state[UPNP_FANOUT_TOPOLOGY_STATE_KEY] = snapshot
-
-  // AVT/GRC snapshots are keyed by their coordinator. Replay each current group snapshot
-  // to the coordinator and every follower after the topology has been reconciled.
-  topology.each { String groupId, List<Map> events ->
-    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    if(!coordinatorId) { return }
-    Map<String, Object> combined = [:]
-    combined.putAll(upnpEventsToAttributes(getStoredAvtEvents(coordinatorId), coordinatorId))
-    combined.putAll(upnpEventsToAttributes(getStoredGrcEvents(coordinatorId)))
-    if(combined.isEmpty()) { return }
-    List<String> members = normalizeGroupPlayerIds(
-        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
-    members.unique().each { String rincon ->
-      ChildDeviceWrapper child = findPlayerBySonosId(rincon)
-      if(child != null) { queueChildStateBatch(child.getDeviceNetworkId(), combined) }
-    }
-    Map<String, Object> groupPlayback = new LinkedHashMap<String, Object>(combined)
-    Map<String, Object> groupVolume = [:]
-    if(groupPlayback.containsKey('groupVolume')) {
-      groupVolume.volume = groupPlayback.remove('groupVolume')
-    }
-    if(groupPlayback.containsKey('groupMute')) {
-      groupVolume.mute = groupPlayback.remove('groupMute')
-    }
-    flushGroupDeviceState(coordinatorId, groupVolume.isEmpty() ? null : groupVolume, groupPlayback)
   }
 }
 
-Map<String, String> buildPlayerGroupMap(Map<String, List<Map>> topology) {
-  Map<String, String> result = [:]
-  topology.each { String groupId, List<Map> events ->
-    List<String> members = normalizeGroupPlayerIds(
-        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    if(coordinatorId && !members.contains(coordinatorId)) { members.add(coordinatorId) }
-    members.each { String rincon -> result[rincon] = groupId }
-  }
-  return result
-}
-
-Map<String, Object> upnpEventsToAttributes(List<Map> events, String coordinatorId = null) {
-  Map<String, Object> attributes = [:]
-  (events ?: []).each { Map event ->
+void deliverUpnpEventsToPlayer(String rincon, List<Map> events) {
+  ChildDeviceWrapper player = findPlayerBySonosId(rincon)
+  if(player == null || !events) { return }
+  events.each { Map event ->
     String name = event?.name?.toString()
-    if(name && event.containsKey('value')) {
-      Object value = event.value
-      if(name == 'albumArtURI') {
-        attributes.putAll(albumArtAttributesForFanout(value?.toString(), coordinatorId))
-      } else {
-        attributes[name] = value
-      }
-    }
+    if(name && event.containsKey('value')) { sendParentChildEvent(player, name, event.value) }
   }
-  return attributes
 }
 
-Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String playerId) {
-  return albumArtAttributesForFanout(rawAlbumArtURI, playerId, null)
+void sendParentChildEvent(ChildDeviceWrapper child, String name, Object value) {
+  if(child == null || !name || value == null) { return }
+  try { child.sendEvent(name: name, value: value) }
+  catch(Exception e) { logWarn("Could not send ${name} to ${child.getDeviceNetworkId()}: ${e.message}") }
 }
 
-Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String playerId, Boolean disableArtEventsOverride) {
-  String resolvedUri = resolveAlbumArtUrl(rawAlbumArtURI, playerId)
-  Map<String, Object> attributes = [albumArtURI: formatAlbumArtForFanout(resolvedUri, playerId)]
-  ChildDeviceWrapper player = findPlayerBySonosId(playerId)
-  Boolean disabled = disableArtEventsOverride
-  if(disabled == null) { disabled = player?.getSetting('disableAlbumArtEvents') as Boolean }
-  if(disabled == null) { disabled = true }
-  if(disabled) {
-    attributes.albumArtSmall = 'Disabled in Preferences'
-    attributes.albumArtMedium = 'Disabled in Preferences'
-    attributes.albumArtLarge = 'Disabled in Preferences'
-    return attributes
+Map<String, String> buildPlayerCoordinatorMap(Map<String, List<Map>> topology) {
+  Map<String, String> coordinators = [:]
+  (topology ?: [:]).each { String groupId, List<Map> events ->
+    String coordinatorId = events.find { Map event -> event?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(!coordinatorId) { return }
+    List<String> members = normalizeGroupPlayerIds(
+        events.find { Map event -> event?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
+    members.unique().each { String memberId -> coordinators[memberId] = coordinatorId }
   }
-
-  if(!resolvedUri || resolvedUri == 'Not Available') {
-    attributes.albumArtSmall = 'Not Available'
-    attributes.albumArtMedium = 'Not Available'
-    attributes.albumArtLarge = 'Not Available'
-    return attributes
-  }
-  List<String> urls = parseConcatenatedAlbumArtUrls(resolvedUri)
-  if(urls.size() > 1) {
-    urls = urls.findAll { String url -> !url.contains('/AArt/') }
-    if(urls.isEmpty()) { urls = parseConcatenatedAlbumArtUrls(resolvedUri) }
-    String large = urls.find { String url -> url.contains('/AArl/') } ?: urls[0]
-    String medium = urls.find { String url -> url.contains('/AArm/') } ?: (urls.find { String url -> url.contains('/AArl/') } ?: urls[0])
-    String small = urls.find { String url -> url.contains('/AArs/') } ?: (urls.find { String url -> url.contains('/AArm/') } ?: urls[0])
-    attributes.albumArtSmall = small
-    attributes.albumArtMedium = medium
-    attributes.albumArtLarge = large
-    attributes.albumArtURI = formatAlbumArtForFanout(medium, playerId)
-    return attributes
-  }
-
-  if(resolvedUri.contains('/getaa?') || resolvedUri.contains('/getaa/')) {
-    attributes.albumArtSmall = appendAlbumArtSize(resolvedUri, 60)
-    attributes.albumArtMedium = appendAlbumArtSize(resolvedUri, 200)
-    attributes.albumArtLarge = appendAlbumArtSize(resolvedUri, 600)
-  } else {
-    attributes.albumArtSmall = resolvedUri
-    attributes.albumArtMedium = resolvedUri
-    attributes.albumArtLarge = resolvedUri
-  }
-  return attributes
+  return coordinators
 }
 
-String resolveAlbumArtUrl(String rawAlbumArtURI, String playerId) {
-  if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') { return 'Not Available' }
-  if(!rawAlbumArtURI.startsWith('/')) { return rawAlbumArtURI }
-  String baseUrl = resolvePlayerUpnpBaseUrl(findPlayerBySonosId(playerId))
-  return baseUrl ? "${baseUrl}${rawAlbumArtURI}" : rawAlbumArtURI
-}
-
-String appendAlbumArtSize(String url, Integer size) {
-  String separator = url.contains('?') ? '&' : '?'
-  return "${url}${separator}x=${size}&y=${size}"
-}
-
-List<String> parseConcatenatedAlbumArtUrls(String value) {
-  if(!value || !(value.contains('http://') || value.contains('https://'))) { return value ? [value] : [] }
-  List<String> urls = []
-  Integer start = 0
-  while(start < value.length()) {
-    Integer offset = value.substring(start).startsWith('https://') ? 8 : 7
-    Integer nextHttp = value.indexOf('http://', start + offset)
-    Integer nextHttps = value.indexOf('https://', start + offset)
-    Integer next = nextHttp > 0 && nextHttps > 0 ? Math.min(nextHttp, nextHttps) : (nextHttp > 0 ? nextHttp : nextHttps)
-    if(next > 0) {
-      urls.add(value.substring(start, next))
-      start = next
-    } else {
-      urls.add(value.substring(start))
-      break
-    }
-  }
-  return urls
-}
-
-String formatAlbumArtForFanout(String albumArtURI, String coordinatorId) {
-  if(!albumArtURI || albumArtURI == 'Not Available') { return 'Not Available' }
-  String imageUrl = albumArtURI
-  if(imageUrl.startsWith('/')) {
-    ChildDeviceWrapper coordinator = findPlayerBySonosId(coordinatorId)
-    String localUpnpUrl = resolvePlayerUpnpBaseUrl(coordinator)
-    if(localUpnpUrl) { imageUrl = "${localUpnpUrl}${imageUrl}" }
-  }
-  return "<br><img src=\"${escapeNewUiHtml(imageUrl)}\" width=\"200\" height=\"200\" >"
-}
-
-String resolvePlayerUpnpBaseUrl(ChildDeviceWrapper player) {
-  if(player == null) { return '' }
-  String configuredUrl = player.getDataValue('localUpnpUrl')?.toString()?.trim()
-  if(configuredUrl) { return configuredUrl.endsWith('/') ? configuredUrl[0..-2] : configuredUrl }
-  String host = player.getDataValue('localUpnpHost')?.toString()?.trim()
-  if(!host) {
-    String ip = player.getDataValue('deviceIp')?.toString()?.trim()
-    if(ip) { host = ip.contains(':') ? ip : "${ip}:1400" }
-  } else if(!host.contains(':')) {
-    host = "${host}:1400"
-  }
-  return host ? "http://${host}" : ''
-}
-
-String formatFavoriteForFanout(Object favorite, String coordinatorId) {
-  if(!(favorite instanceof Map)) { return favorite?.toString() ?: 'No favorite playing' }
-  Map value = (Map)favorite
-  String label = value.label?.toString() ?: 'No favorite playing'
-  String imageUrl = value.imageUrl?.toString()
-  if(!imageUrl) { return label }
-  String formattedImage = formatAlbumArtForFanout(imageUrl, coordinatorId)
-  return formattedImage == 'Not Available' ? label : "${label} ${formattedImage}"
-}
-
-/** Pure set+return only: merge delta by name into the stored list; no child calls. */
 List<Map> putAvtEvents(String coordinatorRincon, List<Map> events) {
-  String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()
+  String rincon = coordinatorRincon?.toString()
+  if(!rincon || !(events instanceof List)) { return [] }
   Map<String, List<Map>> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
       ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[AVT_STORE_STATE_KEY]) : [:]
-  List<Map> stored = snapshots[rincon] instanceof List ? new ArrayList<Map>((List<Map>)snapshots[rincon]) : []
-  if(events instanceof List) {
-    events.each { Map incoming ->
-      String incomingName = incoming?.name?.toString()
-      if(!incomingName) { return }
-      stored.removeAll { Map existing -> existing?.name?.toString() == incomingName }
-      stored.add(new LinkedHashMap(incoming))
-    }
-  }
-  if(!stored.isEmpty()) { snapshots[rincon] = stored }
+  List<Map> stored = events.collect { Map incoming -> new LinkedHashMap(incoming) }
+  snapshots[rincon] = stored
   state[AVT_STORE_STATE_KEY] = snapshots
   return stored
-}
-
-/** Pure set+return only: merge delta by name into the stored list; no child calls. */
-List<Map> putGrcEvents(String coordinatorRincon, List<Map> events) {
-  String rincon = resolveStoredCoordinatorRincon(coordinatorRincon) ?: coordinatorRincon?.toString()
-  Map<String, List<Map>> snapshots = state[GRC_STORE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[GRC_STORE_STATE_KEY]) : [:]
-  List<Map> stored = snapshots[rincon] instanceof List ? new ArrayList<Map>((List<Map>)snapshots[rincon]) : []
-  if(events instanceof List) {
-    events.each { Map incoming ->
-      String incomingName = incoming?.name?.toString()
-      if(!incomingName) { return }
-      stored.removeAll { Map existing -> existing?.name?.toString() == incomingName }
-      stored.add(new LinkedHashMap(incoming))
-    }
-  }
-  if(!stored.isEmpty()) { snapshots[rincon] = stored }
-  state[GRC_STORE_STATE_KEY] = snapshots
-  return stored
-}
-
-String resolveStoredCoordinatorRincon(String rincon) {
-  if(!rincon) { return null }
-  Map<String, List<Map>> zgtEvents = state[ZGT_EVENTS_STATE_KEY] instanceof Map
-      ? (Map<String, List<Map>>)state[ZGT_EVENTS_STATE_KEY] : [:]
-  for(Map.Entry<String, List<Map>> entry : zgtEvents.entrySet()) {
-    String coordinatorId = entry.value?.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    if(coordinatorId == rincon) { return rincon }
-  }
-  for(Map.Entry<String, List<Map>> entry : zgtEvents.entrySet()) {
-    List<String> members = normalizeGroupPlayerIds(
-        entry.value?.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    if(members.contains(rincon)) {
-      String coordinatorId = entry.value?.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-      if(coordinatorId) { return coordinatorId }
-    }
-  }
-  return null
 }
 
 List<Map> getStoredAvtEvents(String rincon) {
   Map<String, List<Map>> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
       ? (Map<String, List<Map>>)state[AVT_STORE_STATE_KEY] : [:]
-  List<Map> stored = snapshots[rincon?.toString()] as List<Map>
-  return stored != null ? new ArrayList<Map>(stored) : []
-}
-
-List<Map> getStoredGrcEvents(String rincon) {
-  Map<String, List<Map>> snapshots = state[GRC_STORE_STATE_KEY] instanceof Map
-      ? (Map<String, List<Map>>)state[GRC_STORE_STATE_KEY] : [:]
   List<Map> stored = snapshots[rincon?.toString()] as List<Map>
   return stored != null ? new ArrayList<Map>(stored) : []
 }
@@ -10774,34 +10284,6 @@ List<Map> getStoredZgtEvents(String groupId) {
 Map<String, List<Map>> getStoredZgtEventsMap() {
   return state[ZGT_EVENTS_STATE_KEY] instanceof Map
       ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[ZGT_EVENTS_STATE_KEY]) : [:]
-}
-
-void forwardAvtToGroup(Map data = [:]) {
-  String rincon = data?.rincon?.toString()
-  if(rincon == null) { return }
-  List<Map> events = getStoredAvtEvents(rincon)
-  if(events.isEmpty()) { return }
-  Map<String, Object> attributes = [:]
-  events.each { Map event -> if(event?.name) { attributes[event.name.toString()] = event.value } }
-  List<String> followerIds = []
-  Map<String, List<Map>> zgtEvents = getStoredZgtEventsMap()
-  for(Map.Entry<String, List<Map>> entry : zgtEvents.entrySet()) {
-    String coordinatorId = entry.value?.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    if(coordinatorId == rincon) {
-      followerIds = normalizeGroupPlayerIds(
-          entry.value?.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-          .findAll { String id -> id && id != rincon }
-      break
-    }
-  }
-  ChildDeviceWrapper coordinator = findPlayerBySonosId(rincon)
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  followerIds.unique().each { String fid ->
-    ChildDeviceWrapper follower = rinconMap[fid]
-    if(coordinator != null && follower != null) {
-      queueFollowerStateBatch(coordinator, follower, rincon, attributes)
-    }
-  }
 }
 
 Map getCurrentReceivedZgtTopology() {
@@ -11254,8 +10736,6 @@ void processPlayerCommandRequest(Map data) {
     Map<String, Map> expected = [:]
     oldMembers.each { String memberId -> expected[memberId] = [coordinatorId: memberId, memberIds: [memberId]] }
     if(playerId && !expected.containsKey(playerId)) { expected[playerId] = [coordinatorId: playerId, memberIds: [playerId]] }
-    setExpectedTopologyForPlayers(expected, UUID.randomUUID().toString(),
-        (now() as Long) + TOPOLOGY_CHANGE_SUPPRESSION_SECONDS * 1000L)
     source.playerCreateNewGroup()
     return
   }
@@ -11994,34 +11474,7 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
     Map<String, Object> attributes = new LinkedHashMap<String, Object>()
     attributes['switch'] = shouldBeActive ? 'on' : 'off'
     attributes['currentlyJoinedPlayers'] = joinedPlayersValue
-    // Include the coordinator's current state with an activation update. The
-    // group driver applies this locally after the player callback has returned.
-    if(shouldBeActive && callerDevice != null) {
-      ['albumArtURI', 'status', 'transportStatus', 'currentRepeatOneMode',
-       'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
-       'currentTrackDuration', 'trackPosition', 'trackPositionUpdated', 'currentArtistName', 'currentAlbumName',
-       'currentTrackName', 'trackDescription', 'trackData', 'currentFavorite',
-       'currentPlaylist', 'nextAlbumName', 'nextArtistName', 'nextTrackName',
-       'nextTrackAlbumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
-       'audioSource', 'currentTrackNumber', 'groupVolume', 'groupMute'].each { String name ->
-        if(name in ['trackPosition', 'trackPositionUpdated'] && !isPlayerTrackPositionUpdatesEnabled(callerDevice)) { return }
-        Object value = callerDevice.currentValue(name, true)
-        if(value != null) {
-          attributes[name] = value
-        }
-      }
-    }
-    // Force a complete coordinator snapshot when the group becomes active or
-    // its public playback state is behind the coordinator. The last-sent cache
-    // may contain values from before the group reset its attributes while
-    // inactive, so it cannot establish what the group currently publishes.
-    Boolean playbackStateOutOfSync = attributes.any { String name, Object value ->
-      !(name in ['switch', 'currentlyJoinedPlayers']) && value != null &&
-          !sameChildStateValue(value, gd.currentValue(name, true))
-    }
-    Boolean forceSnapshot = shouldBeActive && (!wasActive || playbackStateOutOfSync)
-    logDebug("Queueing group membership state for ${groupDni}: active=${shouldBeActive}, attributes=${attributes.keySet()}, forceSnapshot=${forceSnapshot}")
-    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes, forceSnapshot)
+    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes, false)
   }
   if(cursor < groupDnis.size()) {
     runIn(1, 'continueGroupDeviceMembershipUpdate', [overwrite: false, data: [
@@ -12118,7 +11571,7 @@ void drainGroupStateUpdates() {
     }
     try {
       logDebug("Delivering group state to ${groupDni}: attributes=${attributes.keySet()}")
-      Map<String, Object> publishable = prepareGroupDeviceAttributeEvents(groupDevice, attributes)
+      Map<String, Object> publishable = new LinkedHashMap<String, Object>(attributes)
       Map<String, Object> failedAttributes = emitChildAttributeEvents(groupDevice, publishable)
       if(!failedAttributes.isEmpty()) {
         throw new IllegalStateException("${failedAttributes.size()} group attribute event(s) failed")
@@ -12166,137 +11619,6 @@ void drainGroupStateUpdates() {
 }
 
 /** Apply the group driver's inactive and track-position guards before app-owned events are emitted. */
-Map<String, Object> prepareGroupDeviceAttributeEvents(ChildDeviceWrapper groupDevice, Map<String, Object> attributes) {
-  Map<String, Object> publishable = new LinkedHashMap<String, Object>(attributes ?: [:])
-  if(groupDevice == null || publishable.isEmpty()) { return publishable }
-
-  Boolean wasActive = groupDevice.currentValue('switch', true) == 'on'
-  Boolean isActive = publishable.containsKey('switch') ? publishable.switch == 'on' : wasActive
-  Boolean activeOnly = groupDevice.getSetting('onlyUpdateWhenActive') != false
-  Boolean resetWhenInactive = groupDevice.getSetting('resetAttributesWhenInactive') != false
-  Boolean trackPositionEnabled = groupDevice.getSetting('enableTrackPositionUpdates') == true
-  if(!trackPositionEnabled) {
-    publishable.remove('trackPosition')
-    publishable.remove('trackPositionUpdated')
-  }
-
-  if(activeOnly && !isActive) {
-    publishable.keySet().removeAll { String name -> !(name in ['switch', 'currentlyJoinedPlayers']) }
-    if(wasActive && resetWhenInactive) {
-      publishable.putAll([
-        status: 'inactive', transportStatus: 'stopped', trackData: '{}', trackDescription: 'n/a',
-        currentTrackDuration: 'n/a', trackPosition: 0L, trackPositionUpdated: 0L,
-        currentArtistName: 'n/a', currentAlbumName: 'n/a', currentTrackName: 'n/a',
-        albumArtURI: 'n/a', albumArtSmall: 'n/a', albumArtMedium: 'n/a', albumArtLarge: 'n/a',
-        audioSource: 'n/a', currentFavorite: 'n/a', currentPlaylist: 'n/a', currentTrackNumber: 0,
-        nextArtistName: 'n/a', nextAlbumName: 'n/a', nextTrackName: 'n/a',
-        nextTrackAlbumArtURI: 'n/a', queueTrackTotal: '0', queueTrackPosition: '0',
-        groupVolume: 0, groupMute: 'unmuted', currentRepeatOneMode: 'off', currentRepeatAllMode: 'off',
-        currentCrossfadeMode: 'off', currentShuffleMode: 'off'
-      ])
-    }
-  }
-
-  if(publishable.containsKey('volume')) {
-    Object volume = publishable.remove('volume')
-    publishable.volume = volume instanceof Map && ((Map)volume).containsKey('value')
-        ? volume : [value: volume, unit: '%']
-    if(!publishable.containsKey('groupVolume')) {
-      publishable.groupVolume = volume instanceof Map ? ((Map)volume).value : volume
-    }
-  }
-  if(publishable.containsKey('mute') && !publishable.containsKey('groupMute')) {
-    publishable.groupMute = publishable.mute
-  }
-  Boolean disableAlbumArtEvents = isGroupAlbumArtEventsDisabled(groupDevice)
-  if(disableAlbumArtEvents) {
-    publishable.albumArtSmall = 'Disabled in Preferences'
-    publishable.albumArtMedium = 'Disabled in Preferences'
-    publishable.albumArtLarge = 'Disabled in Preferences'
-  } else if(['albumArtSmall', 'albumArtMedium', 'albumArtLarge'].any { String name ->
-    publishable[name] == 'Disabled in Preferences'
-  }) {
-    String artMarkup = publishable.albumArtURI?.toString()
-    def imageMatcher = artMarkup =~ /<img[^>]*src=["']([^"']+)["']/
-    if(imageMatcher.find()) {
-      String imageUrl = imageMatcher.group(1).replace('&amp;', '&')
-      String coordinatorId = groupDevice.getDataValue('groupCoordinatorId')?.toString()
-      if(coordinatorId) {
-        Map<String, Object> artAttributes = albumArtAttributesForFanout(imageUrl, coordinatorId, false)
-        ['albumArtSmall', 'albumArtMedium', 'albumArtLarge'].each { String name ->
-          if(artAttributes.containsKey(name)) { publishable[name] = artAttributes[name] }
-        }
-      }
-    }
-  }
-  String trackName = publishable.currentTrackName?.toString()?.trim()
-  String artistName = publishable.currentArtistName?.toString()?.trim()
-  if(trackName && artistName && !isUnavailableGroupTrackValue(trackName) &&
-      !isUnavailableGroupTrackValue(artistName)) {
-    publishable.trackDescription = "${trackName} by ${artistName}"
-    publishable.trackData = JsonOutput.toJson([
-      name: trackName,
-      artist: artistName,
-      album: publishable.currentAlbumName?.toString()?.trim() ?: 'Not Available'
-    ])
-  }
-  return publishable
-}
-
-Boolean isUnavailableGroupTrackValue(String value) {
-  return !value || value.equalsIgnoreCase('Not Available') || value.equalsIgnoreCase('n/a')
-}
-
-/** Treat Hubitat's persisted bool setting values consistently across Boolean and string forms. */
-Boolean isGroupAlbumArtEventsDisabled(ChildDeviceWrapper groupDevice) {
-  Object rawSetting = groupDevice?.getSetting('disableAlbumArtEvents')
-  if(rawSetting == null) { return true }
-  if(rawSetting instanceof Boolean) { return (Boolean)rawSetting }
-  String normalized = rawSetting.toString().trim().toLowerCase(Locale.ROOT)
-  return normalized in ['true', '1', 'on', 'yes']
-}
-
-/**
- * Combined flush method: resolves group devices ONCE for both volume and playback attributes.
- * Called by the player driver's flushPendingGroupDeviceUpdates() to avoid two separate
- * child device traversals.
- * @param coordinatorId The RINCON ID of the coordinator
- * @param volumeAttrs Map of volume/mute attributes (may be null)
- * @param playbackAttrs Map of extended playback attributes (may be null/empty)
- */
-void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAttrs) {
-  if(!coordinatorId) { return }
-
-  // Invariant: volumeAttrs keys (volume, mute) must not overlap with playbackAttrs keys.
-  // The caller (flushPendingGroupDeviceUpdates) guarantees this by stripping _groupVolume/_groupMute
-  // from the pending map before passing the remainder as playbackAttrs.
-  // Note: switch is NOT included in volumeAttrs — only updateGroupDevices() manages switch state.
-  Map combined = [:]
-  if(volumeAttrs) { combined.putAll(volumeAttrs) }
-  if(playbackAttrs) { combined.putAll(playbackAttrs) }
-  if(combined.isEmpty()) { return }
-
-  List<ChildDeviceWrapper> groupsForCoord = getGroupDevicesForCoordinator(coordinatorId)
-  Object rawAlbumArt = getStoredAvtEvents(coordinatorId).find { Map event ->
-    event?.name?.toString() == 'albumArtURI' && event.containsKey('value')
-  }?.value
-  groupsForCoord.each { ChildDeviceWrapper groupDevice ->
-    Map groupAttributes = new LinkedHashMap(combined)
-    Boolean disableArtEvents = isGroupAlbumArtEventsDisabled(groupDevice)
-    if(rawAlbumArt != null) {
-      groupAttributes.putAll(albumArtAttributesForFanout(rawAlbumArt.toString(), coordinatorId, disableArtEvents))
-    } else if(disableArtEvents) {
-      groupAttributes.albumArtSmall = 'Disabled in Preferences'
-      groupAttributes.albumArtMedium = 'Disabled in Preferences'
-      groupAttributes.albumArtLarge = 'Disabled in Preferences'
-    }
-    Boolean playbackStateOutOfSync = groupAttributes.any { Object rawName, Object value ->
-      String name = rawName?.toString()
-      name != null && value != null && !sameChildStateValue(value, groupDevice.currentValue(name, true))
-    }
-    queueGroupDeviceState(groupDevice.getDeviceNetworkId(), groupAttributes, playbackStateOutOfSync)
-  }
-}
 
 // =============================================================================
 // Version Checking for Installed Files

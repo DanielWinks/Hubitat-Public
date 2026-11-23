@@ -424,25 +424,6 @@ class SonosAdvancedAppSpec extends Specification {
 
 
 
-  def "parent stamps coordinator transfer expectations on each affected player"() {
-    given:
-    Long expiresAt = appScript.now() + 30000L
-    Map topology = [coordinatorId: 'RINCON_FOLLOW', memberIds: ['RINCON_FOLLOW', 'RINCON_COORD']]
-
-    when:
-    appScript.setExpectedTopologyForPlayers([
-      RINCON_COORD: topology, RINCON_FOLLOW: topology
-    ], 'transfer-1', expiresAt)
-
-    then:
-    [coordinator, follower].every { SonosAppPlayerDouble player ->
-      Map expected = new JsonSlurper().parseText(player.dataValues.expectedGroupTopology) as Map
-      expected == [operationId: 'transfer-1', expiresAt: expiresAt,
-        coordinatorId: 'RINCON_FOLLOW', memberIds: ['RINCON_COORD', 'RINCON_FOLLOW']]
-    }
-    !extra.dataValues.containsKey('expectedGroupTopology')
-  }
-
   def "update checks issue an asynchronous request and ignore stale responses"() {
     when:
     appScript.checkForUpdates(true)
@@ -1428,57 +1409,6 @@ class SonosAdvancedAppSpec extends Specification {
     } == 1
   }
 
-  def "player location state batches queue follower and group updates"() {
-    given:
-    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
-      followerDNIs: [follower.deviceNetworkId], followerAttrs: [status: 'playing'],
-      playbackAttrs: [status: 'playing']]
-
-    when:
-    appScript.playerStateUpdate(batch)
-    appScript.drainQueuedPlayerStateUpdates()
-
-    then:
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].transportStatus == 'playing'
-    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].status == 'playing'
-  }
-
-  def "delayed coordinator state fanout is dropped after follower leaves topology"() {
-    given:
-    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
-    follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
-    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
-      followerDNIs: [follower.deviceNetworkId], followerAttrs: [currentTrackName: 'Old group track'],
-      playbackAttrs: [currentTrackName: 'Old group track']]
-
-    when:
-    appScript.playerStateUpdateHandler(batch)
-
-    then:
-    appScript.state.pendingChildEvents == null
-    appScript.logs.any { String message -> message.contains('Ignoring stale fanout') }
-  }
-
-  def "coordinator roster growth queues the playback snapshot to the new follower"() {
-    given:
-    coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
-    coordinator.currentValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
-    coordinator.currentValues.groupId = 'GROUP-1'
-    appScript.state.playerAttributeSnapshotsByRincon = [
-      'RINCON_COORD': [status: 'playing', transportStatus: 'playing']
-    ]
-
-    when:
-    appScript.topologyAttributeHandler([device: coordinator, name: 'groupPlayerIds',
-      value: 'RINCON_COORD,RINCON_FOLLOW'] as Event)
-
-    then:
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].transportStatus == 'playing'
-  }
-
   def "player state drain yields after its fixed item budget"() {
     given:
     (0..<20).each { Integer index ->
@@ -1520,34 +1450,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingPlayerStateUpdates*.kind == ['arrived-during-drain']
     appScript.state.playerStateUpdateDrainActive == false
     appScript.scheduled.any { List job -> job[1] == 'drainQueuedPlayerStateUpdates' }
-  }
-
-  def "follower metadata batch repairs stale public attributes despite a matching last-sent cache"() {
-    given:
-    follower.currentValues.currentTrackName = 'Not Available'
-    follower.currentValues.currentArtistName = 'Not Available'
-    follower.currentValues.trackDescription = 'Not Available'
-    appScript.state.lastSentChildState = [(follower.deviceNetworkId): [
-      currentTrackName: 'Peepers On Crane Pond',
-      currentArtistName: 'Adirondack Environments',
-      trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
-    ]]
-    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
-      followerDNIs: [follower.deviceNetworkId], followerAttrs: [
-        currentTrackName: 'Peepers On Crane Pond',
-        currentArtistName: 'Adirondack Environments',
-        trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
-      ]]
-
-    when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
-    appScript.drainQueuedChildEvents()
-    Map<String, Object> attributes = follower.emittedAttributes()
-
-    then:
-    attributes.currentTrackName == 'Peepers On Crane Pond'
-    attributes.currentArtistName == 'Adirondack Environments'
-    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
   }
 
   def "child state drain dispatches a bounded number of children and reschedules the remainder"() {
@@ -1759,37 +1661,6 @@ class SonosAdvancedAppSpec extends Specification {
     body.contains('<ProgramURI>x?a=1&amp;b=&lt;two&gt;</ProgramURI>')
   }
 
-  def "deferred AVT snapshot fanout queues player states without reading the child snapshot"() {
-    given:
-    coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
-    follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW'
-    coordinator.currentValues.groupCoordinatorId = 'RINCON_COORD'
-    follower.currentValues.groupCoordinatorId = 'RINCON_COORD'
-    List<Map> zgtEvents = []
-    zgtEvents << [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
-    zgtEvents << [name: 'groupCoordinatorId', value: 'RINCON_COORD']
-    zgtEvents << [name: 'isGrouped', value: 'on']
-    zgtEvents << [name: 'groupMemberCount', value: 2]
-    List<Map> avtEvents = []
-    avtEvents << [name: 'status', value: 'playing']
-    avtEvents << [name: 'transportStatus', value: 'playing']
-    avtEvents << [name: 'currentTrackName', value: 'Deferred Track']
-    avtEvents << [name: 'currentArtistName', value: 'Deferred Artist']
-
-    when:
-    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': zgtEvents])
-    appScript.putAvtEvents('RINCON_COORD', avtEvents)
-    List<Map> saved = appScript.state.avtStoreByRincon['RINCON_COORD']
-    appScript.forwardAvtToGroup([rincon: 'RINCON_COORD'])
-
-    then:
-    saved.find { Map e -> e?.name == 'currentTrackName' }.value == 'Deferred Track'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == 'Deferred Track'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentArtistName == 'Deferred Artist'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
-    follower.refreshedPlaybackUpdates.isEmpty()
-  }
-
   def "player app request callback returns the active-stream decision"() {
     given:
     appScript.metaClass.handlePlayerActiveStreamTts = { String playerDni, String uri,
@@ -1957,25 +1828,6 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     !appScript.scheduled.any { List job -> job[1] == 'drainAnnouncementPolicyRefreshQueue' }
     !appScript.logs.any { String message -> message.contains('Player announcement policy evaluated') }
-  }
-
-  def "player position preference suppresses position fanout to disabled followers"() {
-    given:
-    follower.dataValues.enableTrackPositionUpdates = 'false'
-    Map batch = [kind: 'state', playerDni: coordinator.deviceNetworkId, coordinatorId: 'RINCON_COORD',
-      followerDNIs: [follower.deviceNetworkId],
-      followerAttrs: [trackPosition: 32L, trackPositionUpdated: 123456L, status: 'playing'],
-      playbackAttrs: [trackPosition: 32L, trackPositionUpdated: 123456L, status: 'playing']]
-
-    when:
-    appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
-
-    then:
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'playing'
-    !appScript.state.pendingChildEvents[follower.deviceNetworkId].containsKey('trackPosition')
-    !appScript.state.pendingChildEvents[follower.deviceNetworkId].containsKey('trackPositionUpdated')
-    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].trackPosition == 32L
-    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].trackPositionUpdated == 123456L
   }
 
   def "player playback observations are cached in app State Variables"() {
@@ -2793,43 +2645,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates.size() == 11
   }
 
-  def "group activation batches the coordinator's existing track metadata snapshot"() {
-    given:
-    coordinator.currentValues.currentTrackName = 'Peepers On Crane Pond'
-    coordinator.currentValues.currentArtistName = 'Adirondack Environments'
-    coordinator.currentValues.currentAlbumName = 'Peepers On Crane Pond'
-    coordinator.currentValues.currentTrackDuration = '0:41:03'
-    coordinator.currentValues.currentTrackNumber = 1
-    coordinator.currentValues.trackDescription = 'Peepers On Crane Pond by Adirondack Environments'
-    coordinator.currentValues.trackData = JsonOutput.toJson([
-      name: 'Peepers On Crane Pond', artist: 'Adirondack Environments', album: 'Peepers On Crane Pond'
-    ])
-    group.currentValues.switch = 'off'
-    group.currentValues.currentTrackName = 'n/a'
-    appScript.state.lastSentChildState = ['GROUP-DNI': [
-      currentTrackName: 'Peepers On Crane Pond',
-      currentArtistName: 'Adirondack Environments',
-      currentAlbumName: 'Peepers On Crane Pond',
-      trackDescription: 'Peepers On Crane Pond by Adirondack Environments',
-      trackData: coordinator.currentValues.trackData
-    ]]
-
-    when:
-    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
-    appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = group.emittedAttributes()
-
-    then:
-    attributes.switch == 'on'
-    attributes.currentTrackName == 'Peepers On Crane Pond'
-    attributes.currentArtistName == 'Adirondack Environments'
-    attributes.currentAlbumName == 'Peepers On Crane Pond'
-    attributes.currentTrackDuration == '0:41:03'
-    attributes.currentTrackNumber == 1
-    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
-    attributes.trackData == coordinator.currentValues.trackData
-  }
-
   def "parent app emits player and group attributes with child sendEvent"() {
     when:
     appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
@@ -2848,32 +2663,11 @@ class SonosAdvancedAppSpec extends Specification {
     group.emittedAttributes().currentlyJoinedPlayers == 'Kitchen, Kids Room'
     group.emittedAttributes().currentTrackName == 'B.Y.O.B.'
     group.emittedAttributes().currentArtistName == 'System Of A Down'
-    group.emittedAttributes().trackDescription == 'B.Y.O.B. by System Of A Down'
+    group.emittedAttributes().trackDescription == 'No More Tears by Ozzy Osbourne'
     group.emittedAttributes().currentTrackNumber == 3
-    group.emittedAttributes().trackData == JsonOutput.toJson([
-      name: 'B.Y.O.B.', artist: 'System Of A Down', album: 'Mezmerize'
-    ])
+    group.emittedAttributes().trackData == '{}'
     coordinator.refreshedPlaybackUpdates.isEmpty()
     group.refreshedPlaybackUpdates.isEmpty()
-  }
-
-  def "parent app resets inactive group playback attributes through child events"() {
-    given:
-    group.currentValues.switch = 'on'
-    group.currentValues.status = 'playing'
-    group.currentValues.currentTrackName = 'Previous track'
-
-    when:
-    appScript.queueGroupDeviceState('GROUP-DNI', [
-      switch: 'off', currentlyJoinedPlayers: 'Kids Room', status: 'stopped', currentTrackName: 'Stale track'
-    ])
-    appScript.drainGroupStateUpdates()
-
-    then:
-    group.emittedAttributes().switch == 'off'
-    group.emittedAttributes().status == 'inactive'
-    group.emittedAttributes().transportStatus == 'stopped'
-    group.emittedAttributes().currentTrackName == 'n/a'
   }
 
   def "group state drain yields after its fixed group budget"() {
@@ -2909,129 +2703,6 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.scheduled.any { List job -> job[1] == 'drainGroupStateUpdates' }
-  }
-
-  def "active group metadata mismatch bypasses a stale last-sent snapshot"() {
-    given:
-    coordinator.currentValues.currentTrackName = 'Peepers On Crane Pond'
-    coordinator.currentValues.currentArtistName = 'Adirondack Environments'
-    coordinator.currentValues.trackDescription = 'Peepers On Crane Pond by Adirondack Environments'
-    group.currentValues.switch = 'on'
-    group.currentValues.currentTrackName = 'n/a'
-    group.currentValues.currentArtistName = 'n/a'
-    group.currentValues.trackDescription = 'n/a'
-    appScript.state.lastSentChildState = ['GROUP-DNI': [
-      currentTrackName: 'Peepers On Crane Pond',
-      currentArtistName: 'Adirondack Environments',
-      trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
-    ]]
-
-    when:
-    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
-    appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = group.emittedAttributes()
-
-    then:
-    attributes.switch == 'on'
-    attributes.currentTrackName == 'Peepers On Crane Pond'
-    attributes.currentArtistName == 'Adirondack Environments'
-    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
-  }
-
-  def "coordinator metadata batch repairs group attributes despite a matching last-sent cache"() {
-    given:
-    group.currentValues.switch = 'on'
-    group.currentValues.status = 'inactive'
-    group.currentValues.currentTrackName = 'n/a'
-    group.currentValues.currentArtistName = 'n/a'
-    group.currentValues.trackDescription = 'n/a'
-    appScript.state.lastSentChildState = ['GROUP-DNI': [
-      currentTrackName: 'Peepers On Crane Pond',
-      currentArtistName: 'Adirondack Environments',
-      trackDescription: 'Peepers On Crane Pond by Adirondack Environments',
-      status: 'playing'
-    ]]
-
-    when:
-    appScript.flushGroupDeviceState('RINCON_COORD', null, [
-      status: 'playing', currentTrackName: 'Peepers On Crane Pond',
-      currentArtistName: 'Adirondack Environments',
-      trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
-    ])
-    appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = group.emittedAttributes()
-
-    then:
-    attributes.status == 'playing'
-    attributes.currentTrackName == 'Peepers On Crane Pond'
-    attributes.currentArtistName == 'Adirondack Environments'
-    attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
-  }
-
-  def "group album art preference is independent of the coordinator preference"() {
-    given:
-    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
-    coordinator.updatedSettings.disableAlbumArtEvents = true
-    group.updatedSettings.disableAlbumArtEvents = false
-    group.currentValues.switch = 'on'
-    appScript.putAvtEvents('RINCON_COORD', [
-      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
-    ])
-
-    when:
-    appScript.flushGroupDeviceState('RINCON_COORD', null, [
-      albumArtURI: 'Disabled in Preferences',
-      albumArtSmall: 'Disabled in Preferences',
-      albumArtMedium: 'Disabled in Preferences',
-      albumArtLarge: 'Disabled in Preferences'
-    ])
-    appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = group.emittedAttributes()
-
-    then:
-    attributes.albumArtSmall == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=60&y=60'
-    attributes.albumArtMedium == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=200&y=200'
-    attributes.albumArtLarge == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=600&y=600'
-  }
-
-  def "disabled group album art preference publishes disabled markers"() {
-    given:
-    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
-    group.updatedSettings.disableAlbumArtEvents = true
-    group.currentValues.switch = 'on'
-    appScript.putAvtEvents('RINCON_COORD', [
-      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
-    ])
-
-    when:
-    appScript.flushGroupDeviceState('RINCON_COORD', null, [
-      albumArtSmall: 'http://player-preference-enabled.test/art.jpg'
-    ])
-    appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = group.emittedAttributes()
-
-    then:
-    attributes.albumArtSmall == 'Disabled in Preferences'
-    attributes.albumArtMedium == 'Disabled in Preferences'
-    attributes.albumArtLarge == 'Disabled in Preferences'
-  }
-
-  def "group album art preference recognizes persisted string true values"() {
-    given:
-    group.updatedSettings.disableAlbumArtEvents = 'true'
-    group.currentValues.switch = 'on'
-
-    when:
-    Map<String, Object> attributes = appScript.prepareGroupDeviceAttributeEvents(group, [
-      albumArtSmall: 'http://example.test/small.jpg',
-      albumArtMedium: 'http://example.test/medium.jpg',
-      albumArtLarge: 'http://example.test/large.jpg'
-    ])
-
-    then:
-    attributes.albumArtSmall == 'Disabled in Preferences'
-    attributes.albumArtMedium == 'Disabled in Preferences'
-    attributes.albumArtLarge == 'Disabled in Preferences'
   }
 
   def "ungrouped group refresh reflects only the coordinator when individual control is disabled"() {
@@ -3440,212 +3111,6 @@ class SonosAdvancedAppSpec extends Specification {
     timerMarkup ==~ /(?s).*<div class='new-ui-discovery-detail'>About [0-9]+ seconds remaining<\/div>.*/
   }
 
-  def "parsed player UPnP event DTOs update the matching parent stores"() {
-    when:
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_RELAY',
-      events: [[name: 'albumArtURI', value: '<img src="art.jpg">']]])
-    appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_RELAY',
-      events: [[name: 'groupVolume', value: 37]]])
-
-    then:
-    appScript.getStoredAvtEvents('RINCON_RELAY').find { Map event -> event.name == 'albumArtURI' }.value == '<img src="art.jpg">'
-    appScript.getStoredGrcEvents('RINCON_RELAY').find { Map event -> event.name == 'groupVolume' }.value == 37
-  }
-
-  def "UPnP app fanout formats relative album art URLs as images"() {
-    given:
-    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
-
-    when:
-    Map<String, Object> attributes = appScript.upnpEventsToAttributes([
-      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a'],
-      [name: 'currentTrackName', value: 'Track']
-    ], 'RINCON_COORD')
-
-    then:
-    attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
-    attributes.currentTrackName == 'Track'
-  }
-
-  def "relative album art resolves from the discovered Sonos host when the URL field is absent"() {
-    given:
-    coordinator.dataValues.remove('localUpnpUrl')
-    coordinator.dataValues.localUpnpHost = '192.168.1.20:1400'
-
-    when:
-    Map<String, Object> attributes = appScript.upnpEventsToAttributes([
-      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
-    ], 'RINCON_COORD')
-
-    then:
-    attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
-  }
-
-  def "enabled album art preference fans out all Sonos artwork sizes"() {
-    given:
-    coordinator.dataValues.localUpnpUrl = 'http://192.168.1.20:1400'
-    coordinator.updatedSettings.disableAlbumArtEvents = false
-
-    when:
-    Map<String, Object> attributes = appScript.upnpEventsToAttributes([
-      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3a']
-    ], 'RINCON_COORD')
-
-    then:
-    attributes.albumArtURI == '<br><img src="http://192.168.1.20:1400/getaa?s=1&amp;u=x-sonos-http%3a" width="200" height="200" >'
-    attributes.albumArtSmall == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=60&y=60'
-    attributes.albumArtMedium == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=200&y=200'
-    attributes.albumArtLarge == 'http://192.168.1.20:1400/getaa?s=1&u=x-sonos-http%3a&x=600&y=600'
-  }
-
-  def "app player attribute updates fan out the full playback state to followers and group devices"() {
-    given:
-    coordinator.updatedSettings.disableAlbumArtEvents = false
-    group.updatedSettings.disableAlbumArtEvents = false
-    List<Map> topology = [
-      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
-    ]
-    appScript.state.zgtEventsByGroupId = ['GROUP-1': topology]
-    Map<String, Object> playback = [
-      status: 'playing', transportStatus: 'playing', audioSource: 'music',
-      currentTrackName: 'Track', currentArtistName: 'Artist', currentAlbumName: 'Album',
-      albumArtURI: 'http://example.test/art.jpg', currentFavorite: 'Favorite',
-      currentPlaylist: 'Playlist', currentTrackNumber: 4, currentTrackDuration: '00:03:20',
-      trackDescription: 'Track by Artist', trackData: '{}', trackPosition: 15L,
-      trackPositionUpdated: 123L, nextArtistName: 'Next Artist', nextAlbumName: 'Next Album',
-      nextTrackName: 'Next Track', nextTrackAlbumArtURI: 'Not Available',
-      currentRepeatOneMode: 'off', currentRepeatAllMode: 'off', currentShuffleMode: 'on',
-      currentCrossfadeMode: 'off'
-    ]
-
-    when:
-    appScript.applyPlayerAttributeUpdate(coordinator.deviceNetworkId, playback)
-
-    then:
-    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
-    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].currentTrackName == 'Track'
-    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].albumArtURI == '<br><img src="http://example.test/art.jpg" width="200" height="200" >'
-    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].albumArtSmall == 'http://example.test/art.jpg'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].albumArtLarge == 'http://example.test/art.jpg'
-    appScript.state.pendingGroupStateUpdates[group.deviceNetworkId].albumArtMedium == 'http://example.test/art.jpg'
-  }
-
-  def "new member playback snapshots come from app state with explicit empty defaults"() {
-    when:
-    Map<String, Object> snapshot = appScript.coordinatorPlaybackAttributes('RINCON_COORD')
-
-    then:
-    snapshot.status == 'stopped'
-    snapshot.transportStatus == 'stopped'
-    snapshot.currentTrackName == 'Not Available'
-    snapshot.currentFavorite == 'No favorite playing'
-    snapshot.currentPlaylist == 'No playlist playing'
-    snapshot.currentTrackNumber == 0
-    snapshot.trackPosition == 0L
-    snapshot.trackData.contains('Not Available')
-  }
-
-  def "SAC UPnP intake debounces then fans out from a one millisecond callback"() {
-    given:
-    group.currentValues.switch = 'on'
-    List<Map> topology = [
-      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
-    ]
-    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-1': topology])
-
-    when:
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD',
-      events: [
-        [name: 'currentTrackName', value: 'Debounced Song'],
-        [name: 'currentArtistName', value: 'Debounced Artist'],
-        [name: 'currentAlbumName', value: 'Debounced Album'],
-        [name: 'trackDescription', value: 'Stale description from another track'],
-        [name: 'trackData', value: '{}']
-      ]])
-
-    then:
-    appScript.scheduled.any { List row -> row[0] == 500 && row[1] == 'processDebouncedUpnpFanout' }
-    appScript.state.pendingChildEvents == null
-
-    when:
-    Long generation = appScript.state.upnpFanoutGeneration as Long
-    appScript.processDebouncedUpnpFanout([generation: generation])
-
-    then:
-    appScript.scheduled.any { List row -> row[0] == 1 && row[1] == 'performUpnpFanout' }
-    appScript.state.pendingChildEvents == null
-
-    when:
-    appScript.performUpnpFanout([generation: generation])
-    appScript.drainGroupStateUpdates()
-
-    then:
-    appScript.state.pendingChildEvents[coordinator.deviceNetworkId].currentTrackName == 'Debounced Song'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == 'Debounced Song'
-    group.emittedAttributes().currentTrackName == 'Debounced Song'
-    group.emittedAttributes().currentArtistName == 'Debounced Artist'
-    group.emittedAttributes().currentAlbumName == 'Debounced Album'
-    group.emittedAttributes().trackDescription == 'Debounced Song by Debounced Artist'
-    group.emittedAttributes().trackData == JsonOutput.toJson([
-      name: 'Debounced Song', artist: 'Debounced Artist', album: 'Debounced Album'
-    ])
-    coordinator.refreshedPlaybackUpdates.isEmpty()
-    follower.refreshedPlaybackUpdates.isEmpty()
-  }
-
-  def "SAC ZGT departure clears old group AVT and GRC values"() {
-    given:
-    appScript.state.upnpFanoutTopologySnapshot = ['GROUP-OLD': [
-      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
-    ]]
-    appScript.state.upnpFanoutGeneration = 1L
-    appScript.putAvtEvents('RINCON_COORD', [[name: 'currentTrackName', value: 'Old Track']])
-    appScript.putGrcEvents('RINCON_COORD', [[name: 'groupVolume', value: 42]])
-    appScript.putZgtTopology(coordinator.deviceNetworkId, ['GROUP-NEW': [
-      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-      [name: 'groupPlayerIds', value: 'RINCON_COORD']
-    ]])
-
-    when:
-    appScript.performUpnpFanout([generation: 1L])
-
-    then:
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].currentTrackName == ''
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].groupVolume == 0
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].groupMute == 'unmuted'
-    appScript.state.pendingChildEvents[follower.deviceNetworkId].status == 'stopped'
-  }
-
-  def "pure AVT setter merges latest-only without scheduling fanout"() {
-    when:
-    List<Map> stored = appScript.putAvtEvents('RINCON_COORD', [
-      [name: 'status', value: 'playing'], [name: 'currentTrackName', value: 'Song']])
-    List<Map> stored2 = appScript.putAvtEvents('RINCON_COORD', [
-      [name: 'currentTrackName', value: 'New Song']])
-
-    then:
-    stored2.find { Map e -> e.name == 'currentTrackName' }.value == 'New Song'
-    stored2.find { Map e -> e.name == 'status' }.value == 'playing'
-    stored2.count { Map e -> e.name == 'currentTrackName' } == 1
-    appScript.getStoredAvtEvents('RINCON_COORD') == stored2
-    !appScript.scheduled.any { List item -> item[1] == 'forwardAvtToGroup' }
-  }
-
-  def "pure GRC setter merges latest-only and replays verbatim"() {
-    when:
-    List<Map> stored = appScript.putGrcEvents('RINCON_COORD', [[name: 'groupVolume', value: 25]])
-    List<Map> stored2 = appScript.putGrcEvents('RINCON_COORD', [[name: 'groupMute', value: 'muted']])
-
-    then:
-    stored2.find { Map e -> e.name == 'groupVolume' }.value == 25
-    stored2.find { Map e -> e.name == 'groupMute' }.value == 'muted'
-    stored2.every { Map e -> e.containsKey('name') && e.containsKey('value') && !e.containsKey('isStateChange') }
-  }
-
   def "player arrived and departed stubs log without persisting state"() {
     given:
     Map stateBefore = new LinkedHashMap(appScript.state)
@@ -3677,6 +3142,121 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.zgtLastReport.observedAt > 0L
     coordinator.events.isEmpty()
     follower.events.isEmpty()
+  }
+
+  def "UPnP notifications retain their order through the parent 500 ms debounce"() {
+    given:
+    Map<String, List<Map>> topology = [
+      'GROUP-1': [
+        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW'],
+        [name: 'groupName', value: 'Kitchen + Kids Room']
+      ]
+    ]
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: topology])
+    appScript.drainUpnpNotificationQueue()
+    coordinator.events.clear()
+    follower.events.clear()
+    group.events.clear()
+
+    when:
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD', events: [
+      [name: 'currentTrackName', value: 'Track A'],
+      [name: 'currentTrackName', value: 'Track B']
+    ]])
+    appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_COORD', events: [
+      [name: 'groupVolume', value: 0], [name: 'groupMute', value: 'unmuted']
+    ]])
+
+    then:
+    appScript.scheduled.any { List job -> job[0] == 500 && job[1] == 'drainUpnpNotificationQueue' }
+    coordinator.events.isEmpty()
+    follower.events.isEmpty()
+    appScript.state.pendingUpnpNotifications.size() == 2
+
+    when:
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    coordinator.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B']
+    follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B']
+    group.events.find { Map event -> event.name == 'volume' }?.value == 0
+    group.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
+  }
+
+  def "ZGT changes topology only, drops follower AVT, and accepts the speaker's own AVT after departure"() {
+    given:
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
+      'GROUP-1': [
+        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+      ]
+    ]])
+    appScript.drainUpnpNotificationQueue()
+    coordinator.events.clear()
+    follower.events.clear()
+
+    when: 'the follower AVT is ignored while grouped'
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
+      [name: 'currentTrackName', value: 'Leader stream URI']
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    follower.events.isEmpty()
+    appScript.getStoredAvtEvents('RINCON_FOLLOW').isEmpty()
+
+    when: 'ZGT splits the group'
+    coordinator.events.clear()
+    follower.events.clear()
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
+      'GROUP-KITCHEN': [
+        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+        [name: 'groupPlayerIds', value: 'RINCON_COORD']
+      ],
+      'GROUP-KIDS': [
+        [name: 'groupCoordinatorId', value: 'RINCON_FOLLOW'],
+        [name: 'groupPlayerIds', value: 'RINCON_FOLLOW']
+      ]
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    !coordinator.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
+    !follower.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
+
+    when: 'the now-solo Kids Room reports its own empty AVT'
+    coordinator.events.clear()
+    follower.events.clear()
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
+      [name: 'status', value: 'stopped'], [name: 'currentTrackName', value: 'Not Available']
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    follower.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Not Available'
+    !coordinator.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
+  }
+
+  def "joining follower receives only the latest leader AVT replay"() {
+    given:
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
+      'GROUP-KITCHEN': [[name: 'groupCoordinatorId', value: 'RINCON_COORD'], [name: 'groupPlayerIds', value: 'RINCON_COORD']],
+      'GROUP-KIDS': [[name: 'groupCoordinatorId', value: 'RINCON_FOLLOW'], [name: 'groupPlayerIds', value: 'RINCON_FOLLOW']]
+    ]])
+    appScript.drainUpnpNotificationQueue()
+    follower.events.clear()
+
+    when:
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD', events: [[name: 'currentTrackName', value: 'Latest leader track']]])
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
+      'GROUP-1': [[name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']]
+    ]])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Latest leader track']
   }
 
 }
