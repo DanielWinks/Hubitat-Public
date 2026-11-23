@@ -1556,6 +1556,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.coordinatorAvtUpdateScheduledDnis.remove('SONOS-TEST-DNI')
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
+    driver.zgtMemberHostByPlayerId.clear()
     driver.metaClass.getParent = { -> new Expando(
       playerStateUpdate: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       playerAppRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload) },
@@ -2328,7 +2329,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
     driver.currentZgtSeqByDni.clear()
     String zoneState = '<ZoneGroups><ZoneGroup ID="G1:1" Coordinator="RINCON_TEST">' +
-      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker"/></ZoneGroup></ZoneGroups>'
+      '<ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test Speaker" Location="http://192.168.1.50:1400/xml/device_description.xml"/>' +
+      '<ZoneGroupMember UUID="RINCON_B" ZoneName="Bedroom" Location="http://192.168.1.51:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups>'
     String escapedState = zoneState.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
     String body = '<propertyset><property><ZoneGroupState>' + escapedState + '</ZoneGroupState></property></propertyset>'
     String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /zgt HTTP/1.1\r\n' +
@@ -2343,6 +2346,8 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY header values') && entry.contains('SEQ=0') && entry.contains('SID=uuid:zgt-test') && entry.contains('X-SONOS-SERVICETYPE=ZoneGroupTopology') }
     driver.logs.any { String entry -> entry.contains('UPnP NOTIFY parsed') && entry.contains('seq=0') }
+    driver.zgtMemberHostByPlayerId['RINCON_TEST'] == '192.168.1.50:1400'
+    driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 
   def "ZGT notification logs header values with SEQ greater than 0"() {
@@ -2816,42 +2821,14 @@ class SonosAdvPlayerSpec extends Specification {
     driver.scheduled.any { List call -> call[1] == 'flushPendingLocalDeviceEvents' }
   }
 
-  def "batch event enqueue re-arms a drain when the scheduled marker is stale"() {
-    given:
-    driver.state.pendingBatchEvents = [status: 'playing']
-    driver.state.batchEventsScheduled = true
-
-    when:
-    driver.applyStateBatch('{"transportStatus":"playing"}')
-
-    then:
-    driver.state.batchEventsScheduled == true
-    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
+  def "player driver leaves its public player attributes to the parent app"() {
+    expect:
+    !new File('../Drivers/Component/SonosAdvPlayer.groovy').text.contains('device.sendEvent(')
   }
 
-  def "batch drain preserves values re-enqueued while sending the detached batch"() {
-    given:
-    driver.applyStateBatch('{"status":"playing"}')
-    driver.device.metaClass.sendEvent = { Map event ->
-      delegate.events << event
-      delegate.currentValues[event.name as String] = event.value
-      if(event.name == 'status') { driver.applyStateBatch('{"status":"stopped"}') }
-    }
-
-    when:
-    driver.drainBatchEvents()
-
-    then:
-    driver.state.pendingBatchEvents.status == 'stopped'
-    driver.state.batchEventsScheduled == true
-    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
-  }
-
-  def "publication watchdog repairs missing batch and local drain jobs"() {
+  def "publication watchdog repairs missing local drain jobs"() {
     given:
     driver.scheduled.clear()
-    driver.state.pendingBatchEvents = [status: 'playing']
-    driver.state.batchEventsScheduled = true
     driver.pendingLocalDeviceEvents['SONOS-TEST-DNI'] = [groupCoordinatorId: 'RINCON_COORD']
     driver.state.localDeviceEventDrainScheduled = true
 
@@ -2859,38 +2836,13 @@ class SonosAdvPlayerSpec extends Specification {
     driver.verifyPendingPublicationDrains()
 
     then:
-    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
     driver.scheduled.any { List call -> call[1] == 'flushPendingLocalDeviceEvents' }
     driver.scheduled.any { List call -> call[1] == 'verifyPendingPublicationDrains' }
   }
 
-  def "publication watchdog clears stale drain markers when their queues are empty"() {
-    given:
-    driver.scheduled.clear()
-    driver.state.pendingBatchEvents = [:]
-    driver.state.batchEventsScheduled = true
-    driver.state.batchEventsDueAt = 1L
-    driver.state.localDeviceEventDrainScheduled = true
-    driver.state.localDeviceEventDrainDueAt = 1L
-    driver.pendingLocalDeviceEvents.remove('SONOS-TEST-DNI')
-
-    when:
-    driver.verifyPendingPublicationDrains()
-
-    then:
-    !driver.state.containsKey('pendingBatchEvents')
-    !driver.state.containsKey('batchEventsScheduled')
-    !driver.state.containsKey('batchEventsDueAt')
-    !driver.state.containsKey('localDeviceEventDrainScheduled')
-    !driver.state.containsKey('localDeviceEventDrainDueAt')
-    !driver.scheduled.any { List call -> call[1] == 'verifyPendingPublicationDrains' }
-  }
-
-  def "initialization reset clears only this player's stale publication queues"() {
+  def "initialization reset clears only this player's pending publications"() {
     given:
     String otherDni = 'SONOS-OTHER-DNI'
-    driver.state.pendingBatchEvents = [status: 'stopped']
-    driver.state.batchEventsScheduled = true
     driver.state.pendingComponentChildEvents = ['child-dni': [switch: 'on']]
     driver.state.componentChildDrainScheduled = true
     driver.state.groupDeviceUpdateScheduled = true
@@ -2900,7 +2852,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.lastLocalDeviceEvents['SONOS-TEST-DNI'] = [isGroupCoordinator: 'on']
     driver.pendingLocalDeviceEvents[otherDni] = [status: 'playing']
     driver.pendingGroupDeviceUpdates['SONOS-TEST-DNI'] = [status: 'stopped']
-    driver.scheduled << [1000, 'drainBatchEvents']
     driver.scheduled << [1000, 'flushPendingLocalDeviceEvents']
     driver.scheduled << [1000, 'drainComponentChildEvents']
     driver.scheduled << [1000, 'flushPendingGroupDeviceUpdates']
@@ -2909,8 +2860,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.resetPendingStatePublicationForInitialization()
 
     then:
-    !driver.state.containsKey('pendingBatchEvents')
-    !driver.state.containsKey('batchEventsScheduled')
     !driver.state.containsKey('pendingComponentChildEvents')
     !driver.state.containsKey('componentChildDrainScheduled')
     !driver.state.containsKey('groupDeviceUpdateScheduled')
@@ -2919,7 +2868,7 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.lastLocalDeviceEvents.containsKey('SONOS-TEST-DNI')
     !driver.pendingGroupDeviceUpdates.containsKey('SONOS-TEST-DNI')
     driver.pendingLocalDeviceEvents[otherDni].status == 'playing'
-    ['drainBatchEvents', 'flushPendingLocalDeviceEvents', 'drainComponentChildEvents',
+    ['flushPendingLocalDeviceEvents', 'drainComponentChildEvents',
      'flushPendingGroupDeviceUpdates'].every { String method -> driver.unschedules.contains(method) }
   }
 
@@ -3113,6 +3062,22 @@ class SonosAdvPlayerSpec extends Specification {
     driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 
+  def "group membership retries after refreshing topology when a sibling host is not cached"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
+    driver.device.dataValues.id = 'RINCON_TEST'
+    driver.zgtMemberHostByPlayerId.clear()
+
+    when:
+    driver.playerModifyGroupMembers(['RINCON_B'], [])
+
+    then:
+    driver.asyncCalls.any { Map call -> call.params.headers.SOAPAction.endsWith('#GetZoneGroupState') }
+    driver.scheduled.any { List job -> job[1] == 'retryGroupMemberTopologyMutation' &&
+      job[2].data.playerIdsToAdd == ['RINCON_B'] && job[2].data.retryAttempt == 1 }
+  }
+
   def "group creation adds members with UPnP SetAVTransportURI"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50'
@@ -3120,7 +3085,7 @@ class SonosAdvPlayerSpec extends Specification {
     seedGroupTopology('RINCON_TEST', [RINCON_TEST: '192.168.1.50', RINCON_B: '192.168.1.51'])
 
     when:
-    driver.playerCreateGroup(['RINCON_TEST', 'RINCON_B'])
+    driver.playerCreateGroupRequest(JsonOutput.toJson([args: [['RINCON_TEST', 'RINCON_B'], null]]))
 
     then:
     driver.asyncCalls.size() == 1

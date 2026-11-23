@@ -32,8 +32,6 @@ import groovy.transform.CompileStatic
 import groovy.transform.Field
 import groovy.util.XmlSlurper
 import groovy.util.slurpersupport.GPathResult
-import groovy.xml.MarkupBuilder
-import java.io.StringWriter
 import hubitat.scheduling.AsyncResponse
 import hubitat.device.HubResponse
 import java.io.InputStream
@@ -434,17 +432,18 @@ String getBaseControlXML(Map service, String action, Map controlValues = null) {
   Map actionArgs = service.actions[action] as Map
   Map args = new LinkedHashMap(actionArgs.arguments as Map)
   if(controlValues) { controlValues.each { entry -> args[entry.key] = entry.value } }
-  StringWriter writer = new StringWriter()
-  MarkupBuilder xml = new MarkupBuilder(writer)
-  xml.mkp.xmlDeclaration(version: '1.0')
-  xml.'s:Envelope'('xmlns:s': 'http://schemas.xmlsoap.org/soap/envelope/', 's:encodingStyle': 'http://schemas.xmlsoap.org/soap/encoding/') {
-    's:Body' {
-      "u:${action}"('xmlns:u': service.serviceType) {
-        args.each { entry -> "${entry.key}"(entry.value == null ? '' : entry.value.toString()) }
-      }
-    }
+  StringBuilder xml = new StringBuilder(256)
+  xml.append("<?xml version='1.0'?>")
+  xml.append('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">')
+  xml.append('<s:Body><u:').append(action).append(' xmlns:u="')
+      .append(StringEscapeUtils.escapeXml10(service.serviceType.toString())).append('">')
+  args.each { entry ->
+    xml.append('<').append(entry.key).append('>')
+        .append(StringEscapeUtils.escapeXml10(entry.value == null ? '' : entry.value.toString()))
+        .append('</').append(entry.key).append('>')
   }
-  return writer.toString()
+  xml.append('</u:').append(action).append('></s:Body></s:Envelope>')
+  return xml.toString()
 }
 
 @CompileStatic
@@ -518,6 +517,11 @@ metadata {
   command 'setVolumeZero'
   command 'groupVolumeUp'
   command 'groupVolumeDown'
+  // App-to-player topology operations must be declared commands so Hubitat
+  // permits calls through a child device wrapper.
+  command 'playerCreateNewGroup'
+  command 'playerCreateGroupRequest', [[name: 'Request JSON', type: 'STRING']]
+  command 'playerModifyGroupMembersRequest', [[name: 'Request JSON', type: 'STRING']]
   command 'muteGroup'
   command 'unmuteGroup'
 
@@ -939,11 +943,6 @@ Boolean hasLineInCapability() {
 // grouped multi-player update by the order Sonos reports the group members.
 @Field static ConcurrentHashMap<String, Integer> pendingGroupedPlayerVolumes = new ConcurrentHashMap<String, Integer>()
 @Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
-@Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
-@Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
-@Field static final String BATCH_EVENTS_DUE_AT_KEY = 'batchEventsDueAt'
-@Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
-@Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final String LOCAL_EVENT_DRAIN_SCHEDULED_KEY = 'localDeviceEventDrainScheduled'
 @Field static final String LOCAL_EVENT_DRAIN_DUE_AT_KEY = 'localDeviceEventDrainDueAt'
 @Field static final Integer LOCAL_EVENT_MAX_WAIT_MS = 500
@@ -986,9 +985,6 @@ Boolean hasLineInCapability() {
 // Whitelisted persistence — pruning helper surfaces (standalone copy, no #include)
 // =============================================================================
 @Field static final Set<String> ACTIVE_PLAYER_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'pendingBatchEvents',
-  'batchEventsScheduled',
-  'batchEventsDueAt',
   'localDeviceEventDrainScheduled',
   'localDeviceEventDrainDueAt',
   'pendingComponentChildEvents',
@@ -1264,8 +1260,6 @@ void handleSettingsUpdate() {
   synchronizeTrackPositionPreference()
   migrationCleanup()
   pruneOrphanedDriverPersistence()
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  schedulePendingBatchEvents()
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
   resetComponentChildEventRetries()
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
@@ -1288,13 +1282,9 @@ void handleSettingsUpdate() {
 /** Clear this player’s queued publications before local initialization. */
 void resetPendingStatePublicationForInitialization() {
   String dni = device.getDeviceNetworkId()
-  unschedule('drainBatchEvents')
   unschedule('flushPendingLocalDeviceEvents')
   unschedule('drainComponentChildEvents')
   unschedule('flushPendingGroupDeviceUpdates')
-  state.remove(PENDING_BATCH_EVENTS_KEY)
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  state.remove(BATCH_EVENTS_DUE_AT_KEY)
   state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
   state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
   state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
@@ -1508,8 +1498,6 @@ void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
   pruneOrphanedDriverPersistence()
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  schedulePendingBatchEvents()
   scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
   resetComponentChildEventRetries()
   state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
@@ -1614,15 +1602,11 @@ void migrateLegacyRuntimeState() {
       if(decodedValue != null) { runtime.putIfAbsent(key, decodedValue) }
     }
   }
-  Object pendingBatchEvents = state[PENDING_BATCH_EVENTS_KEY]
-  Object batchEventsScheduled = state[BATCH_EVENTS_SCHEDULED_KEY]
   Object pendingComponentChildEvents = state[PENDING_COMPONENT_CHILD_EVENTS_KEY]
   Object componentChildDrainScheduled = state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY]
   Object lastComponentChildEvents = state[LAST_COMPONENT_CHILD_EVENTS_KEY]
   state.clear()
   atomicState.clear()
-  if(pendingBatchEvents != null) { state[PENDING_BATCH_EVENTS_KEY] = pendingBatchEvents }
-  if(batchEventsScheduled != null) { state[BATCH_EVENTS_SCHEDULED_KEY] = batchEventsScheduled }
   if(pendingComponentChildEvents != null) { state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pendingComponentChildEvents }
   if(componentChildDrainScheduled != null) { state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = componentChildDrainScheduled }
   if(lastComponentChildEvents != null) { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastComponentChildEvents }
@@ -4833,6 +4817,7 @@ void parse(String raw) {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
             Map snapshot = parseZgtFullSnapshot(xmlBody)
             if(snapshot == null) { return }
+            cacheZgtMemberHosts((List<Map>)snapshot.groups)
             String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
             queueParsedUpnpRelay([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId])
@@ -4980,7 +4965,7 @@ void cacheZgtMemberHosts(List<Map> groups) {
   }
 }
 
-// Stored already shaped for sendEvent so replay is events.each { device.sendEvent(it) } with no reshaping.
+// Stored as sendEvent-ready attribute maps for parent-app delivery.
 Map<String, List<Map>> projectZgtEventsByGroupId(List<Map> groups) {
   Map<String, List<Map>> eventsByGroupId = [:]
   if(!(groups instanceof List)) { return eventsByGroupId }
@@ -5488,7 +5473,7 @@ void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
   }
 }
 
-// Stored already shaped for sendEvent so replay is events.each { device.sendEvent(it) } with no reshaping.
+// Stored as sendEvent-ready attribute maps for parent-app delivery.
 List<Map> buildAvtEvents(Map incoming, Map previous) {
   List<Map> events = []
   String status = normalizeTransportStatus(incoming.transportState?.toString())
@@ -5922,7 +5907,7 @@ Boolean applyGrcSnapshotIfDifferent(Map snap) {
   return true
 }
 
-// Stored already shaped for sendEvent so replay is events.each { device.sendEvent(it) } with no reshaping.
+// Stored as sendEvent-ready attribute maps for parent-app delivery.
 List<Map> buildGrcEvents(Map snap) {
   List<Map> events = []
   if(snap?.groupVolume != null) { events << [name: 'groupVolume', value: snap.groupVolume as Integer] }
@@ -8161,103 +8146,21 @@ void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
   queueComponentChildEvent(child, name, value)
 }
 
-/** Accept a parent-delivered attribute batch and emit it in bounded chunks. */
-synchronized void applyStateBatch(String jsonAttributes) {
-  Map attributes
-  try { attributes = (Map)parseJson(jsonAttributes) }
-  catch(Exception e) {
-    logWarn("Ignoring malformed child state batch: ${e.message}")
-    return
-  }
-  if(!(attributes instanceof Map) || attributes.isEmpty()) { return }
-  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
-      ? (Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY] : [:]
-  attributes.each { Object name, Object value ->
-    if(name != null && value != null) { pending[name.toString()] = value }
-  }
-  state[PENDING_BATCH_EVENTS_KEY] = pending
-  schedulePendingBatchEvents()
-}
-
-private void schedulePendingBatchEvents() {
-  Map pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map ? (Map)state[PENDING_BATCH_EVENTS_KEY] : [:]
-  if(pending.isEmpty()) {
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    state.remove(BATCH_EVENTS_DUE_AT_KEY)
-    return
-  }
-  Long currentTime = now() as Long
-  Long requestedDueAt = currentTime + BATCH_EVENTS_INTERVAL_MS
-  Long existingDueAt = state[BATCH_EVENTS_DUE_AT_KEY] as Long
-  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
-  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
-  state[BATCH_EVENTS_DUE_AT_KEY] = dueAt
-  state[BATCH_EVENTS_SCHEDULED_KEY] = true
-  runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
-  try {
-    runInMillis(scheduleDelay, 'drainBatchEvents', [overwrite: true])
-  } catch(Exception e) {
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    state.remove(BATCH_EVENTS_DUE_AT_KEY)
-    logWarn("Could not schedule batched player event drain: ${e.message}")
-  }
-}
-
-synchronized void drainBatchEvents() {
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  state.remove(BATCH_EVENTS_DUE_AT_KEY)
-  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
-  state.remove(PENDING_BATCH_EVENTS_KEY)
-  if(pending.isEmpty()) {
-    state.remove(PENDING_BATCH_EVENTS_KEY)
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    return
-  }
-  List<String> names = new ArrayList<String>(pending.keySet()).take(BATCH_EVENTS_PER_DRAIN)
-  Map<String, Object> remaining = new LinkedHashMap<String, Object>(pending)
-  names.each { String name ->
-    try {
-      device.sendEvent(name: name, value: pending[name])
-      remaining.remove(name)
-    } catch(Exception e) {
-      logWarn("Could not emit batched ${name} event; retaining it for retry: ${e.message}")
-    }
-  }
-  Map<String, Object> arrivals = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
-  remaining.putAll(arrivals)
-  if(remaining.isEmpty()) {
-    state.remove(PENDING_BATCH_EVENTS_KEY)
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  } else {
-    state[PENDING_BATCH_EVENTS_KEY] = remaining
-    schedulePendingBatchEvents()
-  }
-}
-
 /** Re-arm publication callbacks if a persisted pending queue outlives its job. */
 void verifyPendingPublicationDrains() {
-  Map batch = state[PENDING_BATCH_EVENTS_KEY] instanceof Map ? (Map)state[PENDING_BATCH_EVENTS_KEY] : [:]
   String dni = device?.getDeviceNetworkId()
   ConcurrentHashMap<String, Object> local = dni ? pendingLocalDeviceEvents.get(dni) : null
   ConcurrentHashMap<String, Object> group = dni ? pendingGroupDeviceUpdates.get(dni) : null
   Map component = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
       ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  if(batch.isEmpty()) {
-    state.remove(PENDING_BATCH_EVENTS_KEY)
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    state.remove(BATCH_EVENTS_DUE_AT_KEY)
-  }
   if(local == null || local.isEmpty()) {
     state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
     state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
   }
-  if(!batch.isEmpty()) { schedulePendingBatchEvents() }
   if(local != null && !local.isEmpty()) { scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS) }
   if(group != null && !group.isEmpty()) { scheduleGroupDeviceUpdateDrain(GROUP_DEVICE_UPDATE_MAX_WAIT_MS) }
   if(!component.isEmpty()) { scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS) }
-  if(!batch.isEmpty() || (local != null && !local.isEmpty()) ||
+  if((local != null && !local.isEmpty()) ||
       (group != null && !group.isEmpty()) || !component.isEmpty()) {
     runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
   }
@@ -11422,6 +11325,40 @@ void playerCreateGroup(List<String> playerIds, String musicContextGroupId = null
   playerModifyGroupMembers(toAdd, toRemove)
 }
 
+/** Hubitat command wrapper for app-originated topology calls. */
+void playerCreateGroupRequest(String requestJson) {
+  Map request = parseTopologyCommandRequest(requestJson)
+  List args = request.args instanceof List ? (List)request.args : []
+  List<String> playerIds = args && args[0] instanceof List
+      ? ((List)args[0]).collect { Object id -> id?.toString() }.findAll { String id -> id } : []
+  String musicContextGroupId = args.size() > 1 ? args[1]?.toString() : null
+  playerCreateGroup(playerIds, musicContextGroupId)
+}
+
+/** Hubitat command wrapper for app-originated topology calls. */
+void playerModifyGroupMembersRequest(String requestJson) {
+  Map request = parseTopologyCommandRequest(requestJson)
+  List args = request.args instanceof List ? (List)request.args : []
+  List<String> playerIdsToAdd = args && args[0] instanceof List
+      ? ((List)args[0]).collect { Object id -> id?.toString() }.findAll { String id -> id } : []
+  List<String> playerIdsToRemove = args.size() > 1 && args[1] instanceof List
+      ? ((List)args[1]).collect { Object id -> id?.toString() }.findAll { String id -> id } : []
+  Map<String, Map> expectedTopology = args.size() > 2 && args[2] instanceof Map
+      ? (Map<String, Map>)args[2] : null
+  playerModifyGroupMembers(playerIdsToAdd, playerIdsToRemove, expectedTopology)
+}
+
+Map parseTopologyCommandRequest(String requestJson) {
+  if(!requestJson) { return [:] }
+  try {
+    Object parsed = new JsonSlurper().parseText(requestJson)
+    return parsed instanceof Map ? (Map)parsed : [:]
+  } catch(Exception e) {
+    logWarn("Ignoring invalid topology command request: ${e.message}")
+    return [:]
+  }
+}
+
 @CompileStatic
 void sendCreateGroupRequest(List<String> playerIds, String musicContextGroupId = null) {
   playerCreateGroup(playerIds, musicContextGroupId)
@@ -11430,6 +11367,12 @@ void sendCreateGroupRequest(List<String> playerIds, String musicContextGroupId =
 @CompileStatic
 void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = [],
     Map<String, Map> expectedTopology = null) {
+  modifyGroupMembersWithTopologyRetry(playerIdsToAdd, playerIdsToRemove, expectedTopology, 0)
+}
+
+@CompileStatic
+private void modifyGroupMembersWithTopologyRetry(List<String> playerIdsToAdd, List<String> playerIdsToRemove,
+    Map<String, Map> expectedTopology, Integer retryAttempt) {
   List<String> playersToAdd = playerIdsToAdd != null ? playerIdsToAdd : new ArrayList<String>()
   List<String> playersToRemove = playerIdsToRemove != null ? playerIdsToRemove : new ArrayList<String>()
   String coordinatorId = getGroupCoordinatorId() ?: getId()
@@ -11477,7 +11420,7 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
     String targetHost = getTopologyMemberHost(playerId)
     if(!targetHost) {
       logWarn("Cannot detach ${playerId} from the Sonos group because its UPnP location is not in the topology cache")
-      playerGetGroupsFull()
+      queueGroupMemberTopologyRetry(playersToAdd, playersToRemove, expectedTopology, retryAttempt)
       return
     }
     Map params = getSoapActionParams(targetHost, AVTransport, 'BecomeCoordinatorOfStandaloneGroup')
@@ -11489,7 +11432,7 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
     String targetHost = getTopologyMemberHost(playerId)
     if(!targetHost) {
       logWarn("Cannot add ${playerId} to ${coordinatorId}: its UPnP location is not in the topology cache")
-      playerGetGroupsFull()
+      queueGroupMemberTopologyRetry(playersToAdd, playersToRemove, expectedTopology, retryAttempt)
       return
     }
     Map params = getSoapActionParams(targetHost, AVTransport, 'SetAVTransportURI',
@@ -11498,6 +11441,34 @@ void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> pla
     postSonosSoapAsync('groupControlSoapCallback', params, [operation: 'addMember',
         playerId: playerId, coordinatorId: coordinatorId])
   }
+}
+
+/** Re-fetch topology, then retry a group mutation whose sibling host was not cached yet. */
+private void queueGroupMemberTopologyRetry(List<String> playersToAdd, List<String> playersToRemove,
+    Map<String, Map> expectedTopology, Integer retryAttempt) {
+  if(retryAttempt >= 3) {
+    logError('Could not resolve a Sonos group member host after 3 topology refresh attempts')
+    return
+  }
+  playerGetGroupsFull()
+  Map data = [
+    playerIdsToAdd: new ArrayList<String>(playersToAdd ?: []),
+    playerIdsToRemove: new ArrayList<String>(playersToRemove ?: []),
+    expectedTopology: expectedTopology ?: [:],
+    retryAttempt: retryAttempt + 1
+  ]
+  runIn(2, 'retryGroupMemberTopologyMutation', [overwrite: true, data: data])
+}
+
+void retryGroupMemberTopologyMutation(Map data) {
+  List<String> playersToAdd = data?.playerIdsToAdd instanceof List
+      ? ((List)data.playerIdsToAdd).collect { Object id -> id?.toString() } : []
+  List<String> playersToRemove = data?.playerIdsToRemove instanceof List
+      ? ((List)data.playerIdsToRemove).collect { Object id -> id?.toString() } : []
+  Map<String, Map> expectedTopology = data?.expectedTopology instanceof Map
+      ? (Map<String, Map>)data.expectedTopology : [:]
+  Integer retryAttempt = data?.retryAttempt instanceof Number ? ((Number)data.retryAttempt).intValue() : 1
+  modifyGroupMembersWithTopologyRetry(playersToAdd, playersToRemove, expectedTopology, retryAttempt)
 }
 
 @CompileStatic

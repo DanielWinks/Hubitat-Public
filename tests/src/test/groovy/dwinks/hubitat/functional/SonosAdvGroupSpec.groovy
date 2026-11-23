@@ -43,13 +43,6 @@ class SonosAdvGroupSpec extends Specification {
     driver.device.dataValues.groupCoordinatorId = 'RINCON_COORD'
     driver.device.dataValues.playerIds = 'RINCON_FOLLOW'
     driver.parent = new SonosGroupParentDouble()
-    driver.heldPlaybackState.remove('SONOS-GROUP-TEST-DNI')
-  }
-
-  private void drainBatchEvents() {
-    while(driver.state.pendingBatchEvents instanceof Map && !((Map)driver.state.pendingBatchEvents).isEmpty()) {
-      driver.drainBatchEvents()
-    }
   }
 
   private void drainGroupRequests() {
@@ -85,34 +78,9 @@ class SonosAdvGroupSpec extends Specification {
     groupRequests().last().command == 'joinPlayersToCoordinator'
   }
 
-  def "group batch enqueue re-arms a drain when the scheduled marker is stale"() {
-    given:
-    driver.state.pendingBatchEvents = [status: [value: 'playing']]
-    driver.state.batchEventsScheduled = true
-
-    when:
-    driver.queueBatchEvents([transportStatus: 'playing'])
-
-    then:
-    driver.state.batchEventsScheduled == true
-    driver.scheduled.any { List call -> call[1] == 'drainBatchEvents' }
-  }
-
-  def "group initialization clears stale publication events and drain jobs"() {
-    given:
-    driver.state.pendingBatchEvents = [status: [value: 'stopped']]
-    driver.state.batchEventsScheduled = true
-    driver.state.batchEventsDueAt = 100L
-    driver.scheduled << [1000, 'drainBatchEvents']
-
-    when:
-    driver.resetPendingStatePublicationForInitialization()
-
-    then:
-    !driver.state.containsKey('pendingBatchEvents')
-    !driver.state.containsKey('batchEventsScheduled')
-    !driver.state.containsKey('batchEventsDueAt')
-    driver.unschedules.contains('drainBatchEvents')
+  def "group driver contains no attribute sendEvent calls"() {
+    expect:
+    !new File('../Drivers/Component/SonosAdvGroup.groovy').text.contains('sendEvent(')
   }
 
   def "retargeting a group fade to the reported volume cancels queued steps"() {
@@ -210,28 +178,6 @@ class SonosAdvGroupSpec extends Specification {
     driver.events.isEmpty()
   }
 
-  def "track position preference controls updates received by the group device"() {
-    given:
-    driver.settings.enableTrackPositionUpdates = false
-    driver.settings.onlyUpdateWhenActive = false
-    String disabledBatch = JsonOutput.toJson([trackPosition: 42L, trackPositionUpdated: 123456L])
-
-    when:
-    driver.updateBatchPlaybackState(disabledBatch)
-
-    then:
-    !driver.events.any { Map event -> event.name in ['trackPosition', 'trackPositionUpdated'] }
-
-    when:
-    driver.settings.enableTrackPositionUpdates = true
-    driver.updateBatchPlaybackState(disabledBatch)
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'trackPosition' }?.value == 42L
-    driver.events.find { Map event -> event.name == 'trackPositionUpdated' }?.value == 123456L
-  }
-
   def "track position updates default off when the preference is null"() {
     given:
     driver.settings.remove('enableTrackPositionUpdates')
@@ -242,23 +188,6 @@ class SonosAdvGroupSpec extends Specification {
     then:
     driver.settings.enableTrackPositionUpdates == false
     driver.getEnableTrackPositionUpdates() == false
-  }
-
-  def "disabling track position updates clears existing group attributes"() {
-    given:
-    driver.settings.enableTrackPositionUpdates = false
-    driver.device.dataValues.enableTrackPositionUpdates = 'true'
-    driver.device.currentValues.trackPosition = 84L
-    driver.device.currentValues.trackPositionUpdated = 123456L
-
-    when:
-    driver.synchronizeTrackPositionPreference()
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'trackPosition' }?.value == 0L
-    driver.events.find { Map event -> event.name == 'trackPositionUpdated' }?.value == 0L
-    driver.device.dataValues.enableTrackPositionUpdates == 'false'
   }
 
   def "optional playback volumes normalize webCoRE zero and preserve minus one sentinel"() {
@@ -425,68 +354,6 @@ class SonosAdvGroupSpec extends Specification {
     driver.events.find { Map event -> event.name == 'groupOperationStatus' } == null
   }
 
-  def "explicit topology requires an exact roster and still reports extra members"() {
-    given:
-    driver.device.dataValues.lastGroupingMode = 'EXPLICIT'
-    String topology = householdTopology('RINCON_COORD',
-      ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'],
-      ['Living Room', 'Dining Room', 'Play'])
-
-    when:
-    driver.applyAppHouseholdTopology(topology)
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'switch' }?.value == 'off'
-    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room, Play'
-  }
-
-  def "explicit topology remains active when the actual roster exactly matches"() {
-    given:
-    driver.device.dataValues.lastGroupingMode = 'EXPLICIT'
-    String topology = householdTopology('RINCON_COORD',
-      ['RINCON_COORD', 'RINCON_FOLLOW'], ['Living Room', 'Dining Room'])
-
-    when:
-    driver.applyAppHouseholdTopology(topology)
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'switch' }?.value == 'on'
-    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room'
-  }
-
-  def "additive topology permits extra members while retaining configured players"() {
-    given:
-    driver.device.dataValues.lastGroupingMode = 'ADDITIVE'
-    String topology = householdTopology('RINCON_COORD',
-      ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'],
-      ['Living Room', 'Dining Room', 'Play'])
-
-    when:
-    driver.applyAppHouseholdTopology(topology)
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'switch' }?.value == 'on'
-    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room, Play'
-  }
-
-  def "topology is inactive when the configured roster has a different coordinator"() {
-    given:
-    driver.device.dataValues.lastGroupingMode = 'EXPLICIT'
-    String topology = householdTopology('RINCON_FOLLOW',
-      ['RINCON_COORD', 'RINCON_FOLLOW'], ['Living Room', 'Dining Room'])
-
-    when:
-    driver.applyAppHouseholdTopology(topology)
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'switch' }?.value == 'off'
-    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Dining Room'
-  }
-
   def "legacy group state migrates to the DNI runtime map and is cleared from Hubitat state"() {
     given:
     driver.state.groupCommandSequence = 7
@@ -512,90 +379,6 @@ class SonosAdvGroupSpec extends Specification {
     UUID.fromString(groupRequests().last().requestId as String).toString() ==
       groupRequests().last().requestId
     groupRequests().last().command == 'refresh'
-  }
-
-  def "refreshing an inactive shared-coordinator group does not copy playback and resets configured attributes"() {
-    given:
-    driver.settings.onlyUpdateWhenActive = true
-    driver.settings.resetAttributesWhenInactive = true
-    driver.device.currentValues.switch = 'off'
-
-    when:
-    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
-      status: 'playing', transportStatus: 'playing', currentTrackName: 'Only the Good Die Young',
-      currentArtistName: 'Billy Joel', volume: 26, mute: 'unmuted', currentlyJoinedPlayers: 'Living Room, Kitchen, Dining Room'
-    ]))
-    drainBatchEvents()
-
-    then:
-    driver.device.currentValue('switch') == 'off'
-    driver.events.find { Map event -> event.name == 'status' }?.value == 'inactive'
-    driver.events.find { Map event -> event.name == 'transportStatus' }?.value == 'stopped'
-    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'n/a'
-    !driver.events.any { Map event -> event.name == 'status' && event.value == 'playing' }
-    !driver.events.any { Map event -> event.name == 'transportStatus' && event.value == 'playing' }
-    driver.events.find { Map event -> event.name == 'currentlyJoinedPlayers' }?.value == 'Living Room, Kitchen, Dining Room'
-  }
-
-  def "inactive refresh leaves playback attributes unchanged when inactive resets are disabled"() {
-    given:
-    driver.settings.onlyUpdateWhenActive = true
-    driver.settings.resetAttributesWhenInactive = false
-    driver.device.currentValues.switch = 'off'
-    driver.device.currentValues.status = 'paused'
-    driver.device.currentValues.transportStatus = 'paused'
-    driver.device.currentValues.currentTrackName = 'Existing track'
-
-    when:
-    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
-      status: 'playing', transportStatus: 'playing', currentTrackName: 'Coordinator track'
-    ]))
-
-    then:
-    driver.events.find { Map event -> event.name == 'status' } == null
-    driver.events.find { Map event -> event.name == 'transportStatus' } == null
-    driver.events.find { Map event -> event.name == 'currentTrackName' } == null
-    driver.device.currentValue('status') == 'paused'
-    driver.device.currentValue('transportStatus') == 'paused'
-    driver.device.currentValue('currentTrackName') == 'Existing track'
-  }
-
-  def "explicit refresh still hydrates an inactive group when active-only updates are disabled"() {
-    given:
-    driver.settings.onlyUpdateWhenActive = false
-    driver.settings.resetAttributesWhenInactive = true
-    driver.device.currentValues.switch = 'off'
-
-    when:
-    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
-      status: 'playing', transportStatus: 'playing', currentTrackName: 'Coordinator track', volume: 26, mute: 'unmuted'
-    ]))
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
-    driver.events.find { Map event -> event.name == 'transportStatus' }?.value == 'playing'
-    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Coordinator track'
-    driver.events.find { Map event -> event.name == 'volume' }?.value == 26
-    driver.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
-  }
-
-  def "explicit refresh hydrates playback while the group is active"() {
-    given:
-    driver.settings.onlyUpdateWhenActive = true
-    driver.settings.resetAttributesWhenInactive = true
-    driver.device.currentValues.switch = 'on'
-
-    when:
-    driver.applyRefreshedPlaybackState(JsonOutput.toJson([
-      status: 'playing', transportStatus: 'playing', currentTrackName: 'Active group track'
-    ]))
-    drainBatchEvents()
-
-    then:
-    driver.events.find { Map event -> event.name == 'status' }?.value == 'playing'
-    driver.events.find { Map event -> event.name == 'transportStatus' }?.value == 'playing'
-    driver.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Active group track'
   }
 
   def "deprecated diagnostic states are removed during initialization"() {

@@ -37,6 +37,12 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<String> refreshedPlaybackUpdates = []
   Closure<Boolean> topologyApplyHook
 
+  Map<String, Object> emittedAttributes() {
+    return events.findAll { Map event -> event?.name != null }.collectEntries { Map event ->
+      [(event.name.toString()): event.value]
+    }
+  }
+
   void mute() { commands << [name: 'mute'] }
   void unmute() { commands << [name: 'unmute'] }
 
@@ -49,11 +55,24 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
     commands << [name: 'playerCreateGroup', playerIds: playerIds, musicContextGroupId: musicContextGroupId]
   }
 
+  void playerCreateGroupRequest(String requestJson) {
+    Map request = (Map)new JsonSlurper().parseText(requestJson)
+    List args = (List)request.args
+    playerCreateGroup((List<String>)args[0], args.size() > 1 ? args[1]?.toString() : null)
+  }
+
   void playerModifyGroupMembers(List<String> playerIdsToAdd = [], List<String> playerIdsToRemove = [],
       Map<String, Map> expectedTopology = null) {
     Map command = [name: 'playerModifyGroupMembers', add: playerIdsToAdd, remove: playerIdsToRemove]
     if(expectedTopology != null) { command.expectedTopology = expectedTopology }
     commands << command
+  }
+
+  void playerModifyGroupMembersRequest(String requestJson) {
+    Map request = (Map)new JsonSlurper().parseText(requestJson)
+    List args = (List)request.args
+    playerModifyGroupMembers((List<String>)args[0], (List<String>)args[1],
+        args.size() > 2 ? (Map<String, Map>)args[2] : null)
   }
 
   void playerGetGroupsFull() {
@@ -172,6 +191,12 @@ class SonosAppGroupDouble extends ChildDeviceWrapper {
   List<String> refreshedPlaybackUpdates = []
   List<Map> voiceUpdates = []
   List<String> acknowledgedGroupRequests = []
+
+  Map<String, Object> emittedAttributes() {
+    return events.findAll { Map event -> event?.name != null }.collectEntries { Map event ->
+      [(event.name.toString()): event.value]
+    }
+  }
 
   void acknowledgeGroupCommand(String requestId) { acknowledgedGroupRequests << requestId }
 
@@ -569,6 +594,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "explicit group refresh forwards coordinator playback values to the group driver"() {
     given:
+    group.currentValues.switch = 'on'
     coordinator.currentValues.status = 'playing'
     coordinator.currentValues.currentTrackName = 'Only the Good Die Young'
     coordinator.currentValues.currentArtistName = 'Billy Joel'
@@ -578,10 +604,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainGroupStateUpdates()
 
     then:
-    group.refreshedPlaybackUpdates.size() == 1
-    group.refreshedPlaybackUpdates[0].contains('"status":"playing"')
-    group.refreshedPlaybackUpdates[0].contains('"currentTrackName":"Only the Good Die Young"')
-    group.refreshedPlaybackUpdates[0].contains('"currentArtistName":"Billy Joel"')
+    group.emittedAttributes().status == 'playing'
+    group.emittedAttributes().currentTrackName == 'Only the Good Die Young'
+    group.emittedAttributes().currentArtistName == 'Billy Joel'
   }
 
   def "unlisted-player eviction removes extras without rebuilding or changing coordinator"() {
@@ -1517,8 +1542,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.playerStateUpdateHandler([data: JsonOutput.toJson(batch)] as Event)
     appScript.drainQueuedChildEvents()
-    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
-      follower.refreshedPlaybackUpdates.last())
+    Map<String, Object> attributes = follower.emittedAttributes()
 
     then:
     attributes.currentTrackName == 'Peepers On Crane Pond'
@@ -1536,9 +1560,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainQueuedChildEvents()
 
     then:
-    follower.refreshedPlaybackUpdates.size() == 1
-    extra.refreshedPlaybackUpdates.size() == 1
-    coordinator.refreshedPlaybackUpdates.isEmpty()
+    follower.emittedAttributes().transportStatus == 'playing'
+    extra.emittedAttributes().transportStatus == 'paused'
+    coordinator.emittedAttributes().isEmpty()
     appScript.state.pendingChildEvents == [(coordinator.deviceNetworkId): [transportStatus: 'stopped']]
     appScript.state.childStateDrainScheduled == true
     appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
@@ -1547,7 +1571,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainQueuedChildEvents()
 
     then:
-    coordinator.refreshedPlaybackUpdates.size() == 1
+    coordinator.emittedAttributes().transportStatus == 'stopped'
     appScript.state.pendingChildEvents == null
     appScript.state.childStateDrainScheduled == null
   }
@@ -1569,9 +1593,10 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "child state drain preserves events queued while a child batch is being delivered"() {
     given:
-    follower.metaClass.applyStateBatch = { String json ->
+    follower.metaClass.sendEvent = { Map event ->
       appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
-      follower.refreshedPlaybackUpdates << json
+      follower.events << event
+      follower.currentValues[event.name.toString()] = event.value
     }
     appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
     appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
@@ -1581,9 +1606,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainQueuedChildEvents()
 
     then:
-    follower.refreshedPlaybackUpdates.size() == 1
-    extra.refreshedPlaybackUpdates.size() == 1
-    coordinator.refreshedPlaybackUpdates.isEmpty()
+    follower.emittedAttributes().transportStatus == 'playing'
+    extra.emittedAttributes().transportStatus == 'paused'
+    coordinator.emittedAttributes().isEmpty()
     appScript.state.pendingChildEvents == [(coordinator.deviceNetworkId): [transportStatus: 'playing']]
     appScript.state.childStateDrainScheduled == true
     appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
@@ -1591,7 +1616,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "failed child delivery retries behind unprocessed children"() {
     given:
-    follower.metaClass.applyStateBatch = { String json -> throw new RuntimeException('simulated failure') }
+    follower.metaClass.sendEvent = { Map event -> throw new RuntimeException('simulated failure') }
     appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
     appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
     appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
@@ -1600,7 +1625,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainQueuedChildEvents()
 
     then:
-    extra.refreshedPlaybackUpdates.size() == 1
+    extra.emittedAttributes().transportStatus == 'paused'
     appScript.state.pendingChildEvents.keySet().toList() == [
       coordinator.deviceNetworkId, follower.deviceNetworkId
     ]
@@ -1609,7 +1634,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainQueuedChildEvents()
 
     then:
-    coordinator.refreshedPlaybackUpdates.size() == 1
+    coordinator.emittedAttributes().transportStatus == 'stopped'
     appScript.state.pendingChildEvents.containsKey(follower.deviceNetworkId)
     appScript.state.childStateDrainScheduled == true
   }
@@ -2735,6 +2760,14 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
   }
 
+  def "group membership does not infer a missing coordinator from the callback"() {
+    when:
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_FOLLOW'])
+
+    then:
+    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'off'
+  }
+
   def "group membership fanout yields after its fixed group budget"() {
     given:
     List<SonosAppGroupDouble> additional = (0..<10).collect { Integer index ->
@@ -2784,8 +2817,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
     appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
-      group.refreshedPlaybackUpdates.last())
+    Map<String, Object> attributes = group.emittedAttributes()
 
     then:
     attributes.switch == 'on'
@@ -2796,6 +2828,40 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.currentTrackNumber == 1
     attributes.trackDescription == 'Peepers On Crane Pond by Adirondack Environments'
     attributes.trackData == coordinator.currentValues.trackData
+  }
+
+  def "parent app emits player and group attributes with child sendEvent"() {
+    when:
+    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
+    appScript.drainQueuedChildEvents()
+    appScript.queueGroupDeviceState('GROUP-DNI', [switch: 'on', currentlyJoinedPlayers: 'Kitchen, Kids Room'])
+    appScript.drainGroupStateUpdates()
+
+    then:
+    coordinator.emittedAttributes().transportStatus == 'playing'
+    group.emittedAttributes().switch == 'on'
+    group.emittedAttributes().currentlyJoinedPlayers == 'Kitchen, Kids Room'
+    coordinator.refreshedPlaybackUpdates.isEmpty()
+    group.refreshedPlaybackUpdates.isEmpty()
+  }
+
+  def "parent app resets inactive group playback attributes through child events"() {
+    given:
+    group.currentValues.switch = 'on'
+    group.currentValues.status = 'playing'
+    group.currentValues.currentTrackName = 'Previous track'
+
+    when:
+    appScript.queueGroupDeviceState('GROUP-DNI', [
+      switch: 'off', currentlyJoinedPlayers: 'Kids Room', status: 'stopped', currentTrackName: 'Stale track'
+    ])
+    appScript.drainGroupStateUpdates()
+
+    then:
+    group.emittedAttributes().switch == 'off'
+    group.emittedAttributes().status == 'inactive'
+    group.emittedAttributes().transportStatus == 'stopped'
+    group.emittedAttributes().currentTrackName == 'n/a'
   }
 
   def "group state drain yields after its fixed group budget"() {
@@ -2821,6 +2887,18 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.containsKey('pendingGroupStateUpdates')
   }
 
+  def "group state enqueue rearms drain when scheduled marker is stale"() {
+    given:
+    appScript.state.groupStateDrainScheduled = true
+    appScript.state.pendingGroupStateUpdates = ['GROUP-DNI': [switch: 'on']]
+
+    when:
+    appScript.queueGroupDeviceState('GROUP-DNI', [currentlyJoinedPlayers: 'Kitchen, Kids Room'])
+
+    then:
+    appScript.scheduled.any { List job -> job[1] == 'drainGroupStateUpdates' }
+  }
+
   def "active group metadata mismatch bypasses a stale last-sent snapshot"() {
     given:
     coordinator.currentValues.currentTrackName = 'Peepers On Crane Pond'
@@ -2839,8 +2917,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
     appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
-      group.refreshedPlaybackUpdates.last())
+    Map<String, Object> attributes = group.emittedAttributes()
 
     then:
     attributes.switch == 'on'
@@ -2870,8 +2947,7 @@ class SonosAdvancedAppSpec extends Specification {
       trackDescription: 'Peepers On Crane Pond by Adirondack Environments'
     ])
     appScript.drainGroupStateUpdates()
-    Map<String, Object> attributes = (Map<String, Object>)new JsonSlurper().parseText(
-      group.refreshedPlaybackUpdates.last())
+    Map<String, Object> attributes = group.emittedAttributes()
 
     then:
     attributes.status == 'playing'
@@ -2882,6 +2958,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "ungrouped group refresh reflects only the coordinator when individual control is disabled"() {
     given:
+    group.currentValues.switch = 'on'
     coordinator.currentValues.isGrouped = 'off'
     coordinator.currentValues.isGroupCoordinator = 'on'
     coordinator.currentValues.volume = 10
@@ -2894,7 +2971,7 @@ class SonosAdvancedAppSpec extends Specification {
       useProportionalVolume: true, controlUngroupedIndividually: false
     ])
     appScript.drainGroupStateUpdates()
-    Map attributes = (Map)new JsonSlurper().parseText(group.refreshedPlaybackUpdates.last())
+    Map attributes = group.emittedAttributes()
 
     then:
     attributes.volume == 10

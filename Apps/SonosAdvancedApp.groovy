@@ -2910,6 +2910,7 @@ void configure(Boolean startup = false) {
   catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
+  clearDisabledGroupTrackPositions()
   try { configureAlarmManagement() }
   catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
   refreshStaticDriverActivePlayerRoster(false)
@@ -3004,7 +3005,21 @@ void drainGroupAnnouncementProgress() {
 void householdHealthCheck() {
   pollLastUpdatedHealth()
   pollPlayerAttributesForState()
+  clearDisabledGroupTrackPositions()
   scheduleHouseholdHealthCheck()
+}
+
+/** Clear stale track positions from groups when that feature is disabled, from the app event path. */
+void clearDisabledGroupTrackPositions() {
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    if(groupDevice.getSetting('enableTrackPositionUpdates') == true) { return }
+    Map<String, Object> reset = [:]
+    ['trackPosition', 'trackPositionUpdated'].each { String name ->
+      Object value = groupDevice.currentValue(name, true)
+      if(value instanceof Number && ((Number)value).doubleValue() != 0.0d) { reset[name] = 0L }
+    }
+    if(!reset.isEmpty()) { emitChildAttributeEvents(groupDevice, reset) }
+  }
 }
 
 void subscribeToPlayerStateAttributes() {
@@ -5120,7 +5135,7 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
         coordinator.currentValue('isGrouped', true) == 'off') {
       logInfo("Creating a group with ${coordinatorId} as coordinator and adding ${targetId}")
       prepareExpectedTopologyForCreateGroup(coordinator, [coordinatorId, targetId])
-      coordinator.playerCreateGroup([coordinatorId, targetId])
+      coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [[coordinatorId, targetId]]]))
       return
     }
     coordinator.playerGetGroupsFull()
@@ -5137,7 +5152,7 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
 
   logInfo("Adding ${targetId} to group ${groupId} through coordinator ${coordinatorId}")
   prepareExpectedTopologyForMutation(coordinator, [targetId], [])
-  coordinator.playerModifyGroupMembers([targetId], [])
+  coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[targetId], []]]))
 }
 
 /**
@@ -5209,6 +5224,28 @@ Boolean sameChildStateValue(Object left, Object right) {
   return left == right
 }
 
+/** Emit child attributes from the parent app so player and group drivers stay event-free. */
+Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<String, Object> attributes) {
+  Map<String, Object> failed = [:]
+  if(child == null || !(attributes instanceof Map)) { return attributes ?: [:] }
+  attributes.each { String name, Object rawValue ->
+    if(!name || rawValue == null) { return }
+    try {
+      if(rawValue instanceof Map && ((Map)rawValue).containsKey('value')) {
+        Map event = [name: name, value: ((Map)rawValue).value]
+        if(((Map)rawValue).unit != null) { event.unit = ((Map)rawValue).unit }
+        child.sendEvent(event)
+      } else {
+        child.sendEvent(name: name, value: rawValue)
+      }
+    } catch(Exception e) {
+      failed[name] = rawValue
+      logWarn("Could not emit ${name} to child ${child.getDeviceNetworkId()}; retaining it for retry: ${e.message}")
+    }
+  }
+  return failed
+}
+
 /**
  * Deliver queued child events after the originating player callback has
  * returned. This method intentionally performs only the final child event
@@ -5243,10 +5280,14 @@ Boolean sameChildStateValue(Object left, Object right) {
       return
     }
     try {
-      child.applyStateBatch(JsonOutput.toJson(eventsForChild))
-      Map<String, Object> sentForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
-      sentForChild.putAll(eventsForChild)
-      lastSent[dni] = sentForChild
+      Map<String, Object> failedAttributes = emitChildAttributeEvents(child, eventsForChild)
+      if(failedAttributes.isEmpty()) {
+        Map<String, Object> sentForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
+        sentForChild.putAll(eventsForChild)
+        lastSent[dni] = sentForChild
+      } else {
+        failed[dni] = failedAttributes
+      }
     } catch(Exception e) {
       Map<String, Object> latest = failed[dni] instanceof Map ? failed[dni] : [:]
       latest.putAll(eventsForChild)
@@ -7863,7 +7904,7 @@ void processGroupCommandRequest(Map data) {
         cancelActiveGroupOperation(groupDni, "${command.toUpperCase()}_REQUESTED")
         if(coordinator && followerIds) {
           prepareExpectedTopologyForMutation(coordinator, [], followerIds)
-          coordinator.playerModifyGroupMembers([], followerIds)
+          coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], followerIds]]))
         } else if(!coordinator) {
           logWarn("Group command ${command} could not resolve coordinator ${coordinatorId}")
         }
@@ -8362,7 +8403,7 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
       }
       logInfo("on() removing coordinator ${coordinatorId} from ${coordinatorOfDesired} before exact assembly for ${groupDevice.getDeviceNetworkId()}")
       prepareExpectedTopologyForMutation(prevCoordinator, [], [coordinatorId], finalExpectation)
-      prevCoordinator.playerModifyGroupMembers([], [coordinatorId], finalExpectation)
+      prevCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalExpectation]]))
       runInMillis(1, 'onAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: 0]])
       return
     }
@@ -8396,7 +8437,7 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
     if(detachDevice != null) {
       logInfo("on() detaching requested followers ${toDetach} from old group ${oldCoordId} before exact assembly for ${groupDevice.getDeviceNetworkId()}")
       prepareExpectedTopologyForMutation(detachDevice, [], toDetach)
-      detachDevice.playerModifyGroupMembers([], toDetach)
+      detachDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], toDetach]]))
       runInMillis(1, 'onAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: retries+1]])
       return
     }
@@ -8407,7 +8448,7 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
     if(ordered.size() > 1) {
       logInfo("on() creating exact group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
       prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
-      desiredDevice.playerCreateGroup(ordered, null)
+      desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     } else {
       logDebug("on() already exact singleton for ${groupDevice.getDeviceNetworkId()}")
     }
@@ -8418,7 +8459,7 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     logInfo("on() creating exact group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
     prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
-    desiredDevice.playerCreateGroup(ordered, null)
+    desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     return
   }
   List<String> extras = membersOfDesired.findAll { String m -> !requiredSet.contains(m) }
@@ -8429,15 +8470,15 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
   if(extras && missing) {
     logInfo("on() evicting ${extras} and adding ${missing} in one step for ${groupDevice.getDeviceNetworkId()}")
     prepareExpectedTopologyForMutation(desiredDevice, missing, extras)
-    desiredDevice.playerModifyGroupMembers(missing, extras)
+    desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missing, extras]]))
   } else if(extras) {
     logInfo("on() evicting extras ${extras} for ${groupDevice.getDeviceNetworkId()}")
     prepareExpectedTopologyForMutation(desiredDevice, [], extras)
-    desiredDevice.playerModifyGroupMembers([], extras)
+    desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], extras]]))
   } else if(missing) {
     logInfo("on() adding missing ${missing} for ${groupDevice.getDeviceNetworkId()}")
     prepareExpectedTopologyForMutation(desiredDevice, missing, [])
-    desiredDevice.playerModifyGroupMembers(missing, [])
+    desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missing, []]]))
   }
 }
 
@@ -8455,7 +8496,7 @@ void onAssemblyAfterDetach(Map data = [:]) {
     if(desiredDevice != null && requiredIds.size() > 1) {
       List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
       prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
-      desiredDevice.playerCreateGroup(ordered, null)
+      desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     }
     return
   }
@@ -8498,7 +8539,7 @@ void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
       }
       logInfo("joinPlayersToCoordinator() removing coordinator ${coordinatorId} from ${coordinatorOfDesired} before join for ${groupDevice.getDeviceNetworkId()}")
       prepareExpectedTopologyForMutation(prevCoordinator, [], [coordinatorId], finalExpectation)
-      prevCoordinator.playerModifyGroupMembers([], [coordinatorId], finalExpectation)
+      prevCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalExpectation]]))
       runInMillis(1, 'joinAssemblyAfterDetach', [data: [groupDni: groupDevice.getDeviceNetworkId(), retry: 0]])
       return
     }
@@ -8514,19 +8555,19 @@ void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     logInfo("joinPlayersToCoordinator() creating group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
     prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
-    desiredDevice.playerCreateGroup(ordered, null)
+    desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     return
   }
   if(!desiredIsCoordinator) {
     List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
     logInfo("joinPlayersToCoordinator() creating group ${ordered} with coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
     prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
-    desiredDevice.playerCreateGroup(ordered, null)
+    desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     return
   }
   logInfo("joinPlayersToCoordinator() adding ${missing} to coordinator ${coordinatorId} for ${groupDevice.getDeviceNetworkId()}")
   prepareExpectedTopologyForMutation(desiredDevice, missing, [])
-  desiredDevice.playerModifyGroupMembers(missing, [])
+  desiredDevice.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missing, []]]))
 }
 
 void joinAssemblyAfterDetach(Map data = [:]) {
@@ -8543,7 +8584,7 @@ void joinAssemblyAfterDetach(Map data = [:]) {
     if(desiredDevice != null && requiredIds.size() > 1) {
       List<String> ordered = [coordinatorId] + requiredIds.findAll { String pid -> pid != coordinatorId }
       prepareExpectedTopologyForCreateGroup(desiredDevice, ordered)
-      desiredDevice.playerCreateGroup(ordered, null)
+      desiredDevice.playerCreateGroupRequest(JsonOutput.toJson([args: [ordered, null]]))
     }
     return
   }
@@ -9344,7 +9385,7 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
         operation.topologyRequestId = UUID.randomUUID().toString()
         logDebug("Dispatching additive coordinator restoration ${operation.topologyRequestId} for group operation ${operation.operationId}")
         prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
-        coordinator.playerCreateGroup(playerIdsInCoordinatorOrder, operation.musicContextGroupId as String)
+        coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [playerIdsInCoordinatorOrder, operation.musicContextGroupId as String]]))
         operation.coordinatorTransferGroupCreated = true
         operation.topologyMutationSent = true
       } else {
@@ -9379,7 +9420,7 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
     logInfo("Moving additive group coordination from ${topology.coordinatorId} to configured coordinator ${coordinatorId}")
     logDebug("Dispatching additive coordinator transfer ${operation.topologyRequestId} for group operation ${operation.operationId}")
     prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
-      previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
+      previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalTopologyExpectation]]))
     operation.topologyMutationSent = true
   } else {
     List<String> coordinatorObservedPlayerIds = getAdditiveObservedPlayerIds(operation, topology)
@@ -9396,7 +9437,7 @@ void sendAdditiveGroupTopologyCommand(Map operation, Map topology,
       logDebug("Sending additive group mutation for ${operation.operationId}: configuredCoordinator=${coordinatorId}, add=${followersToAdd}")
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       prepareExpectedTopologyForMutation(coordinator, followersToAdd, [])
-      coordinator.playerModifyGroupMembers(followersToAdd, [])
+      coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [followersToAdd, []]]))
       operation.topologyMutationSent = true
     } else {
       operation.topologyRequestId = UUID.randomUUID().toString()
@@ -9447,7 +9488,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         logInfo("Evicting unlisted players ${extras} from group ${topology.groupId} using configured coordinator ${configuredCoordinatorId}")
         prepareExpectedTopologyForMutation(configuredCoordinator, [], extras)
-        configuredCoordinator.playerModifyGroupMembers([], extras)
+        configuredCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], extras]]))
         topologyMutationSentNow = true
       } else {
         operation.lastCommand = 'refreshGroupTopology'
@@ -9509,7 +9550,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
             logInfo("Detaching requested followers ${followersToDetach} from old group ${detachCoordinatorId} before creating exact group with ${coordinatorId} for group operation ${operation.operationId}")
             logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
             prepareExpectedTopologyForMutation(detachCoordinator, [], followersToDetach)
-            detachCoordinator.playerModifyGroupMembers([], followersToDetach)
+            detachCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], followersToDetach]]))
             operation.topologyMutationSent = true
             operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
             operation.lastCommandAt = now()
@@ -9606,7 +9647,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         logInfo("Expanding target subgroup ${coordinatorLedTargetSubset.memberIds} under its configured coordinator ${coordinatorId}; adding ${missingPlayers} for group operation ${operation.operationId}")
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         prepareExpectedTopologyForMutation(coordinator, missingPlayers, [])
-        coordinator.playerModifyGroupMembers(missingPlayers, [])
+        coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [missingPlayers, []]]))
         operation.topologyMutationSent = true
         operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
         operation.lastCommandAt = now()
@@ -9632,7 +9673,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
         logInfo("Splitting existing target subgroup ${conflictingTargetGroup.memberIds} from coordinator ${currentCoordinatorId} before creating the exact group with ${coordinatorId}")
         prepareExpectedTopologyForMutation(currentCoordinator, [], followersToSplit)
-        currentCoordinator.playerModifyGroupMembers([], followersToSplit)
+        currentCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], followersToSplit]]))
         operation.topologyMutationSent = true
         operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
         operation.lastCommandAt = now()
@@ -9672,11 +9713,11 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
         // group so the holder already following its stream becomes coordinator.
         prepareExpectedTopologyForMutation(previousCoordinator, [], [topology.coordinatorId as String],
             finalTopologyExpectation)
-        previousCoordinator.playerModifyGroupMembers([], [topology.coordinatorId as String],
-            finalTopologyExpectation)
+        previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [topology.coordinatorId as String],
+            finalTopologyExpectation]]))
       } else {
         prepareExpectedTopologyForMutation(previousCoordinator, [], [coordinatorId], finalTopologyExpectation)
-        previousCoordinator.playerModifyGroupMembers([], [coordinatorId], finalTopologyExpectation)
+        previousCoordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], [coordinatorId], finalTopologyExpectation]]))
       }
       operation.coordinatorTransferStarted = true
       operation.topologyMutationSent = true
@@ -9698,7 +9739,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       operation.topologyRequestId = UUID.randomUUID().toString()
       logDebug("Dispatching topology step ${operation.topologyRequestId} for group operation ${operation.operationId}")
       prepareExpectedTopologyForMutation(coordinator, [], extras)
-      coordinator.playerModifyGroupMembers([], extras)
+      coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[], extras]]))
       operation.topologyMutationSent = true
     } else {
       operation.lastCommand = 'createExactGroup'
@@ -9711,7 +9752,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
       List<String> playerIdsInCoordinatorOrder = [coordinatorId] +
           requiredPlayerIds.findAll { String playerId -> playerId != coordinatorId }
       prepareExpectedTopologyForCreateGroup(coordinator, playerIdsInCoordinatorOrder)
-      coordinator.playerCreateGroup(playerIdsInCoordinatorOrder, operation.musicContextGroupId as String)
+      coordinator.playerCreateGroupRequest(JsonOutput.toJson([args: [playerIdsInCoordinatorOrder, operation.musicContextGroupId as String]]))
       operation.topologyMutationSent = true
     }
   } else if(operation.groupingMode == GROUPING_MODE_ADDITIVE) {
@@ -11908,6 +11949,7 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   List<ChildDeviceWrapper> groupsForCoord = (List<ChildDeviceWrapper>)partitioned['groupDevices']
   Map<String, ChildDeviceWrapper> rinconMap = (Map<String, ChildDeviceWrapper>)partitioned['rinconMap']
   List<String> groupDnis = groupsForCoord.collect { ChildDeviceWrapper gd -> gd.getDeviceNetworkId() }
+  logDebug("updateGroupDevices: coordinator=${coordinatorId}, players=${playersInGroup}, matchingGroups=${groupDnis}")
   Map<String, String> playerNames = [:]
   rinconMap.each { String id, ChildDeviceWrapper player ->
     playerNames[id] = player.getDataValue('name')?.toString() ?: id
@@ -11943,7 +11985,6 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
     Boolean wasActive = gd.currentValue('switch', true) == 'on'
     HashSet<String> configuredPlayers = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
-    observedPlayers.add(coordinatorId)
     String rememberedMode = getFreshGroupingContext(gd.getDeviceNetworkId())?.mode as String
     String deviceMode = (gd.getDataValue('lastGroupingMode') ?: gd.currentValue('groupingMode', true))?.toString()
     String groupingMode = normalizeGroupOperationMode(rememberedMode ?: deviceMode, GROUPING_MODE_EXPLICIT)
@@ -11980,6 +12021,7 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
           !sameChildStateValue(value, gd.currentValue(name, true))
     }
     Boolean forceSnapshot = shouldBeActive && (!wasActive || playbackStateOutOfSync)
+    logDebug("Queueing group membership state for ${groupDni}: active=${shouldBeActive}, attributes=${attributes.keySet()}, forceSnapshot=${forceSnapshot}")
     queueGroupDeviceState(gd.getDeviceNetworkId(), attributes, forceSnapshot)
   }
   if(cursor < groupDnis.size()) {
@@ -12033,10 +12075,11 @@ void queueGroupDeviceState(String groupDni, Map attributes, Boolean forceSnapsho
       : [:]
   attempts.remove(groupDni)
   state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
-  if(state[GROUP_STATE_DRAIN_SCHEDULED_KEY] != true) {
-    state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
-    runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
-  }
+  // Re-arm on every enqueue. The scheduled-job table can lose a job while the
+  // persisted marker remains true (for example after an app update), which
+  // would otherwise strand all subsequent group state updates.
+  state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
+  runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
 }
 
 /**
@@ -12075,13 +12118,21 @@ void drainGroupStateUpdates() {
       return
     }
     try {
-      groupDevice.updateBatchPlaybackState(JsonOutput.toJson(attributes))
+      logDebug("Delivering group state to ${groupDni}: attributes=${attributes.keySet()}")
+      Map<String, Object> publishable = prepareGroupDeviceAttributeEvents(groupDevice, attributes)
+      Map<String, Object> failedAttributes = emitChildAttributeEvents(groupDevice, publishable)
+      if(!failedAttributes.isEmpty()) {
+        throw new IllegalStateException("${failedAttributes.size()} group attribute event(s) failed")
+      }
+      logDebug("Delivered ${publishable.size()} group state event(s) to ${groupDni}")
       Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
           ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
       Map<String, Object> sentForGroup = lastSent[groupDni] instanceof Map ? lastSent[groupDni] : [:]
-      sentForGroup.putAll(attributes)
-      if(attributes.containsKey('volume')) { sentForGroup.groupVolume = attributes.volume }
-      if(attributes.containsKey('mute')) { sentForGroup.groupMute = attributes.mute }
+      Map<String, Object> cachedAttributes = new LinkedHashMap<String, Object>(publishable)
+      if(cachedAttributes.volume instanceof Map && ((Map)cachedAttributes.volume).containsKey('value')) {
+        cachedAttributes.volume = ((Map)cachedAttributes.volume).value
+      }
+      sentForGroup.putAll(cachedAttributes)
       lastSent[groupDni] = sentForGroup
       state[LAST_SENT_CHILD_STATE_KEY] = lastSent
       attempts.remove(groupDni)
@@ -12113,6 +12164,52 @@ void drainGroupStateUpdates() {
   state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
   state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
   runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
+}
+
+/** Apply the group driver's inactive and track-position guards before app-owned events are emitted. */
+Map<String, Object> prepareGroupDeviceAttributeEvents(ChildDeviceWrapper groupDevice, Map<String, Object> attributes) {
+  Map<String, Object> publishable = new LinkedHashMap<String, Object>(attributes ?: [:])
+  if(groupDevice == null || publishable.isEmpty()) { return publishable }
+
+  Boolean wasActive = groupDevice.currentValue('switch', true) == 'on'
+  Boolean isActive = publishable.containsKey('switch') ? publishable.switch == 'on' : wasActive
+  Boolean activeOnly = groupDevice.getSetting('onlyUpdateWhenActive') != false
+  Boolean resetWhenInactive = groupDevice.getSetting('resetAttributesWhenInactive') != false
+  Boolean trackPositionEnabled = groupDevice.getSetting('enableTrackPositionUpdates') == true
+  if(!trackPositionEnabled) {
+    publishable.remove('trackPosition')
+    publishable.remove('trackPositionUpdated')
+  }
+
+  if(activeOnly && !isActive) {
+    publishable.keySet().removeAll { String name -> !(name in ['switch', 'currentlyJoinedPlayers']) }
+    if(wasActive && resetWhenInactive) {
+      publishable.putAll([
+        status: 'inactive', transportStatus: 'stopped', trackData: '{}', trackDescription: 'n/a',
+        currentTrackDuration: 'n/a', trackPosition: 0L, trackPositionUpdated: 0L,
+        currentArtistName: 'n/a', currentAlbumName: 'n/a', currentTrackName: 'n/a',
+        albumArtURI: 'n/a', albumArtSmall: 'n/a', albumArtMedium: 'n/a', albumArtLarge: 'n/a',
+        audioSource: 'n/a', currentFavorite: 'n/a', currentPlaylist: 'n/a', currentTrackNumber: 0,
+        nextArtistName: 'n/a', nextAlbumName: 'n/a', nextTrackName: 'n/a',
+        nextTrackAlbumArtURI: 'n/a', queueTrackTotal: '0', queueTrackPosition: '0',
+        groupVolume: 0, groupMute: 'unmuted', currentRepeatOneMode: 'off', currentRepeatAllMode: 'off',
+        currentCrossfadeMode: 'off', currentShuffleMode: 'off'
+      ])
+    }
+  }
+
+  if(publishable.containsKey('volume')) {
+    Object volume = publishable.remove('volume')
+    publishable.volume = volume instanceof Map && ((Map)volume).containsKey('value')
+        ? volume : [value: volume, unit: '%']
+    if(!publishable.containsKey('groupVolume')) {
+      publishable.groupVolume = volume instanceof Map ? ((Map)volume).value : volume
+    }
+  }
+  if(publishable.containsKey('mute') && !publishable.containsKey('groupMute')) {
+    publishable.groupMute = publishable.mute
+  }
+  return publishable
 }
 
 /**

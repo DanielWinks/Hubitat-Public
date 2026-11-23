@@ -71,17 +71,10 @@ void logTrace(String message) {
 @Field static ConcurrentHashMap<String, Map> groupDeviceVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static ConcurrentHashMap<String, Long> lastGroupDeviceVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
-@Field static ConcurrentHashMap<String, Map<String, Object>> heldPlaybackState = new ConcurrentHashMap<String, Map<String, Object>>()
-@Field static final Set<String> MEMBERSHIP_ATTRIBUTES = Collections.unmodifiableSet(new HashSet<String>(['switch', 'currentlyJoinedPlayers']))
 @Field static volatile List<String> cachedTTSVoiceNames = null
 @Field static volatile String cachedTTSDefaultVoice = null
 @Field static final String GROUPING_MODE_EXPLICIT = 'EXPLICIT'
 @Field static final String GROUPING_MODE_ADDITIVE = 'ADDITIVE'
-@Field static final String PENDING_BATCH_EVENTS_KEY = 'pendingBatchEvents'
-@Field static final String BATCH_EVENTS_SCHEDULED_KEY = 'batchEventsScheduled'
-@Field static final String BATCH_EVENTS_DUE_AT_KEY = 'batchEventsDueAt'
-@Field static final Integer BATCH_EVENTS_PER_DRAIN = 8
-@Field static final Integer BATCH_EVENTS_INTERVAL_MS = 250
 @Field static final List<String> DEPRECATED_GROUP_STATE_ATTRIBUTES = [
   'groupCommandRequest',
   'sonosGroupCommandRequest',
@@ -94,11 +87,7 @@ void logTrace(String message) {
 @Field static final Integer PARENT_REQUEST_RETRY_MS = 1000
 @Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingGroupRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
 
-@Field static final Set<String> ACTIVE_GROUP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'pendingBatchEvents',
-  'batchEventsScheduled',
-  'batchEventsDueAt',
-]))
+@Field static final Set<String> ACTIVE_GROUP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([]))
 
 @Field static final Set<String> ACTIVE_GROUP_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   'groupCoordinatorId',
@@ -540,11 +529,7 @@ void initialize() {
 
 /** Clear stale group-device publication work; refresh repopulates authoritative state. */
 void resetPendingStatePublicationForInitialization() {
-  unschedule('drainBatchEvents')
-  state.remove(PENDING_BATCH_EVENTS_KEY)
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  state.remove(BATCH_EVENTS_DUE_AT_KEY)
-  logDebug("Cleared stale group state-publication queue and drain job for ${device.getDeviceNetworkId()}")
+  logDebug("Cleared stale group state-publication state for ${device.getDeviceNetworkId()}")
 }
 
 void applyInitializationDefaults() {
@@ -608,32 +593,18 @@ void uninstalled() {
   runtimeStateByDni.remove(dni)
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
-  heldPlaybackState.remove(dni)
 }
 
 void configure() {
   migrateLegacyRuntimeState()
   pruneOrphanedGroupPersistence()
-  schedulePendingBatchEvents()
   removeStaleGroupStates()
   synchronizeTrackPositionPreference()
-  Boolean wasGuarded = runtimeState.lastOnlyUpdateWhenActive != false
-  Boolean isGuarded = getOnlyUpdateWhenActiveSetting()
-  runtimeState.lastOnlyUpdateWhenActive = isGuarded
-  if(!isGuarded && wasGuarded) {
-    // Guard just disabled — clear held state and refresh to populate skipped attributes
-    clearHeldState()
-    runIn(2, 'refresh')
-  }
 }
 
 void synchronizeTrackPositionPreference() {
-  Boolean wasEnabled = device.getDataValue('enableTrackPositionUpdates')?.toString()?.toLowerCase(Locale.ROOT) == 'true'
   Boolean isEnabled = getEnableTrackPositionUpdates()
   device.updateDataValue('enableTrackPositionUpdates', isEnabled.toString())
-  if(wasEnabled && !isEnabled) {
-    queueBatchEvents([trackPosition: 0L, trackPositionUpdated: 0L])
-  }
 }
 
 ConcurrentHashMap<String, Object> getRuntimeState() {
@@ -658,11 +629,7 @@ void migrateLegacyRuntimeState() {
   legacy.each { String key, Object value ->
     if(value != null) { runtime.putIfAbsent(key, value) }
   }
-  Object pendingBatchEvents = state[PENDING_BATCH_EVENTS_KEY]
-  Object batchEventsScheduled = state[BATCH_EVENTS_SCHEDULED_KEY]
   state.clear()
-  if(pendingBatchEvents != null) { state[PENDING_BATCH_EVENTS_KEY] = pendingBatchEvents }
-  if(batchEventsScheduled != null) { state[BATCH_EVENTS_SCHEDULED_KEY] = batchEventsScheduled }
 }
 void on() {
   setLastGroupingMode(GROUPING_MODE_EXPLICIT)
@@ -1074,356 +1041,6 @@ void unmute() {
  */
 void refresh() {
   migrateLegacyRuntimeState()
-  requestGroupCommand('refresh', getGroupCommandSettings())
-}
-
-/**
- * Receive a batch of attribute updates as a JSON string from the parent app.
- * Separates membership attributes (always processed) from playback attributes (guarded).
- * When the group is inactive and guarding is enabled, playback attributes are held in memory
- * and replayed when the group transitions to active.
- * @param jsonAttributes JSON string of attribute name-value pairs
- */
-void updateBatchPlaybackState(String jsonAttributes) {
-  processBatchPlaybackState(jsonAttributes, false)
-}
-
-/** Accept one coalesced parent batch through the normal group-state guard. */
-void applyStateBatch(String jsonAttributes) {
-  processBatchPlaybackState(jsonAttributes, false)
-}
-
-/** Receive the app's canonical household topology and reconcile this group's membership. */
-void applyAppHouseholdTopology(String topologyJson) {
-  if(!topologyJson) { return }
-  try {
-    Map topology = (Map)parseJson(topologyJson)
-    if(!(topology.groups instanceof List)) { return }
-    device.updateDataValue('householdTopology', topologyJson)
-    String configuredCoordinator = device.getDataValue('groupCoordinatorId')?.toString()?.trim()
-    List<String> configuredPlayers = configuredCoordinator ? [configuredCoordinator] : []
-    String configuredFollowerIds = device.getDataValue('playerIds')?.toString()
-    configuredPlayers.addAll(normalizeGroupTopologyPlayerIds(configuredFollowerIds))
-    Set<String> configuredPlayerIds = new LinkedHashSet<String>(configuredPlayers)
-    String groupingMode = getGroupTopologyGroupingMode()
-    Map coordinatorGroup = ((List<Map>)topology.groups).find { Map item ->
-      normalizeGroupTopologyPlayerIds(item.playerIds).contains(configuredCoordinator)
-    }
-    List<String> actualPlayerIds = normalizeGroupTopologyPlayerIds(coordinatorGroup?.playerIds)
-    Boolean coordinatorMatches = coordinatorGroup?.coordinatorId?.toString()?.trim() == configuredCoordinator
-    Boolean rosterMatches = groupingMode == GROUPING_MODE_ADDITIVE
-        ? actualPlayerIds.containsAll(configuredPlayerIds)
-        : new HashSet<String>(actualPlayerIds) == new HashSet<String>(configuredPlayerIds)
-    Boolean shouldBeActive = coordinatorGroup != null && configuredPlayerIds && coordinatorMatches && rosterMatches
-    List<String> joinedNames = coordinatorGroup?.playerNames instanceof List
-        ? ((List)coordinatorGroup.playerNames).collect { Object name -> name?.toString() } : []
-    updateBatchPlaybackState(JsonOutput.toJson([
-      switch: shouldBeActive ? 'on' : 'off',
-      currentlyJoinedPlayers: joinedNames.join(', ')
-    ]))
-  } catch(Exception e) {
-    logWarn("Could not apply app household topology snapshot: ${e.message}")
-  }
-}
-
-/** Normalize player identifiers from either a topology list or a stored CSV value. */
-@CompileStatic
-private List<String> normalizeGroupTopologyPlayerIds(Object rawIds) {
-  List<String> playerIds = new ArrayList<String>()
-  if(rawIds instanceof Collection) {
-    for(Object rawId : (Collection)rawIds) {
-      String playerId = rawId?.toString()?.trim()
-      if(playerId) { playerIds.add(playerId) }
-    }
-  } else if(rawIds != null) {
-    String[] rawValues = rawIds.toString().split(',')
-    for(String rawId : rawValues) {
-      String playerId = rawId?.trim()
-      if(playerId) { playerIds.add(playerId) }
-    }
-  }
-  return new ArrayList<String>(new LinkedHashSet<String>(playerIds))
-}
-
-/** Resolve the stored grouping intent, defaulting legacy or unknown values to exact grouping. */
-private String getGroupTopologyGroupingMode() {
-  Object rawMode = device.getDataValue('lastGroupingMode')
-  if(rawMode == null || StringUtils.isBlank(rawMode.toString())) {
-    rawMode = device.currentValue('groupingMode', true)
-  }
-  return normalizeGroupTopologyGroupingMode(rawMode)
-}
-
-@CompileStatic
-private String normalizeGroupTopologyGroupingMode(Object rawMode) {
-  String groupingMode = rawMode?.toString()?.trim()?.toUpperCase()
-  return groupingMode == GROUPING_MODE_ADDITIVE ? GROUPING_MODE_ADDITIVE : GROUPING_MODE_EXPLICIT
-}
-
-/**
- * Apply an explicit refresh from the parent app. Refresh playback is subject
- * to the same inactive-group guard as other playback updates.
- */
-void applyRefreshedPlaybackState(String jsonAttributes) {
-  processBatchPlaybackState(jsonAttributes, true)
-}
-
-private void processBatchPlaybackState(String jsonAttributes, Boolean forcePlaybackUpdate) {
-  Map attributes = (Map)parseJson(jsonAttributes)
-  if(!getEnableTrackPositionUpdates()) {
-    attributes.remove('trackPosition')
-    attributes.remove('trackPositionUpdated')
-  }
-
-  // Separate membership keys (always processed) from playback keys (guarded)
-  Map membershipAttrs = [:]
-  Map playbackAttrs = [:]
-  attributes.each { String attrName, Object attrValue ->
-    if(attrValue == null) { return }
-    if(MEMBERSHIP_ATTRIBUTES.contains(attrName)) {
-      membershipAttrs[attrName] = attrValue
-    } else {
-      playbackAttrs[attrName] = attrValue
-    }
-  }
-
-  // Always apply membership attributes first
-  Boolean wasActive = this.device.currentValue('switch') == 'on'
-  queueBatchEvents(membershipAttrs)
-  // Determine isActive from the batch value if switch was included, since
-  // sendEvent() may not propagate to currentValue() synchronously.
-  Boolean isActive = membershipAttrs.containsKey('switch')
-      ? membershipAttrs['switch'] == 'on'
-      : wasActive
-
-  if(forcePlaybackUpdate) {
-    if(getOnlyUpdateWhenActiveSetting() && !isActive) {
-      if(getResetAttributesWhenInactiveSetting()) {
-        resetPlaybackAttributes()
-      }
-      logDebug('Ignoring refreshed playback state because the group is inactive')
-      return
-    }
-    applyPlaybackAttributes(playbackAttrs)
-    clearHeldState()
-    return
-  }
-
-  // If guard is off, always apply playback state
-  if(!getOnlyUpdateWhenActiveSetting()) {
-    applyPlaybackAttributes(playbackAttrs)
-    clearHeldState()
-    return
-  }
-
-  // If group just became inactive, reset playback attributes and hold new ones
-  if(wasActive && !isActive) {
-    if(getResetAttributesWhenInactiveSetting()) {
-      resetPlaybackAttributes()
-    }
-    holdPlaybackState(playbackAttrs)
-    return
-  }
-
-  // If group just became active, replay held state merged with new attributes
-  if(isActive && !wasActive) {
-    replayHeldState(playbackAttrs)
-    return
-  }
-
-  // If group is active, apply playback attributes directly
-  if(isActive) {
-    applyPlaybackAttributes(playbackAttrs)
-    return
-  }
-
-  // Group is not active — hold the playback attributes for later
-  holdPlaybackState(playbackAttrs)
-}
-
-private void applyPlaybackAttributes(Map attrs) {
-  if(!attrs) { return }
-  Map<String, Object> eventBatch = [:]
-  attrs.each { String attrName, Object attrValue ->
-    if(!getEnableTrackPositionUpdates() && attrName in ['trackPosition', 'trackPositionUpdated']) { return }
-    if(attrValue != null) {
-      if(attrName == 'volume') {
-        eventBatch.volume = [value: attrValue, unit: '%']
-        eventBatch.groupVolume = attrValue
-      } else if(attrName == 'mute') {
-        eventBatch.mute = attrValue
-        eventBatch.groupMute = attrValue
-      } else {
-        eventBatch[attrName] = attrValue
-      }
-    }
-  }
-  queueBatchEvents(eventBatch)
-}
-
-private void queueBatchEvents(Map attributes) {
-  if(!attributes) { return }
-  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
-      ? (Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY] : [:]
-  attributes.each { Object rawName, Object rawValue ->
-    String name = rawName?.toString()
-    if(name && rawValue != null) {
-      pending[name] = rawValue instanceof Map && ((Map)rawValue).containsKey('value')
-          ? rawValue : [value: rawValue, unit: null]
-    }
-  }
-  if(pending.isEmpty()) { return }
-  state[PENDING_BATCH_EVENTS_KEY] = pending
-  schedulePendingBatchEvents()
-}
-
-private void schedulePendingBatchEvents() {
-  Map pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map ? (Map)state[PENDING_BATCH_EVENTS_KEY] : [:]
-  if(pending.isEmpty()) {
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    state.remove(BATCH_EVENTS_DUE_AT_KEY)
-    return
-  }
-  Long currentTime = now() as Long
-  Long requestedDueAt = currentTime + BATCH_EVENTS_INTERVAL_MS
-  Long existingDueAt = state[BATCH_EVENTS_DUE_AT_KEY] as Long
-  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
-  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
-  state[BATCH_EVENTS_DUE_AT_KEY] = dueAt
-  state[BATCH_EVENTS_SCHEDULED_KEY] = true
-  try {
-    runInMillis(scheduleDelay, 'drainBatchEvents', [overwrite: true])
-  } catch(Exception e) {
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    state.remove(BATCH_EVENTS_DUE_AT_KEY)
-    logWarn("Could not schedule group state event drain: ${e.message}")
-  }
-}
-
-void drainBatchEvents() {
-  state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  state.remove(BATCH_EVENTS_DUE_AT_KEY)
-  Map<String, Object> pending = state[PENDING_BATCH_EVENTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY]) : [:]
-  if(pending.isEmpty()) {
-    state.remove(PENDING_BATCH_EVENTS_KEY)
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-    return
-  }
-  List<String> names = new ArrayList<String>(pending.keySet()).take(BATCH_EVENTS_PER_DRAIN)
-  Map<String, Object> remaining = new LinkedHashMap<String, Object>((Map<String, Object>)state[PENDING_BATCH_EVENTS_KEY])
-  names.each { String name ->
-    Map event = pending[name] instanceof Map ? (Map)pending[name] : [value: pending[name]]
-    try {
-      if(event.unit) { sendEvent(name: name, value: event.value, unit: event.unit) }
-      else { sendEvent(name: name, value: event.value) }
-      remaining.remove(name)
-    } catch(Exception e) {
-      logWarn("Could not emit batched ${name} event; retaining it for retry: ${e.message}")
-    }
-  }
-  if(remaining.isEmpty()) {
-    state.remove(PENDING_BATCH_EVENTS_KEY)
-    state.remove(BATCH_EVENTS_SCHEDULED_KEY)
-  } else {
-    state[PENDING_BATCH_EVENTS_KEY] = remaining
-    schedulePendingBatchEvents()
-  }
-}
-
-private void holdPlaybackState(Map newAttrs) {
-  if(!newAttrs || newAttrs.isEmpty()) { return }
-  String dni = device.getDeviceNetworkId()
-  Map<String, Object> existing = heldPlaybackState.get(dni)
-  if(existing == null) {
-    heldPlaybackState[dni] = new LinkedHashMap<String, Object>(newAttrs)
-  } else {
-    existing.putAll(newAttrs)
-  }
-}
-
-/**
- * Replay any held playback attributes that were accumulated while the group was inactive.
- * Merges held state with optional additional attributes (current batch wins on collision).
- * Called internally from updateBatchPlaybackState() when a batch includes
- * switch:'on'. The held state is consumed atomically, so repeated membership
- * deliveries do not replay the same held data more than once.
- * @param additionalAttrs Optional map of new attributes to merge on top of held state
- */
-void replayHeldState(Map additionalAttrs = null) {
-  String dni = device.getDeviceNetworkId()
-  Map<String, Object> held = heldPlaybackState.remove(dni)
-  if(held == null && (additionalAttrs == null || additionalAttrs.isEmpty())) { return }
-
-  // Merge: held state first, then current batch on top (current wins on collision)
-  Map merged = [:]
-  if(held) { merged.putAll(held) }
-  if(additionalAttrs) { merged.putAll(additionalAttrs) }
-
-  logDebug("Replaying ${merged.size()} held attributes after group became active")
-  applyPlaybackAttributes(merged)
-}
-
-private void clearHeldState() {
-  String dni = device.getDeviceNetworkId()
-  heldPlaybackState.remove(dni)
-}
-
-private void resetPlaybackAttributes() {
-  logDebug('Resetting playback attributes for inactive group')
-  Map resetAttrs = [
-    status: 'inactive',
-    transportStatus: 'stopped',
-    trackData: '{}',
-    trackDescription: 'n/a',
-    currentTrackDuration: 'n/a',
-    trackPosition: 0,
-    trackPositionUpdated: 0,
-    currentArtistName: 'n/a',
-    currentAlbumName: 'n/a',
-    currentTrackName: 'n/a',
-    albumArtURI: 'n/a',
-    albumArtSmall: 'n/a',
-    albumArtMedium: 'n/a',
-    albumArtLarge: 'n/a',
-    audioSource: 'n/a',
-    currentFavorite: 'n/a',
-    currentPlaylist: 'n/a',
-    currentTrackNumber: 0,
-    nextArtistName: 'n/a',
-    nextAlbumName: 'n/a',
-    nextTrackName: 'n/a',
-    nextTrackAlbumArtURI: 'n/a',
-    queueTrackTotal: '0',
-    queueTrackPosition: '0',
-    groupVolume: 0,
-    groupMute: 'unmuted',
-    currentRepeatOneMode: 'off',
-    currentRepeatAllMode: 'off',
-    currentCrossfadeMode: 'off',
-    currentShuffleMode: 'off'
-  ]
-  applyPlaybackAttributes(resetAttrs)
-}
-
-/**
- * Retained as a local compatibility hook for callers that explicitly invoke
- * it when this group device transitions from active to inactive.
- * Resets playback attributes to a clean "inactive" state if configured to do so.
- * Only resets when both resetAttributesWhenInactive and onlyUpdateWhenActive are enabled,
- * because when the guard is off, playback attributes flow through unconditionally and
- * resetting would cause a brief flash of empty data immediately overwritten.
- */
-void onGroupDeactivated() {
-  if(getResetAttributesWhenInactiveSetting() && getOnlyUpdateWhenActiveSetting()) {
-    resetPlaybackAttributes()
-  }
-}
-
-/**
- * Calculate and update volume as average of all player volumes
- */
-void refreshAverageVolume() {
   requestGroupCommand('refresh', getGroupCommandSettings())
 }
 
