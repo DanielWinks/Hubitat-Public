@@ -1154,7 +1154,7 @@ class SonosAdvPlayerSpec extends Specification {
           playbackAttrs: playbackAttrs ? new LinkedHashMap(playbackAttrs) : [:]]
       },
       playerCommandRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload); true },
-      playerGroupFavoriteOperationUpdate: { Map payload -> parentPlayerUpdates << [kind: 'groupFavoriteOperation', payload: new LinkedHashMap(payload)] },
+      playerGroupTopologyOperationUpdate: { Map payload -> parentPlayerUpdates << [kind: 'groupTopologyOperation', payload: new LinkedHashMap(payload)] },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
       putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
@@ -2742,34 +2742,17 @@ class SonosAdvPlayerSpec extends Specification {
     driver.asyncCalls[0].params.body.contains('<DesiredVolume>0</DesiredVolume>')
   }
 
-  def "group Favorite loads use the verified group ID without the per-player Amazon workaround"() {
+  def "topology operation updates use a deferred app handoff without device events"() {
     given:
-    seedUpnpFavorite('42')
+    driver.registerGroupTopologyOperation('group-op-private', 'request-1')
 
     when:
-    driver.loadFavoriteForGroupOperation('42', 'repeat all', 'replace', 'off', 'true', 'on', 'group-op-1', 'GROUP-VERIFIED', 'group-op-1:1')
+    driver.emitGroupTopologyOperationEvent('groups', [groupId: 'GROUP-1', coordinatorId: 'RINCON_TEST',
+      playerIds: ['RINCON_TEST']])
+    driver.flushPendingGroupTopologyOperationEvents()
 
     then:
-    driver.asyncCalls.any { it.params.headers.SOAPAction.endsWith('#SetAVTransportURI') }
-    driver.runtimeState.groupFavoriteOperationId == 'group-op-1'
-    driver.runtimeState.groupFavoriteOperationAttemptId == 'group-op-1:1'
-    driver.flushPendingGroupFavoriteOperationEvents()
-    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'groupFavoriteOperation' }.payload
-    update.attemptId == 'group-op-1:1'
-    driver.device.events.isEmpty()
-    driver.scheduled.every { List call -> call[1] != 'playerPlay' }
-  }
-
-  def "group Favorite updates use a deferred app handoff without device events"() {
-    given:
-    driver.registerGroupFavoriteOperation('group-op-private', '42')
-
-    when:
-    driver.emitGroupFavoriteOperationEvent('registered', [favoriteId: '42'])
-    driver.flushPendingGroupFavoriteOperationEvents()
-
-    then:
-    parentPlayerUpdates.any { Map item -> item.kind == 'groupFavoriteOperation' && item.payload.event == 'registered' }
+    parentPlayerUpdates.any { Map item -> item.kind == 'groupTopologyOperation' && item.payload.event == 'groups' }
     driver.device.events.isEmpty()
   }
 
@@ -3096,32 +3079,9 @@ class SonosAdvPlayerSpec extends Specification {
     driver.EVENT_TIMESTAMP_KEYS.contains('lastAVTransportEvent')
   }
 
-  def "group Favorite metadata reports an exact Favorite ID to the parent operation"() {
-    given:
-    driver.getFavoritesMap()['42serviceaccount'] = [id: '42', name: 'Favorite 42', imageUrl: 'https://example.test/cover']
-    driver.registerGroupFavoriteOperation('group-op-2', '42')
-    driver.device.events.clear()
-
-    when:
-    driver.getFavoritesMap()['match'] = [id: '42', name: 'Favorite 42', imageUrl: 'https://example.test/cover',
-      resourceObjectId: 'urn:42']
-    driver.updateCurrentFavoriteFromUpnp([
-      currentTrackURI: 'x-sonos-http:song%3a42.mp4',
-      currentTrackMetaData: [id: 'urn:42'], enqueuedTransportURIMetaData: [:]
-    ])
-
-    then:
-    driver.flushPendingGroupFavoriteOperationEvents()
-    List<Map> updates = parentPlayerUpdates.findAll { Map item -> item.kind == 'groupFavoriteOperation' }
-    Map payload = updates.collect { Map item -> item.payload }.find { Map item -> item.event == 'metadataConfirmed' }
-    payload.event == 'metadataConfirmed'
-    payload.data.favoriteId == '42'
-    payload.data.confirmed == true
-  }
-
   def "empty groups responses emit a negative topology observation"() {
     given:
-    driver.registerGroupFavoriteOperation('group-op-4', '42')
+    driver.registerGroupTopologyOperation('group-op-4')
     driver.device.events.clear()
 
     when:

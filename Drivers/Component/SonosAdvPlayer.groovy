@@ -2820,8 +2820,7 @@ Boolean routeGroupedPlaybackCommandToCoordinator(String command, List args = [])
 /** Route media commands through the app while this player is registered with
  * an active topology-only operation, allowing deferral by the operation roster. */
 Boolean deferCommandToParentDuringGroupOperation(String command, List args = []) {
-  if(!runtimeState.groupTopologyOperationId &&
-      (!runtimeState.groupFavoriteOperationId || runtimeState.groupFavoriteOperationFavoriteId)) { return false }
+  if(!runtimeState.groupTopologyOperationId) { return false }
   requestParentCoordinatorCommand(command, args)
   return true
 }
@@ -3194,8 +3193,6 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
 }
 
 void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  if(deferCommandToParentDuringGroupOperation('loadFavoriteFull',
-      [favoriteId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])) { return }
   String action = queueMode?.toUpperCase() ?: 'REPLACE'
   Boolean playOnCompletion = autoPlay == 'true'
   Boolean repeat = repeatMode == 'unchanged' ? null : repeatMode == 'repeat all'
@@ -3210,179 +3207,63 @@ void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode, St
   }
 }
 
-/**
- * Load a Favorite as part of the parent app's serialized group operation.
- * Playback confirmation and retry ownership remain with the parent so
- * grouping and playback cannot race or retry independently.
- */
-void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
-    String shuffleMode, String autoPlay, String crossfadeMode, String operationId,
-    String expectedGroupId, String attemptId = null, String requestId = null) {
-  if(!operationId || !expectedGroupId) {
-    logWarn('Cannot load group Favorite without an operation ID and verified group ID')
-    return
-  }
-  runtimeState.groupFavoriteOperationId = operationId
-  runtimeState.groupFavoriteOperationFavoriteId = favoriteId
-  runtimeState.groupFavoriteOperationAttemptId = attemptId ?: operationId
-  runtimeState.groupFavoriteOperationRequestId = requestId ?: attemptId ?: operationId
-  runtimeState.groupFavoriteOperationGroupId = expectedGroupId
-  runtimeState.groupFavoriteOperationLoadAt = now()
-  runtimeState.remove('groupTopologyOperationId')
-  runtimeState.remove('groupTopologyOperationRequestId')
-  if(getIsGroupCoordinator() != true) {
-    logWarn("Cannot load group Favorite operation ${operationId}: player is not the group coordinator")
-    emitGroupFavoriteOperationEvent('loadRejected', [reason: 'PLAYER_NOT_COORDINATOR'])
-    return
-  }
-
-  cancelPendingAmazonMusicAutoPlay()
-
-  String action = queueMode.toUpperCase()
-  Boolean playOnCompletion = autoPlay == 'true'
-  Boolean repeat = repeatMode == 'unchanged' ? null : repeatMode == 'repeat all'
-  Boolean repeatOne = repeatMode == 'unchanged' ? null : repeatMode == 'repeat one'
-  Boolean shuffle = shuffleMode == 'unchanged' ? null : shuffleMode == 'on'
-  Boolean crossfade = crossfadeMode == 'on'
-  emitGroupFavoriteOperationEvent('loadStarted', [favoriteId: favoriteId, groupId: expectedGroupId,
-    requestId: runtimeState.groupFavoriteOperationRequestId])
-  playerLoadFavoriteForGroupOperation(
-    favoriteId,
-    action,
-    repeat,
-    repeatOne,
-    shuffle,
-    crossfade,
-    playOnCompletion,
-    expectedGroupId
-  )
-}
-
-/**
- * Register a group Favorite operation on a target player before topology or
- * playback events are observed. The parent app uses this to receive events
- * from every required player, not only the coordinator.
- */
-void registerGroupFavoriteOperation(String operationId, String favoriteId, String requestId = null) {
-  if(!operationId) { return }
-  runtimeState.remove('groupTopologyOperationId')
-  runtimeState.remove('groupTopologyOperationRequestId')
-  runtimeState.groupFavoriteOperationId = operationId
-  if(favoriteId) {
-    runtimeState.groupFavoriteOperationFavoriteId = favoriteId
-  } else {
-    runtimeState.remove('groupFavoriteOperationFavoriteId')
-  }
-  runtimeState.groupFavoriteOperationRequestId = requestId ?: operationId
-  runtimeState.remove('groupFavoriteOperationGroupId')
-  runtimeState.remove('groupFavoriteOperationAttemptId')
-  runtimeState.remove('groupFavoriteOperationLoadAt')
-  emitGroupFavoriteOperationEvent('registered', [favoriteId: favoriteId,
-    requestId: runtimeState.groupFavoriteOperationRequestId])
-}
-
-/** Register a topology-only group operation without creating Favorite state. */
+/** Register the player with a parent app topology operation. */
 void registerGroupTopologyOperation(String operationId, String requestId = null) {
   if(!operationId) { return }
-  runtimeState.remove('groupFavoriteOperationId')
-  runtimeState.remove('groupFavoriteOperationFavoriteId')
-  runtimeState.remove('groupFavoriteOperationAttemptId')
-  runtimeState.remove('groupFavoriteOperationRequestId')
-  runtimeState.remove('groupFavoriteOperationGroupId')
-  runtimeState.remove('groupFavoriteOperationLoadAt')
   runtimeState.groupTopologyOperationId = operationId
   runtimeState.groupTopologyOperationRequestId = requestId ?: operationId
-  emitGroupFavoriteOperationEvent('registered', [requestId: runtimeState.groupTopologyOperationRequestId])
 }
 
-void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String expectedGroupId,
-    String requestId = null) {
-  String currentOperationId = runtimeState.groupFavoriteOperationId as String
-  if(!currentOperationId || currentOperationId != operationId || !attemptId) { return }
-  runtimeState.groupFavoriteOperationAttemptId = attemptId
-  runtimeState.groupFavoriteOperationRequestId = requestId ?: attemptId
-  runtimeState.groupFavoriteOperationGroupId = expectedGroupId
-  runtimeState.groupFavoriteOperationLoadAt = now()
-}
-
-/** Issue a play command with a local request ID tied to the active group operation. */
-void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {
-  if(!operationId || !attemptId || !requestId || runtimeState.groupFavoriteOperationId?.toString() != operationId ||
-      runtimeState.groupFavoriteOperationAttemptId?.toString() != attemptId) {
-    logWarn('Ignoring group operation play command with stale or incomplete correlation IDs')
-    return
-  }
-  runtimeState.groupFavoriteOperationRequestId = requestId
-  emitGroupFavoriteOperationEvent('playStarted', [requestId: requestId])
-  playerPlay()
-}
-
-void clearGroupOperation(String operationId = null) {
-  String currentOperationId = (runtimeState.groupFavoriteOperationId ?:
-      runtimeState.groupTopologyOperationId) as String
+void clearGroupTopologyOperation(String operationId = null) {
+  String currentOperationId = runtimeState.groupTopologyOperationId as String
   if(!currentOperationId || (operationId && currentOperationId != operationId)) { return }
-  runtimeState.remove('groupFavoriteOperationId')
-  runtimeState.remove('groupFavoriteOperationFavoriteId')
-  runtimeState.remove('groupFavoriteOperationGroupId')
-  runtimeState.remove('groupFavoriteOperationAttemptId')
-  runtimeState.remove('groupFavoriteOperationRequestId')
-  runtimeState.remove('groupFavoriteOperationLoadAt')
   runtimeState.remove('groupTopologyOperationId')
   runtimeState.remove('groupTopologyOperationRequestId')
 }
 
-/** Backward-compatible alias for existing parent app deployments. */
-void clearGroupFavoriteOperation(String operationId = null) {
-  clearGroupOperation(operationId)
-}
-
-void emitGroupFavoriteOperationEvent(String eventName, Map data = [:]) {
-  String topologyOperationId = runtimeState.groupTopologyOperationId as String
-  String operationId = topologyOperationId ?: runtimeState.groupFavoriteOperationId as String
+void emitGroupTopologyOperationEvent(String eventName, Map data = [:]) {
+  String operationId = runtimeState.groupTopologyOperationId as String
   if(!operationId || !eventName) { return }
   Map payload = [
     operationId: operationId,
-    requestId: data?.requestId?.toString() ?: (topologyOperationId
-        ? runtimeState.groupTopologyOperationRequestId as String
-        : runtimeState.groupFavoriteOperationRequestId as String),
+    requestId: data?.requestId?.toString() ?: runtimeState.groupTopologyOperationRequestId as String,
     event: eventName,
     playerId: getId(),
-    attemptId: topologyOperationId ? null : runtimeState.groupFavoriteOperationAttemptId as String,
     observedAt: now(),
     data: data ?: [:]
   ]
   synchronized(runtimeState) {
-    List<Map> pending = runtimeState.pendingGroupFavoriteOperationEvents instanceof List
-        ? (List<Map>)runtimeState.pendingGroupFavoriteOperationEvents : []
+    List<Map> pending = runtimeState.pendingGroupTopologyOperationEvents instanceof List
+        ? (List<Map>)runtimeState.pendingGroupTopologyOperationEvents : []
     pending.add(payload)
-    runtimeState.pendingGroupFavoriteOperationEvents = pending
-    if(runtimeState.groupFavoriteOperationDispatchScheduled != true) {
-      runtimeState.groupFavoriteOperationDispatchScheduled = true
-      runInMillis(1, 'flushPendingGroupFavoriteOperationEvents', [overwrite: true])
+    runtimeState.pendingGroupTopologyOperationEvents = pending
+    if(runtimeState.groupTopologyOperationDispatchScheduled != true) {
+      runtimeState.groupTopologyOperationDispatchScheduled = true
+      runInMillis(1, 'flushPendingGroupTopologyOperationEvents', [overwrite: true])
     }
   }
 }
 
-void flushPendingGroupFavoriteOperationEvents() {
+void flushPendingGroupTopologyOperationEvents() {
   List<Map> pending
   synchronized(runtimeState) {
-    pending = runtimeState.pendingGroupFavoriteOperationEvents instanceof List
-        ? new ArrayList<Map>((List<Map>)runtimeState.pendingGroupFavoriteOperationEvents) : []
-    runtimeState.remove('pendingGroupFavoriteOperationEvents')
-    runtimeState.remove('groupFavoriteOperationDispatchScheduled')
+    pending = runtimeState.pendingGroupTopologyOperationEvents instanceof List
+        ? new ArrayList<Map>((List<Map>)runtimeState.pendingGroupTopologyOperationEvents) : []
+    runtimeState.remove('pendingGroupTopologyOperationEvents')
+    runtimeState.remove('groupTopologyOperationDispatchScheduled')
   }
   pending.each { Map payload ->
-    try { parent.playerGroupFavoriteOperationUpdate(payload) }
+    try { parent.playerGroupTopologyOperationUpdate(payload) }
     catch(Exception e) {
-      logWarn("Deferred group Favorite update failed: ${e.message}")
+      logWarn("Deferred group topology update failed: ${e.message}")
       synchronized(runtimeState) {
-        List<Map> retry = runtimeState.pendingGroupFavoriteOperationEvents instanceof List
-            ? (List<Map>)runtimeState.pendingGroupFavoriteOperationEvents : []
+        List<Map> retry = runtimeState.pendingGroupTopologyOperationEvents instanceof List
+            ? (List<Map>)runtimeState.pendingGroupTopologyOperationEvents : []
         retry.add(payload)
-        runtimeState.pendingGroupFavoriteOperationEvents = retry
-        if(runtimeState.groupFavoriteOperationDispatchScheduled != true) {
-          runtimeState.groupFavoriteOperationDispatchScheduled = true
-          runIn(1, 'flushPendingGroupFavoriteOperationEvents', [overwrite: true])
+        runtimeState.pendingGroupTopologyOperationEvents = retry
+        if(runtimeState.groupTopologyOperationDispatchScheduled != true) {
+          runtimeState.groupTopologyOperationDispatchScheduled = true
+          runIn(1, 'flushPendingGroupTopologyOperationEvents', [overwrite: true])
         }
       }
     }
@@ -3450,8 +3331,6 @@ void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, St
 }
 
 void loadPlaylistFull(String playlistId, String repeatMode, String queueMode, String shuffleMode, String autoPlay, String crossfadeMode) {
-  if(deferCommandToParentDuringGroupOperation('loadPlaylistFull',
-      [playlistId, repeatMode, queueMode, shuffleMode, autoPlay, crossfadeMode])) { return }
   if(StringUtils.isBlank(playlistId)) {
     reportPlaylistLoadError(playlistId, 'ERROR_MISSING_PARAMETERS', 'A Sonos playlist ID is required.')
     return
@@ -4686,13 +4565,6 @@ void updateCurrentFavoriteFromUpnp(Map snapshot) {
   Boolean isPlaylist = matchedPlaylist != null
   setCurrentPlaylist(playlistId, matchedPlaylist?.name?.toString(), isPlaylist)
 
-  String operationId = runtimeState.groupFavoriteOperationId?.toString()
-  String expectedFavoriteId = runtimeState.groupFavoriteOperationFavoriteId?.toString()
-  if(operationId && expectedFavoriteId && getIsGroupCoordinator() == true) {
-    emitGroupFavoriteOperationEvent('metadataConfirmed', [favoriteId: favoriteId,
-      confirmed: isFavorite && favoriteId == expectedFavoriteId,
-      groupId: runtimeState.groupFavoriteOperationGroupId as String])
-  }
 }
 
 String normalizeFavoriteResourceId(String resourceId) {
@@ -8585,7 +8457,7 @@ void rematchLatestUpnpPlaybackSnapshot() {
 
 @CompileStatic
 void playerLoadFavorite(String favoriteId, String action, Boolean repeat, Boolean repeatOne, Boolean shuffle, Boolean crossfade, Boolean playOnCompletion) {
-  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, getGroupId(), true)
+  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, getGroupId())
 }
 
 /** Build only the play-mode fields requested by the caller; null means preserve. */
@@ -8601,15 +8473,8 @@ private Map<String, Boolean> buildRequestedPlayModes(Boolean repeat, Boolean rep
 }
 
 @CompileStatic
-void playerLoadFavoriteForGroupOperation(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
-    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId) {
-  playerLoadFavoriteCommand(favoriteId, action, repeat, repeatOne, shuffle, crossfade, playOnCompletion, groupId, false)
-}
-
-@CompileStatic
 private void playerLoadFavoriteCommand(String favoriteId, String action, Boolean repeat, Boolean repeatOne,
-    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId,
-    Boolean scheduleAmazonWorkaround) {
+    Boolean shuffle, Boolean crossfade, Boolean playOnCompletion, String groupId) {
   if(playOnCompletion == true) { invalidateGroupAnnouncementStream('FAVORITE_LOAD_REQUESTED') }
   Map<String, Boolean> playModes = buildRequestedPlayModes(repeat, repeatOne, shuffle, crossfade)
   Map request = [favoriteId: favoriteId, action: action, playModes: playModes,
@@ -8676,10 +8541,6 @@ void loadFavoriteOverUpnp(Map request) {
 void favoriteLoadSoapCallback(AsyncResponse response, Map data = null) {
   if(data?.requestId?.toString() != state.favoriteLoadRequestId?.toString()) { return }
   state.remove('favoriteLoadRequestId')
-  Boolean accepted = response?.status == 200 && !response.hasError()
-  emitGroupFavoriteOperationEvent('favoriteLoadAck', [success: accepted,
-      errorCode: accepted ? null : 'UPNP_LOAD_FAILED', reason: response?.getErrorMessage()?.toString(),
-      groupId: getGroupId()])
   if(response?.status != 200 || response.hasError()) {
     logWarn("UPnP load of favorite ${data?.favoriteId} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
@@ -9351,7 +9212,7 @@ void zoneGroupTopologySoapCallback(AsyncResponse response, Map data = null) {
     }
     Map current = ledgerGroups.find { Map group -> (group.playerIds as List).contains(getId()) }
     if(current != null) {
-      emitGroupFavoriteOperationEvent('groups', [groupId: current.id, coordinatorId: current.coordinatorId,
+      emitGroupTopologyOperationEvent('groups', [groupId: current.id, coordinatorId: current.coordinatorId,
         playerIds: current.playerIds ?: []])
     }
     logInfo("Loaded ${groups.size()} Sonos groups through UPnP ZoneGroupTopology")

@@ -68,7 +68,6 @@ import org.quartz.CronExpression
 @Field static final Integer CHILD_STATE_DRAIN_BATCH_SIZE = 2
 @Field static final DateTimeFormatter APP_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss')
 @Field static final JsonSlurper SHARED_JSON_SLURPER = new JsonSlurper()
-@Field static java.util.Random groupMediaRandom = new java.util.Random()
 
 JsonSlurper getSharedJsonSlurper() {
   return SHARED_JSON_SLURPER
@@ -393,18 +392,16 @@ preferences {
 @Field static final String GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY = 'groupMembershipApplyGenerations'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
 @Field static final String PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY = 'receivedPlayerCommandRequestIds'
-@Field static final String PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY = 'pendingGroupFavoriteEvents'
-@Field static final String GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY = 'groupFavoriteEventDrainScheduled'
+@Field static final String PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY = 'pendingGroupTopologyEvents'
+@Field static final String GROUP_TOPOLOGY_EVENT_DRAIN_SCHEDULED_STATE_KEY = 'groupTopologyEventDrainScheduled'
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
-@Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupFavoriteOperation'
+@Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupTopologyOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
-@Field static final String PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY = 'pendingRandomGroupMediaLoads'
-@Field static final Integer RANDOM_GROUP_MEDIA_LOAD_MAX_ATTEMPTS = 5
 @Field static final String DEFERRED_GROUP_COMMANDS_STATE_KEY = 'deferredGroupOperationCommands'
 @Field static final String GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY = 'groupAnnouncementQueues'
 @Field static final String DEFERRED_PLAYER_COMMANDS_STATE_KEY = 'deferredGroupPlayerCommands'
@@ -419,13 +416,10 @@ preferences {
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 240
-@Field static final Integer GROUP_OPERATION_HARD_DEADLINE_SECONDS = 480
 @Field static final Integer GROUPING_CONTEXT_TTL_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_MAX_TOPOLOGY_ATTEMPTS = 4
 @Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
 @Field static final Integer GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS = 10
-@Field static final Integer GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS = 2
-@Field static final Integer GROUP_OPERATION_MAX_PLAY_ATTEMPTS = 1
 @Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
 @Field static final String LAST_SENT_CHILD_STATE_KEY = 'lastSentChildState'
@@ -486,7 +480,6 @@ preferences {
   GROUP_OPERATION_STATE_KEY,
   GROUPING_CONTEXTS_STATE_KEY,
   GROUP_COMMAND_QUEUE_STATE_KEY,
-  PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY,
   DEFERRED_GROUP_COMMANDS_STATE_KEY,
   GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY,
   DEFERRED_PLAYER_COMMANDS_STATE_KEY,
@@ -2857,10 +2850,6 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
   }
 }
 
-/** Restore topologies captured by the retired announcement regrouping flow before pruning its saved state. */
-
-
-
 void configure(Boolean startup = false) {
   applyLogLevelChange()
   logInfo("${app.name} updated")
@@ -2899,10 +2888,8 @@ void configure(Boolean startup = false) {
   subscribeToGroupCommandRequests()
   Map activeGroupOperation = getActiveGroupOperation()
   if(activeGroupOperation != null) {
-    if(!activeGroupOperation.favoriteId || activeGroupOperation.phase == 'ENSURE_GROUP') {
-      refreshGroupOperationTopology([operationId: activeGroupOperation.operationId])
-    }
-    runIn(1, 'advanceGroupFavoriteOperation', [
+    refreshGroupOperationTopology([operationId: activeGroupOperation.operationId])
+    runIn(1, 'advanceGroupTopologyOperation', [
       overwrite: true,
       data: [operationId: activeGroupOperation.operationId]
     ])
@@ -5283,7 +5270,7 @@ void processTopologyPayload(ChildDeviceWrapper player, Map payload) {
 
     logDebug("Received topology report from ${playerId} for operation ${operation.operationId} at ${observedAt}")
     saveActiveGroupOperation(operation)
-    runIn(1, 'advanceGroupFavoriteOperation', [
+    runIn(1, 'advanceGroupTopologyOperation', [
       overwrite: true,
       data: [operationId: operation.operationId]
     ])
@@ -6024,10 +6011,6 @@ Boolean enqueueGroupCommandRequest(Map request) {
   // executions waiting for the same gate (120 s timeout). The 1 s drain hop
   // keeps announcement timing within budget via chime/watchdog releases.
 
-  // Requests from a group device can arrive in the same scheduler tick as a
-  // Favorite request. Drain them in request-sequence order so an explicit or
-  // additive grouping request is attached to the following Favorite load
-  // instead of racing it.
   Map<String, List<Map>> pending = state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map
       ? (Map<String, List<Map>>)state[GROUP_COMMAND_QUEUE_STATE_KEY]
       : [:]
@@ -6201,11 +6184,11 @@ void processGroupCommandRequest(Map data) {
 
   Map activeOperation = getActiveGroupOperation()
   if(activeOperation && activeOperation.groupDni as String == groupDni &&
-      !activeOperation.favoriteId && activeOperation.phase != 'COMPLETE' &&
+      activeOperation.phase != 'COMPLETE' &&
       isPlaybackCommandThatWaitsForTopology(command)) {
     // Piston runs commonly send media or transport commands immediately after
-    // explicit group activation. Hold playback commands until that requested
-    // topology operation completes; Favorite loads do not start or join one.
+    // explicit group activation. Hold transport commands until that requested
+    // topology operation completes; Favorite and playlist loads go directly to the coordinator.
     logDebug("Waiting for topology change to complete before processing group command ${command} for ${groupDni}")
     deferGroupCommandRequest(request)
     return
@@ -6224,6 +6207,7 @@ void processGroupCommandRequest(Map data) {
     String resolvedCoordinatorId = coordinator?.getDataValue('id') ?: coordinatorId
     List<String> followerIds = playerIds.findAll { String id -> id != resolvedCoordinatorId }
     List<ChildDeviceWrapper> playerDevices = playerIds.collect { String id -> rinconMap[id] }.findAll { it != null }
+    ChildDeviceWrapper currentMediaCoordinator
 
     switch(command) {
       case 'on':
@@ -6361,60 +6345,37 @@ void processGroupCommandRequest(Map data) {
         if(coordinator) { coordinator.getFavorites() }
         break
       case 'loadFavorite':
-        String favoriteId = args.favoriteId?.toString()?.trim()
-        if(!favoriteId) {
-          List<String> favoriteIds = getGroupMediaIds(coordinator, 'favorite')
-          favoriteId = chooseRandomGroupMediaId(favoriteIds)
-          if(!favoriteId) {
-            if(coordinator) { queueRandomGroupMediaLoad(request, 'favorite', coordinator) }
-            else { logWarn("Cannot randomly load favorite for ${groupDni}: coordinator is unavailable") }
-            return
-          }
-        }
-        cancelLegacyGroupFavoriteOperation(activeOperation, groupDni)
-        if(coordinator) {
-          coordinator.loadFavoriteFull(favoriteId, 'off', 'replace', 'off', 'true', 'on')
+        currentMediaCoordinator = resolveCurrentGroupCommandCoordinator(playerIds, rinconMap)
+        if(currentMediaCoordinator) {
+          currentMediaCoordinator.loadFavorite(args.favoriteId?.toString())
         } else {
-          logWarn("Cannot load Favorite ${favoriteId} for ${groupDni}: coordinator is unavailable")
+          logWarn("Cannot load Favorite for ${groupDni}: current coordinator is unavailable")
         }
         break
       case 'loadFavoriteFull':
-        String fullFavoriteId = args.favoriteId?.toString()?.trim()
-        if(!fullFavoriteId) {
-          logWarn("Cannot load Favorite for ${groupDni}: no Favorite ID was provided")
-          break
-        }
-        cancelLegacyGroupFavoriteOperation(activeOperation, groupDni)
-        if(coordinator) {
-          coordinator.loadFavoriteFull(fullFavoriteId,
+        currentMediaCoordinator = resolveCurrentGroupCommandCoordinator(playerIds, rinconMap)
+        if(currentMediaCoordinator) {
+          currentMediaCoordinator.loadFavoriteFull(args.favoriteId?.toString(),
             args.repeatMode?.toString() ?: 'off', args.queueMode?.toString() ?: 'replace',
             args.shuffleMode?.toString() ?: 'off', args.autoPlay?.toString() ?: 'true',
             args.crossfadeMode?.toString() ?: 'on')
         } else {
-          logWarn("Cannot load Favorite ${fullFavoriteId} for ${groupDni}: coordinator is unavailable")
+          logWarn("Cannot load Favorite for ${groupDni}: current coordinator is unavailable")
         }
         break
       case 'getPlaylists':
         if(coordinator) { coordinator.getPlaylists() }
         break
       case 'loadPlaylist':
-        cancelActiveGroupOperation(groupDni, 'PLAYLIST_REQUESTED')
-        if(coordinator) {
-          String playlistId = args.playlistId?.toString()?.trim()
-          if(!playlistId) {
-            playlistId = chooseRandomGroupMediaId(getGroupMediaIds(coordinator, 'playlist'))
-            if(!playlistId) {
-              queueRandomGroupMediaLoad(request, 'playlist', coordinator)
-              return
-            }
-          }
-          coordinator.loadPlaylist(playlistId)
+        currentMediaCoordinator = resolveCurrentGroupCommandCoordinator(playerIds, rinconMap)
+        if(currentMediaCoordinator) {
+          currentMediaCoordinator.loadPlaylist(args.playlistId?.toString())
         }
         break
       case 'loadPlaylistFull':
-        cancelActiveGroupOperation(groupDni, 'PLAYLIST_REQUESTED')
-        if(coordinator) {
-          coordinator.loadPlaylistFull(
+        currentMediaCoordinator = resolveCurrentGroupCommandCoordinator(playerIds, rinconMap)
+        if(currentMediaCoordinator) {
+          currentMediaCoordinator.loadPlaylistFull(
             args.playlistId as String,
             args.repeatMode as String,
             args.queueMode as String,
@@ -6436,99 +6397,17 @@ Boolean isGroupOperationCommand(String command) {
   return command in [
     'on', 'groupPlayers',
     'evictUnlistedPlayers', 'joinPlayersToCoordinator',
-    'loadFavorite', 'loadFavoriteFull',
     'off', 'removePlayersFromCoordinator', 'ungroupPlayers'
   ]
-}
-
-List<String> getGroupMediaIds(ChildDeviceWrapper coordinator, String mediaType) {
-  if(coordinator == null) { return [] }
-  Map catalog = mediaType == 'favorite'
-      ? (Map)coordinator.getFavoritesMap()
-      : (Map)coordinator.getPlaylistsMap()
-  List<String> ids = []
-  if(catalog instanceof Map) {
-    catalog.values().each { Object item ->
-      if(item instanceof Map) {
-        String id = ((Map)item).get('id')?.toString()?.trim()
-        if(id) { ids.add(id) }
-      }
-    }
-  }
-  return ids
-}
-
-String chooseRandomGroupMediaId(List<String> ids) {
-  if(ids == null || ids.isEmpty()) { return null }
-  return ids.get(groupMediaRandom.nextInt(ids.size()))
-}
-
-void queueRandomGroupMediaLoad(Map request, String mediaType, ChildDeviceWrapper coordinator) {
-  List<Map> pending = state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] instanceof List
-      ? (List<Map>)state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY]
-      : []
-  pending.add([
-    request: new LinkedHashMap(request),
-    mediaType: mediaType,
-    coordinatorDni: coordinator.getDeviceNetworkId(),
-    attempts: 0
-  ])
-  state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] = pending
-  if(mediaType == 'favorite') { coordinator.getFavorites() }
-  else { coordinator.getPlaylists() }
-  runIn(2, 'retryRandomGroupMediaLoads', [overwrite: true])
-}
-
-void retryRandomGroupMediaLoads() {
-  List<Map> pending = state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] instanceof List
-      ? (List<Map>)state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY]
-      : []
-  state.remove(PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY)
-  List<Map> remaining = []
-  pending.each { Map item ->
-    ChildDeviceWrapper coordinator = getChildDevice(item.coordinatorDni as String)
-    String mediaType = item.mediaType as String
-    String selectedId = chooseRandomGroupMediaId(getGroupMediaIds(coordinator, mediaType))
-    if(selectedId) {
-      Map request = new LinkedHashMap((Map)item.request)
-      Map args = request.args instanceof Map ? new LinkedHashMap((Map)request.args) : [:]
-      args[mediaType == 'favorite' ? 'favoriteId' : 'playlistId'] = selectedId
-      request.args = args
-      processGroupCommandRequest([request: request])
-    } else {
-      Integer attempts = (item.attempts ?: 0) as Integer
-      if(attempts + 1 >= RANDOM_GROUP_MEDIA_LOAD_MAX_ATTEMPTS) {
-        logWarn("Cannot randomly load ${mediaType} for ${item.request?.groupDni}: no IDs were returned after ${attempts + 1} attempts")
-      } else {
-        item.attempts = attempts + 1
-        remaining.add(item)
-        if(coordinator != null) {
-          if(mediaType == 'favorite') { coordinator.getFavorites() }
-          else { coordinator.getPlaylists() }
-        }
-      }
-    }
-  }
-  if(!remaining.isEmpty()) {
-    state[PENDING_RANDOM_GROUP_MEDIA_LOADS_STATE_KEY] = remaining
-    runIn(2, 'retryRandomGroupMediaLoads', [overwrite: true])
-  }
 }
 
 Boolean isPlaybackCommandThatWaitsForTopology(String command) {
   return command in [
     'play', 'pause', 'stop', 'nextTrack', 'previousTrack', 'playTrack', 'setTrack',
     'playAudioClip', 'playHighPriorityTrack', 'enqueueLowPriorityTrack',
-    'loadFavorite', 'loadFavoriteFull',
-    'loadPlaylist', 'loadPlaylistFull', 'setRepeatMode', 'repeatOne', 'repeatAll', 'repeatNone',
+    'setRepeatMode', 'repeatOne', 'repeatAll', 'repeatNone',
     'setShuffle', 'shuffleOn', 'shuffleOff', 'setCrossfade', 'enableCrossfade', 'disableCrossfade'
   ]
-}
-
-void cancelLegacyGroupFavoriteOperation(Map operation, String groupDni) {
-  if(operation?.groupDni?.toString() == groupDni && operation.favoriteId) {
-    cancelActiveGroupOperation(groupDni, 'SUPERSEDED_BY_FAVORITE_REQUEST')
-  }
 }
 
 Boolean isPlayerPlaybackCommandThatWaitsForGroupOperation(String command) {
@@ -6536,7 +6415,7 @@ Boolean isPlayerPlaybackCommandThatWaitsForGroupOperation(String command) {
     'play', 'pause', 'stop', 'nextTrack', 'previousTrack', 'setTrack', 'selectLineIn', 'selectTV', 'playTrack',
     'playHighPriorityTrack', 'loadAudioClip', 'loadHighPriorityAudioClip',
     'speak', 'speakNoRestore', 'playHighPriorityTTS',
-    'loadFavoriteFull', 'loadPlaylistFull', 'setRepeatMode', 'repeatOne', 'repeatAll', 'repeatNone',
+    'setRepeatMode', 'repeatOne', 'repeatAll', 'repeatNone',
     'setShuffle', 'shuffleOn', 'shuffleOff', 'setCrossfade', 'enableCrossfade', 'disableCrossfade'
   ]
 }
@@ -6570,17 +6449,7 @@ String normalizeGroupOperationValue(Object value, String defaultValue) {
   return normalized ? normalized : defaultValue
 }
 
-Map normalizeGroupFavoriteSpec(Map rawSpec) {
-  Map spec = rawSpec ?: [:]
-  return [
-    favoriteId: spec.favoriteId?.toString(),
-    repeatMode: normalizeGroupOperationValue(spec.repeatMode, 'off').toLowerCase(Locale.ROOT),
-    queueMode: normalizeGroupOperationValue(spec.queueMode, 'replace').toLowerCase(Locale.ROOT),
-    shuffleMode: normalizeGroupOperationValue(spec.shuffleMode, 'off').toLowerCase(Locale.ROOT),
-    autoPlay: normalizeGroupOperationValue(spec.autoPlay, 'true').toLowerCase(Locale.ROOT),
-    crossfadeMode: normalizeGroupOperationValue(spec.crossfadeMode, 'on').toLowerCase(Locale.ROOT)
-  ]
-}
+
 
 Map getFreshGroupingContext(String groupDni) {
   Map contexts = state[GROUPING_CONTEXTS_STATE_KEY] instanceof Map
@@ -6598,7 +6467,7 @@ Map getFreshGroupingContext(String groupDni) {
 }
 
 void storeGroupingContext(Map operation) {
-  if(operation == null || !operation.groupDni || !operation.groupingMode || operation.favoriteId) {
+  if(operation == null || !operation.groupDni || !operation.groupingMode) {
     return
   }
   Map contexts = state[GROUPING_CONTEXTS_STATE_KEY] instanceof Map
@@ -6948,8 +6817,7 @@ Map buildGroupOperationTarget(ChildDeviceWrapper groupDevice, String groupingMod
   ]
 }
 
-Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map target,
-    Map favoriteSpec = null) {
+Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, Map target) {
   Long startTime = now()
   Map operation = [
     operationId: newGroupOperationId(),
@@ -6964,12 +6832,9 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     phase: 'ENSURE_GROUP',
     status: 'ENSURING_TOPOLOGY',
     createdAt: startTime,
-    deadlineAt: startTime + (favoriteSpec ? GROUP_OPERATION_HARD_DEADLINE_SECONDS : GROUP_OPERATION_DEADLINE_SECONDS) * 1000L,
+    deadlineAt: startTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L,
     topologyDeadlineAt: startTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L,
-    favoriteDeadlineAt: 0L,
     topologyAttempt: 0,
-    favoriteAttempt: 0,
-    playAttempt: 0,
     stableObservations: 0,
     topologyFingerprint: null,
     topologyLastObservedAt: 0L,
@@ -6987,29 +6852,8 @@ Map buildNewGroupOperation(ChildDeviceWrapper groupDevice, String groupingMode, 
     observedGroupId: null,
     observedCoordinatorId: null,
     lastTopologyObservations: [],
-    loadAcknowledged: false,
-    loadAcknowledgedAt: 0L,
-    favoriteCommandDelivered: false,
-    favoriteCommandDeliveredAt: 0L,
-    loadErrorCode: null,
-    loadErrorReason: null,
-    playbackState: null,
-    favoriteCommandAt: 0L,
-    favoriteAttemptId: null,
-    favoriteRequestId: null,
-    playRequestId: null,
-    favoriteExpectedGroupId: null,
-    favoriteExpectedCoordinatorId: null,
-    favoriteTopologyVerified: false,
-    playerPlaybackStates: [:],
-    metadataConfirmed: false,
-    metadataObservedAt: 0L,
-    exactFavoriteId: null,
     evictUnlistedOnly: false
   ]
-  if(favoriteSpec != null) {
-    operation.putAll(normalizeGroupFavoriteSpec(favoriteSpec))
-  }
   return operation
 }
 
@@ -7024,8 +6868,8 @@ void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String grouping
   String normalizedMode = normalizeGroupOperationMode(groupingMode, GROUPING_MODE_EXPLICIT)
   Map active = getActiveGroupOperation()
   if(active && active.groupDni as String == groupDni) {
-    if(!active.favoriteId && active.groupingMode == normalizedMode && active.phase != 'COMPLETE') {
-      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    if(active.groupingMode == normalizedMode && active.phase != 'COMPLETE') {
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupTopologyOperation', [
         overwrite: true,
         data: [operationId: active.operationId]
       ])
@@ -7050,96 +6894,15 @@ void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String grouping
   registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
   refreshGroupOperationTopology([operationId: operation.operationId])
-  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupTopologyOperation', [
     overwrite: true,
     data: [operationId: operation.operationId]
   ])
 }
 
-void startGroupFavoriteOperation(ChildDeviceWrapper groupDevice, Map rawSpec) {
-  String groupDni = groupDevice?.getDeviceNetworkId()
-  Map favoriteSpec = normalizeGroupFavoriteSpec(rawSpec)
-  if(!groupDni || !favoriteSpec.favoriteId) {
-    logWarn("Ignoring group Favorite request for ${groupDni ?: 'unknown group'} without a Favorite ID")
-    return
-  }
 
-  Map active = getActiveGroupOperation()
-  if(active && active.groupDni as String == groupDni) {
-    if(!active.favoriteId && active.groupingMode in [GROUPING_MODE_EXPLICIT, GROUPING_MODE_ADDITIVE]) {
-      attachFavoriteToGroupOperation(active, favoriteSpec)
-      return
-    }
-    if(active.favoriteId?.toString() == favoriteSpec.favoriteId?.toString() && active.phase != 'COMPLETE') {
-      return
-    }
-    cancelActiveGroupOperation(groupDni, 'SUPERSEDED_BY_FAVORITE_REQUEST')
-  }
 
-  Map context = getFreshGroupingContext(groupDni)
-  String contextMode = normalizeGroupOperationMode(context?.mode, GROUPING_MODE_CURRENT)
-  String groupingMode = contextMode
-  Map target = buildGroupOperationTarget(groupDevice, groupingMode)
-  if(!target.requiredPlayerIds || target.requiredPlayerIds.isEmpty()) {
-    logWarn("Group Favorite ${favoriteSpec.favoriteId} has no configured players for ${groupDni}")
-    return
-  }
 
-  Map operation = buildNewGroupOperation(groupDevice, groupingMode, target, favoriteSpec)
-  saveActiveGroupOperation(operation)
-  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
-  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-  refreshGroupOperationTopology([operationId: operation.operationId])
-  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
-    overwrite: true,
-    data: [operationId: operation.operationId]
-  ])
-}
-
-void attachFavoriteToGroupOperation(Map operation, Map rawSpec) {
-  if(operation == null || operation.favoriteId) { return }
-  Map favoriteSpec = normalizeGroupFavoriteSpec(rawSpec)
-  if(!favoriteSpec.favoriteId) { return }
-  operation.putAll(favoriteSpec)
-  operation.favoriteAttempt = 0
-  operation.playAttempt = 0
-  operation.loadAcknowledged = false
-  operation.loadAcknowledgedAt = 0L
-  operation.favoriteCommandDelivered = false
-  operation.favoriteCommandDeliveredAt = 0L
-  operation.playCommandDelivered = false
-  operation.loadErrorCode = null
-  operation.loadErrorReason = null
-  operation.playbackState = null
-  operation.favoriteCommandAt = now()
-  operation.favoriteAttemptId = null
-  operation.favoriteRequestId = null
-  operation.playRequestId = null
-  operation.favoriteExpectedGroupId = null
-  operation.favoriteExpectedCoordinatorId = null
-  operation.favoriteTopologyVerified = false
-  operation.playerPlaybackStates = [:]
-  operation.metadataConfirmed = false
-  operation.metadataObservedAt = 0L
-  operation.exactFavoriteId = null
-  Long attachmentTime = now()
-  operation.deadlineAt = attachmentTime + GROUP_OPERATION_HARD_DEADLINE_SECONDS * 1000L
-  operation.topologyDeadlineAt = attachmentTime + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
-  operation.favoriteDeadlineAt = 0L
-  clearRegisteredGroupOperations(operation)
-  operation.registeredPlayerIds = []
-  operation.registrationRequestIds = [:]
-  operation.registrationRequestedAt = [:]
-  operation.registrationEventPlayerIds = []
-  saveActiveGroupOperation(operation)
-  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
-  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-  refreshGroupOperationTopology([operationId: operation.operationId])
-  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
-    overwrite: true,
-    data: [operationId: operation.operationId]
-  ])
-}
 
 void registerGroupOperationOnPlayers(Map operation, Collection ids) {
   if(operation == null || !operation.operationId) { return }
@@ -7162,15 +6925,7 @@ void registerGroupOperationOnPlayers(Map operation, Collection ids) {
     Long lastRequestedAt = requestedAt[playerId] ?: 0L
     if(lastRequestedAt > 0L && now() < lastRequestedAt + 5000L) { return }
     try {
-      if(operation.favoriteId) {
-        player.registerGroupFavoriteOperation(
-          operation.operationId as String,
-          operation.favoriteId as String,
-          requestId
-        )
-      } else {
-        player.registerGroupTopologyOperation(operation.operationId as String, requestId)
-      }
+      player.registerGroupTopologyOperation(operation.operationId as String, requestId)
       registered.add(playerId)
       requestedAt[playerId] = now()
       logDebug("Registered operation ${operation.operationId} on ${playerId} with request ${requestId}")
@@ -7185,25 +6940,7 @@ void registerGroupOperationOnPlayers(Map operation, Collection ids) {
   saveActiveGroupOperation(operation)
 }
 
-void setGroupFavoriteOperationAttemptOnPlayers(Map operation, Collection ids) {
-  if(operation == null || !operation.operationId || !operation.favoriteAttemptId) { return }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  normalizeGroupPlayerIds(ids).each { String playerId ->
-    ChildDeviceWrapper player = rinconMap[playerId]
-    if(player != null) {
-      try {
-        player.setGroupFavoriteOperationAttempt(
-          operation.operationId as String,
-          operation.favoriteAttemptId as String,
-          operation.favoriteExpectedGroupId as String,
-          operation.favoriteRequestId as String
-        )
-      } catch(Exception e) {
-        logDebug("Could not update Favorite attempt ${operation.favoriteAttemptId} on ${playerId}: ${e.message}")
-      }
-    }
-  }
-}
+
 
 Map getCurrentHouseholdTopology() {
   return getCurrentReceivedZgtTopology()
@@ -7550,21 +7287,10 @@ void updateGroupTopologyStability(Map operation, Map topology) {
   }
 }
 
-Boolean isFavoriteGroupTopologySatisfied(Map operation, Map topology) {
-  if(!isGroupTopologySatisfied(operation, topology)) { return false }
-  String expectedGroupId = operation?.favoriteExpectedGroupId as String
-  String expectedCoordinatorId = operation?.favoriteExpectedCoordinatorId as String
-  if(expectedGroupId && topology?.groupId != expectedGroupId) { return false }
-  if(expectedCoordinatorId && topology?.coordinatorId != expectedCoordinatorId) { return false }
-  return true
-}
+
 
 void requestGroupOperationTopology(Map operation, ChildDeviceWrapper player) {
   if(operation == null || player == null) { return }
-  if(operation.favoriteId && ((operation.favoriteAttempt ?: 0) as Integer) > 0) {
-    logDebug("Using subscribed ZGT updates for Favorite operation ${operation.operationId}; no topology poll requested")
-    return
-  }
   try {
     player.playerGetGroupsFull()
   } catch(Exception e) {
@@ -7974,7 +7700,7 @@ void sendGroupTopologyCommand(Map operation, Map topology) {
 void refreshGroupOperationTopology(Map data = [:], Boolean resetStability = true) {
   Map operation = getActiveGroupOperation()
   String callbackOperationId = data?.operationId as String
-  if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId) || operation.favoriteId && operation.phase != 'ENSURE_GROUP') {
+  if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId)) {
     return
   }
   operation.topologyCheckRequestId = UUID.randomUUID().toString()
@@ -7982,14 +7708,7 @@ void refreshGroupOperationTopology(Map data = [:], Boolean resetStability = true
   Map householdTopology = getCurrentHouseholdTopology()
   Map<String, Map> householdObservations = buildGroupOperationTopologyObservations(operation, householdTopology)
   Boolean hasHouseholdTopology = !householdObservations.isEmpty()
-  Boolean favoriteAlreadyLoaded = operation.favoriteId &&
-      ((operation.favoriteAttempt ?: 0) as Integer) > 0
-  Map<String, Map> existingObservations = operation.topologyObservations instanceof Map
-      ? (Map<String, Map>)operation.topologyObservations
-      : [:]
-  operation.topologyObservations = hasHouseholdTopology
-      ? householdObservations
-      : (favoriteAlreadyLoaded ? existingObservations : [:])
+  operation.topologyObservations = hasHouseholdTopology ? householdObservations : [:]
   if(resetStability == true) {
     operation.stableObservations = 0
     operation.topologyFingerprint = null
@@ -7999,7 +7718,7 @@ void refreshGroupOperationTopology(Map data = [:], Boolean resetStability = true
   operation.observedCoordinatorId = null
   operation.observedPlayerIds = []
   saveActiveGroupOperation(operation)
-  if(!hasHouseholdTopology && !favoriteAlreadyLoaded) {
+  if(!hasHouseholdTopology) {
     Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
     List<String> refreshIds = normalizeGroupPlayerIds(
       normalizeGroupPlayerIds(operation.requiredPlayerIds) +
@@ -8015,197 +7734,19 @@ void refreshGroupOperationTopology(Map data = [:], Boolean resetStability = true
   }
 }
 
-void sendGroupFavoriteLoad(Map operation, Map topology) {
-  if(!operation.favoriteId || topology?.consistent != true || !topology.groupId || !topology.coordinatorId) {
-    return
-  }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  String coordinatorId = topology.coordinatorId as String
-  ChildDeviceWrapper coordinator = rinconMap[coordinatorId]
-  if(coordinator == null) {
-    failGroupOperation(operation, 'COORDINATOR_UNAVAILABLE', "Could not resolve live coordinator ${coordinatorId}")
-    return
-  }
-  operation.resolvedCoordinatorId = coordinatorId
-  registerGroupOperationOnPlayers(operation, [coordinatorId])
-  operation.phase = 'WAIT_FOR_FAVORITE'
-  operation.status = 'LOADING_FAVORITE'
-  operation.favoriteAttempt = ((operation.favoriteAttempt ?: 0) as Integer) + 1
-  operation.favoriteDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
-  operation.loadAcknowledged = false
-  operation.loadAcknowledgedAt = 0L
-  operation.favoriteCommandDelivered = false
-  operation.favoriteCommandDeliveredAt = 0L
-  operation.playCommandDelivered = false
-  operation.loadErrorCode = null
-  operation.loadErrorReason = null
-  operation.playbackState = null
-  operation.favoriteCommandAt = now()
-  operation.favoriteAttemptId = null
-  operation.favoriteRequestId = null
-  operation.playRequestId = null
-  operation.favoriteExpectedGroupId = null
-  operation.favoriteExpectedCoordinatorId = null
-  // The topology was confirmed from SAC's subscribed ZGT state immediately
-  // before loading. Track later subscribed changes without requesting another
-  // topology snapshot after the Favorite load.
-  operation.favoriteTopologyVerified = true
-  operation.favoriteAttemptId = UUID.randomUUID().toString()
-  operation.favoriteRequestId = UUID.randomUUID().toString()
-  operation.favoriteExpectedGroupId = topology.groupId as String
-  operation.favoriteExpectedCoordinatorId = coordinatorId
-  operation.playerPlaybackStates = [:]
-  operation.metadataConfirmed = false
-  operation.metadataObservedAt = 0L
-  operation.exactFavoriteId = null
-  operation.lastCommandAt = operation.favoriteCommandAt
-  saveActiveGroupOperation(operation)
-  setGroupFavoriteOperationAttemptOnPlayers(operation, operation.requiredPlayerIds)
-  publishGroupOperationStatus(operation, 'LOADING_FAVORITE')
-  try {
-    try {
-      coordinator.loadFavoriteForGroupOperation(
-        operation.favoriteId as String,
-        operation.repeatMode as String,
-        operation.queueMode as String,
-        operation.shuffleMode as String,
-        operation.autoPlay as String,
-        operation.crossfadeMode as String,
-        operation.operationId as String,
-        topology.groupId as String,
-        operation.favoriteAttemptId as String,
-        operation.favoriteRequestId as String
-      )
-    } catch(MissingMethodException ignored) {
-      // Permit an app update to coexist briefly with an older child driver.
-      // The legacy call has no attempt token, so the event handler falls back
-      // to its operation/time/group identity checks for that mixed version.
-      coordinator.loadFavoriteForGroupOperation(
-        operation.favoriteId as String,
-        operation.repeatMode as String,
-        operation.queueMode as String,
-        operation.shuffleMode as String,
-        operation.autoPlay as String,
-        operation.crossfadeMode as String,
-        operation.operationId as String,
-        topology.groupId as String,
-        operation.favoriteAttemptId as String
-      )
-    }
-  } catch(Exception e) {
-    failGroupOperation(operation, 'GROUP_FAVORITE_COMMAND_FAILED', e.message as String)
-    return
-  }
-  runIn(2, 'advanceGroupFavoriteOperation', [
-    overwrite: true,
-    data: [operationId: operation.operationId]
-  ])
-}
 
-void pollGroupFavoritePlayback(Map operation) {
-  if(!operation?.favoriteId) { return }
-  Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-  normalizeGroupPlayerIds(operation.requiredPlayerIds).each { String playerId ->
-    ChildDeviceWrapper player = rinconMap[playerId]
-    if(player != null) {
-      try { player.getPlaybackStatus() } catch(Exception ignored) { }
-    }
-  }
-  ChildDeviceWrapper coordinator = rinconMap[operation.resolvedCoordinatorId as String]
-  if(coordinator != null) {
-    try { coordinator.getPlaybackMetadataStatus() } catch(Exception ignored) { }
-  }
-}
 
-void updateGroupFavoriteSignalsFromState(Map operation) {
-  if(!operation?.favoriteId) { return }
-  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
-      ? (Map<String, Map>)operation.playerPlaybackStates
-      : [:]
-  Map coordinatorState = playbackStates[operation.resolvedCoordinatorId as String]
-  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
-  Long observedAt = coordinatorState?.observedAt as Long ?: 0L
-  if(coordinatorState != null && observedAt >= favoriteCommandAt) {
-    operation.playbackState = coordinatorState.playbackState as String
-  }
-}
 
-Boolean areRequiredPlayersPlaying(Map operation) {
-  if(!operation?.favoriteId) { return false }
-  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
-  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
-      ? (Map<String, Map>)operation.playerPlaybackStates
-      : [:]
-  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
-  return !requiredPlayerIds.isEmpty() && requiredPlayerIds.every { String playerId ->
-    Map playerState = playbackStates[playerId]
-    Long observedAt = playerState?.observedAt as Long ?: 0L
-    observedAt >= favoriteCommandAt && playerState?.playbackState == 'PLAYBACK_STATE_PLAYING'
-  }
-}
 
-Boolean haveRequiredPlaybackObservations(Map operation) {
-  if(!operation?.favoriteId) { return false }
-  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
-  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
-      ? (Map<String, Map>)operation.playerPlaybackStates
-      : [:]
-  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
-  return !requiredPlayerIds.isEmpty() && requiredPlayerIds.every { String playerId ->
-    Map playerState = playbackStates[playerId]
-    Long observedAt = playerState?.observedAt as Long ?: 0L
-    observedAt >= favoriteCommandAt && playerState?.containsKey('playbackState')
-  }
-}
 
-String summarizeGroupFavoritePlayback(Map operation) {
-  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation?.requiredPlayerIds)
-  Map<String, Map> playbackStates = operation?.playerPlaybackStates instanceof Map
-      ? (Map<String, Map>)operation.playerPlaybackStates
-      : [:]
-  return requiredPlayerIds.collect { String playerId ->
-    Map playerState = playbackStates[playerId]
-    playerId + ': ' + (playerState?.playbackState ?: 'not observed')
-  }.join('; ')
-}
 
-/** Describe the correlated Favorite and playback evidence required to finish an operation. */
-String summarizeGroupFavoriteCompletion(Map operation) {
-  if(operation == null || !operation.favoriteId) { return 'No Favorite completion evidence is required.' }
-  Long currentTime = now()
-  Long commandAt = operation.favoriteCommandAt as Long ?: 0L
-  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
-      ? (Map<String, Map>)operation.playerPlaybackStates
-      : [:]
-  List<String> playerSummaries = normalizeGroupPlayerIds(operation.requiredPlayerIds).collect { String playerId ->
-    Map playerState = playbackStates[playerId]
-    Long observedAt = playerState?.observedAt as Long ?: 0L
-    Long ageSeconds = observedAt > 0L ? Math.max(0L, Math.floorDiv(currentTime - observedAt, 1000L)) : 0L
-    String freshness = observedAt <= 0L ? 'not observed' :
-        (observedAt < commandAt ? 'stale' : "${ageSeconds}s old")
-    "${playerId}=${playerState?.playbackState ?: 'unknown'} (${freshness})"
-  }
-  Long coordinatorObservedAt = playbackStates[operation.resolvedCoordinatorId as String]?.observedAt as Long ?: 0L
-  Long coordinatorAgeSeconds = coordinatorObservedAt > 0L
-      ? Math.max(0L, Math.floorDiv(currentTime - coordinatorObservedAt, 1000L))
-      : 0L
-  String coordinatorFreshness = coordinatorObservedAt <= 0L ? 'not observed' :
-      (coordinatorObservedAt < commandAt ? 'stale' : "${coordinatorAgeSeconds}s old")
-  Long acknowledgmentObservedAt = operation.loadAcknowledgedAt as Long ?: 0L
-  Long metadataObservedAt = operation.metadataObservedAt as Long ?: 0L
-  String acknowledgmentFreshness = acknowledgmentObservedAt <= 0L ? 'not observed' :
-      "${Math.max(0L, Math.floorDiv(currentTime - acknowledgmentObservedAt, 1000L))}s old"
-  String metadataFreshness = metadataObservedAt <= 0L ? 'not observed' :
-      "${Math.max(0L, Math.floorDiv(currentTime - metadataObservedAt, 1000L))}s old"
-  return "phase=${operation.phase ?: 'unknown'}, favorite=${operation.favoriteId}, " +
-      "acknowledged=${operation.loadAcknowledged == true} (${acknowledgmentFreshness}), " +
-      "commandDelivered=${operation.favoriteCommandDelivered == true} at=${operation.favoriteCommandDeliveredAt ?: 0L}, " +
-      "coordinatorPlayback=${operation.playbackState ?: 'unknown'} (${coordinatorFreshness}), " +
-      "loadError=${operation.loadErrorCode ?: 'none'}, metadataConfirmed=${operation.metadataConfirmed == true} (${metadataFreshness}), " +
-      "observedFavorite=${operation.exactFavoriteId ?: 'unknown'} (expected=${operation.favoriteId}), " +
-      "players=[${playerSummaries.join('; ')}], topologyConfirmedBeforeLoad=${operation.favoriteTopologyVerified == true}, " +
-      "favoriteGroup=${operation.favoriteExpectedGroupId ?: 'unknown'}, favoriteCoordinator=${operation.favoriteExpectedCoordinatorId ?: 'unknown'}"
-}
+
+
+
+
+
+
+
 
 /** Summarize the operation timeline that explains a topology or Favorite timeout. */
 String summarizeGroupOperationProgress(Map operation) {
@@ -8219,163 +7760,44 @@ String summarizeGroupOperationProgress(Map operation) {
     item.groupDni?.toString() == operation.groupDni?.toString()
   }.collect { Map item -> item.command?.toString() ?: 'unknown' }
   Long deadlineRemainingMs = deadlineAt > 0L ? deadlineAt - now() : 0L
-  return "operation=${operation.operationId}, elapsedMs=${Math.max(0L, now() - createdAt)}, phase=${operation.phase ?: 'unknown'}, lastCommand=${operation.lastCommand ?: 'none'}, topologyAttempt=${operation.topologyAttempt ?: 0}, stableObservations=${operation.stableObservations ?: 0}, favoriteAttempt=${operation.favoriteAttempt ?: 0}, playAttempt=${operation.playAttempt ?: 0}, deadlineRemainingMs=${deadlineRemainingMs}, deferredCommands=${deferredCommands}"
+  return "operation=${operation.operationId}, elapsedMs=${Math.max(0L, now() - createdAt)}, phase=${operation.phase ?: 'unknown'}, lastCommand=${operation.lastCommand ?: 'none'}, topologyAttempt=${operation.topologyAttempt ?: 0}, stableObservations=${operation.stableObservations ?: 0}, deadlineRemainingMs=${deadlineRemainingMs}, deferredCommands=${deferredCommands}"
 }
 
-/** Permit strong, current playback evidence to cover a lost load-ack event. */
-Boolean isGroupFavoriteCompletionConfirmed(Map operation) {
-  if(operation == null || !operation.favoriteId) { return false }
-  if(operation.favoriteTopologyVerified != true) { return false }
-  if(operation.loadAcknowledged == true && operation.autoPlay?.toString() != 'true') { return true }
-  if(operation.autoPlay?.toString() != 'true') { return false }
-  List<String> requiredPlayerIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
-  Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
-      ? (Map<String, Map>)operation.playerPlaybackStates
-      : [:]
-  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
-  String coordinatorId = operation.resolvedCoordinatorId as String
-  Map coordinatorState = coordinatorId ? playbackStates[coordinatorId] : null
-  Long coordinatorObservedAt = coordinatorState?.observedAt as Long ?: 0L
-  Boolean coordinatorPlaying = !coordinatorId || requiredPlayerIds.contains(coordinatorId)
-      ? coordinatorObservedAt >= favoriteCommandAt && coordinatorState?.playbackState == 'PLAYBACK_STATE_PLAYING'
-      : false
-  Boolean noFreshPlayerReportsStopped = !requiredPlayerIds.isEmpty() && requiredPlayerIds.every { String playerId ->
-    Map playerState = playbackStates[playerId]
-    Long observedAt = playerState?.observedAt as Long ?: 0L
-    observedAt < favoriteCommandAt || playerState?.playbackState == 'PLAYBACK_STATE_PLAYING'
-  }
-  Boolean exactFavoritePlaying = coordinatorPlaying && noFreshPlayerReportsStopped &&
-      operation.metadataConfirmed == true &&
-      operation.exactFavoriteId?.toString() == operation.favoriteId?.toString()
-  if(!exactFavoritePlaying) { return false }
-  if(operation.loadAcknowledged != true) {
-    String acknowledgmentState = operation.loadErrorCode
-        ? "load acknowledgment reported ${operation.loadErrorCode}"
-        : 'load acknowledgment was not observed'
-    logWarn("Completing Favorite ${operation.favoriteId} for operation ${operation.operationId} from matching post-load metadata and playback; ${acknowledgmentState}")
-  }
-  return true
-}
+
 
 /** Return the expired deadline phase, if any. */
 String getExpiredGroupOperationDeadlinePhase(Map operation) {
   if(operation == null) { return null }
   Long currentTime = now()
   Long hardDeadlineAt = operation.deadlineAt as Long ?: 0L
-  Boolean favoritePlaybackPhase = operation.favoriteId &&
-      ((operation.favoriteAttempt ?: 0) as Integer) > 0 && operation.phase != 'ENSURE_GROUP'
-  Long phaseDeadlineAt = favoritePlaybackPhase
-      ? (operation.favoriteDeadlineAt as Long ?: 0L)
-      : (operation.topologyDeadlineAt as Long ?: 0L)
+  Long phaseDeadlineAt = operation.topologyDeadlineAt as Long ?: 0L
   if(phaseDeadlineAt <= 0L) { phaseDeadlineAt = hardDeadlineAt }
   if(phaseDeadlineAt > 0L && currentTime >= phaseDeadlineAt) {
-    return favoritePlaybackPhase ? 'favorite confirmation' : 'group topology'
+    return 'group topology'
   }
   if(hardDeadlineAt > 0L && currentTime >= hardDeadlineAt) { return 'overall operation' }
   return null
 }
 
-void recoverGroupFavoriteAfterTopologyChange(Map operation, Map topology) {
-  String detail = "The group topology changed after the Favorite load: ${summarizeGroupOperationTopology(topology)}"
-  if(operation.groupingMode == GROUPING_MODE_CURRENT) {
-    failGroupOperation(operation, 'GROUP_CHANGED_DURING_FAVORITE', detail)
-    return
-  }
-  if(((operation.favoriteAttempt ?: 0) as Integer) >= GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS) {
-    failGroupOperation(operation, 'FAVORITE_TOPOLOGY_CHANGED', detail)
-    return
-  }
 
-  operation.phase = 'ENSURE_GROUP'
-  operation.status = 'ENSURING_TOPOLOGY'
-  operation.loadAcknowledged = false
-  operation.loadAcknowledgedAt = 0L
-  operation.favoriteCommandDelivered = false
-  operation.favoriteCommandDeliveredAt = 0L
-  operation.playCommandDelivered = false
-  operation.loadErrorCode = null
-  operation.loadErrorReason = null
-  operation.playbackState = null
-  operation.favoriteCommandAt = 0L
-  operation.favoriteAttemptId = null
-  operation.favoriteExpectedGroupId = null
-  operation.favoriteExpectedCoordinatorId = null
-  operation.favoriteTopologyVerified = false
-  operation.playerPlaybackStates = [:]
-  operation.metadataConfirmed = false
-  operation.metadataObservedAt = 0L
-  operation.exactFavoriteId = null
-  operation.topologyAttempt = 0
-  operation.stableObservations = 0
-  operation.topologyFingerprint = null
-  operation.topologyObservations = topology?.observations instanceof List
-      ? ((List<Map>)topology.observations).collectEntries { Map item ->
-        [(item.playerId?.toString()): [
-          groupId: item.groupId?.toString(),
-          coordinatorId: item.coordinatorId?.toString(),
-          playerIds: normalizeGroupPlayerIds(item.playerIds),
-          observedAt: item.observedAt
-        ]]
-      }
-      : (operation.topologyObservations instanceof Map ? operation.topologyObservations : [:])
-  operation.topologyMutationSent = false
-  operation.observedGroupId = null
-  operation.observedCoordinatorId = null
-  operation.observedPlayerIds = []
-  operation.lastTopologyObservations = topology?.observations ?: []
-  operation.topologyDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
-  operation.lastCommand = 'refreshGroupTopology'
-  operation.lastCommandAt = now()
-  operation.errorCode = null
-  operation.detail = null
-  saveActiveGroupOperation(operation)
-  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-  refreshGroupOperationTopology([operationId: operation.operationId])
-  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
-    overwrite: true,
-    data: [operationId: operation.operationId]
-  ])
-}
 
-Boolean isRetryableGroupFavoriteError(String errorCode) {
-  if(!errorCode) { return true }
-  return !(errorCode in ['ERROR_INVALID_OBJECT_ID', 'ERROR_NOT_FOUND', 'ERROR_UNSUPPORTED_COMMAND'])
-}
 
-void advanceGroupFavoriteOperation(Map data = [:]) {
+
+void advanceGroupTopologyOperation(Map data = [:]) {
   Map operation = getActiveGroupOperation()
   String callbackOperationId = data?.operationId as String
   if(operation == null || (callbackOperationId && callbackOperationId != operation.operationId)) {
     return
   }
-  updateGroupFavoriteSignalsFromState(operation)
-  if(isGroupFavoriteCompletionConfirmed(operation)) {
-    completeGroupOperation(operation)
-    return
-  }
   String expiredDeadlinePhase = getExpiredGroupOperationDeadlinePhase(operation)
   if(expiredDeadlinePhase) {
     String detail = "Timed out during ${expiredDeadlinePhase}. ${summarizeGroupOperationProgress(operation)}. "
-    if(operation.favoriteId) {
-      detail += "Favorite evidence: ${summarizeGroupFavoriteCompletion(operation)}. "
-    }
     detail += "Last topology: ${summarizeGroupOperationTopology([observations: operation.lastTopologyObservations])}"
     failGroupOperation(operation, 'GROUP_OPERATION_TIMEOUT', detail)
     return
   }
   registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
 
-  Boolean favoriteLoadInProgress = operation.favoriteId &&
-      ((operation.favoriteAttempt ?: 0) as Integer) > 0 &&
-      operation.phase != 'ENSURE_GROUP'
-  if(favoriteLoadInProgress && operation.favoriteTopologyVerified != true &&
-      operation.favoriteExpectedGroupId && operation.favoriteExpectedCoordinatorId) {
-    // An operation resumed from an older app build may still be waiting for
-    // its post-load roster poll. The existing expected topology records the
-    // pre-load confirmation that authorized this Favorite request.
-    operation.favoriteTopologyVerified = true
-    saveActiveGroupOperation(operation)
-  }
   Map topology = readGroupOperationTopology(operation)
   if(operation.evictUnlistedOnly == true) {
     Map coordinatorTopology = readEvictionCoordinatorTopology(operation)
@@ -8392,15 +7814,6 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
   operation.lastTopologyObservations = topology.observations ?: []
   if(operation.groupingMode == GROUPING_MODE_CURRENT && topology.coordinatorId) {
     operation.resolvedCoordinatorId = topology.coordinatorId as String
-    if(operation.favoriteId) {
-      registerGroupOperationOnPlayers(operation, [topology.coordinatorId as String])
-    }
-  }
-
-  if(favoriteLoadInProgress && operation.favoriteTopologyVerified == true &&
-      topology.fresh == true && !isFavoriteGroupTopologySatisfied(operation, topology)) {
-    recoverGroupFavoriteAfterTopologyChange(operation, topology)
-    return
   }
 
   Boolean topologySatisfied = isGroupTopologySatisfied(operation, topology)
@@ -8445,7 +7858,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
             return
           }
           publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-          runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+          runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupTopologyOperation', [
             overwrite: true,
             data: [operationId: operation.operationId]
           ])
@@ -8459,7 +7872,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
       }
       saveActiveGroupOperation(operation)
       publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+      runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupTopologyOperation', [
         overwrite: true,
         data: [operationId: operation.operationId]
       ])
@@ -8491,7 +7904,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     }
     saveActiveGroupOperation(operation)
     publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [
+    runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupTopologyOperation', [
       overwrite: true,
       data: [operationId: operation.operationId]
     ])
@@ -8502,127 +7915,7 @@ void advanceGroupFavoriteOperation(Map data = [:]) {
     operation.topologyMutationSent = false
   }
   updateGroupTopologyStability(operation, topology)
-
-  if(!operation.favoriteId) {
-    completeGroupOperation(operation)
-    return
-  }
-
-  if(operation.phase == 'ENSURE_GROUP') {
-    sendGroupFavoriteLoad(operation, topology)
-    return
-  }
-
-  updateGroupFavoriteSignalsFromState(operation)
-  if(isGroupFavoriteCompletionConfirmed(operation)) {
-    completeGroupOperation(operation)
-    return
-  }
-  if(operation.loadErrorCode && !isRetryableGroupFavoriteError(operation.loadErrorCode as String)) {
-    failGroupOperation(operation, operation.loadErrorCode as String, operation.loadErrorReason as String)
-    return
-  }
-
-  Long favoriteCommandAt = operation.lastCommandAt as Long ?: 0L
-  Boolean favoriteRetryDue = operation.loadErrorCode ||
-      (operation.loadAcknowledged != true && now() >= favoriteCommandAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L)
-  if(favoriteRetryDue) {
-    if(((operation.favoriteAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS) {
-      // Retry only the Favorite load; topology has already been verified and
-      // no grouping command is repeated for a media acknowledgement failure.
-      operation.phase = 'ENSURE_GROUP'
-      operation.stableObservations = 1
-      operation.lastCommandAt = 0L
-      saveActiveGroupOperation(operation)
-      sendGroupFavoriteLoad(operation, topology)
-      return
-    }
-    failGroupOperation(
-      operation,
-      operation.loadErrorCode as String ?: 'FAVORITE_LOAD_NOT_ACKNOWLEDGED',
-      operation.loadErrorReason as String ?: 'Sonos did not acknowledge the Favorite load.'
-    )
-    return
-  }
-
-  Boolean autoPlay = operation.autoPlay?.toString() == 'true'
-  Boolean playbackInProgress = operation.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']
-  Long lastCommandAt = operation.lastCommandAt as Long ?: 0L
-  Boolean allPlaybackObserved = haveRequiredPlaybackObservations(operation)
-  Boolean partialPlaybackObserved = allPlaybackObserved &&
-      operation.playbackState == 'PLAYBACK_STATE_PLAYING' &&
-      !areRequiredPlayersPlaying(operation)
-  if(operation.loadAcknowledged == true && partialPlaybackObserved &&
-      now() >= lastCommandAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L) {
-    if(((operation.playAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_PLAY_ATTEMPTS) {
-      Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-      ChildDeviceWrapper coordinator = rinconMap[operation.resolvedCoordinatorId as String]
-      if(coordinator != null) {
-        operation.playAttempt = ((operation.playAttempt ?: 0) as Integer) + 1
-        operation.phase = 'WAIT_FOR_PLAYBACK'
-        operation.lastCommand = 'play'
-        operation.lastCommandAt = now()
-        saveActiveGroupOperation(operation)
-        operation.playRequestId = UUID.randomUUID().toString()
-        saveActiveGroupOperation(operation)
-        try { coordinator.playerPlayForGroupOperation(operation.operationId as String,
-          operation.favoriteAttemptId as String, operation.playRequestId as String) } catch(Exception e) {
-          failGroupOperation(operation, 'GROUP_PLAY_COMMAND_FAILED', e.message as String)
-          return
-        }
-      }
-    } else {
-      failGroupOperation(
-        operation,
-        'PARTIAL_PLAYBACK',
-        'The coordinator is playing but one or more requested players are not: ' + summarizeGroupFavoritePlayback(operation)
-      )
-      return
-    }
-  }
-  if(operation.loadAcknowledged == true && !playbackInProgress &&
-      now() >= lastCommandAt + GROUP_OPERATION_COMMAND_WAIT_SECONDS * 1000L) {
-    if(((operation.playAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_PLAY_ATTEMPTS) {
-      Map<String, ChildDeviceWrapper> rinconMap = buildRinconMap()
-      ChildDeviceWrapper coordinator = rinconMap[operation.resolvedCoordinatorId as String]
-      if(coordinator != null) {
-        operation.playAttempt = ((operation.playAttempt ?: 0) as Integer) + 1
-        operation.phase = 'WAIT_FOR_PLAYBACK'
-        operation.lastCommand = 'play'
-        operation.lastCommandAt = now()
-        saveActiveGroupOperation(operation)
-        operation.playRequestId = UUID.randomUUID().toString()
-        saveActiveGroupOperation(operation)
-        try { coordinator.playerPlayForGroupOperation(operation.operationId as String,
-          operation.favoriteAttemptId as String, operation.playRequestId as String) } catch(Exception e) {
-          failGroupOperation(operation, 'GROUP_PLAY_COMMAND_FAILED', e.message as String)
-          return
-        }
-      }
-    } else if(((operation.favoriteAttempt ?: 0) as Integer) < GROUP_OPERATION_MAX_FAVORITE_ATTEMPTS &&
-        !playbackInProgress) {
-      // A second load is bounded and only occurs after the acknowledged load
-      // failed to start playback. Once playback is active, never interrupt it
-      // with another Favorite request merely because metadata is late.
-      operation.phase = 'ENSURE_GROUP'
-      operation.stableObservations = 1
-      operation.lastCommandAt = 0L
-      operation.topologyDeadlineAt = now() + GROUP_OPERATION_DEADLINE_SECONDS * 1000L
-      saveActiveGroupOperation(operation)
-      sendGroupFavoriteLoad(operation, topology)
-      return
-    } else if(!playbackInProgress) {
-      failGroupOperation(operation, 'PLAYBACK_NOT_STARTED', 'Sonos acknowledged the Favorite but playback did not become active.')
-      return
-    }
-  }
-
-  pollGroupFavoritePlayback(operation)
-  saveActiveGroupOperation(operation)
-  runIn(2, 'advanceGroupFavoriteOperation', [
-    overwrite: true,
-    data: [operationId: operation.operationId]
-  ])
+  completeGroupOperation(operation)
 }
 
 /** Pure set+return only: no child calls, so the flush→setter call cannot deadlock the single-threaded gate. */
@@ -8951,154 +8244,61 @@ Map getCurrentReceivedZgtTopology() {
   }
 }
 
-void playerGroupFavoriteOperationUpdate(Map payload) {
+void playerGroupTopologyOperationUpdate(Map payload) {
   if(!(payload instanceof Map) || payload.isEmpty()) { return }
-  List<Map> pending = state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] instanceof List
-      ? (List<Map>)state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] : []
+  List<Map> pending = state[PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY] instanceof List
+      ? (List<Map>)state[PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY] : []
   pending.add(new LinkedHashMap(payload))
-  state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] = pending
-  if(state[GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY] != true) {
-    state[GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY] = true
-    runInMillis(1, 'drainPlayerGroupFavoriteEvents', [overwrite: true])
+  state[PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY] = pending
+  if(state[GROUP_TOPOLOGY_EVENT_DRAIN_SCHEDULED_STATE_KEY] != true) {
+    state[GROUP_TOPOLOGY_EVENT_DRAIN_SCHEDULED_STATE_KEY] = true
+    runInMillis(1, 'drainPlayerGroupTopologyEvents', [overwrite: true])
   }
 }
 
-void drainPlayerGroupFavoriteEvents() {
-  state.remove(GROUP_FAVORITE_EVENT_DRAIN_SCHEDULED_STATE_KEY)
-  List<Map> pending = state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY] instanceof List
-      ? new ArrayList<Map>((List<Map>)state[PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY]) : []
-  state.remove(PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY)
-  pending.each { Map payload -> groupFavoriteOperationEventHandler(payload) }
+void drainPlayerGroupTopologyEvents() {
+  state.remove(GROUP_TOPOLOGY_EVENT_DRAIN_SCHEDULED_STATE_KEY)
+  List<Map> pending = state[PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY] instanceof List
+      ? new ArrayList<Map>((List<Map>)state[PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY]) : []
+  state.remove(PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY)
+  pending.each { Map payload -> groupTopologyOperationEventHandler(payload) }
 }
 
-void groupFavoriteOperationEventHandler(Object event) {
+void groupTopologyOperationEventHandler(Object event) {
   Map payload
   if(event instanceof Map && !((Map)event).containsKey('value') && !((Map)event).containsKey('data')) {
     payload = (Map)event
   } else {
     try { payload = (Map)parseJson(event?.value?.toString()) }
     catch(Exception e) {
-      logWarn("Ignoring malformed group Favorite operation event: ${e.message}")
+      logWarn("Ignoring malformed group topology operation event: ${e.message}")
       return
     }
   }
   Map operation = getActiveGroupOperation()
-  if(operation == null || payload.operationId?.toString() != operation.operationId?.toString()) {
-    return
-  }
-  String eventName = payload.event as String
-  Map eventData = payload.data instanceof Map ? (Map)payload.data : [:]
+  if(operation == null || payload.operationId?.toString() != operation.operationId?.toString() ||
+      payload.event != 'groups') { return }
   String eventPlayerId = payload.playerId as String
-  Long eventObservedAt = (payload.observedAt ?: now()) as Long
-  String eventAttemptId = payload.attemptId as String
-  String expectedAttemptId = operation.favoriteAttemptId as String
-  Boolean isExpectedAttempt = expectedAttemptId && (!eventAttemptId || eventAttemptId == expectedAttemptId)
-  String expectedCoordinatorId = operation.favoriteExpectedCoordinatorId as String ?: operation.observedCoordinatorId as String ?: operation.resolvedCoordinatorId as String
-  Boolean isCoordinatorEvent = !eventPlayerId || !expectedCoordinatorId || eventPlayerId == expectedCoordinatorId
-  Boolean isRequiredPlayer = !eventPlayerId || normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(eventPlayerId)
-  Long favoriteCommandAt = operation.favoriteCommandAt as Long ?: 0L
-  Boolean isAfterFavoriteCommand = favoriteCommandAt <= 0L || eventObservedAt >= favoriteCommandAt
-  String eventGroupId = eventData.groupId as String
-  String expectedGroupId = operation.favoriteExpectedGroupId as String ?: operation.observedGroupId as String
-  Boolean isExpectedGroup = !eventGroupId || !expectedGroupId || eventGroupId == expectedGroupId
-  if(eventName == 'registered' && isRequiredPlayer && eventPlayerId) {
-    Map expectedRegistrationIds = operation.registrationRequestIds instanceof Map
-        ? (Map)operation.registrationRequestIds
-        : [:]
-    String expectedRegistrationId = expectedRegistrationIds[eventPlayerId]?.toString()
-    if(!expectedRegistrationId || payload.requestId?.toString() == expectedRegistrationId) {
-      List<String> eventRegisteredPlayers = normalizeGroupPlayerIds(operation.registrationEventPlayerIds)
-      eventRegisteredPlayers.add(eventPlayerId)
-      operation.registrationEventPlayerIds = new TreeSet<String>(eventRegisteredPlayers).toList()
-      logDebug("Player ${eventPlayerId} acknowledged registration request ${payload.requestId ?: '(legacy)'} for operation ${operation.operationId}")
-    }
-  }
-  switch(eventName) {
-    case 'loadStarted':
-      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand &&
-          payload.requestId?.toString() == operation.favoriteRequestId?.toString()) {
-        operation.favoriteCommandDelivered = true
-        operation.favoriteCommandDeliveredAt = eventObservedAt
-        logDebug("Favorite load request ${operation.favoriteRequestId} for operation ${operation.operationId} was handed to player ${eventPlayerId}")
-      }
-      break
-    case 'playStarted':
-      if(isExpectedAttempt && isCoordinatorEvent && payload.requestId?.toString() == operation.playRequestId?.toString()) {
-        operation.playCommandDelivered = true
-        logDebug("Play request ${operation.playRequestId} for operation ${operation.operationId} was handed to player ${eventPlayerId}")
-      }
-      break
-    case 'favoriteLoadAck':
-      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
-        operation.loadAcknowledged = eventData.success == true
-        operation.loadAcknowledgedAt = eventObservedAt
-        operation.loadErrorCode = eventData.errorCode as String
-        operation.loadErrorReason = eventData.reason as String
-      }
-      break
-    case 'loadRejected':
-      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
-        operation.loadAcknowledged = false
-        operation.loadAcknowledgedAt = eventObservedAt
-        operation.loadErrorCode = eventData.reason as String ?: 'PLAYER_REJECTED_LOAD'
-        operation.loadErrorReason = eventData.reason as String
-      }
-      break
-    case 'playbackStatus':
-      if(isExpectedAttempt && isRequiredPlayer && isAfterFavoriteCommand && isExpectedGroup && eventPlayerId) {
-        Map<String, Map> playbackStates = operation.playerPlaybackStates instanceof Map
-            ? (Map<String, Map>)operation.playerPlaybackStates
-            : [:]
-        playbackStates[eventPlayerId] = [
-          playbackState: eventData.playbackState as String,
-          observedAt: eventObservedAt
-        ]
-        operation.playerPlaybackStates = playbackStates
-      }
-      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
-        operation.playbackState = eventData.playbackState as String
-      }
-      break
-    case 'metadataConfirmed':
-      if(isExpectedAttempt && isCoordinatorEvent && isAfterFavoriteCommand && isExpectedGroup) {
-        if(eventData.confirmed == true && eventData.favoriteId?.toString() == operation.favoriteId?.toString()) {
-          operation.metadataConfirmed = true
-          operation.metadataObservedAt = eventObservedAt
-          operation.exactFavoriteId = eventData.favoriteId as String
-        } else {
-          operation.metadataConfirmed = false
-          operation.metadataObservedAt = eventObservedAt
-          operation.exactFavoriteId = eventData.favoriteId as String
-        }
-      }
-      break
-    case 'groups':
-      if(eventPlayerId && isRequiredPlayer) {
-        Map<String, Map> topologyObservations = operation.topologyObservations instanceof Map
-            ? (Map<String, Map>)operation.topologyObservations
-            : [:]
-        topologyObservations[eventPlayerId] = [
-          groupId: eventData.groupId?.toString(),
-          coordinatorId: eventData.coordinatorId?.toString(),
-          playerIds: normalizeGroupPlayerIds(eventData.playerIds),
-          observedAt: eventObservedAt
-        ]
-        operation.topologyObservations = topologyObservations
-      }
-      if(eventData.containsKey('groupId') && eventData.containsKey('coordinatorId')) {
-        operation.observedGroupId = eventData.groupId as String
-        operation.observedCoordinatorId = eventData.coordinatorId as String
-        operation.observedPlayerIds = normalizeGroupPlayerIds(eventData.playerIds)
-      }
-      break
-    default:
-      break
+  if(!eventPlayerId || !normalizeGroupPlayerIds(operation.requiredPlayerIds).contains(eventPlayerId)) { return }
+  Map eventData = payload.data instanceof Map ? (Map)payload.data : [:]
+  Long observedAt = (payload.observedAt ?: now()) as Long
+  Map<String, Map> observations = operation.topologyObservations instanceof Map
+      ? (Map<String, Map>)operation.topologyObservations
+      : [:]
+  observations[eventPlayerId] = [
+    groupId: eventData.groupId?.toString(),
+    coordinatorId: eventData.coordinatorId?.toString(),
+    playerIds: normalizeGroupPlayerIds(eventData.playerIds),
+    observedAt: observedAt
+  ]
+  operation.topologyObservations = observations
+  if(eventData.containsKey('groupId') && eventData.containsKey('coordinatorId')) {
+    operation.observedGroupId = eventData.groupId as String
+    operation.observedCoordinatorId = eventData.coordinatorId as String
+    operation.observedPlayerIds = normalizeGroupPlayerIds(eventData.playerIds)
   }
   saveActiveGroupOperation(operation)
-  runIn(1, 'advanceGroupFavoriteOperation', [
-    overwrite: true,
-    data: [operationId: operation.operationId]
-  ])
+  runIn(1, 'advanceGroupTopologyOperation', [overwrite: true, data: [operationId: operation.operationId]])
 }
 
 void publishGroupOperationStatus(Map operation, String status, String errorCode = null, String detail = null) {
@@ -9115,7 +8315,7 @@ void clearRegisteredGroupOperations(Map operation) {
   normalizeGroupPlayerIds(operation.registeredPlayerIds).each { String playerId ->
     ChildDeviceWrapper player = rinconMap[playerId]
     if(player != null) {
-      try { player.clearGroupFavoriteOperation(operation.operationId as String) }
+      try { player.clearGroupTopologyOperation(operation.operationId as String) }
       catch(Exception e) { logWarn("Could not clear group operation on ${playerId}: ${e.message}") }
     }
   }
@@ -9127,7 +8327,7 @@ void finishGroupOperation(Map operation, String status, String errorCode = null,
   operation.completedAt = now()
   publishGroupOperationStatus(operation, status, errorCode, detail)
   clearRegisteredGroupOperations(operation)
-  if(status == 'SUCCEEDED' && !operation.favoriteId) {
+  if(status == 'SUCCEEDED') {
     storeGroupingContext(operation)
   }
   state.remove(GROUP_OPERATION_STATE_KEY)
@@ -9207,6 +8407,16 @@ ChildDeviceWrapper resolveGroupCommandCoordinator(ChildDeviceWrapper configuredC
       isSonosCoordinator(player)
     }
   return activeCoordinator ?: configuredCoordinator
+}
+
+ChildDeviceWrapper resolveCurrentGroupCommandCoordinator(Collection<String> playerIds,
+    Map<String, ChildDeviceWrapper> rinconMap) {
+  return playerIds.collect { String id -> rinconMap[id] }.find { ChildDeviceWrapper player ->
+    String playerId = player?.getDataValue('id')?.toString()
+    String reportedCoordinatorId = player?.currentValue('groupCoordinatorId', true)?.toString() ?:
+        player?.getDataValue('groupCoordinatorId')?.toString()
+    playerId && playerId == reportedCoordinatorId
+  }
 }
 
 ChildDeviceWrapper resolveLiveGroupCoordinator(ChildDeviceWrapper anchor,
@@ -9319,7 +8529,7 @@ void processPlayerCommandRequest(Map data) {
   }
   Map activeOperation = getActiveGroupOperation()
   String sourcePlayerId = source.getDataValue('id') as String
-  if(activeOperation && !activeOperation.favoriteId && activeOperation.phase != 'COMPLETE' &&
+  if(activeOperation && activeOperation.phase != 'COMPLETE' &&
       normalizeGroupPlayerIds(activeOperation.requiredPlayerIds).contains(sourcePlayerId) &&
       isPlayerPlaybackCommandThatWaitsForGroupOperation(command)) {
     logDebug("Waiting for topology change to complete before processing player command ${command} from ${playerDni}")

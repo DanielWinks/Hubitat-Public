@@ -118,32 +118,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
     commands << [name: 'restoreGroupAnnouncementPlayback', correlationId: correlationId]
   }
 
-  void loadFavoriteForGroupOperation(String favoriteId, String repeatMode, String queueMode,
-      String shuffleMode, String autoPlay, String crossfadeMode, String operationId, String groupId,
-      String attemptId = null, String requestId = null) {
-    commands << [
-      name: 'loadFavoriteForGroupOperation', favoriteId: favoriteId, repeatMode: repeatMode,
-      queueMode: queueMode, shuffleMode: shuffleMode, autoPlay: autoPlay,
-      crossfadeMode: crossfadeMode, operationId: operationId, groupId: groupId,
-      attemptId: attemptId, requestId: requestId
-    ]
-  }
-
-  void registerGroupFavoriteOperation(String operationId, String favoriteId, String requestId = null) {
-    commands << [name: 'registerGroupFavoriteOperation', operationId: operationId, favoriteId: favoriteId, requestId: requestId]
-  }
-
   void registerGroupTopologyOperation(String operationId, String requestId = null) {
     commands << [name: 'registerGroupTopologyOperation', operationId: operationId, requestId: requestId]
   }
-
-  void setGroupFavoriteOperationAttempt(String operationId, String attemptId, String groupId, String requestId = null) {
-    commands << [name: 'setGroupFavoriteOperationAttempt', operationId: operationId,
-                 attemptId: attemptId, groupId: groupId, requestId: requestId]
-  }
-
-  void clearGroupFavoriteOperation(String operationId = null) {
-    commands << [name: 'clearGroupFavoriteOperation', operationId: operationId]
+  void clearGroupTopologyOperation(String operationId = null) {
+    commands << [name: 'clearGroupTopologyOperation', operationId: operationId]
   }
 
   void getPlaybackStatus() { commands << [name: 'getPlaybackStatus'] }
@@ -157,6 +136,7 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Map getPlaylistsMap() { return playlistsMap }
   void getFavorites() { commands << [name: 'getFavorites'] }
   void getPlaylists() { commands << [name: 'getPlaylists'] }
+  void loadFavorite(String favoriteId = null) { commands << [name: 'loadFavorite', favoriteId: favoriteId] }
   void loadFavoriteFull(String favoriteId, String repeatMode, String queueMode,
       String shuffleMode, String autoPlay, String crossfadeMode) {
     commands << [name: 'loadFavoriteFull', favoriteId: favoriteId, repeatMode: repeatMode,
@@ -164,11 +144,11 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
       crossfadeMode: crossfadeMode]
   }
   void loadPlaylist(String playlistId) { commands << [name: 'loadPlaylist', playlistId: playlistId] }
-  void playerPlayForGroupOperation(String operationId, String attemptId, String requestId) {
-    commands << [name: 'playerPlayForGroupOperation', operationId: operationId,
-      attemptId: attemptId, requestId: requestId]
+  void loadPlaylistFull(String playlistId, String repeatMode, String queueMode,
+      String shuffleMode, String autoPlay, String crossfadeMode) {
+    commands << [name: 'loadPlaylistFull', playlistId: playlistId, repeatMode: repeatMode,
+      queueMode: queueMode, shuffleMode: shuffleMode, autoPlay: autoPlay, crossfadeMode: crossfadeMode]
   }
-
   Boolean applyAppHouseholdTopology(String json) {
     currentValues.householdTopology = json
     return topologyApplyHook == null || topologyApplyHook.call(json) == true
@@ -512,7 +492,7 @@ class SonosAdvancedAppSpec extends Specification {
   void emitTopologyObservation(String playerId, String groupId, String coordinatorId, String playerIds,
       Long observedAt = null) {
     Long eventObservedAt = observedAt ?: appScript.now() + (++topologyObservationSequence * 1000L)
-    appScript.groupFavoriteOperationEventHandler([
+    appScript.groupTopologyOperationEventHandler([
       value: JsonOutput.toJson([
         operationId: appScript.getActiveGroupOperation().operationId,
         playerId: playerId,
@@ -534,20 +514,6 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
 
-
-  void emitPlayback(String playerId, String playbackState, Long observedAt = null, String groupId = 'GROUP-1') {
-    Map operation = appScript.getActiveGroupOperation()
-    appScript.groupFavoriteOperationEventHandler([
-      value: JsonOutput.toJson([
-        operationId: operation.operationId,
-        playerId: playerId,
-        attemptId: operation.favoriteAttemptId,
-        observedAt: observedAt ?: appScript.now(),
-        event: 'playbackStatus',
-        data: [playbackState: playbackState, groupId: groupId]
-      ])
-    ] as Event)
-  }
 
   def "explicit group refresh forwards coordinator playback values to the group driver"() {
     given:
@@ -1164,7 +1130,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     Map topology = appScript.readGroupOperationTopology(operation)
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.advanceGroupTopologyOperation([operationId: operation.operationId])
 
     then:
     topology.fresh == true
@@ -1188,7 +1154,7 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.commands.clear()
 
     when:
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.advanceGroupTopologyOperation([operationId: operation.operationId])
 
     then:
     appScript.getActiveGroupOperation().lastCommand == 'refreshGroupTopology'
@@ -1210,7 +1176,7 @@ class SonosAdvancedAppSpec extends Specification {
     emitTopologyObservation('RINCON_FOLLOW', 'GROUP-FOLLOW', 'RINCON_FOLLOW', 'RINCON_FOLLOW')
 
     when:
-    appScript.advanceGroupFavoriteOperation([operationId: operation.operationId])
+    appScript.advanceGroupTopologyOperation([operationId: operation.operationId])
 
     then:
     appScript.getActiveGroupOperation().lastCommand == 'createExactGroup'
@@ -1242,70 +1208,41 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
 
     then:
-    coordinator.commands.find { it.name == 'loadFavoriteFull' } == [
-      name: 'loadFavoriteFull', favoriteId: '42', repeatMode: 'off', queueMode: 'replace',
-      shuffleMode: 'off', autoPlay: 'true', crossfadeMode: 'on'
-    ]
+    coordinator.commands.find { it.name == 'loadFavorite' } == [name: 'loadFavorite', favoriteId: '42']
     appScript.getActiveGroupOperation() == null
     [coordinator, follower, extra].every { SonosAppPlayerDouble player ->
       !player.commands.any { it.name in ['playerGetGroupsFull', 'playerCreateGroup', 'playerModifyGroupMembers'] }
     }
   }
 
-  def "group favorite load without an ID selects from available sparse IDs"() {
-    given:
-    coordinator.favoritesMap = [
-      first: [id: '3'],
-      second: [id: '9001']
-    ]
-
+  def "group favorite without an ID forwards null once to the current coordinator"() {
     when:
     appScript.processGroupCommandRequest([request: request('loadFavorite', [:], 1)])
 
     then:
-    coordinator.commands.find { it.name == 'loadFavoriteFull' }.favoriteId in ['3', '9001']
+    coordinator.commands.findAll { it.name == 'loadFavorite' } == [[name: 'loadFavorite', favoriteId: null]]
     appScript.getActiveGroupOperation() == null
   }
 
-  def "group playlist load without an ID selects from available sparse IDs and explicit IDs remain intact"() {
-    given:
-    coordinator.playlistsMap = [
-      'playlist-2': [id: 'playlist-2'],
-      'playlist-10004': [id: 'playlist-10004']
-    ]
-
+  def "group playlist without an ID forwards null once to the current coordinator"() {
     when:
     appScript.processGroupCommandRequest([request: request('loadPlaylist', [:], 1)])
 
     then:
-    coordinator.commands.find { it.name == 'loadPlaylist' }.playlistId in ['playlist-2', 'playlist-10004']
-
-    when:
-    appScript.processGroupCommandRequest([request: request('loadPlaylist', [playlistId: 'playlist-explicit-88'], 2)])
-
-    then:
-    coordinator.commands.findAll { it.name == 'loadPlaylist' }*.playlistId == [
-      coordinator.commands.find { it.name == 'loadPlaylist' }.playlistId,
-      'playlist-explicit-88'
-    ]
+    coordinator.commands.findAll { it.name == 'loadPlaylist' } == [[name: 'loadPlaylist', playlistId: null]]
   }
 
-  def "group random favorite load waits for the coordinator favorites query when cache is empty"() {
-    when:
-    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: ' '], 1)])
-
-    then:
-    appScript.state.pendingRandomGroupMediaLoads.size() == 1
-    coordinator.commands.any { it.name == 'getFavorites' }
+  def "group Favorite relay uses the currently reported coordinator"() {
+    given:
+    coordinator.currentValues.groupCoordinatorId = 'RINCON_FOLLOW'
+    follower.currentValues.groupCoordinatorId = 'RINCON_FOLLOW'
 
     when:
-    coordinator.favoritesMap = [item: [id: 'favorite-gap-27']]
-    appScript.retryRandomGroupMediaLoads()
+    appScript.processGroupCommandRequest([request: request('loadFavorite', [favoriteId: '42'], 1)])
 
     then:
-    coordinator.commands.find { it.name == 'loadFavoriteFull' }.favoriteId == 'favorite-gap-27'
-    appScript.getActiveGroupOperation() == null
-    !appScript.state.containsKey('pendingRandomGroupMediaLoads')
+    follower.commands.find { it.name == 'loadFavorite' } == [name: 'loadFavorite', favoriteId: '42']
+    !coordinator.commands.any { it.name == 'loadFavorite' }
   }
 
   def "a negative group observation prevents stale cached topology from satisfying the operation"() {
@@ -1326,7 +1263,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation() != null
   }
 
-  def "queued group requests preserve grouping-before-Favorite order"() {
+  def "queued group requests preserve order while Favorite loads stay one-shot"() {
     given:
     coordinator.dataValues.groupId = 'GROUP-COORD'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
@@ -1342,8 +1279,8 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.getActiveGroupOperation() == null
-    // on() now executes an immediate exact write; loadFavorite runs directly and is not deferred
-    coordinator.commands.find { it.name == 'loadFavoriteFull' }?.favoriteId == '42'
+    // on() starts the topology operation, but Favorite still goes directly to the current coordinator.
+    coordinator.commands.find { it.name == 'loadFavorite' }?.favoriteId == '42'
     coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW'] ||
       coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_FOLLOW']
     !appScript.state.containsKey('deferredGroupOperationCommands')
@@ -2034,7 +1971,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     !appScript.subscriptions.any { it[0] in [coordinator, follower] &&
-      it[1] in ['playerCommandRequest', 'groupFavoriteOperation'] }
+      it[1] in ['playerCommandRequest', 'groupTopologyOperation'] }
     !appScript.subscriptions.any { it[0] == group && it[1] in ['zgtInProgress', 'parentAppRequest'] }
     !appScript.subscriptions.any { it[1] == 'sonosGroupCommandRequest' }
     !appScript.subscriptions.any { it[1] in ['sonosPlayerStateUpdate', 'sonosPlayerAppRequest'] }
@@ -2094,21 +2031,25 @@ class SonosAdvancedAppSpec extends Specification {
     }
   }
 
-  def "Favorite waits for a separate grouping operation, then loads directly"() {
+  def "Favorite and playlist loads go straight to the current coordinator during topology operations"() {
     given:
     appScript.processGroupCommandRequest([request: request('on', [:], 1)])
+
+    when:
     appScript.processGroupCommandRequest([request: request('loadFavoriteFull', [
       favoriteId: '42', repeatMode: 'repeat all', queueMode: 'replace',
       shuffleMode: 'off', autoPlay: 'true', crossfadeMode: 'on'
     ], 2)])
 
-    when:
-    appScript.drainDeferredGroupOperationCommands()
+    appScript.processGroupCommandRequest([request: request('loadPlaylistFull', [
+      playlistId: '88', repeatMode: 'off', queueMode: 'replace',
+      shuffleMode: 'off', autoPlay: 'true', crossfadeMode: 'on'
+    ], 3)])
 
     then:
     coordinator.commands.find { it.name == 'loadFavoriteFull' }.favoriteId == '42'
-    appScript.getActiveGroupOperation() == null
-    !coordinator.commands.any { it.name == 'loadFavoriteForGroupOperation' }
+    coordinator.commands.find { it.name == 'loadPlaylistFull' }.playlistId == '88'
+    appScript.state.deferredGroupOperationCommands == null
   }
 
   def "group device state is exact in explicit mode and subset-based in additive mode"() {
