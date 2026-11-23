@@ -2980,10 +2980,10 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.flushGroupDeviceState('RINCON_COORD', null, [
-      albumArtURI: 'Disabled in preferences',
-      albumArtSmall: 'Disabled in preferences',
-      albumArtMedium: 'Disabled in preferences',
-      albumArtLarge: 'Disabled in preferences'
+      albumArtURI: 'Disabled in Preferences',
+      albumArtSmall: 'Disabled in Preferences',
+      albumArtMedium: 'Disabled in Preferences',
+      albumArtLarge: 'Disabled in Preferences'
     ])
     appScript.drainGroupStateUpdates()
     Map<String, Object> attributes = group.emittedAttributes()
@@ -3011,9 +3011,27 @@ class SonosAdvancedAppSpec extends Specification {
     Map<String, Object> attributes = group.emittedAttributes()
 
     then:
-    attributes.albumArtSmall == 'Disabled in preferences'
-    attributes.albumArtMedium == 'Disabled in preferences'
-    attributes.albumArtLarge == 'Disabled in preferences'
+    attributes.albumArtSmall == 'Disabled in Preferences'
+    attributes.albumArtMedium == 'Disabled in Preferences'
+    attributes.albumArtLarge == 'Disabled in Preferences'
+  }
+
+  def "group album art preference recognizes persisted string true values"() {
+    given:
+    group.updatedSettings.disableAlbumArtEvents = 'true'
+    group.currentValues.switch = 'on'
+
+    when:
+    Map<String, Object> attributes = appScript.prepareGroupDeviceAttributeEvents(group, [
+      albumArtSmall: 'http://example.test/small.jpg',
+      albumArtMedium: 'http://example.test/medium.jpg',
+      albumArtLarge: 'http://example.test/large.jpg'
+    ])
+
+    then:
+    attributes.albumArtSmall == 'Disabled in Preferences'
+    attributes.albumArtMedium == 'Disabled in Preferences'
+    attributes.albumArtLarge == 'Disabled in Preferences'
   }
 
   def "ungrouped group refresh reflects only the coordinator when individual control is disabled"() {

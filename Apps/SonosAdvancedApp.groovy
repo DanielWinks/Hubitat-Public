@@ -10588,9 +10588,9 @@ Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String pl
   if(disabled == null) { disabled = player?.getSetting('disableAlbumArtEvents') as Boolean }
   if(disabled == null) { disabled = true }
   if(disabled) {
-    attributes.albumArtSmall = 'Disabled in preferences'
-    attributes.albumArtMedium = 'Disabled in preferences'
-    attributes.albumArtLarge = 'Disabled in preferences'
+    attributes.albumArtSmall = 'Disabled in Preferences'
+    attributes.albumArtMedium = 'Disabled in Preferences'
+    attributes.albumArtLarge = 'Disabled in Preferences'
     return attributes
   }
 
@@ -12208,14 +12208,13 @@ Map<String, Object> prepareGroupDeviceAttributeEvents(ChildDeviceWrapper groupDe
   if(publishable.containsKey('mute') && !publishable.containsKey('groupMute')) {
     publishable.groupMute = publishable.mute
   }
-  Boolean disableAlbumArtEvents = groupDevice.getSetting('disableAlbumArtEvents') as Boolean
-  if(disableAlbumArtEvents == null) { disableAlbumArtEvents = true }
+  Boolean disableAlbumArtEvents = isGroupAlbumArtEventsDisabled(groupDevice)
   if(disableAlbumArtEvents) {
-    publishable.albumArtSmall = 'Disabled in preferences'
-    publishable.albumArtMedium = 'Disabled in preferences'
-    publishable.albumArtLarge = 'Disabled in preferences'
+    publishable.albumArtSmall = 'Disabled in Preferences'
+    publishable.albumArtMedium = 'Disabled in Preferences'
+    publishable.albumArtLarge = 'Disabled in Preferences'
   } else if(['albumArtSmall', 'albumArtMedium', 'albumArtLarge'].any { String name ->
-    publishable[name] == 'Disabled in preferences'
+    publishable[name] == 'Disabled in Preferences'
   }) {
     String artMarkup = publishable.albumArtURI?.toString()
     def imageMatcher = artMarkup =~ /<img[^>]*src=["']([^"']+)["']/
@@ -12248,6 +12247,15 @@ Boolean isUnavailableGroupTrackValue(String value) {
   return !value || value.equalsIgnoreCase('Not Available') || value.equalsIgnoreCase('n/a')
 }
 
+/** Treat Hubitat's persisted bool setting values consistently across Boolean and string forms. */
+Boolean isGroupAlbumArtEventsDisabled(ChildDeviceWrapper groupDevice) {
+  Object rawSetting = groupDevice?.getSetting('disableAlbumArtEvents')
+  if(rawSetting == null) { return true }
+  if(rawSetting instanceof Boolean) { return (Boolean)rawSetting }
+  String normalized = rawSetting.toString().trim().toLowerCase(Locale.ROOT)
+  return normalized in ['true', '1', 'on', 'yes']
+}
+
 /**
  * Combined flush method: resolves group devices ONCE for both volume and playback attributes.
  * Called by the player driver's flushPendingGroupDeviceUpdates() to avoid two separate
@@ -12274,14 +12282,13 @@ void flushGroupDeviceState(String coordinatorId, Map volumeAttrs, Map playbackAt
   }?.value
   groupsForCoord.each { ChildDeviceWrapper groupDevice ->
     Map groupAttributes = new LinkedHashMap(combined)
-    Boolean disableArtEvents = groupDevice.getSetting('disableAlbumArtEvents') as Boolean
-    if(disableArtEvents == null) { disableArtEvents = true }
+    Boolean disableArtEvents = isGroupAlbumArtEventsDisabled(groupDevice)
     if(rawAlbumArt != null) {
       groupAttributes.putAll(albumArtAttributesForFanout(rawAlbumArt.toString(), coordinatorId, disableArtEvents))
     } else if(disableArtEvents) {
-      groupAttributes.albumArtSmall = 'Disabled in preferences'
-      groupAttributes.albumArtMedium = 'Disabled in preferences'
-      groupAttributes.albumArtLarge = 'Disabled in preferences'
+      groupAttributes.albumArtSmall = 'Disabled in Preferences'
+      groupAttributes.albumArtMedium = 'Disabled in Preferences'
+      groupAttributes.albumArtLarge = 'Disabled in Preferences'
     }
     Boolean playbackStateOutOfSync = groupAttributes.any { Object rawName, Object value ->
       String name = rawName?.toString()
