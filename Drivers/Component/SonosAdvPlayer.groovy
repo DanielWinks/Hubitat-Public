@@ -640,7 +640,7 @@ metadata {
       input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
       input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
       input 'createMuteChildDevice', 'bool', title: 'Create child device for mute control?', required: false, defaultValue: false
-      if(deviceHasBattery() == true) {
+      if(hasBatteryCapability()) {
         input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
       }
       input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
@@ -944,6 +944,7 @@ Boolean hasLineInCapability() {
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
+@Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastMetadataContainerId = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastPlaybackState = new ConcurrentHashMap<String, String>()
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -989,6 +990,7 @@ Boolean hasLineInCapability() {
   'websocketUrl',
   'capabilities',
   'householdId',
+  'hasBattery',
   'groupCoordinatorId',
   'groupId',
   'groupPlayerIds',
@@ -1270,6 +1272,7 @@ void performImmediateInitialization() {
   clearPlayerSubscriptionsForInitialization()
   migrateLegacyRuntimeState()
   pruneOrphanedDriverPersistence()
+  cacheBatteryCapability()
   resetPendingStatePublicationForInitialization()
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
@@ -4332,7 +4335,15 @@ void createRemoveMuteChildDevice(Boolean create) {
 void createRemoveBatteryStatusChildDevice(Boolean create) {
   String dni = getBatteryStatusChildDNI()
   ChildDeviceWrapper child = getBatteryStatusChild()
-  Boolean hasBattery = deviceHasBattery()
+  Boolean hasBattery = hasBatteryCapability()
+  if(!hasBattery) {
+    if(child) { deleteChildDevice(dni) }
+    if(create) {
+      logWarn('Not creating child battery device. No battery capability was detected.')
+      device.updateSetting('createBatteryStatusChildDevice', false)
+    }
+    return
+  }
   if(!child && create && hasBattery) {
     try {
       logDebug("Creating Battery Status device")
@@ -4345,22 +4356,30 @@ void createRemoveBatteryStatusChildDevice(Boolean create) {
     }
   }
   else if(!create && child){ deleteChildDevice(dni) }
-  else if(!child && create && !hasBattery) {
-    logWarn('Not creating child battery device. No battery detected.')
-    this.device.updateSetting('createBatteryStatusChildDevice', false)
-  }
 }
 
-Boolean deviceHasBattery() {
-  if(device == null) { return false }
+Boolean hasBatteryCapability() {
+  return device?.getDataValue(HAS_BATTERY_DEVICE_KEY)?.toString()?.trim()?.toLowerCase(Locale.ROOT) == 'true'
+}
+
+void cacheBatteryCapability() {
+  device.removeDataValue(HAS_BATTERY_DEVICE_KEY)
+  Boolean hasBattery = queryDeviceHasBattery()
+  if(hasBattery == null) { return }
+  device.updateDataValue(HAS_BATTERY_DEVICE_KEY, hasBattery.toString())
+  logDebug("Battery capability cached as ${hasBattery}")
+}
+
+Boolean queryDeviceHasBattery() {
+  if(device == null) { return null }
 
   String deviceIp = getDeviceDataValue('deviceIp')
   if(deviceIp == null || deviceIp == '') {
     logDebug('deviceHasBattery: deviceIp not set')
-    return false
+    return null
   }
 
-  Boolean hasBattery = false
+  Boolean hasBattery = null
   try {
     Map params = [
       uri: "${getLocalUpnpUrl()}/status/batterystatus",

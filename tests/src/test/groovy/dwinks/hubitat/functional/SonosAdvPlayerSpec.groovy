@@ -599,15 +599,45 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.getEnableTrackPositionUpdates()
     !driver.device.dataValues.containsKey('enableTrackPositionUpdates')
-    !driver.device.dataValues.containsKey('hasBattery')
+    driver.device.dataValues.hasBattery == 'true'
   }
 
-  def "battery status capability requires a numeric battery level"() {
+  def "battery status capability requires a numeric level in the response"() {
     expect:
     !driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo><LocalBatteryStatus/></ZPSupportInfo>'))
     !driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo><LocalBatteryStatus><Data name="Level">unknown</Data></LocalBatteryStatus></ZPSupportInfo>'))
     driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo><LocalBatteryStatus><Data name="Level">87</Data></LocalBatteryStatus></ZPSupportInfo>'))
-    !driver.device.dataValues.containsKey('hasBattery')
+    !driver.hasBatteryStatusData(new XmlSlurper().parseText('<ZPSupportInfo></ZPSupportInfo>'))
+  }
+
+  def "initialization caches battery capability and preference visibility uses cached data"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    String batteryXml = '<ZPSupportInfo><LocalBatteryStatus><Data name="Health">GREEN</Data><Data name="Level">100</Data></LocalBatteryStatus></ZPSupportInfo>'
+    Map requested = [:]
+    driver.metaClass.httpGet = { Map params, Closure callback ->
+      requested.putAll(params)
+      callback.call([status: 200, data: new XmlSlurper().parseText(batteryXml)])
+    }
+
+    when:
+    driver.cacheBatteryCapability()
+
+    then:
+    requested.uri.toString().endsWith('/status/batterystatus')
+    driver.device.dataValues.hasBattery == 'true'
+    driver.hasBatteryCapability()
+
+    when:
+    driver.metaClass.httpGet = { Map params, Closure callback ->
+      requested.putAll(params)
+      callback.call([status: 200, data: new XmlSlurper().parseText('<ZPSupportInfo></ZPSupportInfo>')])
+    }
+    driver.cacheBatteryCapability()
+
+    then:
+    driver.device.dataValues.hasBattery == 'false'
+    !driver.hasBatteryCapability()
   }
 
   def "AVTransport and HTControl UPnP report home theater source and input connection"() {
