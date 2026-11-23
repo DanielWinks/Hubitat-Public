@@ -6941,7 +6941,6 @@ void handleContentDirectoryPayload(String xmlBody) {
   if(events.any { Map event -> event.name == 'SavedQueuesUpdateID' } && getPlaylistChild() != null) { getPlaylists() }
 }
 
-@CompileStatic
 void subscribeToAudioClip() {
   Map command = [namespace: 'audioClip', command: 'subscribe', playerId: getId()]
   String json = JsonOutput.toJson([command, [:]])

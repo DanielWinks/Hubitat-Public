@@ -2890,7 +2890,6 @@ void configure(Boolean startup = false) {
   refreshPlayerAnnouncementPolicySnapshots(startup)
   unschedule('refreshStaticDriverActivePlayerRoster')
   schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
-  subscribeToPlayerStateAttributes()
   subscribeToGroupCommandRequests()
   Map activeGroupOperation = getActiveGroupOperation()
   if(activeGroupOperation != null) {
@@ -5417,41 +5416,64 @@ void enqueuePlayerAudioClip(ChildDeviceWrapper player, Map args) {
     priority: args.priority?.toString() == 'HIGH' ? 'HIGH' : 'REGULAR',
     clipType: clipType, origin: args.origin?.toString() ?: 'player-request',
     submittedAt: now()]
+  List<Map> items = []
   if(args.chimeBeforeTTS == true) {
-    enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(), playerId: playerId,
+    items.add([correlationId: UUID.randomUUID().toString(), playerId: playerId,
       volume: item.volume, duration: 8, priority: item.priority, clipType: 'CHIME',
       origin: 'player-chime', submittedAt: now()])
   }
-  enqueuePlayerAudioClipItem(item)
+  items.add(item)
+  enqueuePlayerAudioClipItems(items)
 }
 
 /** All player and group clips pass through this app-owned per-player queue. */
 void enqueuePlayerAudioClipItem(Map item) {
+  enqueuePlayerAudioClipItems([item])
+}
+
+void enqueuePlayerAudioClipItems(List<Map> items) {
   Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
-  String playerId = item?.playerId?.toString()
-  if(!playerId) { return }
-  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : [regular: [], high: []]
-  List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
-  List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
-  if(item.priority == 'HIGH') { high.add(item) } else { regular.add(item) }
-  queue.high = high
-  queue.regular = regular
-  queues[playerId] = queue
+  Set<String> playerIds = new LinkedHashSet<String>()
+  items.each { Map item ->
+    String playerId = item?.playerId?.toString()
+    if(!playerId) { return }
+    Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : [regular: [], high: []]
+    List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
+    List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
+    if(item.priority == 'HIGH') { high.add(item) } else { regular.add(item) }
+    queue.high = high
+    queue.regular = regular
+    queues[playerId] = queue
+    playerIds.add(playerId)
+  }
   state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
-  dispatchNextPlayerAudioClip(playerId)
+  dispatchNextPlayerAudioClips(playerIds)
 }
 
 void dispatchNextPlayerAudioClip(String playerId) {
+  dispatchNextPlayerAudioClips([playerId])
+}
+
+void dispatchNextPlayerAudioClips(Collection<String> playerIds) {
+  List<Map> preparedPosts = []
+  playerIds.each { String playerId ->
+    Map prepared = prepareNextPlayerAudioClipPost(playerId)
+    if(prepared != null) { preparedPosts.add(prepared) }
+  }
+  preparedPosts.each { Map post -> asynchttpPost('audioClipPostCallback', post.params, post.data) }
+}
+
+Map prepareNextPlayerAudioClipPost(String playerId) {
   Map<String, Map> queues = state[AUDIO_CLIP_QUEUES_STATE_KEY] instanceof Map
       ? (Map<String, Map>)state[AUDIO_CLIP_QUEUES_STATE_KEY] : [:]
   Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
-  if(queue == null) { return }
+  if(queue == null) { return null }
   List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
   List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
   Map active = queue.active instanceof Map ? (Map)queue.active : null
   if(active != null) {
-    if(active.priority == 'HIGH' || high.isEmpty()) { return }
+    if(active.priority == 'HIGH' || high.isEmpty()) { return null }
     queue.suspended = active
     queue.remove('active')
   }
@@ -5461,7 +5483,7 @@ void dispatchNextPlayerAudioClip(String playerId) {
   if(next == null) {
     queues.remove(playerId)
     state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
-    return
+    return null
   }
   ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
     candidate.getDataValue('id')?.toString() == playerId
@@ -5475,7 +5497,7 @@ void dispatchNextPlayerAudioClip(String playerId) {
     state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
     logInfo("Skipping audioClip for muted player ${playerId}, correlation=${next.correlationId}")
     completePlayerAudioClip(playerId, next, 'DISMISSED')
-    return
+    return null
   }
   if(!player || !ip) {
     logWarn("Cannot POST audioClip for ${playerId}: player device or IP is unavailable")
@@ -5483,7 +5505,7 @@ void dispatchNextPlayerAudioClip(String playerId) {
     queues[playerId] = queue
     state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
     completePlayerAudioClip(playerId, next, 'FAILED')
-    return
+    return null
   }
   String priority = next.priority == 'HIGH' ? 'HIGH' : null
   BigDecimal requestedVolume = toBigDecimal(next.volume)
@@ -5508,9 +5530,9 @@ void dispatchNextPlayerAudioClip(String playerId) {
   queue.active = next
   queues[playerId] = queue
   state[AUDIO_CLIP_QUEUES_STATE_KEY] = queues
-  logInfo("POST audioClip ${name} to player ${playerId}, priority=${priority}, origin=${next.origin}")
-  asynchttpPost('audioClipPostCallback', params, [playerId: playerId, name: name,
-    appId: AUDIO_CLIP_APP_ID, correlationId: next.correlationId])
+  logInfo("Prepared audioClip POST ${name} for player ${playerId}, priority=${priority}, origin=${next.origin}")
+  return [params: params, data: [playerId: playerId, name: name,
+    appId: AUDIO_CLIP_APP_ID, correlationId: next.correlationId]]
 }
 
 void dispatchNextPlayerAudioClipCallback(Map data = [:]) {
@@ -5897,7 +5919,6 @@ Map getPlayerPlaybackActivity(ChildDeviceWrapper player, String audioSource = nu
 
 
 
-/** Allow extra time for synchronized stream startup and delayed completion callbacks. */
 /** Resolve the shared announcement policy for an individual player. */
 
 
@@ -5915,22 +5936,24 @@ void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, B
     "${player.displayName} (${player.getDataValue('id')})"
   }.join(', ')
   logDebug("Queueing group audioClip ${correlationId} for players: ${playerNames}")
+  List<Map> queuedItems = []
   players.each { ChildDeviceWrapper player ->
     String playerId = player.getDataValue('id')?.toString()
     if(chimeBeforeTTS) {
-      enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(),
+      queuedItems.add([correlationId: UUID.randomUUID().toString(),
         groupCorrelationId: separateChime ? correlationId : null, playerId: playerId,
         uri: null, volume: toBigDecimal(item.volume), duration: 8,
         priority: highPriority ? 'HIGH' : 'REGULAR', clipType: 'CHIME',
         origin: 'group-chime', submittedAt: now()])
     }
     if(!separateChime) {
-      enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(),
+      queuedItems.add([correlationId: UUID.randomUUID().toString(),
         groupCorrelationId: correlationId, playerId: playerId, uri: item.uri?.toString(),
         volume: toBigDecimal(item.volume), duration: duration,
         priority: highPriority ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()])
     }
   }
+  enqueuePlayerAudioClipItems(queuedItems)
   logDebug("Queued group audioClip ${correlationId} on ${players.size()} players")
 }
 
@@ -6056,12 +6079,13 @@ void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
     return
   }
   logDebug("Releasing synchronized TTS ${correlationId} after all group chimes completed")
-  players.each { ChildDeviceWrapper player ->
-    enqueuePlayerAudioClipItem([correlationId: UUID.randomUUID().toString(),
-      groupCorrelationId: correlationId, playerId: player.getDataValue('id')?.toString(),
-      uri: item.uri?.toString(), volume: toBigDecimal(item.volume), duration: item.duration,
-      priority: prioritySidecar ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()])
+  List<Map> queuedItems = players.collect { ChildDeviceWrapper player ->
+    [correlationId: UUID.randomUUID().toString(), groupCorrelationId: correlationId,
+      playerId: player.getDataValue('id')?.toString(), uri: item.uri?.toString(),
+      volume: toBigDecimal(item.volume), duration: item.duration,
+      priority: prioritySidecar ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()]
   }
+  enqueuePlayerAudioClipItems(queuedItems)
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
 }
