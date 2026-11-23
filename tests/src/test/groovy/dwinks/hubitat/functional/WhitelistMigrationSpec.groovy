@@ -128,7 +128,7 @@ class WhitelistMigrationSpec extends Specification {
     app.pruneOrphanedAppPersistence()
 
     then:
-    app.settings.size() == 28
+    app.settings.size() == 26
   }
 
   def "app migrateLegacyAppStateOnce copies discovery keys to atomicState before prune"() {
@@ -180,7 +180,7 @@ class WhitelistMigrationSpec extends Specification {
     playerDriver.pruneOrphanedDriverPersistence()
 
     then:
-    playerDriver.state.containsKey('pendingParentAppTtsRequests')
+    !playerDriver.state.containsKey('pendingParentAppTtsRequests')
     !playerDriver.state.containsKey('pendingBatchEvents')
     playerDriver.state.containsKey('lastError')
     !playerDriver.state.containsKey('orphanState')

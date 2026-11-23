@@ -366,25 +366,6 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.pendingGroupCommandRequests.containsKey('GROUP-DNI')
   }
 
-
-
-  def "legacy in-flight announcement topology is queued for one-time restoration"() {
-    given:
-    appScript.state.groupAnnouncementTopologyTransactions = [old: [
-      correlationId: 'legacy-announcement', groupDni: 'GROUP-DNI', phase: 'STREAMING',
-      originalGroups: [[groupId: 'G1', coordinatorId: 'RINCON_COORD',
-        playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']]]
-    ]]
-
-    when:
-    appScript.migrateLegacyAnnouncementTopologyTransactions()
-
-    then:
-    !appScript.state.containsKey('groupAnnouncementTopologyTransactions')
-    appScript.state.legacyAnnouncementTopologyRecovery.transactions.size() == 1
-    appScript.scheduled.any { List job -> job[1] == 'recoverLegacyAnnouncementTopologies' }
-  }
-
   def "system start re-arms persisted player state updates after reboot"() {
     given:
     appScript.state.playerStateUpdateDrainScheduled = true

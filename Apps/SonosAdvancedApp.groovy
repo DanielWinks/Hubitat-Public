@@ -510,7 +510,6 @@ preferences {
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
   ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY,
-  LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY,
   'userGroups',
   'alarmManagementPreferencesApplied',
   'sonosAlarmRefreshRequestIds',
@@ -2808,8 +2807,6 @@ void initialize() { configure(true) }
 @Field static final String STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY = 'staticDriverActivePlayerRoster'
 @Field static final Integer STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION = 1
 @Field static final String ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY = 'announcementPolicySettings'
-@Field static final String LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY = 'groupAnnouncementTopologyTransactions'
-@Field static final String LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY = 'legacyAnnouncementTopologyRecovery'
 
 /** Return the player roster published during app lifecycle/device changes. */
 Map<String, Object> getStaticDriverActivePlayerRoster() {
@@ -2863,112 +2860,14 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
 }
 
 /** Restore topologies captured by the retired announcement regrouping flow before pruning its saved state. */
-void migrateLegacyAnnouncementTopologyTransactions() {
-  Map legacy = state[LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY] instanceof Map
-      ? new LinkedHashMap((Map)state[LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY]) : [:]
-  if(legacy.isEmpty()) { return }
-  List<Map> recoveryTransactions = []
-  legacy.values().each { Map transaction ->
-    if(transaction?.userTopologyChanged == true || !(transaction?.originalGroups instanceof List)) { return }
-    List<Map> originalGroups = ((List<Map>)transaction.originalGroups).findAll { Map group ->
-      group?.coordinatorId && normalizeGroupPlayerIds(group.playerIds)
-    }
-    if(transaction.phase != 'SNAPSHOTTING' && !originalGroups.isEmpty()) {
-      recoveryTransactions.add([groupDni: transaction.groupDni?.toString(),
-        correlationId: transaction.correlationId?.toString(), originalGroups: originalGroups, groupIndex: 0])
-    }
-  }
-  state.remove(LEGACY_ANNOUNCEMENT_TOPOLOGY_STATE_KEY)
-  if(recoveryTransactions.isEmpty()) {
-    logInfo('Removed stale announcement topology snapshots; no regrouping recovery was needed')
-    return
-  }
-  state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = [transactions: recoveryTransactions,
-    transactionIndex: 0, operationId: null]
-  logWarn("Recovering ${recoveryTransactions.size()} in-flight announcement topology change(s) before resuming announcements")
-  runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
-}
 
-void recoverLegacyAnnouncementTopologies() {
-  Map recovery = state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] instanceof Map
-      ? (Map)state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] : null
-  if(recovery == null) { return }
-  if(getActiveGroupOperation() != null) {
-    runIn(2, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
-    return
-  }
-  List<Map> transactions = recovery.transactions instanceof List ? (List<Map>)recovery.transactions : []
-  Integer transactionIndex = (recovery.transactionIndex ?: 0) as Integer
-  if(transactionIndex >= transactions.size()) {
-    state.remove(LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY)
-    return
-  }
-  Map transaction = transactions[transactionIndex]
-  List<Map> originalGroups = transaction.originalGroups instanceof List ? (List<Map>)transaction.originalGroups : []
-  Integer groupIndex = (transaction.groupIndex ?: 0) as Integer
-  if(groupIndex >= originalGroups.size()) {
-    Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
-        ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
-    Map queue = queues[transaction.groupDni?.toString()] instanceof Map ? (Map)queues[transaction.groupDni.toString()] : null
-    if(queue?.active?.correlationId?.toString() == transaction.correlationId?.toString()) { queue.active = null }
-    if(queue != null) {
-      queues[transaction.groupDni.toString()] = queue
-      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: transaction.groupDni], overwrite: false])
-    }
-    recovery.transactionIndex = transactionIndex + 1
-    recovery.operationId = null
-    state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
-    runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
-    return
-  }
-  ChildDeviceWrapper groupDevice = getChildDevice(transaction.groupDni?.toString())
-  Map original = originalGroups[groupIndex]
-  String coordinatorId = original.coordinatorId?.toString()
-  List<String> requiredIds = normalizeGroupPlayerIds(original.playerIds)
-  if(groupDevice == null || !coordinatorId || !requiredIds.contains(coordinatorId)) {
-    logWarn("Skipping legacy announcement topology recovery step ${groupIndex + 1}; group or coordinator is unavailable")
-    transaction.groupIndex = groupIndex + 1
-    state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
-    runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
-    return
-  }
-  Map target = [requiredPlayerIds: [coordinatorId] + requiredIds.findAll { String id -> id != coordinatorId }.sort(),
-    configuredCoordinatorId: coordinatorId, desiredCoordinatorId: coordinatorId,
-    resolvedCoordinatorId: coordinatorId, missingPlayerIds: []]
-  Map operation = buildNewGroupOperation(groupDevice, GROUPING_MODE_EXPLICIT, target)
-  operation.legacyAnnouncementRecovery = true
-  recovery.operationId = operation.operationId
-  state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
-  saveActiveGroupOperation(operation)
-  registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
-  publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
-  refreshGroupOperationTopology([operationId: operation.operationId])
-  runIn(GROUP_OPERATION_POLL_SECONDS, 'advanceGroupFavoriteOperation', [overwrite: true,
-    data: [operationId: operation.operationId]])
-}
 
-void advanceLegacyAnnouncementTopologyRecovery(Map operation) {
-  Map recovery = state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] instanceof Map
-      ? (Map)state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] : null
-  if(recovery == null) { return }
-  List<Map> transactions = recovery.transactions instanceof List ? (List<Map>)recovery.transactions : []
-  Integer transactionIndex = (recovery.transactionIndex ?: 0) as Integer
-  if(transactionIndex < transactions.size()) {
-    Map transaction = transactions[transactionIndex]
-    transaction.groupIndex = ((transaction.groupIndex ?: 0) as Integer) + 1
-  }
-  recovery.operationId = null
-  state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] = recovery
-  runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
-}
 
 void configure(Boolean startup = false) {
   applyLogLevelChange()
   logInfo("${app.name} updated")
   // Copy-then-prune: migrate legacy keys before whitelist removal deletes them.
   migrateLegacyAppStateOnce()
-  migrateLegacyAnnouncementTopologyTransactions()
   Map<String, Object> pruneResult = pruneOrphanedAppPersistence()
   // Log summary is already emitted by prune; keep reference for debugging.
   logDebug("App persistence prune completed: ${pruneResult}")
@@ -9237,12 +9136,6 @@ void finishGroupOperation(Map operation, String status, String errorCode = null,
     storeGroupingContext(operation)
   }
   state.remove(GROUP_OPERATION_STATE_KEY)
-  Map recovery = state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] instanceof Map ? (Map)state[LEGACY_ANNOUNCEMENT_RECOVERY_STATE_KEY] : null
-  if(operation.legacyAnnouncementRecovery == true && recovery?.operationId?.toString() == operation.operationId?.toString()) {
-    advanceLegacyAnnouncementTopologyRecovery(operation)
-  } else if(recovery != null) {
-    runIn(1, 'recoverLegacyAnnouncementTopologies', [overwrite: true])
-  }
   if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List) {
     runIn(1, 'drainDeferredGroupOperationCommands', [overwrite: true])
   }

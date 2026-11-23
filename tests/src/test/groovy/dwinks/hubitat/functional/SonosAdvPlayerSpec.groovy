@@ -648,8 +648,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>0</TOSLinkConnected></property></propertyset>')
 
     then:
-    driver.device.currentValues.audioSource == 'x-sonos-htastream:RINCON_TEST:spdif'
-    driver.device.currentValues.audioSourceSignalStatus == 'no-signal'
+    driver.events.any { Map event -> event.name == 'audioSource' && event.value == 'x-sonos-htastream:RINCON_TEST:spdif' }
+    driver.events.any { Map event -> event.name == 'audioSourceSignalStatus' && event.value == 'no-signal' }
     driver.device.currentValues.htControlTosLinkConnected == '0'
     playerStateMessages().isEmpty()
   }
@@ -667,13 +667,10 @@ class SonosAdvPlayerSpec extends Specification {
     driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>1</TOSLinkConnected></property></propertyset>')
 
     then:
-    driver.device.currentValues.audioSourceSignalStatus == 'signal'
+    driver.events.any { Map event -> event.name == 'audioSourceSignalStatus' && event.value == 'signal' }
   }
 
   def "WebSocket playback metadata no longer drives home theater signal observations"() {
-    given:
-    driver.device.currentValues.audioSourceSignalStatus = 'no-signal'
-
     when:
     driver.processWebsocketMessage(JsonOutput.toJson([
       [namespace: 'playbackMetadata', type: 'metadataStatus'],
@@ -681,7 +678,7 @@ class SonosAdvPlayerSpec extends Specification {
     ]))
 
     then:
-    driver.device.currentValues.audioSourceSignalStatus == 'no-signal'
+    !driver.events.any { Map event -> event.name == 'audioSourceSignalStatus' }
   }
 
   def "only the latest stream callback plays and duplicate callbacks are ignored"() {
