@@ -62,6 +62,18 @@ class SonosAdvGroupSpec extends Specification {
     ]]])
   }
 
+  def "group preference save schedules the existing full refresh command"() {
+    given:
+    driver.metaClass.initialize = { -> }
+    driver.metaClass.configure = { -> }
+
+    when:
+    driver.updated()
+
+    then:
+    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'refresh' }
+  }
+
   def "group actions use app requests without publishing control attributes"() {
     when:
     driver.on()

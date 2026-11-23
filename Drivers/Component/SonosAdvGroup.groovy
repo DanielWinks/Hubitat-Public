@@ -588,6 +588,7 @@ void installed() { initialize() }
 void updated() {
   initialize()
   configure()
+  runInMillis(1, 'refresh', [overwrite: true])
 }
 
 void uninstalled() {

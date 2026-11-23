@@ -1272,7 +1272,7 @@ void handleSettingsUpdate() {
     groupsRegistryInitialization()
     favoritesMapInitialization()
   }
-  scheduleAlbumArtPreferenceRefresh()
+  getPlaybackMetadataStatus()
 }
 
 
@@ -1327,7 +1327,7 @@ void performImmediateInitialization() {
   if(getIsGroupCoordinator() == true) { subscribeToAVTransport() }
   subscribeToContentDirectory()
   wsConnect()
-  if(getIsGroupCoordinator() == true) { getPlaybackMetadataStatus() }
+  getPlaybackMetadataStatus()
   refreshUpnpMediaCatalogs()
   scheduleWebsocketHealthCheck()
 }
@@ -1545,10 +1545,8 @@ void reconcileChildDevices() {
   createRemoveRightChannelChildDevice(getCreateRightChannelChildDevice())
   createRemoveNightModeChildDevice(getCreateNightModeChildDevice())
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
-  // Ask the parent app to refresh artwork attributes using this device's preference.
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  scheduleAlbumArtPreferenceRefresh()
   // Re-initialize in-memory data structures (static fields cleared on JVM restart)
   // Guard: these methods use getId() as a ConcurrentHashMap key, which throws NPE if null.
   // On fresh install, device data isn't set yet — secondaryConfigurationPhase4() will handle this.
@@ -1786,7 +1784,6 @@ void secondaryConfigurationPhase4() {
   createRemoveSpeechEnhancementChildDevice(getCreateSpeechEnhancementChildDevice())
   if(getDisableTrackDataEvents()) { clearTrackDataEvent() }
   if(getDisableArtistAlbumTrackEvents()) { clearCurrentNextArtistAlbumTrackData() }
-  scheduleAlbumArtPreferenceRefresh()
   audioClipQueueInitialization()
   groupsRegistryInitialization()
   favoritesMapInitialization()
@@ -7560,21 +7557,6 @@ void clearCurrentNextArtistAlbumTrackData() {
   setCurrentTrackName(null)
   setCurrentTrackNumber(0)
   setNextArtistAlbumTrack(null, null, null)
-}
-
-void scheduleAlbumArtPreferenceRefresh() {
-  runInMillis(1, 'notifyParentAlbumArtPreferenceUpdate', [overwrite: true])
-}
-
-void notifyParentAlbumArtPreferenceUpdate() {
-  try {
-    parent.playerAlbumArtPreferenceUpdate([
-      playerDni: device.getDeviceNetworkId(),
-      currentAlbumArtURI: device.currentValue('albumArtURI', true)?.toString()
-    ])
-  } catch(Exception e) {
-    logWarn("Could not notify parent of album art preference update: ${e.message}")
-  }
 }
 
 void clearTrackDataEvent() {

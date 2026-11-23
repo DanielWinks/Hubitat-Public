@@ -5445,31 +5445,6 @@ void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes
   }
 }
 
-/** A device preference save asks the app to republish the latest art using the new setting. */
-void playerAlbumArtPreferenceUpdate(Map payload) {
-  String playerDni = payload?.playerDni?.toString()
-  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
-  String playerId = player?.getDataValue('id')?.toString()
-  if(!player || !playerId) { return }
-  String coordinatorId = player.getDataValue('groupCoordinatorId')?.toString() ?: playerId
-  List<Map> events = getStoredAvtEvents(coordinatorId)
-  Map artEvent = events.find { Map event -> event?.name?.toString() == 'albumArtURI' }
-  String rawAlbumArtURI = artEvent?.value?.toString() ?: 'Not Available'
-  if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') {
-    String previousAlbumArtURI = payload?.currentAlbumArtURI?.toString()
-    def imageMatcher = previousAlbumArtURI =~ /<img[^>]*src=["']([^"']+)["']/
-    if(imageMatcher.find()) {
-      rawAlbumArtURI = StringEscapeUtils.unescapeHtml4(imageMatcher.group(1))
-    } else if(previousAlbumArtURI && previousAlbumArtURI.startsWith('http')) {
-      rawAlbumArtURI = previousAlbumArtURI
-    }
-  }
-  if(!rawAlbumArtURI) { rawAlbumArtURI = 'Not Available' }
-  Map<String, Object> attributes = albumArtAttributesForFanout(rawAlbumArtURI, coordinatorId)
-  queueChildStateBatch(playerDni, attributes)
-  if(coordinatorId == playerId) { flushGroupDeviceState(coordinatorId, null, attributes) }
-}
-
 /** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
 String playerStateUpdateCoalesceKey(Map payload) {
   // playbackObservation/state/wsConnected/wsRetry removed — parent now reads attributes + lastUpdated

@@ -31,6 +31,20 @@ class SonosAdvPlayerSpec extends Specification {
       upnpMetadata: '<DIDL-Lite><item id="SQ:' + playlistId + '"><dc:title>Playlist ' + playlistId + '</dc:title></item></DIDL-Lite>']
   }
 
+  def "settings save requests the full current playback metadata snapshot"() {
+    given:
+    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.asyncCalls.clear()
+
+    when:
+    driver.handleSettingsUpdate()
+
+    then:
+    driver.asyncCalls.any { Map call ->
+      call.params?.headers?.SOAPAction == 'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo'
+    }
+  }
+
   void queueTestGroupSocketCommand(Integer marker = 10) {
     driver.device.dataValues.websocketStatus = 'open'
     driver.sendWsMessage(JsonOutput.toJson([[namespace: 'audioClip', command: 'loadAudioClip', playerId: 'RINCON_TEST'],
