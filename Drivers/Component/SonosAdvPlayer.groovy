@@ -581,6 +581,7 @@ metadata {
   attribute 'balance', 'number'
   attribute 'nightMode', 'enum', [ 'on', 'off' ]
   attribute 'speechEnhancement', 'enum', [ 'on', 'off' ]
+  attribute 'htControlTosLinkConnected', 'enum', [ '0', '1' ]
   command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
   command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
   command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
@@ -617,7 +618,6 @@ metadata {
   attribute 'groupMemberNames', 'JSON_OBJECT'
   attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
   attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
-  attribute 'lastUpdated', 'number'
   }
 
   preferences {
@@ -918,29 +918,12 @@ Boolean hasLineInCapability() {
 // grouped multi-player update by the order Sonos reports the group members.
 @Field static ConcurrentHashMap<String, Integer> pendingGroupedPlayerVolumes = new ConcurrentHashMap<String, Integer>()
 @Field static final Integer GROUPED_PLAYER_VOLUME_STAGGER_MS = 250
-@Field static final String LOCAL_EVENT_DRAIN_SCHEDULED_KEY = 'localDeviceEventDrainScheduled'
-@Field static final String LOCAL_EVENT_DRAIN_DUE_AT_KEY = 'localDeviceEventDrainDueAt'
-@Field static final Integer LOCAL_EVENT_MAX_WAIT_MS = 500
-@Field static final Integer LOCAL_EVENTS_PER_DRAIN = 8
-@Field static final Integer LOCAL_EVENT_DRAIN_INTERVAL_MS = 200
-@Field static final Striped<java.util.concurrent.locks.Lock> localDeviceEventStripes = Striped.lock(64)
-@Field static final String PENDING_COMPONENT_CHILD_EVENTS_KEY = 'pendingComponentChildEvents'
-@Field static final String COMPONENT_CHILD_DRAIN_SCHEDULED_KEY = 'componentChildDrainScheduled'
-@Field static final String COMPONENT_CHILD_DRAIN_DUE_AT_KEY = 'componentChildDrainDueAt'
-@Field static final String COMPONENT_CHILD_RETRY_ATTEMPTS_KEY = 'componentChildRetryAttempts'
-@Field static final String LAST_COMPONENT_CHILD_EVENTS_KEY = 'lastComponentChildEvents'
-@Field static final Integer COMPONENT_CHILD_MAX_WAIT_MS = 500
-@Field static final Integer COMPONENT_CHILD_EVENTS_PER_DRAIN = 8
-@Field static final Integer COMPONENT_CHILD_DRAIN_INTERVAL_MS = 200
-@Field static final Integer COMPONENT_CHILD_RETRY_MAX_MS = 30000
 
 @Field static final Integer AUDIO_CLIP_ACTIVE_TIMEOUT_SECONDS = 15
 @Field static final Integer AUDIO_CLIP_DONE_GRACE_SECONDS = 15
 @Field static ConcurrentHashMap<String, Map> groupVolumeFadeState = new ConcurrentHashMap<String, Map>()
 @Field static ConcurrentHashMap<String, Long> lastVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
-@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> pendingLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
-@Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> lastLocalDeviceEvents = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
 @Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
@@ -955,13 +938,6 @@ Boolean hasLineInCapability() {
 // Whitelisted persistence — pruning helper surfaces (standalone copy, no #include)
 // =============================================================================
 @Field static final Set<String> ACTIVE_PLAYER_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'localDeviceEventDrainScheduled',
-  'localDeviceEventDrainDueAt',
-  'pendingComponentChildEvents',
-  'componentChildDrainScheduled',
-  'componentChildDrainDueAt',
-  'componentChildRetryAttempts',
-  'lastComponentChildEvents',
   'pendingParentAppTtsRequests',
   'favoriteLoadRequestId',
   'playlistLoadRequestId',
@@ -994,7 +970,6 @@ Boolean hasLineInCapability() {
   'groupCoordinatorId',
   'groupId',
   'groupPlayerIds',
-  'isGroupCoordinator',
   'coordinatorStatusChanged',
   'deviceIp',
   'secondaryIds',
@@ -1004,7 +979,6 @@ Boolean hasLineInCapability() {
   'zgtSub',
   'zgtSubExpires',
   'zgtSubExpiresEpoch',
-  'rcSnapshotJson',
   'staticDriverActivePlayerRoster',
   'sid1',
   'sid2',
@@ -1070,7 +1044,6 @@ Boolean hasLineInCapability() {
   'groupMemberNames',
   'status',
   'transportStatus',
-  'lastUpdated',
 ]))
 
 @Field static final Set<String> ACTIVE_PLAYER_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -1202,10 +1175,6 @@ List<String> pruneOrphanSettings(Set<String> active) {
 // =============================================================================
 void uninstalled() {
   unschedule('refreshUpnpMediaCatalogs')
-  unschedule('flushPendingLocalDeviceEvents')
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-  state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-  unschedule('drainComponentChildEvents')
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
@@ -1226,10 +1195,6 @@ void handleSettingsUpdate() {
   synchronizeTrackPositionPreference()
   migrationCleanup()
   pruneOrphanedDriverPersistence()
-  scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
-  resetComponentChildEventRetries()
-  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-  scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
   cancelAudioClipWatchdog()
   if(getId()) {
     audioClipQueueInitialization()
@@ -1243,22 +1208,11 @@ void handleSettingsUpdate() {
 
 
 
-/** Clear this player’s queued publications before local initialization. */
-void resetPendingStatePublicationForInitialization() {
+/** Clear obsolete bridge attributes before local initialization. */
+void clearLegacyBridgeAttributesForInitialization() {
   String dni = device.getDeviceNetworkId()
-  unschedule('flushPendingLocalDeviceEvents')
-  unschedule('drainComponentChildEvents')
-  state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-  state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-  state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
-  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-  state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
-  state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
-  state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY)
-  pendingLocalDeviceEvents.remove(dni)
-  lastLocalDeviceEvents.remove(dni)
   clearLegacyBridgeCurrentStates()
-  logDebug("Cleared stale state-publication queues and drain jobs for ${dni} before fresh initialization snapshot")
+  logDebug("Cleared stale bridge attributes for ${dni} before fresh initialization snapshot")
 }
 
 void performImmediateInitialization() {
@@ -1273,7 +1227,7 @@ void performImmediateInitialization() {
   migrateLegacyRuntimeState()
   pruneOrphanedDriverPersistence()
   cacheBatteryCapability()
-  resetPendingStatePublicationForInitialization()
+  clearLegacyBridgeAttributesForInitialization()
   cancelAudioClipWatchdog()
   maybeCleanupStaticDriverState()
   reconcileChildDevices()
@@ -1439,10 +1393,6 @@ void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
   pruneOrphanedDriverPersistence()
-  scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
-  resetComponentChildEventRetries()
-  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-  scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS)
   cancelAudioClipWatchdog()
   runtimeState.wsRetryCount = 0
   migrationCleanup()
@@ -1499,8 +1449,8 @@ void reconcileChildDevices() {
 
 void synchronizeTrackPositionPreference() {
   if(!getEnableTrackPositionUpdates()) {
-    queuePlayerAttributeUpdate('trackPosition', 0L)
-    queuePlayerAttributeUpdate('trackPositionUpdated', 0L)
+    device.sendEvent(name: 'trackPosition', value: 0L)
+    device.sendEvent(name: 'trackPositionUpdated', value: 0L)
   }
 }
 
@@ -1536,14 +1486,8 @@ void migrateLegacyRuntimeState() {
       if(decodedValue != null) { runtime.putIfAbsent(key, decodedValue) }
     }
   }
-  Object pendingComponentChildEvents = state[PENDING_COMPONENT_CHILD_EVENTS_KEY]
-  Object componentChildDrainScheduled = state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY]
-  Object lastComponentChildEvents = state[LAST_COMPONENT_CHILD_EVENTS_KEY]
   state.clear()
   atomicState.clear()
-  if(pendingComponentChildEvents != null) { state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pendingComponentChildEvents }
-  if(componentChildDrainScheduled != null) { state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = componentChildDrainScheduled }
-  if(lastComponentChildEvents != null) { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastComponentChildEvents }
 }
 
 Boolean isHiddenJsonStateKey(String name) {
@@ -1858,8 +1802,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
     clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
     clearedEntries += clearStaticMap(favoriteRetryState)
     clearedEntries += clearStaticMap(playlistRetryState)
-    clearedEntries += clearStaticMap(pendingLocalDeviceEvents)
-    clearedEntries += clearStaticMap(lastLocalDeviceEvents)
     clearedEntries += clearStaticMap(lastMetadataContainerId)
     clearedEntries += clearStaticMap(lastPlaybackState)
     clearedEntries += clearStaticMap(lastWsEventLog)
@@ -1894,8 +1836,6 @@ void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
   removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
   removedEntries += pruneStaticMapKeys(favoriteRetryState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(playlistRetryState, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(pendingLocalDeviceEvents, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(lastLocalDeviceEvents, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastMetadataContainerId, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastPlaybackState, activePlayerDnis)
   removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
@@ -2042,8 +1982,6 @@ void clearStaticDriverStateForCurrentDevice() {
       audioClipProgressByCorrelationIdByDni?.remove(dni)
       favoriteRetryState?.remove(dni)
       playlistRetryState?.remove(dni)
-      pendingLocalDeviceEvents?.remove(dni)
-      lastLocalDeviceEvents?.remove(dni)
       lastMetadataContainerId?.remove(dni)
       lastPlaybackState?.remove(dni)
       lastWsEventLog?.remove(dni)
@@ -4148,9 +4086,9 @@ void componentOff(DeviceWrapper child) {
 
 void setNextArtistAlbumTrack(String nextArtistName, String nextAlbumName, String nextTrackName) {
   if(getDisableArtistAlbumTrackEvents()) {return}
-  queuePlayerAttributeUpdate('nextArtistName', nextArtistName ?: 'Not Available')
-  queuePlayerAttributeUpdate('nextAlbumName', nextAlbumName ?: 'Not Available')
-  queuePlayerAttributeUpdate('nextTrackName', nextTrackName ?: 'Not Available')
+  device.sendEvent(name: 'nextArtistName', value: nextArtistName ?: 'Not Available')
+  device.sendEvent(name: 'nextAlbumName', value: nextAlbumName ?: 'Not Available')
+  device.sendEvent(name: 'nextTrackName', value: nextTrackName ?: 'Not Available')
 }
 
 void updateChildBatteryStatus(Integer battery, String powerSource, BigDecimal temperature) {
@@ -4204,33 +4142,6 @@ ChildDeviceWrapper getSpeechEnhancementChild() { return getChildDevice(getSpeech
 // End Child Device Helpers
 // =============================================================================
 
-void invalidateComponentChildState(String dni) {
-  if(!dni) { return }
-  Map<String, Map<String, Object>> lastSent = state[LAST_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[LAST_COMPONENT_CHILD_EVENTS_KEY]) : [:]
-  lastSent.remove(dni)
-  if(lastSent.isEmpty()) { state.remove(LAST_COMPONENT_CHILD_EVENTS_KEY) }
-  else { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastSent }
-  Map<String, Integer> retries = state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Integer>((Map<String, Integer>)state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY]) : [:]
-  retries.remove(dni)
-  if(retries.isEmpty()) { state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY) }
-  else { state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] = retries }
-}
-
-/** Drop queued events only when a child is intentionally removed or disabled. */
-void discardComponentChildState(String dni) {
-  if(!dni) { return }
-  invalidateComponentChildState(dni)
-  Map<String, Map<String, Object>> pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[PENDING_COMPONENT_CHILD_EVENTS_KEY]) : [:]
-  pending.remove(dni)
-  if(pending.isEmpty()) { state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY) }
-  else { state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pending }
-}
-
-
-
 // =============================================================================
 // Create Child Devices
 // =============================================================================
@@ -4238,7 +4149,6 @@ void createRemoveCrossfadeChildDevice(Boolean create) {
   String dni = getCrossfadeControlChildDNI()
   ChildDeviceWrapper child = getCrossfadeControlChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating CrossfadeControl device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4246,18 +4156,16 @@ void createRemoveCrossfadeChildDevice(Boolean create) {
           label: "Sonos Crossfade Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'Crossfade')
-      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveCrossfadeChildDevice', e)
     }
-  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ deleteChildDevice(dni) }
 }
 
 void createRemoveShuffleChildDevice(Boolean create) {
   String dni = getShuffleControlChildDNI()
   ChildDeviceWrapper child = getShuffleControlChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating Shuffle Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4265,18 +4173,16 @@ void createRemoveShuffleChildDevice(Boolean create) {
           label: "Sonos Shuffle Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'Shuffle')
-      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveShuffleChildDevice', e)
     }
-  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ deleteChildDevice(dni) }
 }
 
 void createRemoveRepeatOneChildDevice(Boolean create) {
   String dni = getRepeatOneControlChildDNI()
   ChildDeviceWrapper child = getRepeatOneControlChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating RepeatOne Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4284,19 +4190,17 @@ void createRemoveRepeatOneChildDevice(Boolean create) {
           label: "Sonos RepeatOne Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'RepeatOne')
-      scheduleComponentChildEventDrainNow(dni)
       logDebug("ChildDNI = ${child.getDeviceNetworkId()}")
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveRepeatOneChildDevice', e)
     }
-  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ deleteChildDevice(dni) }
 }
 
 void createRemoveRepeatAllChildDevice(Boolean create) {
   String dni = getRepeatAllControlChildDNI()
   ChildDeviceWrapper child = getRepeatAllControlChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating RepeatAll Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4304,18 +4208,16 @@ void createRemoveRepeatAllChildDevice(Boolean create) {
           label: "Sonos RepeatAll Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'RepeatAll')
-      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveRepeatAllChildDevice', e)
     }
-  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ deleteChildDevice(dni) }
 }
 
 void createRemoveMuteChildDevice(Boolean create) {
   String dni = getMuteControlChildDNI()
   ChildDeviceWrapper child = getMuteControlChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating Mute Control device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4323,13 +4225,12 @@ void createRemoveMuteChildDevice(Boolean create) {
           label: "Sonos Mute Control - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'Mute')
-      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveMuteChildDevice', e)
     } catch (Exception e) {
       logException('createRemoveMuteChildDevice', e)
     }
-  } else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  } else if(!create && child){ deleteChildDevice(dni) }
 }
 
 void createRemoveBatteryStatusChildDevice(Boolean create) {
@@ -4635,7 +4536,6 @@ void createRemoveNightModeChildDevice(Boolean create) {
   String dni = getNightModeChildDNI()
   ChildDeviceWrapper child = getNightModeChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating NightMode device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4643,19 +4543,17 @@ void createRemoveNightModeChildDevice(Boolean create) {
           label: "Sonos NightMode - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'NightMode')
-      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveNightModeChildDevice', e)
     }
   }
-  else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  else if(!create && child){ deleteChildDevice(dni) }
 }
 
 void createRemoveSpeechEnhancementChildDevice(Boolean create) {
   String dni = getSpeechEnhancementChildDNI()
   ChildDeviceWrapper child = getSpeechEnhancementChild()
   if(!child && create) {
-    invalidateComponentChildState(dni)
     try {
       logDebug("Creating SpeechEnhancement device")
       child = addChildDevice('hubitat', 'Generic Component Switch', dni,
@@ -4663,12 +4561,11 @@ void createRemoveSpeechEnhancementChildDevice(Boolean create) {
           label: "Sonos SpeechEnhancement - ${(device.getDataValue('name') ?: device.displayName)}"]
       )
       child.updateDataValue('command', 'SpeechEnhancement')
-      scheduleComponentChildEventDrainNow(dni)
     } catch (UnknownDeviceTypeException e) {
       logException('createRemoveSpeechEnhancementChildDevice', e)
     }
   }
-  else if(!create && child){ discardComponentChildState(dni); deleteChildDevice(dni) }
+  else if(!create && child){ deleteChildDevice(dni) }
 }
 // =============================================================================
 // Create Child Devices
@@ -4685,13 +4582,11 @@ Long getHubitatCurrentTime() { return now() }
 void parse(String raw) {
   if(raw == null || raw == '') {return}
   if(raw.startsWith('UPNP_RESPONSE|')) {
-    try { queuePlayerAttributeUpdate('lastUpdated', getHubitatCurrentTime()) } catch(Exception ignored) { }
     logDebug("UPnP response parse entered; payloadLength=${raw.length()}")
     handleUpnpRawResponse(raw)
     return
   }
   if(!raw.startsWith('mac:')) {
-    try { queuePlayerAttributeUpdate('lastUpdated', getHubitatCurrentTime()) } catch(Exception ignored) { }
     logDebug("WebSocket parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     try {
       setLastWebsocketEvent()
@@ -4723,9 +4618,6 @@ void parse(String raw) {
       return
     }
     String serviceType = messageHeaders["X-SONOS-SERVICETYPE"]?.toString()
-    if(!(serviceType in ['ZoneGroupTopology', 'AVTransport', 'GroupRenderingControl'])) {
-      try { queuePlayerAttributeUpdate('lastUpdated', getHubitatCurrentTime()) } catch(Exception ignored) { }
-    }
     String seqRaw = messageHeaders["SEQ"] ?: messageHeaders["X-SONOS-SEQ"]
     Integer seq = null
     if(seqRaw != null) {
@@ -4749,7 +4641,7 @@ void parse(String raw) {
             cacheZgtMemberHosts((List<Map>)snapshot.groups)
             String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
-            queueParsedUpnpRelay([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId])
+            scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId])
           } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
           return
         case 'AVTransport':
@@ -4760,7 +4652,7 @@ void parse(String raw) {
             String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             String rincon = getId()
             List<Map> events = buildAvtEvents(snapshot, [:])
-            queueParsedUpnpRelay([service: 'AVT', sourceDni: sourceDni, rincon: rincon, events: events])
+            scheduleParsedUpnpParentHandoff([service: 'AVT', sourceDni: sourceDni, rincon: rincon, events: events])
           } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
           return
         case 'RenderingControl':
@@ -4783,7 +4675,7 @@ void parse(String raw) {
             String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             String rincon = getId()
             List<Map> events = buildGrcEvents(snapshot)
-            queueParsedUpnpRelay([service: 'GRC', sourceDni: sourceDni, rincon: rincon, events: events])
+            scheduleParsedUpnpParentHandoff([service: 'GRC', sourceDni: sourceDni, rincon: rincon, events: events])
           } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
           return
         case 'HTControl':
@@ -4807,8 +4699,8 @@ void parse(String raw) {
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
 
-// Parse handlers relay sendEvent-ready payloads after parse() releases the player gate.
-void queueParsedUpnpRelay(Map payload) {
+// Parent callbacks run after parse() releases the player gate.
+void scheduleParsedUpnpParentHandoff(Map payload) {
   if(payload == null || parent == null) { return }
   runInMillis(1, 'relayParsedUpnpToParent', [overwrite: false, data: new LinkedHashMap(payload)])
 }
@@ -4836,7 +4728,7 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
   List<Map> groups = (List<Map>)snapshot.groups
   cacheZgtMemberHosts(groups)
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
-  queueParsedUpnpRelay([service: 'ZGT', sourceDni: deviceDni, eventsByGroupId: eventsByGroupId])
+  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: deviceDni, eventsByGroupId: eventsByGroupId])
 }
 
 // Refresh the transient host cache (see field comment); parse is otherwise store-free.
@@ -5125,7 +5017,7 @@ void handleAvtFull(String dni, String xmlBody, Integer incomingSeq) {
   if(notification == null) { return }
   List<Map> events = buildAvtEvents(notification, [:])
   if(events) {
-    queueParsedUpnpRelay([service: 'AVT', sourceDni: deviceDni, rincon: getId(), events: events])
+    scheduleParsedUpnpParentHandoff([service: 'AVT', sourceDni: deviceDni, rincon: getId(), events: events])
   }
 }
 
@@ -5353,8 +5245,11 @@ void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer i
   if(snapshot == null) { return }
   List<Map> events = buildRcEvents(snapshot)
   if(events) {
-    queueParsedUpnpRelay([service: 'RC', sourceDni: dni ?: device.getDeviceNetworkId()?.toString() ?: 'unknown',
-      rincon: getId(), events: events])
+    events.each { Map event ->
+      if(event?.name != null && event?.value != null) {
+        device.sendEvent(name: event.name.toString(), value: event.value)
+      }
+    }
   }
 }
 
@@ -5364,7 +5259,7 @@ void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incom
   Map snapshot = parseGrcFullSnapshot(xmlBody)
   if(snapshot == null) { return }
   List<Map> events = buildGrcEvents(snapshot)
-  if(events) { queueParsedUpnpRelay([service: 'GRC', sourceDni: deviceDni, rincon: getId(), events: events]) }
+  if(events) { scheduleParsedUpnpParentHandoff([service: 'GRC', sourceDni: deviceDni, rincon: getId(), events: events]) }
 }
 
 // Stored as sendEvent-ready attribute maps for parent-app delivery.
@@ -5735,7 +5630,7 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
   if(snapshot == null) { return false }
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
   String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-  queueParsedUpnpRelay([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
+  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
   return true
 }
 
@@ -5743,13 +5638,13 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   if(topology == null || !(topology.groups instanceof List)) { return false }
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)topology.groups)
   String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-  queueParsedUpnpRelay([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
+  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
   return true
 }
 
 @CompileStatic
 void updateZoneGroupName(String groupName) {
-  queuePlayerAttributeUpdate('groupName', groupName)
+  if(groupName != null) { device.sendEvent(name: 'groupName', value: groupName) }
 }
 
 void processGroupRenderingControlMessages(String xmlString) {
@@ -5758,8 +5653,8 @@ void processGroupRenderingControlMessages(String xmlString) {
 
 @CompileStatic
 void setGroupVolumeState(Integer groupVolume) {
-  if(!shouldQueuePlayerAttributeUpdate('groupVolume', groupVolume, getGroupVolumeState())) { return }
-  queuePlayerAttributeUpdate('groupVolume', groupVolume)
+  if(!(groupVolume != getGroupVolumeState())) { return }
+  if(groupVolume != null) { device.sendEvent(name: 'groupVolume', value: groupVolume) }
 }
 @CompileStatic
 Integer getGroupVolumeState() {
@@ -5769,8 +5664,8 @@ Integer getGroupVolumeState() {
 
 @CompileStatic
 void setGroupMuteState(String groupMute) {
-  if(!shouldQueuePlayerAttributeUpdate('groupMute', groupMute, getGroupMuteState())) { return }
-  queuePlayerAttributeUpdate('groupMute', groupMute)
+  if(!(groupMute != getGroupMuteState())) { return }
+  if(groupMute != null) { device.sendEvent(name: 'groupMute', value: groupMute) }
 }
 @CompileStatic
 String getGroupMuteState() {
@@ -5780,16 +5675,15 @@ String getGroupMuteState() {
 
 @CompileStatic
 void setNightModeState(String value) {
-  if(!shouldQueuePlayerAttributeUpdate('nightMode', value, this.device.currentValue('nightMode') as String)) { return }
-  queuePlayerAttributeUpdate('nightMode', value)
+  if(!(value != this.device.currentValue('nightMode') as String)) { return }
+  if(value != null) { device.sendEvent(name: 'nightMode', value: value) }
   sendChildEvent(getNightModeChild(), 'switch', value)
 }
 
 @CompileStatic
 void setDialogLevelState(String value) {
-  if(!shouldQueuePlayerAttributeUpdate('speechEnhancement', value,
-      this.device.currentValue('speechEnhancement') as String)) { return }
-  queuePlayerAttributeUpdate('speechEnhancement', value)
+  if(!(value != this.device.currentValue('speechEnhancement') as String)) { return }
+  if(value != null) { device.sendEvent(name: 'speechEnhancement', value: value) }
   sendChildEvent(getSpeechEnhancementChild(), 'switch', value)
 }
 
@@ -6729,7 +6623,7 @@ void clearCurrentNextArtistAlbumTrackData() {
 }
 
 void clearTrackDataEvent() {
-  queuePlayerAttributeUpdate('trackData', '{}')
+  device.sendEvent(name: 'trackData', value: '{}')
 }
 // =============================================================================
 // End Misc Helpers
@@ -6954,284 +6848,6 @@ Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
   }
 }
 
-private Object getLocalDeviceEventLock(String dni) {
-  return localDeviceEventStripes.get(dni)
-}
-
-/** Queue one local attribute until its fixed maximum-wait drain deadline. */
-void queuePlayerAttributeUpdate(String name, Object value) {
-  if(!name || value == null) { return }
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = getLocalDeviceEventLock(dni)
-  synchronized(lock) {
-    lastLocalDeviceEvents.putIfAbsent(dni, new ConcurrentHashMap<String, Object>())
-    ConcurrentHashMap<String, Object> lastSent = lastLocalDeviceEvents.get(dni)
-    pendingLocalDeviceEvents.putIfAbsent(dni, new ConcurrentHashMap<String, Object>())
-    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-    Boolean alreadyPending = pending.containsKey(name)
-    Object previous = alreadyPending ? pending.get(name) : lastSent?.get(name)
-    Object currentValue = this.device.currentValue(name, true)
-
-    if(alreadyPending && previous == value) {
-      logDebug("Local event queue coalesced; dni=${dni}, attribute=${name}, value=${value}, pending=${pending.size()}")
-      // Re-arm the callback even for a coalesced value. The pending map, not
-      // the scheduled flag, is authoritative about whether work remains.
-      scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
-      return
-    }
-    if(!alreadyPending && previous == value && currentValue == value) {
-      logDebug("Local event queue deduplicated against current device state; dni=${dni}, attribute=${name}, value=${value}")
-      return
-    }
-
-    pending.put(name, value)
-    logDebug("Local event queued; dni=${dni}, attribute=${name}, value=${value}, previous=${previous}, current=${currentValue}, pending=${pending.size()}, scheduled=${state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] == true}")
-    scheduleLocalDeviceEventDrain(LOCAL_EVENT_MAX_WAIT_MS)
-  }
-}
-
-Boolean shouldQueuePlayerAttributeUpdate(String name, Object value, Object currentValue) {
-  if(value != currentValue) { return true }
-  String dni = device.getDeviceNetworkId()
-  ConcurrentHashMap<String, Object> localPending = pendingLocalDeviceEvents.get(dni)
-  if(localPending?.containsKey(name) && localPending.get(name) != value) { return true }
-  return false
-}
-
-/** Ensure a callback exists for all pending local events. A stale state flag
- * must never suppress scheduling; repeated calls overwrite the same callback
- * using the earliest pending deadline. */
-private void scheduleLocalDeviceEventDrain(Integer delayMs) {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = getLocalDeviceEventLock(dni)
-  synchronized(lock) {
-    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-    if(!pending || pending.isEmpty()) {
-      state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-      state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-      return
-    }
-
-    Long currentTime = now() as Long
-    Long requestedDueAt = currentTime + Math.max(1, delayMs ?: LOCAL_EVENT_DRAIN_INTERVAL_MS) as Long
-    Long existingDueAt = state[LOCAL_EVENT_DRAIN_DUE_AT_KEY] as Long
-    Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
-    Long remainingMs = Math.max(1L, dueAt - currentTime)
-    Integer scheduleDelay = remainingMs > Integer.MAX_VALUE ? Integer.MAX_VALUE : remainingMs as Integer
-    state[LOCAL_EVENT_DRAIN_DUE_AT_KEY] = dueAt
-    state[LOCAL_EVENT_DRAIN_SCHEDULED_KEY] = true
-    runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
-    logDebug("Scheduling or refreshing local event drain; dni=${dni}, delayMs=${scheduleDelay}, dueAt=${dueAt}, pending=${pending.size()}, previousScheduled=${existingDueAt != null}")
-    try {
-      runInMillis(scheduleDelay, 'flushPendingLocalDeviceEvents', [overwrite: true])
-    } catch(Exception e) {
-      state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-      state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-      logWarn("Could not schedule local event drain for dni=${dni}; pending=${pending.size()}: ${e.message}")
-    }
-  }
-}
-
-void flushPendingLocalDeviceEvents() {
-  String dni = device.getDeviceNetworkId()
-  if(!dni) { return }
-  Object lock = getLocalDeviceEventLock(dni)
-  Map<String, Object> batch = [:]
-  synchronized(lock) {
-    state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-    state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-    if(!pending || pending.isEmpty()) {
-      if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
-      return
-    }
-    List<String> names = new ArrayList<String>(pending.keySet()).take(LOCAL_EVENTS_PER_DRAIN)
-    names.each { String attrName ->
-      Object attrValue = pending.remove(attrName)
-      if(attrValue != null) { batch[attrName] = attrValue }
-    }
-  }
-
-  ConcurrentHashMap<String, Object> lastSent = lastLocalDeviceEvents.get(dni)
-  if(lastSent == null) {
-    ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
-    ConcurrentHashMap<String, Object> existing = lastLocalDeviceEvents.putIfAbsent(dni, created)
-    lastSent = existing ?: created
-  }
-  if(!batch.isEmpty()) {
-    try {
-      if(!dispatchParentStateUpdateDirect([kind: 'deviceAttributes', playerDni: dni, attributes: batch])) {
-        throw new IllegalStateException('Parent app rejected player attribute handoff')
-      }
-      lastSent.putAll(batch)
-    } catch(Exception e) {
-      synchronized(lock) {
-        ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-        if(pending == null) {
-          ConcurrentHashMap<String, Object> created = new ConcurrentHashMap<String, Object>()
-          ConcurrentHashMap<String, Object> existing = pendingLocalDeviceEvents.putIfAbsent(dni, created)
-          pending = existing ?: created
-        }
-        batch.each { String attrName, Object attrValue -> pending.put(attrName, attrValue) }
-        logWarn("Could not hand off player attributes to the app for dni=${dni}; retaining ${batch.size()} values: ${e.message}")
-      }
-    }
-  }
-  synchronized(lock) {
-    ConcurrentHashMap<String, Object> pending = pendingLocalDeviceEvents.get(dni)
-    if(!pending || pending.isEmpty()) {
-      if(pending != null) { pendingLocalDeviceEvents.remove(dni, pending) }
-      state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-      state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-    } else {
-      scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS)
-    }
-  }
-}
-
-/** Dispatch the child driver's custom batch command across the Hubitat wrapper boundary. */
-void applyChildStateBatch(ChildDeviceWrapper child, String jsonAttributes) {
-  child.applyStateBatch(jsonAttributes)
-}
-
-private void scheduleComponentChildEventDrain(Integer delayMs) {
-  Map pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  if(pending.isEmpty()) {
-    state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-    state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
-    return
-  }
-  Long currentTime = now() as Long
-  Long requestedDueAt = currentTime + Math.max(1, delayMs ?: COMPONENT_CHILD_DRAIN_INTERVAL_MS) as Long
-  Long existingDueAt = state[COMPONENT_CHILD_DRAIN_DUE_AT_KEY] as Long
-  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
-  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
-  state[COMPONENT_CHILD_DRAIN_DUE_AT_KEY] = dueAt
-  state[COMPONENT_CHILD_DRAIN_SCHEDULED_KEY] = true
-  runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
-  try {
-    runInMillis(scheduleDelay, 'drainComponentChildEvents', [overwrite: true])
-  } catch(Exception e) {
-    state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-    state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
-    logWarn("Could not schedule component-child event drain: ${e.message}")
-  }
-}
-
-/** Retry promptly when a missing component child has been recreated. */
-private void scheduleComponentChildEventDrainNow(String dni) {
-  Map pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  if(dni && pending.containsKey(dni)) {
-    unschedule('drainComponentChildEvents')
-    state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-    state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
-    scheduleComponentChildEventDrain(1)
-  }
-}
-
-private void resetComponentChildEventRetries() {
-  state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY)
-}
-
-private Integer componentChildRetryDelay(Integer attempts) {
-  Integer delayMs = COMPONENT_CHILD_DRAIN_INTERVAL_MS
-  for(Integer attempt = 1; attempt < attempts && delayMs < COMPONENT_CHILD_RETRY_MAX_MS; attempt++) {
-    delayMs = Math.min(delayMs * 2, COMPONENT_CHILD_RETRY_MAX_MS)
-  }
-  return delayMs
-}
-
-private synchronized void queueComponentChildEvent(ChildDeviceWrapper child, String name, Object value) {
-  if(child == null || !name || value == null) { return }
-  String dni = child.getDeviceNetworkId()
-  Map<String, Map<String, Object>> lastSent = state[LAST_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[LAST_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  Map<String, Object> lastForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
-  Map<String, Map<String, Object>> pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  Map<String, Object> eventsForChild = pending[dni] instanceof Map ? pending[dni] : [:]
-  Object prior = eventsForChild.containsKey(name) ? eventsForChild[name] : lastForChild[name]
-  if((eventsForChild.containsKey(name) || lastForChild.containsKey(name)) && prior == value) { return }
-  eventsForChild[name] = value
-  pending[dni] = eventsForChild
-  state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pending
-  scheduleComponentChildEventDrain(COMPONENT_CHILD_MAX_WAIT_MS)
-}
-
-synchronized void drainComponentChildEvents() {
-  state.remove(COMPONENT_CHILD_DRAIN_SCHEDULED_KEY)
-  state.remove(COMPONENT_CHILD_DRAIN_DUE_AT_KEY)
-  Map<String, Map<String, Object>> pending = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  if(pending.isEmpty()) {
-    state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
-    return
-  }
-  Map<String, Map<String, Object>> lastSent = state[LAST_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[LAST_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  Map<String, Integer> retryAttempts = state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] instanceof Map
-      ? new LinkedHashMap<String, Integer>((Map<String, Integer>)state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY]) : [:]
-  Set<String> failedDnis = new LinkedHashSet<String>()
-  Set<String> successfulDnis = new LinkedHashSet<String>()
-  Integer emitted = 0
-  List<String> targetDnis = new ArrayList<String>(pending.keySet())
-  for(String dni : targetDnis) {
-    if(emitted >= COMPONENT_CHILD_EVENTS_PER_DRAIN) { break }
-    Map<String, Object> eventsForChild = pending[dni] instanceof Map ? pending[dni] : [:]
-    ChildDeviceWrapper child = getChildDevice(dni)
-    if(child == null) {
-      logWarn("drainComponentChildEvents: no child device found for DNI ${dni}; keeping queued values")
-      failedDnis.add(dni)
-      emitted++
-      continue
-    }
-    List<String> eventNames = new ArrayList<String>(eventsForChild.keySet())
-    for(String eventName : eventNames) {
-      if(emitted >= COMPONENT_CHILD_EVENTS_PER_DRAIN) { break }
-      Object eventValue = eventsForChild[eventName]
-      try {
-        child.sendEvent(name: eventName, value: eventValue)
-        Map<String, Object> lastForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
-        lastForChild[eventName] = eventValue
-        lastSent[dni] = lastForChild
-        eventsForChild.remove(eventName)
-        successfulDnis.add(dni)
-        emitted++
-      } catch(Exception e) {
-        logWarn("Could not emit ${eventName} to child ${dni}; retaining it for retry: ${e.message}")
-        failedDnis.add(dni)
-        emitted++
-      }
-    }
-    if(eventsForChild.isEmpty()) { pending.remove(dni) }
-  }
-  successfulDnis.each { String dni ->
-    if(!failedDnis.contains(dni)) { retryAttempts.remove(dni) }
-  }
-  failedDnis.each { String dni ->
-    Integer attempts = retryAttempts[dni] ?: 0
-    retryAttempts[dni] = Math.min(attempts + 1, 32)
-  }
-  if(retryAttempts.isEmpty()) { state.remove(COMPONENT_CHILD_RETRY_ATTEMPTS_KEY) }
-  else { state[COMPONENT_CHILD_RETRY_ATTEMPTS_KEY] = retryAttempts }
-  if(!lastSent.isEmpty()) { state[LAST_COMPONENT_CHILD_EVENTS_KEY] = lastSent }
-  if(pending.isEmpty()) {
-    state.remove(PENDING_COMPONENT_CHILD_EVENTS_KEY)
-  } else {
-    state[PENDING_COMPONENT_CHILD_EVENTS_KEY] = pending
-    Integer nextDelay = COMPONENT_CHILD_DRAIN_INTERVAL_MS
-    for(String dni : pending.keySet()) {
-      Integer attempts = retryAttempts[dni]
-      if(attempts != null) { nextDelay = Math.max(nextDelay, componentChildRetryDelay(attempts)) }
-    }
-    scheduleComponentChildEventDrain(nextDelay)
-  }
-}
-
 // Favorites/playlists WS delegate helpers — only one player per household subscribes
 // NOTE: checkIsFavPlaylistDelegate() has a side effect — claims the delegate slot on first call.
 // For read-only checks use: favPlaylistDelegate.get(getHouseholdId()) == device.getDeviceNetworkId()
@@ -7297,24 +6913,8 @@ void removeWsDeviceDataKeys() {
 }
 
 void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
-  queueComponentChildEvent(child, name, value)
-}
-
-/** Re-arm publication callbacks if a persisted pending queue outlives its job. */
-void verifyPendingPublicationDrains() {
-  String dni = device?.getDeviceNetworkId()
-  ConcurrentHashMap<String, Object> local = dni ? pendingLocalDeviceEvents.get(dni) : null
-  Map component = state[PENDING_COMPONENT_CHILD_EVENTS_KEY] instanceof Map
-      ? (Map)state[PENDING_COMPONENT_CHILD_EVENTS_KEY] : [:]
-  if(local == null || local.isEmpty()) {
-    state.remove(LOCAL_EVENT_DRAIN_SCHEDULED_KEY)
-    state.remove(LOCAL_EVENT_DRAIN_DUE_AT_KEY)
-  }
-  if(local != null && !local.isEmpty()) { scheduleLocalDeviceEventDrain(LOCAL_EVENT_DRAIN_INTERVAL_MS) }
-  if(!component.isEmpty()) { scheduleComponentChildEventDrain(COMPONENT_CHILD_DRAIN_INTERVAL_MS) }
-  if((local != null && !local.isEmpty()) || !component.isEmpty()) {
-    runIn(30, 'verifyPendingPublicationDrains', [overwrite: true])
-  }
+  if(child == null || !name || value == null) { return }
+  child.sendEvent(name: name, value: value)
 }
 
 Object getChildCurrentStateValue(DeviceWrapper child, String name, Boolean skipCache = false) {
@@ -7376,7 +6976,7 @@ void setGroupId(String groupId) {
   String oldGroupId = getGroupId()
   if(oldGroupId == groupId) { return }
   setDeviceDataValue('groupId', groupId)
-  queuePlayerAttributeUpdate('groupId', groupId)
+  if(groupId != null) { device.sendEvent(name: 'groupId', value: groupId) }
 }
 
 @CompileStatic
@@ -7385,8 +6985,8 @@ String getGroupName() {
   return this.device.currentValue('groupName',true)
 }
 void setGroupName(String groupName) {
-  if(!shouldQueuePlayerAttributeUpdate('groupName', groupName, getGroupName())) { return }
-  queuePlayerAttributeUpdate('groupName', groupName)
+  if(!(groupName != getGroupName())) { return }
+  if(groupName != null) { device.sendEvent(name: 'groupName', value: groupName) }
 }
 
 Boolean getIsGrouped() {
@@ -7394,17 +6994,16 @@ Boolean getIsGrouped() {
 }
 void setIsGrouped(Boolean isGrouped) {
   String newValue = isGrouped ? 'on' : 'off'
-  if(!shouldQueuePlayerAttributeUpdate('isGrouped', newValue, this.device.currentValue('isGrouped'))) { return }
-  queuePlayerAttributeUpdate('isGrouped', newValue)
+  if(!(newValue != this.device.currentValue('isGrouped'))) { return }
+  if(newValue != null) { device.sendEvent(name: 'isGrouped', value: newValue) }
 }
 
 Integer getGroupMemberCount() {
   return this.device.currentValue('groupMemberCount') as Integer
 }
 void setGroupMemberCount(Integer groupMemberCount) {
-  if(!shouldQueuePlayerAttributeUpdate('groupMemberCount', groupMemberCount,
-      this.device.currentValue('groupMemberCount') as Integer)) { return }
-  queuePlayerAttributeUpdate('groupMemberCount', groupMemberCount)
+  if(!(groupMemberCount != this.device.currentValue('groupMemberCount') as Integer)) { return }
+  if(groupMemberCount != null) { device.sendEvent(name: 'groupMemberCount', value: groupMemberCount) }
 }
 
 String getGroupCoordinatorId() {
@@ -7422,7 +7021,7 @@ void setGroupCoordinatorId(String groupCoordinatorId) {
   // State is stale (for example after a lost local-event drain callback).
   if(groupCoordinatorId != previousGroupCoordinator ||
       this.device.currentValue('groupCoordinatorId', true) != groupCoordinatorId) {
-    queuePlayerAttributeUpdate('groupCoordinatorId', groupCoordinatorId)
+    if(groupCoordinatorId != null) { device.sendEvent(name: 'groupCoordinatorId', value: groupCoordinatorId) }
   }
   Boolean isGroupCoordinator = getId() == groupCoordinatorId
   // Keep the persisted coordinator role derived from the ID on every topology
@@ -7456,21 +7055,20 @@ String getGroupCoordinatorName() {
   return this.device.currentValue('groupCoordinatorName')
 }
 void setGroupCoordinatorName(String groupCoordinatorName) {
-  if(shouldQueuePlayerAttributeUpdate('groupCoordinatorName', groupCoordinatorName, getGroupCoordinatorName())) {
-    queuePlayerAttributeUpdate('groupCoordinatorName', groupCoordinatorName)
+  if((groupCoordinatorName != getGroupCoordinatorName())) {
+    if(groupCoordinatorName != null) { device.sendEvent(name: 'groupCoordinatorName', value: groupCoordinatorName) }
   }
 }
 
 Boolean getIsGroupCoordinator() {
-  return getDeviceDataValue('isGroupCoordinator') == 'true'
+  String playerId = getId()
+  String coordinatorId = getGroupCoordinatorId()
+  return playerId != null && playerId != '' && playerId == coordinatorId
 }
 void setIsGroupCoordinator(Boolean isGroupCoordinator) {
-  Boolean previouslyWasGroupCoordinator = getIsGroupCoordinator()
   String publicValue = isGroupCoordinator ? 'on' : 'off'
-  setDeviceDataValue('isGroupCoordinator', isGroupCoordinator.toString())
-  if(isGroupCoordinator != previouslyWasGroupCoordinator ||
-      this.device.currentValue('isGroupCoordinator', true) != publicValue) {
-    queuePlayerAttributeUpdate('isGroupCoordinator', publicValue)
+  if(this.device.currentValue('isGroupCoordinator', true) != publicValue) {
+    if(publicValue != null) { device.sendEvent(name: 'isGroupCoordinator', value: publicValue) }
   }
 }
 
@@ -7494,9 +7092,9 @@ void setGroupPlayerIds(List<String> groupPlayerIds) {
   if(newValue != oldValue) {
     Boolean isNowGrouped = groupPlayerIds.size() > 1
     setDeviceDataValue('groupPlayerIds', newValue)
-    queuePlayerAttributeUpdate('isGrouped', isNowGrouped ? 'on' : 'off')
-    queuePlayerAttributeUpdate('groupMemberCount', groupPlayerIds.size())
-    queuePlayerAttributeUpdate('groupPlayerIds', newValue)
+    device.sendEvent(name: 'isGrouped', value: isNowGrouped ? 'on' : 'off')
+    device.sendEvent(name: 'groupMemberCount', value: groupPlayerIds.size())
+    if(newValue != null) { device.sendEvent(name: 'groupPlayerIds', value: newValue) }
     // sid4 remains subscribed per device across group membership transitions.
   }
   logDebug('Updating group device with new group membership information')
@@ -7525,8 +7123,8 @@ String getGroupMemberNames() {
 }
 void setGroupMemberNames(List<String> groupPlayerNames) {
   String newValue = groupPlayerNames.toString()
-  if(!shouldQueuePlayerAttributeUpdate('groupMemberNames', newValue, getGroupMemberNames())) { return }
-  queuePlayerAttributeUpdate('groupMemberNames', newValue)
+  if(!(newValue != getGroupMemberNames())) { return }
+  if(newValue != null) { device.sendEvent(name: 'groupMemberNames', value: newValue) }
 }
 
 @CompileStatic
@@ -7599,10 +7197,9 @@ void setAudioSource(String trackUri, Boolean isPlayingLocalTrack) {
     ])
     runtimeState.remove('groupAnnouncementStream')
   }
-  Boolean audioSourceChanged = shouldQueuePlayerAttributeUpdate('audioSource', audioSourceUrl,
-      this.device.currentValue('audioSource'))
+  Boolean audioSourceChanged = (audioSourceUrl != this.device.currentValue('audioSource'))
   if(!audioSourceChanged) { return }
-  queuePlayerAttributeUpdate('audioSource', audioSourceUrl)
+  if(audioSourceUrl != null) { device.sendEvent(name: 'audioSource', value: audioSourceUrl) }
   // Queue for batched group device update
 }
 
@@ -7612,16 +7209,16 @@ String getAlbumArtURI() {
 
 void setCurrentFavorite(String foundFavImageUrl, String foundFavId, String foundFavName, Boolean isFav) {
   if(isFav) {
-    Map<String, Object> value = [label: "Favorite #${foundFavId} ${foundFavName}", imageUrl: foundFavImageUrl ?: '']
-    queuePlayerAttributeUpdate('currentFavorite', value)
+    String value = "Favorite #${foundFavId} ${foundFavName}"
+    if(value != null) { device.sendEvent(name: 'currentFavorite', value: value) }
   } else {
     setCurrentFavorite('No favorite playing')
   }
 }
 @CompileStatic
 void setCurrentFavorite(String uri) {
-  if(!shouldQueuePlayerAttributeUpdate('currentFavorite', uri, getCurrentFavorite())) { return }
-  queuePlayerAttributeUpdate('currentFavorite', uri)
+  if(!(uri != getCurrentFavorite())) { return }
+  if(uri != null) { device.sendEvent(name: 'currentFavorite', value: uri) }
   // Queue for batched group device update
 }
 String getCurrentFavorite() {
@@ -7638,8 +7235,8 @@ void setCurrentPlaylist(String foundPlaylistId, String foundPlaylistName, Boolea
 
 @CompileStatic
 void setCurrentPlaylist(String uri) {
-  if(!shouldQueuePlayerAttributeUpdate('currentPlaylist', uri, getCurrentPlaylist())) { return }
-  queuePlayerAttributeUpdate('currentPlaylist', uri)
+  if(!(uri != getCurrentPlaylist())) { return }
+  if(uri != null) { device.sendEvent(name: 'currentPlaylist', value: uri) }
   // Queue for batched group device update
 }
 
@@ -7673,10 +7270,10 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
     logWarn("Ignoring unsupported Sonos TransportState='${transportState}' from ${source}")
     return
   }
-  if(!shouldQueuePlayerAttributeUpdate('status', status, this.device.currentValue('status')) &&
-      !shouldQueuePlayerAttributeUpdate('transportStatus', status, getTransportStatus())) { return }
-  queuePlayerAttributeUpdate('status', status)
-  queuePlayerAttributeUpdate('transportStatus', status)
+  if(!(status != this.device.currentValue('status')) &&
+      !(status != getTransportStatus())) { return }
+  if(status != null) { device.sendEvent(name: 'status', value: status) }
+  if(status != null) { device.sendEvent(name: 'transportStatus', value: status) }
   // Queue for batched group device update
 }
 String getTransportStatus() {
@@ -7688,16 +7285,16 @@ Integer getPlayerVolume() {
 }
 void setPlayerVolume(Integer volume) {
   Integer oldVolume = getPlayerVolume()
-  if(!shouldQueuePlayerAttributeUpdate('volume', volume, oldVolume) &&
-      !shouldQueuePlayerAttributeUpdate('level', volume, this.device.currentValue('level') as Integer)) { return }
-  queuePlayerAttributeUpdate('level', volume)
-  queuePlayerAttributeUpdate('volume', volume)
+  if(!(volume != oldVolume) &&
+      !(volume != this.device.currentValue('level') as Integer)) { return }
+  if(volume != null) { device.sendEvent(name: 'level', value: volume) }
+  if(volume != null) { device.sendEvent(name: 'volume', value: volume) }
   if(volume > 0) { runtimeState.restoreLevelAfterUnmute = volume }
 }
 void setBalanceState(Integer balance) {
   Integer oldBalance = this.device.currentValue('balance') as Integer
-  if(!shouldQueuePlayerAttributeUpdate('balance', balance, oldBalance)) { return }
-  queuePlayerAttributeUpdate('balance', balance)
+  if(!(balance != oldBalance)) { return }
+  if(balance != null) { device.sendEvent(name: 'balance', value: balance) }
 }
 Boolean getIsMuted() {
   return getMuteState() == 'muted'
@@ -7712,7 +7309,7 @@ void setMuteState(String muted) {
   Object restoreLevel = runtimeState.restoreLevelAfterUnmute
   logDebug("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
   sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
-  if(!shouldQueuePlayerAttributeUpdate('mute', muted, observedMutedState)) {
+  if(!(muted != observedMutedState)) {
     logDebug("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
     return
   }
@@ -7732,21 +7329,21 @@ void setMuteState(String muted) {
       logWarn('Skipping AirPlay unmute volume restore because the saved restore level is unavailable or invalid')
     }
   }
-  queuePlayerAttributeUpdate('mute', muted)
+  if(muted != null) { device.sendEvent(name: 'mute', value: muted) }
   logDebug("setMuteState queued parent mute event; value=${muted}")
 }
 
 void setBassState(Integer bass) {
-  if(!shouldQueuePlayerAttributeUpdate('bass', bass, this.device.currentValue('bass') as Integer)) { return }
-  queuePlayerAttributeUpdate('bass', bass)
+  if(!(bass != this.device.currentValue('bass') as Integer)) { return }
+  if(bass != null) { device.sendEvent(name: 'bass', value: bass) }
 }
 void setTrebleState(Integer treble) {
-  if(!shouldQueuePlayerAttributeUpdate('treble', treble, this.device.currentValue('treble') as Integer)) { return }
-  queuePlayerAttributeUpdate('treble', treble)
+  if(!(treble != this.device.currentValue('treble') as Integer)) { return }
+  if(treble != null) { device.sendEvent(name: 'treble', value: treble) }
 }
 void setLoudnessState(String loudness) {
-  if(!shouldQueuePlayerAttributeUpdate('loudness', loudness, this.device.currentValue('loudness'))) { return }
-  queuePlayerAttributeUpdate('loudness', loudness)
+  if(!(loudness != this.device.currentValue('loudness'))) { return }
+  if(loudness != null) { device.sendEvent(name: 'loudness', value: loudness) }
 }
 
 @CompileStatic
@@ -7765,12 +7362,12 @@ void setPlayMode(String playMode){
     default: return
   }
   if(newRepeatOne == oldRepeatOne && newRepeatAll == oldRepeatAll && newShuffle == oldShuffle &&
-      !shouldQueuePlayerAttributeUpdate('currentRepeatOneMode', newRepeatOne, oldRepeatOne) &&
-      !shouldQueuePlayerAttributeUpdate('currentRepeatAllMode', newRepeatAll, oldRepeatAll) &&
-      !shouldQueuePlayerAttributeUpdate('currentShuffleMode', newShuffle, oldShuffle)) { return }
-  queuePlayerAttributeUpdate('currentRepeatOneMode', newRepeatOne)
-  queuePlayerAttributeUpdate('currentRepeatAllMode', newRepeatAll)
-  queuePlayerAttributeUpdate('currentShuffleMode', newShuffle)
+      !(newRepeatOne != oldRepeatOne) &&
+      !(newRepeatAll != oldRepeatAll) &&
+      !(newShuffle != oldShuffle)) { return }
+  if(newRepeatOne != null) { device.sendEvent(name: 'currentRepeatOneMode', value: newRepeatOne) }
+  if(newRepeatAll != null) { device.sendEvent(name: 'currentRepeatAllMode', value: newRepeatAll) }
+  if(newShuffle != null) { device.sendEvent(name: 'currentShuffleMode', value: newShuffle) }
   sendChildEvent(getRepeatOneControlChild(), 'switch', newRepeatOne)
   sendChildEvent(getRepeatAllControlChild(), 'switch', newRepeatAll)
   sendChildEvent(getShuffleControlChild(), 'switch', newShuffle)
@@ -7783,8 +7380,8 @@ String getCurrentShuffleMode() { return this.device.currentValue('currentShuffle
 
 @CompileStatic
 void setCrossfadeMode(String currentCrossfadeMode) {
-  if(!shouldQueuePlayerAttributeUpdate('currentCrossfadeMode', currentCrossfadeMode, getCrossfadeMode())) { return }
-  queuePlayerAttributeUpdate('currentCrossfadeMode', currentCrossfadeMode)
+  if(!(currentCrossfadeMode != getCrossfadeMode())) { return }
+  if(currentCrossfadeMode != null) { device.sendEvent(name: 'currentCrossfadeMode', value: currentCrossfadeMode) }
   sendChildEvent(getCrossfadeControlChild(), 'switch', currentCrossfadeMode)
   // Queue for batched group device update
 }
@@ -7792,8 +7389,8 @@ String getCrossfadeMode() { return this.device.currentValue('currentCrossfadeMod
 
 @CompileStatic
 void setCurrentTrackDuration(String currentTrackDuration){
-  if(shouldQueuePlayerAttributeUpdate('currentTrackDuration', currentTrackDuration, getCurrentTrackDuration())) {
-    queuePlayerAttributeUpdate('currentTrackDuration', currentTrackDuration)
+  if((currentTrackDuration != getCurrentTrackDuration())) {
+    if(currentTrackDuration != null) { device.sendEvent(name: 'currentTrackDuration', value: currentTrackDuration) }
   }
   // Queue for batched group device update
 }
@@ -7840,8 +7437,8 @@ void setTrackPositionFromPlaybackStatus(Map eventData, String playbackState, Lon
 void setTrackPosition(Long positionSeconds, Long updatedAt) {
   if(positionSeconds == null || updatedAt == null) { return }
   if(getEnableTrackPositionUpdates()) {
-    queuePlayerAttributeUpdate('trackPosition', positionSeconds)
-    queuePlayerAttributeUpdate('trackPositionUpdated', updatedAt)
+    if(positionSeconds != null) { device.sendEvent(name: 'trackPosition', value: positionSeconds) }
+    if(updatedAt != null) { device.sendEvent(name: 'trackPositionUpdated', value: updatedAt) }
   }
   // Keep group devices independent: their own preference decides whether they
   // apply these coordinator updates, even when this player suppresses its event.
@@ -7853,8 +7450,8 @@ Long getTrackPositionUpdated() { return this.device.currentValue('trackPositionU
 @CompileStatic
 void setCurrentArtistName(String currentArtistName) {
   String value = currentArtistName ?: 'Not Available'
-  if(shouldQueuePlayerAttributeUpdate('currentArtistName', value, getCurrentArtistName())) {
-    queuePlayerAttributeUpdate('currentArtistName', value)
+  if((value != getCurrentArtistName())) {
+    if(value != null) { device.sendEvent(name: 'currentArtistName', value: value) }
   }
   // Queue for batched group device update
 }
@@ -7863,8 +7460,8 @@ String getCurrentArtistName() { return this.device.currentValue('currentArtistNa
 @CompileStatic
 void setCurrentAlbumName(String currentAlbumName) {
   String value = currentAlbumName ?: 'Not Available'
-  if(shouldQueuePlayerAttributeUpdate('currentAlbumName', value, getCurrentAlbumName())) {
-    queuePlayerAttributeUpdate('currentAlbumName', value)
+  if((value != getCurrentAlbumName())) {
+    if(value != null) { device.sendEvent(name: 'currentAlbumName', value: value) }
   }
   // Queue for batched group device update
 }
@@ -7873,8 +7470,8 @@ String getCurrentAlbumName() { return this.device.currentValue('currentAlbumName
 @CompileStatic
 void setCurrentTrackName(String currentTrackName) {
   String value = currentTrackName ?: 'Not Available'
-  if(shouldQueuePlayerAttributeUpdate('currentTrackName', value, getCurrentTrackName())) {
-    queuePlayerAttributeUpdate('currentTrackName', value)
+  if((value != getCurrentTrackName())) {
+    if(value != null) { device.sendEvent(name: 'currentTrackName', value: value) }
   }
   // Queue for batched group device update
 }
@@ -7883,8 +7480,8 @@ String getCurrentTrackName() { return this.device.currentValue('currentTrackName
 @CompileStatic
 void setCurrentTrackNumber(Integer currentTrackNumber) {
   Integer value = currentTrackNumber ?: 0
-  if(shouldQueuePlayerAttributeUpdate('currentTrackNumber', value, getCurrentTrackNumber())) {
-    queuePlayerAttributeUpdate('currentTrackNumber', value)
+  if((value != getCurrentTrackNumber())) {
+    if(value != null) { device.sendEvent(name: 'currentTrackNumber', value: value) }
   }
   // Queue for batched group device update
   observeTransportTrackNumber(value)
@@ -7905,9 +7502,9 @@ void observeTransportTrackNumber(Integer currentTrackNumber) {
 @CompileStatic
 void setTrackDescription(String trackDescription) {
   String prevTrackDescription = getTrackDescription()
-  Boolean changed = shouldQueuePlayerAttributeUpdate('trackDescription', trackDescription, prevTrackDescription)
+  Boolean changed = (trackDescription != prevTrackDescription)
   if(changed) {
-    queuePlayerAttributeUpdate('trackDescription', trackDescription)
+    if(trackDescription != null) { device.sendEvent(name: 'trackDescription', value: trackDescription) }
   }
   // Queue for batched group device update
 
@@ -7917,8 +7514,8 @@ String getTrackDescription() { return this.device.currentValue('trackDescription
 @CompileStatic
 void setTrackDataEvents(Map trackData) {
   String trackDataJson = JsonOutput.toJson(trackData)
-  if(shouldQueuePlayerAttributeUpdate('trackData', trackDataJson, getTrackDataEvents())) {
-    queuePlayerAttributeUpdate('trackData', trackDataJson)
+  if((trackDataJson != getTrackDataEvents())) {
+    if(trackDataJson != null) { device.sendEvent(name: 'trackData', value: trackDataJson) }
   }
   // Queue for batched group device update
 }
@@ -7927,8 +7524,8 @@ String getTrackDataEvents() {return this.device.currentValue('trackData')}
 @CompileStatic
 void setNextArtistName(String nextArtistName) {
   String value = nextArtistName ?: 'Not Available'
-  if(!shouldQueuePlayerAttributeUpdate('nextArtistName', value, getNextArtistName())) { return }
-  queuePlayerAttributeUpdate('nextArtistName', value)
+  if(!(value != getNextArtistName())) { return }
+  if(value != null) { device.sendEvent(name: 'nextArtistName', value: value) }
   // Queue for batched group device update
 }
 String getNextArtistName() { return this.device.currentValue('nextArtistName') }
@@ -7936,8 +7533,8 @@ String getNextArtistName() { return this.device.currentValue('nextArtistName') }
 @CompileStatic
 void setNextAlbumName(String nextAlbumName) {
   String value = nextAlbumName ?: 'Not Available'
-  if(!shouldQueuePlayerAttributeUpdate('nextAlbumName', value, getNextAlbumName())) { return }
-  queuePlayerAttributeUpdate('nextAlbumName', value)
+  if(!(value != getNextAlbumName())) { return }
+  if(value != null) { device.sendEvent(name: 'nextAlbumName', value: value) }
   // Queue for batched group device update
 }
 String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
@@ -7945,8 +7542,8 @@ String getNextAlbumName() { return this.device.currentValue('nextAlbumName') }
 @CompileStatic
 void setNextTrackName(String nextTrackName) {
   String value = nextTrackName ?: 'Not Available'
-  if(!shouldQueuePlayerAttributeUpdate('nextTrackName', value, getNextTrackName())) { return }
-  queuePlayerAttributeUpdate('nextTrackName', value)
+  if(!(value != getNextTrackName())) { return }
+  if(value != null) { device.sendEvent(name: 'nextTrackName', value: value) }
   // Queue for batched group device update
 }
 String getNextTrackName() { return this.device.currentValue('nextTrackName') }
@@ -7954,8 +7551,8 @@ String getNextTrackName() { return this.device.currentValue('nextTrackName') }
 @CompileStatic
 void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocalTrack) {
   String rawUri = isPlayingLocalTrack || !nextTrackAlbumArtURI ? 'Not Available' : nextTrackAlbumArtURI
-  if(!shouldQueuePlayerAttributeUpdate('nextTrackAlbumArtURI', rawUri, getNextTrackAlbumArtURI())) { return }
-  queuePlayerAttributeUpdate('nextTrackAlbumArtURI', rawUri)
+  if(!(rawUri != getNextTrackAlbumArtURI())) { return }
+  if(rawUri != null) { device.sendEvent(name: 'nextTrackAlbumArtURI', value: rawUri) }
   // Queue for batched group device update
 }
 String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
@@ -8283,7 +7880,6 @@ void webSocketStatus(String message) {
     runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
     setWebSocketStatus('open')
     runtimeState.wsRetryCount = 0 // Reset retry counter on successful connection
-    // wsConnected now signaled via lastUpdated heartbeat (parse() sends lastUpdated)
   }
   else if(message == 'status: closing') {
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
@@ -8317,7 +7913,6 @@ void scheduleWebSocketReconnect() {
   runtimeState[WS_RETRY_SCHEDULED_KEY] = true
 
   logInfo("WebSocket connection failed. Retry ${retryCount + 1} in ${delaySeconds} seconds...")
-  // wsRetry now signaled via lastUpdated heartbeat (absent parse() = offline)
   runIn(delaySeconds, 'retryWebSocketConnection', [overwrite: true])
 }
 
@@ -8855,19 +8450,19 @@ Boolean hasFavoriteOrPlaylistChild() { return getFavoritesChild() != null || get
 
 void handleContentDirectoryPayload(String xmlBody) {
   GPathResult root = new XmlSlurper().parseText(xmlBody)
-  Boolean favoritesChanged = false
-  Boolean playlistsChanged = false
+  List<Map> events = []
   for(Object property : root.children()) {
     if(!(property instanceof GPathResult)) { continue }
     for(Object value : ((GPathResult)property).children()) {
       if(!(value instanceof GPathResult)) { continue }
-      String name = xmlLocalName((GPathResult)value)
-      if(name == 'FavoritesUpdateID') { favoritesChanged = true }
-      if(name == 'SavedQueuesUpdateID') { playlistsChanged = true }
+      GPathResult node = (GPathResult)value
+      String name = xmlLocalName(node)
+      String valueText = node.text()?.toString()?.trim()
+      if(name && valueText != null) { events << [name: name, value: valueText] }
     }
   }
-  if(favoritesChanged && getFavoritesChild() != null) { getFavorites() }
-  if(playlistsChanged && getPlaylistChild() != null) { getPlaylists() }
+  if(events.any { Map event -> event.name == 'FavoritesUpdateID' } && getFavoritesChild() != null) { getFavorites() }
+  if(events.any { Map event -> event.name == 'SavedQueuesUpdateID' } && getPlaylistChild() != null) { getPlaylists() }
 }
 
 @CompileStatic
@@ -11436,7 +11031,6 @@ void componentSetGroupLevelLocal(BigDecimal level) {
 // Websocket Incoming Data Processing
 // =============================================================================
 void processWebsocketMessage(String message) {
-  try { queuePlayerAttributeUpdate('lastUpdated', now()) } catch(Exception ignored) { }
   if(message == null || message == '') {return}
   String dni
   ArrayList json
@@ -11701,6 +11295,8 @@ void handleHtControlPayload(String xmlBody) {
   if(connectedNode == null) { return }
   String connected = connectedNode.text()?.toString()?.trim()
   if(!(connected in ['0', '1'])) { return }
+  List<Map> events = [[name: 'htControlTosLinkConnected', value: connected]]
+  events.each { Map event -> device.sendEvent(name: event.name.toString(), value: event.value) }
   state.htControlTosLinkConnected = connected
   state.htControlObservedAt = now()
   // App owns playback storage; fall back to the transient runtime snapshot.

@@ -282,7 +282,6 @@ class SonosAdvancedAppSpec extends Specification {
     player.dataValues.groupCoordinatorId = coordinatorId
     player.dataValues.groupPlayerIds = playerIds
     player.dataValues.websocketUrl = "ws://192.0.2.${id.hashCode().abs() % 200 + 1}:1443/websocket/api"
-    player.dataValues.isGroupCoordinator = isCoordinator.toString()
     player.currentValues.transportStatus = 'stopped'
     player
   }
@@ -525,7 +524,6 @@ class SonosAdvancedAppSpec extends Specification {
       player.dataValues.groupId = groupId
       player.dataValues.groupCoordinatorId = coordinatorId
       player.dataValues.groupPlayerIds = playerIds
-      player.dataValues.isGroupCoordinator = player.dataValues.id == coordinatorId ? 'true' : 'false'
     }
   }
 
@@ -659,7 +657,6 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.groupId = 'GROUP-1'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_EXTRA,RINCON_FOLLOW'
-    coordinator.dataValues.isGroupCoordinator = 'true'
     Map operation = [
       configuredCoordinatorId: 'RINCON_COORD', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
     ]
@@ -972,11 +969,9 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.groupId = 'GROUP-2'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA'
-    coordinator.dataValues.isGroupCoordinator = 'false'
     follower.dataValues.groupId = 'GROUP-2'
     follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     follower.dataValues.groupPlayerIds = 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA'
-    follower.dataValues.isGroupCoordinator = 'true'
     coordinator.commands.clear()
     follower.commands.clear()
 
@@ -1004,7 +999,6 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.groupId = 'GROUP-COORD'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    coordinator.dataValues.isGroupCoordinator = 'true'
     coordinator.commands.clear()
     follower.commands.clear()
     extra.commands.clear()
@@ -1022,11 +1016,9 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.groupId = 'GROUP-COORD'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    coordinator.dataValues.isGroupCoordinator = 'true'
     follower.dataValues.groupId = 'GROUP-FOLLOW'
     follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
-    follower.dataValues.isGroupCoordinator = 'true'
 
     when:
     appScript.processGroupCommandRequest([request: request('joinPlayersToCoordinator')])
@@ -1357,11 +1349,9 @@ class SonosAdvancedAppSpec extends Specification {
     coordinator.dataValues.groupId = 'GROUP-COORD'
     coordinator.dataValues.groupCoordinatorId = 'RINCON_COORD'
     coordinator.dataValues.groupPlayerIds = 'RINCON_COORD'
-    coordinator.dataValues.isGroupCoordinator = 'true'
     follower.dataValues.groupId = 'GROUP-FOLLOW'
     follower.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
     follower.dataValues.groupPlayerIds = 'RINCON_FOLLOW'
-    follower.dataValues.isGroupCoordinator = 'true'
 
     when:
     appScript.enqueueGroupCommandRequest(request('loadFavorite', [favoriteId: '42'], 2))
@@ -2404,13 +2394,12 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { it.contains('Discarding expired queued announcement stale-announcement') }
   }
 
-  def "announcement stays queued while a target speaker is offline"() {
+  def "announcement dispatch does not depend on lastUpdated offline polling"() {
     given:
     makeAnnouncementRosterExact()
-    appScript.state.offlineSonosPlayers = ['DNI-RINCON_FOLLOW': [id: 'RINCON_FOLLOW', retryDelay: 30]]
     appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [pending: [[
-      correlationId: 'offline-announcement', command: 'playAudioClip',
-      uri: 'http://example.test/offline.mp3', volume: '15', duration: 5,
+      correlationId: 'announcement-without-offline-poll', command: 'playAudioClip',
+      uri: 'http://example.test/announcement.mp3', volume: '15', duration: 5,
       submittedAt: appScript.now(), coordinatorId: 'RINCON_COORD',
       playerIds: ['RINCON_COORD', 'RINCON_FOLLOW']
     ]]]]
@@ -2419,10 +2408,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.startNextGroupAnnouncement('GROUP-DNI')
 
     then:
-    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active == null
-    appScript.state.groupAnnouncementQueues['GROUP-DNI'].pending*.correlationId == ['offline-announcement']
-    !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' || it.name == 'playerPrepareAudioClipForSynchronizedStart' }
-    appScript.scheduled.any { it[1] == 'startNextGroupAnnouncementCallback' }
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.correlationId == 'announcement-without-offline-poll'
+    coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
   }
 
   def "unlimited TTS retention disables expiration"() {

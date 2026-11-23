@@ -355,7 +355,6 @@ preferences {
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final Integer HOUSEHOLD_HEALTH_CHECK_INTERVAL_SECONDS = 300
 @Field static final List<String> PLAYER_STATE_ATTRIBUTES = ['groupVolume','groupMute','groupPlayerIds','groupCoordinatorId','isGroupCoordinator','isGrouped','status','transportStatus','audioSource','currentTrackName','currentArtistName']
-@Field static final Integer LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS = 300
 @Field static final String GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY = 'groupAnnouncementProgressQueue'
 @Field static final String GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY = 'groupAnnouncementDueAt'
 @Field static final Integer GROUP_ANNOUNCEMENT_PROGRESS_MAX = 64
@@ -395,7 +394,6 @@ preferences {
 @Field static final Integer GROUP_STATE_DRAIN_MAX_ITEMS = 8
 @Field static final Integer GROUP_MEMBERSHIP_APPLY_BATCH_SIZE = 8
 @Field static final String GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY = 'groupMembershipApplyGenerations'
-@Field static final String OFFLINE_SONOS_PLAYERS_STATE_KEY = 'offlineSonosPlayers'
 @Field static final String PLAYER_COMMAND_QUEUE_STATE_KEY = 'pendingPlayerCommandRequests'
 @Field static final String PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY = 'receivedPlayerCommandRequestIds'
 @Field static final String PENDING_GROUP_FAVORITE_EVENTS_STATE_KEY = 'pendingGroupFavoriteEvents'
@@ -484,7 +482,6 @@ preferences {
   PLAYER_STATE_UPDATE_DRAIN_DUE_AT_STATE_KEY,
   PLAYER_STATE_UPDATE_DRAIN_ACTIVE_STATE_KEY,
   GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY,
-  OFFLINE_SONOS_PLAYERS_STATE_KEY,
   PLAYER_COMMAND_QUEUE_STATE_KEY,
   PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY,
   DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY,
@@ -3007,7 +3004,6 @@ void drainGroupAnnouncementProgress() {
 }
 
 void householdHealthCheck() {
-  pollLastUpdatedHealth()
   pollPlayerAttributesForState()
   clearDisabledGroupTrackPositions()
   scheduleHouseholdHealthCheck()
@@ -3031,7 +3027,6 @@ void subscribeToPlayerStateAttributes() {
     PLAYER_STATE_ATTRIBUTES.each { String attr ->
       try { subscribe(d, attr, 'handleGroupStateAttribute') } catch(Exception e) { logDebug("subscribe to ${d} ${attr} failed: ${e.message}") }
     }
-    try { subscribe(d, 'lastUpdated', 'handleLastUpdatedAttribute') } catch(Exception ignored) { }
   }
 }
 
@@ -3043,42 +3038,6 @@ void handleGroupStateAttribute(Event event) {
   }
   if(!player) { return }
   updatePlaybackObservationsFromAttributes(player)
-}
-
-void handleLastUpdatedAttribute(Event event) {
-  // lastUpdated heartbeat already advances offline detection via pollLastUpdatedHealth; subscription wakes poll early
-  pollLastUpdatedHealth()
-}
-
-void pollLastUpdatedHealth() {
-  Instant nowInstant = hubNowInstant()
-  Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    String dni = player.getDeviceNetworkId()?.toString()
-    if(!dni) { return }
-    Long lastUpdated = null
-    try { lastUpdated = player.currentValue('lastUpdated', true) as Long } catch(Exception ignored) { }
-    if(lastUpdated == null) {
-      try {
-        String v = player.getDataValue('lastUpdated')?.toString()
-        lastUpdated = v ? Long.parseLong(v) : null
-      } catch(Exception ignored) { }
-    }
-    Boolean offline = lastUpdated == null || Duration.between(Instant.ofEpochMilli(lastUpdated), nowInstant).seconds > LAST_UPDATED_OFFLINE_THRESHOLD_SECONDS
-    if(offline) {
-      if(!offlinePlayers.containsKey(dni)) {
-        offlinePlayers[dni] = [id: player.getDataValue('id'), name: player.displayName, retryDelay: 300]
-        state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
-      }
-    } else {
-      if(offlinePlayers.containsKey(dni)) {
-        offlinePlayers.remove(dni)
-        state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
-        resumeAnnouncementsForPlayer(dni)
-      }
-    }
-  }
 }
 
 void pollPlayerAttributesForState() {
@@ -5363,7 +5322,6 @@ void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes
 
 /** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
 String playerStateUpdateCoalesceKey(Map payload) {
-  // playbackObservation/state/wsConnected/wsRetry removed — parent now reads attributes + lastUpdated
   return null
 }
 
@@ -5483,22 +5441,6 @@ void playerStateUpdateHandler(Object event) {
   String playerDni = payload.playerDni as String
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || !player.getDataValue('id')) { return }
-  if(payload.kind == 'wsRetry') {
-    Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
-        ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
-    offlinePlayers[playerDni] = [id: player.getDataValue('id'), name: player.displayName,
-      retryDelay: (payload.retryDelay ?: 30) as Integer]
-    state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
-    return
-  }
-  if(payload.kind == 'wsConnected') {
-    Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
-        ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
-    offlinePlayers.remove(playerDni)
-    state[OFFLINE_SONOS_PLAYERS_STATE_KEY] = offlinePlayers
-    resumeAnnouncementsForPlayer(playerDni)
-    return
-  }
   if(payload.kind == 'groupAnnouncementProgress') {
     handleGroupAnnouncementProgress(player, payload)
     return
@@ -5916,21 +5858,6 @@ void startNextGroupAnnouncement(String groupDni) {
   if(coordinator == null || players.isEmpty()) {
     logWarn("Cannot start group announcement ${item.correlationId}: target devices are unavailable")
     finishGroupAnnouncement(groupDni, item.correlationId?.toString(), 'FAILED')
-    return
-  }
-  Map<String, Map> offlinePlayers = state[OFFLINE_SONOS_PLAYERS_STATE_KEY] instanceof Map
-      ? (Map<String, Map>)state[OFFLINE_SONOS_PLAYERS_STATE_KEY] : [:]
-  Boolean targetOffline = players.any { ChildDeviceWrapper player ->
-    offlinePlayers.containsKey(player.getDeviceNetworkId())
-  }
-  if(targetOffline) {
-    queue.active = null
-    pending.add(0, item)
-    queue.pending = pending
-    queues[groupDni] = queue
-    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-    logDebug("Deferring announcement ${item.correlationId} while a target speaker is offline")
-    runIn(30, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: true])
     return
   }
   if(item.forceAudioClip == true) {
@@ -8160,17 +8087,11 @@ Object getGroupOperationChildValue(ChildDeviceWrapper player, String name) {
   return value
 }
 
-Boolean isCachedSonosCoordinator(ChildDeviceWrapper player) {
+Boolean isSonosCoordinator(ChildDeviceWrapper player) {
   if(player == null) { return false }
-  Object v = player.getDataValue('isGroupCoordinator')
-  if(v != null && v.toString().trim() != '') {
-    return v.toString() == 'true'
-  }
-  try {
-    return player.currentValue('isGroupCoordinator', true) == 'on'
-  } catch(Exception ignored) {
-    return false
-  }
+  String playerId = player.getDataValue('id')?.toString()
+  String coordinatorId = player.getDataValue('groupCoordinatorId')?.toString()
+  return playerId != null && playerId != '' && playerId == coordinatorId
 }
 
 List<String> getDeviceDataFollowerIds(DeviceWrapper groupDevice) {
@@ -8206,7 +8127,7 @@ void handleOnExactGroupImmediate(ChildDeviceWrapper groupDevice) {
   String groupId = getGroupOperationChildValue(desiredDevice, 'groupId')?.toString()
   String coordinatorOfDesired = getGroupOperationChildValue(desiredDevice, 'groupCoordinatorId')?.toString()
   List<String> membersOfDesired = normalizeGroupPlayerIds(getGroupOperationChildValue(desiredDevice, 'groupPlayerIds'))
-  Boolean desiredIsCoordinator = isCachedSonosCoordinator(desiredDevice)
+  Boolean desiredIsCoordinator = isSonosCoordinator(desiredDevice)
   if(coordinatorOfDesired != coordinatorId && groupId && membersOfDesired.contains(coordinatorId) && !desiredIsCoordinator) {
     ChildDeviceWrapper prevCoordinator = coordinatorOfDesired ? rinconMap[coordinatorOfDesired] : null
     if(prevCoordinator != null) {
@@ -8331,7 +8252,7 @@ void handleJoinAdditiveGroupImmediate(ChildDeviceWrapper groupDevice) {
   String groupId = getGroupOperationChildValue(desiredDevice, 'groupId')?.toString()
   String coordinatorOfDesired = getGroupOperationChildValue(desiredDevice, 'groupCoordinatorId')?.toString()
   List<String> membersOfDesired = normalizeGroupPlayerIds(getGroupOperationChildValue(desiredDevice, 'groupPlayerIds'))
-  Boolean desiredIsCoordinator = isCachedSonosCoordinator(desiredDevice)
+  Boolean desiredIsCoordinator = isSonosCoordinator(desiredDevice)
   if(coordinatorOfDesired != coordinatorId && groupId && membersOfDesired.contains(coordinatorId) && !desiredIsCoordinator) {
     ChildDeviceWrapper prevCoordinator = coordinatorOfDesired ? rinconMap[coordinatorOfDesired] : null
     if(prevCoordinator != null) {
@@ -8931,14 +8852,7 @@ Map readEvictionCoordinatorTopology(Map operation) {
   List<String> playerIds = normalizeGroupPlayerIds(
     getGroupOperationChildValue(coordinator, 'groupPlayerIds')
   )
-  Boolean isCoordinator = coordinator.getDataValue('isGroupCoordinator') == 'true'
-  if(!isCoordinator) {
-    try {
-      isCoordinator = coordinator.currentValue('isGroupCoordinator', true) == 'on'
-    } catch(Exception ignored) {
-      isCoordinator = false
-    }
-  }
+  Boolean isCoordinator = isSonosCoordinator(coordinator)
   if(liveCoordinatorId != configuredCoordinatorId || !groupId || playerIds.isEmpty() || !isCoordinator) {
     return null
   }
@@ -10149,7 +10063,7 @@ void playerDeparted(String rincon, String dni, String name) {
 /** Queue complete UPnP notification batches; never coalesce their event lists. */
 synchronized void putPlayerUpnpEvents(Map payload) {
   String service = payload?.service?.toString()
-  if(!(service in ['RC', 'GRC', 'ZGT', 'AVT'])) { return }
+  if(!(service in ['GRC', 'ZGT', 'AVT'])) { return }
   Map copy = new LinkedHashMap(payload)
   if(payload.events instanceof List) { copy.events = ((List<Map>)payload.events).collect { Map e -> new LinkedHashMap(e) } }
   if(payload.eventsByGroupId instanceof Map) {
@@ -10189,8 +10103,6 @@ void processUpnpNotification(Map notification) {
     deliverUpnpEventsToGroup(sourceId, events, true)
   } else if(service == 'GRC') {
     deliverUpnpEventsToGroup(coordinatorId, events, false)
-  } else if(service == 'RC') {
-    deliverUpnpEventsToPlayer(sourceId, events)
   }
 }
 
@@ -10705,8 +10617,7 @@ ChildDeviceWrapper resolveGroupCommandCoordinator(ChildDeviceWrapper configuredC
     List<String> playerIds, Map<String, ChildDeviceWrapper> rinconMap) {
   ChildDeviceWrapper activeCoordinator = playerIds.collect { String id -> rinconMap[id] }
     .find { ChildDeviceWrapper player ->
-      player != null && (player.getDataValue('isGroupCoordinator') == 'true' ||
-        player.currentValue('isGroupCoordinator', true) == 'on')
+      isSonosCoordinator(player)
     }
   return activeCoordinator ?: configuredCoordinator
 }
@@ -10838,8 +10749,7 @@ void processPlayerCommandRequest(Map data) {
     }
     ChildDeviceWrapper coordinator = candidateIds.collect { String id -> rinconMap[id] }
       .find { ChildDeviceWrapper player ->
-        player != null && (player.getDataValue('isGroupCoordinator') == 'true' ||
-          player.currentValue('isGroupCoordinator', true) == 'on')
+        isSonosCoordinator(player)
       }
     if(coordinator == null && configuredCoordinatorId) {
       coordinator = rinconMap[configuredCoordinatorId]
@@ -11035,7 +10945,7 @@ Boolean groupCommandBoolean(Object value, Boolean defaultValue) {
 
 Boolean isSonosGrouped(ChildDeviceWrapper coordinator) {
   return coordinator?.currentValue('isGrouped', true) == 'on' &&
-      coordinator?.currentValue('isGroupCoordinator', true) == 'on'
+      isSonosCoordinator(coordinator)
 }
 
 /** True when every configured target is currently a member of the live group. */
@@ -11528,7 +11438,7 @@ void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
     playerNames[id] = player.getDataValue('name')?.toString() ?: id
   }
   ChildDeviceWrapper callerDevice = rinconMap[coordinatorId]
-  Boolean isCallerActualCoordinator = callerDevice?.getDataValue('isGroupCoordinator') == 'true'
+  Boolean isCallerActualCoordinator = isSonosCoordinator(callerDevice)
   Map<String, Long> generations = state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] instanceof Map
       ? (Map<String, Long>)state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] : [:]
   Long generation = ((generations[coordinatorId] ?: 0L) as Long) + 1L
