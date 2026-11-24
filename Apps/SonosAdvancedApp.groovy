@@ -332,6 +332,7 @@ definition(
 
 preferences {
   page(name: 'mainPage', install: true, uninstall: true)
+  page(name: 'legacyBooleanSettingsPage')
   page(name: 'newUiPage')
   page(name: 'localPlayerPage')
   page(name: 'localPlayerSelectionPage')
@@ -344,12 +345,8 @@ preferences {
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 @Field static final String DISCOVERED_SONOS_SECONDARIES_STATE_KEY = 'discoveredSonosSecondaries'
-@Field static final String DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY = 'discoveryTopologyRequested'
-@Field static final String DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY = 'discoveryTopologyRequestId'
-@Field static final Map<String, String> DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE = [
-  serviceType: 'urn:schemas-upnp-org:service:ZoneGroupTopology:1',
-  controlURL: '/ZoneGroupTopology/Control'
-]
+@Field static final String QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY = 'quickTopologyRequestId'
+@Field static final String QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY = 'quickTopologyQueriedDuringDiscovery'
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
@@ -403,17 +400,6 @@ preferences {
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY = 'pendingPromotedAvtPlayers'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
-@Field static final String HT_SAT_CHAN_MAPS_STATE_KEY = 'htSatChanMapSetByPlayer'
-@Field static final String HT_SATELLITE_NAMES_STATE_KEY = 'htSatelliteNamesById'
-@Field static final String SPEAKER_CHANNEL_MAPS_STATE_KEY = 'speakerChannelMapSetByPlayer'
-@Field static final String TOPOLOGY_SATELLITE_OWNERS_STATE_KEY = 'topologySatelliteOwnersById'
-@Field static final String STEREO_PAIR_COORDINATORS_STATE_KEY = 'stereoPairCoordinators'
-@Field static final String PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY = 'pageTopologyRequestId'
-@Field static final String PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY = 'pendingGroupSatelliteReconciliations'
-@Field static final String GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY = 'groupSatelliteReconciliationScheduled'
-@Field static final String ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY = 'activeGroupSatelliteReconciliation'
-@Field static final String GROUP_SATELLITE_STATUSES_STATE_KEY = 'groupSatelliteStatuses'
-@Field static final String PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY = 'pendingGroupSatelliteVerifications'
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupTopologyOperation'
@@ -519,15 +505,7 @@ preferences {
   NEW_UI_GROUP_ERROR_KEY,
   NEW_UI_GROUP_DELETE_KEY,
   DISCOVERED_SONOS_SECONDARIES_STATE_KEY,
-  HT_SAT_CHAN_MAPS_STATE_KEY,
-  HT_SATELLITE_NAMES_STATE_KEY,
-  SPEAKER_CHANNEL_MAPS_STATE_KEY,
-  PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY,
-  PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY,
-  GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY,
-  ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY,
-  GROUP_SATELLITE_STATUSES_STATE_KEY,
-  PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY,
+  QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY,
   LOCAL_CONTROL_RETRY_STATE_KEY,
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
@@ -574,8 +552,7 @@ preferences {
   'discoveryRunning',
   'discoveryEndTime',
   'discoveryProbeAttempts',
-  'discoveryTopologyRequested',
-  'discoveryTopologyRequestId',
+  'quickTopologyQueriedDuringDiscovery',
 ]))
 
 @Field static final Set<String> ACTIVE_APP_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -605,7 +582,6 @@ preferences {
   'newUiGroupName',
   'newUiGroupCoordinator',
   'newUiGroupFollowers',
-  'newUiGroupSatellite',
 ]))
 // =============================================================================
 // Migration-Prune Helpers — whitelist-driven for-each removal
@@ -654,20 +630,6 @@ void migrateLegacyAppStateOnce() {
       }
     } catch(Exception ignored) { }
   }
-
-  // Older app builds accidentally persisted normal app state in atomicState.
-  // Restore those values before the whitelist prunes the legacy location.
-  ACTIVE_APP_STATE_KEYS.each { String key ->
-    if(ACTIVE_APP_ATOMIC_STATE_KEYS.contains(key)) { return }
-    try {
-      if(atomicState[key] != null && state[key] == null) {
-        state[key] = atomicState[key]
-        logWarn("Migrated legacy atomicState value '${key}' into app state before pruning")
-      }
-    } catch(Exception e) {
-      logWarn("Could not migrate legacy atomicState value '${key}': ${e.message}")
-    }
-  }
 }
 
 // =============================================================================
@@ -698,7 +660,7 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // =============================================================================
 Map mainPage() {
   applyLogLevelChange()
-  requestPageTopologyRefresh()
+  requestQuickTopologyRefresh()
   applyAlarmManagementPreferenceChanges()
   Boolean useOldUi = settings.useOldUi == true
   if(useOldUi) {
@@ -884,8 +846,39 @@ Map mainPage() {
   }
 }
 
+/** Keep the legacy preference inputs registered on an unlinked page for compatibility. */
+Map legacyBooleanSettingsPage() {
+  dynamicPage(name: 'legacyBooleanSettingsPage', title: 'Legacy Settings', install: false, uninstall: false) {
+    section('') {
+      input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?', required: false, defaultValue: false
+      input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?', required: false, defaultValue: false
+      input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true
+      input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false
+      input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention', options: [
+        '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
+        '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
+        '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
+        '1440': '24 hours', unlimited: 'Unlimited'
+      ], required: true, defaultValue: '60'
+      input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method', options: [
+        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
+        alwaysCoordinatorStream: 'Always standard stream'
+      ], required: true, defaultValue: 'alwaysNonInterrupting'
+      input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method', options: [
+        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
+        alwaysCoordinatorStream: 'Always standard stream'
+      ], required: true, defaultValue: 'alwaysNonInterrupting'
+      input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync', required: false, defaultValue: false
+      input 'suppressChimeOnSuccessiveTTS', 'bool', title: 'Suppress chime on successive TTS messages', required: false, defaultValue: false
+      input 'logLevel', 'enum', title: 'Logging level',
+        options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
+        required: false, defaultValue: getConfiguredLogLevel()
+    }
+  }
+}
+
 Map newUiPage() {
-  requestPageTopologyRefresh()
+  requestQuickTopologyRefresh()
   dynamicPage(
     name: 'newUiPage',
     title: 'Player Devices',
@@ -951,7 +944,6 @@ void renderNewUiPageContent() {
       input name: 'newUiGroupName', type: 'text', title: 'Group name', defaultValue: settings.newUiGroupName?.toString() ?: '', submitOnChange: true
       input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator', options: groupPlayerOptions, defaultValue: groupCoordinator, submitOnChange: true, offerAll: false
       input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers', options: compatibleFollowerOptions, multiple: true, defaultValue: groupFollowers, submitOnChange: true, offerAll: false
-      input name: 'newUiGroupSatellite', type: 'enum', title: 'Satellites', options: (['': 'No satellite'] + getNewUiSatelliteOptions()), defaultValue: getNewUiGroupSatellite(groupDraft), submitOnChange: true, offerAll: false
       paragraph displayNewUiGroupEditor()
     }
 
@@ -962,6 +954,7 @@ void renderNewUiPageContent() {
 void startDiscoverySession() {
   if(atomicState.discoveryRunning != true) {
     logDebug('Starting a new discovery session; clearing per-session probe reservations')
+    atomicState.remove(QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY)
     subscribeToSsdpEvents(location)
     atomicState.discoveryRunning = true
     ssdpDiscover()
@@ -1411,20 +1404,13 @@ List<Map> buildNewUiSpeakerRows() {
 }
 
 List<Map> getNewUiSecondaryDevices(String primaryPlayerId) {
-  Map<String, Map> secondariesById = [:]
+  List<Map> secondaries = []
   discoveredSonosSecondaries.each { Object ignored, Object rawInfo ->
     Map info = rawInfo instanceof Map ? (Map)rawInfo : [:]
     if(info.primaryDeviceId?.toString() == primaryPlayerId) {
-      String id = info.id?.toString()
-      if(id) {
-        Map current = secondariesById[id]
-        Boolean richer = info.topologyOnly != true
-        Boolean currentRicher = current?.topologyOnly != true
-        if(current == null || (richer && !currentRicher)) { secondariesById[id] = info }
-      }
+      secondaries.add(info)
     }
   }
-  List<Map> secondaries = new ArrayList<Map>(secondariesById.values())
   secondaries.sort { Map left, Map right ->
     String leftName = (left.modelDisplayName ?: left.modelName ?: left.id ?: '').toString()
     String rightName = (right.modelDisplayName ?: right.modelName ?: right.id ?: '').toString()
@@ -1444,12 +1430,7 @@ String renderNewUiSecondaryDevices(Map row) {
   StringBuilder html = new StringBuilder()
   html.append("<div class='new-ui-secondary-count'>${secondaries.size()} discovered</div>")
   secondaries.each { Map secondary ->
-    String name
-    if(secondary.topologyRole?.toString() == 'satellite') {
-      name = (secondary.name ?: secondary.modelDisplayName ?: secondary.modelName ?: 'Satellite').toString()
-    } else {
-      name = (secondary.modelDisplayName ?: secondary.modelName ?: secondary.name ?: 'Secondary speaker').toString()
-    }
+    String name = (secondary.modelDisplayName ?: secondary.modelName ?: 'Secondary speaker').toString()
     String id = secondary.id?.toString()
     String ip = (secondary.deviceIp ?: secondary.localUpnpHost)?.toString()
     String detail = [ip, id]
@@ -1591,18 +1572,12 @@ String renderNewUiGroupEditorMarkup() {
       ? "<div class='new-ui-group-editor-error'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</div>"
       : ''
   String editorInstructions = selectedCoordinator
-      ? 'Choose one coordinator, optional satellite, and one or more compatible follower speakers.'
-      : 'Select one coordinator, optional satellite, then select one or more follower speakers.'
+      ? 'Choose one coordinator and one or more compatible follower speakers.'
+      : 'Select one coordinator, then select one or more follower speakers.'
   StringBuilder coordinatorOptions = new StringBuilder("<option value=''>Choose a coordinator</option>")
   playerOptions.each { String id, String label ->
     String selected = id == selectedCoordinator ? ' selected' : ''
     coordinatorOptions.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
-  }
-  String satelliteId = getNewUiGroupSatellite(groupDraft)
-  StringBuilder satelliteOptionMarkup = new StringBuilder("<option value=''>No satellite</option>")
-  getNewUiSatelliteOptions().each { String id, String label ->
-    String selected = id == satelliteId ? ' selected' : ''
-    satelliteOptionMarkup.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
   }
   String nameChange = "updateNewUiGroupField('name')"
   String coordinatorChange = "updateNewUiGroupField('coordinator')"
@@ -1621,20 +1596,17 @@ String renderNewUiGroupEditorMarkup() {
   String cancelAction = newUiButtonLink('btnNewUiCancelGroup', 'Cancel', '#4b5563', '14px', 'Cancel group edit', 'new-ui-group-cancel')
   String nameChangeAction = newUiButtonLink('btnNewUiGroupNameChanged', 'Update group name', '#4054b2', '13px', 'Update group name', 'new-ui-group-field-change-action new-ui-group-name-change-action')
   String coordinatorChangeAction = newUiButtonLink('btnNewUiGroupCoordinatorChanged', 'Update group coordinator', '#4054b2', '13px', 'Update group coordinator', 'new-ui-group-field-change-action new-ui-group-coordinator-change-action')
-  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']),.mdl-cell:has([name='settings[newUiGroupSatellite]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-column{display:flex;flex-direction:column;gap:16px;min-width:0}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
+  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
   StringBuilder html = new StringBuilder(css)
   html.append("<style>.new-ui-group-follower-item .form-group{display:none!important}.new-ui-group-follower-item>div{display:block!important;width:100%}.new-ui-group-follower-toggle{box-sizing:border-box;display:flex!important;align-items:center;width:100%;min-height:40px;padding:7px;border:1px solid transparent;border-radius:6px;color:var(--text-color,#30343b)!important;text-align:left}.new-ui-group-follower-toggle:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-control{display:flex;align-items:center;gap:9px}.new-ui-group-checkbox{box-sizing:border-box;position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;border:1.5px solid #747b86;border-radius:4px;background:var(--surface-card,#fff)}.new-ui-group-checkbox-checked{border-color:#4054b2;background:#4054b2}.new-ui-group-checkbox-checked:after{box-sizing:border-box;content:'';width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}.new-ui-group-follower-toggle:focus-visible{outline:2px solid #4054b2;outline-offset:2px}</style>")
   html.append("<div class='new-ui-group-editor-card'><div class='new-ui-group-editor-heading'>${editorTitle}</div><div class='new-ui-group-editor-description'>${editorInstructions}</div>${editorErrorMarkup}")
   html.append("<div class='new-ui-group-editor-grid'>")
   html.append("<div class='new-ui-group-editor-field new-ui-group-editor-field-wide'><label for='new-ui-group-name'>Group name</label><input id='new-ui-group-name' type='text' name='newUiGroupNameUi' value='${escapeNewUiHtml(editorName)}' autocomplete='off' onchange=\"${nameChange}\"></div>")
-  html.append("<div class='new-ui-group-editor-column'><div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
-  html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-satellite'>Satellites</label><select id='new-ui-group-satellite' name='newUiGroupSatelliteUi' onchange=\"updateNewUiGroupSatelliteField()\">${satelliteOptionMarkup}</select></div></div>")
+  html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
   html.append("<div class='new-ui-group-editor-field'><span class='new-ui-group-editor-label'>Followers</span><div id='new-ui-group-followers' class='new-ui-group-follower-list' aria-describedby='new-ui-group-followers-help'>${followerOptionsMarkup}</div><div id='new-ui-group-followers-help' class='new-ui-group-editor-help'>Select one or more compatible speakers.</div></div>")
   html.append("</div><div class='new-ui-group-editor-actions'>").append(saveAction).append(cancelAction).append('</div>')
   html.append(nameChangeAction).append(coordinatorChangeAction)
-  String satelliteChangeAction = newUiButtonLink('btnNewUiGroupSatelliteChanged', 'Update group satellite', '#4054b2', '13px', 'Update group satellite', 'new-ui-group-field-change-action new-ui-group-satellite-change-action')
-  html.append(satelliteChangeAction)
-  html.append("<script>function syncNewUiGroupFields(){var name=document.querySelector(\"#new-ui-group-name\");var coordinator=document.querySelector(\"#new-ui-group-coordinator\");var satellite=document.querySelector(\"#new-ui-group-satellite\");var nameSetting=document.querySelector(\"[name='settings[newUiGroupName]']\");var coordinatorSetting=document.querySelector(\"[name='settings[newUiGroupCoordinator]']\");var satelliteSetting=document.querySelector(\"[name='settings[newUiGroupSatellite]']\");if(name&&nameSetting){nameSetting.value=name.value}if(coordinator&&coordinatorSetting){coordinatorSetting.value=coordinator.value}if(satellite&&satelliteSetting){satelliteSetting.value=satellite.value}}function updateNewUiGroupField(field){syncNewUiGroupFields();var buttonClass={name:'.new-ui-group-name-change-action',coordinator:'.new-ui-group-coordinator-change-action'}[field];var button=buttonClass?document.querySelector(buttonClass):null;if(button){buttonClick(button)}}function updateNewUiGroupSatelliteField(){var select=document.querySelector('#new-ui-group-satellite');var setting=document.querySelector(\"[name='settings[newUiGroupSatellite]']\");var button=document.querySelector('.new-ui-group-satellite-change-action');if(select&&setting){setting.value=select.value}if(button){buttonClick(button)}}</script>")
+  html.append("<script>function syncNewUiGroupFields(){var name=document.querySelector(\"#new-ui-group-name\");var coordinator=document.querySelector(\"#new-ui-group-coordinator\");var nameSetting=document.querySelector(\"[name='settings[newUiGroupName]']\");var coordinatorSetting=document.querySelector(\"[name='settings[newUiGroupCoordinator]']\");if(name&&nameSetting){nameSetting.value=name.value}if(coordinator&&coordinatorSetting){coordinatorSetting.value=coordinator.value}}function updateNewUiGroupField(field){syncNewUiGroupFields();var buttonClass={name:'.new-ui-group-name-change-action',coordinator:'.new-ui-group-coordinator-change-action'}[field];var button=buttonClass?document.querySelector(buttonClass):null;if(button){buttonClick(button)}}</script>")
   html.append('</div>')
   return html.toString()
 }
@@ -1722,7 +1694,7 @@ String displayNewUiGroupTable() {
         border-spacing: 0;
         border-radius: 0;
         color: var(--text-color, #424242);
-        table-layout: fixed;
+        min-width: 760px;
         width: 100%;
       }
       #new-ui-group-table th,
@@ -1732,7 +1704,7 @@ String displayNewUiGroupTable() {
         border-right: 0;
         color: var(--text-color, #424242);
         font-size: 14px !important;
-        padding: 8px 10px !important;
+        padding: 12px 14px !important;
         text-align: center;
         vertical-align: middle;
       }
@@ -1765,27 +1737,19 @@ String displayNewUiGroupTable() {
         line-height: 20px;
         vertical-align: middle;
       }
-      #new-ui-group-table .new-ui-group-action-header,
       #new-ui-group-table .new-ui-group-action-cell {
-        box-sizing: border-box;
-        max-width: 68px !important;
-        min-width: 68px !important;
-        padding: 8px 6px !important;
+        padding-left: 10px !important;
+        padding-right: 10px !important;
         white-space: nowrap;
-        width: 68px !important;
+        width: 100px;
       }
       #new-ui-group-table .new-ui-group-name,
       #new-ui-group-table .new-ui-group-followers {
         text-align: left;
       }
       #new-ui-group-table .new-ui-group-name {
-        overflow-wrap: anywhere;
-        width: 28%;
+        min-width: 200px;
       }
-      #new-ui-group-table th:nth-child(3),
-      #new-ui-group-table td:nth-child(3) { width: 16%; }
-      #new-ui-group-table th:nth-child(4),
-      #new-ui-group-table td:nth-child(4) { width: 17%; }
       #new-ui-group-table .new-ui-group-name a {
         color: #2196F3;
         text-decoration: none;
@@ -1796,11 +1760,6 @@ String displayNewUiGroupTable() {
       #new-ui-group-table .new-ui-group-followers br {
         line-height: 1.7;
       }
-      #new-ui-group-table .new-ui-status { display: inline-block; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; }
-      #new-ui-group-table .new-ui-status-active { color: #2e7d32; }
-      #new-ui-group-table .new-ui-status-inactive { color: #c62828; }
-      #new-ui-group-table .new-ui-status-unknown,
-      #new-ui-group-table .new-ui-status-na { color: var(--text-color-secondary, #757575); }
       .new-ui-group-mobile-list { display: none; }
       .new-ui-group-mobile-actions { align-items: center; display: flex; gap: 14px; }
       .new-ui-group-mobile-record { text-align: center; }
@@ -1834,17 +1793,15 @@ String renderNewUiGroupTableMarkup() {
   List<Map> rows = buildNewUiGroupRows()
   StringBuilder html = new StringBuilder()
   html.append("<div><table id='new-ui-group-table' class='mdl-data-table'>")
-  html.append("<colgroup><col style='width:68px'><col style='width:28%'><col style='width:16%'><col style='width:17%'><col></colgroup>")
   html.append('<thead><tr>')
-  html.append("<th class='new-ui-group-action-header'>Action</th>")
+  html.append('<th>Action</th>')
   html.append('<th>Group Name</th>')
   html.append('<th>Coordinator</th>')
-  html.append('<th>Satellites</th>')
   html.append('<th>Followers</th>')
   html.append('</tr></thead><tbody>')
 
   if(rows.isEmpty()) {
-    html.append("<tr><td colspan='5'>No Sonos groups have been created yet.</td></tr>")
+    html.append("<tr><td colspan='4'>No Sonos groups have been created yet.</td></tr>")
   } else {
     rows.each { Map row ->
       String groupName = row.name?.toString() ?: 'Unnamed group'
@@ -1861,13 +1818,11 @@ String renderNewUiGroupTableMarkup() {
       String coordinatorName = row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown'
       String safeCoordinator = escapeNewUiHtml(coordinatorName)
       String followerMarkup = renderNewUiGroupFollowers(row.followerIds)
-      String satelliteMarkup = renderNewUiGroupSatellite(row.satelliteId, row.name?.toString(), row.coordinatorId?.toString())
 
       html.append('<tr>')
       html.append("<td class='new-ui-group-action-cell' data-label='Action'>${actionMarkup}</td>")
       html.append("<td class='new-ui-group-name' data-label='Group name'><strong>${safeName}</strong></td>")
       html.append("<td data-label='Coordinator'>${safeCoordinator}</td>")
-      html.append("<td data-label='Satellites'>${satelliteMarkup}</td>")
       html.append("<td class='new-ui-group-followers' data-label='Followers'>${followerMarkup}</td>")
       html.append('</tr>')
     }
@@ -1895,11 +1850,9 @@ String renderNewUiGroupTableMobileListMarkup() {
       }
       String coordinator = escapeNewUiHtml(row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown')
       String followers = renderNewUiGroupFollowers(row.followerIds)
-      String satellite = renderNewUiGroupSatellite(row.satelliteId, row.name?.toString(), row.coordinatorId?.toString())
       html.append("<article class='new-ui-mobile-record new-ui-group-mobile-record'><div class='new-ui-group-mobile-title'><strong>${safeName}</strong></div>")
       html.append("<div class='new-ui-group-mobile-buttons'>${actions}</div>")
       html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Coordinator</span><span class='new-ui-mobile-value'>${coordinator}</span></div>")
-      html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Satellites</span><span class='new-ui-mobile-value'>${satellite}</span></div>")
       html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Followers</span><span class='new-ui-mobile-value'>${followers}</span></div></article>")
     }
   }
@@ -1909,9 +1862,7 @@ String renderNewUiGroupTableMobileListMarkup() {
 
 List<Map> buildNewUiGroupRows() {
   LinkedHashMap<String, Map> rowsByName = new LinkedHashMap<String, Map>()
-  Map configuredGroups = recoverGroupDefinitionsFromChildDevices(
-      state.userGroups instanceof Map ? (Map)state.userGroups : [:])
-  state.userGroups = configuredGroups
+  Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
 
   configuredGroups.each { Object rawName, Object rawDefinition ->
     String groupName = rawName?.toString()
@@ -1920,7 +1871,6 @@ List<Map> buildNewUiGroupRows() {
       rowsByName[groupName] = [
         name: groupName,
         coordinatorId: definition.groupCoordinatorId?.toString(),
-        satelliteId: definition.satelliteId?.toString(),
         followerIds: normalizeNewUiGroupPlayerIds(definition.playerIds),
         device: null
       ]
@@ -1936,7 +1886,6 @@ List<Map> buildNewUiGroupRows() {
       name: groupName,
       coordinatorId: null,
       followerIds: [],
-      satelliteId: null,
       device: null
     ]
     row.device = groupDevice
@@ -1946,7 +1895,6 @@ List<Map> buildNewUiGroupRows() {
     if(!row.followerIds) {
       row.followerIds = normalizeNewUiGroupPlayerIds(groupDevice.getDataValue('playerIds'))
     }
-    if(!row.satelliteId) { row.satelliteId = groupDevice.getDataValue('satelliteId')?.toString() }
     rowsByName[groupName] = row
   }
 
@@ -2016,78 +1964,6 @@ String renderNewUiGroupFollowers(Object followerIds) {
   return StringUtils.join(ids.collect { String id -> escapeNewUiHtml(playerNames[id] ?: id) }, '<br>')
 }
 
-String renderNewUiGroupSatellite(Object satelliteId, String groupName = null, String coordinatorId = null) {
-  Map statuses = state[GROUP_SATELLITE_STATUSES_STATE_KEY] instanceof Map
-      ? (Map)state[GROUP_SATELLITE_STATUSES_STATE_KEY] : [:]
-  Map status = groupName && statuses[groupName] instanceof Map ? (Map)statuses[groupName] : null
-  String id = satelliteId?.toString()
-  if(!id) {
-    if(status?.status?.toString() == 'Error') {
-      return newUiStatusBadge('Unconfirmed', 'inactive', status.message?.toString() ?: 'Satellite removal failed')
-    }
-    return newUiStatusBadge('—', 'na', 'No satellite configured')
-  }
-  String label = getNewUiSatelliteOptions()[id] ?: getStoredSatelliteName(id) ?: id
-  String owner = findHomeTheaterSatelliteOwners()[id]?.toString()
-  if(status?.status?.toString() == 'Pending') {
-    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge('Pending', 'unknown', status.message?.toString() ?: 'Waiting for Sonos topology') }"
-  }
-  if(status?.status?.toString() == 'Error' || status?.status?.toString() == 'Unconfirmed') {
-    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge(status.status.toString(), 'inactive', status.message?.toString() ?: 'Bond state could not be confirmed') }"
-  }
-  if(owner == coordinatorId) {
-    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge('Bonded', 'active', 'Sonos topology confirms this Sub is bonded to the coordinator') }"
-  }
-  if(owner) {
-    Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-    String ownerName = playerNames[owner] ?: owner
-    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge("Bonded to ${ownerName}", 'inactive', 'Sonos topology reports a different bond owner') }"
-  }
-  return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge('Not bonded', 'unknown', 'Sonos topology does not report this Sub as bonded') }"
-}
-
-Map<String, String> getNewUiSatelliteOptions() {
-  Map<String, String> options = [:]
-  restoreDiscoveredSonosSecondaries()
-  Map<String, String> names = state[HT_SATELLITE_NAMES_STATE_KEY] instanceof Map
-      ? (Map<String, String>)state[HT_SATELLITE_NAMES_STATE_KEY] : [:]
-  names.each { String id, String name ->
-    if(id && name) { options[id] = name }
-  }
-  discoveredSonosSecondaries.each { Object ignored, Object raw ->
-    Map secondary = raw instanceof Map ? (Map)raw : [:]
-    String id = secondary.id?.toString()
-    String model = (secondary.modelDisplayName ?: secondary.modelName ?: '').toString().toLowerCase(Locale.ROOT)
-    if(id && model.contains('sub')) {
-      options[id] = (secondary.name ?: names[id] ?: secondary.modelDisplayName ?: secondary.modelName ?: id).toString()
-    }
-  }
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    String id = player.getDataValue('id')?.toString()
-    String model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName') ?: '').toString().toLowerCase(Locale.ROOT)
-    if(id && model.contains('sub')) { options[id] = player.getDataValue('name')?.toString() ?: names[id] ?: id }
-  }
-  Map<String, String> channelMaps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
-      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
-  channelMaps.each { String ownerId, String rawMap ->
-    rawMap.split(';').each { String pair ->
-      List<String> parts = pair.split(':', 2).collect { String value -> value.trim() }
-      if(parts.size() == 2 && parts[0] != ownerId && parts[1].split(',')
-          .collect { String channel -> channel.trim() }.contains('SW') && !options.containsKey(parts[0])) {
-        options[parts[0]] = names[parts[0]] ?: parts[0]
-      }
-    }
-  }
-  return options.sort { Map.Entry left, Map.Entry right ->
-    left.value.toString().compareToIgnoreCase(right.value.toString())
-  }
-}
-
-String getStoredSatelliteName(String satelliteId) {
-  Map names = state[HT_SATELLITE_NAMES_STATE_KEY] instanceof Map ? (Map)state[HT_SATELLITE_NAMES_STATE_KEY] : [:]
-  return names[satelliteId]?.toString()
-}
-
 Map getNewUiGroupDraft() {
   return state[NEW_UI_GROUP_DRAFT_KEY] instanceof Map ? (Map)state[NEW_UI_GROUP_DRAFT_KEY] : [:]
 }
@@ -2095,11 +1971,6 @@ Map getNewUiGroupDraft() {
 String getNewUiGroupCoordinator(Map draft) {
   Object configured = settings.containsKey('newUiGroupCoordinator') ? settings.newUiGroupCoordinator : null
   return configured != null ? configured.toString() : (draft.coordinatorId?.toString() ?: '')
-}
-
-String getNewUiGroupSatellite(Map draft) {
-  Object configured = settings.containsKey('newUiGroupSatellite') ? settings.newUiGroupSatellite : null
-  return configured != null ? configured.toString() : (draft.satelliteId?.toString() ?: '')
 }
 
 List<String> getNewUiGroupFollowers(Map draft) {
@@ -2386,10 +2257,6 @@ void appButtonHandler(String buttonName) {
     handleNewUiGroupFieldChange('coordinator')
     return
   }
-  if(buttonName == 'btnNewUiGroupSatelliteChanged') {
-    handleNewUiGroupSatelliteChange()
-    return
-  }
   if(buttonName == 'btnNewUiSaveGroup') {
     saveNewUiGroup()
     return
@@ -2494,7 +2361,6 @@ void beginNewUiGroupEditor(String coordinatorId) {
   Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
   String initialName = buildNewUiAutomaticGroupName(coordinatorId, [], playerNames)
   state[NEW_UI_GROUP_DRAFT_KEY] = [name: initialName, coordinatorId: coordinatorId, followerIds: []]
-  state[NEW_UI_GROUP_DRAFT_KEY].satelliteId = ''
   if(coordinatorId) {
     app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: coordinatorId])
     app.updateSetting('newUiGroupName', [type: 'text', value: initialName])
@@ -2523,14 +2389,12 @@ void beginNewUiGroupEdit(String token) {
     name: group.name.toString(),
     coordinatorId: group.coordinatorId?.toString(),
     followerIds: existingFollowerIds
-    , satelliteId: group.satelliteId?.toString() ?: ''
   ]
   app.updateSetting('newUiGroupName', group.name.toString())
   if(group.coordinatorId) {
     app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: group.coordinatorId.toString()])
   }
   app.updateSetting('newUiGroupFollowers', [type: 'enum', value: normalizeNewUiGroupPlayerIds(group.followerIds)])
-  app.updateSetting('newUiGroupSatellite', [type: 'enum', value: group.satelliteId?.toString() ?: ''])
   logInfo("New UI group edit started for '${group.name}'")
 }
 
@@ -2583,20 +2447,6 @@ void handleNewUiGroupFieldChange(String field) {
   app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
 }
 
-void handleNewUiGroupSatelliteChange() {
-  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
-  Map draft = getNewUiGroupDraft()
-  String satelliteId = getNewUiGroupSatellite(draft)
-  if(satelliteId && !getNewUiSatelliteOptions().containsKey(satelliteId)) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'Select a discovered Sonos Sub or Sub Mini.'
-    return
-  }
-  draft.satelliteId = satelliteId
-  state[NEW_UI_GROUP_DRAFT_KEY] = draft
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
-}
-
 void saveNewUiGroup() {
   if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
     logWarn('New UI group save requested without an active editor')
@@ -2609,7 +2459,6 @@ void saveNewUiGroup() {
   String groupName = configuredName != null ? configuredName.toString().trim() : (draft.name?.toString()?.trim() ?: '')
   String coordinatorId = getNewUiGroupCoordinator(draft)
   List<String> followerIds = getNewUiGroupFollowers(draft).unique()
-  String satelliteId = getNewUiGroupSatellite(draft)
 
   String draftName = draft.name?.toString()?.trim() ?: ''
   if(configuredName != null && groupName && groupName != draftName) {
@@ -2621,16 +2470,12 @@ void saveNewUiGroup() {
     state[NEW_UI_GROUP_ERROR_KEY] = 'Select a coordinator before saving the group.'
     return
   }
+  if(followerIds.isEmpty()) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'Select at least one follower before saving the group.'
+    return
+  }
   if(followerIds.contains(coordinatorId)) {
     state[NEW_UI_GROUP_ERROR_KEY] = 'The coordinator cannot also be a follower.'
-    return
-  }
-  if(satelliteId && !getNewUiSatelliteOptions().containsKey(satelliteId)) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'The selected satellite is no longer available. Select a discovered Sonos Sub or Sub Mini.'
-    return
-  }
-  if(satelliteId && (satelliteId == coordinatorId || followerIds.contains(satelliteId))) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'A satellite cannot also be the coordinator or a follower.'
     return
   }
   if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == true) {
@@ -2645,9 +2490,7 @@ void saveNewUiGroup() {
   if(!groupName) {
     groupName = "${playerNames[coordinatorId]} + ${followerIds.size()} others"
   }
-  Map configuredGroups = recoverGroupDefinitionsFromChildDevices(
-      state.userGroups instanceof Map ? (Map)state.userGroups : [:])
-  state.userGroups = configuredGroups
+  Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
   if(configuredGroups.containsKey(groupName) && groupName != originalName) {
     state[NEW_UI_GROUP_ERROR_KEY] = "A group named '${groupName}' already exists. Choose a different name."
     return
@@ -2660,9 +2503,8 @@ void saveNewUiGroup() {
   if(originalName && originalName != groupName) {
     configuredGroups.remove(originalName)
   }
-  configuredGroups[groupName] = [groupCoordinatorId: coordinatorId, playerIds: followerIds, satelliteId: satelliteId]
+  configuredGroups[groupName] = [groupCoordinatorId: coordinatorId, playerIds: followerIds]
   state.userGroups = configuredGroups
-  clearGroupSatelliteStatus(groupName)
   String mode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
   clearNewUiGroupSettings()
   createGroupDevices()
@@ -2698,710 +2540,7 @@ void clearNewUiGroupSettings() {
   app.removeSetting('newUiGroupName')
   app.removeSetting('newUiGroupCoordinator')
   app.removeSetting('newUiGroupFollowers')
-  app.removeSetting('newUiGroupSatellite')
   app.removeSetting('newUiGroupFollowerSelection')
-}
-
-/** Bond updates run after the editor/save gate has returned and use only async local UPnP calls. */
-void queueGroupSatelliteReconciliation(String groupName, Map previousDefinition, Map desiredDefinition) {
-  Map queue = state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] instanceof Map
-      ? (Map)state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] : [:]
-  queue[groupName] = [groupName: groupName, previous: new LinkedHashMap(previousDefinition ?: [:]),
-    desired: new LinkedHashMap(desiredDefinition ?: [:]), queuedAt: now()]
-  state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] = queue
-  if(state[GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY] != true) {
-    state[GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY] = true
-    runIn(1, 'drainGroupSatelliteReconciliations', [overwrite: true])
-  }
-}
-
-/** Satellite bonding is an explicit group action, never a side effect of saving preferences. */
-void reconcileGroupDeviceSatellite(ChildDeviceWrapper groupDevice) {
-  String dni = groupDevice?.getDeviceNetworkId()?.toString()
-  Integer markerIndex = dni ? dni.indexOf(GROUP_DEVICE_DNI_MARKER) : -1
-  String groupName = markerIndex >= 0 ? dni.substring(markerIndex + GROUP_DEVICE_DNI_MARKER.length()) : null
-  Map configured = getConfiguredGroupDefinition(groupDevice)
-  String coordinatorId = groupDevice?.getDataValue('groupCoordinatorId')?.toString() ?: configured.groupCoordinatorId?.toString()
-  String satelliteId = groupDevice?.getDataValue('satelliteId')?.toString() ?: configured.satelliteId?.toString()
-  if(!groupName || !coordinatorId || !satelliteId) { return }
-  queueGroupSatelliteReconciliation(groupName, [:], [groupCoordinatorId: coordinatorId, satelliteId: satelliteId,
-    requiredPlayerIds: getAllPlayersForGroupDevice(groupDevice)])
-}
-
-/** Wait for the player group operation to settle before moving its bonded satellite. */
-void scheduleGroupDeviceSatelliteReconciliation(ChildDeviceWrapper groupDevice, Boolean requireExactMembers = true) {
-  String dni = groupDevice?.getDeviceNetworkId()?.toString()
-  Map configured = getConfiguredGroupDefinition(groupDevice)
-  String coordinatorId = groupDevice?.getDataValue('groupCoordinatorId')?.toString() ?: configured.groupCoordinatorId?.toString()
-  String satelliteId = groupDevice?.getDataValue('satelliteId')?.toString() ?: configured.satelliteId?.toString()
-  String groupName = newUiGroupNameFromDeviceNetworkId(dni)
-  logInfo("Group activation satellite check scheduled for '${groupName ?: dni}': coordinator=${coordinatorId ?: 'missing'}, satellite=${satelliteId ?: 'none'}")
-  if(!dni || !satelliteId || !coordinatorId) {
-    if(satelliteId && !coordinatorId) { logWarn("Cannot reconcile satellite for '${groupName ?: dni}': configured coordinator is missing") }
-    return
-  }
-  if(groupName) { setGroupSatelliteStatus(groupName, 'Pending', 'Waiting for group membership to settle') }
-  runIn(12, 'reconcileGroupDeviceSatelliteAfterActivation', [overwrite: true, data: [groupDni: dni,
-    groupName: groupName, coordinatorId: coordinatorId, satelliteId: satelliteId,
-    requiredPlayerIds: getAllPlayersForGroupDevice(groupDevice), requireExactMembers: requireExactMembers]])
-  logDebug("Scheduled satellite topology preflight for '${groupName}' in 12 seconds")
-}
-
-void reconcileGroupDeviceSatelliteAfterActivation(Map data = [:]) {
-  String dni = data?.groupDni?.toString()
-  String groupName = data?.groupName?.toString() ?: newUiGroupNameFromDeviceNetworkId(dni)
-  ChildDeviceWrapper groupDevice = dni ? getChildDevice(dni) : null
-  Map configured = getConfiguredGroupDefinition(groupDevice)
-  String coordinatorId = data?.coordinatorId?.toString() ?: groupDevice?.getDataValue('groupCoordinatorId')?.toString() ?: configured.groupCoordinatorId?.toString()
-  String satelliteId = data?.satelliteId?.toString() ?: groupDevice?.getDataValue('satelliteId')?.toString() ?: configured.satelliteId?.toString()
-  if(!coordinatorId || !satelliteId || !groupName) {
-    logWarn("Satellite topology preflight skipped for '${groupName ?: dni}': coordinator or satellite configuration is missing")
-    return
-  }
-  List<String> requiredPlayerIds = data?.requiredPlayerIds instanceof Collection
-      ? normalizeGroupPlayerIds(data.requiredPlayerIds)
-      : (groupDevice != null ? getAllPlayersForGroupDevice(groupDevice) : [coordinatorId])
-  queueGroupSatelliteReconciliation(groupName, [:], [
-    groupCoordinatorId: coordinatorId, satelliteId: satelliteId, requiredPlayerIds: requiredPlayerIds,
-    requireExactMembers: data?.requireExactMembers != false])
-}
-
-void continueGroupSatelliteAddAfterRemoval(Map data = [:]) {
-  Map operation = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-  if(operation == null || operation.requestId?.toString() != data?.requestId?.toString()) { return }
-  requestGroupSatelliteTopology(operation, 'post-removal')
-}
-
-/** Recheck topology after a bonded-zone write, including writes Sonos rejected mid-reshuffle. */
-void requestGroupBondedZoneVerification(Map data = [:]) {
-  Map operation = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-  if(operation == null || operation.requestId?.toString() != data?.requestId?.toString()) { return }
-  requestGroupSatelliteTopology(operation, 'bonded-zone-verification')
-}
-
-void clearGroupSatelliteStatus(String groupName) {
-  Map statuses = state[GROUP_SATELLITE_STATUSES_STATE_KEY] instanceof Map
-      ? (Map)state[GROUP_SATELLITE_STATUSES_STATE_KEY] : [:]
-  statuses.remove(groupName)
-  state[GROUP_SATELLITE_STATUSES_STATE_KEY] = statuses
-}
-
-void drainGroupSatelliteReconciliations() {
-  state.remove(GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY)
-  Map active = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-  if(active != null) {
-    Long requestedAt = active.requestedAt instanceof Number ? ((Number)active.requestedAt).longValue() : 0L
-    Long ageMs = requestedAt > 0L ? now() - requestedAt : Long.MAX_VALUE
-    if(ageMs > 60000L) {
-      logWarn("Clearing stale satellite reconciliation for '${active.groupName ?: 'unknown group'}' after ${ageMs}ms; allowing the queued activation to proceed")
-      state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-    } else {
-      logDebug("Satellite reconciliation for '${active.groupName ?: 'unknown group'}' is still active; leaving queued work for its callback")
-      return
-    }
-  }
-  Map queue = state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] instanceof Map
-      ? (Map)state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] : [:]
-  if(queue.isEmpty()) { return }
-  String groupName = queue.keySet().iterator().next().toString()
-  Map request = queue.remove(groupName) as Map
-  state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] = queue
-  startGroupSatelliteReconciliation(request)
-}
-
-void startGroupSatelliteReconciliation(Map request) {
-  Map desired = request?.desired instanceof Map ? (Map)request.desired : [:]
-  Map previous = request?.previous instanceof Map ? (Map)request.previous : [:]
-  String groupName = request?.groupName?.toString()
-  String targetId = desired.groupCoordinatorId?.toString()
-  String desiredSatellite = desired.satelliteId?.toString()
-  String oldSatellite = previous.satelliteId?.toString()
-  Map<String, String> players = getRinconLocalHostMap()
-  ChildDeviceWrapper groupDevice = getChildDevice("${app.id}-SonosGroupDevice-${groupName}")
-  List<String> requiredPlayerIds = desired.requiredPlayerIds instanceof Collection
-      ? normalizeGroupPlayerIds(desired.requiredPlayerIds)
-      : (groupDevice != null ? getAllPlayersForGroupDevice(groupDevice) : [targetId])
-  if(targetId && !requiredPlayerIds.contains(targetId)) { requiredPlayerIds.add(0, targetId) }
-  Map operation = [groupName: groupName, targetId: targetId, desiredSatellite: desiredSatellite,
-    oldSatellite: oldSatellite, previousCoordinatorId: previous.groupCoordinatorId?.toString(),
-    requiredPlayerIds: requiredPlayerIds, requireExactMembers: desired.requireExactMembers != false,
-    players: players, topologyAttempt: 0, requestedAt: now(), requestId: UUID.randomUUID().toString()]
-  state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-  setGroupSatelliteStatus(groupName, 'Pending', 'Checking the coordinator topology before changing the satellite bond')
-  runIn(90, 'expireGroupSatelliteReconciliation', [overwrite: true,
-    data: [requestId: operation.requestId]])
-  requestGroupSatelliteTopology(operation, 'preflight')
-}
-
-void expireGroupSatelliteReconciliation(Map data = [:]) {
-  Map operation = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-  if(operation == null || operation.requestId?.toString() != data?.requestId?.toString()) { return }
-  failGroupSatelliteReconciliation(operation,
-      'Satellite reconciliation timed out before Sonos topology confirmed the bond')
-}
-
-void requestGroupSatelliteTopology(Map operation, String purpose) {
-  String targetId = operation?.targetId?.toString()
-  String host = operation?.players instanceof Map ? ((Map)operation.players)[targetId]?.toString() : null
-  if(!targetId || !host) {
-    failGroupSatelliteReconciliation(operation, "No local UPnP address is available for coordinator ${targetId ?: 'unknown'}")
-    return
-  }
-  String service = 'urn:schemas-upnp-org:service:ZoneGroupTopology:1'
-  String body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${service}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
-  Map params = [uri: "http://${host}/ZoneGroupTopology/Control",
-    headers: [SOAPAction: "${service}#GetZoneGroupState"],
-    requestContentType: 'text/xml', contentType: 'text/xml', timeout: 5, body: body]
-  Map data = [requestId: operation.requestId, purpose: purpose]
-  logInfo("Querying fresh Sonos topology from configured coordinator ${targetId} before satellite reconciliation for '${operation.groupName}'")
-  asynchttpPost('groupSatelliteTopologyCallback', params, data)
-}
-
-void retryGroupSatelliteTopology(Map data = [:]) {
-  Map operation = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-  if(operation == null || operation.requestId?.toString() != data?.requestId?.toString()) { return }
-  operation.topologyAttempt = ((operation.topologyAttempt ?: 0) as Integer) + 1
-  state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-  requestGroupSatelliteTopology(operation, 'preflight')
-}
-
-void groupSatelliteTopologyCallback(AsyncResponse response, Map data) {
-  String purpose = data?.purpose?.toString()
-  String requestId = data?.requestId?.toString()
-  logDebug("Received satellite topology callback request=${requestId ?: 'missing'}, purpose=${purpose ?: 'missing'}, status=${response?.status ?: 'missing'}, error=${response?.hasError()}")
-  if(purpose == 'verification') {
-    Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-        ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-    if(!(verifications[requestId] instanceof Map)) { return }
-  } else {
-    Map active = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-        ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-    if(active == null || active.requestId?.toString() != requestId) { return }
-  }
-  if(response == null || response.hasError() || response.status != 200) {
-    Map active = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-        ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : [:]
-    String failure = describeHomeTheaterSatelliteFailure(response)
-    String message = "Sonos topology query returned HTTP ${response?.status ?: 'error'}"
-    if(failure) { message += ": ${failure}" }
-    if(purpose == 'verification') {
-      Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-          ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-      Map verification = verifications.remove(requestId) as Map
-      state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
-      setGroupSatelliteStatus(verification?.groupName?.toString(), 'Unconfirmed', message)
-      app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-    } else {
-      failGroupSatelliteReconciliation(active, message)
-    }
-    return
-  }
-  String responseBody = null
-  try { responseBody = response.getData()?.toString() } catch(Exception ignored) { }
-  logDebug("Satellite topology callback request=${requestId} returned ${responseBody?.length() ?: 0} response characters")
-  if(!responseBody) {
-    String message = 'Sonos topology query returned no response data'
-    if(purpose == 'verification') {
-      Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-          ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-      Map verification = verifications.remove(requestId) as Map
-      state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
-      setGroupSatelliteStatus(verification?.groupName?.toString(), 'Unconfirmed', message)
-      app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-    } else {
-      Map active = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-          ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : [:]
-      failGroupSatelliteReconciliation(active, message)
-    }
-    return
-  }
-  Map topology
-  try { topology = parseDiscoveryTopologyResponse(responseBody) }
-  catch(Exception e) {
-    String message = "Could not parse Sonos topology response: ${e.message}"
-    if(purpose == 'verification') {
-      Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-          ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-      Map verification = verifications.remove(requestId) as Map
-      state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
-      setGroupSatelliteStatus(verification?.groupName?.toString(), 'Unconfirmed', message)
-      app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-    } else {
-      Map active = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-          ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : [:]
-      failGroupSatelliteReconciliation(active, message)
-    }
-    return
-  }
-  state[HT_SAT_CHAN_MAPS_STATE_KEY] = topology.channelMaps instanceof Map
-      ? new LinkedHashMap<String, String>((Map)topology.channelMaps) : [:]
-  state[HT_SATELLITE_NAMES_STATE_KEY] = topology.satelliteNames instanceof Map
-      ? new LinkedHashMap<String, String>((Map)topology.satelliteNames) : [:]
-  if(topology.speakerChannelMaps instanceof Map && !((Map)topology.speakerChannelMaps).isEmpty()) {
-    state[SPEAKER_CHANNEL_MAPS_STATE_KEY] = new LinkedHashMap<String, String>((Map)topology.speakerChannelMaps)
-  }
-  Map<String, String> freshSatelliteOwners = storeTopologySatelliteOwners(topology)
-  removeTopologySatellitePrimaries((Map)state[HT_SATELLITE_NAMES_STATE_KEY])
-  applyTopologySecondaries((List<Map>)(topology.secondaryDevices ?: []))
-
-  if(purpose == 'verification') {
-    verifyGroupSatelliteBond([requestId: requestId])
-    applyGroupSwitchesFromTopology((List<Map>)(topology.groupMemberships ?: []), freshSatelliteOwners)
-    app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-    return
-  }
-  Map operation = (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY]
-  String targetId = operation.targetId?.toString()
-  List<String> requiredIds = normalizeGroupPlayerIds(operation.requiredPlayerIds)
-  Map liveGroup = ((List<Map>)(topology.groupMemberships ?: [])).find { Map group ->
-    group.coordinatorId?.toString() == targetId
-  }
-  List<String> liveIds = normalizeGroupPlayerIds(liveGroup?.playerIds)
-  Boolean groupReady = liveGroup != null && liveIds.containsAll(requiredIds) &&
-      (operation.requireExactMembers != true || requiredIds.toSet() == liveIds.toSet())
-  if(!groupReady) {
-    Integer attempt = (operation.topologyAttempt ?: 0) as Integer
-    if(attempt < 5) {
-      setGroupSatelliteStatus(operation.groupName?.toString(), 'Pending', 'Waiting for the configured coordinator and players to appear in fresh topology')
-      logInfo("Configured group '${operation.groupName}' is not ready in coordinator topology yet; retry ${attempt + 1} of 5")
-      runIn(3, 'retryGroupSatelliteTopology', [overwrite: true, data: [requestId: requestId]])
-    } else {
-      failGroupSatelliteReconciliation(operation,
-        'Fresh Sonos topology did not confirm the configured coordinator and players; satellite was not changed')
-    }
-    applyGroupSwitchesFromTopology((List<Map>)(topology.groupMemberships ?: []), freshSatelliteOwners)
-    return
-  }
-  if(purpose == 'bonded-zone-verification') {
-    String satelliteId = operation.desiredSatellite?.toString()
-    String currentOwner = satelliteId ? freshSatelliteOwners[satelliteId]?.toString() : null
-    if(currentOwner == targetId) {
-      state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-      setGroupSatelliteStatus(operation.groupName?.toString(), 'Applied', 'Bond confirmed by fresh Sonos topology')
-      drainGroupSatelliteReconciliations()
-      return
-    }
-    Integer attempts = (operation.bondedZoneAttempt ?: 1) as Integer
-    if(attempts < 2 && currentOwner == null) {
-      operation.bondedZoneAttempt = attempts + 1
-      state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-      logInfo("Sonos topology has not converged for bonded-zone satellite '${satelliteId}'; reasserting the same channel map once (attempt 2 of 2)")
-      sendHomeTheaterSatelliteAdd(operation)
-      return
-    }
-    String message = currentOwner
-        ? "Satellite is bonded to unexpected coordinator ${currentOwner} after AddBondedZones"
-        : "Sonos topology did not confirm the satellite after ${attempts} AddBondedZones attempts"
-    failGroupSatelliteReconciliation(operation, message)
-    return
-  }
-  if(purpose == 'post-removal') {
-    String satelliteId = operation.desiredSatellite?.toString()
-    String priorOwner = operation.removeOwner?.toString()
-    String currentOwner = satelliteId ? freshSatelliteOwners[satelliteId]?.toString() : null
-    if(currentOwner == targetId) {
-      state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-      setGroupSatelliteStatus(operation.groupName?.toString(), 'Applied', 'Fresh coordinator topology confirms the satellite is already bonded')
-      drainGroupSatelliteReconciliations()
-      return
-    }
-    if(currentOwner && currentOwner != priorOwner) {
-      failGroupSatelliteReconciliation(operation,
-        "Satellite topology changed to unexpected owner ${currentOwner} while releasing it from ${priorOwner ?: 'its previous coordinator'}")
-      return
-    }
-    if(currentOwner == priorOwner) {
-      Integer attempt = (operation.removalTopologyAttempt ?: 0) as Integer
-      if(attempt < 1) {
-        operation.removalTopologyAttempt = attempt + 1
-        state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-        logInfo("Sonos still reports satellite ${satelliteId} on ${priorOwner}; allowing another settle interval before the final topology check")
-        runIn(16, 'continueGroupSatelliteAddAfterRemoval', [overwrite: true, data: [requestId: requestId]])
-      } else {
-        failGroupSatelliteReconciliation(operation,
-          "Fresh Sonos topology still reports satellite ${satelliteId} bonded to ${priorOwner} after removal was accepted")
-      }
-      return
-    }
-    // Only issue the destination bond command after topology confirms that the
-    // satellite is no longer bonded to its previous coordinator.
-    sendHomeTheaterSatelliteAdd(operation)
-    return
-  }
-  // Reconciliation must use only the topology payload from this request.
-  // The persisted snapshot is for UI/status consumers and may be older than
-  // the speaker state that this activation is about to change.
-  operation.freshSatelliteOwners = freshSatelliteOwners
-  continueGroupSatelliteReconciliationFromTopology(operation)
-  applyGroupSwitchesFromTopology((List<Map>)(topology.groupMemberships ?: []), freshSatelliteOwners)
-}
-
-void continueGroupSatelliteReconciliationFromTopology(Map operation) {
-  Map owners = operation?.freshSatelliteOwners instanceof Map
-      ? (Map)operation.freshSatelliteOwners : [:]
-  String groupName = operation.groupName?.toString()
-  String targetId = operation.targetId?.toString()
-  String desiredSatellite = operation.desiredSatellite?.toString()
-  String removeSatellite = null
-  String removeOwner = null
-  String oldSatellite = operation.oldSatellite?.toString()
-  if(oldSatellite && oldSatellite != desiredSatellite) {
-    String observedOwner = owners[oldSatellite]?.toString()
-    String previousCoordinator = operation.previousCoordinatorId?.toString()
-    if(observedOwner && (!previousCoordinator || observedOwner == previousCoordinator)) {
-      removeSatellite = oldSatellite
-      removeOwner = observedOwner
-    }
-  }
-  if(desiredSatellite) {
-    String observedOwner = owners[desiredSatellite]?.toString()
-    if(observedOwner == targetId) {
-      state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-      setGroupSatelliteStatus(groupName, 'Applied', 'Fresh coordinator topology confirms the satellite is already bonded')
-      drainGroupSatelliteReconciliations()
-      return
-    }
-    if(observedOwner && observedOwner != targetId) {
-      // AddHTSatellite can return success without moving a Sub that is still
-      // bonded to another room. Remove the verified old bond first for every
-      // reassignment, then add it through the destination's correct action.
-      operation.removeSatellite = desiredSatellite
-      operation.removeOwner = observedOwner
-      state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-      setGroupSatelliteStatus(groupName, 'Pending', 'Removing the existing bond before moving the satellite')
-      sendHomeTheaterSatelliteAction(operation, observedOwner, 'RemoveHTSatellite',
-          [SatRoomUUID: desiredSatellite], 'remove')
-      return
-    }
-  }
-  operation.removeSatellite = removeSatellite
-  operation.removeOwner = removeOwner
-  state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-  setGroupSatelliteStatus(groupName, 'Pending', desiredSatellite ? 'Changing the satellite bond' : 'Removing the configured satellite bond')
-  if(removeSatellite && removeOwner) {
-    sendHomeTheaterSatelliteAction(operation, removeOwner, 'RemoveHTSatellite', [SatRoomUUID: removeSatellite], 'remove')
-  } else if(desiredSatellite) {
-    sendHomeTheaterSatelliteAdd(operation)
-  } else {
-    state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-    setGroupSatelliteStatus(groupName, 'Applied', 'Fresh coordinator topology confirms the satellite is already unbonded')
-    drainGroupSatelliteReconciliations()
-  }
-}
-
-Map<String, String> getRinconLocalHostMap() {
-  Map<String, String> result = [:]
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    String id = player.getDataValue('id')?.toString()
-    String host = player.getDataValue('localUpnpHost')?.toString()?.trim()
-    if(!host) {
-      String ip = player.getDataValue('deviceIp')?.toString()?.trim()
-      host = ip ? (ip.contains(':') ? ip : "${ip}:1400") : null
-    } else if(!host.contains(':')) { host = "${host}:1400" }
-    if(id && host) { result[id] = host }
-  }
-  // Stereo-pair channel maps can identify an invisible LF speaker as the
-  // pair's control/master device. Its topology Location is retained with the
-  // discovered secondary records even though it has no primary player child.
-  discoveredSonosSecondaries.each { Object key, Object raw ->
-    Map secondary = raw instanceof Map ? (Map)raw : [:]
-    String id = secondary.id?.toString()
-    String host = secondary.localUpnpHost?.toString()?.trim()
-    if(!host) {
-      String ip = secondary.deviceIp?.toString()?.trim()
-      host = ip ? (ip.contains(':') ? ip : "${ip}:1400") : null
-    } else if(!host.contains(':')) { host = "${host}:1400" }
-    if(id && host && !result.containsKey(id)) { result[id] = host }
-  }
-  return result
-}
-
-Map<String, String> findHomeTheaterSatelliteOwners() {
-  if(state.containsKey(TOPOLOGY_SATELLITE_OWNERS_STATE_KEY)) {
-    Map<String, String> liveOwners = state[TOPOLOGY_SATELLITE_OWNERS_STATE_KEY] instanceof Map
-        ? (Map<String, String>)state[TOPOLOGY_SATELLITE_OWNERS_STATE_KEY] : [:]
-    return new LinkedHashMap<String, String>(liveOwners)
-  }
-  // A persisted SW channel assignment can survive a failed or partial bond
-  // operation. Only a Satellite node in the current topology response proves
-  // that the Sub is presently bonded.
-  return [:]
-}
-
-Boolean isStereoPairChannelMap(String rawMap) {
-  if(!rawMap) { return false }
-  List<List<String>> assignments = rawMap.split(';').collect { String entry ->
-    List<String> pair = entry.split(':', 2).collect { String part -> part.trim() }
-    pair.size() == 2 ? pair[1].split(',').collect { String channel -> channel.trim().toUpperCase(Locale.ROOT) } : []
-  }.findAll { List<String> channels -> !channels.isEmpty() && !channels.contains('SW') }
-  return assignments.size() == 2 && assignments.count { List<String> channels -> channels == ['LF', 'LF'] } == 1 &&
-      assignments.count { List<String> channels -> channels == ['RF', 'RF'] } == 1
-}
-
-Boolean isStereoPairCoordinator(String coordinatorId, String rawMap = null) {
-  if(rawMap && isStereoPairChannelMap(rawMap)) { return true }
-  Collection rawCoordinators = state[STEREO_PAIR_COORDINATORS_STATE_KEY] instanceof Collection
-      ? (Collection)state[STEREO_PAIR_COORDINATORS_STATE_KEY] : []
-  return coordinatorId != null && rawCoordinators.any { Object id -> id?.toString() == coordinatorId }
-}
-
-String findStereoPairMasterId(String rawMap) {
-  if(!isStereoPairChannelMap(rawMap)) { return null }
-  List<String> master = rawMap.split(';').collect { String assignment ->
-    List<String> pair = assignment.split(':', 2).collect { String part -> part.trim() }
-    pair.size() == 2 && pair[1].split(',').collect { String channel -> channel.trim().toUpperCase(Locale.ROOT) } == ['LF', 'LF']
-        ? pair[0] : null
-  }.findAll { String id -> id }
-  return master.size() == 1 ? master[0] : null
-}
-
-String findStereoPairChannelMapForCoordinator(String coordinatorId) {
-  Map<String, String> maps = state[SPEAKER_CHANNEL_MAPS_STATE_KEY] instanceof Map
-      ? (Map<String, String>)state[SPEAKER_CHANNEL_MAPS_STATE_KEY] : [:]
-  return maps.values().find { String candidate ->
-    isStereoPairChannelMap(candidate) && candidate.split(';').any { String assignment ->
-      assignment.split(':', 2)[0]?.trim() == coordinatorId
-    }
-  }
-}
-
-Map<String, String> storeTopologySatelliteOwners(Map topology) {
-  Map<String, String> owners = [:]
-  List<Map> secondaries = topology?.secondaryDevices instanceof List ? (List<Map>)topology.secondaryDevices : []
-  Map<String, String> channelMaps = topology?.speakerChannelMaps instanceof Map
-      ? (Map<String, String>)topology.speakerChannelMaps : [:]
-  Set<String> visibleStereoPairMembers = topology?.stereoPairCoordinators instanceof Collection
-      ? ((Collection)topology.stereoPairCoordinators).collect { Object id -> id?.toString() }.findAll { String id -> id } as Set<String>
-      : [] as Set<String>
-  secondaries.each { Map secondary ->
-    String satelliteId = secondary?.topologyRole?.toString() == 'satellite' ? secondary.id?.toString() : null
-    String ownerId = secondary?.primaryDeviceId?.toString()
-    if(satelliteId && ownerId) {
-      // On a stereo pair, topology can nest the Satellite under the invisible
-      // pair member. Attribute that bond to the visible pair coordinator only
-      // when its live ChannelMapSet contains both that member and the Sub.
-      String visiblePairOwner = visibleStereoPairMembers.find { String visibleId ->
-        String rawMap = channelMaps[visibleId]
-        isStereoPairChannelMap(rawMap) && rawMap.split(';').any { String entry ->
-          entry.trim().startsWith("${ownerId}:")
-        } && rawMap.split(';').any { String entry ->
-          entry.trim().startsWith("${satelliteId}:SW")
-        }
-      }
-      owners[satelliteId] = visiblePairOwner ?: ownerId
-    }
-  }
-  // ChannelMapSet can retain a previous SW assignment after a failed bond.
-  // The Satellite child node is the live ownership signal.
-  state[TOPOLOGY_SATELLITE_OWNERS_STATE_KEY] = owners
-  Collection rawCoordinators = topology?.stereoPairCoordinators instanceof Collection
-      ? (Collection)topology.stereoPairCoordinators : []
-  state[STEREO_PAIR_COORDINATORS_STATE_KEY] = rawCoordinators.collect { Object id -> id?.toString() }
-  return owners
-}
-
-void sendHomeTheaterSatelliteAdd(Map operation) {
-  String targetId = operation?.targetId?.toString()
-  String satelliteId = operation?.desiredSatellite?.toString()
-  if(!satelliteId) {
-    state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-    setGroupSatelliteStatus(operation.groupName?.toString(), 'Applied', 'No satellite configured')
-    drainGroupSatelliteReconciliations()
-    return
-  }
-  Map<String, String> speakerMaps = state[SPEAKER_CHANNEL_MAPS_STATE_KEY] instanceof Map
-      ? (Map<String, String>)state[SPEAKER_CHANNEL_MAPS_STATE_KEY] : [:]
-  String speakerMap = speakerMaps[targetId]
-  if(!isStereoPairChannelMap(speakerMap)) {
-    String pairMap = findStereoPairChannelMapForCoordinator(targetId)
-    if(pairMap) { speakerMap = pairMap }
-  }
-  if(isStereoPairCoordinator(targetId, speakerMap)) {
-    if(!isStereoPairChannelMap(speakerMap)) {
-      failGroupSatelliteReconciliation(operation,
-        'The live topology identifies a stereo pair, but did not provide its left/right ChannelMapSet; no bond command was sent')
-      return
-    }
-    // A stereo pair with a Sub is represented as a bonded-zone channel map.
-    // Send AddBondedZones to the configured room coordinator while preserving
-    // the dynamic left/right assignments and appending the Sub's SW channel.
-    List<String> entries = speakerMap.split(';').collect { String entry -> entry.trim() }
-        .findAll { String entry -> entry && !entry.startsWith("${satelliteId}:") }
-    entries << "${satelliteId}:SW"
-    String channelMap = entries.join(';')
-    if(operation.bondedZoneAttempt == null) { operation.bondedZoneAttempt = 1 }
-    state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-    sendHomeTheaterSatelliteAction(operation, targetId, 'AddBondedZones', [ChannelMapSet: channelMap], 'add')
-    return
-  }
-
-  Map<String, String> homeTheaterMaps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
-      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
-  List<String> entries = homeTheaterMaps[targetId]
-      ? homeTheaterMaps[targetId].split(';').collect { String entry -> entry.trim() }
-          .findAll { String entry -> entry && !entry.startsWith("${satelliteId}:") }
-      : []
-  Boolean hasCoordinator = entries.any { String entry -> entry.startsWith("${targetId}:") }
-  if(!hasCoordinator) { entries.add(0, "${targetId}:LF,RF") }
-  entries << "${satelliteId}:SW"
-  String channelMap = entries.join(';')
-  sendHomeTheaterSatelliteAction(operation, targetId, 'AddHTSatellite', [HTSatChanMapSet: channelMap], 'add')
-}
-
-void sendHomeTheaterSatelliteAction(Map operation, String ownerId, String action, Map args, String stage) {
-  String host = operation?.players instanceof Map ? ((Map)operation.players)[ownerId]?.toString() : null
-  if(!host) {
-    failGroupSatelliteReconciliation(operation, "No local UPnP address is available for ${ownerId}")
-    return
-  }
-  String service = 'urn:schemas-upnp-org:service:DeviceProperties:1'
-  StringBuilder body = new StringBuilder("<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:${action} xmlns:u=\"${service}\">")
-  args.each { String name, Object value ->
-    String safe = value?.toString()?.replace('&', '&amp;')?.replace('<', '&lt;')?.replace('>', '&gt;') ?: ''
-    body.append('<').append(name).append('>').append(safe).append('</').append(name).append('>')
-  }
-  body.append('</u:').append(action).append('></s:Body></s:Envelope>')
-  Map params = [uri: "http://${host}/DeviceProperties/Control",
-    headers: [SOAPAction: "\"${service}#${action}\""],
-    contentType: 'text/xml', requestContentType: 'text/xml; charset="utf-8"', body: body.toString(), timeout: 15]
-  Map data = [requestId: operation.requestId, stage: stage, action: action, ownerId: ownerId]
-  logInfo("Sending Sonos ${action} request to ${ownerId} for group '${operation.groupName}'")
-  logDebug("Sonos ${action} target=${params.uri}, SOAPAction=${params.headers.SOAPAction}, body=${body}")
-  asynchttpPost('groupSatelliteBondCallback', params, data)
-}
-
-void groupSatelliteBondCallback(AsyncResponse response, Map data) {
-  Map operation = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
-      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
-  if(operation == null || operation.requestId?.toString() != data?.requestId?.toString()) { return }
-  if(response?.hasError() == true || response?.status != 200) {
-    String details = describeHomeTheaterSatelliteFailure(response)
-    String message = "Sonos ${data.action} returned HTTP ${response?.status ?: 'error'}"
-    if(details) { message += ": ${details}" }
-    if(data.action == 'AddBondedZones' && data.stage == 'add') {
-      logWarn("${message}; checking live topology before deciding whether to reassert the bonded-zone map")
-      runIn(16, 'requestGroupBondedZoneVerification', [overwrite: true,
-        data: [requestId: operation.requestId]])
-      return
-    }
-    failGroupSatelliteReconciliation(operation, message)
-    return
-  }
-  if(data.stage == 'remove' && operation.desiredSatellite) {
-    operation.removalTopologyAttempt = 0
-    state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
-    logInfo("Sonos satellite removal accepted for group '${operation.groupName}'; allowing the bond change to settle before checking topology")
-    runIn(16, 'continueGroupSatelliteAddAfterRemoval', [overwrite: true, data: [requestId: operation.requestId]])
-    return
-  }
-  if(data.stage == 'add' && data.action == 'AddBondedZones') {
-    logInfo("Sonos AddBondedZones accepted for '${operation.groupName}'; allowing the bond change to settle before checking topology")
-    runIn(16, 'requestGroupBondedZoneVerification', [overwrite: true,
-      data: [requestId: operation.requestId]])
-    return
-  }
-  String groupName = operation.groupName?.toString()
-  state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-  setGroupSatelliteStatus(groupName, 'Pending', 'Command accepted; waiting for topology confirmation')
-  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-  verifications[operation.requestId.toString()] = [groupName: groupName, satelliteId: operation.desiredSatellite,
-    targetId: operation.desiredSatellite ? operation.targetId : null,
-    verifySatelliteId: operation.desiredSatellite ?: operation.removeSatellite,
-    requestId: operation.requestId, queuedAt: now()]
-  state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
-  runIn(8, 'requestGroupSatelliteVerificationTopology', [overwrite: true,
-    data: [requestId: operation.requestId]])
-  drainGroupSatelliteReconciliations()
-}
-
-void requestGroupSatelliteVerificationTopology(Map data = [:]) {
-  String requestId = data?.requestId?.toString()
-  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-  Map verification = verifications[requestId] instanceof Map ? (Map)verifications[requestId] : null
-  if(verification == null) { return }
-  Map operation = [requestId: requestId, groupName: verification.groupName,
-    targetId: verification.targetId, players: getRinconLocalHostMap()]
-  requestGroupSatelliteTopology(operation, 'verification')
-}
-
-String describeHomeTheaterSatelliteFailure(AsyncResponse response) {
-  String payload = null
-  String responseError = null
-  try { payload = response?.data?.toString() } catch(Exception ignored) { }
-  if(!payload) {
-    try { payload = response?.getData()?.toString() } catch(Exception ignored) { }
-  }
-  try { responseError = response?.errorMessage?.toString() } catch(Exception ignored) { }
-  if(!payload) { return responseError }
-  java.util.regex.Matcher codeMatcher = payload =~ /(?is)<(?:[\w.-]+:)?errorCode\b[^>]*>(.*?)<\/(?:[\w.-]+:)?errorCode\s*>/
-  java.util.regex.Matcher descriptionMatcher = payload =~ /(?is)<(?:[\w.-]+:)?errorDescription\b[^>]*>(.*?)<\/(?:[\w.-]+:)?errorDescription\s*>/
-  String code = codeMatcher.find() ? codeMatcher.group(1)?.trim() : null
-  String description = descriptionMatcher.find() ? descriptionMatcher.group(1)?.trim() : null
-  List<String> parts = []
-  if(code) { parts << "UPnP ${code}" }
-  if(description) { parts << description }
-  if(!parts.isEmpty()) { return parts.join(': ') }
-  return responseError
-}
-
-void verifyGroupSatelliteBond(Map data) {
-  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-  Map verification = verifications[data?.requestId?.toString()] instanceof Map
-      ? (Map)verifications[data.requestId.toString()] : null
-  if(verification == null) { return }
-  verifications.remove(data.requestId.toString())
-  state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
-  String groupName = verification.groupName?.toString()
-  String satelliteId = verification.verifySatelliteId?.toString()
-  String desiredSatelliteId = verification.satelliteId?.toString()
-  String targetId = verification.targetId?.toString()
-  String owner = satelliteId ? findHomeTheaterSatelliteOwners()[satelliteId]?.toString() : null
-  Boolean bondConfirmed = desiredSatelliteId && owner == targetId
-  Boolean unbondConfirmed = !desiredSatelliteId && satelliteId && owner == null
-  if(bondConfirmed || unbondConfirmed) {
-    setGroupSatelliteStatus(groupName, 'Applied', bondConfirmed ? 'Bond confirmed by Sonos topology' : 'Satellite unbond confirmed')
-  } else {
-    setGroupSatelliteStatus(groupName, 'Unconfirmed', "Sonos topology reports ${owner ?: 'no bond'}; expected ${targetId ?: 'no bond'}")
-  }
-  app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-}
-
-void reconcilePendingGroupSatelliteVerifications() {
-  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
-      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
-  Map owners = findHomeTheaterSatelliteOwners()
-  List<String> confirmed = []
-  verifications.each { String requestId, Map verification ->
-    String satelliteId = verification.verifySatelliteId?.toString()
-    String owner = satelliteId ? owners[satelliteId]?.toString() : null
-    if((satelliteId && owner == verification.targetId?.toString()) || (!satelliteId && owner == null)) {
-      confirmed << requestId
-    }
-  }
-  confirmed.each { String requestId -> verifyGroupSatelliteBond([requestId: requestId]) }
-}
-
-void failGroupSatelliteReconciliation(Map operation, String message) {
-  String groupName = operation?.groupName?.toString()
-  state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
-  setGroupSatelliteStatus(groupName, 'Error', message)
-  logWarn("Sonos satellite bond update failed for '${groupName}': ${message}")
-  drainGroupSatelliteReconciliations()
-}
-
-void setGroupSatelliteStatus(String groupName, String status, String message) {
-  Map statuses = state[GROUP_SATELLITE_STATUSES_STATE_KEY] instanceof Map
-      ? (Map)state[GROUP_SATELLITE_STATUSES_STATE_KEY] : [:]
-  statuses[groupName] = [status: status, message: message, updatedAt: now()]
-  state[GROUP_SATELLITE_STATUSES_STATE_KEY] = statuses
 }
 
 String synchronizeNewUiGroupName(Map draft, String coordinatorId, List<String> followerIds,
@@ -3476,10 +2615,6 @@ void confirmNewUiGroupDeletion() {
   }
 
   String groupName = group.name.toString()
-  Map deletedDefinition = state.userGroups instanceof Map && state.userGroups[groupName] instanceof Map
-      ? new LinkedHashMap((Map)state.userGroups[groupName]) : [:]
-  queueGroupSatelliteReconciliation(groupName, deletedDefinition,
-      [groupCoordinatorId: deletedDefinition.groupCoordinatorId, satelliteId: ''])
   try {
     if(state.userGroups instanceof Map) {
       state.userGroups.remove(groupName)
@@ -3592,12 +2727,9 @@ void startNewUiDiscoverySession() {
 void applySettingsButton() { configure() }
 
 void saveGroup() {
-  state.userGroups = recoverGroupDefinitionsFromChildDevices(
-      state.userGroups instanceof Map ? (Map)state.userGroups : [:])
+  if(!state.userGroups) { state.userGroups = [:] }
   String editingGroup = app.getSetting('editDeleteGroup')
   String newName = app.getSetting('newGroupName')
-  Map previousDefinition = editingGroup && state.userGroups[editingGroup] instanceof Map
-      ? new LinkedHashMap((Map)state.userGroups[editingGroup]) : [:]
 
   // If editing and name changed, rename the existing device in place
   // This preserves dashboard tiles, rules, and automations that reference the device
@@ -3626,8 +2758,7 @@ void saveGroup() {
     state.userGroups.remove(editingGroup)
   }
 
-  state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers'), satelliteId: previousDefinition.satelliteId]
-  clearGroupSatelliteStatus(newName)
+  state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
   app.removeSetting('newGroupCoordinator')
@@ -3646,9 +2777,6 @@ void deleteGroup() {
   if(!state.userGroups?.containsKey(groupName)) {
     logWarn("Group '${groupName}' not found, nothing to delete")
   }
-  Map deletedDefinition = state.userGroups[groupName] instanceof Map ? new LinkedHashMap((Map)state.userGroups[groupName]) : [:]
-  queueGroupSatelliteReconciliation(groupName, deletedDefinition,
-      [groupCoordinatorId: deletedDefinition.groupCoordinatorId, satelliteId: ''])
   state.userGroups.remove(groupName)
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
@@ -4438,14 +3566,10 @@ void refreshFavoritesAndPlaylists() {
 // Create Child Devices
 // =============================================================================
 void createGroupDevices() {
-  if(!(state.userGroups instanceof Map)) {
-    logWarn('Skipping group-device reconciliation because saved group state is unavailable')
-    return
-  }
-  state.userGroups = recoverGroupDefinitionsFromChildDevices((Map)state.userGroups)
+  if(!state.userGroups) {return}
   logDebug('Creating group devices...')
   state.userGroups.each{ it ->
-    if(!it.value?.groupCoordinatorId || !(it.value.playerIds instanceof Collection)) {
+    if(!it.value?.groupCoordinatorId || !it.value?.playerIds) {
       logWarn("Skipping group '${it.key}': saved group state is missing coordinator or player list")
       return
     }
@@ -4463,11 +3587,10 @@ void createGroupDevices() {
       logWarn("Skipping group '${it.key}' because the child device could not be created")
     } else {
       String groupCoordinatorId = it.value.groupCoordinatorId as String
-      String playerIds = ((Collection)it.value.playerIds).collect { Object id -> id?.toString() }.findAll { String id -> id }.join(',')
+      String playerIds =  it.value.playerIds.join(',')
       ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
       device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
       device.updateDataValue('playerIds', playerIds)
-      device.updateDataValue('satelliteId', it.value.satelliteId?.toString() ?: '')
       if(coordDev == null) {
         logWarn("Skipping household ID update for group '${it.key}': coordinator '${groupCoordinatorId}' was not found")
       } else {
@@ -4483,25 +3606,6 @@ void createGroupDevices() {
   app.removeSetting('groupDevices')
   app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
   removeOrphans()
-}
-
-/** Recover a missing saved definition from its existing child before cleanup can delete that child. */
-Map recoverGroupDefinitionsFromChildDevices(Map configuredGroups) {
-  Map<String, Object> recovered = new LinkedHashMap<String, Object>(configuredGroups ?: [:])
-  app.getChildDevices().each { ChildDeviceWrapper child ->
-    String dni = child.getDeviceNetworkId()?.toString()
-    Integer markerIndex = dni ? dni.indexOf(GROUP_DEVICE_DNI_MARKER) : -1
-    if(markerIndex < 0) { return }
-    String groupName = dni.substring(markerIndex + GROUP_DEVICE_DNI_MARKER.length())
-    if(!groupName || recovered.containsKey(groupName)) { return }
-    String coordinatorId = child.getDataValue('groupCoordinatorId')?.toString()
-    if(!coordinatorId) { return }
-    List<String> playerIds = normalizeNewUiGroupPlayerIds(child.getDataValue('playerIds'))
-    recovered[groupName] = [groupCoordinatorId: coordinatorId, playerIds: playerIds,
-      satelliteId: child.getDataValue('satelliteId')?.toString() ?: '']
-    logWarn("Recovered saved group '${groupName}' from its existing group device")
-  }
-  return recovered
 }
 
 /** Set up child event subscriptions used by player and alarm request paths. */
@@ -4818,15 +3922,13 @@ void runSecondaryConfiguration(Map data) {
 }
 
 void removeOrphans() {
-  if(!(state.userGroups instanceof Map)) {
-    logWarn('Skipping orphan cleanup because saved group state is unavailable')
-    return
-  }
   // Single getChildDevices() call partitioned into groups and players
   // Copy the platform collection before deleting any child; Hubitat may return
   // a live list, and mutating it during iteration can skip devices or throw.
   List<ChildDeviceWrapper> allChildren = new ArrayList<ChildDeviceWrapper>(app.getChildDevices())
-  List<String> configuredGroupDevices = getUserGroupsDNIsFromUserGroups()
+  List<String> configuredGroupDevices = state.userGroups instanceof Map
+      ? getUserGroupsDNIsFromUserGroups()
+      : normalizeNewUiGroupPlayerIds(settings.groupDevices)
   allChildren.each { child ->
     String id = child.getDataValue('id')
     String dni = child.getDeviceNetworkId()
@@ -4949,22 +4051,10 @@ void extendDiscovery(Integer seconds) {
     logDebug('Starting a fresh discovery session while retaining devices already found')
     atomicState.discoveryRunning = true
     atomicState.discoveryProbeAttempts = [:]
-    resetDiscoveryTopologyRequest()
     subscribeToSsdpEvents(location)
     sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
     sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
     startMdnsDiscovery()
-    Map firstKnownSpeaker = discoveredSonoses.values().find { Object entry ->
-      entry instanceof Map && ((Map)entry).deviceIp
-    } as Map
-    if(firstKnownSpeaker == null) {
-      firstKnownSpeaker = discoveredSonosSecondaries.values().find { Object entry ->
-        entry instanceof Map && ((Map)entry).deviceIp
-      } as Map
-    }
-    if(firstKnownSpeaker?.deviceIp) {
-      requestDiscoveryTopologyOnce(firstKnownSpeaker.deviceIp.toString())
-    }
     runIn(1, 'updateDiscoveryTimer')
   }
   // Add seconds to current remaining time (or from now if already expired)
@@ -4999,7 +4089,6 @@ void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
-	resetDiscoveryTopologyRequest()
 	atomicState.discoveryProbeAttempts = [:]
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
@@ -5093,411 +4182,6 @@ Boolean reserveDiscoveryProbe(String ipAddress) {
     atomicState.discoveryProbeAttempts = updated
     logDebug("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
     return true
-  }
-}
-
-void resetDiscoveryTopologyRequest() {
-  atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
-  atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
-}
-
-void requestDiscoveryTopologyOnce(String ipAddress) {
-  if(!ipAddress || atomicState.discoveryRunning != true ||
-      atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] == true) {
-    return
-  }
-
-  String requestId = UUID.randomUUID().toString()
-  atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = true
-  atomicState[DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY] = requestId
-  String serviceType = DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE.serviceType
-  String requestBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${serviceType}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
-  Map params = [
-    uri: "http://${ipAddress}:1400${DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE.controlURL}",
-    headers: [SOAPAction: "${serviceType}#GetZoneGroupState"],
-    requestContentType: 'text/xml',
-    contentType: 'text/xml',
-    timeout: 5,
-    body: requestBody
-  ]
-
-  try {
-    logInfo("Requesting full Sonos topology from first discovered speaker at ${ipAddress}")
-    asynchttpPost('discoveryTopologyCallback', params, [requestId: requestId, sourceIp: ipAddress])
-  } catch(Exception e) {
-    atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
-    atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Could not dispatch Sonos topology discovery request to ${ipAddress}: ${e.message}")
-  }
-}
-
-/** Refresh saved topology from an already configured speaker whenever an app page opens. */
-void requestPageTopologyRefresh() {
-  if(state[PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY]) { return }
-  String speakerIp = null
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    if(speakerIp) { return }
-    String host = player.getDataValue('localUpnpHost')?.toString()?.trim()
-    String ip = player.getDataValue('deviceIp')?.toString()?.trim()
-    speakerIp = host ? host.tokenize(':')[0] : ip
-  }
-  if(!speakerIp) {
-    logDebug('Skipping page topology refresh because no configured Sonos speaker IP is available')
-    return
-  }
-
-  String requestId = UUID.randomUUID().toString()
-  state[PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY] = requestId
-  String serviceType = DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE.serviceType
-  String requestBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${serviceType}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
-  Map params = [uri: "http://${speakerIp}:1400${DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE.controlURL}",
-    headers: [SOAPAction: "${serviceType}#GetZoneGroupState"], requestContentType: 'text/xml',
-    contentType: 'text/xml', timeout: 5, body: requestBody]
-  try {
-    logInfo("Refreshing Sonos topology on app page load from ${speakerIp}")
-    asynchttpPost('pageTopologyCallback', params, [requestId: requestId, sourceIp: speakerIp])
-  } catch(Exception e) {
-    state.remove(PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Could not dispatch page topology refresh to ${speakerIp}: ${e.message}")
-  }
-}
-
-void pageTopologyCallback(AsyncResponse response, Map data) {
-  String requestId = data?.requestId?.toString()
-  if(!requestId || requestId != state[PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString()) {
-    logDebug('Ignoring stale page topology response')
-    return
-  }
-  state.remove(PAGE_TOPOLOGY_REQUEST_ID_STATE_KEY)
-  if(response == null || response.hasError()) {
-    logWarn("Page topology refresh failed from ${data?.sourceIp}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    Map topology = parseDiscoveryTopologyResponse(response.getData()?.toString())
-    state[HT_SAT_CHAN_MAPS_STATE_KEY] = topology.channelMaps instanceof Map
-        ? new LinkedHashMap<String, String>((Map)topology.channelMaps) : [:]
-    if(topology.speakerChannelMaps instanceof Map && !((Map)topology.speakerChannelMaps).isEmpty()) {
-      state[SPEAKER_CHANNEL_MAPS_STATE_KEY] = new LinkedHashMap<String, String>((Map)topology.speakerChannelMaps)
-    }
-    storeTopologySatelliteOwners(topology)
-    state[HT_SATELLITE_NAMES_STATE_KEY] = topology.satelliteNames instanceof Map
-        ? new LinkedHashMap<String, String>((Map)topology.satelliteNames) : [:]
-    removeTopologySatellitePrimaries((Map)state[HT_SATELLITE_NAMES_STATE_KEY])
-    applyTopologySecondaries((List<Map>)(topology.secondaryDevices ?: []))
-    applyGroupSwitchesFromTopology((List<Map>)(topology.groupMemberships ?: []))
-    logInfo("Page topology refresh received ${((List)topology.speakerIps).size()} Sonos speaker locations")
-    ((List<String>)topology.speakerIps).each { String ip ->
-      if(ip) { requestPagePlayerInfo(ip) }
-    }
-    if(!((List)topology.speakerIps).isEmpty()) {
-      state.remove(GROUP_SATELLITE_STATUSES_STATE_KEY)
-      String selectedSatellite = getNewUiGroupSatellite(getNewUiGroupDraft())
-      if(selectedSatellite && getNewUiSatelliteOptions().containsKey(selectedSatellite) &&
-          state[NEW_UI_GROUP_ERROR_KEY]?.toString()?.startsWith('The selected satellite is no longer available')) {
-        state.remove(NEW_UI_GROUP_ERROR_KEY)
-      }
-    }
-    app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-    app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
-  } catch(Exception e) {
-    logWarn("Could not parse page topology response: ${e.message}")
-  }
-}
-
-void requestPagePlayerInfo(String ipAddress) {
-  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
-    requestContentType: 'application/json', contentType: 'application/json',
-    ignoreSSLIssues: true, timeout: 3]
-  try {
-    logDebug("Dispatching page-load player-info probe for topology speaker ${ipAddress}")
-    asynchttpGet('pagePlayerInfoCallback', params, [ipAddress: ipAddress])
-  } catch(Exception e) {
-    logDebug("Could not dispatch page player-info probe to ${ipAddress}: ${e.message}")
-  }
-}
-
-void pagePlayerInfoCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { return }
-  if(response == null || response.hasError()) {
-    logWarn("Page-load player-info probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    Map playerInfo = response.getJson() as Map
-    if(playerInfo) {
-      logDebug("Page-load player-info probe succeeded for ${ipAddress}; requesting device description")
-      requestPageDeviceDescription(ipAddress, new LinkedHashMap(playerInfo))
-    } else {
-      logWarn("Page-load player-info response from ${ipAddress} was empty")
-    }
-  } catch(Exception e) {
-    logDebug("Could not parse page player-info response from ${ipAddress}: ${e.message}")
-  }
-}
-
-void requestPageDeviceDescription(String ipAddress, LinkedHashMap playerInfo) {
-  Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml",
-    requestContentType: 'application/xml', contentType: 'application/xml', timeout: 3]
-  try {
-    logDebug("Dispatching page-load device-description probe for topology speaker ${ipAddress}")
-    asynchttpGet('pageDeviceDescriptionCallback', params, [ipAddress: ipAddress, playerInfo: playerInfo])
-  } catch(Exception e) {
-    logDebug("Could not dispatch page device-description probe to ${ipAddress}: ${e.message}")
-  }
-}
-
-void pageDeviceDescriptionCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { return }
-  if(response == null || response.hasError()) {
-    logWarn("Page-load device-description probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    String descriptionXml = response.getData()?.toString()
-    GPathResult description = new XmlSlurper().parseText(descriptionXml)
-    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
-    logInfo("Page-load device description updated ${data?.playerInfo?.device?.name ?: ipAddress} (${description.device.modelName.text()})")
-  } catch(Exception e) {
-    logDebug("Could not process page device-description response from ${ipAddress}: ${e.message}")
-    return
-  }
-  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-}
-
-void discoveryTopologyCallback(AsyncResponse response, Map data) {
-  String requestId = data?.requestId?.toString()
-  if(!requestId || requestId != atomicState[DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString()) {
-    logDebug('Ignoring a stale Sonos topology discovery response')
-    return
-  }
-  if(atomicState.discoveryRunning != true) {
-    logDebug('Ignoring Sonos topology discovery response because discovery has stopped')
-    return
-  }
-  if(response == null || response.hasError()) {
-    atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
-    atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logDebug("Sonos topology discovery request failed: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-
-  try {
-    String responseBody = response.getData()?.toString()
-    Map topology = parseDiscoveryTopologyResponse(responseBody)
-    List<String> speakerIps = (List<String>)(topology.speakerIps ?: [])
-    if(speakerIps.isEmpty()) {
-      atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
-      atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
-      logWarn('Sonos topology response did not contain any speaker locations; discovery will continue with network probes')
-      return
-    }
-
-    state[HT_SAT_CHAN_MAPS_STATE_KEY] = topology.channelMaps instanceof Map
-        ? new LinkedHashMap<String, String>((Map)topology.channelMaps) : [:]
-    if(topology.speakerChannelMaps instanceof Map && !((Map)topology.speakerChannelMaps).isEmpty()) {
-      state[SPEAKER_CHANNEL_MAPS_STATE_KEY] = new LinkedHashMap<String, String>((Map)topology.speakerChannelMaps)
-    }
-    storeTopologySatelliteOwners(topology)
-    state[HT_SATELLITE_NAMES_STATE_KEY] = topology.satelliteNames instanceof Map
-        ? new LinkedHashMap<String, String>((Map)topology.satelliteNames) : [:]
-    removeTopologySatellitePrimaries((Map)state[HT_SATELLITE_NAMES_STATE_KEY])
-    applyTopologySecondaries((List<Map>)(topology.secondaryDevices ?: []))
-
-    Integer queuedProbeCount = 0
-    String sourceIp = data?.sourceIp?.toString()
-    speakerIps.each { String speakerIp ->
-      if(speakerIp != sourceIp && !isIpAlreadyDiscovered(speakerIp)) {
-        processDiscoveredSonosDevice(speakerIp)
-        queuedProbeCount++
-      }
-    }
-    logInfo("Topology discovery found ${speakerIps.size()} Sonos speaker locations and queued ${queuedProbeCount} additional probe(s)")
-  } catch(Exception e) {
-    atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
-    atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Could not parse Sonos topology discovery response: ${e.message}")
-  }
-}
-
-Map parseDiscoveryTopologyResponse(String responseBody) {
-  if(!responseBody) { return [speakerIps: [], channelMaps: [:], speakerChannelMaps: [:], satelliteNames: [:], groupMemberships: []] }
-  GPathResult envelope = new XmlSlurper().parseText(responseBody)
-  GPathResult responseNode = findXmlDescendantByLocalName(envelope, 'GetZoneGroupStateResponse')
-  GPathResult topologyStateNode = findDirectXmlChild(responseNode, 'ZoneGroupState')
-  GPathResult topology = topologyStateNode
-  List<GPathResult> members = []
-  if(topologyStateNode != null) {
-    collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
-  }
-  if(members.isEmpty()) {
-    // Some Sonos responses XML-escape the topology payload as text; others
-    // return the nested ZoneGroupState/ZoneGroups elements directly.
-    String topologyXml = topologyStateNode?.text()?.toString()
-    if(!topologyXml) { return [speakerIps: [], channelMaps: [:], speakerChannelMaps: [:], satelliteNames: [:]] }
-    topology = new XmlSlurper().parseText(topologyXml)
-    collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
-  }
-  LinkedHashSet<String> speakerIps = new LinkedHashSet<String>()
-  Map<String, String> channelMaps = [:]
-  Map<String, String> speakerChannelMaps = [:]
-  Map<String, String> satelliteNames = [:]
-  List<Map> secondaryDevices = []
-  List<GPathResult> groups = []
-  Set<String> stereoPairCoordinators = new LinkedHashSet<String>()
-  collectXmlDescendantsByLocalName(topology, 'ZoneGroup', groups)
-  members.each { GPathResult member ->
-    String playerId = xmlAttribute(member, 'UUID')
-    addDiscoveryTopologyLocation(speakerIps, xmlAttribute(member, 'Location'))
-    String channelMap = xmlAttribute(member, 'HTSatChanMapSet')
-    if(playerId && channelMap) { channelMaps[playerId] = channelMap }
-    String speakerChannelMap = xmlAttribute(member, 'ChannelMapSet')
-    if(playerId && speakerChannelMap) { speakerChannelMaps[playerId] = speakerChannelMap }
-
-    GPathResult containingGroup = groups.find { GPathResult group ->
-      List<GPathResult> groupMembers = []
-      collectXmlDescendantsByLocalName(group, 'ZoneGroupMember', groupMembers)
-      groupMembers.any { GPathResult groupMember -> xmlAttribute(groupMember, 'UUID') == playerId }
-    }
-    coordinatorId = xmlAttribute(containingGroup, 'Coordinator')
-    if(playerId && playerId != coordinatorId && xmlAttribute(member, 'Invisible') == '1') {
-      secondaryDevices << [id: playerId, name: xmlAttribute(member, 'ZoneName'),
-        topologyRole: 'invisibleMember', primaryDeviceId: coordinatorId, topologyOnly: true,
-        deviceIp: locationHost(xmlAttribute(member, 'Location'))]
-    }
-
-    List<GPathResult> satellites = []
-    collectXmlDescendantsByLocalName(member, 'Satellite', satellites)
-    satellites.each { GPathResult satellite ->
-      String satelliteId = xmlAttribute(satellite, 'UUID')
-      String satelliteName = xmlAttribute(satellite, 'ZoneName')
-      addDiscoveryTopologyLocation(speakerIps, xmlAttribute(satellite, 'Location'))
-      if(satelliteId && satelliteName) {
-        satelliteNames[satelliteId] = satelliteName
-        secondaryDevices << [id: satelliteId, name: satelliteName,
-          topologyRole: 'satellite', primaryDeviceId: playerId, topologyOnly: true,
-          deviceIp: locationHost(xmlAttribute(satellite, 'Location'))]
-      }
-    }
-  }
-  // Invisible members include both stereo-pair channels and home-theater
-  // satellites. Classify a pair from its dynamic L/R channel assignments,
-  // never from invisibility alone (a Sub is commonly Invisible="1").
-  groups.each { GPathResult group ->
-    List<GPathResult> groupMembers = []
-    collectXmlDescendantsByLocalName(group, 'ZoneGroupMember', groupMembers)
-    Set<String> pairMemberIds = new LinkedHashSet<String>()
-    groupMembers.each { GPathResult groupMember ->
-      [xmlAttribute(groupMember, 'ChannelMapSet'), xmlAttribute(groupMember, 'HTSatChanMapSet')].each { String rawMap ->
-        if(isStereoPairChannelMap(rawMap)) {
-          rawMap.split(';').each { String assignment ->
-            List<String> parts = assignment.split(':', 2).collect { String part -> part.trim() }
-            if(parts.size() == 2 && parts[0]) { pairMemberIds.add(parts[0]) }
-          }
-        }
-      }
-    }
-    // The outer ZoneGroup coordinator may be a different room. For example,
-    // Arc can coordinate a playback group containing a Kids' Room stereo pair.
-    // Attribute stereo-pair status to the visible speaker ID named by the
-    // dynamic left/right map, never to the enclosing ZoneGroup coordinator.
-    groupMembers.each { GPathResult groupMember ->
-      String memberId = xmlAttribute(groupMember, 'UUID')
-      if(memberId && xmlAttribute(groupMember, 'Invisible') != '1' && pairMemberIds.contains(memberId)) {
-        stereoPairCoordinators.add(memberId)
-      }
-    }
-  }
-  List<Map> groupMemberships = groups.collect { GPathResult group ->
-    String coordinatorId = xmlAttribute(group, 'Coordinator')
-    List<GPathResult> groupMembers = []
-    collectXmlDescendantsByLocalName(group, 'ZoneGroupMember', groupMembers)
-    List<String> playerIds = groupMembers.findAll { GPathResult member -> xmlAttribute(member, 'Invisible') != '1' }
-        .collect { GPathResult member -> xmlAttribute(member, 'UUID') }
-        .findAll { String id -> id }
-    List<String> allPlayerIds = groupMembers.collect { GPathResult member -> xmlAttribute(member, 'UUID') }
-        .findAll { String id -> id }
-    [coordinatorId: coordinatorId, playerIds: playerIds.unique(), allPlayerIds: allPlayerIds.unique()]
-  }.findAll { Map group -> group.coordinatorId && group.playerIds }
-  return [speakerIps: new ArrayList<String>(speakerIps), channelMaps: channelMaps,
-    speakerChannelMaps: speakerChannelMaps, satelliteNames: satelliteNames, secondaryDevices: secondaryDevices,
-    groupMemberships: groupMemberships, stereoPairCoordinators: new ArrayList<String>(stereoPairCoordinators)]
-}
-
-void applyGroupSwitchesFromTopology(List<Map> groupMemberships, Map<String, String> freshSatelliteOwners = null) {
-  if(!(groupMemberships instanceof List)) { return }
-  groupMemberships.each { Map group ->
-    String coordinatorId = group?.coordinatorId?.toString()
-    List<String> playerIds = normalizeGroupPlayerIds(group?.playerIds)
-    if(coordinatorId) { updateGroupDevices(coordinatorId, playerIds, true, freshSatelliteOwners) }
-  }
-}
-
-String locationHost(String location) {
-  try { return location ? new URI(location).host : null }
-  catch(Exception ignored) { return null }
-}
-
-void applyTopologySecondaries(List<Map> secondaryDevices) {
-  if(!(secondaryDevices instanceof List)) { return }
-  secondaryDevices.each { Map secondary ->
-    String id = secondary.id?.toString()
-    if(!id) { return }
-    Map richer = null
-    String richerKey = null
-    discoveredSonosSecondaries.each { Object key, Object raw ->
-      Map info = raw instanceof Map ? (Map)raw : [:]
-      if(info.id?.toString() == id && info.topologyOnly != true) {
-        richer = info
-        richerKey = key?.toString()
-      }
-    }
-    if(richer != null) {
-      if(!richer.primaryDeviceId && secondary.primaryDeviceId) {
-        richer.primaryDeviceId = secondary.primaryDeviceId
-      }
-      richer.name = secondary.name ?: richer.name
-      richer.topologyRole = secondary.topologyRole ?: richer.topologyRole
-      discoveredSonosSecondaries[richerKey] = richer
-      return
-    }
-    String key = "topology:${id}"
-    discoveredSonosSecondaries[key] = secondary
-    List<String> staleKeys = discoveredSonoses.findAll { Object discoveryKey, Object raw ->
-      Map info = raw instanceof Map ? (Map)raw : [:]
-      info.id?.toString() == id
-    }.keySet().collect { Object discoveryKey -> discoveryKey?.toString() }
-    staleKeys.each { String discoveryKey -> discoveredSonoses.remove(discoveryKey) }
-  }
-  persistDiscoveredSonosSecondaries()
-}
-
-/** Remove stale standalone discovery rows for UUIDs the live topology identifies as satellites. */
-void removeTopologySatellitePrimaries(Map satelliteNames) {
-  if(!(satelliteNames instanceof Map) || satelliteNames.isEmpty()) { return }
-  Set<String> satelliteIds = satelliteNames.keySet().collect { Object id -> id?.toString() }
-      .findAll { String id -> id } as Set<String>
-  List<String> staleKeys = discoveredSonoses.findAll { Object key, Object raw ->
-    Map info = raw instanceof Map ? (Map)raw : [:]
-    satelliteIds.contains(info.id?.toString())
-  }.keySet().collect { Object key -> key?.toString() }
-  staleKeys.each { String key -> discoveredSonoses.remove(key) }
-}
-
-List<String> extractDiscoveryTopologyIpAddresses(String responseBody) {
-  return (List<String>)(parseDiscoveryTopologyResponse(responseBody).speakerIps ?: [])
-}
-
-void addDiscoveryTopologyLocation(Set<String> speakerIps, String location) {
-  if(speakerIps == null || !location) { return }
-  try {
-    String speakerIp = new URI(location).host
-    if(speakerIp) { speakerIps.add(speakerIp) }
-  } catch(Exception e) {
-    logDebug("Ignoring invalid topology device location '${location}': ${e.message}")
   }
 }
 
@@ -5641,20 +4325,6 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   String playerId = playerInfo?.playerId
   String groupId = playerInfo?.groupId
   List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
-  Map topologySecondary = discoveredSonosSecondaries.values().find { Object raw ->
-    Map info = raw instanceof Map ? (Map)raw : [:]
-    info.id?.toString() == playerId || info.deviceIp?.toString() == ipAddress
-  } as Map
-  String secondaryPrimaryId = playerInfoDevice?.primaryDeviceId?.toString() ?: topologySecondary?.primaryDeviceId?.toString()
-  Boolean isSecondaryDevice = playerInfoDevice?.primaryDeviceId != null || topologySecondary != null
-
-  if(isSecondaryDevice) {
-    List<String> stalePrimaryKeys = discoveredSonoses.findAll { Object key, Object raw ->
-      Map existing = raw instanceof Map ? (Map)raw : [:]
-      key?.toString() == mac || existing.id?.toString() == playerId
-    }.keySet().collect { Object key -> key.toString() }
-    stalePrimaryKeys.each { String key -> discoveredSonoses.remove(key) }
-  }
 
   if(mac && playerInfoDevice?.name) {
     logDebug("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
@@ -5682,17 +4352,14 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     if(isDuplicate) { logDebug("Device already discovered in primaries (IP/ID match) - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
   }
   if(!isDuplicate) {
-    Map matchingSecondary = discoveredSonosSecondaries.values().find { Object value ->
-      Map existingDevice = value instanceof Map ? (Map)value : [:]
-      existingDevice.id?.toString() == playerId || existingDevice.deviceIp?.toString() == ipAddress
-    } as Map
-    isDuplicate = matchingSecondary != null && matchingSecondary.topologyOnly != true
+    isDuplicate = discoveredSonosSecondaries.containsKey(mac) || discoveredSonosSecondaries.any { key, value ->
+      LinkedHashMap existingDevice = value as LinkedHashMap
+      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
+    }
     if(isDuplicate) { logDebug("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
   }
 
-  if(isDuplicate && !isSecondaryDevice) { return }
-
-  requestDiscoveryTopologyOnce(ipAddress)
+  if(isDuplicate) { return }
 
   LinkedHashMap discoveredSonos = [
     name: playerName,
@@ -5708,11 +4375,9 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     localUpnpHost: "${ipAddress}:1400"
   ]
   // Handle secondary/satellite devices (subs, surrounds, right channel in stereo pair)
-  if(isSecondaryDevice) {
+  if(playerInfoDevice?.primaryDeviceId) {
     LinkedHashMap discoveredSonosSecondary = [
-      primaryDeviceId: secondaryPrimaryId,
-      name: topologySecondary?.name ?: playerInfoDevice?.name,
-      topologyRole: topologySecondary?.topologyRole,
+      primaryDeviceId: playerInfoDevice?.primaryDeviceId,
       id: playerId,
       swGen: swGen,
       capabilities: deviceCapabilities,
@@ -5724,15 +4389,17 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
       localUpnpUrl: "http://${ipAddress}:1400",
       localUpnpHost: "${ipAddress}:1400"
     ]
-    // Replace topology-only placeholders with the richer player-info and device-description result.
-    List<String> existingSecondaryKeys = discoveredSonosSecondaries.findAll { Object key, Object value ->
-      Map secondary = value instanceof Map ? (Map)value : [:]
-      secondary.id?.toString() == playerId || secondary.deviceIp?.toString() == ipAddress
-    }.keySet().collect { Object key -> key.toString() }
-    existingSecondaryKeys.each { String key -> discoveredSonosSecondaries.remove(key) }
-    discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-    persistDiscoveredSonosSecondaries()
-    logInfo("Discovered secondary ${modelName} (${playerId}) for primary ${secondaryPrimaryId}")
+    // Check for duplicate secondaries
+    boolean secondaryExists = discoveredSonosSecondaries.values().any { secondaryDevice ->
+      LinkedHashMap secondary = secondaryDevice as LinkedHashMap
+      return secondary.id == playerId
+    }
+    if(!secondaryExists) {
+      discoveredSonosSecondaries[mac] = discoveredSonosSecondary
+      persistDiscoveredSonosSecondaries()
+      logInfo("Discovered secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
+    }
+    requestQuickTopologyDuringDiscovery(ipAddress)
     // Secondary devices should never appear in the main discovered list
     scheduleMethod(2, 'sendFoundSonosEvents')
     return
@@ -5742,10 +4409,135 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
     logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
+    requestQuickTopologyDuringDiscovery(ipAddress)
     scheduleMethod(2, 'sendFoundSonosEvents')
   } else {
     logDebug("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
+}
+
+/** Use one already-known speaker to discover the rest of the Sonos topology. */
+void requestQuickTopologyRefresh(String preferredIp = null) {
+  if(state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]) { return }
+  String speakerIp = preferredIp?.trim()
+  if(!speakerIp) {
+    ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+      String ip = candidate.getDataValue('deviceIp')?.toString()?.trim()
+      return ip != null && !ip.isEmpty()
+    }
+    speakerIp = player?.getDataValue('deviceIp')?.toString()?.trim()
+  }
+  if(!speakerIp && discoveredSonoses instanceof Map) {
+    Map known = discoveredSonoses.values().find { Object raw ->
+      raw instanceof Map && ((Map)raw).deviceIp
+    } as Map
+    speakerIp = known?.deviceIp?.toString()?.trim()
+  }
+  if(!speakerIp && discoveredSonosSecondaries instanceof Map) {
+    Map known = discoveredSonosSecondaries.values().find { Object raw ->
+      raw instanceof Map && ((Map)raw).deviceIp
+    } as Map
+    speakerIp = known?.deviceIp?.toString()?.trim()
+  }
+  if(!speakerIp) { return }
+
+  String requestId = UUID.randomUUID().toString()
+  String service = 'urn:schemas-upnp-org:service:ZoneGroupTopology:1'
+  String body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${service}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
+  Map params = [uri: "http://${speakerIp}:1400/ZoneGroupTopology/Control",
+    headers: [SOAPAction: "${service}#GetZoneGroupState"],
+    requestContentType: 'text/xml', contentType: 'text/xml', timeout: 5, body: body]
+  state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY] = requestId
+  try {
+    logInfo("Querying Sonos topology from ${speakerIp}")
+    asynchttpPost('quickTopologyCallback', params, [requestId: requestId, sourceIp: speakerIp])
+  } catch(Exception e) {
+    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
+    logWarn("Could not query Sonos topology from ${speakerIp}: ${e.message}")
+  }
+}
+
+void requestQuickTopologyDuringDiscovery(String speakerIp) {
+  if(atomicState.discoveryRunning != true || atomicState[QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY] == true) { return }
+  atomicState[QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY] = true
+  requestQuickTopologyRefresh(speakerIp)
+}
+
+void quickTopologyCallback(AsyncResponse response, Map data) {
+  String requestId = data?.requestId?.toString()
+  if(!requestId || requestId != state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString()) { return }
+  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
+  if(response == null || response.hasError()) {
+    logWarn("Sonos topology query failed from ${data?.sourceIp}: status=${response?.status}, error=${response?.getErrorMessage()}")
+    return
+  }
+  try {
+    String body = response.getData()?.toString()
+    GPathResult envelope = new XmlSlurper().parseText(body)
+    GPathResult responseNode = findXmlDescendantByLocalName(envelope, 'GetZoneGroupStateResponse')
+    GPathResult topologyNode = findDirectXmlChild(responseNode, 'ZoneGroupState')
+    List<GPathResult> members = []
+    collectXmlDescendantsByLocalName(topologyNode, 'ZoneGroupMember', members)
+    if(members.isEmpty()) {
+      String nestedXml = topologyNode?.text()?.toString()
+      if(nestedXml) {
+        GPathResult topology = new XmlSlurper().parseText(nestedXml)
+        collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
+      }
+    }
+    LinkedHashSet<String> ips = new LinkedHashSet<String>()
+    members.each { GPathResult member ->
+      addQuickTopologyIp(ips, xmlAttribute(member, 'Location'))
+      List<GPathResult> satellites = []
+      collectXmlDescendantsByLocalName(member, 'Satellite', satellites)
+      satellites.each { GPathResult satellite -> addQuickTopologyIp(ips, xmlAttribute(satellite, 'Location')) }
+    }
+    String sourceIp = data?.sourceIp?.toString()
+    ips.findAll { String ip -> ip && ip != sourceIp }.each { String ip ->
+      if(atomicState.discoveryRunning == true) { processDiscoveredSonosDevice(ip) }
+      else { requestQuickTopologySpeakerInfo(ip) }
+    }
+    logInfo("Sonos topology query found ${ips.size()} speaker locations")
+  } catch(Exception e) {
+    logWarn("Could not parse Sonos topology response: ${e.message}")
+  }
+}
+
+void addQuickTopologyIp(Set<String> ips, String location) {
+  try {
+    String ip = location ? new URI(location).host : null
+    if(ip) { ips.add(ip) }
+  } catch(Exception ignored) { }
+}
+
+void requestQuickTopologySpeakerInfo(String ipAddress) {
+  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
+    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
+  try { asynchttpGet('quickTopologySpeakerInfoCallback', params, [ipAddress: ipAddress]) }
+  catch(Exception e) { logDebug("Could not query topology speaker ${ipAddress}: ${e.message}") }
+}
+
+void quickTopologySpeakerInfoCallback(AsyncResponse response, Map data) {
+  String ipAddress = data?.ipAddress?.toString()
+  if(!ipAddress || response == null || response.hasError()) { return }
+  try {
+    Map playerInfo = response.getJson() as Map
+    if(!(playerInfo instanceof Map)) { return }
+    Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3]
+    asynchttpGet('quickTopologyDeviceDescriptionCallback', params,
+      [ipAddress: ipAddress, playerInfo: new LinkedHashMap(playerInfo)])
+  } catch(Exception e) { logDebug("Could not process topology player info from ${ipAddress}: ${e.message}") }
+}
+
+void quickTopologyDeviceDescriptionCallback(AsyncResponse response, Map data) {
+  String ipAddress = data?.ipAddress?.toString()
+  if(!ipAddress || response == null || response.hasError()) { return }
+  try {
+    GPathResult description = new XmlSlurper().parseText(response.getData()?.toString())
+    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
+    app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
+  } catch(Exception e) { logDebug("Could not process topology device description from ${ipAddress}: ${e.message}") }
 }
 
 @CompileStatic
@@ -7749,14 +6541,6 @@ void processGroupCommandRequest(Map data) {
 
     switch(command) {
       case 'on':
-        // `on()` must establish the configured coordinator from fresh group
-        // topology before satellite reconciliation. Cached player attributes
-        // can say the target is a singleton while Sonos still has it joined
-        // under another coordinator (for example Arc under Kids' Room).
-        startGroupTopologyOperation(groupDevice, GROUPING_MODE_EXPLICIT,
-            args + [activateSatelliteAfterTopology: true])
-        break
-
       case 'groupPlayers':
         handleOnExactGroupImmediate(groupDevice)
         break
@@ -7781,7 +6565,6 @@ void processGroupCommandRequest(Map data) {
         break
 
       case 'joinPlayersToCoordinator':
-        scheduleGroupDeviceSatelliteReconciliation(groupDevice, false)
         handleJoinAdditiveGroupImmediate(groupDevice)
         break
 
@@ -8437,8 +7220,6 @@ void startGroupTopologyOperation(ChildDeviceWrapper groupDevice, String grouping
   Map operation = buildNewGroupOperation(groupDevice, normalizedMode, target)
   operation.evictUnlistedOnly = args?.evictUnlistedOnly == true ||
       args?.evictUnlistedOnly?.toString() == 'true'
-  operation.activateSatelliteAfterTopology = args?.activateSatelliteAfterTopology == true ||
-      args?.activateSatelliteAfterTopology?.toString() == 'true'
   saveActiveGroupOperation(operation)
   registerGroupOperationOnPlayers(operation, operation.requiredPlayerIds)
   publishGroupOperationStatus(operation, 'ENSURING_TOPOLOGY')
@@ -9505,12 +8286,6 @@ synchronized void putPlayerUpnpEvents(Map payload) {
     }
     copy.eventsByGroupId = groups
   }
-  if(payload.htSatChanMapSetByPlayer instanceof Map) {
-    copy.htSatChanMapSetByPlayer = new LinkedHashMap((Map)payload.htSatChanMapSetByPlayer)
-  }
-  if(payload.htSatelliteNamesById instanceof Map) {
-    copy.htSatelliteNamesById = new LinkedHashMap((Map)payload.htSatelliteNamesById)
-  }
   List<Map> pending = state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] instanceof List
       ? (List<Map>)state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] : []
   pending.add(copy)
@@ -9558,21 +8333,6 @@ void processUpnpTopologyNotification(Map notification) {
   if(!sourceDni || next.isEmpty()) { return }
   Map<String, String> oldCoordinators = buildPlayerCoordinatorMap(previous)
   putZgtTopology(sourceDni, next)
-  if(notification.htSatChanMapSetByPlayer instanceof Map) {
-    state[HT_SAT_CHAN_MAPS_STATE_KEY] = new LinkedHashMap((Map)notification.htSatChanMapSetByPlayer)
-  }
-  if(notification.htSatelliteNamesById instanceof Map) {
-    state[HT_SATELLITE_NAMES_STATE_KEY] = new LinkedHashMap((Map)notification.htSatelliteNamesById)
-  }
-  // Re-evaluate group switches when a topology notification changes a satellite
-  // bond even if the player roster itself did not change.
-  next.each { String groupId, List<Map> events ->
-    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    List<String> members = normalizeGroupPlayerIds(
-        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
-    if(coordinatorId) { updateGroupDevices(coordinatorId, members.unique(), true) }
-  }
   Set<String> promotedPlayers = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
       ? new LinkedHashSet<String>((Collection<String>)state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY]) : new LinkedHashSet<String>()
   buildPlayerCoordinatorMap(next).each { String playerId, String coordinatorId ->
@@ -9602,8 +8362,6 @@ void processUpnpTopologyNotification(Map notification) {
     members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
         .each { String follower -> replayLatestLeaderAvt(leader, follower) }
   }
-  reconcilePendingGroupSatelliteVerifications()
-  app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
 }
 
 /** Apply a newly promoted coordinator's latest cached AVT after the ZGT debounce and settling window. */
@@ -9841,8 +8599,7 @@ Map getCurrentReceivedZgtTopology() {
         memberIds: memberIds,
         coordinatorName: events.find { Map e -> e?.name?.toString() == 'groupCoordinatorName' }?.value?.toString(),
         groupName: events.find { Map e -> e?.name?.toString() == 'groupName' }?.value?.toString(),
-        satellites: findHomeTheaterSatelliteOwners().findAll { String satelliteId, String ownerId -> ownerId == coordinatorId }.keySet().toList(),
-        channelMap: [:] ]
+        satellites: [], channelMap: [:] ]
     }
     return [groups: converted, sourcePlayerDni: report.sourcePlayerDni?.toString(),
       observedAt: (report.observedAt ?: now()) as Long]
@@ -9937,12 +8694,6 @@ void finishGroupOperation(Map operation, String status, String errorCode = null,
   clearRegisteredGroupOperations(operation)
   if(status == 'SUCCEEDED') {
     storeGroupingContext(operation)
-    if(operation.activateSatelliteAfterTopology == true) {
-      ChildDeviceWrapper groupDevice = getChildDevice(operation.groupDni as String)
-      if(groupDevice != null) {
-        scheduleGroupDeviceSatelliteReconciliation(groupDevice)
-      }
-    }
   }
   state.remove(GROUP_OPERATION_STATE_KEY)
   if(state[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List) {
@@ -10828,48 +9579,37 @@ String unEscapeMetaData(String text) {
 // =============================================================================
 // Component Methods for Child Event Processing
 // =============================================================================
-void updateGroupDevices(String coordinatorId, List<String> playersInGroup, Boolean topologyCoordinatorConfirmed = null,
-    Map<String, String> freshSatelliteOwners = null) {
+void updateGroupDevices(String coordinatorId, List<String> playersInGroup) {
   logDebug('updateGroupDevices')
   if(!coordinatorId || !playersInGroup) {
     return
   }
-  List<String> observedPlayers = normalizeGroupPlayerIds(playersInGroup)
-  Map<String, ChildDeviceWrapper> rinconMap = [:]
-  List<ChildDeviceWrapper> groupsForCoord = []
-  app.getChildDevices().each { ChildDeviceWrapper child ->
-    String id = child.getDataValue('id')?.toString()
-    if(id) {
-      rinconMap[id] = child
-    } else {
-      List<String> configuredPlayers = getAllPlayersForGroupDevice(child)
-      if(configuredPlayers.contains(coordinatorId) || !Collections.disjoint(configuredPlayers, observedPlayers)) {
-        groupsForCoord.add(child)
-      }
-    }
-  }
+  // Single pass over all children: partition into group devices (for this coordinator)
+  // and a RINCON lookup map (for player name resolution). Avoids two separate getChildDevices() calls.
+  Map partitioned = getGroupDevicesAndRinconMap(coordinatorId)
+  List<ChildDeviceWrapper> groupsForCoord = (List<ChildDeviceWrapper>)partitioned['groupDevices']
+  Map<String, ChildDeviceWrapper> rinconMap = (Map<String, ChildDeviceWrapper>)partitioned['rinconMap']
   List<String> groupDnis = groupsForCoord.collect { ChildDeviceWrapper gd -> gd.getDeviceNetworkId() }
-  logDebug("updateGroupDevices: coordinator=${coordinatorId}, players=${observedPlayers}, affectedGroups=${groupDnis}")
+  logDebug("updateGroupDevices: coordinator=${coordinatorId}, players=${playersInGroup}, matchingGroups=${groupDnis}")
   Map<String, String> playerNames = [:]
   rinconMap.each { String id, ChildDeviceWrapper player ->
     playerNames[id] = player.getDataValue('name')?.toString() ?: id
   }
   ChildDeviceWrapper callerDevice = rinconMap[coordinatorId]
-  Boolean isCallerActualCoordinator = topologyCoordinatorConfirmed != null
-      ? topologyCoordinatorConfirmed : isSonosCoordinator(callerDevice)
+  Boolean isCallerActualCoordinator = isSonosCoordinator(callerDevice)
   Map<String, Long> generations = state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] instanceof Map
       ? (Map<String, Long>)state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] : [:]
   Long generation = ((generations[coordinatorId] ?: 0L) as Long) + 1L
   generations[coordinatorId] = generation
   state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] = generations
-  applyGroupDeviceMembershipBatch(coordinatorId, observedPlayers, groupDnis,
-      playerNames, isCallerActualCoordinator, generation, 0, freshSatelliteOwners)
+  applyGroupDeviceMembershipBatch(coordinatorId, new ArrayList<String>(playersInGroup), groupDnis,
+      playerNames, isCallerActualCoordinator, generation, 0)
 }
 
 /** Apply membership to a bounded number of group devices per invocation. */
 void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersInGroup,
     List<String> groupDnis, Map<String, String> playerNames, Boolean isCallerActualCoordinator,
-    Long generation, Integer cursor, Map<String, String> freshSatelliteOwners = null) {
+    Long generation, Integer cursor) {
   Map<String, Long> generations = state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] instanceof Map
       ? (Map<String, Long>)state[GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY] : [:]
   if(((generations[coordinatorId] ?: 0L) as Long) != generation) { return }
@@ -10878,33 +9618,20 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
   ChildDeviceWrapper callerDevice = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
     player.getDataValue('id') == coordinatorId
   }
-  Map<String, String> satelliteOwners = freshSatelliteOwners != null
-      ? freshSatelliteOwners : findHomeTheaterSatelliteOwners()
   Integer end = Math.min(groupDnis.size(), cursor + GROUP_MEMBERSHIP_APPLY_BATCH_SIZE)
   while(cursor < end) {
     String groupDni = groupDnis[cursor++]
     ChildDeviceWrapper gd = getChildDevice(groupDni)
     if(gd == null) { continue }
     Boolean wasActive = gd.currentValue('switch', true) == 'on'
-    List<String> configuredPlayerList = getAllPlayersForGroupDevice(gd)
-    HashSet<String> configuredPlayers = new HashSet<String>(configuredPlayerList)
+    HashSet<String> configuredPlayers = new HashSet<String>(getAllPlayersForGroupDevice(gd))
     HashSet<String> observedPlayers = new HashSet<String>(normalizeGroupPlayerIds(playersInGroup))
-    Map configuredGroup = getConfiguredGroupDefinition(gd)
-    String configuredCoordinatorId = gd.getDataValue('groupCoordinatorId')?.toString() ?:
-        configuredGroup.groupCoordinatorId?.toString()
-    String configuredSatelliteId = gd.getDataValue('satelliteId')?.toString() ?:
-        configuredGroup.satelliteId?.toString()
-    Boolean membershipSatisfied = configuredPlayers.equals(observedPlayers)
-    Boolean coordinatorSatisfied = configuredCoordinatorId == coordinatorId && isCallerActualCoordinator
-    String groupName = newUiGroupNameFromDeviceNetworkId(gd.getDeviceNetworkId()?.toString())
-    Map satelliteStatuses = state[GROUP_SATELLITE_STATUSES_STATE_KEY] instanceof Map
-        ? (Map)state[GROUP_SATELLITE_STATUSES_STATE_KEY] : [:]
-    Map satelliteStatus = groupName && satelliteStatuses[groupName] instanceof Map
-        ? (Map)satelliteStatuses[groupName] : [:]
-    Boolean satelliteCheckPending = satelliteStatus.status?.toString() in ['Pending', 'Error', 'Unconfirmed']
-    Boolean satelliteSatisfied = !configuredSatelliteId ||
-        (satelliteOwners[configuredSatelliteId] == configuredCoordinatorId && !satelliteCheckPending)
-    Boolean shouldBeActive = membershipSatisfied && coordinatorSatisfied && satelliteSatisfied
+    String rememberedMode = getFreshGroupingContext(gd.getDeviceNetworkId())?.mode as String
+    String groupingMode = normalizeGroupOperationMode(rememberedMode, GROUPING_MODE_EXPLICIT)
+    Boolean membershipSatisfied = groupingMode == GROUPING_MODE_EXPLICIT
+        ? configuredPlayers.equals(observedPlayers)
+        : observedPlayers.containsAll(configuredPlayers)
+    Boolean shouldBeActive = membershipSatisfied && isCallerActualCoordinator
     Map<String, Object> attributes = new LinkedHashMap<String, Object>()
     attributes['switch'] = shouldBeActive ? 'on' : 'off'
     attributes['currentlyJoinedPlayers'] = joinedPlayersValue
@@ -10914,7 +9641,7 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
     runIn(1, 'continueGroupDeviceMembershipUpdate', [overwrite: false, data: [
       coordinatorId: coordinatorId, playersInGroup: playersInGroup, groupDnis: groupDnis,
       playerNames: playerNames, isCallerActualCoordinator: isCallerActualCoordinator,
-      generation: generation, cursor: cursor, freshSatelliteOwners: freshSatelliteOwners]])
+      generation: generation, cursor: cursor]])
   }
 }
 
@@ -10924,8 +9651,7 @@ void continueGroupDeviceMembershipUpdate(Map data = [:]) {
       data.groupDnis instanceof List ? (List<String>)data.groupDnis : [],
       data.playerNames instanceof Map ? (Map<String, String>)data.playerNames : [:],
       data.isCallerActualCoordinator == true, (data.generation ?: 0L) as Long,
-      (data.cursor ?: 0) as Integer,
-      data.freshSatelliteOwners instanceof Map ? (Map<String, String>)data.freshSatelliteOwners : null)
+      (data.cursor ?: 0) as Integer)
 }
 
 /**

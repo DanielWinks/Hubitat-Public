@@ -92,7 +92,6 @@ void logTrace(String message) {
 @Field static final Set<String> ACTIVE_GROUP_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   'groupCoordinatorId',
   'playerIds',
-  'satelliteId',
   'householdTopology',
 ]))
 
@@ -750,7 +749,7 @@ void enqueueLowPriorityTrack(String uri, Object volume = null) {
 
 void joinPlayersToCoordinator() {
   List<String> followers = getAllFollowersInGroupDevice()
-  if(!followers && !device.getDataValue('satelliteId')) {
+  if(!followers) {
     logWarn('No followers found to join to coordinator')
     return
   }

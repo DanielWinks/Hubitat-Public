@@ -1140,7 +1140,6 @@ void initialize() {
 }
 
 void handleSettingsUpdate() {
-  clearLegacyUpnpFallbackSchedules()
   // Pure settings-save path — no purge, no ZGT clear, no parent turn, no UPnP invalidate
   reconcileChildDevices()
   synchronizeTrackPositionPreference()
@@ -1165,7 +1164,6 @@ void clearLegacyBridgeAttributesForInitialization() {
 }
 
 void performImmediateInitialization() {
-  clearLegacyUpnpFallbackSchedules()
   if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
     try { wsClose() }
     catch(Exception e) { logDebug("Could not close WebSocket before player initialization: ${e.message}") }
@@ -3851,9 +3849,7 @@ void parse(String raw) {
             cacheZgtMemberHosts((List<Map>)snapshot.groups)
             String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
-            scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId,
-              htSatChanMapSetByPlayer: projectHtSatChanMapSetByPlayer((List<Map>)snapshot.groups),
-              htSatelliteNamesById: projectHtSatelliteNamesById((List<Map>)snapshot.groups)])
+            scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId])
           } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
           return
         case 'AVTransport':
@@ -3940,9 +3936,7 @@ void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer 
   List<Map> groups = (List<Map>)snapshot.groups
   cacheZgtMemberHosts(groups)
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
-  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: deviceDni, eventsByGroupId: eventsByGroupId,
-    htSatChanMapSetByPlayer: projectHtSatChanMapSetByPlayer(groups),
-    htSatelliteNamesById: projectHtSatelliteNamesById(groups)])
+  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: deviceDni, eventsByGroupId: eventsByGroupId])
 }
 
 // Refresh the transient host cache (see field comment); parse is otherwise store-free.
@@ -4007,42 +4001,6 @@ Map<String, List<Map>> projectZgtEventsByGroupId(List<Map> groups) {
     if(!events.isEmpty()) { eventsByGroupId[groupId] = events }
   }
   return eventsByGroupId
-}
-
-/** Private topology metadata for home-theater bonds; it is never published as a device attribute. */
-Map<String, String> projectHtSatChanMapSetByPlayer(List<Map> groups) {
-  Map<String, String> bindings = [:]
-  (groups ?: []).each { Map group ->
-    if(group?.members instanceof List) {
-      ((List<?>)group.members).each { Object rawMember ->
-        Map member = rawMember instanceof Map ? (Map)rawMember : [:]
-        String playerId = member.playerId?.toString()
-        String channelMap = member.htSatChannelMapSet?.toString()?.trim()
-        if(playerId && channelMap) { bindings[playerId] = channelMap }
-      }
-    }
-  }
-  return bindings
-}
-
-Map<String, String> projectHtSatelliteNamesById(List<Map> groups) {
-  Map<String, String> names = [:]
-  (groups ?: []).each { Map group ->
-    if(group?.members instanceof List) {
-      ((List<?>)group.members).each { Object rawMember ->
-        Map member = rawMember instanceof Map ? (Map)rawMember : [:]
-        if(member.secondaries instanceof List) {
-          ((List<?>)member.secondaries).each { Object rawSatellite ->
-            Map satellite = rawSatellite instanceof Map ? (Map)rawSatellite : [:]
-            String id = satellite.playerId?.toString()
-            String name = satellite.zoneName?.toString()
-            if(id && name) { names[id] = name }
-          }
-        }
-      }
-    }
-  }
-  return names
 }
 
 Map<String, List<String>> parseChannelMap(String raw) {
@@ -4865,9 +4823,7 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
   if(snapshot == null) { return false }
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
   String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId,
-    htSatChanMapSetByPlayer: projectHtSatChanMapSetByPlayer((List<Map>)snapshot.groups),
-    htSatelliteNamesById: projectHtSatelliteNamesById((List<Map>)snapshot.groups)])
+  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
   return true
 }
 
@@ -4875,9 +4831,7 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   if(topology == null || !(topology.groups instanceof List)) { return false }
   Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)topology.groups)
   String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId,
-    htSatChanMapSetByPlayer: projectHtSatChanMapSetByPlayer((List<Map>)topology.groups),
-    htSatelliteNamesById: projectHtSatelliteNamesById((List<Map>)topology.groups)])
+  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
   return true
 }
 
@@ -5551,17 +5505,16 @@ Integer cleanupUpnpRequestQueues(Set<String> activeDnis) {
   return removed
 }
 
-/** Cancel fallback jobs left by driver versions that used per-subscription mutexes. */
-void clearLegacyUpnpFallbackSchedules() {
-  unschedule('unlockSubscribeMutexAfterTimeout')
-  unschedule('unlockSid1SubscribeMutexAfterTimeoutCallback')
-  unschedule('unlockSid2SubscribeMutexAfterTimeoutCallback')
-  unschedule('unlockSid3SubscribeMutexAfterTimeoutCallback')
-  unschedule('unlockSid4SubscribeMutexAfterTimeoutCallback')
-  unschedule('unlockSubscribeMutexAfterTimeoutCallback')
-  unschedule('unlockUnsubscribeMutexAfterTimeout')
-  unschedule('unlockUnsubscribeMutexAfterTimeoutCallback')
-}
+// Retained legacy schedule/callback names. Old HubAction responses carry no GUID
+// and therefore cannot be allowed to mutate current subscription ownership.
+void unlockSubscribeMutexAfterTimeout(String sid) { logDebug("Ignoring legacy UPnP fallback for ${sid}") }
+void unlockSid1SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSid2SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSid3SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSid4SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockUnsubscribeMutexAfterTimeout() { logDebug('Ignoring legacy UPnP fallback') }
+void unlockUnsubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 
 @CompileStatic
 void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {

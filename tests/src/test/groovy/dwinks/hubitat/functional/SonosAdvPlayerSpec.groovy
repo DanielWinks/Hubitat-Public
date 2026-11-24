@@ -69,20 +69,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').getAt('title').text() == 'A < B > C "D" \'E\''
   }
 
-  def "ZGT projection preserves home theater channel maps as private topology data"() {
-    given:
-    List<Map> groups = [[members: [
-      [playerId: 'RINCON_ARC', htSatChannelMapSet: 'RINCON_ARC:LF,RF;RINCON_SUB:SW',
-        secondaries: [[playerId: 'RINCON_SUB', zoneName: 'Sub Mini']]],
-      [playerId: 'RINCON_KITCHEN', htSatChannelMapSet: '']
-    ]]]
-
-    expect:
-    driver.projectHtSatChanMapSetByPlayer(groups) == [RINCON_ARC: 'RINCON_ARC:LF,RF;RINCON_SUB:SW']
-    driver.projectHtSatelliteNamesById(groups) == [RINCON_SUB: 'Sub Mini']
-    !driver.projectZgtEventsByGroupId(groups).values().flatten().any { Map event -> event.name == 'htSatChanMapSet' }
-  }
-
   def "favorites are browsed and correlated to AVTransport by their UPnP resource URI"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50'
@@ -1479,39 +1465,19 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getSid('sid2') == null
   }
 
-  def "legacy HubAction callbacks cannot alter current queue ownership"() {
+  def "legacy callbacks and old fallback methods cannot alter current queue ownership"() {
     when:
     driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
     String guid = driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid
     driver.subscribeResubscribeGenericCallback('subscribeToAVTransport', 'resubscribeToAVTransport', 'sid1', 'AVTransport', null)
     driver.upnpUnsubscribeCallbackGeneric('sid1', 'AVTransport', null)
+    driver.unlockSid1SubscribeMutexAfterTimeoutCallback()
     driver.socketStatus('receive error')
 
     then:
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.guid == guid
     driver.getSid('sid1') == null
     rawConnections.size() == 1
-  }
-
-  def "settings update removes scheduled legacy UPnP fallback jobs"() {
-    given:
-    driver.unschedules.clear()
-
-    when:
-    driver.handleSettingsUpdate()
-
-    then:
-    driver.unschedules.containsAll([
-      'unlockSubscribeMutexAfterTimeout',
-      'unlockSid1SubscribeMutexAfterTimeoutCallback',
-      'unlockSid2SubscribeMutexAfterTimeoutCallback',
-      'unlockSid3SubscribeMutexAfterTimeoutCallback',
-      'unlockSid4SubscribeMutexAfterTimeoutCallback',
-      'unlockSubscribeMutexAfterTimeoutCallback',
-      'unlockUnsubscribeMutexAfterTimeout',
-      'unlockUnsubscribeMutexAfterTimeoutCallback'
-    ])
-    !driver.unschedules.contains('retryUpnpSid1')
   }
 
   def "ZGT XML guards reject blank outer and nested payloads"() {
