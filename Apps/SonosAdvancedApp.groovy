@@ -332,7 +332,6 @@ definition(
 
 preferences {
   page(name: 'mainPage', install: true, uninstall: true)
-  page(name: 'legacyBooleanSettingsPage')
   page(name: 'newUiPage')
   page(name: 'localPlayerPage')
   page(name: 'localPlayerSelectionPage')
@@ -862,37 +861,6 @@ Map mainPage() {
       }
       // This option changes the page structure, so retain its native submit-and-refresh control.
       input 'useOldUi', 'bool', title: 'Use old UI', required: false, defaultValue: false, submitOnChange: true
-    }
-  }
-}
-
-/** Keep the legacy preference inputs registered on an unlinked page for compatibility. */
-Map legacyBooleanSettingsPage() {
-  dynamicPage(name: 'legacyBooleanSettingsPage', title: 'Legacy Settings', install: false, uninstall: false) {
-    section('') {
-      input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?', required: false, defaultValue: false
-      input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?', required: false, defaultValue: false
-      input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true
-      input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false
-      input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention', options: [
-        '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
-        '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
-        '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
-        '1440': '24 hours', unlimited: 'Unlimited'
-      ], required: true, defaultValue: '60'
-      input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method', options: [
-        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
-        alwaysCoordinatorStream: 'Always standard stream'
-      ], required: true, defaultValue: 'alwaysNonInterrupting'
-      input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method', options: [
-        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
-        alwaysCoordinatorStream: 'Always standard stream'
-      ], required: true, defaultValue: 'alwaysNonInterrupting'
-      input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync', required: false, defaultValue: false
-      input 'suppressChimeOnSuccessiveTTS', 'bool', title: 'Suppress chime on successive TTS messages', required: false, defaultValue: false
-      input 'logLevel', 'enum', title: 'Logging level',
-        options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
-        required: false, defaultValue: getConfiguredLogLevel()
     }
   }
 }

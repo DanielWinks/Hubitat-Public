@@ -1140,6 +1140,7 @@ void initialize() {
 }
 
 void handleSettingsUpdate() {
+  clearLegacyUpnpFallbackSchedules()
   // Pure settings-save path — no purge, no ZGT clear, no parent turn, no UPnP invalidate
   reconcileChildDevices()
   synchronizeTrackPositionPreference()
@@ -1164,6 +1165,7 @@ void clearLegacyBridgeAttributesForInitialization() {
 }
 
 void performImmediateInitialization() {
+  clearLegacyUpnpFallbackSchedules()
   if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
     try { wsClose() }
     catch(Exception e) { logDebug("Could not close WebSocket before player initialization: ${e.message}") }
@@ -5549,16 +5551,17 @@ Integer cleanupUpnpRequestQueues(Set<String> activeDnis) {
   return removed
 }
 
-// Retained legacy schedule/callback names. Old HubAction responses carry no GUID
-// and therefore cannot be allowed to mutate current subscription ownership.
-void unlockSubscribeMutexAfterTimeout(String sid) { logDebug("Ignoring legacy UPnP fallback for ${sid}") }
-void unlockSid1SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSid2SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSid3SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSid4SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockUnsubscribeMutexAfterTimeout() { logDebug('Ignoring legacy UPnP fallback') }
-void unlockUnsubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+/** Cancel fallback jobs left by driver versions that used per-subscription mutexes. */
+void clearLegacyUpnpFallbackSchedules() {
+  unschedule('unlockSubscribeMutexAfterTimeout')
+  unschedule('unlockSid1SubscribeMutexAfterTimeoutCallback')
+  unschedule('unlockSid2SubscribeMutexAfterTimeoutCallback')
+  unschedule('unlockSid3SubscribeMutexAfterTimeoutCallback')
+  unschedule('unlockSid4SubscribeMutexAfterTimeoutCallback')
+  unschedule('unlockSubscribeMutexAfterTimeoutCallback')
+  unschedule('unlockUnsubscribeMutexAfterTimeout')
+  unschedule('unlockUnsubscribeMutexAfterTimeoutCallback')
+}
 
 @CompileStatic
 void subscribeResubscribeGenericCallback(String sub, String resub, String subId, String domain, HubResponse response) {
