@@ -85,6 +85,7 @@ class WhitelistMigrationSpec extends Specification {
     given:
     app.state['htSatChanMapSetByPlayer'] = ['RINCON_ARC': 'RINCON_ARC:LF,RF;RINCON_SUB:SW']
     app.state['htSatelliteNamesById'] = ['RINCON_SUB': 'Sub Mini']
+    app.state['speakerChannelMapSetByPlayer'] = ['RINCON_ONE': 'RINCON_ONE:LF,RF']
     app.state['pendingGroupSatelliteReconciliations'] = [:]
     app.state['groupSatelliteReconciliationScheduled'] = true
     app.state['activeGroupSatelliteReconciliation'] = [requestId: 'active']
@@ -97,6 +98,7 @@ class WhitelistMigrationSpec extends Specification {
     then:
     app.state['htSatChanMapSetByPlayer']['RINCON_ARC'].contains('RINCON_SUB:SW')
     app.state['htSatelliteNamesById']['RINCON_SUB'] == 'Sub Mini'
+    app.state['speakerChannelMapSetByPlayer']['RINCON_ONE'] == 'RINCON_ONE:LF,RF'
     app.state.containsKey('pendingGroupSatelliteReconciliations')
     app.state['groupSatelliteReconciliationScheduled'] == true
     app.state['activeGroupSatelliteReconciliation'].requestId == 'active'
@@ -104,6 +106,7 @@ class WhitelistMigrationSpec extends Specification {
     app.state['pendingGroupSatelliteVerifications']['active'].satelliteId == 'RINCON_SUB'
     !((List)result.stateRemoved).intersect([
       'htSatChanMapSetByPlayer', 'htSatelliteNamesById', 'pendingGroupSatelliteReconciliations',
+      'speakerChannelMapSetByPlayer',
       'groupSatelliteReconciliationScheduled', 'activeGroupSatelliteReconciliation',
       'groupSatelliteStatuses', 'pendingGroupSatelliteVerifications'
     ])

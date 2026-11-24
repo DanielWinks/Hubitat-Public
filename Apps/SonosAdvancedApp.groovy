@@ -345,6 +345,12 @@ preferences {
 @Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
 @Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 @Field static final String DISCOVERED_SONOS_SECONDARIES_STATE_KEY = 'discoveredSonosSecondaries'
+@Field static final String DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY = 'discoveryTopologyRequested'
+@Field static final String DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY = 'discoveryTopologyRequestId'
+@Field static final Map<String, String> DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE = [
+  serviceType: 'urn:schemas-upnp-org:service:ZoneGroupTopology:1',
+  controlURL: '/ZoneGroupTopology/Control'
+]
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
@@ -400,6 +406,7 @@ preferences {
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final String HT_SAT_CHAN_MAPS_STATE_KEY = 'htSatChanMapSetByPlayer'
 @Field static final String HT_SATELLITE_NAMES_STATE_KEY = 'htSatelliteNamesById'
+@Field static final String SPEAKER_CHANNEL_MAPS_STATE_KEY = 'speakerChannelMapSetByPlayer'
 @Field static final String PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY = 'pendingGroupSatelliteReconciliations'
 @Field static final String GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY = 'groupSatelliteReconciliationScheduled'
 @Field static final String ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY = 'activeGroupSatelliteReconciliation'
@@ -512,6 +519,7 @@ preferences {
   DISCOVERED_SONOS_SECONDARIES_STATE_KEY,
   HT_SAT_CHAN_MAPS_STATE_KEY,
   HT_SATELLITE_NAMES_STATE_KEY,
+  SPEAKER_CHANNEL_MAPS_STATE_KEY,
   PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY,
   GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY,
   ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY,
@@ -563,6 +571,8 @@ preferences {
   'discoveryRunning',
   'discoveryEndTime',
   'discoveryProbeAttempts',
+  'discoveryTopologyRequested',
+  'discoveryTopologyRequestId',
 ]))
 
 @Field static final Set<String> ACTIVE_APP_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
@@ -2073,18 +2083,6 @@ String getStoredSatelliteName(String satelliteId) {
   return names[satelliteId]?.toString()
 }
 
-Boolean canAcceptHomeTheaterSatellite(String coordinatorId) {
-  Map<String, String> maps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
-      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
-  String rawMap = maps[coordinatorId]
-  if(!rawMap) { return false }
-  return rawMap.split(';').any { String pair ->
-    List<String> parts = pair.split(':', 2).collect { String value -> value.trim() }
-    parts.size() == 2 && parts[0] == coordinatorId && parts[1].split(',')
-        .collect { String channel -> channel.trim() }.any { String channel -> channel in ['LF', 'RF'] }
-  }
-}
-
 Map getNewUiGroupDraft() {
   return state[NEW_UI_GROUP_DRAFT_KEY] instanceof Map ? (Map)state[NEW_UI_GROUP_DRAFT_KEY] : [:]
 }
@@ -2634,10 +2632,6 @@ void saveNewUiGroup() {
     state[NEW_UI_GROUP_ERROR_KEY] = 'A satellite cannot also be the coordinator or a follower.'
     return
   }
-  if(satelliteId && !canAcceptHomeTheaterSatellite(coordinatorId)) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'The selected coordinator has not reported a home-theater channel map that can accept a satellite.'
-    return
-  }
   if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == true) {
     groupName = buildNewUiAutomaticGroupName(coordinatorId, followerIds, playerNames)
   }
@@ -2810,6 +2804,15 @@ Map<String, String> findHomeTheaterSatelliteOwners() {
       }
     }
   }
+  restoreDiscoveredSonosSecondaries()
+  discoveredSonosSecondaries.values().each { Object raw ->
+    Map secondary = raw instanceof Map ? (Map)raw : [:]
+    String satelliteId = secondary.id?.toString()
+    String discoveredOwner = secondary.primaryDeviceId?.toString()
+    if(satelliteId && discoveredOwner && !owners.containsKey(satelliteId)) {
+      owners[satelliteId] = discoveredOwner
+    }
+  }
   return owners as Map<String, String>
 }
 
@@ -2826,16 +2829,16 @@ void sendHomeTheaterSatelliteAdd(Map operation) {
       ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
   String base = maps[targetId]
   if(!base) {
-    failGroupSatelliteReconciliation(operation, "No home-theater channel map was observed for coordinator ${targetId ?: 'unknown'}")
-    return
+    Map<String, String> speakerMaps = state[SPEAKER_CHANNEL_MAPS_STATE_KEY] instanceof Map
+        ? (Map<String, String>)state[SPEAKER_CHANNEL_MAPS_STATE_KEY] : [:]
+    base = speakerMaps[targetId]
   }
-  List<String> entries = base.split(';').collect { String entry -> entry.trim() }
-      .findAll { String entry -> entry && !entry.startsWith("${satelliteId}:") && !entry.endsWith(':SW') }
+  List<String> entries = base
+      ? base.split(';').collect { String entry -> entry.trim() }
+          .findAll { String entry -> entry && !entry.startsWith("${satelliteId}:") && !entry.endsWith(':SW') }
+      : []
   Boolean hasCoordinator = entries.any { String entry -> entry.startsWith("${targetId}:") }
-  if(!hasCoordinator) {
-    failGroupSatelliteReconciliation(operation, "Coordinator ${targetId} is not present in its home-theater channel map")
-    return
-  }
+  if(!hasCoordinator) { entries.add(0, "${targetId}:LF,RF") }
   entries << "${satelliteId}:SW"
   String channelMap = entries.join(';')
   sendHomeTheaterSatelliteAction(operation, targetId, 'AddHTSatellite', [HTSatChanMapSet: channelMap], 'add')
@@ -4459,10 +4462,22 @@ void extendDiscovery(Integer seconds) {
     logDebug('Starting a fresh discovery session while retaining devices already found')
     atomicState.discoveryRunning = true
     atomicState.discoveryProbeAttempts = [:]
+    resetDiscoveryTopologyRequest()
     subscribeToSsdpEvents(location)
     sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
     sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
     startMdnsDiscovery()
+    Map firstKnownSpeaker = discoveredSonoses.values().find { Object entry ->
+      entry instanceof Map && ((Map)entry).deviceIp
+    } as Map
+    if(firstKnownSpeaker == null) {
+      firstKnownSpeaker = discoveredSonosSecondaries.values().find { Object entry ->
+        entry instanceof Map && ((Map)entry).deviceIp
+      } as Map
+    }
+    if(firstKnownSpeaker?.deviceIp) {
+      requestDiscoveryTopologyOnce(firstKnownSpeaker.deviceIp.toString())
+    }
     runIn(1, 'updateDiscoveryTimer')
   }
   // Add seconds to current remaining time (or from now if already expired)
@@ -4497,6 +4512,7 @@ void ssdpDiscover() {
   logDebug("Starting SSDP Discovery...")
   discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
   discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
+	resetDiscoveryTopologyRequest()
 	atomicState.discoveryProbeAttempts = [:]
 	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
 	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
@@ -4590,6 +4606,145 @@ Boolean reserveDiscoveryProbe(String ipAddress) {
     atomicState.discoveryProbeAttempts = updated
     logDebug("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
     return true
+  }
+}
+
+void resetDiscoveryTopologyRequest() {
+  atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
+  atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
+}
+
+void requestDiscoveryTopologyOnce(String ipAddress) {
+  if(!ipAddress || atomicState.discoveryRunning != true ||
+      atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] == true) {
+    return
+  }
+
+  String requestId = UUID.randomUUID().toString()
+  atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = true
+  atomicState[DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY] = requestId
+  String serviceType = DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE.serviceType
+  String requestBody = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${serviceType}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
+  Map params = [
+    uri: "http://${ipAddress}:1400${DISCOVERY_ZONE_GROUP_TOPOLOGY_SERVICE.controlURL}",
+    headers: [SOAPAction: "${serviceType}#GetZoneGroupState"],
+    requestContentType: 'text/xml',
+    contentType: 'text/xml',
+    timeout: 5,
+    body: requestBody
+  ]
+
+  try {
+    logInfo("Requesting full Sonos topology from first discovered speaker at ${ipAddress}")
+    asynchttpPost('discoveryTopologyCallback', params, [requestId: requestId, sourceIp: ipAddress])
+  } catch(Exception e) {
+    atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
+    atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
+    logWarn("Could not dispatch Sonos topology discovery request to ${ipAddress}: ${e.message}")
+  }
+}
+
+void discoveryTopologyCallback(AsyncResponse response, Map data) {
+  String requestId = data?.requestId?.toString()
+  if(!requestId || requestId != atomicState[DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString()) {
+    logDebug('Ignoring a stale Sonos topology discovery response')
+    return
+  }
+  if(atomicState.discoveryRunning != true) {
+    logDebug('Ignoring Sonos topology discovery response because discovery has stopped')
+    return
+  }
+  if(response == null || response.hasError()) {
+    atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
+    atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
+    logDebug("Sonos topology discovery request failed: status=${response?.status}, error=${response?.getErrorMessage()}")
+    return
+  }
+
+  try {
+    String responseBody = response.getData()?.toString()
+    Map topology = parseDiscoveryTopologyResponse(responseBody)
+    List<String> speakerIps = (List<String>)(topology.speakerIps ?: [])
+    if(speakerIps.isEmpty()) {
+      atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
+      atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
+      logWarn('Sonos topology response did not contain any speaker locations; discovery will continue with network probes')
+      return
+    }
+
+    if(topology.channelMaps instanceof Map && !((Map)topology.channelMaps).isEmpty()) {
+      state[HT_SAT_CHAN_MAPS_STATE_KEY] = new LinkedHashMap<String, String>((Map)topology.channelMaps)
+    }
+    if(topology.speakerChannelMaps instanceof Map && !((Map)topology.speakerChannelMaps).isEmpty()) {
+      state[SPEAKER_CHANNEL_MAPS_STATE_KEY] = new LinkedHashMap<String, String>((Map)topology.speakerChannelMaps)
+    }
+    if(topology.satelliteNames instanceof Map && !((Map)topology.satelliteNames).isEmpty()) {
+      state[HT_SATELLITE_NAMES_STATE_KEY] = new LinkedHashMap<String, String>((Map)topology.satelliteNames)
+    }
+
+    Integer queuedProbeCount = 0
+    String sourceIp = data?.sourceIp?.toString()
+    speakerIps.each { String speakerIp ->
+      if(speakerIp != sourceIp && !isIpAlreadyDiscovered(speakerIp)) {
+        processDiscoveredSonosDevice(speakerIp)
+        queuedProbeCount++
+      }
+    }
+    logInfo("Topology discovery found ${speakerIps.size()} Sonos speaker locations and queued ${queuedProbeCount} additional probe(s)")
+  } catch(Exception e) {
+    atomicState[DISCOVERY_TOPOLOGY_REQUESTED_STATE_KEY] = false
+    atomicState.remove(DISCOVERY_TOPOLOGY_REQUEST_ID_STATE_KEY)
+    logWarn("Could not parse Sonos topology discovery response: ${e.message}")
+  }
+}
+
+Map parseDiscoveryTopologyResponse(String responseBody) {
+  if(!responseBody) { return [speakerIps: [], channelMaps: [:], speakerChannelMaps: [:], satelliteNames: [:]] }
+  GPathResult envelope = new XmlSlurper().parseText(responseBody)
+  GPathResult responseNode = findXmlDescendantByLocalName(envelope, 'GetZoneGroupStateResponse')
+  GPathResult topologyStateNode = findDirectXmlChild(responseNode, 'ZoneGroupState')
+  String topologyXml = topologyStateNode?.text()?.toString()
+  if(!topologyXml) { return [speakerIps: [], channelMaps: [:], speakerChannelMaps: [:], satelliteNames: [:]] }
+
+  GPathResult topology = new XmlSlurper().parseText(topologyXml)
+  List<GPathResult> members = []
+  collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
+  LinkedHashSet<String> speakerIps = new LinkedHashSet<String>()
+  Map<String, String> channelMaps = [:]
+  Map<String, String> speakerChannelMaps = [:]
+  Map<String, String> satelliteNames = [:]
+  members.each { GPathResult member ->
+    String playerId = xmlAttribute(member, 'UUID')
+    addDiscoveryTopologyLocation(speakerIps, xmlAttribute(member, 'Location'))
+    String channelMap = xmlAttribute(member, 'HTSatChanMapSet')
+    if(playerId && channelMap) { channelMaps[playerId] = channelMap }
+    String speakerChannelMap = xmlAttribute(member, 'ChannelMapSet')
+    if(playerId && speakerChannelMap) { speakerChannelMaps[playerId] = speakerChannelMap }
+
+    List<GPathResult> satellites = []
+    collectXmlDescendantsByLocalName(member, 'Satellite', satellites)
+    satellites.each { GPathResult satellite ->
+      String satelliteId = xmlAttribute(satellite, 'UUID')
+      String satelliteName = xmlAttribute(satellite, 'ZoneName')
+      addDiscoveryTopologyLocation(speakerIps, xmlAttribute(satellite, 'Location'))
+      if(satelliteId && satelliteName) { satelliteNames[satelliteId] = satelliteName }
+    }
+  }
+  return [speakerIps: new ArrayList<String>(speakerIps), channelMaps: channelMaps,
+    speakerChannelMaps: speakerChannelMaps, satelliteNames: satelliteNames]
+}
+
+List<String> extractDiscoveryTopologyIpAddresses(String responseBody) {
+  return (List<String>)(parseDiscoveryTopologyResponse(responseBody).speakerIps ?: [])
+}
+
+void addDiscoveryTopologyLocation(Set<String> speakerIps, String location) {
+  if(speakerIps == null || !location) { return }
+  try {
+    String speakerIp = new URI(location).host
+    if(speakerIp) { speakerIps.add(speakerIp) }
+  } catch(Exception e) {
+    logDebug("Ignoring invalid topology device location '${location}': ${e.message}")
   }
 }
 
@@ -4768,6 +4923,8 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   }
 
   if(isDuplicate) { return }
+
+  requestDiscoveryTopologyOnce(ipAddress)
 
   LinkedHashMap discoveredSonos = [
     name: playerName,
