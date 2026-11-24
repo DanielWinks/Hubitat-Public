@@ -398,6 +398,13 @@ preferences {
 @Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
 @Field static final String PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY = 'pendingPromotedAvtPlayers'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
+@Field static final String HT_SAT_CHAN_MAPS_STATE_KEY = 'htSatChanMapSetByPlayer'
+@Field static final String HT_SATELLITE_NAMES_STATE_KEY = 'htSatelliteNamesById'
+@Field static final String PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY = 'pendingGroupSatelliteReconciliations'
+@Field static final String GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY = 'groupSatelliteReconciliationScheduled'
+@Field static final String ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY = 'activeGroupSatelliteReconciliation'
+@Field static final String GROUP_SATELLITE_STATUSES_STATE_KEY = 'groupSatelliteStatuses'
+@Field static final String PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY = 'pendingGroupSatelliteVerifications'
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupTopologyOperation'
@@ -503,6 +510,13 @@ preferences {
   NEW_UI_GROUP_ERROR_KEY,
   NEW_UI_GROUP_DELETE_KEY,
   DISCOVERED_SONOS_SECONDARIES_STATE_KEY,
+  HT_SAT_CHAN_MAPS_STATE_KEY,
+  HT_SATELLITE_NAMES_STATE_KEY,
+  PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY,
+  GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY,
+  ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY,
+  GROUP_SATELLITE_STATUSES_STATE_KEY,
+  PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY,
   LOCAL_CONTROL_RETRY_STATE_KEY,
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
@@ -578,6 +592,7 @@ preferences {
   'newUiGroupName',
   'newUiGroupCoordinator',
   'newUiGroupFollowers',
+  'newUiGroupSatellite',
 ]))
 // =============================================================================
 // Migration-Prune Helpers — whitelist-driven for-each removal
@@ -938,6 +953,7 @@ void renderNewUiPageContent() {
       input name: 'newUiGroupName', type: 'text', title: 'Group name', defaultValue: settings.newUiGroupName?.toString() ?: '', submitOnChange: true
       input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator', options: groupPlayerOptions, defaultValue: groupCoordinator, submitOnChange: true, offerAll: false
       input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers', options: compatibleFollowerOptions, multiple: true, defaultValue: groupFollowers, submitOnChange: true, offerAll: false
+      input name: 'newUiGroupSatellite', type: 'enum', title: 'Satellites', options: (['': 'No satellite'] + getNewUiSatelliteOptions()), defaultValue: getNewUiGroupSatellite(groupDraft), submitOnChange: true, offerAll: false
       paragraph displayNewUiGroupEditor()
     }
 
@@ -1565,12 +1581,18 @@ String renderNewUiGroupEditorMarkup() {
       ? "<div class='new-ui-group-editor-error'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</div>"
       : ''
   String editorInstructions = selectedCoordinator
-      ? 'Choose one coordinator and one or more compatible follower speakers.'
-      : 'Select one coordinator, then select one or more follower speakers.'
+      ? 'Choose one coordinator, optional satellite, and one or more compatible follower speakers.'
+      : 'Select one coordinator, optional satellite, then select one or more follower speakers.'
   StringBuilder coordinatorOptions = new StringBuilder("<option value=''>Choose a coordinator</option>")
   playerOptions.each { String id, String label ->
     String selected = id == selectedCoordinator ? ' selected' : ''
     coordinatorOptions.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
+  }
+  String satelliteId = getNewUiGroupSatellite(groupDraft)
+  StringBuilder satelliteOptionMarkup = new StringBuilder("<option value=''>No satellite</option>")
+  getNewUiSatelliteOptions().each { String id, String label ->
+    String selected = id == satelliteId ? ' selected' : ''
+    satelliteOptionMarkup.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
   }
   String nameChange = "updateNewUiGroupField('name')"
   String coordinatorChange = "updateNewUiGroupField('coordinator')"
@@ -1589,17 +1611,20 @@ String renderNewUiGroupEditorMarkup() {
   String cancelAction = newUiButtonLink('btnNewUiCancelGroup', 'Cancel', '#4b5563', '14px', 'Cancel group edit', 'new-ui-group-cancel')
   String nameChangeAction = newUiButtonLink('btnNewUiGroupNameChanged', 'Update group name', '#4054b2', '13px', 'Update group name', 'new-ui-group-field-change-action new-ui-group-name-change-action')
   String coordinatorChangeAction = newUiButtonLink('btnNewUiGroupCoordinatorChanged', 'Update group coordinator', '#4054b2', '13px', 'Update group coordinator', 'new-ui-group-field-change-action new-ui-group-coordinator-change-action')
-  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
+  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']),.mdl-cell:has([name='settings[newUiGroupSatellite]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-column{display:flex;flex-direction:column;gap:16px;min-width:0}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
   StringBuilder html = new StringBuilder(css)
   html.append("<style>.new-ui-group-follower-item .form-group{display:none!important}.new-ui-group-follower-item>div{display:block!important;width:100%}.new-ui-group-follower-toggle{box-sizing:border-box;display:flex!important;align-items:center;width:100%;min-height:40px;padding:7px;border:1px solid transparent;border-radius:6px;color:var(--text-color,#30343b)!important;text-align:left}.new-ui-group-follower-toggle:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-control{display:flex;align-items:center;gap:9px}.new-ui-group-checkbox{box-sizing:border-box;position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;border:1.5px solid #747b86;border-radius:4px;background:var(--surface-card,#fff)}.new-ui-group-checkbox-checked{border-color:#4054b2;background:#4054b2}.new-ui-group-checkbox-checked:after{box-sizing:border-box;content:'';width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}.new-ui-group-follower-toggle:focus-visible{outline:2px solid #4054b2;outline-offset:2px}</style>")
   html.append("<div class='new-ui-group-editor-card'><div class='new-ui-group-editor-heading'>${editorTitle}</div><div class='new-ui-group-editor-description'>${editorInstructions}</div>${editorErrorMarkup}")
   html.append("<div class='new-ui-group-editor-grid'>")
   html.append("<div class='new-ui-group-editor-field new-ui-group-editor-field-wide'><label for='new-ui-group-name'>Group name</label><input id='new-ui-group-name' type='text' name='newUiGroupNameUi' value='${escapeNewUiHtml(editorName)}' autocomplete='off' onchange=\"${nameChange}\"></div>")
-  html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
+  html.append("<div class='new-ui-group-editor-column'><div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
+  html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-satellite'>Satellites</label><select id='new-ui-group-satellite' name='newUiGroupSatelliteUi' onchange=\"updateNewUiGroupSatelliteField()\">${satelliteOptionMarkup}</select></div></div>")
   html.append("<div class='new-ui-group-editor-field'><span class='new-ui-group-editor-label'>Followers</span><div id='new-ui-group-followers' class='new-ui-group-follower-list' aria-describedby='new-ui-group-followers-help'>${followerOptionsMarkup}</div><div id='new-ui-group-followers-help' class='new-ui-group-editor-help'>Select one or more compatible speakers.</div></div>")
   html.append("</div><div class='new-ui-group-editor-actions'>").append(saveAction).append(cancelAction).append('</div>')
   html.append(nameChangeAction).append(coordinatorChangeAction)
-  html.append("<script>function syncNewUiGroupFields(){var name=document.querySelector(\"#new-ui-group-name\");var coordinator=document.querySelector(\"#new-ui-group-coordinator\");var nameSetting=document.querySelector(\"[name='settings[newUiGroupName]']\");var coordinatorSetting=document.querySelector(\"[name='settings[newUiGroupCoordinator]']\");if(name&&nameSetting){nameSetting.value=name.value}if(coordinator&&coordinatorSetting){coordinatorSetting.value=coordinator.value}}function updateNewUiGroupField(field){syncNewUiGroupFields();var buttonClass={name:'.new-ui-group-name-change-action',coordinator:'.new-ui-group-coordinator-change-action'}[field];var button=buttonClass?document.querySelector(buttonClass):null;if(button){buttonClick(button)}}</script>")
+  String satelliteChangeAction = newUiButtonLink('btnNewUiGroupSatelliteChanged', 'Update group satellite', '#4054b2', '13px', 'Update group satellite', 'new-ui-group-field-change-action new-ui-group-satellite-change-action')
+  html.append(satelliteChangeAction)
+  html.append("<script>function syncNewUiGroupFields(){var name=document.querySelector(\"#new-ui-group-name\");var coordinator=document.querySelector(\"#new-ui-group-coordinator\");var satellite=document.querySelector(\"#new-ui-group-satellite\");var nameSetting=document.querySelector(\"[name='settings[newUiGroupName]']\");var coordinatorSetting=document.querySelector(\"[name='settings[newUiGroupCoordinator]']\");var satelliteSetting=document.querySelector(\"[name='settings[newUiGroupSatellite]']\");if(name&&nameSetting){nameSetting.value=name.value}if(coordinator&&coordinatorSetting){coordinatorSetting.value=coordinator.value}if(satellite&&satelliteSetting){satelliteSetting.value=satellite.value}}function updateNewUiGroupField(field){syncNewUiGroupFields();var buttonClass={name:'.new-ui-group-name-change-action',coordinator:'.new-ui-group-coordinator-change-action'}[field];var button=buttonClass?document.querySelector(buttonClass):null;if(button){buttonClick(button)}}function updateNewUiGroupSatelliteField(){var select=document.querySelector('#new-ui-group-satellite');var setting=document.querySelector(\"[name='settings[newUiGroupSatellite]']\");var button=document.querySelector('.new-ui-group-satellite-change-action');if(select&&setting){setting.value=select.value}if(button){buttonClick(button)}}</script>")
   html.append('</div>')
   return html.toString()
 }
@@ -1687,7 +1712,7 @@ String displayNewUiGroupTable() {
         border-spacing: 0;
         border-radius: 0;
         color: var(--text-color, #424242);
-        min-width: 760px;
+        table-layout: fixed;
         width: 100%;
       }
       #new-ui-group-table th,
@@ -1697,7 +1722,7 @@ String displayNewUiGroupTable() {
         border-right: 0;
         color: var(--text-color, #424242);
         font-size: 14px !important;
-        padding: 12px 14px !important;
+        padding: 8px 10px !important;
         text-align: center;
         vertical-align: middle;
       }
@@ -1730,19 +1755,27 @@ String displayNewUiGroupTable() {
         line-height: 20px;
         vertical-align: middle;
       }
+      #new-ui-group-table .new-ui-group-action-header,
       #new-ui-group-table .new-ui-group-action-cell {
-        padding-left: 10px !important;
-        padding-right: 10px !important;
+        box-sizing: border-box;
+        max-width: 68px !important;
+        min-width: 68px !important;
+        padding: 8px 6px !important;
         white-space: nowrap;
-        width: 100px;
+        width: 68px !important;
       }
       #new-ui-group-table .new-ui-group-name,
       #new-ui-group-table .new-ui-group-followers {
         text-align: left;
       }
       #new-ui-group-table .new-ui-group-name {
-        min-width: 200px;
+        overflow-wrap: anywhere;
+        width: 28%;
       }
+      #new-ui-group-table th:nth-child(3),
+      #new-ui-group-table td:nth-child(3) { width: 16%; }
+      #new-ui-group-table th:nth-child(4),
+      #new-ui-group-table td:nth-child(4) { width: 17%; }
       #new-ui-group-table .new-ui-group-name a {
         color: #2196F3;
         text-decoration: none;
@@ -1753,6 +1786,11 @@ String displayNewUiGroupTable() {
       #new-ui-group-table .new-ui-group-followers br {
         line-height: 1.7;
       }
+      #new-ui-group-table .new-ui-status { display: inline-block; font-size: 12px; font-weight: 600; line-height: 1.4; white-space: nowrap; }
+      #new-ui-group-table .new-ui-status-active { color: #2e7d32; }
+      #new-ui-group-table .new-ui-status-inactive { color: #c62828; }
+      #new-ui-group-table .new-ui-status-unknown,
+      #new-ui-group-table .new-ui-status-na { color: var(--text-color-secondary, #757575); }
       .new-ui-group-mobile-list { display: none; }
       .new-ui-group-mobile-actions { align-items: center; display: flex; gap: 14px; }
       .new-ui-group-mobile-record { text-align: center; }
@@ -1786,15 +1824,17 @@ String renderNewUiGroupTableMarkup() {
   List<Map> rows = buildNewUiGroupRows()
   StringBuilder html = new StringBuilder()
   html.append("<div><table id='new-ui-group-table' class='mdl-data-table'>")
+  html.append("<colgroup><col style='width:68px'><col style='width:28%'><col style='width:16%'><col style='width:17%'><col></colgroup>")
   html.append('<thead><tr>')
-  html.append('<th>Action</th>')
+  html.append("<th class='new-ui-group-action-header'>Action</th>")
   html.append('<th>Group Name</th>')
   html.append('<th>Coordinator</th>')
+  html.append('<th>Satellites</th>')
   html.append('<th>Followers</th>')
   html.append('</tr></thead><tbody>')
 
   if(rows.isEmpty()) {
-    html.append("<tr><td colspan='4'>No Sonos groups have been created yet.</td></tr>")
+    html.append("<tr><td colspan='5'>No Sonos groups have been created yet.</td></tr>")
   } else {
     rows.each { Map row ->
       String groupName = row.name?.toString() ?: 'Unnamed group'
@@ -1811,11 +1851,13 @@ String renderNewUiGroupTableMarkup() {
       String coordinatorName = row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown'
       String safeCoordinator = escapeNewUiHtml(coordinatorName)
       String followerMarkup = renderNewUiGroupFollowers(row.followerIds)
+      String satelliteMarkup = renderNewUiGroupSatellite(row.satelliteId, row.name?.toString(), row.coordinatorId?.toString())
 
       html.append('<tr>')
       html.append("<td class='new-ui-group-action-cell' data-label='Action'>${actionMarkup}</td>")
       html.append("<td class='new-ui-group-name' data-label='Group name'><strong>${safeName}</strong></td>")
       html.append("<td data-label='Coordinator'>${safeCoordinator}</td>")
+      html.append("<td data-label='Satellites'>${satelliteMarkup}</td>")
       html.append("<td class='new-ui-group-followers' data-label='Followers'>${followerMarkup}</td>")
       html.append('</tr>')
     }
@@ -1843,9 +1885,11 @@ String renderNewUiGroupTableMobileListMarkup() {
       }
       String coordinator = escapeNewUiHtml(row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown')
       String followers = renderNewUiGroupFollowers(row.followerIds)
+      String satellite = renderNewUiGroupSatellite(row.satelliteId, row.name?.toString(), row.coordinatorId?.toString())
       html.append("<article class='new-ui-mobile-record new-ui-group-mobile-record'><div class='new-ui-group-mobile-title'><strong>${safeName}</strong></div>")
       html.append("<div class='new-ui-group-mobile-buttons'>${actions}</div>")
       html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Coordinator</span><span class='new-ui-mobile-value'>${coordinator}</span></div>")
+      html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Satellites</span><span class='new-ui-mobile-value'>${satellite}</span></div>")
       html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Followers</span><span class='new-ui-mobile-value'>${followers}</span></div></article>")
     }
   }
@@ -1864,6 +1908,7 @@ List<Map> buildNewUiGroupRows() {
       rowsByName[groupName] = [
         name: groupName,
         coordinatorId: definition.groupCoordinatorId?.toString(),
+        satelliteId: definition.satelliteId?.toString(),
         followerIds: normalizeNewUiGroupPlayerIds(definition.playerIds),
         device: null
       ]
@@ -1879,6 +1924,7 @@ List<Map> buildNewUiGroupRows() {
       name: groupName,
       coordinatorId: null,
       followerIds: [],
+      satelliteId: null,
       device: null
     ]
     row.device = groupDevice
@@ -1888,6 +1934,7 @@ List<Map> buildNewUiGroupRows() {
     if(!row.followerIds) {
       row.followerIds = normalizeNewUiGroupPlayerIds(groupDevice.getDataValue('playerIds'))
     }
+    if(!row.satelliteId) { row.satelliteId = groupDevice.getDataValue('satelliteId')?.toString() }
     rowsByName[groupName] = row
   }
 
@@ -1957,6 +2004,87 @@ String renderNewUiGroupFollowers(Object followerIds) {
   return StringUtils.join(ids.collect { String id -> escapeNewUiHtml(playerNames[id] ?: id) }, '<br>')
 }
 
+String renderNewUiGroupSatellite(Object satelliteId, String groupName = null, String coordinatorId = null) {
+  Map statuses = state[GROUP_SATELLITE_STATUSES_STATE_KEY] instanceof Map
+      ? (Map)state[GROUP_SATELLITE_STATUSES_STATE_KEY] : [:]
+  Map status = groupName && statuses[groupName] instanceof Map ? (Map)statuses[groupName] : null
+  String id = satelliteId?.toString()
+  if(!id) {
+    if(status?.status?.toString() == 'Error') {
+      return newUiStatusBadge('Unconfirmed', 'inactive', status.message?.toString() ?: 'Satellite removal failed')
+    }
+    return newUiStatusBadge('—', 'na', 'No satellite configured')
+  }
+  String label = getNewUiSatelliteOptions()[id] ?: getStoredSatelliteName(id) ?: id
+  String owner = findHomeTheaterSatelliteOwners()[id]?.toString()
+  if(status?.status?.toString() == 'Pending') {
+    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge('Pending', 'unknown', status.message?.toString() ?: 'Waiting for Sonos topology') }"
+  }
+  if(status?.status?.toString() == 'Error' || status?.status?.toString() == 'Unconfirmed') {
+    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge(status.status.toString(), 'inactive', status.message?.toString() ?: 'Bond state could not be confirmed') }"
+  }
+  if(owner == coordinatorId) {
+    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge('Bonded', 'active', 'Sonos topology confirms this Sub is bonded to the coordinator') }"
+  }
+  if(owner) {
+    Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
+    String ownerName = playerNames[owner] ?: owner
+    return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge("Bonded to ${ownerName}", 'inactive', 'Sonos topology reports a different bond owner') }"
+  }
+  return "${escapeNewUiHtml(label)}<br>${newUiStatusBadge('Not bonded', 'unknown', 'Sonos topology does not report this Sub as bonded') }"
+}
+
+Map<String, String> getNewUiSatelliteOptions() {
+  Map<String, String> options = [:]
+  restoreDiscoveredSonosSecondaries()
+  Map<String, String> names = state[HT_SATELLITE_NAMES_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[HT_SATELLITE_NAMES_STATE_KEY] : [:]
+  discoveredSonosSecondaries.each { Object ignored, Object raw ->
+    Map secondary = raw instanceof Map ? (Map)raw : [:]
+    String id = secondary.id?.toString()
+    String model = (secondary.modelDisplayName ?: secondary.modelName ?: '').toString().toLowerCase(Locale.ROOT)
+    if(id && model.contains('sub')) {
+      options[id] = (secondary.name ?: names[id] ?: secondary.modelDisplayName ?: secondary.modelName ?: id).toString()
+    }
+  }
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String id = player.getDataValue('id')?.toString()
+    String model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName') ?: '').toString().toLowerCase(Locale.ROOT)
+    if(id && model.contains('sub')) { options[id] = player.getDataValue('name')?.toString() ?: names[id] ?: id }
+  }
+  Map<String, String> channelMaps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
+  channelMaps.each { String ownerId, String rawMap ->
+    rawMap.split(';').each { String pair ->
+      List<String> parts = pair.split(':', 2).collect { String value -> value.trim() }
+      if(parts.size() == 2 && parts[0] != ownerId && parts[1].split(',')
+          .collect { String channel -> channel.trim() }.contains('SW') && !options.containsKey(parts[0])) {
+        options[parts[0]] = names[parts[0]] ?: parts[0]
+      }
+    }
+  }
+  return options.sort { Map.Entry left, Map.Entry right ->
+    left.value.toString().compareToIgnoreCase(right.value.toString())
+  }
+}
+
+String getStoredSatelliteName(String satelliteId) {
+  Map names = state[HT_SATELLITE_NAMES_STATE_KEY] instanceof Map ? (Map)state[HT_SATELLITE_NAMES_STATE_KEY] : [:]
+  return names[satelliteId]?.toString()
+}
+
+Boolean canAcceptHomeTheaterSatellite(String coordinatorId) {
+  Map<String, String> maps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
+  String rawMap = maps[coordinatorId]
+  if(!rawMap) { return false }
+  return rawMap.split(';').any { String pair ->
+    List<String> parts = pair.split(':', 2).collect { String value -> value.trim() }
+    parts.size() == 2 && parts[0] == coordinatorId && parts[1].split(',')
+        .collect { String channel -> channel.trim() }.any { String channel -> channel in ['LF', 'RF'] }
+  }
+}
+
 Map getNewUiGroupDraft() {
   return state[NEW_UI_GROUP_DRAFT_KEY] instanceof Map ? (Map)state[NEW_UI_GROUP_DRAFT_KEY] : [:]
 }
@@ -1964,6 +2092,11 @@ Map getNewUiGroupDraft() {
 String getNewUiGroupCoordinator(Map draft) {
   Object configured = settings.containsKey('newUiGroupCoordinator') ? settings.newUiGroupCoordinator : null
   return configured != null ? configured.toString() : (draft.coordinatorId?.toString() ?: '')
+}
+
+String getNewUiGroupSatellite(Map draft) {
+  Object configured = settings.containsKey('newUiGroupSatellite') ? settings.newUiGroupSatellite : null
+  return configured != null ? configured.toString() : (draft.satelliteId?.toString() ?: '')
 }
 
 List<String> getNewUiGroupFollowers(Map draft) {
@@ -2250,6 +2383,10 @@ void appButtonHandler(String buttonName) {
     handleNewUiGroupFieldChange('coordinator')
     return
   }
+  if(buttonName == 'btnNewUiGroupSatelliteChanged') {
+    handleNewUiGroupSatelliteChange()
+    return
+  }
   if(buttonName == 'btnNewUiSaveGroup') {
     saveNewUiGroup()
     return
@@ -2354,6 +2491,7 @@ void beginNewUiGroupEditor(String coordinatorId) {
   Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
   String initialName = buildNewUiAutomaticGroupName(coordinatorId, [], playerNames)
   state[NEW_UI_GROUP_DRAFT_KEY] = [name: initialName, coordinatorId: coordinatorId, followerIds: []]
+  state[NEW_UI_GROUP_DRAFT_KEY].satelliteId = ''
   if(coordinatorId) {
     app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: coordinatorId])
     app.updateSetting('newUiGroupName', [type: 'text', value: initialName])
@@ -2382,12 +2520,14 @@ void beginNewUiGroupEdit(String token) {
     name: group.name.toString(),
     coordinatorId: group.coordinatorId?.toString(),
     followerIds: existingFollowerIds
+    , satelliteId: group.satelliteId?.toString() ?: ''
   ]
   app.updateSetting('newUiGroupName', group.name.toString())
   if(group.coordinatorId) {
     app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: group.coordinatorId.toString()])
   }
   app.updateSetting('newUiGroupFollowers', [type: 'enum', value: normalizeNewUiGroupPlayerIds(group.followerIds)])
+  app.updateSetting('newUiGroupSatellite', [type: 'enum', value: group.satelliteId?.toString() ?: ''])
   logInfo("New UI group edit started for '${group.name}'")
 }
 
@@ -2440,6 +2580,20 @@ void handleNewUiGroupFieldChange(String field) {
   app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
 }
 
+void handleNewUiGroupSatelliteChange() {
+  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
+  Map draft = getNewUiGroupDraft()
+  String satelliteId = getNewUiGroupSatellite(draft)
+  if(satelliteId && !getNewUiSatelliteOptions().containsKey(satelliteId)) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'Select a discovered Sonos Sub or Sub Mini.'
+    return
+  }
+  draft.satelliteId = satelliteId
+  state[NEW_UI_GROUP_DRAFT_KEY] = draft
+  state.remove(NEW_UI_GROUP_ERROR_KEY)
+  app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
+}
+
 void saveNewUiGroup() {
   if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
     logWarn('New UI group save requested without an active editor')
@@ -2452,6 +2606,7 @@ void saveNewUiGroup() {
   String groupName = configuredName != null ? configuredName.toString().trim() : (draft.name?.toString()?.trim() ?: '')
   String coordinatorId = getNewUiGroupCoordinator(draft)
   List<String> followerIds = getNewUiGroupFollowers(draft).unique()
+  String satelliteId = getNewUiGroupSatellite(draft)
 
   String draftName = draft.name?.toString()?.trim() ?: ''
   if(configuredName != null && groupName && groupName != draftName) {
@@ -2471,6 +2626,18 @@ void saveNewUiGroup() {
     state[NEW_UI_GROUP_ERROR_KEY] = 'The coordinator cannot also be a follower.'
     return
   }
+  if(satelliteId && !getNewUiSatelliteOptions().containsKey(satelliteId)) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'The selected satellite is no longer available. Select a discovered Sonos Sub or Sub Mini.'
+    return
+  }
+  if(satelliteId && (satelliteId == coordinatorId || followerIds.contains(satelliteId))) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'A satellite cannot also be the coordinator or a follower.'
+    return
+  }
+  if(satelliteId && !canAcceptHomeTheaterSatellite(coordinatorId)) {
+    state[NEW_UI_GROUP_ERROR_KEY] = 'The selected coordinator has not reported a home-theater channel map that can accept a satellite.'
+    return
+  }
   if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == true) {
     groupName = buildNewUiAutomaticGroupName(coordinatorId, followerIds, playerNames)
   }
@@ -2484,6 +2651,15 @@ void saveNewUiGroup() {
     groupName = "${playerNames[coordinatorId]} + ${followerIds.size()} others"
   }
   Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
+  String duplicateSatelliteGroup = configuredGroups.find { Object otherName, Object rawDefinition ->
+    String otherGroup = otherName?.toString()
+    Map other = rawDefinition instanceof Map ? (Map)rawDefinition : [:]
+    otherGroup != originalName && satelliteId && other.satelliteId?.toString() == satelliteId
+  }?.key?.toString()
+  if(duplicateSatelliteGroup) {
+    state[NEW_UI_GROUP_ERROR_KEY] = "That satellite is already configured for '${duplicateSatelliteGroup}'."
+    return
+  }
   if(configuredGroups.containsKey(groupName) && groupName != originalName) {
     state[NEW_UI_GROUP_ERROR_KEY] = "A group named '${groupName}' already exists. Choose a different name."
     return
@@ -2493,11 +2669,14 @@ void saveNewUiGroup() {
     return
   }
 
+  Map previousDefinition = originalName && configuredGroups[originalName] instanceof Map
+      ? new LinkedHashMap((Map)configuredGroups[originalName]) : [:]
   if(originalName && originalName != groupName) {
     configuredGroups.remove(originalName)
   }
-  configuredGroups[groupName] = [groupCoordinatorId: coordinatorId, playerIds: followerIds]
+  configuredGroups[groupName] = [groupCoordinatorId: coordinatorId, playerIds: followerIds, satelliteId: satelliteId]
   state.userGroups = configuredGroups
+  queueGroupSatelliteReconciliation(groupName, previousDefinition, (Map)configuredGroups[groupName])
   String mode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
   clearNewUiGroupSettings()
   createGroupDevices()
@@ -2533,7 +2712,232 @@ void clearNewUiGroupSettings() {
   app.removeSetting('newUiGroupName')
   app.removeSetting('newUiGroupCoordinator')
   app.removeSetting('newUiGroupFollowers')
+  app.removeSetting('newUiGroupSatellite')
   app.removeSetting('newUiGroupFollowerSelection')
+}
+
+/** Bond updates run after the editor/save gate has returned and use only async local UPnP calls. */
+void queueGroupSatelliteReconciliation(String groupName, Map previousDefinition, Map desiredDefinition) {
+  Map queue = state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] : [:]
+  queue[groupName] = [groupName: groupName, previous: new LinkedHashMap(previousDefinition ?: [:]),
+    desired: new LinkedHashMap(desiredDefinition ?: [:]), queuedAt: now()]
+  state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] = queue
+  if(state[GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY] != true) {
+    state[GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY] = true
+    runIn(1, 'drainGroupSatelliteReconciliations', [overwrite: true])
+  }
+}
+
+void drainGroupSatelliteReconciliations() {
+  state.remove(GROUP_SATELLITE_RECONCILIATION_SCHEDULED_STATE_KEY)
+  if(state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map) { return }
+  Map queue = state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] : [:]
+  if(queue.isEmpty()) { return }
+  String groupName = queue.keySet().iterator().next().toString()
+  Map request = queue.remove(groupName) as Map
+  state[PENDING_GROUP_SATELLITE_RECONCILIATIONS_STATE_KEY] = queue
+  startGroupSatelliteReconciliation(request)
+}
+
+void startGroupSatelliteReconciliation(Map request) {
+  Map desired = request?.desired instanceof Map ? (Map)request.desired : [:]
+  Map previous = request?.previous instanceof Map ? (Map)request.previous : [:]
+  String groupName = request?.groupName?.toString()
+  String targetId = desired.groupCoordinatorId?.toString()
+  String desiredSatellite = desired.satelliteId?.toString()
+  String oldSatellite = previous.satelliteId?.toString()
+  Map<String, String> players = getRinconLocalHostMap()
+  Map owners = findHomeTheaterSatelliteOwners()
+  String removeSatellite = null
+  String removeOwner = null
+  if(oldSatellite && oldSatellite != desiredSatellite) {
+    String observedOwner = owners[oldSatellite]?.toString()
+    String previousCoordinator = previous.groupCoordinatorId?.toString()
+    if(observedOwner && (!previousCoordinator || observedOwner == previousCoordinator)) {
+      removeSatellite = oldSatellite
+      removeOwner = observedOwner
+    }
+  }
+  if(desiredSatellite) {
+    String observedOwner = owners[desiredSatellite]?.toString()
+    if(observedOwner == targetId) {
+      setGroupSatelliteStatus(groupName, 'Applied', 'Satellite is already bonded to the group coordinator')
+      drainGroupSatelliteReconciliations()
+      return
+    }
+    if(observedOwner) {
+      removeSatellite = desiredSatellite
+      removeOwner = observedOwner
+    }
+  }
+  Map operation = [groupName: groupName, targetId: targetId, desiredSatellite: desiredSatellite,
+    removeSatellite: removeSatellite, removeOwner: removeOwner, players: players,
+    requestedAt: now(), requestId: UUID.randomUUID().toString()]
+  state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] = operation
+  setGroupSatelliteStatus(groupName, 'Pending', desiredSatellite ? 'Waiting for Sonos bond change' : 'Waiting for Sonos unbond')
+  if(removeSatellite && removeOwner) {
+    sendHomeTheaterSatelliteAction(operation, removeOwner, 'RemoveHTSatellite', [SatRoomUUID: removeSatellite], 'remove')
+  } else {
+    sendHomeTheaterSatelliteAdd(operation)
+  }
+}
+
+Map<String, String> getRinconLocalHostMap() {
+  Map<String, String> result = [:]
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String id = player.getDataValue('id')?.toString()
+    String host = player.getDataValue('localUpnpHost')?.toString()?.trim()
+    if(!host) {
+      String ip = player.getDataValue('deviceIp')?.toString()?.trim()
+      host = ip ? (ip.contains(':') ? ip : "${ip}:1400") : null
+    } else if(!host.contains(':')) { host = "${host}:1400" }
+    if(id && host) { result[id] = host }
+  }
+  return result
+}
+
+Map<String, String> findHomeTheaterSatelliteOwners() {
+  Map owners = [:]
+  Map<String, String> maps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
+  maps.each { String ownerId, String rawMap ->
+    rawMap.split(';').each { String pair ->
+      List<String> parts = pair.split(':', 2).collect { String item -> item.trim() }
+      if(parts.size() == 2 && parts[1].split(',').collect { String c -> c.trim() }.contains('SW')) {
+        owners[parts[0]] = ownerId
+      }
+    }
+  }
+  return owners as Map<String, String>
+}
+
+void sendHomeTheaterSatelliteAdd(Map operation) {
+  String targetId = operation?.targetId?.toString()
+  String satelliteId = operation?.desiredSatellite?.toString()
+  if(!satelliteId) {
+    state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
+    setGroupSatelliteStatus(operation.groupName?.toString(), 'Applied', 'No satellite configured')
+    drainGroupSatelliteReconciliations()
+    return
+  }
+  Map<String, String> maps = state[HT_SAT_CHAN_MAPS_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[HT_SAT_CHAN_MAPS_STATE_KEY] : [:]
+  String base = maps[targetId]
+  if(!base) {
+    failGroupSatelliteReconciliation(operation, "No home-theater channel map was observed for coordinator ${targetId ?: 'unknown'}")
+    return
+  }
+  List<String> entries = base.split(';').collect { String entry -> entry.trim() }
+      .findAll { String entry -> entry && !entry.startsWith("${satelliteId}:") && !entry.endsWith(':SW') }
+  Boolean hasCoordinator = entries.any { String entry -> entry.startsWith("${targetId}:") }
+  if(!hasCoordinator) {
+    failGroupSatelliteReconciliation(operation, "Coordinator ${targetId} is not present in its home-theater channel map")
+    return
+  }
+  entries << "${satelliteId}:SW"
+  String channelMap = entries.join(';')
+  sendHomeTheaterSatelliteAction(operation, targetId, 'AddHTSatellite', [HTSatChanMapSet: channelMap], 'add')
+}
+
+void sendHomeTheaterSatelliteAction(Map operation, String ownerId, String action, Map args, String stage) {
+  String host = operation?.players instanceof Map ? ((Map)operation.players)[ownerId]?.toString() : null
+  if(!host) {
+    failGroupSatelliteReconciliation(operation, "No local UPnP address is available for ${ownerId}")
+    return
+  }
+  String service = 'urn:schemas-upnp-org:service:DeviceProperties:1'
+  StringBuilder body = new StringBuilder("<?xml version='1.0'?><s:Envelope xmlns:s='http://schemas.xmlsoap.org/soap/envelope/' s:encodingStyle='http://schemas.xmlsoap.org/soap/encoding/'><s:Body><u:${action} xmlns:u='${service}'>")
+  args.each { String name, Object value ->
+    String safe = value?.toString()?.replace('&', '&amp;')?.replace('<', '&lt;')?.replace('>', '&gt;') ?: ''
+    body.append('<').append(name).append('>').append(safe).append('</').append(name).append('>')
+  }
+  body.append('</u:').append(action).append('></s:Body></s:Envelope>')
+  Map params = [uri: "http://${host}/DeviceProperties/Control", headers: [SOAPAction: "${service}#${action}"],
+    contentType: 'text/xml; charset=utf-8', requestContentType: 'text/xml; charset=utf-8', body: body.toString(), timeout: 15]
+  Map data = [requestId: operation.requestId, stage: stage, action: action, ownerId: ownerId]
+  logInfo("Sending Sonos ${action} request to ${ownerId} for group '${operation.groupName}'")
+  asynchttpPost('groupSatelliteBondCallback', params, data)
+}
+
+void groupSatelliteBondCallback(AsyncResponse response, Map data) {
+  Map operation = state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] instanceof Map
+      ? (Map)state[ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY] : null
+  if(operation == null || operation.requestId?.toString() != data?.requestId?.toString()) { return }
+  if(response?.hasError() == true || response?.status != 200) {
+    failGroupSatelliteReconciliation(operation, "Sonos ${data.action} returned HTTP ${response?.status ?: 'error'}")
+    return
+  }
+  if(data.stage == 'remove' && operation.desiredSatellite) {
+    sendHomeTheaterSatelliteAdd(operation)
+    return
+  }
+  String groupName = operation.groupName?.toString()
+  state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
+  setGroupSatelliteStatus(groupName, 'Pending', 'Command accepted; waiting for topology confirmation')
+  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
+  verifications[operation.requestId.toString()] = [groupName: groupName, satelliteId: operation.desiredSatellite,
+    targetId: operation.desiredSatellite ? operation.targetId : null,
+    verifySatelliteId: operation.desiredSatellite ?: operation.removeSatellite,
+    requestId: operation.requestId, queuedAt: now()]
+  state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
+  runIn(8, 'verifyGroupSatelliteBond', [overwrite: true, data: [requestId: operation.requestId]])
+  drainGroupSatelliteReconciliations()
+}
+
+void verifyGroupSatelliteBond(Map data) {
+  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
+  Map verification = verifications[data?.requestId?.toString()] instanceof Map
+      ? (Map)verifications[data.requestId.toString()] : null
+  if(verification == null) { return }
+  verifications.remove(data.requestId.toString())
+  state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] = verifications
+  String groupName = verification.groupName?.toString()
+  String satelliteId = verification.verifySatelliteId?.toString()
+  String desiredSatelliteId = verification.satelliteId?.toString()
+  String targetId = verification.targetId?.toString()
+  String owner = satelliteId ? findHomeTheaterSatelliteOwners()[satelliteId]?.toString() : null
+  Boolean bondConfirmed = desiredSatelliteId && owner == targetId
+  Boolean unbondConfirmed = !desiredSatelliteId && satelliteId && owner == null
+  if(bondConfirmed || unbondConfirmed) {
+    setGroupSatelliteStatus(groupName, 'Applied', bondConfirmed ? 'Bond confirmed by Sonos topology' : 'Satellite unbond confirmed')
+  } else {
+    setGroupSatelliteStatus(groupName, 'Unconfirmed', "Sonos topology reports ${owner ?: 'no bond'}; expected ${targetId ?: 'no bond'}")
+  }
+  app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
+}
+
+void reconcilePendingGroupSatelliteVerifications() {
+  Map verifications = state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_GROUP_SATELLITE_VERIFICATIONS_STATE_KEY] : [:]
+  Map owners = findHomeTheaterSatelliteOwners()
+  List<String> confirmed = []
+  verifications.each { String requestId, Map verification ->
+    String satelliteId = verification.verifySatelliteId?.toString()
+    String owner = satelliteId ? owners[satelliteId]?.toString() : null
+    if((satelliteId && owner == verification.targetId?.toString()) || (!satelliteId && owner == null)) {
+      confirmed << requestId
+    }
+  }
+  confirmed.each { String requestId -> verifyGroupSatelliteBond([requestId: requestId]) }
+}
+
+void failGroupSatelliteReconciliation(Map operation, String message) {
+  String groupName = operation?.groupName?.toString()
+  state.remove(ACTIVE_GROUP_SATELLITE_RECONCILIATION_STATE_KEY)
+  setGroupSatelliteStatus(groupName, 'Error', message)
+  logWarn("Sonos satellite bond update failed for '${groupName}': ${message}")
+  drainGroupSatelliteReconciliations()
+}
+
+void setGroupSatelliteStatus(String groupName, String status, String message) {
+  Map statuses = state[GROUP_SATELLITE_STATUSES_STATE_KEY] instanceof Map
+      ? (Map)state[GROUP_SATELLITE_STATUSES_STATE_KEY] : [:]
+  statuses[groupName] = [status: status, message: message, updatedAt: now()]
+  state[GROUP_SATELLITE_STATUSES_STATE_KEY] = statuses
 }
 
 String synchronizeNewUiGroupName(Map draft, String coordinatorId, List<String> followerIds,
@@ -2608,6 +3012,10 @@ void confirmNewUiGroupDeletion() {
   }
 
   String groupName = group.name.toString()
+  Map deletedDefinition = state.userGroups instanceof Map && state.userGroups[groupName] instanceof Map
+      ? new LinkedHashMap((Map)state.userGroups[groupName]) : [:]
+  queueGroupSatelliteReconciliation(groupName, deletedDefinition,
+      [groupCoordinatorId: deletedDefinition.groupCoordinatorId, satelliteId: ''])
   try {
     if(state.userGroups instanceof Map) {
       state.userGroups.remove(groupName)
@@ -2723,6 +3131,8 @@ void saveGroup() {
   if(!state.userGroups) { state.userGroups = [:] }
   String editingGroup = app.getSetting('editDeleteGroup')
   String newName = app.getSetting('newGroupName')
+  Map previousDefinition = editingGroup && state.userGroups[editingGroup] instanceof Map
+      ? new LinkedHashMap((Map)state.userGroups[editingGroup]) : [:]
 
   // If editing and name changed, rename the existing device in place
   // This preserves dashboard tiles, rules, and automations that reference the device
@@ -2751,7 +3161,8 @@ void saveGroup() {
     state.userGroups.remove(editingGroup)
   }
 
-  state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
+  state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers'), satelliteId: previousDefinition.satelliteId]
+  queueGroupSatelliteReconciliation(newName, previousDefinition, (Map)state.userGroups[newName])
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
   app.removeSetting('newGroupCoordinator')
@@ -2770,6 +3181,9 @@ void deleteGroup() {
   if(!state.userGroups?.containsKey(groupName)) {
     logWarn("Group '${groupName}' not found, nothing to delete")
   }
+  Map deletedDefinition = state.userGroups[groupName] instanceof Map ? new LinkedHashMap((Map)state.userGroups[groupName]) : [:]
+  queueGroupSatelliteReconciliation(groupName, deletedDefinition,
+      [groupCoordinatorId: deletedDefinition.groupCoordinatorId, satelliteId: ''])
   state.userGroups.remove(groupName)
   app.removeSetting('newGroupName')
   app.removeSetting('newGroupPlayers')
@@ -3584,6 +3998,7 @@ void createGroupDevices() {
       ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
       device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
       device.updateDataValue('playerIds', playerIds)
+      device.updateDataValue('satelliteId', it.value.satelliteId?.toString() ?: '')
       if(coordDev == null) {
         logWarn("Skipping household ID update for group '${it.key}': coordinator '${groupCoordinatorId}' was not found")
       } else {
@@ -8153,6 +8568,12 @@ synchronized void putPlayerUpnpEvents(Map payload) {
     }
     copy.eventsByGroupId = groups
   }
+  if(payload.htSatChanMapSetByPlayer instanceof Map) {
+    copy.htSatChanMapSetByPlayer = new LinkedHashMap((Map)payload.htSatChanMapSetByPlayer)
+  }
+  if(payload.htSatelliteNamesById instanceof Map) {
+    copy.htSatelliteNamesById = new LinkedHashMap((Map)payload.htSatelliteNamesById)
+  }
   List<Map> pending = state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] instanceof List
       ? (List<Map>)state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] : []
   pending.add(copy)
@@ -8200,6 +8621,12 @@ void processUpnpTopologyNotification(Map notification) {
   if(!sourceDni || next.isEmpty()) { return }
   Map<String, String> oldCoordinators = buildPlayerCoordinatorMap(previous)
   putZgtTopology(sourceDni, next)
+  if(notification.htSatChanMapSetByPlayer instanceof Map) {
+    state[HT_SAT_CHAN_MAPS_STATE_KEY] = new LinkedHashMap((Map)notification.htSatChanMapSetByPlayer)
+  }
+  if(notification.htSatelliteNamesById instanceof Map) {
+    state[HT_SATELLITE_NAMES_STATE_KEY] = new LinkedHashMap((Map)notification.htSatelliteNamesById)
+  }
   Set<String> promotedPlayers = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
       ? new LinkedHashSet<String>((Collection<String>)state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY]) : new LinkedHashSet<String>()
   buildPlayerCoordinatorMap(next).each { String playerId, String coordinatorId ->
@@ -8229,6 +8656,8 @@ void processUpnpTopologyNotification(Map notification) {
     members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
         .each { String follower -> replayLatestLeaderAvt(leader, follower) }
   }
+  reconcilePendingGroupSatelliteVerifications()
+  app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
 }
 
 /** Apply a newly promoted coordinator's latest cached AVT after the ZGT debounce and settling window. */
@@ -8466,7 +8895,8 @@ Map getCurrentReceivedZgtTopology() {
         memberIds: memberIds,
         coordinatorName: events.find { Map e -> e?.name?.toString() == 'groupCoordinatorName' }?.value?.toString(),
         groupName: events.find { Map e -> e?.name?.toString() == 'groupName' }?.value?.toString(),
-        satellites: [], channelMap: [:] ]
+        satellites: findHomeTheaterSatelliteOwners().findAll { String satelliteId, String ownerId -> ownerId == coordinatorId }.keySet().toList(),
+        channelMap: [:] ]
     }
     return [groups: converted, sourcePlayerDni: report.sourcePlayerDni?.toString(),
       observedAt: (report.observedAt ?: now()) as Long]

@@ -81,6 +81,34 @@ class WhitelistMigrationSpec extends Specification {
     (result.stateRemoved as List).contains('favs')
   }
 
+  def "app retains Sonos satellite topology and bond reconciliation state"() {
+    given:
+    app.state['htSatChanMapSetByPlayer'] = ['RINCON_ARC': 'RINCON_ARC:LF,RF;RINCON_SUB:SW']
+    app.state['htSatelliteNamesById'] = ['RINCON_SUB': 'Sub Mini']
+    app.state['pendingGroupSatelliteReconciliations'] = [:]
+    app.state['groupSatelliteReconciliationScheduled'] = true
+    app.state['activeGroupSatelliteReconciliation'] = [requestId: 'active']
+    app.state['groupSatelliteStatuses'] = ['Arc + Kitchen': [status: 'Pending']]
+    app.state['pendingGroupSatelliteVerifications'] = ['active': [satelliteId: 'RINCON_SUB']]
+
+    when:
+    Map result = app.pruneOrphanedAppPersistence()
+
+    then:
+    app.state['htSatChanMapSetByPlayer']['RINCON_ARC'].contains('RINCON_SUB:SW')
+    app.state['htSatelliteNamesById']['RINCON_SUB'] == 'Sub Mini'
+    app.state.containsKey('pendingGroupSatelliteReconciliations')
+    app.state['groupSatelliteReconciliationScheduled'] == true
+    app.state['activeGroupSatelliteReconciliation'].requestId == 'active'
+    app.state['groupSatelliteStatuses']['Arc + Kitchen'].status == 'Pending'
+    app.state['pendingGroupSatelliteVerifications']['active'].satelliteId == 'RINCON_SUB'
+    !((List)result.stateRemoved).intersect([
+      'htSatChanMapSetByPlayer', 'htSatelliteNamesById', 'pendingGroupSatelliteReconciliations',
+      'groupSatelliteReconciliationScheduled', 'activeGroupSatelliteReconciliation',
+      'groupSatelliteStatuses', 'pendingGroupSatelliteVerifications'
+    ])
+  }
+
   def "app prunes orphan atomicState keys"() {
     given:
     app.atomicState['discoveryRunning'] = true
@@ -120,7 +148,7 @@ class WhitelistMigrationSpec extends Specification {
      'autoInstallTime', 'autoInstallNextOccurrence', 'autoInstallDayOfWeek',
      'hubSecurityUsername', 'hubSecurityPassword', 'libraryIdSMAPI', 'libraryIdUtilities',
      'playerDevices', 'groupDevices', 'skipOrphanRemoval', 'descriptionTextEnable',
-     'newUiGroupName', 'newUiGroupCoordinator', 'newUiGroupFollowers'].each { String k ->
+     'newUiGroupName', 'newUiGroupCoordinator', 'newUiGroupFollowers', 'newUiGroupSatellite'].each { String k ->
       app.settings[k] = 'value'
     }
 
@@ -128,7 +156,7 @@ class WhitelistMigrationSpec extends Specification {
     app.pruneOrphanedAppPersistence()
 
     then:
-    app.settings.size() == 26
+    app.settings.size() == 27
   }
 
   def "app migrateLegacyAppStateOnce copies discovery keys to atomicState before prune"() {
@@ -259,6 +287,7 @@ class WhitelistMigrationSpec extends Specification {
     groupDriver.state['pendingBatchEvents'] = []
     groupDriver.state['orphanState'] = 'x'
     groupDriver.device.dataValues['groupCoordinatorId'] = 'RINCON_COORD'
+    groupDriver.device.dataValues['satelliteId'] = 'RINCON_SUB'
     groupDriver.device.dataValues['orphanData'] = 'x'
     groupDriver.device.currentValues['status'] = 'playing'
     groupDriver.device.currentValues['orphanAttr'] = 'x'
@@ -272,6 +301,7 @@ class WhitelistMigrationSpec extends Specification {
     !groupDriver.state.containsKey('pendingBatchEvents')
     !groupDriver.state.containsKey('orphanState')
     groupDriver.device.dataValues.containsKey('groupCoordinatorId')
+    groupDriver.device.dataValues['satelliteId'] == 'RINCON_SUB'
     !groupDriver.device.dataValues.containsKey('orphanData')
     groupDriver.device.currentValues.containsKey('status')
     !groupDriver.device.currentValues.containsKey('orphanAttr')

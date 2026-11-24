@@ -69,6 +69,20 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').getAt('title').text() == 'A < B > C "D" \'E\''
   }
 
+  def "ZGT projection preserves home theater channel maps as private topology data"() {
+    given:
+    List<Map> groups = [[members: [
+      [playerId: 'RINCON_ARC', htSatChannelMapSet: 'RINCON_ARC:LF,RF;RINCON_SUB:SW',
+        secondaries: [[playerId: 'RINCON_SUB', zoneName: 'Sub Mini']]],
+      [playerId: 'RINCON_KITCHEN', htSatChannelMapSet: '']
+    ]]]
+
+    expect:
+    driver.projectHtSatChanMapSetByPlayer(groups) == [RINCON_ARC: 'RINCON_ARC:LF,RF;RINCON_SUB:SW']
+    driver.projectHtSatelliteNamesById(groups) == [RINCON_SUB: 'Sub Mini']
+    !driver.projectZgtEventsByGroupId(groups).values().flatten().any { Map event -> event.name == 'htSatChanMapSet' }
+  }
+
   def "favorites are browsed and correlated to AVTransport by their UPnP resource URI"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50'

@@ -92,6 +92,7 @@ void logTrace(String message) {
 @Field static final Set<String> ACTIVE_GROUP_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   'groupCoordinatorId',
   'playerIds',
+  'satelliteId',
   'householdTopology',
 ]))
 

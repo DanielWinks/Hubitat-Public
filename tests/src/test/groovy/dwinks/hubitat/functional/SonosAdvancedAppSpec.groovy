@@ -224,6 +224,130 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.groupCommandRequestSequence([sequence: 'invalid']) == Integer.MAX_VALUE
   }
 
+  def "ZGT retains private subwoofer ownership and group table shows selected satellite"() {
+    given:
+    appScript.state.userGroups = [
+      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW'], satelliteId: 'RINCON_SUB']
+    ]
+    appScript.state['htSatChanMapSetByPlayer'] = [
+      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_SUB:SW'
+    ]
+    appScript.state['htSatelliteNamesById'] = ['RINCON_SUB': 'Sub Mini']
+
+    when:
+    appScript.processUpnpTopologyNotification([
+      service: 'ZGT', sourceDni: coordinator.deviceNetworkId,
+      eventsByGroupId: ['GROUP-1': [
+        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
+      ]],
+      htSatChanMapSetByPlayer: ['RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_SUB:SW'],
+      htSatelliteNamesById: ['RINCON_SUB': 'Sub Mini']
+    ])
+    String markup = appScript.renderNewUiGroupTableMarkup()
+
+    then:
+    appScript.findHomeTheaterSatelliteOwners() == ['RINCON_SUB': 'RINCON_COORD']
+    markup.contains('<th>Satellites</th>')
+    markup.contains('Sub Mini')
+  }
+
+  def "new group editor places same-width satellite selector below coordinator"() {
+    given:
+    appScript.discoveredSonosSecondaries['sub-mac'] = [id: 'RINCON_SUB', modelName: 'SubMini', name: 'Sub Mini']
+    appScript.state['newUiGroupEditorMode'] = 'create'
+    appScript.state['newUiGroupDraft'] = [name: '', coordinatorId: 'RINCON_COORD', followerIds: [], satelliteId: '']
+    appScript.settings.newUiGroupCoordinator = 'RINCON_COORD'
+
+    when:
+    String markup = appScript.renderNewUiGroupEditorMarkup()
+
+    then:
+    markup.indexOf("id='new-ui-group-coordinator'") < markup.indexOf("id='new-ui-group-satellite'")
+    markup.indexOf("id='new-ui-group-satellite'") < markup.indexOf("id='new-ui-group-followers'")
+    markup.contains("class='new-ui-group-editor-column'")
+    markup.contains('Satellites')
+  }
+
+  def "satellite options restore discovered and currently bonded subs after app reload"() {
+    given:
+    appScript.state['discoveredSonosSecondaries'] = [
+      'sub-mac': [id: 'RINCON_DISCOVERED_SUB', modelName: 'SubMini', name: 'Discovered Sub Mini']
+    ]
+    appScript.state['htSatChanMapSetByPlayer'] = [
+      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_TOPOLOGY_SUB:SW'
+    ]
+    appScript.state['htSatelliteNamesById'] = ['RINCON_TOPOLOGY_SUB': 'Bonded Sub']
+
+    expect:
+    appScript.getNewUiSatelliteOptions() == [
+      'RINCON_DISCOVERED_SUB': 'Discovered Sub Mini',
+      'RINCON_TOPOLOGY_SUB': 'Bonded Sub'
+    ]
+  }
+
+  def "satellite move removes the old bond then adds the subwoofer to the selected coordinator"() {
+    given:
+    appScript.state['htSatChanMapSetByPlayer'] = [
+      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_KEEP:SW',
+      'RINCON_FOLLOW': 'RINCON_FOLLOW:LF,RF;RINCON_SUB:SW'
+    ]
+    appScript.state['htSatelliteNamesById'] = ['RINCON_SUB': 'Sub Mini']
+    Map previous = [groupCoordinatorId: 'RINCON_FOLLOW', satelliteId: 'RINCON_SUB']
+    Map desired = [groupCoordinatorId: 'RINCON_COORD', satelliteId: 'RINCON_SUB']
+
+    when:
+    appScript.queueGroupSatelliteReconciliation('Arc + Kitchen', previous, desired)
+    appScript.drainGroupSatelliteReconciliations()
+    Map removeRequest = appScript.asyncCalls.last()
+    appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), removeRequest.data as Map)
+    Map addRequest = appScript.asyncCalls.last()
+    String requestId = addRequest.data.requestId.toString()
+    appScript.state['htSatChanMapSetByPlayer'] = [
+      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_SUB:SW',
+      'RINCON_FOLLOW': 'RINCON_FOLLOW:LF,RF'
+    ]
+    appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), addRequest.data as Map)
+    appScript.verifyGroupSatelliteBond([requestId: requestId])
+
+    then:
+    removeRequest.verb == 'POST'
+    removeRequest.cb == 'groupSatelliteBondCallback'
+    removeRequest.params.uri == 'http://192.0.2.11:1400/DeviceProperties/Control'
+    removeRequest.params.headers.SOAPAction.endsWith('#RemoveHTSatellite')
+    removeRequest.params.body.contains('<SatRoomUUID>RINCON_SUB</SatRoomUUID>')
+    addRequest.params.uri == 'http://192.0.2.10:1400/DeviceProperties/Control'
+    addRequest.params.headers.SOAPAction.endsWith('#AddHTSatellite')
+    addRequest.params.body.contains('<HTSatChanMapSet>RINCON_COORD:LF,RF;RINCON_SUB:SW</HTSatChanMapSet>')
+    !addRequest.params.body.contains('RINCON_KEEP:SW')
+    appScript.state['groupSatelliteStatuses']['Arc + Kitchen'].status == 'Applied'
+    appScript.state['pendingGroupSatelliteVerifications'].isEmpty()
+  }
+
+  def "removing a group satellite sends RemoveHTSatellite to its current owner"() {
+    given:
+    appScript.state['htSatChanMapSetByPlayer'] = [
+      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_SUB:SW'
+    ]
+    Map previous = [groupCoordinatorId: 'RINCON_COORD', satelliteId: 'RINCON_SUB']
+    Map desired = [groupCoordinatorId: 'RINCON_COORD', satelliteId: '']
+
+    when:
+    appScript.queueGroupSatelliteReconciliation('Arc + Kitchen', previous, desired)
+    appScript.drainGroupSatelliteReconciliations()
+    Map removeRequest = appScript.asyncCalls.last()
+    String requestId = removeRequest.data.requestId.toString()
+    appScript.state['htSatChanMapSetByPlayer'] = ['RINCON_COORD': 'RINCON_COORD:LF,RF']
+    appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), removeRequest.data as Map)
+    appScript.verifyGroupSatelliteBond([requestId: requestId])
+
+    then:
+    removeRequest.params.headers.SOAPAction.endsWith('#RemoveHTSatellite')
+    removeRequest.params.body.contains('<SatRoomUUID>RINCON_SUB</SatRoomUUID>')
+    appScript.state['groupSatelliteStatuses']['Arc + Kitchen'].status == 'Applied'
+    appScript.state['groupSatelliteStatuses']['Arc + Kitchen'].message == 'Satellite unbond confirmed'
+  }
+
   SonosAppPlayerDouble createPlayer(String id, String groupId, String coordinatorId,
       String playerIds, Boolean isCoordinator) {
     SonosAppPlayerDouble player = new SonosAppPlayerDouble(
@@ -2417,10 +2541,13 @@ class SonosAdvancedAppSpec extends Specification {
     String token = appScript.newUiGroupToken(groupName)
 
     then:
-    markup.contains('<th>Action</th>')
+    markup.contains("<th class='new-ui-group-action-header'>Action</th>")
     markup.contains('<th>Group Name</th>')
     markup.contains('<th>Coordinator</th>')
+    markup.contains('<th>Satellites</th>')
     markup.contains('<th>Followers</th>')
+    markup.contains("<colgroup><col style='width:68px'>")
+    groupTable.contains('.new-ui-group-action-header')
     markup.contains(groupName)
     markup.contains('RINCON_COORD')
     markup.contains('RINCON_FOLLOW')
@@ -2469,7 +2596,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.appButtonHandler('btnNewUiSaveGroup')
 
     then:
-    appScript.state.userGroups['Family'] == [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
+    appScript.state.userGroups['Family'] == [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW'], satelliteId: '']
     appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-Family") != null
     appScript.state.newUiGroupEditorMode == null
     appScript.app.updatedSettings.groupDevices == ["${appScript.app.id}-SonosGroupDevice-Family"]
@@ -2554,7 +2681,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.state.userGroups[oldName] == null
-    appScript.state.userGroups[newName] == [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
+    appScript.state.userGroups[newName] == [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW'], satelliteId: '']
     appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-${oldName}") == null
     appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-${newName}") == group
     group.label == "Sonos Group: ${newName}"
