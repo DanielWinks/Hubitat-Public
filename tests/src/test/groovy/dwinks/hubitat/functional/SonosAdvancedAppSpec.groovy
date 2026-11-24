@@ -263,6 +263,7 @@ class SonosAdvancedAppSpec extends Specification {
     String responseXml = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
       <s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>${escapedTopology}</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body>
     </s:Envelope>"""
+    Map topology = appScript.parseDiscoveryTopologyResponse(responseXml)
 
     when:
     appScript.discoveryTopologyCallback(new AsyncResponse(data: responseXml), requestData)
@@ -272,14 +273,222 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state['htSatChanMapSetByPlayer'] == [RINCON_FIRST: 'RINCON_FIRST:LF,RF;RINCON_SUB:SW']
     appScript.state['speakerChannelMapSetByPlayer'] == [RINCON_FIRST: 'RINCON_FIRST:LF,RF']
     appScript.state['htSatelliteNamesById'] == [RINCON_SUB: 'Sub Mini']
+    topology.secondaryDevices.any { Map secondary ->
+      secondary.id == 'RINCON_SUB' && secondary.primaryDeviceId == 'RINCON_FIRST'
+    }
     appScript.asyncCalls.findAll { Map call -> call.verb == 'GET' }.collect { Map call -> call.params.uri }.sort() == [
-      'https://192.168.1.11:1443/api/v1/players/local/info',
-      'https://192.168.1.12:1443/api/v1/players/local/info'
+      'https://192.168.1.11:1443/api/v1/players/local/info'
     ]
+    appScript.getNewUiSecondaryDevices('RINCON_FIRST').any { Map secondary -> secondary.id == 'RINCON_SUB' }
     appScript.atomicState.discoveryTopologyRequested == true
   }
 
-  def "ZGT retains private subwoofer ownership and group table shows selected satellite"() {
+  def "app page load refreshes topology from an already configured speaker"() {
+    given:
+    coordinator.dataValues.localUpnpHost = '192.168.1.10:1400'
+    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false])
+    appScript.binding.setVariable('autoCheckUpdates', false)
+    appScript.binding.setVariable('autoInstallUpdates', false)
+    appScript.settings.newUiGroupSatellite = 'RINCON_SUB'
+    appScript.state.newUiGroupDraft = [satelliteId: 'RINCON_SUB']
+    appScript.state.newUiGroupError = 'The selected satellite is no longer available. Select a discovered Sonos Sub or Sub Mini.'
+    appScript.state.groupSatelliteStatuses = [Family: [status: 'Error']]
+
+    when:
+    appScript.mainPage()
+    Map request = appScript.asyncCalls.find { Map call -> call.verb == 'POST' }
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD"><ZoneGroupMember UUID="RINCON_COORD" Location="http://192.168.1.10:1400/xml/device_description.xml" HTSatChanMapSet="RINCON_COORD:LF,RF;RINCON_SUB:SW"><Satellite UUID="RINCON_SUB" Location="http://192.168.1.11:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember></ZoneGroup></ZoneGroups></ZoneGroupState>'
+    String responseXml = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>${StringEscapeUtils.escapeXml10(topologyXml)}</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>"""
+    String requestId = request.data.requestId as String
+    appScript.pageTopologyCallback(new AsyncResponse(data: responseXml), request.data as Map)
+
+    then:
+    request.verb == 'POST'
+    request.params.uri == 'http://192.168.1.10:1400/ZoneGroupTopology/Control'
+    request.params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+    appScript.state.pageTopologyRequestId == null
+    appScript.state.htSatChanMapSetByPlayer.RINCON_COORD.contains('RINCON_SUB:SW')
+    appScript.state.htSatelliteNamesById.RINCON_SUB == 'Sub Mini'
+    appScript.asyncCalls.any { Map call ->
+      call.cb == 'pagePlayerInfoCallback' && call.params.uri == 'https://192.168.1.11:1443/api/v1/players/local/info'
+    }
+    appScript.asyncCalls.any { Map call ->
+      call.cb == 'pagePlayerInfoCallback' && call.params.uri == 'https://192.168.1.10:1443/api/v1/players/local/info'
+    }
+    appScript.state.newUiGroupError == null
+    appScript.state.groupSatelliteStatuses == null
+    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'off'
+    appScript.app.events*.name.containsAll(['newUiGroupsTable', 'newUiGroupEditor'])
+    requestId
+  }
+
+  def "raw ZoneGroupState Satellite nodes populate satellite options"() {
+    given:
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_ARC">' +
+      '<ZoneGroupMember UUID="RINCON_ARC" Location="http://192.168.1.35:1400/xml/device_description.xml" HTSatChanMapSet="RINCON_ARC:LF,RF;RINCON_SUB:SW">' +
+      '<Satellite UUID="RINCON_SUB" Location="http://192.168.1.149:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    String responseXml = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState><ZoneGroupState>${topologyXml}</ZoneGroupState></ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>"""
+
+    when:
+    Map topology = appScript.parseDiscoveryTopologyResponse(responseXml)
+    appScript.state.htSatelliteNamesById = topology.satelliteNames
+    appScript.discoveredSonoses['F0:F6:C1:0B:79:1A'] = [id: 'RINCON_SUB', name: 'Sub Mini']
+    appScript.removeTopologySatellitePrimaries(topology.satelliteNames)
+
+    then:
+    topology.satelliteNames == [RINCON_SUB: 'Sub Mini']
+    appScript.getNewUiSatelliteOptions()['RINCON_SUB'] == 'Sub Mini'
+    appScript.discoveredSonoses.isEmpty()
+  }
+
+  def "topology Invisible member is attached as a secondary speaker"() {
+    given:
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_KIDS">' +
+      '<ZoneGroupMember UUID="RINCON_RIGHT" Location="http://192.168.1.39:1400/xml/device_description.xml" ZoneName="Kids Room" Invisible="1" ChannelMapSet="RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF"/>' +
+      '<ZoneGroupMember UUID="RINCON_KIDS" Location="http://192.168.1.34:1400/xml/device_description.xml" ZoneName="Kids Room"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    String responseXml = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>${StringEscapeUtils.escapeXml10(topologyXml)}</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>"""
+
+    when:
+    Map topology = appScript.parseDiscoveryTopologyResponse(responseXml)
+    appScript.applyTopologySecondaries(topology.secondaryDevices as List<Map>)
+
+    then:
+    appScript.getNewUiSecondaryDevices('RINCON_KIDS').any { Map secondary ->
+      secondary.id == 'RINCON_RIGHT' && secondary.primaryDeviceId == 'RINCON_KIDS'
+    }
+    topology.stereoPairCoordinators == ['RINCON_KIDS']
+  }
+
+  def "satellite nested under an invisible stereo-pair member belongs to the visible pair coordinator"() {
+    given:
+    String channelMap = 'RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF;RINCON_SUB:SW'
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_KIDS">' +
+      "<ZoneGroupMember UUID=\"RINCON_KIDS\" Location=\"http://192.0.2.10:1400/xml/device_description.xml\" ChannelMapSet=\"${channelMap}\"/>" +
+      "<ZoneGroupMember UUID=\"RINCON_RIGHT\" Location=\"http://192.0.2.11:1400/xml/device_description.xml\" Invisible=\"1\" ChannelMapSet=\"${channelMap}\"><Satellite UUID=\"RINCON_SUB\" Location=\"http://192.0.2.12:1400/xml/device_description.xml\" ZoneName=\"Sub Mini\"/></ZoneGroupMember>" +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+
+    when:
+    Map topology = appScript.parseDiscoveryTopologyResponse(satelliteTopologyResponse(topologyXml))
+    appScript.storeTopologySatelliteOwners(topology)
+
+    then:
+    topology.secondaryDevices.find { Map item -> item.id == 'RINCON_SUB' }.primaryDeviceId == 'RINCON_RIGHT'
+    appScript.findHomeTheaterSatelliteOwners() == ['RINCON_SUB': 'RINCON_KIDS']
+  }
+
+  def "invisible home theater satellite does not imply a stereo pair"() {
+    given:
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_ARC">' +
+      '<ZoneGroupMember UUID="RINCON_ARC" Location="http://192.0.2.10:1400/xml/device_description.xml" ZoneName="Arc"/>' +
+      '<ZoneGroupMember UUID="RINCON_SUB" Location="http://192.0.2.11:1400/xml/device_description.xml" ZoneName="Sub Mini" Invisible="1"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    String responseXml = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>${StringEscapeUtils.escapeXml10(topologyXml)}</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>"""
+
+    when:
+    Map topology = appScript.parseDiscoveryTopologyResponse(responseXml)
+
+    then:
+    topology.stereoPairCoordinators.isEmpty()
+    topology.secondaryDevices.any { Map device -> device.id == 'RINCON_SUB' && device.topologyRole == 'invisibleMember' }
+  }
+
+  def "ChannelMapSet can identify an SW channel without proving a current Sub bond"() {
+    given:
+    String channelMap = 'RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF;RINCON_SUB:SW'
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_KIDS">' +
+      "<ZoneGroupMember UUID=\"RINCON_KIDS\" Location=\"http://192.0.2.10:1400/xml/device_description.xml\" ZoneName=\"Kids Room\" ChannelMapSet=\"${channelMap}\"/>" +
+      "<ZoneGroupMember UUID=\"RINCON_RIGHT\" Location=\"http://192.0.2.11:1400/xml/device_description.xml\" ZoneName=\"Kids Room\" Invisible=\"1\" ChannelMapSet=\"${channelMap}\"/>" +
+      "<ZoneGroupMember UUID=\"RINCON_SUB\" Location=\"http://192.0.2.12:1400/xml/device_description.xml\" ZoneName=\"Sub Mini\" Invisible=\"1\" ChannelMapSet=\"${channelMap}\"/>" +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+
+    when:
+    Map topology = appScript.parseDiscoveryTopologyResponse(satelliteTopologyResponse(topologyXml))
+    appScript.storeTopologySatelliteOwners(topology)
+
+    then:
+    topology.groupMemberships[0].allPlayerIds == ['RINCON_KIDS', 'RINCON_RIGHT', 'RINCON_SUB']
+    appScript.findHomeTheaterSatelliteOwners().isEmpty()
+    appScript.isStereoPairChannelMap(channelMap)
+  }
+
+  def "stereo pair metadata inside another room's group does not classify the outer coordinator as stereo"() {
+    given:
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_ARC">' +
+      '<ZoneGroupMember UUID="RINCON_ARC" Location="http://192.0.2.10:1400/xml/device_description.xml"/>' +
+      '<ZoneGroupMember UUID="RINCON_KIDS" Location="http://192.0.2.11:1400/xml/device_description.xml" ChannelMapSet="RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF"/>' +
+      '<ZoneGroupMember UUID="RINCON_RIGHT" Invisible="1" Location="http://192.0.2.12:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+
+    when:
+    Map topology = appScript.parseDiscoveryTopologyResponse(satelliteTopologyResponse(topologyXml))
+
+    then:
+    topology.stereoPairCoordinators == ['RINCON_KIDS']
+  }
+
+  def "already bonded Sub on a stereo pair is not sent a bond request"() {
+    given:
+    String channelMap = 'RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF;RINCON_SUB:SW'
+    appScript.state['speakerChannelMapSetByPlayer'] = [RINCON_KIDS: channelMap]
+    appScript.state['stereoPairCoordinators'] = ['RINCON_KIDS']
+    appScript.state['topologySatelliteOwnersById'] = [RINCON_SUB: 'RINCON_KIDS']
+    Map operation = [groupName: 'Kids Room + Sub', targetId: 'RINCON_KIDS', desiredSatellite: 'RINCON_SUB',
+      players: [RINCON_KIDS: '192.0.2.10:1400'], requestId: 'already-bonded-stereo-sub',
+      freshSatelliteOwners: [RINCON_SUB: 'RINCON_KIDS']]
+
+    when:
+    appScript.continueGroupSatelliteReconciliationFromTopology(operation)
+
+    then:
+    appScript.asyncCalls.isEmpty()
+  }
+
+  def "player-info discovery replaces topology placeholder and deduplicates secondary row"() {
+    given:
+    appScript.discoveredSonosSecondaries['old-placeholder'] = [id: 'RINCON_RIGHT',
+      name: 'Kids Room', modelName: 'Secondary speaker', primaryDeviceId: 'RINCON_KIDS', deviceIp: '192.168.1.39']
+    appScript.applyTopologySecondaries([[id: 'RINCON_RIGHT', name: 'Kids Room', topologyRole: 'invisibleMember',
+      primaryDeviceId: 'RINCON_KIDS', deviceIp: '192.168.1.39', topologyOnly: true]])
+    LinkedHashMap playerInfo = [playerId: 'RINCON_RIGHT', householdId: 'SONOS_HOUSEHOLD',
+      device: [name: 'Kids Room', swGen: '2', capabilities: []]]
+    String descriptionXml = '<root><device><modelName>SYMFONISK Bookshelf</modelName><MACAddress>AA:BB:CC:DD:EE:39</MACAddress></device></root>'
+
+    when:
+    appScript.pageDeviceDescriptionCallback(new AsyncResponse(data: descriptionXml),
+      [ipAddress: '192.168.1.39', playerInfo: playerInfo])
+
+    then:
+    appScript.discoveredSonosSecondaries.values().count { Map item -> item.id == 'RINCON_RIGHT' } == 1
+    appScript.getNewUiSecondaryDevices('RINCON_KIDS').size() == 1
+    appScript.getNewUiSecondaryDevices('RINCON_KIDS').first().modelName == 'SYMFONISK Bookshelf'
+    appScript.discoveredSonosSecondaries.values().find { Map item -> item.id == 'RINCON_RIGHT' }.topologyRole == 'invisibleMember'
+    appScript.renderNewUiSecondaryDevices([secondaryDevices: appScript.getNewUiSecondaryDevices('RINCON_KIDS')]).contains('SYMFONISK Bookshelf')
+    appScript.scheduled.any { List item -> item[1] == 'sendFoundSonosEvents' }
+  }
+
+  def "satellite player info replaces placeholder but renders the topology ZoneName"() {
+    given:
+    appScript.discoveredSonosSecondaries['old-satellite-placeholder'] = [id: 'RINCON_SUB',
+      name: 'Sub Mini', modelName: 'Satellite', primaryDeviceId: 'RINCON_ARC', deviceIp: '192.168.1.149']
+    appScript.applyTopologySecondaries([[id: 'RINCON_SUB', name: 'Sub Mini', topologyRole: 'satellite',
+      primaryDeviceId: 'RINCON_ARC', deviceIp: '192.168.1.149', topologyOnly: true]])
+    LinkedHashMap playerInfo = [playerId: 'RINCON_SUB', householdId: 'SONOS_HOUSEHOLD',
+      device: [name: 'Sub Mini', swGen: '2', capabilities: []]]
+    String descriptionXml = '<root><device><modelName>Sonos Sub Mini</modelName><MACAddress>AA:BB:CC:DD:EE:49</MACAddress></device></root>'
+
+    when:
+    appScript.pageDeviceDescriptionCallback(new AsyncResponse(data: descriptionXml),
+      [ipAddress: '192.168.1.149', playerInfo: playerInfo])
+
+    then:
+    appScript.discoveredSonosSecondaries.values().count { Map item -> item.id == 'RINCON_SUB' } == 1
+    appScript.getNewUiSecondaryDevices('RINCON_ARC').first().modelName == 'Sonos Sub Mini'
+    appScript.renderNewUiSecondaryDevices([secondaryDevices: appScript.getNewUiSecondaryDevices('RINCON_ARC')]).contains('<strong>Sub Mini</strong>')
+  }
+
+  def "cached ZGT channel map does not prove satellite ownership"() {
     given:
     appScript.state.userGroups = [
       'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW'], satelliteId: 'RINCON_SUB']
@@ -302,9 +511,50 @@ class SonosAdvancedAppSpec extends Specification {
     String markup = appScript.renderNewUiGroupTableMarkup()
 
     then:
-    appScript.findHomeTheaterSatelliteOwners() == ['RINCON_SUB': 'RINCON_COORD']
+    appScript.findHomeTheaterSatelliteOwners().isEmpty()
     markup.contains('<th>Satellites</th>')
     markup.contains('Sub Mini')
+  }
+
+  def "stale discovered secondary metadata does not imply a current satellite bond"() {
+    given:
+    appScript.discoveredSonosSecondaries['sub-mac'] = [id: 'RINCON_SUB', name: 'Sub Mini',
+      primaryDeviceId: 'RINCON_ARC', topologyRole: 'satellite']
+    appScript.state['htSatChanMapSetByPlayer'] = [:]
+
+    expect:
+    appScript.findHomeTheaterSatelliteOwners().isEmpty()
+    appScript.renderNewUiGroupSatellite('RINCON_SUB', 'Kids Room + Arc', 'RINCON_KIDS')
+      .contains('Not bonded')
+  }
+
+  def "page topology replaces cached satellite ownership when the fresh snapshot has no bond"() {
+    given:
+    appScript.state['pageTopologyRequestId'] = 'fresh-topology'
+    appScript.state['htSatChanMapSetByPlayer'] = [
+      'RINCON_ARC': 'RINCON_ARC:LF,RF;RINCON_SUB:SW'
+    ]
+    appScript.state['htSatelliteNamesById'] = ['RINCON_SUB': 'Sub Mini']
+    appScript.state['speakerChannelMapSetByPlayer'] = [
+      'RINCON_ARC': 'RINCON_ARC:LF,RF;RINCON_SUB:SW'
+    ]
+    appScript.state['topologySatelliteOwnersById'] = [:]
+    appScript.discoveredSonosSecondaries['sub-mac'] = [id: 'RINCON_SUB', name: 'Sub Mini',
+      primaryDeviceId: 'RINCON_ARC', topologyRole: 'satellite']
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_ARC">' +
+      '<ZoneGroupMember UUID="RINCON_ARC" Location="http://192.0.2.10:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    String responseXml = """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>${StringEscapeUtils.escapeXml10(topologyXml)}</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>"""
+
+    when:
+    appScript.pageTopologyCallback(new AsyncResponse(data: responseXml),
+      [requestId: 'fresh-topology', sourceIp: '192.0.2.10'])
+
+    then:
+    appScript.state['htSatChanMapSetByPlayer'].isEmpty()
+    appScript.state['htSatelliteNamesById'].isEmpty()
+    appScript.state['topologySatelliteOwnersById'].isEmpty()
+    appScript.findHomeTheaterSatelliteOwners().isEmpty()
   }
 
   def "new group editor places same-width satellite selector below coordinator"() {
@@ -341,7 +591,7 @@ class SonosAdvancedAppSpec extends Specification {
     ]
   }
 
-  def "saving an already bonded Arc satellite does not require a cached channel map"() {
+  def "saving an already bonded Arc satellite does not send a bond request"() {
     given:
     appScript.state.userGroups = [:]
     appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
@@ -361,18 +611,17 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.settings.newUiGroupSatellite = 'RINCON_SUB'
     appScript.appButtonHandler('btnNewUiGroupSatelliteChanged')
     appScript.appButtonHandler('btnNewUiSaveGroup')
-    appScript.drainGroupSatelliteReconciliations()
 
     then:
     appScript.state.userGroups['Family'] == [groupCoordinatorId: 'RINCON_COORD',
       playerIds: ['RINCON_FOLLOW'], satelliteId: 'RINCON_SUB']
     appScript.state.newUiGroupError == null
-    appScript.state.groupSatelliteStatuses['Family'].status == 'Applied'
-    appScript.state.groupSatelliteStatuses['Family'].message == 'Satellite is already bonded to the group coordinator'
+    appScript.state.pendingGroupSatelliteReconciliations == null
+    appScript.state.groupSatelliteStatuses == [:]
     appScript.asyncCalls.isEmpty()
   }
 
-  def "unbonded satellite can be assigned to any coordinator without a cached home-theater map"() {
+  def "unbonded satellite is added only after fresh coordinator topology confirms activation"() {
     given:
     appScript.state.userGroups = [:]
     appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
@@ -392,18 +641,69 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.settings.newUiGroupSatellite = 'RINCON_SUB'
     appScript.appButtonHandler('btnNewUiGroupSatelliteChanged')
     appScript.appButtonHandler('btnNewUiSaveGroup')
+    appScript.reconcileGroupDeviceSatellite(appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-Family"))
     appScript.drainGroupSatelliteReconciliations()
+    Map topologyRequest = appScript.asyncCalls.last()
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml"/>' +
+      '<ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(topologyXml)), topologyRequest.data as Map)
 
     then:
     appScript.state.userGroups['Family'] == [groupCoordinatorId: 'RINCON_COORD',
       playerIds: ['RINCON_FOLLOW'], satelliteId: 'RINCON_SUB']
     appScript.state.newUiGroupError == null
-    appScript.asyncCalls.size() == 1
-    appScript.asyncCalls[0].params.headers.SOAPAction.endsWith('#AddHTSatellite')
-    appScript.asyncCalls[0].params.body.contains('<HTSatChanMapSet>RINCON_COORD:LF,RF;RINCON_SUB:SW</HTSatChanMapSet>')
+    topologyRequest.params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+    appScript.asyncCalls.last().params.headers.SOAPAction.contains('#AddHTSatellite')
+    appScript.asyncCalls.last().params.body.contains('<HTSatChanMapSet>RINCON_COORD:LF,RF;RINCON_SUB:SW</HTSatChanMapSet>')
   }
 
-  def "satellite bond command preserves a stereo pair speaker channel map"() {
+  def "fresh topology avoids AddHTSatellite when the sub is already bonded to the configured coordinator"() {
+    given:
+    appScript.state.userGroups = [:]
+    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId]
+    appScript.settings.groupDevices = [group.deviceNetworkId]
+    group.dataValues.satelliteId = 'RINCON_SUB'
+
+    when:
+    appScript.queueGroupSatelliteReconciliation('Test Group', [:], [groupCoordinatorId: 'RINCON_COORD',
+      satelliteId: 'RINCON_SUB', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW']])
+    appScript.drainGroupSatelliteReconciliations()
+    Map request = appScript.asyncCalls.last()
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml" HTSatChanMapSet="RINCON_COORD:LF,RF;RINCON_SUB:SW"><Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember>' +
+      '<ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(topologyXml)), request.data as Map)
+
+    then:
+    request.params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+    appScript.asyncCalls.size() == 1
+    appScript.state.activeGroupSatelliteReconciliation == null
+    appScript.state.groupSatelliteStatuses['Test Group'].status == 'Applied'
+  }
+
+  def "stale satellite reconciliation does not block a new activation preflight"() {
+    given:
+    appScript.state.activeGroupSatelliteReconciliation = [requestId: 'old', groupName: 'Old Group',
+      requestedAt: appScript.now() - 120000L]
+    appScript.queueGroupSatelliteReconciliation('Family', [:], [groupCoordinatorId: 'RINCON_COORD',
+      satelliteId: 'RINCON_SUB', requiredPlayerIds: ['RINCON_COORD']])
+    appScript.state.groupSatelliteReconciliationScheduled = false
+
+    when:
+    appScript.drainGroupSatelliteReconciliations()
+
+    then:
+    appScript.state.activeGroupSatelliteReconciliation.requestId != 'old'
+    appScript.asyncCalls.size() == 1
+    appScript.asyncCalls[0].params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+  }
+
+  def "stereo pair with a sub uses AddBondedZones and preserves the dynamic left right map"() {
     given:
     appScript.state['speakerChannelMapSetByPlayer'] = [
       'RINCON_COORD': 'RINCON_COORD:LF,LF;RINCON_RIGHT:RF,RF'
@@ -416,46 +716,247 @@ class SonosAdvancedAppSpec extends Specification {
 
     then:
     appScript.asyncCalls.size() == 1
+    appScript.asyncCalls[0].params.headers.SOAPAction.contains('#AddBondedZones')
+    appScript.asyncCalls[0].params.headers.SOAPAction.startsWith('"')
+    appScript.asyncCalls[0].params.headers.SOAPAction.endsWith('"')
+    appScript.asyncCalls[0].params.requestContentType == 'text/xml; charset="utf-8"'
     appScript.asyncCalls[0].params.body.contains(
-      '<HTSatChanMapSet>RINCON_COORD:LF,LF;RINCON_RIGHT:RF,RF;RINCON_SUB:SW</HTSatChanMapSet>')
+      '<ChannelMapSet>RINCON_COORD:LF,LF;RINCON_RIGHT:RF,RF;RINCON_SUB:SW</ChannelMapSet>')
+    !appScript.asyncCalls[0].params.body.contains('<HTSatChanMapSet>')
   }
 
-  def "satellite move removes the old bond then adds the subwoofer to the selected coordinator"() {
+  def "stereo pair map attached to its invisible member targets the configured coordinator for AddBondedZones"() {
     given:
-    appScript.state['htSatChanMapSetByPlayer'] = [
-      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_KEEP:SW',
-      'RINCON_FOLLOW': 'RINCON_FOLLOW:LF,RF;RINCON_SUB:SW'
+    appScript.state['speakerChannelMapSetByPlayer'] = [
+      'RINCON_RIGHT': 'RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF'
     ]
-    appScript.state['htSatelliteNamesById'] = ['RINCON_SUB': 'Sub Mini']
+    appScript.state['stereoPairCoordinators'] = ['RINCON_KIDS']
+    appScript.discoveredSonosSecondaries['topology:RINCON_RIGHT'] = [
+      id: 'RINCON_RIGHT', deviceIp: '192.0.2.11', topologyOnly: true]
+    Map operation = [groupName: 'Kids Room + Arc', targetId: 'RINCON_KIDS', desiredSatellite: 'RINCON_SUB',
+      players: ['RINCON_KIDS': '192.0.2.10:1400'], requestId: 'stereo-secondary-map-test']
+    operation.players.putAll(appScript.getRinconLocalHostMap())
+
+    when:
+    appScript.sendHomeTheaterSatelliteAdd(operation)
+
+    then:
+    appScript.asyncCalls.size() == 1
+    appScript.asyncCalls[0].params.headers.SOAPAction.contains('#AddBondedZones')
+    appScript.asyncCalls[0].params.uri == 'http://192.0.2.10:1400/DeviceProperties/Control'
+    appScript.asyncCalls[0].params.body.contains(
+      '<ChannelMapSet>RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF;RINCON_SUB:SW</ChannelMapSet>')
+  }
+
+  def "moving a home theater sub onto a stereo pair removes old bond before AddBondedZones"() {
+    given:
+    appScript.state['speakerChannelMapSetByPlayer'] = [
+      'RINCON_COORD': 'RINCON_COORD:LF,LF;RINCON_RIGHT:RF,RF'
+    ]
+    Map operation = [groupName: 'Kids Room + Arc', targetId: 'RINCON_COORD', desiredSatellite: 'RINCON_SUB',
+      requiredPlayerIds: ['RINCON_COORD'], players: [
+        'RINCON_COORD': '192.0.2.10:1400', 'RINCON_ARC': '192.0.2.20:1400'
+      ], requestId: 'pair-move-test', freshSatelliteOwners: ['RINCON_SUB': 'RINCON_ARC']]
+    // Persisted topology may lag the response for the coordinator queried by
+    // this activation. Reconciliation must use the fresh callback payload.
+    appScript.state['topologySatelliteOwnersById'] = ['RINCON_SUB': 'RINCON_ARC']
+    appScript.state['activeGroupSatelliteReconciliation'] = operation
+
+    when:
+    appScript.continueGroupSatelliteReconciliationFromTopology(operation)
+    Map removeRequest = appScript.asyncCalls[0]
+    appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), removeRequest.data as Map)
+    appScript.continueGroupSatelliteAddAfterRemoval([requestId: 'pair-move-test'])
+    Map releasedTopologyRequest = appScript.asyncCalls.last()
+    String releasedTopology = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(releasedTopology)), releasedTopologyRequest.data as Map)
+
+    then:
+    removeRequest.params.uri == 'http://192.0.2.20:1400/DeviceProperties/Control'
+    removeRequest.params.headers.SOAPAction.contains('#RemoveHTSatellite')
+    removeRequest.params.body.contains('<SatRoomUUID>RINCON_SUB</SatRoomUUID>')
+    releasedTopologyRequest.data.purpose == 'post-removal'
+    appScript.asyncCalls.size() == 3
+    appScript.asyncCalls[2].params.uri == 'http://192.0.2.10:1400/DeviceProperties/Control'
+    appScript.asyncCalls[2].params.headers.SOAPAction.contains('#AddBondedZones')
+    appScript.asyncCalls[2].params.body.contains(
+      '<ChannelMapSet>RINCON_COORD:LF,LF;RINCON_RIGHT:RF,RF;RINCON_SUB:SW</ChannelMapSet>')
+  }
+
+  def "fresh stereo-pair topology skips a bond command when the sub is already assigned there"() {
+    given:
+    appScript.state.userGroups = [:]
+    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId]
+    appScript.settings.groupDevices = [group.deviceNetworkId]
+    group.dataValues.satelliteId = 'RINCON_SUB'
+
+    when:
+    appScript.queueGroupSatelliteReconciliation('Test Group', [:], [groupCoordinatorId: 'RINCON_COORD',
+      satelliteId: 'RINCON_SUB', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW']])
+    appScript.drainGroupSatelliteReconciliations()
+    Map request = appScript.asyncCalls.last()
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml" ChannelMapSet="RINCON_COORD:LF,LF;RINCON_RIGHT:RF,RF;RINCON_SUB:SW">' +
+      '<Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember>' +
+      '<ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(topologyXml)), request.data as Map)
+
+    then:
+    request.params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+    appScript.asyncCalls.size() == 1
+    appScript.state.activeGroupSatelliteReconciliation == null
+    appScript.state.groupSatelliteStatuses['Test Group'].status == 'Applied'
+  }
+
+  def "satellite child node confirms ownership even when channel maps omit the satellite"() {
+    given:
+    appScript.state.userGroups = [:]
+    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId]
+    appScript.settings.groupDevices = [group.deviceNetworkId]
+    group.dataValues.satelliteId = 'RINCON_SUB'
+
+    when:
+    appScript.queueGroupSatelliteReconciliation('Test Group', [:], [groupCoordinatorId: 'RINCON_COORD',
+      satelliteId: 'RINCON_SUB', requiredPlayerIds: ['RINCON_COORD', 'RINCON_FOLLOW']])
+    appScript.drainGroupSatelliteReconciliations()
+    Map request = appScript.asyncCalls.last()
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml">' +
+      '<Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember>' +
+      '<ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(topologyXml)), request.data as Map)
+
+    then:
+    appScript.asyncCalls.size() == 1
+    appScript.findHomeTheaterSatelliteOwners() == ['RINCON_SUB': 'RINCON_COORD']
+    appScript.state.activeGroupSatelliteReconciliation == null
+    appScript.state.groupSatelliteStatuses['Test Group'].status == 'Applied'
+  }
+
+  def "moving a Sub between home theater rooms removes the existing bond before adding it"() {
+    given:
     Map previous = [groupCoordinatorId: 'RINCON_FOLLOW', satelliteId: 'RINCON_SUB']
-    Map desired = [groupCoordinatorId: 'RINCON_COORD', satelliteId: 'RINCON_SUB']
+    Map desired = [groupCoordinatorId: 'RINCON_COORD', satelliteId: 'RINCON_SUB',
+      requiredPlayerIds: ['RINCON_COORD']]
 
     when:
     appScript.queueGroupSatelliteReconciliation('Arc + Kitchen', previous, desired)
     appScript.drainGroupSatelliteReconciliations()
+    Map preflightRequest = appScript.asyncCalls.last()
+    String preflightXml = '<ZoneGroupState><ZoneGroups>' +
+      '<ZoneGroup Coordinator="RINCON_COORD"><ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml"/></ZoneGroup>' +
+      '<ZoneGroup Coordinator="RINCON_FOLLOW"><ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400/xml/device_description.xml" HTSatChanMapSet="RINCON_FOLLOW:LF,RF;RINCON_SUB:SW"><Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember></ZoneGroup>' +
+      '</ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(preflightXml)), preflightRequest.data as Map)
     Map removeRequest = appScript.asyncCalls.last()
+    String requestId = removeRequest.data.requestId.toString()
     appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), removeRequest.data as Map)
+    appScript.continueGroupSatelliteAddAfterRemoval([requestId: requestId])
+    Map releasedTopologyRequest = appScript.asyncCalls.last()
+    String releasedXml = '<ZoneGroupState><ZoneGroups>' +
+      '<ZoneGroup Coordinator="RINCON_COORD"><ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml"/></ZoneGroup>' +
+      '</ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(releasedXml)), releasedTopologyRequest.data as Map)
     Map addRequest = appScript.asyncCalls.last()
-    String requestId = addRequest.data.requestId.toString()
-    appScript.state['htSatChanMapSetByPlayer'] = [
-      'RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_SUB:SW',
-      'RINCON_FOLLOW': 'RINCON_FOLLOW:LF,RF'
-    ]
     appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), addRequest.data as Map)
-    appScript.verifyGroupSatelliteBond([requestId: requestId])
+    appScript.requestGroupSatelliteVerificationTopology([requestId: requestId])
+    Map verificationRequest = appScript.asyncCalls.last()
+    String verificationXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml" HTSatChanMapSet="RINCON_COORD:LF,RF;RINCON_SUB:SW"><Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(verificationXml)), verificationRequest.data as Map)
 
     then:
-    removeRequest.verb == 'POST'
-    removeRequest.cb == 'groupSatelliteBondCallback'
+    preflightRequest.params.headers.SOAPAction.endsWith('#GetZoneGroupState')
     removeRequest.params.uri == 'http://192.0.2.11:1400/DeviceProperties/Control'
-    removeRequest.params.headers.SOAPAction.endsWith('#RemoveHTSatellite')
-    removeRequest.params.body.contains('<SatRoomUUID>RINCON_SUB</SatRoomUUID>')
+    removeRequest.params.headers.SOAPAction.contains('#RemoveHTSatellite')
+    releasedTopologyRequest.data.purpose == 'post-removal'
+    addRequest.cb == 'groupSatelliteBondCallback'
+    addRequest.params.headers.SOAPAction.contains('#AddHTSatellite')
     addRequest.params.uri == 'http://192.0.2.10:1400/DeviceProperties/Control'
-    addRequest.params.headers.SOAPAction.endsWith('#AddHTSatellite')
     addRequest.params.body.contains('<HTSatChanMapSet>RINCON_COORD:LF,RF;RINCON_SUB:SW</HTSatChanMapSet>')
     !addRequest.params.body.contains('RINCON_KEEP:SW')
     appScript.state['groupSatelliteStatuses']['Arc + Kitchen'].status == 'Applied'
     appScript.state['pendingGroupSatelliteVerifications'].isEmpty()
+  }
+
+  def "satellite activation waits for the group operation to settle"() {
+    given:
+    group.dataValues.satelliteId = 'RINCON_SUB'
+
+    when:
+    appScript.scheduleGroupDeviceSatelliteReconciliation(group)
+
+    then:
+    appScript.scheduled.any { List job -> job[0] == 12 && job[1] == 'reconcileGroupDeviceSatelliteAfterActivation' &&
+      job[2]?.data?.groupDni == group.deviceNetworkId &&
+      job[2]?.data?.coordinatorId == 'RINCON_COORD' &&
+      job[2]?.data?.satelliteId == 'RINCON_SUB' &&
+      job[2]?.data?.requiredPlayerIds == ['RINCON_COORD', 'RINCON_FOLLOW'] }
+  }
+
+  def "satellite bond failure reports the UPnP fault from the SOAP response"() {
+    expect:
+    appScript.describeHomeTheaterSatelliteFailure(new AsyncResponse(status: 500, data: '''
+      <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><s:Fault>
+        <detail><UPnPError><errorCode>501</errorCode><errorDescription>Action Failed</errorDescription></UPnPError></detail>
+      </s:Fault></s:Body></s:Envelope>
+    ''')) == 'UPnP 501: Action Failed'
+  }
+
+  def "satellite bond callback handles an HTTP failure without response data"() {
+    given:
+    appScript.state.activeGroupSatelliteReconciliation = [requestId: 'no-body', groupName: 'Kids Room + Arc']
+
+    when:
+    appScript.groupSatelliteBondCallback(new AsyncResponse(status: 500, error: true),
+      [requestId: 'no-body', action: 'AddHTSatellite'])
+
+    then:
+    appScript.state.activeGroupSatelliteReconciliation == null
+    appScript.state.groupSatelliteStatuses['Kids Room + Arc'].status == 'Error'
+    appScript.state.groupSatelliteStatuses['Kids Room + Arc'].message == 'Sonos AddHTSatellite returned HTTP 500'
+  }
+
+  def "bonded-zone HTTP 500 is checked against topology before reasserting the same map"() {
+    given:
+    appScript.state['speakerChannelMapSetByPlayer'] = [
+      'RINCON_RIGHT': 'RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF'
+    ]
+    appScript.state['stereoPairCoordinators'] = ['RINCON_KIDS']
+    appScript.state.activeGroupSatelliteReconciliation = [requestId: 'retry-bond', groupName: 'Kids Room + Arc',
+      targetId: 'RINCON_KIDS', desiredSatellite: 'RINCON_SUB', requiredPlayerIds: ['RINCON_KIDS'],
+      players: ['RINCON_KIDS': '192.0.2.10:1400', 'RINCON_RIGHT': '192.0.2.11:1400'],
+      bondedZoneAttempt: 1, topologyAttempt: 0]
+
+    when:
+    appScript.groupSatelliteBondCallback(new AsyncResponse(status: 500, error: true),
+      [requestId: 'retry-bond', action: 'AddBondedZones', stage: 'add'])
+    appScript.requestGroupBondedZoneVerification([requestId: 'retry-bond'])
+    Map topologyRequest = appScript.asyncCalls.last()
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_KIDS">' +
+      '<ZoneGroupMember UUID="RINCON_KIDS" Location="http://192.0.2.10:1400/xml/device_description.xml"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(topologyXml)), topologyRequest.data as Map)
+
+    then:
+    appScript.scheduled.any { List job -> job[0] == 16 && job[1] == 'requestGroupBondedZoneVerification' }
+    topologyRequest.data.purpose == 'bonded-zone-verification'
+    appScript.asyncCalls.last().params.headers.SOAPAction.contains('#AddBondedZones')
+    appScript.asyncCalls.last().params.body.contains(
+      '<ChannelMapSet>RINCON_KIDS:RF,RF;RINCON_RIGHT:LF,LF;RINCON_SUB:SW</ChannelMapSet>')
+    appScript.state.activeGroupSatelliteReconciliation.bondedZoneAttempt == 2
   }
 
   def "removing a group satellite sends RemoveHTSatellite to its current owner"() {
@@ -469,14 +970,23 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.queueGroupSatelliteReconciliation('Arc + Kitchen', previous, desired)
     appScript.drainGroupSatelliteReconciliations()
+    Map preflightRequest = appScript.asyncCalls.last()
+    String topologyXml = '<ZoneGroupState><ZoneGroups><ZoneGroup Coordinator="RINCON_COORD">' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400/xml/device_description.xml" HTSatChanMapSet="RINCON_COORD:LF,RF;RINCON_SUB:SW">' +
+      '<Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400/xml/device_description.xml" ZoneName="Sub Mini"/></ZoneGroupMember>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    appScript.groupSatelliteTopologyCallback(new AsyncResponse(status: 200,
+      data: satelliteTopologyResponse(topologyXml)), preflightRequest.data as Map)
     Map removeRequest = appScript.asyncCalls.last()
     String requestId = removeRequest.data.requestId.toString()
     appScript.state['htSatChanMapSetByPlayer'] = ['RINCON_COORD': 'RINCON_COORD:LF,RF']
+    appScript.state['topologySatelliteOwnersById'] = [:]
     appScript.groupSatelliteBondCallback(new AsyncResponse(status: 200), removeRequest.data as Map)
     appScript.verifyGroupSatelliteBond([requestId: requestId])
 
     then:
-    removeRequest.params.headers.SOAPAction.endsWith('#RemoveHTSatellite')
+    preflightRequest.params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+    removeRequest.params.headers.SOAPAction.contains('#RemoveHTSatellite')
     removeRequest.params.body.contains('<SatRoomUUID>RINCON_SUB</SatRoomUUID>')
     appScript.state['groupSatelliteStatuses']['Arc + Kitchen'].status == 'Applied'
     appScript.state['groupSatelliteStatuses']['Arc + Kitchen'].message == 'Satellite unbond confirmed'
@@ -501,6 +1011,11 @@ class SonosAdvancedAppSpec extends Specification {
 
   Map request(String command, Map args = [:], Integer sequence = 1) {
     [groupDni: 'GROUP-DNI', requestId: "GROUP-DNI-${sequence}", command: command, args: args]
+  }
+
+  String satelliteTopologyResponse(String topologyXml) {
+    String escaped = StringEscapeUtils.escapeXml10(topologyXml)
+    return """<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetZoneGroupStateResponse xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"><ZoneGroupState>${escaped}</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>"""
   }
 
   void makeAnnouncementRosterExact() {
@@ -899,7 +1414,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.getActiveGroupOperation().evictUnlistedOnly == true
   }
 
-  def "explicit grouping evicts extras without using the additive join operation"() {
+  def "on starts a fresh explicit topology operation before satellite activation"() {
     given:
     makeTopology('GROUP-1', 'RINCON_COORD', 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA')
 
@@ -907,11 +1422,10 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.processGroupCommandRequest([request: request('on')])
 
     then:
-    coordinator.commands.find { it.name == 'playerModifyGroupMembers' } == [
-      name: 'playerModifyGroupMembers', add: [], remove: ['RINCON_EXTRA']
-    ]
-    coordinator.commands.every { it.name != 'playerCreateGroup' }
-    appScript.getActiveGroupOperation() == null
+    appScript.getActiveGroupOperation().groupingMode == 'EXPLICIT'
+    appScript.getActiveGroupOperation().activateSatelliteAfterTopology == true
+    coordinator.commands.any { it.name == 'playerGetGroupsFull' }
+    !appScript.scheduled.any { it[1] == 'reconcileGroupDeviceSatelliteAfterActivation' }
   }
 
   def "explicit grouping transfers coordination before rebuilding an already joined group"() {
@@ -1018,7 +1532,7 @@ class SonosAdvancedAppSpec extends Specification {
     operation.lastCommand == 'addMissingPlayers'
   }
 
-  def "play after on() runs immediately without an operation"() {
+  def "play after on() waits for fresh topology operation"() {
     given:
     appScript.processGroupCommandRequest([request: request('on')])
     coordinator.commands.clear()
@@ -1027,9 +1541,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.processGroupCommandRequest([request: request('play', [:], 2)])
 
     then:
-    appScript.getActiveGroupOperation() == null
-    coordinator.commands.find { it.name == 'play' } != null
-    !appScript.state.containsKey('deferredGroupOperationCommands')
+    appScript.getActiveGroupOperation() != null
+    coordinator.commands.every { it.name != 'play' }
+    appScript.state.deferredGroupOperationCommands.any { it.command == 'play' }
   }
 
   def "explicit group creation puts the desired coordinator first after transfer"() {
@@ -1516,11 +2030,10 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainGroupCommandRequests()
 
     then:
-    appScript.getActiveGroupOperation() == null
-    // on() starts the topology operation, but Favorite still goes directly to the current coordinator.
+    appScript.getActiveGroupOperation() != null
+    // on() starts a fresh topology operation, but Favorite still goes directly to the current coordinator.
     coordinator.commands.find { it.name == 'loadFavorite' }?.favoriteId == '42'
-    coordinator.commands.find { it.name == 'playerCreateGroup' }?.playerIds == ['RINCON_COORD', 'RINCON_FOLLOW'] ||
-      coordinator.commands.find { it.name == 'playerModifyGroupMembers' }?.add == ['RINCON_FOLLOW']
+    coordinator.commands.any { it.name == 'playerGetGroupsFull' }
     !appScript.state.containsKey('deferredGroupOperationCommands')
   }
 
@@ -2402,7 +2915,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.deferredGroupOperationCommands == null
   }
 
-  def "group device state is exact in explicit mode and subset-based in additive mode"() {
+  def "group device switch requires an exact member roster in every mode"() {
     given:
     appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'])
 
@@ -2416,8 +2929,38 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW', 'RINCON_EXTRA'])
 
     then:
-    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'on'
+    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'off'
     appScript.state.pendingGroupStateUpdates['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
+  }
+
+  def "configured group stays off until its satellite is bonded to its coordinator"() {
+    given:
+    group.dataValues.satelliteId = 'RINCON_SUB'
+
+    when:
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
+
+    then:
+    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'off'
+
+    when:
+    appScript.state.clear()
+    appScript.state['htSatChanMapSetByPlayer'] = ['RINCON_COORD': 'RINCON_COORD:LF,RF;RINCON_SUB:SW']
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
+
+    then:
+    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'off'
+  }
+
+  def "configured group turns off when a different coordinator leads its exact members"() {
+    given:
+    group.dataValues.groupCoordinatorId = 'RINCON_FOLLOW'
+
+    when:
+    appScript.updateGroupDevices('RINCON_COORD', ['RINCON_COORD', 'RINCON_FOLLOW'])
+
+    then:
+    appScript.state.pendingGroupStateUpdates['GROUP-DNI'].switch == 'off'
   }
 
   def "track position preference is read from player settings instead of device data"() {
@@ -2634,7 +3177,7 @@ class SonosAdvancedAppSpec extends Specification {
     page.title == '<p hidden>Sonos Advanced Controller</p>'
     appScript.state.updateAvailable == true
     appScript.state.installedAppVersion == '98.0.0'
-    appScript.asyncCalls.empty
+    appScript.asyncCalls*.verb == ['POST']
     noticeMarkup.contains('settings[btnInstallUpdate]')
     noticeMarkup.contains('settings[btnDismissUpdate]')
   }
@@ -2737,16 +3280,101 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { String entry -> entry.contains("New UI created Sonos group 'Family'") }
   }
 
-  def "new UI follower selection sentinel preserves the empty selection for validation"() {
+  def "new UI group can be saved with only a coordinator and satellite"() {
     given:
+    appScript.state.userGroups = [:]
+    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
+    appScript.settings.skipOrphanRemoval = true
+    appScript.discoveredSonosSecondaries['sub-mac'] = [
+      id: 'RINCON_SUB', modelName: 'SubMini', name: 'Sonos Sub Mini'
+    ]
     appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
+    appScript.settings.newUiGroupName = 'Coordinator Only'
+    appScript.appButtonHandler('btnNewUiGroupNameChanged')
+    appScript.settings.newUiGroupSatellite = 'RINCON_SUB'
+    appScript.appButtonHandler('btnNewUiGroupSatelliteChanged')
 
     when:
     appScript.appButtonHandler('btnNewUiSaveGroup')
 
     then:
-    appScript.state.newUiGroupError == 'Select at least one follower before saving the group.'
-    appScript.state.newUiGroupEditorMode == 'create'
+    appScript.state.userGroups['Coordinator Only'] == [groupCoordinatorId: 'RINCON_COORD', playerIds: [], satelliteId: 'RINCON_SUB']
+    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-Coordinator Only") != null
+    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-Coordinator Only").getDataValue('playerIds') == ''
+    appScript.state.newUiGroupError == null
+  }
+
+  def "same satellite can be configured in multiple groups without bonding on save"() {
+    given:
+    appScript.state.userGroups = ["Kids' Room + Arc": [groupCoordinatorId: 'RINCON_COORD',
+      playerIds: ['RINCON_FOLLOW'], satelliteId: 'RINCON_SUB']]
+    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
+    appScript.settings.skipOrphanRemoval = true
+    appScript.discoveredSonosSecondaries['sub-mac'] = [id: 'RINCON_SUB', modelName: 'Sonos Sub Mini', name: 'Sub Mini']
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_EXTRA')
+    appScript.settings.newUiGroupName = 'Arc + Sub'
+    appScript.appButtonHandler('btnNewUiGroupNameChanged')
+    appScript.settings.newUiGroupCoordinator = 'RINCON_EXTRA'
+    appScript.appButtonHandler('btnNewUiGroupCoordinatorChanged')
+    appScript.settings.newUiGroupSatellite = 'RINCON_SUB'
+    appScript.appButtonHandler('btnNewUiGroupSatelliteChanged')
+
+    when:
+    appScript.appButtonHandler('btnNewUiSaveGroup')
+
+    then:
+    appScript.state.userGroups["Kids' Room + Arc"].satelliteId == 'RINCON_SUB'
+    appScript.state.userGroups['Arc + Sub'] == [groupCoordinatorId: 'RINCON_EXTRA', playerIds: [], satelliteId: 'RINCON_SUB']
+    appScript.state.newUiGroupError == null
+    appScript.asyncCalls.isEmpty()
+  }
+
+  def "saving a group preserves other saved groups and their child devices"() {
+    given:
+    String existingDni = "${appScript.app.id}-SonosGroupDevice-Existing"
+    appScript.state.userGroups = [:]
+    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
+    appScript.settings.skipOrphanRemoval = true
+    ChildDeviceWrapper existingGroup = appScript.addChildDevice('dwinks', 'Sonos Advanced Group', existingDni,
+      [name: 'Sonos Group', label: 'Sonos Group: Existing']) as ChildDeviceWrapper
+    existingGroup.updateDataValue('groupCoordinatorId', 'RINCON_COORD')
+    existingGroup.updateDataValue('playerIds', 'RINCON_FOLLOW')
+    existingGroup.updateDataValue('satelliteId', '')
+    appScript.app.children = appScript.children
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_EXTRA')
+    appScript.settings.newUiGroupName = 'New Group'
+    appScript.appButtonHandler('btnNewUiGroupNameChanged')
+    appScript.settings.newUiGroupCoordinator = 'RINCON_EXTRA'
+    appScript.appButtonHandler('btnNewUiGroupCoordinatorChanged')
+
+    when:
+    appScript.appButtonHandler('btnNewUiSaveGroup')
+
+    then:
+    appScript.state.userGroups.keySet() == ['Existing', 'New Group'] as Set
+    appScript.logs.any { String entry -> entry.contains("Recovered saved group 'Existing'") }
+    appScript.app.getChildDevice(existingDni) != null
+    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-New Group") != null
+    appScript.app.updatedSettings.groupDevices.toSet() == [existingDni, "${appScript.app.id}-SonosGroupDevice-New Group"] as Set
+  }
+
+  def "group table restores missing definitions from existing group devices"() {
+    given:
+    appScript.state.userGroups = [:]
+    ChildDeviceWrapper existingGroup = appScript.addChildDevice('dwinks', 'Sonos Advanced Group',
+      "${appScript.app.id}-SonosGroupDevice-Existing", [label: 'Sonos Group: Existing']) as ChildDeviceWrapper
+    existingGroup.updateDataValue('groupCoordinatorId', 'RINCON_COORD')
+    existingGroup.updateDataValue('playerIds', 'RINCON_FOLLOW')
+    existingGroup.updateDataValue('satelliteId', '')
+    appScript.app.children = appScript.children
+
+    when:
+    List<Map> rows = appScript.buildNewUiGroupRows()
+
+    then:
+    rows*.name == ['Existing']
+    appScript.state.userGroups['Existing'].groupCoordinatorId == 'RINCON_COORD'
+    appScript.state.userGroups['Existing'].playerIds == ['RINCON_FOLLOW']
   }
 
   def "new UI follower action updates and removes the configured follower"() {

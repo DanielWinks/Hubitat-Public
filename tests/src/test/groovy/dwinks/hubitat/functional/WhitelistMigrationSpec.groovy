@@ -180,6 +180,29 @@ class WhitelistMigrationSpec extends Specification {
     (result.stateRemoved as List).contains('discoveryRunning')
   }
 
+  def "app restores legacy atomicState groups and satellite discovery before pruning"() {
+    given:
+    app.atomicState['userGroups'] = [Family: [groupCoordinatorId: 'RINCON_ARC', playerIds: [], satelliteId: 'RINCON_SUB']]
+    app.atomicState['discoveredSonosSecondaries'] = [sub: [id: 'RINCON_SUB', modelName: 'Sonos Sub Mini']]
+    app.atomicState['htSatChanMapSetByPlayer'] = [RINCON_ARC: 'RINCON_ARC:LF,RF;RINCON_SUB:SW']
+    app.atomicState['groupSatelliteStatuses'] = [Family: [status: 'Error']]
+
+    when:
+    app.migrateLegacyAppStateOnce()
+    Map result = app.pruneOrphanedAppPersistence()
+
+    then:
+    app.state['userGroups'].Family.satelliteId == 'RINCON_SUB'
+    app.state['discoveredSonosSecondaries'].sub.id == 'RINCON_SUB'
+    app.state['htSatChanMapSetByPlayer'].RINCON_ARC.contains('RINCON_SUB:SW')
+    app.state['groupSatelliteStatuses'].Family.status == 'Error'
+    !app.atomicState.containsKey('userGroups')
+    !app.atomicState.containsKey('discoveredSonosSecondaries')
+    (result.atomicStateRemoved as List).containsAll([
+      'userGroups', 'discoveredSonosSecondaries', 'htSatChanMapSetByPlayer', 'groupSatelliteStatuses'
+    ])
+  }
+
   def "app prune is idempotent"() {
     given:
     app.state['userGroups'] = [:]

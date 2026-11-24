@@ -750,7 +750,7 @@ void enqueueLowPriorityTrack(String uri, Object volume = null) {
 
 void joinPlayersToCoordinator() {
   List<String> followers = getAllFollowersInGroupDevice()
-  if(!followers) {
+  if(!followers && !device.getDataValue('satelliteId')) {
     logWarn('No followers found to join to coordinator')
     return
   }
