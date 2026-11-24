@@ -1125,6 +1125,10 @@ String displayNewUiSpeakerTable() {
         text-align: center;
         white-space: nowrap;
       }
+      #new-ui-speaker-table th.new-ui-speaker-name,
+      #new-ui-speaker-table th.new-ui-secondary-speakers {
+        text-align: left;
+      }
       #new-ui-speaker-table .new-ui-table-toolbar-cell {
         background: var(--surface-b, #f7f8fa);
         padding: 0 18px !important;
@@ -1271,8 +1275,8 @@ String renderNewUiSpeakerTableMarkup() {
   html.append("<div><table id='new-ui-speaker-table' class='mdl-data-table'>")
   html.append('<thead><tr>')
   html.append('<th>Action</th>')
-  html.append('<th>Speaker</th>')
-  html.append('<th>Secondary Speakers</th>')
+  html.append("<th class='new-ui-speaker-name'>Speaker</th>")
+  html.append("<th class='new-ui-secondary-speakers'>Secondary Speakers</th>")
   html.append('<th>Network</th>')
   html.append('<th>Create Group From</th>')
   html.append('</tr></thead><tbody>')
@@ -1695,6 +1699,7 @@ String displayNewUiGroupTable() {
         border-radius: 0;
         color: var(--text-color, #424242);
         min-width: 760px;
+        table-layout: fixed;
         width: 100%;
       }
       #new-ui-group-table th,
@@ -1718,6 +1723,12 @@ String displayNewUiGroupTable() {
         font-size: 14px !important;
         font-weight: 500;
         white-space: nowrap;
+      }
+      #new-ui-group-table th.new-ui-group-name,
+      #new-ui-group-table th.new-ui-group-coordinator,
+      #new-ui-group-table td.new-ui-group-coordinator,
+      #new-ui-group-table th.new-ui-group-followers {
+        text-align: left;
       }
       #new-ui-group-table .new-ui-group-table-toolbar-cell {
         background: var(--surface-b, #f7f8fa);
@@ -1749,6 +1760,7 @@ String displayNewUiGroupTable() {
       }
       #new-ui-group-table .new-ui-group-name {
         min-width: 200px;
+        overflow-wrap: anywhere;
       }
       #new-ui-group-table .new-ui-group-name a {
         color: #2196F3;
@@ -1793,11 +1805,12 @@ String renderNewUiGroupTableMarkup() {
   List<Map> rows = buildNewUiGroupRows()
   StringBuilder html = new StringBuilder()
   html.append("<div><table id='new-ui-group-table' class='mdl-data-table'>")
+  html.append("<colgroup><col style='width:6%'><col style='width:34%'><col style='width:23%'><col style='width:37%'></colgroup>")
   html.append('<thead><tr>')
   html.append('<th>Action</th>')
-  html.append('<th>Group Name</th>')
-  html.append('<th>Coordinator</th>')
-  html.append('<th>Followers</th>')
+  html.append("<th class='new-ui-group-name'>Group Name</th>")
+  html.append("<th class='new-ui-group-coordinator'>Coordinator</th>")
+  html.append("<th class='new-ui-group-followers'>Followers</th>")
   html.append('</tr></thead><tbody>')
 
   if(rows.isEmpty()) {
@@ -1822,7 +1835,7 @@ String renderNewUiGroupTableMarkup() {
       html.append('<tr>')
       html.append("<td class='new-ui-group-action-cell' data-label='Action'>${actionMarkup}</td>")
       html.append("<td class='new-ui-group-name' data-label='Group name'><strong>${safeName}</strong></td>")
-      html.append("<td data-label='Coordinator'>${safeCoordinator}</td>")
+      html.append("<td class='new-ui-group-coordinator' data-label='Coordinator'>${safeCoordinator}</td>")
       html.append("<td class='new-ui-group-followers' data-label='Followers'>${followerMarkup}</td>")
       html.append('</tr>')
     }
