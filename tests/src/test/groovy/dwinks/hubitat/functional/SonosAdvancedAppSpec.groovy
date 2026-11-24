@@ -1757,6 +1757,14 @@ class SonosAdvancedAppSpec extends Specification {
         id: 'available-sonos-id', priority: 'REGULAR', clipType: 'CUSTOM', status: 'DONE'])])
 
     then:
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.correlationId == groupCorrelationId
+    appScript.scheduled.any { List job -> job[1] == 'completeGroupAnnouncementAfterAudioClipGrace' && job[0] == 1000 }
+
+    when:
+    appScript.completeGroupAnnouncementAfterAudioClipGrace([groupDni: 'GROUP-DNI',
+      correlationId: groupCorrelationId])
+
+    then:
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active == null
   }
 
@@ -2373,6 +2381,48 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.asyncCalls[0].params.headers.SOAPAction.endsWith('#GetZoneGroupState')
   }
 
+  def "quick topology refresh batches rich speaker lookups before one page update"() {
+    given:
+    appScript.atomicState = [discoveryRunning: true]
+    coordinator.dataValues.deviceIp = '192.0.2.10'
+    appScript.requestQuickTopologyRefresh()
+    Map topologyRequest = appScript.asyncCalls[0]
+    String topologyXml = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1">' +
+      '<s:Body><u:GetZoneGroupStateResponse><ZoneGroupState><ZoneGroups><ZoneGroup>' +
+      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400" ZoneName="Arc">' +
+      '<Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400" ModelName="Sub Mini"/></ZoneGroupMember>' +
+      '<ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400" ZoneName="Kitchen"/>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>'
+
+    when:
+    appScript.quickTopologyCallback(new AsyncResponse(status: 200, data: topologyXml), topologyRequest.data as Map)
+    List<Map> infoRequests = appScript.asyncCalls.findAll { Map call -> call.cb == 'quickTopologySpeakerInfoCallback' }
+    infoRequests.each { Map call ->
+      String ip = call.data.ipAddress.toString()
+      String id = ip.endsWith('.10') ? 'RINCON_COORD' : (ip.endsWith('.11') ? 'RINCON_FOLLOW' : 'RINCON_SUB')
+      String name = ip.endsWith('.10') ? 'Arc' : (ip.endsWith('.11') ? 'Kitchen' : 'Sub Mini')
+      Map info = [playerId: id, householdId: 'HOUSE', groupId: 'GROUP', device: [name: name,
+        primaryDeviceId: ip.endsWith('.12') ? 'RINCON_COORD' : null, swGen: '2', capabilities: []]]
+      appScript.quickTopologySpeakerInfoCallback(new AsyncResponse(status: 200, data: JsonOutput.toJson(info)), call.data as Map)
+    }
+    List<Map> descriptionRequests = appScript.asyncCalls.findAll { Map call -> call.cb == 'quickTopologyDeviceDescriptionCallback' }
+    descriptionRequests.eachWithIndex { Map call, Integer index ->
+      String mac = ['AA:BB:CC:DD:EE:10', 'AA:BB:CC:DD:EE:11', 'AA:BB:CC:DD:EE:12'][index]
+      String model = index == 2 ? 'Sub Mini' : 'Sonos One'
+      appScript.quickTopologyDeviceDescriptionCallback(new AsyncResponse(status: 200,
+        data: "<root><device><modelName>${model}</modelName><MACAddress>${mac}</MACAddress></device></root>"), call.data as Map)
+    }
+
+    then:
+    assert infoRequests.size() == 3, appScript.logs.join('\n')
+    descriptionRequests.size() == 3
+    appScript.app.events.count { Map event -> event.name == 'newUiSpeakerTable' } == 1
+    appScript.discoveredSonoses.values().any { Map item -> item.id == 'RINCON_FOLLOW' && item.topologyInfo.ZoneName == 'Kitchen' }
+    appScript.discoveredSonosSecondaries.values().any { Map item -> item.id == 'RINCON_SUB' && item.topologyInfo.UUID == 'RINCON_SUB' }
+    appScript.state.quickTopologyRequestId == null
+    appScript.state.quickTopologyRefreshBatch == null
+  }
+
   def "main page renders cached installed version without changing the async update result"() {
     given:
     appScript.atomicState = [discoveryRunning: false]
@@ -2522,7 +2572,40 @@ class SonosAdvancedAppSpec extends Specification {
     (appScript.state.newUiGroupDraft.followerIds as List<String>).empty
   }
 
-  def "muted member completion advances an audio clip group announcement"() {
+  def "new UI group editor renders the latest draft while settings refresh is pending"() {
+    given:
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
+    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
+    appScript.settings.newUiGroupFollowers = []
+
+    when:
+    String markup = appScript.renderNewUiGroupEditorMarkup()
+
+    then:
+    markup.contains("option value='RINCON_COORD' selected")
+    markup.contains('new-ui-group-checkbox-checked')
+    markup.contains("value='RINCON_COORD + RINCON_FOLLOW'")
+    appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft()) == ['RINCON_FOLLOW']
+  }
+
+  def "new UI automatic group name updates in the same follower selection action"() {
+    given:
+    coordinator.dataValues.name = 'Arc'
+    follower.dataValues.name = 'Kitchen'
+    extra.dataValues.name = "Kids' Room"
+    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
+
+    when:
+    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
+    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_EXTRA')
+
+    then:
+    appScript.getNewUiGroupDraft().name == 'Arc + 2 others'
+    appScript.app.updatedSettings.newUiGroupName == 'Arc + 2 others'
+    appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft()) == ['RINCON_FOLLOW', 'RINCON_EXTRA']
+  }
+
+  def "audio clip group completion waits one second after the first terminal player callback"() {
     given:
     appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [pending: [], active: [
       correlationId: 'muted-member-announcement', mode: 'AUDIO_CLIP',
@@ -2535,9 +2618,38 @@ class SonosAdvancedAppSpec extends Specification {
       correlationId: 'muted-member-announcement', phase: 'DISMISSED', reason: 'muted'])
 
     then:
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active.correlationId == 'muted-member-announcement'
+    appScript.scheduled.any { List job -> job[1] == 'completeGroupAnnouncementAfterAudioClipGrace' && job[0] == 1000 }
+    !appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
+
+    when:
+    appScript.completeGroupAnnouncementAfterAudioClipGrace([groupDni: 'GROUP-DNI',
+      correlationId: 'muted-member-announcement'])
+
+    then:
     appScript.state.groupAnnouncementQueues['GROUP-DNI'].active == null
     appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
     !appScript.logs.any { String entry -> entry.contains('timed out') }
+  }
+
+  def "audio clip group completion advances after grace when another player never reports done"() {
+    given:
+    appScript.state.groupAnnouncementQueues = ['GROUP-DNI': [pending: [], active: [
+      correlationId: 'missing-callback-announcement', mode: 'AUDIO_CLIP',
+      coordinatorId: 'RINCON_COORD', playerIds: ['RINCON_COORD', 'RINCON_FOLLOW'],
+      playerStatuses: [:]
+    ]]]
+
+    when:
+    appScript.handleGroupAnnouncementProgress(coordinator, [groupDni: 'GROUP-DNI',
+      correlationId: 'missing-callback-announcement', phase: 'DONE'])
+    appScript.completeGroupAnnouncementAfterAudioClipGrace([groupDni: 'GROUP-DNI',
+      correlationId: 'missing-callback-announcement'])
+
+    then:
+    appScript.state.groupAnnouncementQueues['GROUP-DNI'].active == null
+    appScript.logs.any { String entry -> entry.contains('completion grace expired') && entry.contains('RINCON_FOLLOW') }
+    appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
   }
 
   def "new UI automatic group names use the follower name for one follower"() {
@@ -2566,7 +2678,9 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.appButtonHandler("newUiEditGroup|${appScript.newUiGroupToken(oldName)}")
     appScript.settings.newUiGroupName = newName
+    appScript.appButtonHandler('btnNewUiGroupNameChanged')
     appScript.settings.newUiGroupCoordinator = 'RINCON_COORD'
+    appScript.appButtonHandler('btnNewUiGroupCoordinatorChanged')
     appScript.settings.newUiGroupFollowers = ['RINCON_FOLLOW']
     appScript.appButtonHandler('btnNewUiSaveGroup')
 

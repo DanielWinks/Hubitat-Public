@@ -346,6 +346,14 @@ preferences {
 @Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
 @Field static final String DISCOVERED_SONOS_SECONDARIES_STATE_KEY = 'discoveredSonosSecondaries'
 @Field static final String QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY = 'quickTopologyRequestId'
+@Field static final String QUICK_TOPOLOGY_BATCH_STATE_KEY = 'quickTopologyRefreshBatch'
+@Field static final List<String> QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES = [
+  'UUID', 'Location', 'ZoneName', 'Icon', 'Configuration', 'SoftwareGeneration',
+  'MinCompatibleVersion', 'LegacyCompatibleVersion', 'BootSeq', 'TVConfiguration',
+  'WirelessMode', 'HasConfiguredSSID', 'ChannelFreq', 'BehindWifiExtender', 'WifiEnabled',
+  'EthLink', 'VoiceConfigState', 'MicEnabled', 'Invisible', 'HdmiCecAvailable',
+  'HdmiArcAvailable', 'ModelName', 'ModelDisplayName', 'SWGen'
+]
 @Field static final String QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY = 'quickTopologyQueriedDuringDiscovery'
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
@@ -367,7 +375,7 @@ preferences {
 @Field static final String PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY = 'pendingPlayerAttributeUpdates'
 @Field static final String PLAYER_ATTRIBUTE_UPDATE_DRAIN_SCHEDULED_STATE_KEY = 'playerAttributeUpdateDrainScheduled'
 @Field static final List<String> SHARED_PLAYER_PLAYBACK_ATTRIBUTES = [
-  'status', 'transportStatus', 'audioSource', 'currentTrackName', 'currentArtistName',
+  'status', 'transportStatus', 'audioSource', 'audioInputFormat', 'currentTrackName', 'currentArtistName',
   'currentAlbumName', 'albumArtURI', 'currentFavorite', 'currentPlaylist', 'currentTrackNumber',
   'currentTrackDuration', 'trackDescription', 'trackData', 'trackPosition', 'trackPositionUpdated',
   'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
@@ -376,7 +384,7 @@ preferences {
   'groupVolume', 'groupMute'
 ]
 @Field static final Set<String> SOAP_EVENT_OWNED_ATTRIBUTES = [
-  'status', 'transportStatus', 'audioSource', 'currentTrackName', 'currentArtistName',
+  'status', 'transportStatus', 'audioSource', 'audioInputFormat', 'currentTrackName', 'currentArtistName',
   'currentAlbumName', 'albumArtURI', 'albumArtSmall', 'albumArtMedium', 'albumArtLarge',
   'currentFavorite', 'currentPlaylist', 'currentTrackNumber', 'currentTrackDuration',
   'currentRepeatOneMode', 'currentRepeatAllMode', 'currentShuffleMode', 'currentCrossfadeMode',
@@ -506,6 +514,7 @@ preferences {
   NEW_UI_GROUP_DELETE_KEY,
   DISCOVERED_SONOS_SECONDARIES_STATE_KEY,
   QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY,
+  QUICK_TOPOLOGY_BATCH_STATE_KEY,
   LOCAL_CONTROL_RETRY_STATE_KEY,
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
@@ -1982,11 +1991,17 @@ Map getNewUiGroupDraft() {
 }
 
 String getNewUiGroupCoordinator(Map draft) {
+  if(state[NEW_UI_GROUP_EDITOR_MODE_KEY] && draft.containsKey('coordinatorId')) {
+    return draft.coordinatorId?.toString() ?: ''
+  }
   Object configured = settings.containsKey('newUiGroupCoordinator') ? settings.newUiGroupCoordinator : null
   return configured != null ? configured.toString() : (draft.coordinatorId?.toString() ?: '')
 }
 
 List<String> getNewUiGroupFollowers(Map draft) {
+  if(state[NEW_UI_GROUP_EDITOR_MODE_KEY] && draft.containsKey('followerIds')) {
+    return normalizeNewUiGroupPlayerIds(draft.followerIds)
+  }
   Object configured = settings.containsKey('newUiGroupFollowers') ? settings.newUiGroupFollowers : null
   return normalizeNewUiGroupPlayerIds(configured != null ? configured : draft.followerIds)
 }
@@ -2430,6 +2445,7 @@ void toggleNewUiGroupFollower(String playerId) {
   draft.followerIds = followerIds
   state[NEW_UI_GROUP_DRAFT_KEY] = draft
   app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
+  refreshAutomaticNewUiGroupName(draft)
   state.remove(NEW_UI_GROUP_ERROR_KEY)
   app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
 }
@@ -2452,6 +2468,7 @@ void handleNewUiGroupFieldChange(String field) {
     app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
     draft.coordinatorId = coordinatorId
     draft.followerIds = followerIds
+    refreshAutomaticNewUiGroupName(draft)
   } else {
     return
   }
@@ -2468,15 +2485,9 @@ void saveNewUiGroup() {
 
   Map draft = getNewUiGroupDraft()
   String originalName = state[NEW_UI_GROUP_ORIGINAL_NAME_KEY]?.toString()
-  Object configuredName = settings.containsKey('newUiGroupName') ? settings.newUiGroupName : null
-  String groupName = configuredName != null ? configuredName.toString().trim() : (draft.name?.toString()?.trim() ?: '')
+  String groupName = draft.name?.toString()?.trim() ?: ''
   String coordinatorId = getNewUiGroupCoordinator(draft)
   List<String> followerIds = getNewUiGroupFollowers(draft).unique()
-
-  String draftName = draft.name?.toString()?.trim() ?: ''
-  if(configuredName != null && groupName && groupName != draftName) {
-    state[NEW_UI_GROUP_AUTO_NAME_KEY] = false
-  }
 
   Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
   if(!coordinatorId || !playerNames.containsKey(coordinatorId)) {
@@ -2566,22 +2577,36 @@ String synchronizeNewUiGroupName(Map draft, String coordinatorId, List<String> f
     state[NEW_UI_GROUP_AUTO_NAME_KEY] = false
   }
 
-  String automaticName = buildNewUiAutomaticGroupName(coordinatorId, followerIds, playerNames)
-  if(state[NEW_UI_GROUP_AUTO_NAME_KEY] != false && automaticName) {
-    if(configuredName != automaticName) {
-      app.updateSetting('newUiGroupName', [type: 'text', value: automaticName])
-    }
-    draft.name = automaticName
-    draft.coordinatorId = coordinatorId
-    draft.followerIds = followerIds
-    return automaticName
-  }
+  String automaticName = refreshAutomaticNewUiGroupName(draft, coordinatorId, followerIds, playerNames)
+  if(automaticName) { return automaticName }
 
-  String editorName = configuredName != null ? configuredName : previousName
+  String editorName = state[NEW_UI_GROUP_AUTO_NAME_KEY] == false
+      ? previousName
+      : (configuredName != null ? configuredName : previousName)
   draft.name = editorName
   draft.coordinatorId = coordinatorId
   draft.followerIds = followerIds
   return editorName
+}
+
+String refreshAutomaticNewUiGroupName(Map draft, String coordinatorId = null,
+    List<String> followerIds = null, Map<String, String> playerNames = null) {
+  if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == false) { return null }
+  String selectedCoordinator = coordinatorId != null ? coordinatorId : draft.coordinatorId?.toString()
+  List<String> selectedFollowers = followerIds != null
+      ? normalizeNewUiGroupPlayerIds(followerIds)
+      : normalizeNewUiGroupPlayerIds(draft.followerIds)
+  Map<String, String> names = playerNames ?: getNewUiGroupPlayerNameMap()
+  String automaticName = buildNewUiAutomaticGroupName(selectedCoordinator, selectedFollowers, names)
+  if(!automaticName) { return null }
+  if(settings.newUiGroupName?.toString()?.trim() != automaticName) {
+    app.updateSetting('newUiGroupName', [type: 'text', value: automaticName])
+  }
+  draft.name = automaticName
+  draft.coordinatorId = selectedCoordinator
+  draft.followerIds = selectedFollowers
+  state[NEW_UI_GROUP_DRAFT_KEY] = draft
+  return automaticName
 }
 
 String buildNewUiAutomaticGroupName(String coordinatorId, List<String> followerIds,
@@ -4203,13 +4228,23 @@ void requestDiscoveryDeviceDescription(String ipAddress, LinkedHashMap playerInf
     logDebug("Skipping device-description request for ${ipAddress}; discovery stopped before player-info callback")
     return
   }
+  requestSonosDeviceDescription(ipAddress, playerInfo, 'discoveryDeviceDescriptionCallback', [ipAddress: ipAddress])
+}
+
+Boolean requestSonosDeviceDescription(String ipAddress, LinkedHashMap playerInfo, String callback,
+    Map callbackData) {
   Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3,
     requestContentType: 'application/xml', contentType: 'application/xml']
+  Map data = new LinkedHashMap(callbackData ?: [:])
+  data.ipAddress = ipAddress
+  data.playerInfo = playerInfo
   try {
     logDebug("Dispatching asynchronous device-description probe for ${ipAddress} (timeout=3s)")
-    asynchttpGet('discoveryDeviceDescriptionCallback', params, [ipAddress: ipAddress, playerInfo: playerInfo])
+    asynchttpGet(callback, params, data)
+    return true
   } catch(Exception e) {
     logDebug("Could not dispatch device-description probe for ${ipAddress}: ${e.message}")
+    return false
   }
 }
 
@@ -4263,14 +4298,21 @@ void requestDiscoveryPlayerInfo(String ipAddress) {
     logDebug("Skipping player-info request for ${ipAddress}; discovery session has stopped")
     return
   }
+  requestSonosPlayerInfo(ipAddress, 'discoveryPlayerInfoCallback', [ipAddress: ipAddress])
+}
+
+Boolean requestSonosPlayerInfo(String ipAddress, String callback, Map callbackData) {
   Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
     headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
     requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
-  Map callbackData = [ipAddress: ipAddress]
   try {
     logDebug("Dispatching asynchronous player-info probe for ${ipAddress}:1443 (timeout=3s)")
-    asynchttpGet('discoveryPlayerInfoCallback', params, callbackData)
-  } catch(Exception e) { logDebug("Could not dispatch player-info probe for ${ipAddress}: ${e.message}") }
+    asynchttpGet(callback, params, callbackData ?: [ipAddress: ipAddress])
+    return true
+  } catch(Exception e) {
+    logDebug("Could not dispatch player-info probe for ${ipAddress}: ${e.message}")
+    return false
+  }
 }
 
 void processDiscoveredSonosDevice(String ipAddress) {
@@ -4325,7 +4367,8 @@ void processParsedSsdpEvent(LinkedHashMap event) {
 }
 
 @CompileStatic
-void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescription, String ipAddress) {
+void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescription, String ipAddress,
+    Map topologyInfo = null, Boolean publishDiscoveryUpdates = true) {
   LinkedHashMap playerInfoDevice = playerInfo?.device as LinkedHashMap
 
   String modelName = deviceDescription['device']['modelName']
@@ -4355,6 +4398,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
     existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
     existingDevice.localUpnpHost = "${ipAddress}:1400"
+    if(topologyInfo) { existingDevice.topologyInfo = new LinkedHashMap(topologyInfo) }
     logDebug("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
   }
   if(!isDuplicate) {
@@ -4372,7 +4416,19 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     if(isDuplicate) { logDebug("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
   }
 
-  if(isDuplicate) { return }
+  if(isDuplicate) {
+    if(topologyInfo) {
+      [discoveredSonoses, discoveredSonosSecondaries].each { Map<String, LinkedHashMap> devices ->
+        Object match = devices.values().find { Object rawCandidate ->
+          if(!(rawCandidate instanceof Map)) { return false }
+          Map candidate = (Map)rawCandidate
+          return candidate.id?.toString() == playerId || candidate.deviceIp?.toString() == ipAddress
+        }
+        if(match instanceof Map) { ((Map)match).topologyInfo = new LinkedHashMap(topologyInfo) }
+      }
+    }
+    return
+  }
 
   LinkedHashMap discoveredSonos = [
     name: playerName,
@@ -4385,7 +4441,8 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     deviceIp: "${ipAddress}",
     localApiUrl: "https://${ipAddress}:1443/api/v1/",
     localUpnpUrl: "http://${ipAddress}:1400",
-    localUpnpHost: "${ipAddress}:1400"
+    localUpnpHost: "${ipAddress}:1400",
+    topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
   ]
   // Handle secondary/satellite devices (subs, surrounds, right channel in stereo pair)
   if(playerInfoDevice?.primaryDeviceId) {
@@ -4400,7 +4457,8 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
       deviceIp: "${ipAddress}",
       localApiUrl: "https://${ipAddress}:1443/api/v1/",
       localUpnpUrl: "http://${ipAddress}:1400",
-      localUpnpHost: "${ipAddress}:1400"
+      localUpnpHost: "${ipAddress}:1400",
+      topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
     ]
     // Check for duplicate secondaries
     boolean secondaryExists = discoveredSonosSecondaries.values().any { secondaryDevice ->
@@ -4412,9 +4470,9 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
       persistDiscoveredSonosSecondaries()
       logInfo("Discovered secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
     }
-    requestQuickTopologyDuringDiscovery(ipAddress)
+    if(publishDiscoveryUpdates) { requestQuickTopologyDuringDiscovery(ipAddress) }
     // Secondary devices should never appear in the main discovered list
-    scheduleMethod(2, 'sendFoundSonosEvents')
+    if(publishDiscoveryUpdates) { scheduleMethod(2, 'sendFoundSonosEvents') }
     return
   }
 
@@ -4422,8 +4480,10 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
     discoveredSonoses[mac] = discoveredSonos
     logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
-    requestQuickTopologyDuringDiscovery(ipAddress)
-    scheduleMethod(2, 'sendFoundSonosEvents')
+    if(publishDiscoveryUpdates) {
+      requestQuickTopologyDuringDiscovery(ipAddress)
+      scheduleMethod(2, 'sendFoundSonosEvents')
+    }
   } else {
     logDebug("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
   }
@@ -4479,8 +4539,8 @@ void requestQuickTopologyDuringDiscovery(String speakerIp) {
 void quickTopologyCallback(AsyncResponse response, Map data) {
   String requestId = data?.requestId?.toString()
   if(!requestId || requestId != state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString()) { return }
-  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
   if(response == null || response.hasError()) {
+    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
     logWarn("Sonos topology query failed from ${data?.sourceIp}: status=${response?.status}, error=${response?.getErrorMessage()}")
     return
   }
@@ -4498,22 +4558,45 @@ void quickTopologyCallback(AsyncResponse response, Map data) {
         collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
       }
     }
-    LinkedHashSet<String> ips = new LinkedHashSet<String>()
+    LinkedHashMap<String, Map> devicesByIp = new LinkedHashMap<String, Map>()
     members.each { GPathResult member ->
-      addQuickTopologyIp(ips, xmlAttribute(member, 'Location'))
+      addQuickTopologyDevice(devicesByIp, member, false, null)
+      String primaryId = xmlAttribute(member, 'UUID')
       List<GPathResult> satellites = []
       collectXmlDescendantsByLocalName(member, 'Satellite', satellites)
-      satellites.each { GPathResult satellite -> addQuickTopologyIp(ips, xmlAttribute(satellite, 'Location')) }
+      satellites.each { GPathResult satellite -> addQuickTopologyDevice(devicesByIp, satellite, true, primaryId) }
     }
     String sourceIp = data?.sourceIp?.toString()
-    ips.findAll { String ip -> ip && ip != sourceIp }.each { String ip ->
-      if(atomicState.discoveryRunning == true) { processDiscoveredSonosDevice(ip) }
-      else { requestQuickTopologySpeakerInfo(ip) }
+    List<String> pendingIps = new ArrayList<String>(devicesByIp.keySet())
+    if(pendingIps.isEmpty()) {
+      state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
+      return
     }
-    logInfo("Sonos topology query found ${ips.size()} speaker locations")
+    state[QUICK_TOPOLOGY_BATCH_STATE_KEY] = [
+      requestId: requestId,
+      devicesByIp: devicesByIp,
+      pendingIps: pendingIps
+    ]
+    pendingIps.each { String ip -> requestQuickTopologySpeakerInfo(ip, requestId) }
+    logInfo("Sonos topology query found ${devicesByIp.size()} speaker locations; gathering details before refreshing the page")
   } catch(Exception e) {
+    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
     logWarn("Could not parse Sonos topology response: ${e.message}")
   }
+}
+
+void addQuickTopologyDevice(Map<String, Map> devicesByIp, GPathResult deviceNode,
+    Boolean secondary, String primaryDeviceId) {
+  String ip = null
+  try { ip = new URI(xmlAttribute(deviceNode, 'Location')).host } catch(Exception ignored) { }
+  if(!ip) { return }
+  Map<String, String> topologyInfo = [:]
+  QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES.each { String name ->
+    String value = xmlAttribute(deviceNode, name)
+    if(value != null) { topologyInfo[name] = value }
+  }
+  devicesByIp[ip] = [ipAddress: ip, secondary: secondary, primaryDeviceId: primaryDeviceId,
+    topologyInfo: topologyInfo]
 }
 
 void addQuickTopologyIp(Set<String> ips, String location) {
@@ -4523,34 +4606,101 @@ void addQuickTopologyIp(Set<String> ips, String location) {
   } catch(Exception ignored) { }
 }
 
-void requestQuickTopologySpeakerInfo(String ipAddress) {
-  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
-    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
-  try { asynchttpGet('quickTopologySpeakerInfoCallback', params, [ipAddress: ipAddress]) }
-  catch(Exception e) { logDebug("Could not query topology speaker ${ipAddress}: ${e.message}") }
+void requestQuickTopologySpeakerInfo(String ipAddress, String requestId) {
+  Boolean dispatched = requestSonosPlayerInfo(ipAddress, 'quickTopologySpeakerInfoCallback',
+      [ipAddress: ipAddress, requestId: requestId])
+  if(!dispatched) { completeQuickTopologySpeaker(ipAddress, requestId) }
 }
 
 void quickTopologySpeakerInfoCallback(AsyncResponse response, Map data) {
   String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress || response == null || response.hasError()) { return }
+  String requestId = data?.requestId?.toString()
+  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
+      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
+  if(!ipAddress || !requestId || batch.requestId?.toString() != requestId) { return }
+  if(response == null || response.hasError()) {
+    completeQuickTopologySpeaker(ipAddress, requestId)
+    return
+  }
   try {
     Map playerInfo = response.getJson() as Map
-    if(!(playerInfo instanceof Map)) { return }
-    Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3]
-    asynchttpGet('quickTopologyDeviceDescriptionCallback', params,
-      [ipAddress: ipAddress, playerInfo: new LinkedHashMap(playerInfo)])
-  } catch(Exception e) { logDebug("Could not process topology player info from ${ipAddress}: ${e.message}") }
+    if(!(playerInfo instanceof Map)) {
+      completeQuickTopologySpeaker(ipAddress, requestId)
+      return
+    }
+    Boolean dispatched = requestSonosDeviceDescription(ipAddress, new LinkedHashMap(playerInfo),
+        'quickTopologyDeviceDescriptionCallback', [ipAddress: ipAddress, requestId: requestId])
+    if(!dispatched) { completeQuickTopologySpeaker(ipAddress, requestId) }
+  } catch(Exception e) {
+    logDebug("Could not process topology player info from ${ipAddress}: ${e.message}")
+    completeQuickTopologySpeaker(ipAddress, requestId)
+  }
 }
 
 void quickTopologyDeviceDescriptionCallback(AsyncResponse response, Map data) {
   String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress || response == null || response.hasError()) { return }
+  String requestId = data?.requestId?.toString()
+  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
+      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
+  if(!ipAddress || !requestId || batch.requestId?.toString() != requestId) { return }
+  if(response == null || response.hasError()) {
+    completeQuickTopologySpeaker(ipAddress, requestId)
+    return
+  }
   try {
     GPathResult description = new XmlSlurper().parseText(response.getData()?.toString())
-    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
-    app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-  } catch(Exception e) { logDebug("Could not process topology device description from ${ipAddress}: ${e.message}") }
+    Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
+    Map topologyDevice = devicesByIp[ipAddress] ?: [:]
+    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress,
+        topologyDevice.topologyInfo instanceof Map ? (Map)topologyDevice.topologyInfo : [:], false)
+  } catch(Exception e) {
+    logDebug("Could not process topology device description from ${ipAddress}: ${e.message}")
+  }
+  completeQuickTopologySpeaker(ipAddress, requestId)
+}
+
+void completeQuickTopologySpeaker(String ipAddress, String requestId) {
+  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
+      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
+  if(!requestId || batch.requestId?.toString() != requestId) { return }
+  List<String> pendingIps = batch.pendingIps instanceof Collection
+      ? new ArrayList<String>((Collection<String>)batch.pendingIps) : []
+  pendingIps.remove(ipAddress)
+  if(!pendingIps.isEmpty()) {
+    batch.pendingIps = pendingIps
+    state[QUICK_TOPOLOGY_BATCH_STATE_KEY] = batch
+    return
+  }
+
+  applyQuickTopologyFallbackDevices(batch)
+  state.remove(QUICK_TOPOLOGY_BATCH_STATE_KEY)
+  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
+  logInfo("Sonos topology speaker details complete; refreshing the player page once")
+  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
+}
+
+void applyQuickTopologyFallbackDevices(Map batch) {
+  Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
+  devicesByIp.each { String ipAddress, Map topologyDevice ->
+    Boolean secondary = topologyDevice.secondary == true
+    Map<String, String> topologyInfo = topologyDevice.topologyInfo instanceof Map
+        ? (Map<String, String>)topologyDevice.topologyInfo : [:]
+    String playerId = topologyInfo.UUID?.toString()
+    String primaryDeviceId = topologyDevice.primaryDeviceId?.toString()
+    Map target = secondary ? (Map)discoveredSonosSecondaries : (Map)discoveredSonoses
+    Boolean alreadyKnown = target.values().any { Object raw ->
+      raw instanceof Map && ((Map)raw).deviceIp?.toString() == ipAddress
+    }
+    if(alreadyKnown) { return }
+    String playerName = topologyInfo.ZoneName?.toString() ?: playerId ?: "Sonos speaker at ${ipAddress}"
+    Map fallback = [id: playerId ?: ipAddress, name: playerName,
+      primaryDeviceId: primaryDeviceId, modelName: topologyInfo.ModelName,
+      modelDisplayName: topologyInfo.ModelDisplayName, swGen: topologyInfo.SWGen,
+      capabilities: [], deviceIp: ipAddress, localApiUrl: "https://${ipAddress}:1443/api/v1/",
+      localUpnpUrl: "http://${ipAddress}:1400", localUpnpHost: "${ipAddress}:1400",
+      topologyInfo: topologyInfo]
+    target[ipAddress] = new LinkedHashMap(fallback)
+  }
 }
 
 @CompileStatic
@@ -6167,35 +6317,66 @@ void handleGroupAnnouncementProgress(ChildDeviceWrapper player, Map payload) {
     if(phase == 'FAILED' || phase == 'DISMISSED') { statuses[playerId] = 'DONE' }
     // INTERRUPTED is not terminal here: HIGH priority clips suspend regular
     // clips and the player driver reports ACTIVE again when it resumes them.
-    if(expected && expected.every { String id -> statuses[id] in ['DONE', 'FAILED', 'DISMISSED'] }) {
-      if(active.chimePhase == true) {
-        Map<String, String> ttsStatuses = [:]
-        statuses.each { String id, String status ->
-          if(status == 'DISMISSED') { ttsStatuses[id] = 'DISMISSED' }
-        }
-        active.chimePhase = false
-        active.waitingForSynchronizedTTSRelease = true
-        active.playerStatuses = ttsStatuses
-        queues[groupDni] = queue
-        state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-        runInMillis(100, 'releaseGroupAnnouncementTTSAfterChime', [overwrite: true,
-          data: [groupDni: groupDni, correlationId: correlationId]])
-        return
-      }
-      if(isPrioritySidecar) {
-          queue.remove('priorityActive')
-        queues[groupDni] = queue
-        state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
-        if(!(queue.active instanceof Map)) {
-          runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
-        }
-        return
-      }
-      finishGroupAnnouncement(groupDni, correlationId, 'DONE')
+    if(phase in ['DONE', 'FAILED', 'DISMISSED'] && active.audioClipCompletionGraceStarted != true) {
+      active.audioClipCompletionGraceStarted = true
+      queues[groupDni] = queue
+      state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+      runInMillis(1000, 'completeGroupAnnouncementAfterAudioClipGrace', [overwrite: false,
+        data: [groupDni: groupDni, correlationId: correlationId]])
+      logDebug("Started one-second completion grace for group audioClip ${correlationId}")
     }
   }
   queues[groupDni] = queue
   state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+}
+
+/** Give delayed group-member audioClip callbacks one second before advancing the group queue. */
+void completeGroupAnnouncementAfterAudioClipGrace(Map data = null) {
+  String groupDni = data?.groupDni?.toString()
+  String correlationId = data?.correlationId?.toString()
+  if(!groupDni || !correlationId) { return }
+  Map<String, Map> queues = state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] instanceof Map
+      ? (Map<String, Map>)state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] : [:]
+  Map queue = queues[groupDni] instanceof Map ? (Map)queues[groupDni] : null
+  Map priorityActive = queue?.priorityActive instanceof Map ? (Map)queue.priorityActive : null
+  Boolean isPrioritySidecar = priorityActive?.correlationId?.toString() == correlationId
+  Map active = isPrioritySidecar ? priorityActive : (queue?.active instanceof Map ? (Map)queue.active : null)
+  if(active == null || active.correlationId?.toString() != correlationId || active.mode?.toString() != 'AUDIO_CLIP') { return }
+
+  List<String> expected = normalizeGroupPlayerIds(active.playerIds)
+  Map<String, String> statuses = active.playerStatuses instanceof Map
+      ? (Map<String, String>)active.playerStatuses : [:]
+  List<String> missing = expected.findAll { String id -> !(statuses[id] in ['DONE', 'FAILED', 'DISMISSED']) }
+  if(missing) {
+    logWarn("Group audioClip ${correlationId} completion grace expired; continuing without terminal callbacks from ${missing}")
+    missing.each { String id -> statuses[id] = 'FAILED' }
+    active.playerStatuses = statuses
+  }
+
+  if(active.chimePhase == true) {
+    Map<String, String> ttsStatuses = [:]
+    statuses.each { String id, String status ->
+      if(status == 'DISMISSED') { ttsStatuses[id] = 'DISMISSED' }
+    }
+    active.chimePhase = false
+    active.waitingForSynchronizedTTSRelease = true
+    active.playerStatuses = ttsStatuses
+    queues[groupDni] = queue
+    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    runInMillis(100, 'releaseGroupAnnouncementTTSAfterChime', [overwrite: true,
+      data: [groupDni: groupDni, correlationId: correlationId]])
+    return
+  }
+  if(isPrioritySidecar) {
+    queue.remove('priorityActive')
+    queues[groupDni] = queue
+    state[GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY] = queues
+    if(!(queue.active instanceof Map)) {
+      runInMillis(1, 'startNextGroupAnnouncementCallback', [data: [groupDni: groupDni], overwrite: false])
+    }
+    return
+  }
+  finishGroupAnnouncement(groupDni, correlationId, 'DONE')
 }
 
 /** After the group chime phase completes, release each queued TTS clip in a second coordinated pass. */

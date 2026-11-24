@@ -560,6 +560,7 @@ metadata {
   attribute 'albumArtMedium', 'string'
   attribute 'albumArtLarge', 'string'
   attribute 'audioSource', 'string'
+  attribute 'audioInputFormat', 'string'
   attribute 'audioSourceSignalStatus', 'enum', ['not-ht', 'unknown', 'signal', 'no-signal']
   attribute 'currentAlbumName', 'string'
   attribute 'currentTrackName', 'string'
@@ -794,8 +795,6 @@ Boolean hasLineInCapability() {
 @Field static final String ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY = 'announcementPlaybackSnapshot'
 @Field static final Integer TRANSPORT_WATCHDOG_SECONDS = 4
 @Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
-@Field static final String UPNP_EXPECTED_EVENTS_KEY = 'upnpExpectedSubscriptionEvents'
-@Field static final Integer UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS = 10
 @Field static final List<Long> WS_BACKOFF_STAGE_SECONDS = [600L, 600L, 600L, 7200L, 14400L, 21600L]
 @Field static final List<Integer> WS_BACKOFF_INTERVALS_SECONDS = [30, 60, 120, 300, 900, 1800, 3600]
 @Field static final Integer WS_STALE_TIMEOUT_SECONDS = 900
@@ -963,6 +962,7 @@ Boolean hasLineInCapability() {
   'albumArtMedium',
   'albumArtLarge',
   'audioSource',
+  'audioInputFormat',
   'currentAlbumName',
   'currentTrackName',
   'currentFavorite',
@@ -1128,8 +1128,6 @@ void uninstalled() {
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
-  unschedule('watchExpectedUpnpSubscriptionEvents')
-  runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY)
   clearStaticDriverStateForCurrentDevice()
 }
 void installed() { initialize() }
@@ -3866,7 +3864,6 @@ void parse(String raw) {
         case 'RenderingControl':
           try {
             logDebug('RenderingControl event processing beginning')
-            observeExpectedUpnpSubscriptionEvent('sid2')
             setLastInboundMrRcEvent()
             String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             logZgtXmlAtTrace(rcDni, xmlBody)
@@ -3895,7 +3892,6 @@ void parse(String raw) {
           return
         case 'ContentDirectory':
           try {
-            observeExpectedUpnpSubscriptionEvent('sid6')
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ContentDirectory event payload'); return }
             handleContentDirectoryPayload(xmlBody)
           } catch(Exception e) { logWarn("Ran into an issue parsing ContentDirectory: ${e}") }
@@ -4154,6 +4150,8 @@ Map parseAvtFullSnapshot(String xmlString) {
       playMode: iid['CurrentPlayMode']['@val']?.toString(),
       hasCrossfadeMode: iid['CurrentCrossfadeMode'].size() > 0,
       crossfadeMode: iid['CurrentCrossfadeMode']['@val']?.toString(),
+      hasStreamInfo: findDirectXmlChild(iid, 'streamInfo') != null,
+      streamInfo: findDirectXmlChild(iid, 'streamInfo')?.text()?.toString()?.trim(),
       numberOfTracks: iid['NumberOfTracks']['@val']?.toString(),
       hasTrack: iid['CurrentTrack'].size() > 0,
       track: iid['CurrentTrack']['@val']?.toString(),
@@ -4290,6 +4288,10 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
   if(incoming.hasCrossfadeMode == true && incoming.crossfadeMode?.toString()?.trim()) {
     events << [name: 'currentCrossfadeMode', value: (incoming.crossfadeMode.toString().trim() == '1' ? 'on' : 'off')]
   }
+  if(incoming.hasStreamInfo == true) {
+    String audioFormat = formatSonosAudioInput(incoming.streamInfo?.toString())
+    events << [name: 'audioInputFormat', value: audioFormat]
+  }
   if(incoming.hasNextTrackMetaData == true || (incoming.hasNextTrackURI == true && !incoming.nextTrackURI?.toString())) {
     Boolean nextMetadataEmpty = incoming.hasNextTrackMetaData == true && !incoming.nextTrackMetaDataRaw?.toString()
     Map nextMetadata = incoming.nextTrackMetaData instanceof Map ? (Map)incoming.nextTrackMetaData : [:]
@@ -4306,6 +4308,24 @@ List<Map> buildAvtEvents(Map incoming, Map previous) {
     }
   }
   return events
+}
+
+@CompileStatic
+String formatSonosAudioInput(String rawCode) {
+  String code = rawCode?.trim()
+  if(!code) { return 'Unknown' }
+  switch(code) {
+    case '33554434': return 'Stereo PCM 2.0'
+    case '84934713': return 'Dolby Digital 5.1'
+    case '84934714': return 'Dolby Digital Plus 5.1'
+    case '84934658': return 'Multichannel PCM 5.1'
+    case '84934716': return 'Dolby TrueHD 5.1'
+    case '84934721': return 'DTS 5.1'
+    case '59': return 'Dolby Atmos (DD+)'
+    case '61': return 'Dolby Atmos (TrueHD)'
+    case '63': return 'Dolby Atmos (MAT 2.0)'
+    default: return code
+  }
 }
 
 // The parent notification queue preserves complete AVT batches in arrival order.

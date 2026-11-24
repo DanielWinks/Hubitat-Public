@@ -1648,6 +1648,24 @@ class SonosAdvPlayerSpec extends Specification {
     events.find { Map event -> event.name == 'nextTrackAlbumArtURI' }?.value == '/getaa?s=1&u=next'
   }
 
+  def "AVTransport streamInfo reports the Sonos audio input format label"() {
+    given:
+    String xml = '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/"><InstanceID val="0"><r:streamInfo>84934714</r:streamInfo></InstanceID></Event>') +
+      '</LastChange></property></propertyset>'
+
+    when:
+    Map snapshot = driver.parseAvtFullSnapshot(xml)
+    List<Map> events = driver.buildAvtEvents(snapshot, [:])
+
+    then:
+    snapshot.streamInfo == '84934714'
+    events.find { Map event -> event.name == 'audioInputFormat' }?.value == 'Dolby Digital Plus 5.1'
+    driver.formatSonosAudioInput('84934713') == 'Dolby Digital 5.1'
+    driver.formatSonosAudioInput('63') == 'Dolby Atmos (MAT 2.0)'
+    driver.formatSonosAudioInput('123456') == '123456'
+  }
+
   def "AVT explicitly clears next-track fields when NextTrackMetaData is empty"() {
     given:
     String fragment = '<r:NextTrackMetaData val=""/>'
