@@ -60,6 +60,7 @@ jobs:
           new_version = f"{major}.{minor}.{patch}"
           source_files = [
               "Apps/SonosAdvancedApp.groovy",
+              "Apps/SonosAdvancedDiscoveryApp.groovy",
               "Drivers/Component/SonosAdvPlayer.groovy",
               "Drivers/Component/SonosAdvGroup.groovy",
               "Drivers/Component/SonosAdvSnapshot.groovy",
@@ -90,6 +91,7 @@ jobs:
         with:
           add: |
             Apps/SonosAdvancedApp.groovy
+            Apps/SonosAdvancedDiscoveryApp.groovy
             Drivers/Component/SonosAdvPlayer.groovy
             Drivers/Component/SonosAdvGroup.groovy
             Drivers/Component/SonosAdvSnapshot.groovy

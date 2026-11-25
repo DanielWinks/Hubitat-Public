@@ -141,6 +141,7 @@ class ScriptLoader {
       void section(Object... a) { if (a && a.last() instanceof Closure) ((Closure) a.last()).call() }
       void page(Map args, Closure body = null) { if (body != null) body.call() }
       void input(Object... a) {}
+      void app(Map args) {}
       void paragraph(Object... a) {}
       void label(Map args = [:]) {}
       void path(String p, Closure body) { if (body != null) body.call() }

@@ -145,6 +145,7 @@ jobs:
 
           # Update App version
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Apps/SonosAdvancedApp.groovy
+          sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Apps/SonosAdvancedDiscoveryApp.groovy
 
           # Update all Driver versions
           sed -i "s/version: '$OLD_VERSION'/version: '$NEW_VERSION'/" Drivers/Component/SonosAdvPlayer.groovy
@@ -249,6 +250,7 @@ jobs:
 
           ### Files Updated
           - SonosAdvancedApp.groovy
+          - SonosAdvancedDiscoveryApp.groovy
           - SonosAdvPlayer.groovy
           - SonosAdvGroup.groovy
           - SonosAdvSnapshot.groovy
@@ -266,6 +268,7 @@ jobs:
         with:
           add: |
             Apps/SonosAdvancedApp.groovy
+            Apps/SonosAdvancedDiscoveryApp.groovy
             Drivers/Component/SonosAdvPlayer.groovy
             Drivers/Component/SonosAdvGroup.groovy
             Drivers/Component/SonosAdvSnapshot.groovy
@@ -292,6 +295,7 @@ jobs:
           prerelease: false
           files: |
             Apps/SonosAdvancedApp.groovy
+            Apps/SonosAdvancedDiscoveryApp.groovy
             Drivers/Component/SonosAdvPlayer.groovy
             Drivers/Component/SonosAdvGroup.groovy
             Drivers/Component/SonosAdvSnapshot.groovy

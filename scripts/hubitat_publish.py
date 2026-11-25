@@ -17,7 +17,7 @@ this script (git-ignored), one JSON line per file per run.
 On startup the log is read back to decide what to push:
 
 - If the last recorded result for every SAC file is a success (or
-  there is no usable log yet), all 12 files are pushed.
+  there is no usable log yet), all 13 files are pushed.
 - If any file's last result is a failure (or is missing from the log),
   only those files are attempted, so a failed run can be retried
   quickly. Once that retry makes every file successful, the following
@@ -44,8 +44,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 HUB_HOST = "192.168.1.3"
 
-# SAC = the controller app plus all component drivers. The app is
-# published last. Paths are relative to the repository root.
+# SAC = the discovery child app, controller app, and all component drivers.
+# The controller is published last. Paths are relative to the repository root.
 SAC_FILES = [
     ("Drivers/Component/SonosAdvAlarmManager.groovy", "driver"),
     ("Drivers/Component/SonosAdvAlarmSwitch.groovy", "driver"),
@@ -58,6 +58,7 @@ SAC_FILES = [
     ("Drivers/Component/SonosAdvSecondaries.groovy", "driver"),
     ("Drivers/Component/SonosAdvSleepTimer.groovy", "driver"),
     ("Drivers/Component/SonosAdvSnapshot.groovy", "driver"),
+    ("Apps/SonosAdvancedDiscoveryApp.groovy", "app"),
     ("Apps/SonosAdvancedApp.groovy", "app"),
 ]
 
@@ -259,9 +260,14 @@ def get_hub_version(host, code_type, code_id):
     if status == 200:
         try:
             data = json.loads(body)
-            if data.get("id") == code_id:
-                return data.get("version")
+            # Hubitat returns the code id as a JSON string on some firmware,
+            # while callers may pass an integer from the user-code list.
+            if str(data.get("id")) == str(code_id):
+                version = data.get("version")
+                return int(version) if version is not None else None
         except json.JSONDecodeError:
+            pass
+        except (TypeError, ValueError):
             pass
     return None
 

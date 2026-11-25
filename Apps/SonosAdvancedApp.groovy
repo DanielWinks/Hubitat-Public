@@ -25,6 +25,7 @@ import groovy.transform.Field
 import groovy.transform.CompileStatic
 import com.hubitat.app.ChildDeviceWrapper
 import com.hubitat.app.DeviceWrapper
+import com.hubitat.app.InstalledAppWrapper
 import com.hubitat.app.exception.UnknownDeviceTypeException
 import com.hubitat.hub.domain.Event
 import com.hubitat.hub.domain.Location
@@ -332,29 +333,17 @@ definition(
 
 preferences {
   page(name: 'mainPage', install: true, uninstall: true)
-  page(name: 'legacyBooleanSettingsPage')
-  page(name: 'newUiPage')
-  page(name: 'localPlayerPage')
-  page(name: 'localPlayerSelectionPage')
-  page(name: 'groupPage')
 }
 
 // =============================================================================
 // Fields
 // =============================================================================
-@Field static Map discoveredSonoses = new java.util.concurrent.ConcurrentHashMap()
-@Field static Map discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap()
-@Field static final String DISCOVERED_SONOS_SECONDARIES_STATE_KEY = 'discoveredSonosSecondaries'
-@Field static final String QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY = 'quickTopologyRequestId'
-@Field static final String QUICK_TOPOLOGY_BATCH_STATE_KEY = 'quickTopologyRefreshBatch'
-@Field static final List<String> QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES = [
-  'UUID', 'Location', 'ZoneName', 'Icon', 'Configuration', 'SoftwareGeneration',
-  'MinCompatibleVersion', 'LegacyCompatibleVersion', 'BootSeq', 'TVConfiguration',
-  'WirelessMode', 'HasConfiguredSSID', 'ChannelFreq', 'BehindWifiExtender', 'WifiEnabled',
-  'EthLink', 'VoiceConfigState', 'MicEnabled', 'Invisible', 'HdmiCecAvailable',
-  'HdmiArcAvailable', 'ModelName', 'ModelDisplayName', 'SWGen'
-]
-@Field static final String QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY = 'quickTopologyQueriedDuringDiscovery'
+@Field static final String LEGACY_DISCOVERY_SECONDARIES_STATE_KEY = 'discoveredSonosSecondaries'
+@Field static final String PENDING_PLAYER_PROVISIONING_REQUESTS_KEY = 'pendingPlayerProvisioningRequests'
+@Field static final String PLAYER_PROVISIONING_REQUEST_STATUS_KEY = 'playerProvisioningRequestStatus'
+@Field static final String PENDING_GROUP_CONFIGURATION_REQUESTS_KEY = 'pendingGroupConfigurationRequests'
+@Field static final String DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY = 'discoveryManagementChildInstanceId'
+
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
 @Field static final String LOCAL_CONTROL_RETRY_DATA_KEY = '_localControlRetryRequest'
@@ -441,16 +430,6 @@ preferences {
 @Field static final String CHILD_STATE_DRAIN_DUE_AT_KEY = 'childStateDrainDueAt'
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
 @Field static final String GROUP_STATE_DRAIN_SCHEDULED_KEY = 'groupStateDrainScheduled'
-@Field static final String NEW_UI_GROUP_EDITOR_MODE_KEY = 'newUiGroupEditorMode'
-@Field static final String NEW_UI_GROUP_ORIGINAL_NAME_KEY = 'newUiGroupOriginalName'
-@Field static final String NEW_UI_GROUP_DRAFT_KEY = 'newUiGroupDraft'
-@Field static final String NEW_UI_GROUP_AUTO_NAME_KEY = 'newUiGroupAutoName'
-@Field static final String NEW_UI_GROUP_ERROR_KEY = 'newUiGroupError'
-@Field static final String NEW_UI_GROUP_DELETE_KEY = 'pendingNewUiDeleteGroup'
-@Field static final String NEW_UI_GROUP_TABLE_EVENT = 'newUiGroupsTable'
-@Field static final String NEW_UI_GROUP_EDITOR_EVENT = 'newUiGroupEditor'
-@Field static final String NEW_UI_GROUP_MODE_CREATE = 'create'
-@Field static final String NEW_UI_GROUP_MODE_EDIT = 'edit'
 @Field static Map SOURCES = [
   "\$": "None",
   "x-file-cifs:": "Library",
@@ -506,15 +485,11 @@ preferences {
   CHILD_STATE_DRAIN_DUE_AT_KEY,
   GROUP_STATE_DRAIN_ATTEMPTS_KEY,
   GROUP_STATE_DRAIN_SCHEDULED_KEY,
-  NEW_UI_GROUP_EDITOR_MODE_KEY,
-  NEW_UI_GROUP_ORIGINAL_NAME_KEY,
-  NEW_UI_GROUP_DRAFT_KEY,
-  NEW_UI_GROUP_AUTO_NAME_KEY,
-  NEW_UI_GROUP_ERROR_KEY,
-  NEW_UI_GROUP_DELETE_KEY,
-  DISCOVERED_SONOS_SECONDARIES_STATE_KEY,
-  QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY,
-  QUICK_TOPOLOGY_BATCH_STATE_KEY,
+  LEGACY_DISCOVERY_SECONDARIES_STATE_KEY,
+  PENDING_PLAYER_PROVISIONING_REQUESTS_KEY,
+  PLAYER_PROVISIONING_REQUEST_STATUS_KEY,
+  PENDING_GROUP_CONFIGURATION_REQUESTS_KEY,
+  DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY,
   LOCAL_CONTROL_RETRY_STATE_KEY,
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
   STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
@@ -523,13 +498,6 @@ preferences {
   'alarmManagementPreferencesApplied',
   'sonosAlarmRefreshRequestIds',
   'receivedGroupCommandRequestIds',
-  'groupPageError',
-  'refreshGroupPage',
-  'pendingNewUiDeletePlayer',
-  'playerCreationFeedback',
-  'playerCreationTimestamp',
-  'playerRemovalFeedback',
-  'playerRemovalTimestamp',
   'ttsVoiceRefreshRequestId',
   'logLevel',
   'updateAvailable',
@@ -558,13 +526,10 @@ preferences {
 ]))
 
 @Field static final Set<String> ACTIVE_APP_ATOMIC_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'discoveryRunning',
-  'discoveryEndTime',
-  'discoveryProbeAttempts',
-  'quickTopologyQueriedDuringDiscovery',
 ]))
 
 @Field static final Set<String> ACTIVE_APP_SETTINGS_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  'playerDevices',
   'logLevel',
   'useOldUi',
   'maximumTtsRetention',
@@ -584,7 +549,6 @@ preferences {
   'hubSecurityPassword',
   'libraryIdSMAPI',
   'libraryIdUtilities',
-  'playerDevices',
   'groupDevices',
   'skipOrphanRemoval',
   'descriptionTextEnable',
@@ -629,18 +593,6 @@ List<String> pruneOrphanSettings(Set<String> active) {
   return toRemove
 }
 
-void migrateLegacyAppStateOnce() {
-  // One-release copy: legacy state.* keys that moved to atomicState.
-  // Prune will delete the old state key after this copy lands.
-  ['discoveryRunning', 'discoveryEndTime'].each { String key ->
-    try {
-      if(state[key] != null && atomicState[key] == null) {
-        atomicState[key] = state[key]
-      }
-    } catch(Exception ignored) { }
-  }
-}
-
 // =============================================================================
 // End Fields
 // =============================================================================
@@ -652,6 +604,34 @@ void migrateLegacyAppStateOnce() {
 @CompileStatic
 String getLocalApiPrefix(String ipAddress) {
   return "https://${ipAddress}/api/v1"
+}
+
+Boolean requestSonosPlayerInfo(String ipAddress, String callback, Map callbackData) {
+  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
+    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
+  try {
+    asynchttpGet(callback, params, callbackData ?: [ipAddress: ipAddress])
+    return true
+  } catch(Exception e) {
+    logDebug("Could not dispatch player-info request for ${ipAddress}: ${e.message}")
+    return false
+  }
+}
+
+Boolean requestSonosDeviceDescription(String ipAddress, LinkedHashMap playerInfo, String callback, Map callbackData) {
+  Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3,
+    requestContentType: 'application/xml', contentType: 'application/xml']
+  Map data = new LinkedHashMap(callbackData ?: [:])
+  data.ipAddress = ipAddress
+  data.playerInfo = playerInfo
+  try {
+    asynchttpGet(callback, params, data)
+    return true
+  } catch(Exception e) {
+    logDebug("Could not dispatch device-description request for ${ipAddress}: ${e.message}")
+    return false
+  }
 }
 
 String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
@@ -668,891 +648,46 @@ String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
 // App Pages
 // =============================================================================
 Map mainPage() {
-  applyLogLevelChange()
-  requestQuickTopologyRefresh()
-  applyAlarmManagementPreferenceChanges()
-  Boolean useOldUi = settings.useOldUi == true
-  if(useOldUi) {
-    stopDiscovery()
-  }
-  logDebug("Rendering mainPage; updateAvailable=${state.updateAvailable == true}, latestVersion=${state.latestVersion}, dismissedVersion=${state.dismissedUpdateVersion}, asyncCheckInFlight=${state.updateCheckRequestId != null}")
+  InstalledAppWrapper discoveryChild = ensureDiscoveryManagementChild()
+  String discoveryChildUrl = discoveryChild
+      ? "/installedapp/configure/${discoveryChild.getId()}/discoveryPage" : null
   checkForUpdates()
-  logDebug('mainPage returned from asynchronous update-check dispatch')
-  dynamicPage(title: useOldUi ? 'Sonos Advanced Controller' : '<p hidden>Sonos Advanced Controller</p>') {
-    section {
-      if(useOldUi) {
-        paragraph 'This application provides Advanced Sonos Player control, including announcements and grouping.'
-      }
-      if(state.updateAvailable == true) {
-        if(useOldUi) {
-          String currentVersion = state.installedAppVersion?.toString() ?: getCurrentVersion()
-          section('<b style="color:#ff6b6b">⚠️ Update Available</b>', hideable: false) {
-            paragraph "<b>Version ${state.latestVersion} is available!</b><br/>Current version: ${currentVersion}<br/>Released: ${state.latestReleaseDate}<br/><br/><a href='${state.latestReleaseUrl}' target='_blank'>View Release Notes</a>"
-            input 'btnInstallUpdate', 'button', title: 'Install Update', submitOnChange: false
-            input 'btnDismissUpdate', 'button', title: 'Dismiss', submitOnChange: false
-          }
-        } else {
-          paragraph displayNewUiUpdateNotice()
-        }
-      }
-    }
-
-    if(useOldUi) {
-      section() {
-        href (
-          page: 'localPlayerPage',
-          title: 'Sonos Virtual Player Devices',
-          description: 'Select to create Sonos player devices using local discovery'
-        )
-        href (
-          page: 'groupPage',
-          title: 'Sonos Virtual Group Devices',
-          description: 'Select to create/delete Sonos group devices'
-        )
-      }
-
-      section('Announcement Settings') {
-        input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention',
-          options: [
-            '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
-            '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
-            '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
-            '1440': '24 hours', unlimited: 'Unlimited'
-          ], required: true, defaultValue: '60', submitOnChange: true
-        paragraph 'Maximum time between when a TTS message is submitted on Hubitat and when it is dequeued and sent to the speaker.'
-        input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method',
-          options: [automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting', alwaysCoordinatorStream: 'Always standard stream'],
-          required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
-        input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method',
-          options: [automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting', alwaysCoordinatorStream: 'Always standard stream'],
-          required: true, defaultValue: 'alwaysNonInterrupting', submitOnChange: true
-        paragraph 'Automatic uses synchronized audio clips while the coordinator is playing or when the target players are not already grouped together. Always standard stream plays through the current coordinator group without changing group membership.'
-        input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync',
-          required: false, defaultValue: false, submitOnChange: true
-        if(settings.queueChimeSeparatelyFromTTS == true || settings.queueChimeSeparatelyFromTTS?.toString() == 'true') {
-          paragraph '<span style="color:#ffb020"><b>Warning:</b> This may cause a slight delay between chime and TTS start.</span>'
-        }
-        input 'suppressChimeOnSuccessiveTTS', 'bool', title: 'Suppress chime on successive TTS messages',
-          required: false, defaultValue: false, submitOnChange: true
-        paragraph 'When enabled, queued TTS messages after another TTS announcement start without an additional chime.'
-      }
-
-      section('Alarm Management') {
-        input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?', required: false, defaultValue: false, submitOnChange: true
-        if(settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true') {
-          paragraph 'Creates one household-level Sonos Alarm Manager child device.'
-        }
-        input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?', required: false, defaultValue: false, submitOnChange: true
-        if(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true') {
-          paragraph 'Creates one switch child device for each alarm found on the Sonos household. Alarm changes are sent over the local Sonos UPnP interface.'
-        }
-        paragraph 'Each option takes effect as soon as it is toggled.'
-      }
-
-      section('Logging Settings:', hideable: true) {
-        input 'logLevel', 'enum', title: 'Logging level',
-          options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
-          required: false, defaultValue: getConfiguredLogLevel(), submitOnChange: true
-      }
-    } else {
-      renderNewUiPageContent()
-      section() {
-        paragraph displayCustomSettings()
-      }
-    }
-
-    section('Update Settings:', hideable: true, hidden: true) {
-      paragraph "<span style='color: #ff6b6b;'><b>⚠ Warning:</b> The built-in auto-update functionality should not be used if you manage this app through Hubitat Package Manager (HPM). Using both may cause conflicts, or version mismatches. If you installed via HPM, use HPM to manage updates.</span>"
-      paragraph 'If Hub Login Security is enabled, enter the local hub credentials used by this app.'
-      input 'hubSecurityUsername', 'text', title: 'Hub Login Security username', required: false
-      input 'hubSecurityPassword', 'password', title: 'Hub Login Security password', required: false
-      if(useOldUi) {
-        input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true, submitOnChange: true
-        input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false, submitOnChange: true
-      }
-      if(autoCheckUpdates) {
-        input 'updateCheckFrequency', 'enum', title: 'Check frequency', required: false, defaultValue: 'Daily',
-              options: ['Daily', 'Weekly', 'Manual']
-      }
-      if(autoInstallUpdates) {
-        input 'autoInstallTime', 'time', title: 'Install updates at this time', required: true, defaultValue: '02:00'
-        input 'autoInstallNextOccurrence', 'bool', title: 'Install at next occurrence of selected time (regardless of day)', required: false, defaultValue: false, submitOnChange: true
-        if(!autoInstallNextOccurrence) {
-          input 'autoInstallDayOfWeek', 'enum', title: 'Install on this day of week', required: false, defaultValue: 'Sunday',
-                options: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-        }
-      }
-      input 'btnCheckForUpdates', 'button', title: 'Check for Updates Now', submitOnChange: false
-      if(state.lastUpdateCheckFormatted) {
-        paragraph "Last checked: ${state.lastUpdateCheckFormatted}"
-      }
-
-      input 'btnCheckInstalledVersions', 'button', title: 'Check Versions of Installed Files', submitOnChange: false
-      if(state.lastVersionCheck) {
-        paragraph "Last version check: ${Instant.ofEpochMilli(state.lastVersionCheck as Long).atZone(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(APP_TIMESTAMP_FORMATTER)}"
-      }
-
-      // Show message if update was just completed
-      if(state.updateJustCompleted) {
-        paragraph "<span style='color:green'><b>✓ Update completed successfully!</b></span><br><i>Click 'Check Versions of Installed Files' to verify all files are at the correct version.</i>"
-        state.remove('updateJustCompleted')
-      }
-
-      // Display installed file versions
-      if(state.installedVersions && state.installedVersions.size() > 0) {
-        paragraph "<b>Installed File Versions:</b>"
-        StringBuilder versionList = new StringBuilder('<ul>')
-        state.installedVersions.each { file ->
-          String statusColor = file.status == 'OK' ? 'green' : (file.status == 'Mismatch' ? 'red' : 'gray')
-          String statusIcon = file.status == 'OK' ? '✓' : (file.status == 'Mismatch' ? '✗' : '?')
-          versionList.append("<li><span style='color:${statusColor}'><b>${statusIcon}</b></span> <b>${file.name}</b>: ${file.installedVersion}")
-          if(file.status == 'Mismatch') {
-            versionList.append(" <span style='color:red'>(expected ${file.expectedVersion})</span>")
-          }
-          versionList.append('</li>')
-        }
-        versionList.append('</ul>')
-        paragraph versionList.toString()
-      }
-
-      if(state.versionMismatches && state.versionMismatches.size() > 0) {
-        paragraph "<span style='color:red'><b>⚠ ${state.versionMismatches.size()} Version Mismatch(es) Found</b></span>"
-        input 'btnFixVersionMismatches', 'button', title: 'Update All Mismatched Versions', submitOnChange: false
-      } else if(state.lastVersionCheck && state.versionMismatches != null) {
-        paragraph "<span style='color:green'><b>✓ All installed files are at the correct version</b></span>"
-      }
-
-      // Duplicate cleanup section
-      paragraph "<hr><b>Maintenance</b>"
-      input 'btnCleanupDuplicates', 'button', title: 'Check and Remove Duplicate Apps/Drivers', submitOnChange: false
-      if(state.duplicateCleanupResult) {
-        paragraph "<i>Last cleanup result: ${state.duplicateCleanupResult}</i>"
-      }
-
-      // Library management section
-      paragraph "<hr><b>Library Management</b>"
-      paragraph "<i>Enter the library IDs from your hub's Library Code section to enable library publishing. Find these by going to Apps Code → Libraries in the Hubitat interface.</i>"
-      input 'libraryIdSMAPI', 'number', title: 'SMAPILibrary ID', required: false, submitOnChange: true
-      input 'libraryIdUtilities', 'number', title: 'UtilitiesAndLoggingLibrary ID', required: false, submitOnChange: true
-
-      if(settings.libraryIdSMAPI && settings.libraryIdUtilities) {
-        input 'btnPublishLibraries', 'button', title: 'Publish Libraries to Hub', submitOnChange: false
-        if(state.lastLibraryPublish) {
-          paragraph "<i>Last publish: ${state.lastLibraryPublish}</i>"
-        }
+  dynamicPage(title: 'Sonos Advanced Controller', install: true, uninstall: true) {
+    section('Management') {
+      if(discoveryChildUrl) {
+        href(url: discoveryChildUrl, title: 'Sonos Discovery & Management',
+            description: 'Open speaker discovery, player management, and group tables', style: 'internal')
       } else {
-        paragraph "<i>⚠ Enter both library IDs above to enable library publishing.</i>"
+        paragraph 'The Discovery & Management child app could not be created. Reopen this page to retry.'
       }
     }
-
-    section('Interface Settings:', hideable: true) {
-      if(!useOldUi) {
-        paragraph updateSettingsDisclosureInstaller() + updateSettingsDisclosureControlsStyle()
-      }
-      // This option changes the page structure, so retain its native submit-and-refresh control.
-      input 'useOldUi', 'bool', title: 'Use old UI', required: false, defaultValue: false, submitOnChange: true
-    }
-  }
-}
-
-/** Keep the legacy preference inputs registered on an unlinked page for compatibility. */
-Map legacyBooleanSettingsPage() {
-  dynamicPage(name: 'legacyBooleanSettingsPage', title: 'Legacy Settings', install: false, uninstall: false) {
-    section('') {
-      input 'enableAlarmManagement', 'bool', title: 'Create Sonos Alarm Manager device?', required: false, defaultValue: false
-      input 'enableAlarmSwitches', 'bool', title: 'Create Sonos alarm switch devices?', required: false, defaultValue: false
-      input 'autoCheckUpdates', 'bool', title: 'Automatically check for updates', required: false, defaultValue: true
-      input 'autoInstallUpdates', 'bool', title: 'Automatically install updates', required: false, defaultValue: false
-      input 'maximumTtsRetention', 'enum', title: 'Maximum TTS retention', options: [
-        '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
-        '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
-        '180': '3 hours', '240': '4 hours', '360': '6 hours', '720': '12 hours',
-        '1440': '24 hours', unlimited: 'Unlimited'
-      ], required: true, defaultValue: '60'
-      input 'groupAnnouncementMode', 'enum', title: 'Normal priority announcement method', options: [
-        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
-        alwaysCoordinatorStream: 'Always standard stream'
-      ], required: true, defaultValue: 'alwaysNonInterrupting'
-      input 'highPriorityAnnouncementMode', 'enum', title: 'High priority announcement method', options: [
-        automatic: 'Automatic', alwaysNonInterrupting: 'Always non-interrupting',
-        alwaysCoordinatorStream: 'Always standard stream'
-      ], required: true, defaultValue: 'alwaysNonInterrupting'
-      input 'queueChimeSeparatelyFromTTS', 'bool', title: 'Queue chime separately from TTS for better sync', required: false, defaultValue: false
-      input 'suppressChimeOnSuccessiveTTS', 'bool', title: 'Suppress chime on successive TTS messages', required: false, defaultValue: false
+    section('Logging') {
       input 'logLevel', 'enum', title: 'Logging level',
         options: [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off'],
-        required: false, defaultValue: getConfiguredLogLevel()
+        required: false, defaultValue: 'info', submitOnChange: true
+    }
+    if(state.updateAvailable == true) {
+      section('Update Available') {
+        paragraph displayNewUiUpdateNotice()
+      }
     }
   }
 }
 
-Map newUiPage() {
-  requestQuickTopologyRefresh()
-  dynamicPage(
-    name: 'newUiPage',
-    title: 'Player Devices',
-    nextPage: 'mainPage',
-    install: false,
-    uninstall: false,
-    refreshInterval: 0
-  ) {
-    renderNewUiPageContent()
+InstalledAppWrapper ensureDiscoveryManagementChild() {
+  String childAppName = 'Sonos Advanced Controller - Discovery & Management'
+  List<InstalledAppWrapper> childApps = getChildApps() as List<InstalledAppWrapper>
+  InstalledAppWrapper child = childApps?.find { candidate ->
+    candidate.getName() == childAppName
   }
-}
-
-void renderNewUiPageContent() {
-  section() {
-    paragraph displayNewUiSpeakerTable()
-  }
-
-  if(state.pendingNewUiDeletePlayer) {
-    String pendingPlayerKey = state.pendingNewUiDeletePlayer as String
-    Map pendingPlayer = buildNewUiSpeakerRows().find { Map row ->
-      String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
-      rowKey == pendingPlayerKey
-    }
-    String pendingPlayerName = pendingPlayer?.name?.toString() ?: pendingPlayerKey
-    String safePendingPlayerName = escapeNewUiHtml(pendingPlayerName)
-    String safePendingPlayerKey = escapeNewUiHtml(pendingPlayerKey)
-    section() {
-      paragraph "<b style='color:#F44336'>Are you sure you want to remove '${safePendingPlayerName}' (${safePendingPlayerKey})?</b>"
-      input 'btnConfirmNewUiDeletePlayer', 'button', title: 'Yes, Remove Speaker', submitOnChange: true
-      input 'btnCancelNewUiDeletePlayer', 'button', title: 'Cancel', submitOnChange: true
-    }
-  }
-
-  if(state[NEW_UI_GROUP_DELETE_KEY]) {
-    Map pendingGroup = findNewUiGroupByToken(state[NEW_UI_GROUP_DELETE_KEY] as String)
-    String pendingGroupName = pendingGroup?.name?.toString() ?: state[NEW_UI_GROUP_DELETE_KEY].toString()
-    String safePendingGroupName = escapeNewUiHtml(pendingGroupName)
-    section() {
-      paragraph "<b style='color:#F44336'>Are you sure you want to remove the Sonos group '${safePendingGroupName}'?</b>"
-      input 'btnConfirmNewUiDeleteGroup', 'button', title: 'Yes, Remove Group', submitOnChange: true
-      input 'btnCancelNewUiDeleteGroup', 'button', title: 'Cancel', submitOnChange: true
-    }
-  }
-
-  section() {
-    if(state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
-      Map groupDraft = getNewUiGroupDraft()
-      List<ChildDeviceWrapper> groupPlayers = getCurrentPlayerDevices()
-      Map<String, String> groupPlayerOptions = groupPlayers.collectEntries { ChildDeviceWrapper player ->
-        String id = player.getDataValue('id')?.toString()
-        id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
-      }
-      String groupCoordinator = getNewUiGroupCoordinator(groupDraft)
-      List<String> groupFollowers = getNewUiGroupFollowers(groupDraft)
-      Map<String, String> groupSwGen = groupPlayers.collectEntries { ChildDeviceWrapper player ->
-        String id = player.getDataValue('id')?.toString()
-        id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
-      }
-      String selectedCoordinatorSwGen = groupSwGen[groupCoordinator]
-      Map<String, String> compatibleFollowerOptions = groupPlayerOptions.findAll { String id, String ignored ->
-        id != groupCoordinator && (!selectedCoordinatorSwGen || !groupSwGen[id] || groupSwGen[id] == selectedCoordinatorSwGen || groupFollowers.contains(id))
-      }
-      input name: 'newUiGroupName', type: 'text', title: 'Group name', defaultValue: settings.newUiGroupName?.toString() ?: '', submitOnChange: true
-      input name: 'newUiGroupCoordinator', type: 'enum', title: 'Coordinator', options: groupPlayerOptions, defaultValue: groupCoordinator, submitOnChange: true, offerAll: false
-      input name: 'newUiGroupFollowers', type: 'enum', title: 'Followers', options: compatibleFollowerOptions, multiple: true, defaultValue: groupFollowers, submitOnChange: true, offerAll: false
-      paragraph displayNewUiGroupEditor()
-    }
-
-    paragraph displayNewUiGroupTable()
-  }
-}
-
-void startDiscoverySession() {
-  if(atomicState.discoveryRunning != true) {
-    logDebug('Starting a new discovery session; clearing per-session probe reservations')
-    atomicState.remove(QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY)
-    subscribeToSsdpEvents(location)
-    atomicState.discoveryRunning = true
-    ssdpDiscover()
-    atomicState.discoveryEndTime = Instant.ofEpochMilli(now()).plus(Duration.ofMinutes(1)).toEpochMilli()
-    app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-    runIn(60, 'stopDiscovery')
-    runIn(1, 'updateDiscoveryTimer')
-    app.sendEvent(name: 'discoveryTimer', value: 'Discovery started')
-  }
-}
-
-String displayNewUiSpeakerTable() {
-  String css = """
-    <style>
-      .mdl-grid:has(.sonos-update-card) { padding-bottom: 0 !important; }
-      .mdl-cell:has(.sonos-update-card) { margin-bottom: 0 !important; }
-      .sonos-update-card { margin-bottom: 0 !important; }
-      .mdl-grid:has(.new-ui-device-card) { padding-top: 0 !important; }
-      .mdl-cell:has(.new-ui-device-card) { margin-top: 0 !important; }
-      .new-ui-device-card {
-        background: var(--surface-card, var(--surface-a, #fff));
-        border: 1px solid var(--surface-border, #dedede);
-        border-radius: 12px;
-        box-shadow: 0 2px 10px rgba(25, 35, 55, .07);
-        color: var(--text-color, #30343b);
-        margin: 0 0 18px;
-        overflow: hidden;
-      }
-      .new-ui-device-toolbar {
-        align-items: center;
-        background: var(--surface-b, #f7f8fa);
-        border-bottom: 1px solid var(--surface-border, #e5e7eb);
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-        justify-content: space-between;
-        padding: 15px 18px;
-        position: relative;
-      }
-      .new-ui-device-toolbar-container { border-bottom: 1px solid var(--surface-border, #e5e7eb); }
-      .new-ui-device-toolbar > span[class*='discoveryTimer'] {
-        align-items: center;
-        display: flex;
-        flex: 1 1 auto;
-        flex-wrap: wrap;
-        gap: 16px;
-        justify-content: space-between;
-        min-width: 0;
-      }
-      .new-ui-discovery-status {
-        align-items: center;
-        display: flex;
-        gap: 11px;
-        min-width: 220px;
-      }
-      .new-ui-discovery-indicator {
-        background: #9aa2ad;
-        border-radius: 50%;
-        flex: 0 0 10px;
-        height: 10px;
-        width: 10px;
-      }
-      .new-ui-discovery-indicator-running {
-        animation: new-ui-discovery-pulse 1.6s ease-in-out infinite;
-        background: #16a36a;
-        box-shadow: 0 0 0 4px rgba(22, 163, 106, .12);
-      }
-      @keyframes new-ui-discovery-pulse {
-        50% { box-shadow: 0 0 0 7px rgba(22, 163, 106, .04); }
-      }
-      .new-ui-discovery-copy { line-height: 1.35; }
-      .new-ui-discovery-title { font-size: 15px; font-weight: 650; }
-      .new-ui-device-section-title {
-        color: var(--text-color, #30343b);
-        flex: 1 1 auto;
-        font-size: 17px;
-        font-weight: 650;
-        text-align: center;
-      }
-      .new-ui-discovery-detail {
-        color: var(--text-color-secondary, #6b7280);
-        font-size: 12px;
-        margin-top: 2px;
-      }
-      .new-ui-device-toolbar .form-group:has(input[name='btnNewUiDiscoverSpeakers']) { display: none !important; }
-      .new-ui-discovery-button {
-        align-items: center;
-        background: #4054b2;
-        border: 1px solid #4054b2;
-        border-radius: 8px;
-        color: #fff;
-        cursor: pointer;
-        display: inline-flex;
-        font-size: 14px;
-        font-weight: 600;
-        gap: 9px;
-        line-height: 1.2;
-        padding: 10px 14px;
-        transition: background .15s ease, box-shadow .15s ease, transform .15s ease;
-      }
-      .new-ui-discovery-button:hover { background: #34479e; box-shadow: 0 2px 6px rgba(52, 71, 158, .2); }
-      .new-ui-discovery-button:active { transform: translateY(1px); }
-      .new-ui-discovery-button:focus-visible { outline: 2px solid #1a77c9; outline-offset: 2px; }
-      .new-ui-discovery-button svg { height: 16px; width: 16px; }
-      #new-ui-speaker-table-wrapper {
-        display: block;
-        overflow-x: auto;
-        padding: 0 !important;
-        width: 100%;
-      }
-
-      /* Keep only the group editor's action buttons on one row. */
-      .form-group:has(input[name='settings[btnNewUiSaveGroup]']),
-      .form-group:has(input[name='settings[btnNewUiCancelGroup]']) {
-        display: inline-block !important;
-        width: auto !important;
-        margin: 8px 8px 0 0 !important;
-        vertical-align: top;
-      }
-
-      .mdl-cell:has(input[name='settings[btnNewUiSaveGroup]']),
-      .mdl-cell:has(input[name='settings[btnNewUiCancelGroup]']),
-      .mdl-cell:has(button[name='settings[btnNewUiSaveGroup]']),
-      .mdl-cell:has(button[name='settings[btnNewUiCancelGroup]']) {
-        display: inline-block !important;
-        width: auto !important;
-        margin: 8px 8px 0 0 !important;
-        vertical-align: top;
-      }
-
-      input[name='settings[btnNewUiSaveGroup]'],
-      input[name='settings[btnNewUiCancelGroup]'],
-      button[name='settings[btnNewUiSaveGroup]'],
-      button[name='settings[btnNewUiCancelGroup]'] {
-        display: inline-block !important;
-        width: auto !important;
-      }
-      #new-ui-speaker-table {
-        background-color: var(--surface-card, var(--surface-a, #ffffff));
-        border: 0;
-        border-collapse: separate;
-        border-spacing: 0;
-        border-radius: 0;
-        color: var(--text-color, #424242);
-        min-width: 760px;
-        width: 100%;
-      }
-      #new-ui-speaker-table th,
-      #new-ui-speaker-table td {
-        background-color: var(--surface-card, var(--surface-a, #ffffff));
-        border-bottom: 1px solid var(--surface-border, #EEEEEE);
-        border-right: 0;
-        color: var(--text-color, #424242);
-        font-size: 14px !important;
-        padding: 12px 14px !important;
-        text-align: center;
-      }
-      #new-ui-speaker-table thead {
-        background-color: var(--surface-b, #F5F5F5);
-      }
-      #new-ui-speaker-table th {
-        background-color: var(--surface-b, #F5F5F5);
-        border-bottom: 1px solid var(--surface-border, #E0E0E0);
-        color: var(--text-color, #424242);
-        font-size: 14px !important;
-        font-weight: 500;
-        padding: 11px 14px !important;
-        text-align: center;
-        white-space: nowrap;
-      }
-      #new-ui-speaker-table th.new-ui-speaker-name,
-      #new-ui-speaker-table th.new-ui-secondary-speakers {
-        text-align: left;
-      }
-      #new-ui-speaker-table .new-ui-table-toolbar-cell {
-        background: var(--surface-b, #f7f8fa);
-        padding: 0 18px !important;
-        text-align: left;
-      }
-      #new-ui-speaker-table tbody tr:hover {
-        background-color: var(--surface-hover, #f8f9fc) !important;
-      }
-      #new-ui-speaker-table tbody tr:last-child td {
-        border-bottom: 0;
-      }
-      #new-ui-speaker-table td:first-child .form-group {
-        display: none;
-      }
-      #new-ui-speaker-table td:first-child .submitOnChange {
-        line-height: 20px;
-        vertical-align: middle;
-      }
-      #new-ui-speaker-table .new-ui-speaker-name {
-        min-width: 170px;
-        text-align: left;
-      }
-      #new-ui-speaker-table .new-ui-speaker-name a {
-        color: #2196F3;
-        text-decoration: none;
-      }
-      #new-ui-speaker-table .new-ui-speaker-name a:hover {
-        text-decoration: underline;
-      }
-      #new-ui-speaker-table .new-ui-speaker-detail {
-        color: var(--text-color-secondary, #666666);
-        font-size: 11px;
-        margin-top: 3px;
-        text-align: left;
-      }
-      #new-ui-speaker-table .new-ui-secondary-speakers {
-        min-width: 190px;
-        text-align: left;
-      }
-      #new-ui-speaker-table .new-ui-secondary-count {
-        color: var(--text-color, #424242);
-        font-size: 11px;
-        font-weight: 600;
-        margin-bottom: 3px;
-        text-align: left;
-      }
-      #new-ui-speaker-table .new-ui-secondary-entry {
-        color: var(--text-color, #424242);
-        font-size: 12px;
-        line-height: 1.25;
-        text-align: left;
-      }
-      #new-ui-speaker-table .new-ui-secondary-entry + .new-ui-secondary-entry {
-        border-top: 1px solid var(--surface-border, #EEEEEE);
-        margin-top: 4px;
-        padding-top: 4px;
-      }
-      #new-ui-speaker-table .new-ui-secondary-detail {
-        color: var(--text-color-secondary, #757575);
-        font-size: 10px;
-      }
-      #new-ui-speaker-table .new-ui-status {
-        display: inline-block;
-        font-weight: 600;
-        white-space: nowrap;
-      }
-      #new-ui-speaker-table .new-ui-status-active {
-        color: #2e7d32;
-      }
-      #new-ui-speaker-table .new-ui-status-inactive {
-        color: #c62828;
-      }
-      #new-ui-speaker-table .new-ui-status-unknown,
-      #new-ui-speaker-table .new-ui-status-na {
-        color: var(--text-color-secondary, #757575);
-      }
-      #new-ui-speaker-table .new-ui-action-cell {
-        padding-left: 12px !important;
-        padding-right: 12px !important;
-        width: 64px;
-      }
-      #new-ui-speaker-table .new-ui-group-action-cell {
-        padding-left: 12px !important;
-        padding-right: 12px !important;
-        width: 110px;
-      }
-      .new-ui-mobile-list { display: none; }
-      .new-ui-mobile-record { border-bottom: 1px solid var(--surface-border, #e5e7eb); padding: 14px 16px; }
-      .new-ui-mobile-record:last-child { border-bottom: 0; }
-      .new-ui-mobile-field { align-items: flex-start; display: flex; gap: 12px; padding: 5px 0; }
-      .new-ui-mobile-label { color: var(--text-color-secondary, #6b7280); flex: 0 0 34%; font-size: 12px; font-weight: 600; }
-      .new-ui-mobile-value { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; text-align: left; }
-      .new-ui-mobile-value .new-ui-speaker-detail { overflow-wrap: anywhere; }
-      .new-ui-mobile-actions { align-items: center; display: flex; gap: 14px; }
-      .new-ui-mobile-record .form-group { display: none !important; }
-      .new-ui-mobile-action-button { align-items: center; border: 1px solid transparent; border-radius: 7px; box-sizing: border-box; display: inline-flex !important; font-size: 13px !important; font-weight: 600; justify-content: center; line-height: 1.2; min-height: 38px; padding: 9px 15px; text-decoration: none; }
-      .new-ui-mobile-remove-button { background: var(--surface-b, #fff); border-color: #d84a45; color: #c83d38 !important; }
-      .new-ui-mobile-create-group-button { background: #4054b2; border-color: #4054b2; color: #fff !important; }
-      .new-ui-mobile-speaker-primary { font-size: 16px; line-height: 1.45; text-align: center; }
-      .new-ui-mobile-speaker-primary .new-ui-speaker-detail { color: var(--text-color-secondary, #6b7280); font-size: 13px; overflow-wrap: anywhere; }
-      .new-ui-mobile-secondary-box { border: 1px solid var(--surface-border, #cfd3da); border-radius: 9px; margin: 12px auto; max-width: 100%; padding: 10px 12px; text-align: center; }
-      .new-ui-mobile-secondary-title { color: var(--text-color-secondary, #6b7280); font-size: 12px; font-weight: 650; margin: 0 auto 7px; }
-      .new-ui-mobile-secondary-box .new-ui-secondary-count,
-      .new-ui-mobile-secondary-box .new-ui-secondary-entry,
-      .new-ui-mobile-secondary-box .new-ui-secondary-detail { text-align: center; }
-      .new-ui-mobile-secondary-box .new-ui-secondary-detail { color: var(--text-color-secondary, #6b7280); font-size: 11px !important; overflow-wrap: anywhere; }
-      .new-ui-mobile-ip { color: var(--text-color, #30343b); font-size: 14px; text-align: center; }
-      .new-ui-mobile-ip-label { color: var(--text-color-secondary, #6b7280); font-size: 12px; font-weight: 650; }
-      .new-ui-mobile-create-group { display: flex; justify-content: center; margin-top: 10px; }
-      .new-ui-mobile-empty { color: var(--text-color-secondary, #6b7280); padding: 16px; }
-      @media (max-width: 640px) {
-        .new-ui-speaker-mobile-list .new-ui-mobile-record { padding: 16px 14px; text-align: center; }
-        .new-ui-mobile-field { align-items: center; flex-direction: column; gap: 3px; padding: 7px 0; text-align: center; }
-        .new-ui-mobile-label { flex: 0 0 auto; }
-        .new-ui-mobile-value { flex: 1 1 auto; text-align: center; width: 100%; }
-        #new-ui-speaker-table-wrapper,
-        #new-ui-speaker-table-wrapper > div { overflow: visible !important; }
-        #new-ui-speaker-table-wrapper { display: none !important; }
-        .new-ui-speaker-mobile-list { display: block !important; }
-        .new-ui-device-toolbar {
-          align-items: stretch;
-          box-sizing: border-box;
-          flex-direction: column;
-          gap: 10px;
-          padding: 12px 14px !important;
-        }
-        .new-ui-device-toolbar > div[style='display:inline-block'] { display: block !important; width: 100%; }
-        .new-ui-device-toolbar > span[class*='discoveryTimer'] { align-items: stretch; flex-direction: column; gap: 10px; width: 100%; }
-        .new-ui-device-section-title { order: 1; }
-        .new-ui-device-toolbar > span[class*='discoveryTimer'] > .new-ui-discovery-status { order: 2; }
-        .new-ui-device-toolbar > span[class*='discoveryTimer'] > .new-ui-discovery-button { order: 3; }
-        .new-ui-device-toolbar > span[class*='discoveryTimer'] > div[style='display:inline-block'] { display: block !important; width: 100%; }
-        .new-ui-discovery-button { justify-content: center; width: 100%; }
-      }
-    </style>
-  """
-  String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-  return "${css.trim()}${iconifyScript}<div class='new-ui-device-card'><div class='new-ui-device-toolbar-container'><div class='new-ui-device-toolbar'><span class='ssr-app-state-${app.id}-discoveryTimer'>${renderNewUiDiscoveryTimerMarkup()}</span></div></div><span class='ssr-app-state-${app.id}-newUiSpeakerTable'><div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>${renderNewUiSpeakerMobileListMarkup()}</span></div>"
-}
-
-String renderNewUiSpeakerTableMarkup() {
-  List<Map> rows = buildNewUiSpeakerRows()
-  StringBuilder html = new StringBuilder()
-  html.append("<div><table id='new-ui-speaker-table' class='mdl-data-table'>")
-  html.append('<thead><tr>')
-  html.append('<th>Action</th>')
-  html.append("<th class='new-ui-speaker-name'>Speaker</th>")
-  html.append("<th class='new-ui-secondary-speakers'>Secondary Speakers</th>")
-  html.append('<th>Network</th>')
-  html.append('<th>Create Group From</th>')
-  html.append('</tr></thead><tbody>')
-
-  if(rows.isEmpty()) {
-    html.append("<tr><td colspan='5'>No primary Sonos speakers have been discovered yet.</td></tr>")
-  } else {
-    rows.each { Map row ->
-      String safeName = escapeNewUiHtml(row.name)
-      String safeModel = escapeNewUiHtml(row.model)
-      String safeId = escapeNewUiHtml(row.id)
-      String safeIp = escapeNewUiHtml(row.ip ?: 'Unknown')
-      String childDeviceId = row.player?.id?.toString()
-      if(row.created == true && childDeviceId) {
-        safeName = deviceEditLink(childDeviceId, safeName)
-      }
-      String detail = [safeModel, safeId]
-          .findAll { String value -> value }
-          .join(' &middot; ')
-
-      html.append('<tr>')
-      html.append("<td class='new-ui-action-cell' data-label='Action'>${renderNewUiCreatedStatus(row)}</td>")
-      html.append("<td class='new-ui-speaker-name' data-label='Speaker'><strong>${safeName}</strong>")
-      if(detail) {
-        html.append("<div class='new-ui-speaker-detail'>${detail}</div>")
-      }
-      html.append('</td>')
-      html.append("<td class='new-ui-secondary-speakers' data-label='Secondary speakers'>${renderNewUiSecondaryDevices(row)}</td>")
-      html.append("<td data-label='Network'>${safeIp}</td>")
-      html.append("<td class='new-ui-group-action-cell' data-label='Create group from'>${renderNewUiCreateGroupStatus(row)}</td>")
-      html.append('</tr>')
-    }
-  }
-
-  html.append('</tbody></table></div>')
-  return html.toString()
-}
-
-String renderNewUiSpeakerMobileListMarkup() {
-  List<Map> rows = buildNewUiSpeakerRows()
-  StringBuilder html = new StringBuilder("<div id='new-ui-speaker-mobile-list' class='new-ui-mobile-list new-ui-speaker-mobile-list'>")
-  if(rows.isEmpty()) {
-    html.append("<div class='new-ui-mobile-empty'>No primary Sonos speakers have been discovered yet.</div>")
-  } else {
-    rows.each { Map row ->
-      String safeName = escapeNewUiHtml(row.name)
-      String safeModel = escapeNewUiHtml(row.model)
-      String safeId = escapeNewUiHtml(row.id)
-      String safeIp = escapeNewUiHtml(row.ip ?: 'Unknown')
-      String childDeviceId = row.player?.id?.toString()
-      if(row.created == true && childDeviceId) {
-        safeName = deviceEditLink(childDeviceId, safeName)
-      }
-      String detail = [safeModel, safeId].findAll { String value -> value }.join(' &middot; ')
-      String speakerMarkup = "<strong>${safeName}</strong>" + (detail ? "<div class='new-ui-speaker-detail'>${detail}</div>" : '')
-      String actionKey = row.discoveryKey?.toString() ?: row.id?.toString()
-      String playerAction
-      if(row.created == true) {
-        playerAction = newUiButtonLink("newUiMobileDeletePlayer|${actionKey}", 'Remove', '#c83d38', '13px', 'Remove speaker', 'new-ui-mobile-action-button new-ui-mobile-remove-button')
-      } else {
-        playerAction = newUiButtonLink("newUiMobileCreatePlayer|${actionKey}", 'Add speaker', '#4054b2', '13px', 'Create speaker', 'new-ui-mobile-action-button new-ui-mobile-create-group-button')
-      }
-      String groupAction = '<span class="new-ui-status new-ui-status-na">—</span>'
-      if(row.created == true && row.id) {
-        groupAction = newUiButtonLink("newUiMobileCreateGroup|${row.id}", 'Create Group From', '#fff', '13px', 'Create group from speaker', 'new-ui-mobile-action-button new-ui-mobile-create-group-button')
-      }
-      html.append("<article class='new-ui-mobile-record'><div class='new-ui-mobile-speaker-primary'>${speakerMarkup}</div>")
-      html.append("<div class='new-ui-mobile-create-group'>${playerAction}</div>")
-      html.append("<section class='new-ui-mobile-secondary-box'><div class='new-ui-mobile-secondary-title'>Secondary Speakers</div>${renderNewUiSecondaryDevices(row)}</section>")
-      html.append("<div class='new-ui-mobile-ip'><span class='new-ui-mobile-ip-label'>IP:</span> ${safeIp}</div>")
-      html.append("<div class='new-ui-mobile-create-group'>${groupAction}</div></article>")
-    }
-  }
-  html.append('</div>')
-  return html.toString()
-}
-
-List<Map> buildNewUiSpeakerRows() {
-  restoreDiscoveredSonosSecondaries()
-  LinkedHashMap<String, Map> rowsById = new LinkedHashMap<String, Map>()
-  List<ChildDeviceWrapper> installedPlayers = getCurrentPlayerDevices()
-  Map<String, String> installedSecondaryOwners = [:]
-  installedPlayers.each { ChildDeviceWrapper player ->
-    String primaryId = player.getDataValue('id')?.toString()
-    String secondaryIds = player.getDataValue('secondaryIds')?.toString()
-    if(primaryId && secondaryIds) {
-      secondaryIds.split(',').each { String secondaryId ->
-        String normalizedSecondaryId = secondaryId?.trim()
-        if(normalizedSecondaryId) { installedSecondaryOwners[normalizedSecondaryId] = primaryId }
-      }
-    }
-  }
-  Map<String, List<Map>> installedSecondaryDetails = [:].withDefault { [] }
-
-  discoveredSonoses.each { Object discoveryKey, Object rawInfo ->
-    Map info = rawInfo instanceof Map ? (Map)rawInfo : [:]
-    String discoveryId = discoveryKey?.toString()
-    String playerId = info.id?.toString() ?: discoveryId
-    if(playerId) {
-      String installedOwnerId = installedSecondaryOwners[playerId]
-      if(installedOwnerId) {
-        Map secondaryInfo = new LinkedHashMap(info)
-        secondaryInfo.primaryDeviceId = installedOwnerId
-        installedSecondaryDetails[installedOwnerId].add(secondaryInfo)
-        return
-      }
-      rowsById[playerId] = [
-        id: playerId,
-        discoveryKey: discoveryId,
-        name: info.name?.toString() ?: playerId,
-        model: (info.modelDisplayName ?: info.modelName)?.toString(),
-        ip: (info.deviceIp ?: info.ipAddress)?.toString(),
-        secondaryDevices: getNewUiSecondaryDevices(playerId),
-        created: false,
-        player: null
-      ]
-    }
-  }
-
-  installedPlayers.each { ChildDeviceWrapper player ->
-    String playerId = player.getDataValue('id')?.toString() ?: player.getDeviceNetworkId()?.toString()
-    if(playerId) {
-      Map row = rowsById[playerId] ?: [
-        id: playerId,
-        discoveryKey: player.getDeviceNetworkId()?.toString(),
-        name: playerId,
-        model: null,
-        ip: null,
-        secondaryDevices: getNewUiSecondaryDevices(playerId),
-        created: false,
-        player: null
-      ]
-      row.created = true
-      row.player = player
-      row.name = player.getDataValue('name')?.toString() ?: player.label?.toString() ?: row.name
-      row.model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString() ?: row.model
-      row.ip = (player.getDataValue('deviceIp') ?: player.getDataValue('localUpnpHost'))?.toString() ?: row.ip
-      row.discoveryKey = row.discoveryKey ?: player.getDeviceNetworkId()?.toString()
-      List<Map> secondaryDevices = getNewUiSecondaryDevices(playerId)
-      (installedSecondaryDetails[playerId] ?: []).each { Map secondary ->
-        if(!secondaryDevices.any { Map existing -> existing.id?.toString() == secondary.id?.toString() }) {
-          secondaryDevices.add(secondary)
-        }
-      }
-      row.secondaryDevices = secondaryDevices
-      rowsById[playerId] = row
-    }
-  }
-
-  List<Map> rows = new ArrayList<Map>(rowsById.values())
-  rows.sort { Map left, Map right ->
-    left.name.toString().compareToIgnoreCase(right.name.toString())
-  }
-  return rows
-}
-
-List<Map> getNewUiSecondaryDevices(String primaryPlayerId) {
-  List<Map> secondaries = []
-  discoveredSonosSecondaries.each { Object ignored, Object rawInfo ->
-    Map info = rawInfo instanceof Map ? (Map)rawInfo : [:]
-    if(info.primaryDeviceId?.toString() == primaryPlayerId) {
-      secondaries.add(info)
-    }
-  }
-  secondaries.sort { Map left, Map right ->
-    String leftName = (left.modelDisplayName ?: left.modelName ?: left.id ?: '').toString()
-    String rightName = (right.modelDisplayName ?: right.modelName ?: right.id ?: '').toString()
-    leftName.compareToIgnoreCase(rightName)
-  }
-  return secondaries
-}
-
-String renderNewUiSecondaryDevices(Map row) {
-  List<Map> secondaries = row.secondaryDevices instanceof List
-      ? (List<Map>)row.secondaryDevices
-      : []
-  if(secondaries.isEmpty()) {
-    return newUiStatusBadge('—', 'na', 'No discovered secondary speakers')
-  }
-
-  StringBuilder html = new StringBuilder()
-  html.append("<div class='new-ui-secondary-count'>${secondaries.size()} discovered</div>")
-  secondaries.each { Map secondary ->
-    String name = (secondary.modelDisplayName ?: secondary.modelName ?: 'Secondary speaker').toString()
-    String id = secondary.id?.toString()
-    String ip = (secondary.deviceIp ?: secondary.localUpnpHost)?.toString()
-    String detail = [ip, id]
-        .findAll { Object value -> value }
-        .collect { Object value -> escapeNewUiHtml(value) }
-        .join(' &middot; ')
-    html.append("<div class='new-ui-secondary-entry'><strong>${escapeNewUiHtml(name)}</strong>")
-    if(detail) {
-      html.append("<div class='new-ui-secondary-detail'>${detail}</div>")
-    }
-    html.append('</div>')
-  }
-  return html.toString()
-}
-
-String renderNewUiUpnpStatus(Map row, String sid, Boolean groupedOnly = false) {
-  if(row.created != true || row.player == null) {
-    return newUiStatusBadge('Not created', 'na', 'Create the Hubitat player before checking subscriptions')
-  }
-
-  if(groupedOnly) {
-    try {
-      Object grouped = row.player.currentValue('isGrouped', true)
-      if(grouped != null && grouped.toString().toLowerCase(Locale.ROOT) in ['off', 'false']) {
-        return newUiStatusBadge('Not required', 'na', 'This subscription is only needed while grouped')
-      }
-    } catch(Exception ignored) {
-      // Fall through to the subscription validity check when group state is unavailable.
-    }
-  }
+  if(child) { return child }
 
   try {
-    Boolean valid = row.player.subValid(sid) as Boolean
-    return valid
-        ? newUiStatusBadge('Active', 'active', "${sid} is within its current renewal window")
-        : newUiStatusBadge('Inactive', 'inactive', "${sid} is not currently valid")
+    return app.addChildApp('dwinks', childAppName, 'Sonos Discovery & Management')
   } catch(Exception e) {
-    logDebug("Could not read ${sid} status for ${row.id}: ${e.message}")
-    return newUiStatusBadge('Unknown', 'unknown', "${sid} status is unavailable")
+    logError("Could not create the Discovery & Management child app: ${e.message}")
+    return null
   }
-}
-
-String renderNewUiWebSocketStatus(Map row) {
-  if(row.created != true || row.player == null) {
-    return newUiStatusBadge('Not created', 'na', 'Create the Hubitat player before checking WebSocket state')
-  }
-
-  Object status = null
-  try {
-    status = row.player.getDataValue('websocketStatus')
-    if(!status && row.player.respondsTo('getWebSocketStatus')) {
-      status = row.player.getWebSocketStatus()
-    }
-  } catch(Exception e) {
-    logDebug("Could not read WebSocket status for ${row.id}: ${e.message}")
-  }
-
-  String normalized = status?.toString()?.trim()?.toLowerCase(Locale.ROOT)
-  if(normalized == 'open') {
-    return newUiStatusBadge('Connected', 'active', 'WebSocket is open')
-  }
-  if(normalized in ['closed', 'closing', 'connect timed out']) {
-    return newUiStatusBadge('Disconnected', 'inactive', "WebSocket status: ${status}")
-  }
-  return newUiStatusBadge('Unknown', 'unknown', 'WebSocket status is unavailable')
-}
-
-String renderNewUiCreatedStatus(Map row) {
-  String actionKey = row.discoveryKey?.toString() ?: row.id?.toString()
-  if(row.created == true) {
-    String deleteIcon = "<iconify-icon icon='material-symbols:delete-outline' style='font-size:20px;vertical-align:middle'></iconify-icon>"
-    return newUiButtonLink("newUiDeletePlayer|${actionKey}", deleteIcon, '#F44336', '20px')
-  }
-  String addIcon = "<iconify-icon icon='material-symbols:add-circle-outline-rounded' style='font-size:20px;vertical-align:middle'></iconify-icon>"
-  return newUiButtonLink("newUiCreatePlayer|${actionKey}", addIcon, '#4CAF50', '20px')
-}
-
-String renderNewUiCreateGroupStatus(Map row) {
-  if(row.created != true || !row.id) {
-    return newUiStatusBadge('—', 'na', 'Create the speaker before creating a group from it')
-  }
-  String groupIcon = "<iconify-icon icon='material-symbols:group-add' style='font-size:20px;vertical-align:middle'></iconify-icon>"
-  return newUiButtonLink("newUiCreateGroup|${row.id}", groupIcon, '#4CAF50', '20px')
 }
 
 String newUiButtonLink(String buttonName, String linkText, String color = '#1A77C9', String font = '15px', String ariaLabel = null, String cssClass = '', String clickHandler = null) {
@@ -1564,708 +699,15 @@ String newUiButtonLink(String buttonName, String linkText, String color = '#1A77
       "<input type='hidden' name='settings[${buttonName}]' value=''>"
 }
 
-String newUiStatusBadge(String label, String statusClass, String title) {
-  String safeLabel = escapeNewUiHtml(label)
-  String safeTitle = escapeNewUiHtml(title)
-  return "<span class='new-ui-status new-ui-status-${statusClass}' title='${safeTitle}'>${safeLabel}</span>"
-}
-
 String escapeNewUiHtml(Object value) {
   return StringEscapeUtils.escapeHtml4(StringUtils.defaultString(value?.toString())).replace("'", '&#39;')
 }
 
-// The prefs HTML fragment builders below stay on StringBuilder deliberately:
-// MarkupBuilder emits double-quoted attributes, which would break the
-// single-quoted href/class contract asserted by the specs and rendered by
-// Hubitat's prefs. Escaping is centralized in escapeNewUiHtml instead.
-String deviceEditLink(String deviceId, String escapedLabel) {
-  return "<a href='/device/edit/${escapeNewUiHtml(deviceId)}' target='_blank'>${escapedLabel}</a>"
-}
-
-String displayNewUiGroupEditor() {
-  return "<span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_EDITOR_EVENT}'>${renderNewUiGroupEditorMarkup()}</span>"
-}
-
-String renderNewUiGroupEditorMarkup() {
-  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return '' }
-  Map groupDraft = getNewUiGroupDraft()
-  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
-  Map<String, String> playerOptions = players.collectEntries { ChildDeviceWrapper player ->
-    String id = player.getDataValue('id')?.toString()
-    id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
-  }
-  String selectedCoordinator = getNewUiGroupCoordinator(groupDraft)
-  List<String> selectedFollowers = getNewUiGroupFollowers(groupDraft)
-  Map<String, String> playerSwGenMap = players.collectEntries { ChildDeviceWrapper player ->
-    String id = player.getDataValue('id')?.toString()
-    id ? [(id): player.getDataValue('swGen')?.toString()] : [:]
-  }
-  String coordinatorSwGen = playerSwGenMap[selectedCoordinator]
-  Map<String, String> followerOptions = playerOptions.findAll { String id, String ignored ->
-    id != selectedCoordinator && (!coordinatorSwGen || !playerSwGenMap[id] || playerSwGenMap[id] == coordinatorSwGen || selectedFollowers.contains(id))
-  }
-  String editorMode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
-  String editorTitle = editorMode == NEW_UI_GROUP_MODE_EDIT ? 'Edit Sonos Group' : 'Create Sonos Group'
-  String editorName = synchronizeNewUiGroupName(groupDraft, selectedCoordinator, selectedFollowers, playerOptions)
-  String editorErrorMarkup = state[NEW_UI_GROUP_ERROR_KEY]
-      ? "<div class='new-ui-group-editor-error'>${escapeNewUiHtml(state[NEW_UI_GROUP_ERROR_KEY])}</div>"
-      : ''
-  String editorInstructions = selectedCoordinator
-      ? 'Choose one coordinator and one or more compatible follower speakers.'
-      : 'Select one coordinator, then select one or more follower speakers.'
-  StringBuilder coordinatorOptions = new StringBuilder("<option value=''>Choose a coordinator</option>")
-  playerOptions.each { String id, String label ->
-    String selected = id == selectedCoordinator ? ' selected' : ''
-    coordinatorOptions.append("<option value='${escapeNewUiHtml(id)}'${selected}>${escapeNewUiHtml(label)}</option>")
-  }
-  String nameChange = "updateNewUiGroupField('name')"
-  String coordinatorChange = "updateNewUiGroupField('coordinator')"
-  StringBuilder followerMarkup = new StringBuilder()
-  followerOptions.each { String id, String label ->
-    Boolean selected = selectedFollowers.contains(id)
-    String actionLabel = selected ? "Remove ${label} from followers" : "Add ${label} to followers"
-    String checkboxClass = selected ? 'new-ui-group-checkbox new-ui-group-checkbox-checked' : 'new-ui-group-checkbox'
-    String followerControl = "<span class='new-ui-group-follower-control'><span class='${checkboxClass}' aria-hidden='true'></span><span>${escapeNewUiHtml(label)}</span></span>"
-    String toggleAction = newUiButtonLink("newUiToggleGroupFollower|${id}", followerControl,
-        '#30343b', '14px', actionLabel, 'new-ui-group-follower-toggle')
-    followerMarkup.append("<div class='new-ui-group-follower-item'>${toggleAction}</div>")
-  }
-  String followerOptionsMarkup = followerMarkup.toString()
-  String saveAction = newUiButtonLink('btnNewUiSaveGroup', 'Save group', '#4054b2', '14px', 'Save group', 'new-ui-group-save', 'syncNewUiGroupFields();buttonClick(this)')
-  String cancelAction = newUiButtonLink('btnNewUiCancelGroup', 'Cancel', '#4b5563', '14px', 'Cancel group edit', 'new-ui-group-cancel')
-  String nameChangeAction = newUiButtonLink('btnNewUiGroupNameChanged', 'Update group name', '#4054b2', '13px', 'Update group name', 'new-ui-group-field-change-action new-ui-group-name-change-action')
-  String coordinatorChangeAction = newUiButtonLink('btnNewUiGroupCoordinatorChanged', 'Update group coordinator', '#4054b2', '13px', 'Update group coordinator', 'new-ui-group-field-change-action new-ui-group-coordinator-change-action')
-  String css = "<style>.mdl-cell:has([name='settings[newUiGroupName]']),.mdl-cell:has([name='settings[newUiGroupCoordinator]']),.mdl-cell:has([name='settings[newUiGroupFollowers]']){display:none!important}.mdl-cell:has(.new-ui-group-editor-card){box-sizing:border-box!important;width:100%!important;max-width:100%!important;flex:0 0 100%!important}.new-ui-group-editor-card{box-sizing:border-box;width:100%;max-width:100%;background:var(--surface-card,var(--surface-a,#fff));border:1px solid var(--surface-border,#dedede);border-radius:12px;box-shadow:0 2px 10px rgba(25,35,55,.07);margin:10px 0 18px;padding:18px 20px;color:var(--text-color,#30343b)}.new-ui-group-editor-heading{font-size:18px;font-weight:650;margin-bottom:4px}.new-ui-group-editor-description{color:var(--text-color-secondary,#6b7280);font-size:13px;margin-bottom:16px}.new-ui-group-editor-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:16px}.new-ui-group-editor-field{display:flex;flex-direction:column;gap:7px;min-width:0}.new-ui-group-editor-field-wide{grid-column:1/-1}.new-ui-group-editor-field label,.new-ui-group-editor-label{font-size:14px;font-weight:600}.new-ui-group-editor-field input,.new-ui-group-editor-field select{box-sizing:border-box;width:100%;max-width:100%;padding:10px 12px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;background:var(--surface-card,#fff);color:var(--text-color,#30343b);font:inherit}.new-ui-group-editor-field input:focus,.new-ui-group-editor-field select:focus{border-color:#4054b2;outline:2px solid rgba(64,84,178,.18)}.new-ui-group-follower-list{background:var(--surface-card,#fff);display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:7px;border:1px solid var(--surface-border,#c8cdd5);border-radius:7px;padding:10px}.new-ui-group-follower-option{display:flex;align-items:center;gap:9px;padding:7px;border-radius:5px;cursor:pointer}.new-ui-group-follower-option:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-option span{font-weight:400}.new-ui-group-editor-help{color:var(--text-color-secondary,#68707c);font-size:12px}.new-ui-group-editor-error{background:#fff1f0;border:1px solid #ffc9c5;border-radius:7px;color:#a52822;margin:0 0 12px;padding:10px 12px}.new-ui-group-editor-actions{display:flex;gap:10px;margin-top:16px}.new-ui-group-field-change-action{position:absolute!important;left:-10000px!important;top:auto!important;width:1px!important;height:1px!important;overflow:hidden!important}.new-ui-group-editor-actions .new-ui-group-save,.new-ui-group-editor-actions .new-ui-group-cancel{border:1px solid #c8cdd5;border-radius:7px;padding:9px 16px;font:inherit;font-weight:600;cursor:pointer}.new-ui-group-editor-actions .new-ui-group-save{background:#4054b2!important;border-color:#4054b2!important;color:#fff!important}.new-ui-group-editor-actions .new-ui-group-cancel{background:var(--surface-b,#f7f8fa)!important;border-color:var(--surface-border,#c8cdd5)!important;color:var(--text-color,#30343b)!important}@media(max-width:640px){.new-ui-group-editor-card{padding:14px}.new-ui-group-editor-grid{grid-template-columns:minmax(0,1fr)}.new-ui-group-editor-field-wide{grid-column:auto}.new-ui-group-editor-actions{flex-wrap:wrap}}</style>"
-  StringBuilder html = new StringBuilder(css)
-  html.append("<style>.new-ui-group-follower-item .form-group{display:none!important}.new-ui-group-follower-item>div{display:block!important;width:100%}.new-ui-group-follower-toggle{box-sizing:border-box;display:flex!important;align-items:center;width:100%;min-height:40px;padding:7px;border:1px solid transparent;border-radius:6px;color:var(--text-color,#30343b)!important;text-align:left}.new-ui-group-follower-toggle:hover{background:var(--surface-b,#f3f5fb)}.new-ui-group-follower-control{display:flex;align-items:center;gap:9px}.new-ui-group-checkbox{box-sizing:border-box;position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 18px;width:18px;height:18px;border:1.5px solid #747b86;border-radius:4px;background:var(--surface-card,#fff)}.new-ui-group-checkbox-checked{border-color:#4054b2;background:#4054b2}.new-ui-group-checkbox-checked:after{box-sizing:border-box;content:'';width:5px;height:9px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}.new-ui-group-follower-toggle:focus-visible{outline:2px solid #4054b2;outline-offset:2px}</style>")
-  html.append("<div class='new-ui-group-editor-card'><div class='new-ui-group-editor-heading'>${editorTitle}</div><div class='new-ui-group-editor-description'>${editorInstructions}</div>${editorErrorMarkup}")
-  html.append("<div class='new-ui-group-editor-grid'>")
-  html.append("<div class='new-ui-group-editor-field new-ui-group-editor-field-wide'><label for='new-ui-group-name'>Group name</label><input id='new-ui-group-name' type='text' name='newUiGroupNameUi' value='${escapeNewUiHtml(editorName)}' autocomplete='off' onchange=\"${nameChange}\"></div>")
-  html.append("<div class='new-ui-group-editor-field'><label for='new-ui-group-coordinator'>Coordinator</label><select id='new-ui-group-coordinator' name='newUiGroupCoordinatorUi' onchange=\"${coordinatorChange}\">${coordinatorOptions}</select></div>")
-  html.append("<div class='new-ui-group-editor-field'><span class='new-ui-group-editor-label'>Followers</span><div id='new-ui-group-followers' class='new-ui-group-follower-list' aria-describedby='new-ui-group-followers-help'>${followerOptionsMarkup}</div><div id='new-ui-group-followers-help' class='new-ui-group-editor-help'>Select one or more compatible speakers.</div></div>")
-  html.append("</div><div class='new-ui-group-editor-actions'>").append(saveAction).append(cancelAction).append('</div>')
-  html.append(nameChangeAction).append(coordinatorChangeAction)
-  html.append("<script>function syncNewUiGroupFields(){var name=document.querySelector(\"#new-ui-group-name\");var coordinator=document.querySelector(\"#new-ui-group-coordinator\");var nameSetting=document.querySelector(\"[name='settings[newUiGroupName]']\");var coordinatorSetting=document.querySelector(\"[name='settings[newUiGroupCoordinator]']\");if(name&&nameSetting){nameSetting.value=name.value}if(coordinator&&coordinatorSetting){coordinatorSetting.value=coordinator.value}}function updateNewUiGroupField(field){syncNewUiGroupFields();var buttonClass={name:'.new-ui-group-name-change-action',coordinator:'.new-ui-group-coordinator-change-action'}[field];var button=buttonClass?document.querySelector(buttonClass):null;if(button){buttonClick(button)}}</script>")
-  html.append('</div>')
-  return html.toString()
-}
-
-String displayNewUiGroupTable() {
-  String css = """
-    <style>
-      .mdl-grid:has(.new-ui-device-card) { padding-bottom: 0 !important; }
-      .mdl-cell:has(.new-ui-device-card) { margin-bottom: 0 !important; }
-      .new-ui-device-card { margin-bottom: 0 !important; }
-      .mdl-grid:has(.new-ui-groups-card) { padding-bottom: 0 !important; padding-top: 0 !important; }
-      .mdl-cell:has(.new-ui-groups-card) { margin-bottom: 0 !important; margin-top: 0 !important; }
-      .new-ui-groups-card { margin-bottom: 0 !important; margin-top: 0 !important; }
-      .mdl-grid:has(.sonos-settings) { padding-top: 0 !important; }
-      .mdl-cell:has(.sonos-settings) { margin-top: 0 !important; }
-      .new-ui-groups-card {
-        background: var(--surface-card, var(--surface-a, #fff));
-        border: 1px solid var(--surface-border, #dedede);
-        border-radius: 12px;
-        box-shadow: 0 2px 10px rgba(25, 35, 55, .07);
-        color: var(--text-color, #30343b);
-        margin: 10px 0 18px;
-        overflow: hidden;
-      }
-      #new-ui-group-table-wrapper {
-        display: block;
-        overflow-x: auto;
-        padding: 0 !important;
-        width: 100%;
-      }
-      .new-ui-group-table-content {
-        display: block;
-        margin: 0 !important;
-        padding: 0 !important;
-      }
-      .new-ui-group-toolbar {
-        align-items: center;
-        background: var(--surface-b, #f7f8fa);
-        border-bottom: 1px solid var(--surface-border, #e5e7eb);
-        display: flex;
-        gap: 16px;
-        justify-content: space-between;
-        min-height: 60px;
-        padding: 10px 18px;
-        position: relative;
-      }
-      .new-ui-group-toolbar-title {
-        color: var(--text-color, #30343b);
-        font-size: 17px;
-        font-weight: 650;
-        left: 50%;
-        position: absolute;
-        text-align: center;
-        transform: translateX(-50%);
-      }
-      .new-ui-group-toolbar .form-group:has(input[name='btnNewUiCreateGroup']) { display: none !important; }
-      .new-ui-group-toolbar-container { border-bottom: 1px solid var(--surface-border, #e5e7eb); }
-      .new-ui-group-create-button {
-        align-items: center;
-        background: #4054b2;
-        border: 1px solid #4054b2;
-        border-radius: 8px;
-        color: #fff;
-        cursor: pointer;
-        display: inline-flex;
-        font-weight: 600;
-        gap: 8px;
-        line-height: 1.2;
-        padding: 9px 13px;
-        transition: background .15s ease, box-shadow .15s ease;
-      }
-      .new-ui-group-create-button:hover { background: #34479e; box-shadow: 0 2px 6px rgba(52, 71, 158, .2); }
-      .new-ui-group-create-button:focus-visible { outline: 2px solid #1a77c9; outline-offset: 2px; }
-      .new-ui-group-create-button svg { height: 16px; width: 16px; }
-      .new-ui-group-toolbar > div[style='display:inline-block'] { display: inline-block !important; margin-left: auto; position: relative; z-index: 1; }
-      .new-ui-group-table-toolbar-cell {
-        background: var(--surface-b, #f7f8fa) !important;
-        padding: 0 !important;
-        text-align: left !important;
-      }
-      #new-ui-group-table {
-        background-color: var(--surface-card, var(--surface-a, #ffffff));
-        border: 0;
-        border-collapse: separate;
-        border-spacing: 0;
-        border-radius: 0;
-        color: var(--text-color, #424242);
-        min-width: 760px;
-        table-layout: fixed;
-        width: 100%;
-      }
-      #new-ui-group-table th,
-      #new-ui-group-table td {
-        background-color: var(--surface-card, var(--surface-a, #ffffff));
-        border-bottom: 1px solid var(--surface-border, #EEEEEE);
-        border-right: 0;
-        color: var(--text-color, #424242);
-        font-size: 14px !important;
-        padding: 12px 14px !important;
-        text-align: center;
-        vertical-align: middle;
-      }
-      #new-ui-group-table thead {
-        background-color: var(--surface-b, #F5F5F5);
-      }
-      #new-ui-group-table th {
-        background-color: var(--surface-b, #F5F5F5);
-        border-bottom: 1px solid var(--surface-border, #E0E0E0);
-        color: var(--text-color, #424242);
-        font-size: 14px !important;
-        font-weight: 500;
-        white-space: nowrap;
-      }
-      #new-ui-group-table th.new-ui-group-name,
-      #new-ui-group-table th.new-ui-group-coordinator,
-      #new-ui-group-table td.new-ui-group-coordinator,
-      #new-ui-group-table th.new-ui-group-followers {
-        text-align: left;
-      }
-      #new-ui-group-table .new-ui-group-table-toolbar-cell {
-        background: var(--surface-b, #f7f8fa);
-        padding: 0 !important;
-        text-align: left;
-      }
-      #new-ui-group-table tbody tr:hover {
-        background-color: var(--surface-hover, #f8f9fc) !important;
-      }
-      #new-ui-group-table tbody tr:last-child td {
-        border-bottom: 0;
-      }
-      #new-ui-group-table td:first-child .form-group {
-        display: none;
-      }
-      #new-ui-group-table td:first-child .submitOnChange {
-        line-height: 20px;
-        vertical-align: middle;
-      }
-      #new-ui-group-table .new-ui-group-action-cell {
-        padding-left: 10px !important;
-        padding-right: 10px !important;
-        white-space: nowrap;
-        width: 100px;
-      }
-      #new-ui-group-table .new-ui-group-name,
-      #new-ui-group-table .new-ui-group-followers {
-        text-align: left;
-      }
-      #new-ui-group-table .new-ui-group-name {
-        min-width: 200px;
-        overflow-wrap: anywhere;
-      }
-      #new-ui-group-table .new-ui-group-name a {
-        color: #2196F3;
-        text-decoration: none;
-      }
-      #new-ui-group-table .new-ui-group-name a:hover {
-        text-decoration: underline;
-      }
-      #new-ui-group-table .new-ui-group-followers br {
-        line-height: 1.7;
-      }
-      .new-ui-group-mobile-list { display: none; }
-      .new-ui-group-mobile-actions { align-items: center; display: flex; gap: 14px; }
-      .new-ui-group-mobile-record { text-align: center; }
-      .new-ui-group-mobile-title { font-size: 17px; line-height: 1.4; overflow-wrap: anywhere; }
-      .new-ui-group-mobile-title a { color: #2196F3; text-decoration: none; }
-      .new-ui-group-mobile-buttons { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin: 10px 0 12px; }
-      .new-ui-group-mobile-buttons .form-group { display: none !important; }
-      .new-ui-group-mobile-buttons .submitOnChange { align-items: center; border: 1px solid transparent; border-radius: 7px; box-sizing: border-box; display: inline-flex !important; font-size: 13px !important; font-weight: 600; justify-content: center; line-height: 1.2; min-height: 38px; padding: 9px 15px; text-decoration: none; }
-      .new-ui-group-mobile-edit { background: #4054b2; border-color: #4054b2 !important; color: #fff !important; }
-      .new-ui-group-mobile-delete { background: var(--surface-b, #fff); border-color: #d84a45 !important; color: #c83d38 !important; }
-      .new-ui-group-mobile-record .new-ui-mobile-field { margin-top: 5px; }
-      @media (max-width: 640px) {
-        #new-ui-group-table-wrapper,
-        #new-ui-group-table-wrapper > div { overflow: visible !important; }
-        #new-ui-group-table-wrapper { display: none !important; }
-        .new-ui-group-mobile-list { display: block !important; }
-        .new-ui-group-toolbar { align-items: stretch; box-sizing: border-box; flex-direction: column; gap: 10px; padding: 12px 14px !important; width: 100%; }
-        .new-ui-group-toolbar > div[style='display:inline-block'] { display: block !important; margin: 0; width: 100%; }
-        .new-ui-group-toolbar-title { align-self: center; left: auto; position: static; transform: none; }
-        .new-ui-group-create-button { box-sizing: border-box; justify-content: center; margin: 0 auto; white-space: nowrap; width: 100%; }
-      }
-    </style>
-  """
-  String iconifyScript = "<script src='https://code.iconify.design/iconify-icon/1.0.0/iconify-icon.min.js'></script>"
-  String createIcon = "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round'><path d='M12 5v14M5 12h14'></path></svg>"
-  String createButton = newUiButtonLink('btnNewUiCreateGroup', "${createIcon}<span>Create group</span>", '#fff', '14px', 'Create a Sonos group', 'new-ui-group-create-button')
-  return "${css.trim()}${iconifyScript}<div class='new-ui-groups-card'><div class='new-ui-group-toolbar-container'><div class='new-ui-group-toolbar'><div class='new-ui-group-toolbar-title'>Sonos groups</div>${createButton}</div></div><span class='ssr-app-state-${app.id}-${NEW_UI_GROUP_TABLE_EVENT}'><div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div>${renderNewUiGroupTableMobileListMarkup()}</span></div>"
-}
-
-String renderNewUiGroupTableMarkup() {
-  List<Map> rows = buildNewUiGroupRows()
-  StringBuilder html = new StringBuilder()
-  html.append("<div><table id='new-ui-group-table' class='mdl-data-table'>")
-  html.append("<colgroup><col style='width:6%'><col style='width:34%'><col style='width:23%'><col style='width:37%'></colgroup>")
-  html.append('<thead><tr>')
-  html.append('<th>Action</th>')
-  html.append("<th class='new-ui-group-name'>Group Name</th>")
-  html.append("<th class='new-ui-group-coordinator'>Coordinator</th>")
-  html.append("<th class='new-ui-group-followers'>Followers</th>")
-  html.append('</tr></thead><tbody>')
-
-  if(rows.isEmpty()) {
-    html.append("<tr><td colspan='4'>No Sonos groups have been created yet.</td></tr>")
-  } else {
-    rows.each { Map row ->
-      String groupName = row.name?.toString() ?: 'Unnamed group'
-      String token = newUiGroupToken(groupName)
-      String editIcon = "<iconify-icon icon='material-symbols:edit' style='font-size:19px;vertical-align:middle;margin-right:6px'></iconify-icon>"
-      String deleteIcon = "<iconify-icon icon='material-symbols:delete-outline' style='font-size:20px;vertical-align:middle'></iconify-icon>"
-      String actionMarkup = newUiButtonLink("newUiEditGroup|${token}", editIcon, 'var(--text-color, #424242)', '19px') +
-          newUiButtonLink("newUiDeleteGroup|${token}", deleteIcon, '#F44336', '20px')
-      String safeName = escapeNewUiHtml(groupName)
-      String groupDeviceId = row.device?.id?.toString()
-      if(groupDeviceId) {
-        safeName = deviceEditLink(groupDeviceId, safeName)
-      }
-      String coordinatorName = row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown'
-      String safeCoordinator = escapeNewUiHtml(coordinatorName)
-      String followerMarkup = renderNewUiGroupFollowers(row.followerIds)
-
-      html.append('<tr>')
-      html.append("<td class='new-ui-group-action-cell' data-label='Action'>${actionMarkup}</td>")
-      html.append("<td class='new-ui-group-name' data-label='Group name'><strong>${safeName}</strong></td>")
-      html.append("<td class='new-ui-group-coordinator' data-label='Coordinator'>${safeCoordinator}</td>")
-      html.append("<td class='new-ui-group-followers' data-label='Followers'>${followerMarkup}</td>")
-      html.append('</tr>')
-    }
-  }
-
-  html.append('</tbody></table></div>')
-  return html.toString()
-}
-
-String renderNewUiGroupTableMobileListMarkup() {
-  List<Map> rows = buildNewUiGroupRows()
-  StringBuilder html = new StringBuilder("<div id='new-ui-group-mobile-list' class='new-ui-mobile-list new-ui-group-mobile-list'>")
-  if(rows.isEmpty()) {
-    html.append("<div class='new-ui-mobile-empty'>No Sonos groups have been created yet.</div>")
-  } else {
-    rows.each { Map row ->
-      String groupName = row.name?.toString() ?: 'Unnamed group'
-      String token = newUiGroupToken(groupName)
-      String actions = newUiButtonLink("newUiMobileEditGroup|${token}", 'Edit', '#fff', '13px', 'Edit group', 'new-ui-group-mobile-edit') +
-          newUiButtonLink("newUiMobileDeleteGroup|${token}", 'Delete', '#c83d38', '13px', 'Delete group', 'new-ui-group-mobile-delete')
-      String safeName = escapeNewUiHtml(groupName)
-      String groupDeviceId = row.device?.id?.toString()
-      if(groupDeviceId) {
-        safeName = deviceEditLink(groupDeviceId, safeName)
-      }
-      String coordinator = escapeNewUiHtml(row.coordinatorName?.toString() ?: row.coordinatorId?.toString() ?: 'Unknown')
-      String followers = renderNewUiGroupFollowers(row.followerIds)
-      html.append("<article class='new-ui-mobile-record new-ui-group-mobile-record'><div class='new-ui-group-mobile-title'><strong>${safeName}</strong></div>")
-      html.append("<div class='new-ui-group-mobile-buttons'>${actions}</div>")
-      html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Coordinator</span><span class='new-ui-mobile-value'>${coordinator}</span></div>")
-      html.append("<div class='new-ui-mobile-field'><span class='new-ui-mobile-label'>Followers</span><span class='new-ui-mobile-value'>${followers}</span></div></article>")
-    }
-  }
-  html.append('</div>')
-  return html.toString()
-}
-
-List<Map> buildNewUiGroupRows() {
-  LinkedHashMap<String, Map> rowsByName = new LinkedHashMap<String, Map>()
-  Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
-
-  configuredGroups.each { Object rawName, Object rawDefinition ->
-    String groupName = rawName?.toString()
-    Map definition = rawDefinition instanceof Map ? (Map)rawDefinition : [:]
-    if(groupName) {
-      rowsByName[groupName] = [
-        name: groupName,
-        coordinatorId: definition.groupCoordinatorId?.toString(),
-        followerIds: normalizeNewUiGroupPlayerIds(definition.playerIds),
-        device: null
-      ]
-    }
-  }
-
-  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
-    String groupName = newUiGroupNameFromDeviceNetworkId(groupDevice.getDeviceNetworkId()?.toString())
-    if(!groupName) {
-      return
-    }
-    Map row = rowsByName[groupName] ?: [
-      name: groupName,
-      coordinatorId: null,
-      followerIds: [],
-      device: null
-    ]
-    row.device = groupDevice
-    if(!row.coordinatorId) {
-      row.coordinatorId = groupDevice.getDataValue('groupCoordinatorId')?.toString()
-    }
-    if(!row.followerIds) {
-      row.followerIds = normalizeNewUiGroupPlayerIds(groupDevice.getDataValue('playerIds'))
-    }
-    rowsByName[groupName] = row
-  }
-
-  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  rowsByName.values().each { Map row ->
-    String coordinatorId = row.coordinatorId?.toString()
-    row.coordinatorName = coordinatorId ? (playerNames[coordinatorId] ?: coordinatorId) : null
-  }
-
-  List<Map> rows = new ArrayList<Map>(rowsByName.values())
-  rows.sort { Map left, Map right ->
-    left.name.toString().compareToIgnoreCase(right.name.toString())
-  }
-  return rows
-}
-
-Map findNewUiGroupByToken(String token) {
-  if(!token) {
-    return null
-  }
-  return buildNewUiGroupRows().find { Map row -> newUiGroupToken(row.name?.toString()) == token }
-}
-
-String newUiGroupToken(String groupName) {
-  if(groupName == null || groupName.isEmpty()) { return '' }
-  try {
-    MessageDigest digest = MessageDigest.getInstance('SHA-256')
-    byte[] hash = digest.digest(groupName.getBytes('UTF-8'))
-    StringBuilder hex = new StringBuilder(hash.length * 2)
-    for(byte b : hash) {
-      hex.append(String.format(Locale.ROOT, '%02x', b & 0xff))
-    }
-    return hex.toString()
-  } catch(Exception ignored) {
-    return UUID.nameUUIDFromBytes(groupName.getBytes('UTF-8')).toString()
-  }
-}
-
-String newUiGroupNameFromDeviceNetworkId(String deviceNetworkId) {
-  String prefix = "${app.id}-SonosGroupDevice-"
-  return deviceNetworkId?.startsWith(prefix) ? deviceNetworkId.substring(prefix.length()) : null
-}
-
-List<String> normalizeNewUiGroupPlayerIds(Object value) {
-  if(value instanceof Collection) {
-    return value.collect { Object id -> id?.toString() }.findAll { String id -> id }
-  }
-  if(value) {
-    return value.toString().split(',').collect { String id -> id.trim() }.findAll { String id -> id }
-  }
-  return []
-}
-
-Map<String, String> getNewUiGroupPlayerNameMap() {
-  return getCurrentPlayerDevices().collectEntries { ChildDeviceWrapper player ->
-    String id = player.getDataValue('id')?.toString()
-    id ? [(id): (player.getDataValue('name')?.toString() ?: id)] : [:]
-  }
-}
-
-String renderNewUiGroupFollowers(Object followerIds) {
-  List<String> ids = normalizeNewUiGroupPlayerIds(followerIds)
-  if(ids.isEmpty()) {
-    return newUiStatusBadge('—', 'na', 'No follower speakers configured')
-  }
-  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  return StringUtils.join(ids.collect { String id -> escapeNewUiHtml(playerNames[id] ?: id) }, '<br>')
-}
-
-Map getNewUiGroupDraft() {
-  return state[NEW_UI_GROUP_DRAFT_KEY] instanceof Map ? (Map)state[NEW_UI_GROUP_DRAFT_KEY] : [:]
-}
-
-String getNewUiGroupCoordinator(Map draft) {
-  if(state[NEW_UI_GROUP_EDITOR_MODE_KEY] && draft.containsKey('coordinatorId')) {
-    return draft.coordinatorId?.toString() ?: ''
-  }
-  Object configured = settings.containsKey('newUiGroupCoordinator') ? settings.newUiGroupCoordinator : null
-  return configured != null ? configured.toString() : (draft.coordinatorId?.toString() ?: '')
-}
-
-List<String> getNewUiGroupFollowers(Map draft) {
-  if(state[NEW_UI_GROUP_EDITOR_MODE_KEY] && draft.containsKey('followerIds')) {
-    return normalizeNewUiGroupPlayerIds(draft.followerIds)
-  }
-  Object configured = settings.containsKey('newUiGroupFollowers') ? settings.newUiGroupFollowers : null
-  return normalizeNewUiGroupPlayerIds(configured != null ? configured : draft.followerIds)
-}
-
-Map localPlayerPage() {
-  startDiscoverySession()
-
-  Long endTime = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
-  Integer remainingSecs = Math.max(0, Duration.between(Instant.ofEpochMilli(now()), Instant.ofEpochMilli(endTime)).seconds as Integer)
-
-  dynamicPage(
-		name: "localPlayerPage",
-		title: "Discovery Started!",
-		nextPage: 'localPlayerSelectionPage',
-		install: false,
-		uninstall: false
-  ) {
-    section("Please wait while we discover your Sonos devices. Using both SSDP and mDNS discovery methods. Click Next when all your devices have been discovered.") {
-      if(atomicState.discoveryRunning == true) {
-        paragraph "<b><span class='app-state-${app.id}-discoveryTimer'>Discovery time remaining: ${remainingSecs} seconds</span></b>"
-      } else {
-        paragraph "<b>Discovery has stopped.</b> Click Next to proceed or extend to continue."
-      }
-      input 'btnExtend60', 'button', title: 'Extend 60 Seconds', submitOnChange: true
-      input 'btnExtend300', 'button', title: 'Extend 5 Minutes', submitOnChange: true
-      paragraph (
-        "<div id='discoveryStatus'>" +
-        "<span class='app-state-${app.id}-sonosDiscoveredCount'>Found Devices (${discoveredSonoses.size()} primary, ${discoveredSonosSecondaries.size()} secondary): </span>" +
-        "<span class='app-state-${app.id}-sonosDiscovered'>${getFoundSonoses()}</span>" +
-        "</div>"
-      )
-    }
-  }
-}
-
-Map localPlayerSelectionPage() {
-  stopDiscovery()
-
-  // Clear feedback when entering page fresh (not from button click)
-  if(state.playerCreationFeedback && state.playerCreationTimestamp) {
-    Long timeSinceCreation = now() - (state.playerCreationTimestamp as Long)
-    if(timeSinceCreation > 2000) { state.remove('playerCreationFeedback') }
-  }
-  if(state.playerRemovalFeedback && state.playerRemovalTimestamp) {
-    Long timeSinceRemoval = now() - (state.playerRemovalTimestamp as Long)
-    if(timeSinceRemoval > 2000) { state.remove('playerRemovalFeedback') }
-  }
-
-  LinkedHashMap newlyDiscovered = discoveredSonoses.collectEntries{id, player -> [(id.toString()): player.name]}
-  LinkedHashMap previouslyCreated = getCurrentPlayerDevices().collectEntries{[(it.getDeviceNetworkId().toString()): it.getDataValue('name')]}
-
-  // Additional duplicate check: ensure no device appears twice with different MACs
-  // This can happen if a device changes IP or MAC spoofing occurs
-  Set<String> seenPlayerIds = [] as Set
-  LinkedHashMap deduplicatedDiscovered = [:]
-  newlyDiscovered.each { mac, name ->
-    Map deviceInfo = discoveredSonoses[mac]
-    String playerId = deviceInfo?.id
-    if(playerId && !seenPlayerIds.contains(playerId)) {
-      deduplicatedDiscovered[mac] = name
-      seenPlayerIds.add(playerId)
-    } else if(playerId) {
-      logWarn("Duplicate device detected: ${name} (${mac}) has same playerId as another device. Skipping.")
-    } else {
-      deduplicatedDiscovered[mac] = name
-    }
-  }
-
-  LinkedHashMap selectionOptions = previouslyCreated
-  Integer newlyFoundCount = 0
-  deduplicatedDiscovered.each{ k,v ->
-    if(!selectionOptions.containsKey(k)) {
-      selectionOptions[k] = v
-      newlyFoundCount++
-    }
-  }
-
-  dynamicPage(
-		name: "localPlayerSelectionPage",
-		title: "",
-		nextPage: 'mainPage',
-		install: false,
-		uninstall: false
-  ) {
-    section("Select your device(s) below.") {
-      input (
-        name: 'playerDevices',
-        title: "<b>Available Devices (${selectionOptions.size()}):</b> <i>${newlyFoundCount > 0 ? "${newlyFoundCount} newly discovered" : 'No new devices found'}</i>",
-        type: 'enum',
-        options: selectionOptions,
-        multiple: true,
-        required: false,
-        submitOnChange: true
-      )
-
-      // Show feedback messages
-      if(state.playerCreationFeedback) {
-        paragraph "<div style='background-color:#90EE90;padding:10px;border-radius:5px;margin:10px 0;'><b>✓ ${state.playerCreationFeedback}</b></div>"
-      }
-      if(state.playerRemovalFeedback) {
-        paragraph "<div style='background-color:#FFB6C1;padding:10px;border-radius:5px;margin:10px 0;'><b>✓ ${state.playerRemovalFeedback}</b></div>"
-      }
-
-      // Action buttons
-      List<String> willBeCreated = settings.playerDevices ? (settings.playerDevices - getCreatedPlayerDevices()) : []
-      List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices?.contains(p.getDeviceNetworkId())) }
-
-      if(willBeCreated.size() > 0) {
-        input 'createPlayerDevices', 'button', title: "Create ${willBeCreated.size()} Player(s)", submitOnChange: true, width: 6
-        String createList = willBeCreated.collect{ selectionOptions[it] }.join('\n')
-        paragraph "<b>Will create:</b>\n${createList}"
-      }
-
-      if(willBeRemoved.size() > 0) {
-        input 'removePlayerDevices', 'button', title: "Remove ${willBeRemoved.size()} Player(s)", submitOnChange: true, width: 6
-        String removeList = willBeRemoved.collect{ it.label }.join('\n')
-        paragraph "<b>Will remove:</b>\n${removeList}"
-      }
-
-      // Only show "all in sync" message if:
-      // 1. Current selection has no pending creates or removes AND
-      // 2. There are no newly discovered devices available to select
-      if(willBeCreated.size() == 0 && willBeRemoved.size() == 0 && newlyFoundCount == 0) {
-        paragraph "<i>All discovered devices are already created. Select or deselect devices above to create or remove players.</i>"
-      } else if(willBeCreated.size() == 0 && willBeRemoved.size() == 0 && newlyFoundCount > 0) {
-        paragraph "<i>Select newly discovered devices above to create them, or deselect existing devices to remove them.</i>"
-      }
-
-      href (
-        name: 'localPlayerPageRefresh',
-        title: 'Re-discover Devices',
-        description: 'Run discovery again to find new devices',
-        page: 'localPlayerPage'
-      )
-    }
-  }
-}
-
-Map groupPage() {
-  if(!state.userGroups) { state.userGroups = [:] }
-  // Build player data in a single pass — collect ID, name, and swGen together
-  // Avoids N separate getDeviceFromRincon() calls for S1/S2 filtering
-  List<ChildDeviceWrapper> players = getCurrentPlayerDevices()
-  Map coordinatorSelectionOptions = players.collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('name')] }
-  Map<String, String> playerSwGenMap = players.collectEntries { player -> [(player.getDataValue('id')): player.getDataValue('swGen')] }
-  Boolean coordIsS1 = (newGroupCoordinator && playerSwGenMap[newGroupCoordinator] == '1')
-  logDebug("Selected group coordinator is S1: ${coordIsS1}")
-  Map playerSelectionOptionsS1 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && playerSwGenMap[it.key] == '1' }
-  Map playerSelectionOptionsS2 = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator && playerSwGenMap[it.key] == '2' }
-  Map playerSelectionOptions = [:]
-  if(!newGroupCoordinator) {playerSelectionOptions = playerSelectionOptionsS1 + playerSelectionOptionsS2}
-  else if(newGroupCoordinator && coordIsS1) {playerSelectionOptions = playerSelectionOptionsS1}
-  else {playerSelectionOptions = playerSelectionOptionsS2}
-
-  String edg = app.getSetting('editDeleteGroup')
-  if(edg) {
-    if(!app.getSetting('newGroupName')) {
-      app.updateSetting('newGroupName', edg)
-    }
-    if(!app.getSetting('newGroupPlayers')) {
-      app.updateSetting('newGroupPlayers', [type: 'enum', value: state.userGroups[edg]?.playerIds])
-    }
-    if(!app.getSetting('newGroupCoordinator')) {
-      app.updateSetting('newGroupCoordinator', [type: 'enum', value: state.userGroups[edg]?.groupCoordinatorId])
-    }
-    playerSelectionOptions = coordinatorSelectionOptions.findAll { it.key != newGroupCoordinator }
-  }
-  if(app.getSetting('newGroupName') == null || app.getSetting('newGroupPlayers') == null || app.getSetting('newGroupCoordinator') == null) {
-    state.groupPageError = 'You must select a coordinator, at least 1 follower player, and provide a name for the group'
-  } else {
-    state.remove('groupPageError')
-  }
-
-  dynamicPage(title: 'Sonos Player Virtual Groups', nextPage: 'mainPage') {
-    section {
-      paragraph ('This page allows you to create and delete Sonos group devices.')
-    }
-    section ('Select players to add to new group:', hideable: true){
-      if(state.groupPageError) {
-        paragraph (state.groupPageError)
-      }
-      input(name: 'newGroupName', type: 'text', title: 'Group Name:', required: false, submitOnChange: true)
-      input(name: 'newGroupCoordinator', type: 'enum', title: 'Select Coordinator (leader):', multiple: false, options: coordinatorSelectionOptions, required: false, submitOnChange: true, offerAll: false)
-      input(name: 'newGroupPlayers', type: 'enum', title: 'Select Players (followers):', multiple: true, options: playerSelectionOptions, required: false, submitOnChange: true, offerAll: false)
-      input(name: 'saveGroup', type: 'button', title: 'Save Group?', submitOnChange: true, width: 2, disabled: state.groupPageError != null)
-      input(name: 'deleteGroup', type: 'button', title: 'Delete Group?', submitOnChange: true, width: 2)
-      input(name: 'cancelGroupEdit', type: 'button', title: 'Cancel Edit?', submitOnChange: true, width: 2)
-    }
-    section ("Select virtual groups to edit/delete (${state.userGroups.size()} active groups found):", hideable: true) {
-      input (name: 'editDeleteGroup', title: '', type: 'enum', multiple: false, options: state.userGroups.keySet(), submitOnChange: true)
-    }
-    if(state.refreshGroupPage) {
-      section() {
-        state.remove('refreshGroupPage')
-        app.removeSetting('newGroupName')
-        app.removeSetting('newGroupPlayers')
-        app.removeSetting('newGroupCoordinator')
-        paragraph "<script>{changeSubmit(this)}</script>"
-      }
-    }
-  }
-}
-// =============================================================================
-// End App Pages
-// =============================================================================
-
-
-
-// =============================================================================
-// Button Handlers
-// =============================================================================
 void appButtonHandler(String buttonName) {
-  logDebug("Received app button action '${buttonName}'")
-  if(buttonName?.startsWith('newUiMobile')) {
-    buttonName = buttonName.replaceFirst('newUiMobile', 'newUi')
-  }
-  if(buttonName?.startsWith('newUiSetting|')) {
-    handleNewUiSettingChange(buttonName)
-    return
-  }
-  if(buttonName == 'applySettingsButton') { applySettingsButton() }
-  if(buttonName == 'saveGroup') { saveGroup() }
-  if(buttonName == 'deleteGroup') { deleteGroup() }
-  if(buttonName == 'cancelGroupEdit') { cancelGroupEdit() }
-  if(buttonName == 'createPlayerDevices') { createPlayerDevicesWithFeedback() }
-  if(buttonName == 'removePlayerDevices') { removePlayerDevicesWithFeedback() }
-
-  // Update management buttons
-  if(buttonName == 'btnCheckForUpdates') { checkForUpdates(true) }
-  if(buttonName == 'btnInstallUpdate') { installUpdate() }
-  if(buttonName == 'btnCheckInstalledVersions') { checkInstalledVersions() }
-  if(buttonName == 'btnFixVersionMismatches') { fixVersionMismatches() }
-  if(buttonName == 'btnCleanupDuplicates') { cleanupDuplicates() }
-  if(buttonName == 'btnPublishLibraries') { publishLibraries() }
+  if(buttonName == 'btnInstallUpdate') { installUpdate(); return }
   if(buttonName == 'btnDismissUpdate') {
     String dismissedVersion = state.latestVersion?.toString() ?: state.latestManifest?.version?.toString()
     if(dismissedVersion) { state.dismissedUpdateVersion = dismissedVersion }
-    logInfo("Dismissing update notice for version ${dismissedVersion ?: 'unknown'}")
     state.updateAvailable = false
     state.latestVersion = null
     state.latestManifest = null
@@ -2273,601 +715,344 @@ void appButtonHandler(String buttonName) {
     state.latestReleaseUrl = null
     app.updateLabel('Sonos Advanced Controller')
     app.sendEvent(name: 'newUiUpdateNotice', value: 'dismissed')
-    logDebug("Update notice dismissed; updateAvailable=${state.updateAvailable}, dismissedVersion=${state.dismissedUpdateVersion}")
-    return
-  }
-  if(buttonName == 'btnExtend60') { extendDiscovery(60) }
-  if(buttonName == 'btnExtend300') { extendDiscovery(300) }
-  if(buttonName == 'btnNewUiDiscoverSpeakers') {
-    startNewUiDiscoverySession()
-    return
-  }
-
-  if(buttonName?.startsWith('newUiCreateGroup|')) {
-    beginNewUiGroupEditor(buttonName.minus('newUiCreateGroup|'))
-    return
-  }
-  if(buttonName?.startsWith('newUiEditGroup|')) {
-    beginNewUiGroupEdit(buttonName.minus('newUiEditGroup|'))
-    return
-  }
-  if(buttonName?.startsWith('newUiDeleteGroup|')) {
-    requestNewUiGroupDeletion(buttonName.minus('newUiDeleteGroup|'))
-    return
-  }
-  if(buttonName == 'btnNewUiCreateGroup') {
-    beginNewUiGroupEditor(null)
-    return
-  }
-  if(buttonName?.startsWith('newUiToggleGroupFollower|')) {
-    toggleNewUiGroupFollower(buttonName.minus('newUiToggleGroupFollower|'))
-    return
-  }
-  if(buttonName == 'btnNewUiGroupNameChanged') {
-    handleNewUiGroupFieldChange('name')
-    return
-  }
-  if(buttonName == 'btnNewUiGroupCoordinatorChanged') {
-    handleNewUiGroupFieldChange('coordinator')
-    return
-  }
-  if(buttonName == 'btnNewUiSaveGroup') {
-    saveNewUiGroup()
-    return
-  }
-  if(buttonName == 'btnNewUiCancelGroup') {
-    cancelNewUiGroupEditor()
-    return
-  }
-  if(buttonName == 'btnConfirmNewUiDeleteGroup') {
-    confirmNewUiGroupDeletion()
-    return
-  }
-  if(buttonName == 'btnCancelNewUiDeleteGroup') {
-    cancelNewUiGroupDeletion()
-    return
-  }
-  if(buttonName.startsWith('newUiCreatePlayer|')) {
-    createNewUiPlayer(buttonName.minus('newUiCreatePlayer|'))
-    return
-  }
-  if(buttonName.startsWith('newUiDeletePlayer|')) {
-    requestNewUiPlayerDeletion(buttonName.minus('newUiDeletePlayer|'))
-    return
-  }
-  if(buttonName == 'btnConfirmNewUiDeletePlayer') {
-    confirmNewUiPlayerDeletion()
-    return
-  }
-  if(buttonName == 'btnCancelNewUiDeletePlayer') {
-    cancelNewUiPlayerDeletion()
-    return
   }
 }
 
-void createNewUiPlayer(String playerKey) {
-  if(!playerKey) {
-    logWarn('New UI create request did not include a Sonos player identifier')
-    return
-  }
+Map getLegacyDiscoveryState() {
+  Object secondaries = state[LEGACY_DISCOVERY_SECONDARIES_STATE_KEY]
+  return [secondaries: secondaries instanceof Map ? new LinkedHashMap((Map)secondaries) : [:],
+    playerDevices: settings.playerDevices instanceof Collection ? new ArrayList(settings.playerDevices) : settings.playerDevices,
+    groupConfigurations: state.userGroups instanceof Map ? new LinkedHashMap((Map)state.userGroups) : [:]]
+}
 
-  Map playerRow = buildNewUiSpeakerRows().find { Map row ->
-    String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
-    rowKey == playerKey
+void acknowledgeLegacyDiscoveryState() {
+  state.remove(LEGACY_DISCOVERY_SECONDARIES_STATE_KEY)
+  state.remove('userGroups')
+  ['playerDevices', 'groupDevices', 'newGroupName', 'newGroupCoordinator',
+    'newGroupPlayers', 'editDeleteGroup'].each { String settingName ->
+    try { app.removeSetting(settingName) } catch(Exception ignored) { }
+    try { settings.remove(settingName) } catch(Exception ignored) { }
+    try { app.updatedSettings?.remove(settingName) } catch(Exception ignored) { }
   }
-  if(playerRow == null) {
-    logWarn("New UI create request could not find discovered Sonos player '${playerKey}'")
-    return
-  }
-  if(playerRow.created == true) {
-    logInfo("New UI create request ignored because Sonos player '${playerKey}' already exists")
-    return
-  }
-  if(!discoveredSonoses[playerKey]) {
-    logWarn("New UI create request could not find discovery data for Sonos player '${playerKey}'")
-    return
-  }
+}
 
-  List<String> configuredPlayers = getConfiguredPlayerDeviceKeys()
-  if(!configuredPlayers.contains(playerKey)) {
-    configuredPlayers.add(playerKey)
+Map registerDiscoveryManagementChild(Object childInstanceId) {
+  String childId = childInstanceId?.toString()
+  if(!childId || !(childId ==~ /[0-9]{1,12}/)) { return [accepted: false, owner: false] }
+  String ownerId = state[DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY]?.toString()
+  if(!ownerId) {
+    state[DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY] = childId
+    ownerId = childId
   }
+  return [accepted: true, owner: ownerId == childId, ownerId: ownerId]
+}
 
+void unregisterDiscoveryManagementChild(Object childInstanceId) {
+  if(state[DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY]?.toString() == childInstanceId?.toString()) {
+    state.remove(DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY)
+  }
+}
+
+Map getProvisioningSnapshot() {
+  Map<String, String> players = [:]
+  Map<String, String> playerNames = [:]
+  List<Map<String, Object>> playerRows = []
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String dni = player.getDeviceNetworkId()?.toString()
+    if(dni) {
+      players[dni] = player.getDataValue('name')?.toString() ?: player.label?.toString() ?: dni
+      String playerId = player.getDataValue('id')?.toString() ?: dni
+      playerNames[playerId] = players[dni]
+      List<String> secondaryIds = splitTokens(player.getDataValue('secondaryIds')?.toString(), ',')
+      List<String> secondaryIps = splitTokens(player.getDataValue('secondaryDeviceIps')?.toString(), ',')
+      List<Map<String, Object>> secondaries = []
+      for(Integer index = 0; index < secondaryIds.size(); index++) {
+        secondaries.add([id: secondaryIds[index],
+          deviceIp: index < secondaryIps.size() ? secondaryIps[index] : null])
+      }
+      playerRows.add([deviceNetworkId: dni,
+        deviceId: player.id?.toString(),
+        id: player.getDataValue('id')?.toString() ?: dni,
+        name: players[dni],
+        model: (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString(),
+        ip: (player.getDataValue('deviceIp') ?: player.getDataValue('localUpnpHost'))?.toString(),
+        secondaries: secondaries])
+    }
+  }
+  List<Map<String, Object>> groupRows = []
+  getCurrentGroupDevices().each { ChildDeviceWrapper group ->
+    String dni = group.getDeviceNetworkId()?.toString()
+    String name = extractGroupNameFromDni(dni)
+    if(name) {
+      groupRows.add([name: name,
+        deviceId: group.id?.toString(),
+        coordinatorId: group.getDataValue('groupCoordinatorId')?.toString(),
+        followerIds: splitTokens(group.getDataValue('playerIds')?.toString(), ',')])
+    }
+  }
+  return [players: players, playerNames: playerNames, playerRows: playerRows, groups: groupRows]
+}
+
+Map submitGroupConfigurationSync(Map request) {
+  if(request?.schemaVersion != 1 || !request.requestId || !(request.groups instanceof Map)) {
+    return [accepted: false, error: 'invalid_request']
+  }
+  Map groups = (Map)request.groups
+  if(groups.size() > 64 || request.requestId.toString().length() > 80) {
+    return [accepted: false, error: 'request_too_large']
+  }
+  Map<String, Map> validated = [:]
+  groups.each { Object rawName, Object rawDefinition ->
+    String name = rawName?.toString()?.trim()
+    if(!name || name.length() > 128 || !(rawDefinition instanceof Map)) { return }
+    Map definition = (Map)rawDefinition
+    String coordinatorId = definition.groupCoordinatorId?.toString()
+    List<String> followers = normalizeGroupPlayerIds(definition.playerIds)
+    if(coordinatorId && !followers.isEmpty() && coordinatorId.length() <= 128 &&
+        followers.size() <= 64 && followers.every { String id -> id.length() <= 128 && id ==~ /[A-Za-z0-9:._-]+/ }) {
+      validated[name] = [groupCoordinatorId: coordinatorId, playerIds: followers]
+    }
+  }
+  if(validated.size() != groups.size()) { return [accepted: false, error: 'invalid_group_data'] }
+  String requestId = request.requestId.toString()
+  Map queue = state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY]) : [:]
+  if(queue.containsKey(requestId)) { return [accepted: true, requestId: requestId] }
+  if(queue.size() >= 8) { return [accepted: false, error: 'queue_full'] }
+  queue[requestId] = [groups: validated]
+  state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] = queue
+  runIn(1, 'drainGroupConfigurationRequests', [overwrite: false])
+  return [accepted: true, requestId: requestId]
+}
+
+Map submitGroupManagementRequest(Map request) {
+  if(request?.schemaVersion != 1 || !request.requestId ||
+      !(request.action in ['upsert', 'delete'])) {
+    return [accepted: false, error: 'invalid_request']
+  }
+  String requestId = request.requestId.toString()
+  if(requestId.length() > 80) { return [accepted: false, error: 'invalid_request'] }
+  Map queue = state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY]) : [:]
+  if(queue.containsKey(requestId)) { return [accepted: true, requestId: requestId] }
+  if(queue.size() >= 8) { return [accepted: false, error: 'queue_full'] }
+  String name = request.name?.toString()?.trim()
+  String oldName = request.oldName?.toString()?.trim()
+  if(!name || name.length() > 128 || (oldName && oldName.length() > 128)) {
+    return [accepted: false, error: 'invalid_group_name']
+  }
+  Map queued = [action: request.action.toString(), name: name, oldName: oldName]
+  if(request.action == 'upsert') {
+    String coordinatorId = request.groupCoordinatorId?.toString()
+    List<String> followers = normalizeGroupPlayerIds(request.playerIds)
+    Set<String> installedPlayers = getCurrentPlayerDevices().collect { ChildDeviceWrapper player ->
+      player.getDataValue('id')?.toString()
+    }.findAll { String id -> id } as Set<String>
+    if(!coordinatorId || !installedPlayers.contains(coordinatorId) || followers.isEmpty() ||
+        followers.size() > 64 || followers.contains(coordinatorId) ||
+        followers.any { String id -> !installedPlayers.contains(id) }) {
+      return [accepted: false, error: 'invalid_players']
+    }
+    queued.groupCoordinatorId = coordinatorId
+    queued.playerIds = followers.unique()
+  }
+  queue[requestId] = queued
+  state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] = queue
+  runIn(1, 'drainGroupConfigurationRequests', [overwrite: false])
+  return [accepted: true, requestId: requestId]
+}
+
+void drainGroupConfigurationRequests() {
+  Map queue = state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY]) : [:]
+  if(queue.isEmpty()) { return }
+  String requestId = queue.keySet().iterator().next().toString()
+  Map request = (Map)queue[requestId]
+  queue.remove(requestId)
+  state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] = queue
   try {
-    Integer createdCount = createPlayerDevices([playerKey])
-    if(createdCount < 1) {
-      logWarn("New UI could not create Sonos player '${playerKey}'")
-      return
-    }
-    app.updateSetting('playerDevices', [type: 'enum', value: configuredPlayers])
-    String playerName = playerRow.name?.toString() ?: playerKey
-    logInfo("New UI created Sonos Advanced Player '${playerName}' (${playerKey})")
-    runIn(3, 'finalizeNewUiPlayerCreation')
-  } catch(Exception e) {
-    logError("New UI failed to create Sonos player '${playerKey}': ${e.message}")
-  }
-}
-
-void finalizeNewUiPlayerCreation() {
-  refreshStaticDriverActivePlayerRoster()
-  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-  runIn(1, 'subscribeToGroupCommandRequests')
-  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-}
-
-void beginNewUiGroupEditor(String coordinatorId) {
-  if(coordinatorId) {
-    ChildDeviceWrapper coordinator = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
-      player.getDataValue('id')?.toString() == coordinatorId
-    }
-    if(coordinator == null) {
-      logWarn("New UI group editor could not find coordinator '${coordinatorId}'")
-      return
-    }
-  }
-
-  clearNewUiGroupSettings()
-  state[NEW_UI_GROUP_EDITOR_MODE_KEY] = NEW_UI_GROUP_MODE_CREATE
-  state.remove(NEW_UI_GROUP_ORIGINAL_NAME_KEY)
-  state[NEW_UI_GROUP_AUTO_NAME_KEY] = true
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  state.remove(NEW_UI_GROUP_DELETE_KEY)
-  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  String initialName = buildNewUiAutomaticGroupName(coordinatorId, [], playerNames)
-  state[NEW_UI_GROUP_DRAFT_KEY] = [name: initialName, coordinatorId: coordinatorId, followerIds: []]
-  if(coordinatorId) {
-    app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: coordinatorId])
-    app.updateSetting('newUiGroupName', [type: 'text', value: initialName])
-  }
-  logInfo(coordinatorId
-      ? "New UI group creation started from coordinator '${coordinatorId}'"
-      : 'New UI group creation started')
-}
-
-void beginNewUiGroupEdit(String token) {
-  Map group = findNewUiGroupByToken(token)
-  if(group == null) {
-    logWarn("New UI group edit request could not resolve group token '${token}'")
-    return
-  }
-
-  clearNewUiGroupSettings()
-  state[NEW_UI_GROUP_EDITOR_MODE_KEY] = NEW_UI_GROUP_MODE_EDIT
-  state[NEW_UI_GROUP_ORIGINAL_NAME_KEY] = group.name.toString()
-  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  List<String> existingFollowerIds = normalizeNewUiGroupPlayerIds(group.followerIds)
-  state[NEW_UI_GROUP_AUTO_NAME_KEY] = isNewUiGroupAutomaticName(
-      group.name.toString(), buildNewUiAutomaticGroupName(group.coordinatorId?.toString(), existingFollowerIds, playerNames))
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  state[NEW_UI_GROUP_DRAFT_KEY] = [
-    name: group.name.toString(),
-    coordinatorId: group.coordinatorId?.toString(),
-    followerIds: existingFollowerIds
-  ]
-  app.updateSetting('newUiGroupName', group.name.toString())
-  if(group.coordinatorId) {
-    app.updateSetting('newUiGroupCoordinator', [type: 'enum', value: group.coordinatorId.toString()])
-  }
-  app.updateSetting('newUiGroupFollowers', [type: 'enum', value: normalizeNewUiGroupPlayerIds(group.followerIds)])
-  logInfo("New UI group edit started for '${group.name}'")
-}
-
-void toggleNewUiGroupFollower(String playerId) {
-  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
-  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  if(!playerId || !playerNames.containsKey(playerId)) { return }
-
-  Map draft = getNewUiGroupDraft()
-  String coordinatorId = getNewUiGroupCoordinator(draft)
-  if(playerId == coordinatorId) { return }
-
-  List<String> followerIds = getNewUiGroupFollowers(draft)
-  if(followerIds.contains(playerId)) {
-    followerIds.remove(playerId)
-  } else {
-    followerIds << playerId
-  }
-  followerIds = followerIds.unique()
-  draft.followerIds = followerIds
-  state[NEW_UI_GROUP_DRAFT_KEY] = draft
-  app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
-  refreshAutomaticNewUiGroupName(draft)
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
-}
-
-void handleNewUiGroupFieldChange(String field) {
-  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) { return }
-  Map draft = getNewUiGroupDraft()
-  String coordinatorId = getNewUiGroupCoordinator(draft)
-  List<String> followerIds = getNewUiGroupFollowers(draft)
-  if(field == 'name') {
-    String previousName = draft.name?.toString()?.trim() ?: ''
-    String updatedName = settings.newUiGroupName?.toString()?.trim() ?: ''
-    if(updatedName != previousName) { state[NEW_UI_GROUP_AUTO_NAME_KEY] = false }
-    draft.name = updatedName
-  } else if(field == 'coordinator') {
-    coordinatorId = settings.newUiGroupCoordinator?.toString() ?: ''
-    Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-    if(coordinatorId && !playerNames.containsKey(coordinatorId)) { return }
-    followerIds = followerIds.findAll { String id -> id != coordinatorId }
-    app.updateSetting('newUiGroupFollowers', [type: 'enum', value: followerIds])
-    draft.coordinatorId = coordinatorId
-    draft.followerIds = followerIds
-    refreshAutomaticNewUiGroupName(draft)
-  } else {
-    return
-  }
-  state[NEW_UI_GROUP_DRAFT_KEY] = draft
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  app.sendEvent(name: NEW_UI_GROUP_EDITOR_EVENT, value: 'updated')
-}
-
-void saveNewUiGroup() {
-  if(!state[NEW_UI_GROUP_EDITOR_MODE_KEY]) {
-    logWarn('New UI group save requested without an active editor')
-    return
-  }
-
-  Map draft = getNewUiGroupDraft()
-  String originalName = state[NEW_UI_GROUP_ORIGINAL_NAME_KEY]?.toString()
-  String groupName = draft.name?.toString()?.trim() ?: ''
-  String coordinatorId = getNewUiGroupCoordinator(draft)
-  List<String> followerIds = getNewUiGroupFollowers(draft).unique()
-
-  Map<String, String> playerNames = getNewUiGroupPlayerNameMap()
-  if(!coordinatorId || !playerNames.containsKey(coordinatorId)) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'Select a coordinator before saving the group.'
-    return
-  }
-  if(followerIds.isEmpty()) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'Select at least one follower before saving the group.'
-    return
-  }
-  if(followerIds.contains(coordinatorId)) {
-    state[NEW_UI_GROUP_ERROR_KEY] = 'The coordinator cannot also be a follower.'
-    return
-  }
-  if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == true) {
-    groupName = buildNewUiAutomaticGroupName(coordinatorId, followerIds, playerNames)
-  }
-  List<String> unknownFollowers = followerIds.findAll { String id -> !playerNames.containsKey(id) }
-  if(!unknownFollowers.isEmpty()) {
-    state[NEW_UI_GROUP_ERROR_KEY] = "These follower speakers are no longer available: ${unknownFollowers.join(', ')}"
-    return
-  }
-
-  if(!groupName) {
-    groupName = "${playerNames[coordinatorId]} + ${followerIds.size()} others"
-  }
-  Map configuredGroups = state.userGroups instanceof Map ? (Map)state.userGroups : [:]
-  if(configuredGroups.containsKey(groupName) && groupName != originalName) {
-    state[NEW_UI_GROUP_ERROR_KEY] = "A group named '${groupName}' already exists. Choose a different name."
-    return
-  }
-  if(originalName && originalName != groupName && !renameNewUiGroupDevice(originalName, groupName)) {
-    state[NEW_UI_GROUP_ERROR_KEY] = "The existing group device could not be renamed to '${groupName}'."
-    return
-  }
-
-  if(originalName && originalName != groupName) {
-    configuredGroups.remove(originalName)
-  }
-  configuredGroups[groupName] = [groupCoordinatorId: coordinatorId, playerIds: followerIds]
-  state.userGroups = configuredGroups
-  String mode = state[NEW_UI_GROUP_EDITOR_MODE_KEY] as String
-  clearNewUiGroupSettings()
-  createGroupDevices()
-  state.remove(NEW_UI_GROUP_EDITOR_MODE_KEY)
-  state.remove(NEW_UI_GROUP_ORIGINAL_NAME_KEY)
-  state.remove(NEW_UI_GROUP_DRAFT_KEY)
-  state.remove(NEW_UI_GROUP_AUTO_NAME_KEY)
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  runIn(1, 'subscribeToGroupCommandRequests')
-  app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-  logInfo("New UI ${mode == NEW_UI_GROUP_MODE_EDIT ? 'updated' : 'created'} Sonos group '${groupName}'")
-}
-
-Boolean renameNewUiGroupDevice(String oldName, String newName) {
-  String oldDni = "${app.id}-SonosGroupDevice-${oldName}"
-  String newDni = "${app.id}-SonosGroupDevice-${newName}"
-  DeviceWrapper existingDevice = getChildDevice(oldDni)
-  if(existingDevice == null) {
-    return true
-  }
-  try {
-    existingDevice.setDeviceNetworkId(newDni)
-    existingDevice.setLabel("Sonos Group: ${newName}")
-    logInfo("Renamed group device from '${oldName}' to '${newName}'")
-    return true
-  } catch(Exception e) {
-    logError("Failed to rename group device from '${oldName}' to '${newName}': ${e.message}")
-    return false
-  }
-}
-
-void clearNewUiGroupSettings() {
-  app.removeSetting('newUiGroupName')
-  app.removeSetting('newUiGroupCoordinator')
-  app.removeSetting('newUiGroupFollowers')
-  app.removeSetting('newUiGroupFollowerSelection')
-}
-
-String synchronizeNewUiGroupName(Map draft, String coordinatorId, List<String> followerIds,
-    Map<String, String> playerNames) {
-  String configuredName = settings.containsKey('newUiGroupName') && settings.newUiGroupName != null
-      ? settings.newUiGroupName.toString().trim()
-      : null
-  String previousName = draft.name?.toString()?.trim() ?: ''
-  if(configuredName != null && configuredName != previousName && configuredName != '') {
-    state[NEW_UI_GROUP_AUTO_NAME_KEY] = false
-  }
-
-  String automaticName = refreshAutomaticNewUiGroupName(draft, coordinatorId, followerIds, playerNames)
-  if(automaticName) { return automaticName }
-
-  String editorName = state[NEW_UI_GROUP_AUTO_NAME_KEY] == false
-      ? previousName
-      : (configuredName != null ? configuredName : previousName)
-  draft.name = editorName
-  draft.coordinatorId = coordinatorId
-  draft.followerIds = followerIds
-  return editorName
-}
-
-String refreshAutomaticNewUiGroupName(Map draft, String coordinatorId = null,
-    List<String> followerIds = null, Map<String, String> playerNames = null) {
-  if(state[NEW_UI_GROUP_AUTO_NAME_KEY] == false) { return null }
-  String selectedCoordinator = coordinatorId != null ? coordinatorId : draft.coordinatorId?.toString()
-  List<String> selectedFollowers = followerIds != null
-      ? normalizeNewUiGroupPlayerIds(followerIds)
-      : normalizeNewUiGroupPlayerIds(draft.followerIds)
-  Map<String, String> names = playerNames ?: getNewUiGroupPlayerNameMap()
-  String automaticName = buildNewUiAutomaticGroupName(selectedCoordinator, selectedFollowers, names)
-  if(!automaticName) { return null }
-  if(settings.newUiGroupName?.toString()?.trim() != automaticName) {
-    app.updateSetting('newUiGroupName', [type: 'text', value: automaticName])
-  }
-  draft.name = automaticName
-  draft.coordinatorId = selectedCoordinator
-  draft.followerIds = selectedFollowers
-  state[NEW_UI_GROUP_DRAFT_KEY] = draft
-  return automaticName
-}
-
-String buildNewUiAutomaticGroupName(String coordinatorId, List<String> followerIds,
-    Map<String, String> playerNames) {
-  String coordinatorName = playerNames[coordinatorId]
-  if(!coordinatorName) { return '' }
-  if(followerIds.size() == 1 && playerNames[followerIds[0]]) {
-    return "${coordinatorName} + ${playerNames[followerIds[0]]}"
-  }
-  return "${coordinatorName} + ${followerIds.size()} others"
-}
-
-Boolean isNewUiGroupAutomaticName(String name, String automaticName) {
-  return name && automaticName && name == automaticName
-}
-
-void cancelNewUiGroupEditor() {
-  clearNewUiGroupSettings()
-  state.remove(NEW_UI_GROUP_EDITOR_MODE_KEY)
-  state.remove(NEW_UI_GROUP_ORIGINAL_NAME_KEY)
-  state.remove(NEW_UI_GROUP_DRAFT_KEY)
-  state.remove(NEW_UI_GROUP_AUTO_NAME_KEY)
-  state.remove(NEW_UI_GROUP_ERROR_KEY)
-  logInfo('Cancelled New UI group edit')
-}
-
-void requestNewUiGroupDeletion(String token) {
-  Map group = findNewUiGroupByToken(token)
-  if(group == null) {
-    logWarn("New UI group delete request could not resolve group token '${token}'")
-    return
-  }
-  state[NEW_UI_GROUP_DELETE_KEY] = token
-  logInfo("New UI delete requested for Sonos group '${group.name}'; awaiting confirmation")
-}
-
-void confirmNewUiGroupDeletion() {
-  String token = state[NEW_UI_GROUP_DELETE_KEY]?.toString()
-  state.remove(NEW_UI_GROUP_DELETE_KEY)
-  Map group = findNewUiGroupByToken(token)
-  if(group == null) {
-    logWarn('New UI group delete confirmation could not resolve the selected group')
-    return
-  }
-
-  String groupName = group.name.toString()
-  try {
-    if(state.userGroups instanceof Map) {
-      state.userGroups.remove(groupName)
-    }
-    String groupDni = "${app.id}-SonosGroupDevice-${groupName}"
-    if(getChildDevice(groupDni) != null) {
-      app.deleteChildDevice(groupDni)
-    }
-    app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
-    if(state[NEW_UI_GROUP_ORIGINAL_NAME_KEY]?.toString() == groupName) {
-      cancelNewUiGroupEditor()
+    if(request.action == 'delete') {
+      String oldName = request.oldName?.toString()
+      String dni = "${app.id}-SonosGroupDevice-${oldName ?: request.name}"
+      if(app.getChildDevice(dni)) { app.deleteChildDevice(dni) }
+    } else if(request.action == 'upsert') {
+      String oldName = request.oldName?.toString()
+      String name = request.name?.toString()
+      if(oldName && oldName != name) {
+        String oldDni = "${app.id}-SonosGroupDevice-${oldName}"
+        ChildDeviceWrapper existing = app.getChildDevice(oldDni)
+        if(existing) {
+          existing.setDeviceNetworkId("${app.id}-SonosGroupDevice-${name}")
+          existing.setLabel("Sonos Group: ${name}")
+        }
+      }
+      upsertGroupDevice(name, request)
+    } else {
+      Map groups = request.groups instanceof Map ? (Map)request.groups : [:]
+      groups.each { String name, Map definition -> upsertGroupDevice(name, definition) }
     }
     runIn(1, 'subscribeToGroupCommandRequests')
-    app.sendEvent(name: NEW_UI_GROUP_TABLE_EVENT, value: 'updated')
-    logInfo("Removed Sonos group '${groupName}'")
   } catch(Exception e) {
-    logError("Failed to remove Sonos group '${groupName}': ${e.message}")
+    logError("Group configuration sync ${requestId} failed: ${e.message}")
   }
+  if(queue) { runIn(1, 'drainGroupConfigurationRequests', [overwrite: false]) }
 }
 
-void cancelNewUiGroupDeletion() {
-  String token = state[NEW_UI_GROUP_DELETE_KEY]?.toString()
-  state.remove(NEW_UI_GROUP_DELETE_KEY)
-  if(token) {
-    Map group = findNewUiGroupByToken(token)
-    logInfo("Cancelled New UI group delete request for '${group?.name ?: token}'")
+Map submitPlayerProvisioningRequest(Map request) {
+  if(request?.schemaVersion != 1 || !request.requestId || !(request.selected instanceof Collection) ||
+      !(request.players instanceof Map) || !(request.secondaries instanceof Map)) {
+    return [accepted: false, error: 'invalid_request']
   }
+  List<String> selected = ((Collection)request.selected).collect { Object value -> value?.toString() }
+      .findAll { String value -> value } .unique()
+  Map players = (Map)request.players
+  Map secondaries = (Map)request.secondaries
+  if(players.size() > 64 || secondaries.size() > 128 || request.requestId.toString().length() > 80) {
+    return [accepted: false, error: 'request_too_large']
+  }
+  if(selected.isEmpty() || selected.size() > 64 ||
+      selected.any { String dni -> dni.length() > 128 || !(dni ==~ /[A-Za-z0-9:._-]+/) }) {
+    return [accepted: false, error: 'invalid_selection']
+  }
+  Set<String> allowedFields = ['id', 'name', 'deviceIp', 'localApiUrl', 'localUpnpUrl', 'localUpnpHost',
+      'websocketUrl', 'swGen', 'capabilities', 'modelName', 'householdId', 'topologyInfo'] as Set<String>
+  Map<String, Map> validatedPlayers = [:]
+  selected.each { String dni ->
+    Object raw = players[dni]
+    if(!(raw instanceof Map)) { return }
+    Map player = (Map)raw
+    List<String> required = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+    Map<String, Object> detachedPlayer = detachProvisioningMap(player, allowedFields)
+    if(required.every { String key -> detachedPlayer[key] != null && detachedPlayer[key].toString().trim() }) {
+      validatedPlayers[dni] = detachedPlayer
+    }
+  }
+  if(validatedPlayers.size() != selected.size()) { return [accepted: false, error: 'invalid_player_data'] }
+  Set<String> allowedSecondaryFields = ['id', 'primaryDeviceId', 'deviceIp', 'localApiUrl', 'localUpnpUrl',
+      'localUpnpHost', 'websocketUrl', 'swGen', 'capabilities', 'modelName', 'modelDisplayName',
+      'householdId', 'topologyInfo'] as Set<String>
+  Map<String, Map> validatedSecondaries = [:]
+  secondaries.each { Object key, Object raw ->
+    if(key instanceof String && raw instanceof Map && ((Map)raw).id && ((Map)raw).primaryDeviceId) {
+      validatedSecondaries[key.toString()] = detachProvisioningMap((Map)raw, allowedSecondaryFields)
+    }
+  }
+  if(validatedSecondaries.size() != secondaries.size()) { return [accepted: false, error: 'invalid_secondary_data'] }
+  Map<String, Object> queue = state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY]) : [:]
+  String requestId = request.requestId.toString()
+  if(queue.containsKey(requestId) || ((Map)(state[PLAYER_PROVISIONING_REQUEST_STATUS_KEY] ?: [:])).containsKey(requestId)) {
+    return [accepted: true, requestId: requestId]
+  }
+  if(queue.size() >= 8) { return [accepted: false, error: 'queue_full'] }
+  queue[requestId] = [selected: selected, players: validatedPlayers, secondaries: validatedSecondaries]
+  state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] = queue
+  recordPlayerProvisioningStatus(requestId, 'queued')
+  runIn(1, 'drainPlayerProvisioningRequests', [overwrite: false])
+  return [accepted: true, requestId: requestId]
 }
 
-List<String> getConfiguredPlayerDeviceKeys() {
-  if(settings.playerDevices instanceof Collection) {
-    return settings.playerDevices.collect { Object value -> value?.toString() }.findAll { String value -> value }
+Map<String, Object> detachProvisioningMap(Map source, Set<String> allowedFields) {
+  Map<String, Object> detached = [:]
+  source.each { Object field, Object value ->
+    if(field instanceof String && allowedFields.contains(field.toString()) && value != null) {
+      Object copied = detachProvisioningValue(value, 0)
+      if(copied != null) { detached[field.toString()] = copied }
+    }
   }
-  if(settings.playerDevices) {
-    return [settings.playerDevices.toString()]
-  }
-  return []
+  return detached
 }
 
-void requestNewUiPlayerDeletion(String playerKey) {
-  if(!playerKey) {
-    logWarn('New UI delete request did not include a Sonos player identifier')
-    return
+Object detachProvisioningValue(Object value, Integer depth) {
+  if(value == null) { return null }
+  if(value instanceof String) { return value.toString().length() <= 4096 ? value.toString() : null }
+  if(value instanceof Number || value instanceof Boolean) { return value }
+  if(depth >= 3) { return null }
+  if(value instanceof Map && ((Map)value).size() <= 64) {
+    Map<String, Object> detached = [:]
+    ((Map)value).each { Object key, Object nested ->
+      if(key instanceof String) {
+        Object copied = detachProvisioningValue(nested, depth + 1)
+        if(copied != null) { detached[key.toString()] = copied }
+      }
+    }
+    return detached
   }
-  state.pendingNewUiDeletePlayer = playerKey
-  Map playerRow = buildNewUiSpeakerRows().find { Map row ->
-    String rowKey = row.discoveryKey?.toString() ?: row.id?.toString()
-    rowKey == playerKey
+  if(value instanceof Collection && ((Collection)value).size() <= 128) {
+    List detached = []
+    ((Collection)value).each { Object nested ->
+      Object copied = detachProvisioningValue(nested, depth + 1)
+      if(copied != null) { detached.add(copied) }
+    }
+    return detached
   }
-  String playerName = playerRow?.name?.toString() ?: playerKey
-  logInfo("New UI delete requested for Sonos player '${playerName}' (${playerKey}); awaiting confirmation")
+  return null
 }
 
-void confirmNewUiPlayerDeletion() {
-  String playerKey = state.pendingNewUiDeletePlayer as String
-  state.remove('pendingNewUiDeletePlayer')
-  if(!playerKey) {
-    logWarn('New UI delete confirmation received without a pending Sonos player')
-    return
+Map submitPlayerRemovalRequest(Map request) {
+  if(request?.schemaVersion != 1 || !request.requestId || !(request.remove instanceof Collection)) {
+    return [accepted: false, error: 'invalid_request']
   }
+  List<String> requested = ((Collection)request.remove).collect { Object value -> value?.toString() }.findAll { String value -> value }.unique()
+  if(requested.size() > 64 || request.requestId.toString().length() > 80) { return [accepted: false, error: 'invalid_request'] }
+  Set<String> installed = getCurrentPlayerDevices().collect { ChildDeviceWrapper player ->
+    player.getDeviceNetworkId()?.toString()
+  }.findAll { String dni -> dni } as Set<String>
+  List<String> remove = requested.findAll { String dni -> installed.contains(dni) }
+  if(remove.size() != requested.size()) { return [accepted: false, error: 'unknown_device'] }
+  String requestId = request.requestId.toString()
+  Map queue = state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY]) : [:]
+  if(queue.containsKey(requestId) || ((Map)(state[PLAYER_PROVISIONING_REQUEST_STATUS_KEY] ?: [:])).containsKey(requestId)) {
+    return [accepted: true, requestId: requestId]
+  }
+  if(queue.size() >= 8) { return [accepted: false, error: 'queue_full'] }
+  queue[requestId] = [remove: remove]
+  state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] = queue
+  recordPlayerProvisioningStatus(requestId, 'queued')
+  runIn(1, 'drainPlayerProvisioningRequests', [overwrite: false])
+  return [accepted: true, requestId: requestId]
+}
 
-  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
-    String deviceNetworkId = candidate.getDeviceNetworkId()?.toString()
-    String playerId = candidate.getDataValue('id')?.toString()
-    deviceNetworkId == playerKey || playerId == playerKey
-  }
-  if(player == null) {
-    logWarn("New UI delete confirmation could not find Sonos player '${playerKey}'")
-    return
-  }
+void recordPlayerProvisioningStatus(String requestId, String status) {
+  Map statuses = state[PLAYER_PROVISIONING_REQUEST_STATUS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PLAYER_PROVISIONING_REQUEST_STATUS_KEY]) : [:]
+  statuses[requestId] = [status: status, updatedAt: now()]
+  while(statuses.size() > 20) { statuses.remove(statuses.keySet().iterator().next()) }
+  state[PLAYER_PROVISIONING_REQUEST_STATUS_KEY] = statuses
+}
 
-  String deviceNetworkId = player.getDeviceNetworkId()?.toString()
-  String playerName = player.getDataValue('name')?.toString() ?: player.label?.toString() ?: playerKey
+void drainPlayerProvisioningRequests() {
+  Map queue = state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY]) : [:]
+  if(queue.isEmpty()) { return }
+  String requestId = queue.keySet().iterator().next().toString()
+  Map request = (Map)queue[requestId]
+  queue.remove(requestId)
+  state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] = queue
+  recordPlayerProvisioningStatus(requestId, 'processing')
   try {
-    logInfo("Removing Sonos Advanced Player '${playerName}' (${deviceNetworkId}) from Hubitat")
-    app.deleteChildDevice(deviceNetworkId)
-    List<String> configuredPlayers = getConfiguredPlayerDeviceKeys()
-    configuredPlayers = configuredPlayers.findAll { String value -> value != deviceNetworkId && value != playerKey }
-    app.updateSetting('playerDevices', [type: 'enum', value: configuredPlayers])
-    runIn(3, 'finalizeNewUiPlayerDeletion')
+    if(request.remove instanceof Collection) {
+      ((Collection)request.remove).each { Object rawDni ->
+        String dni = rawDni?.toString()
+        ChildDeviceWrapper player = dni ? app.getChildDevice(dni) : null
+        if(player && player.getDataValue('id')) { app.deleteChildDevice(dni) }
+      }
+      refreshStaticDriverActivePlayerRoster()
+      runIn(1, 'subscribeToGroupCommandRequests')
+    } else {
+      Integer created = createPlayerDevicesFromProvisioning((List<String>)request.selected,
+          (Map<String, Map>)request.players, (Map<String, Map>)request.secondaries)
+      runIn(3, 'finalizeProvisionedPlayerCreation', [data: [requestId: requestId, created: created]])
+    }
+    recordPlayerProvisioningStatus(requestId, 'complete')
   } catch(Exception e) {
-    logError("Failed to remove Sonos Advanced Player '${playerName}': ${e.message}")
+    recordPlayerProvisioningStatus(requestId, 'failed')
+    logError("Player management request ${requestId} failed: ${e.message}")
   }
+  if(queue) { runIn(1, 'drainPlayerProvisioningRequests', [overwrite: false]) }
 }
 
-void finalizeNewUiPlayerDeletion() {
-  refreshStaticDriverActivePlayerRoster()
-  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-}
-
-void cancelNewUiPlayerDeletion() {
-  String playerKey = state.pendingNewUiDeletePlayer as String
-  state.remove('pendingNewUiDeletePlayer')
-  if(playerKey) {
-    logInfo("Cancelled New UI delete request for Sonos player '${playerKey}'")
-  }
-}
-
-void startNewUiDiscoverySession() {
-  if(atomicState.discoveryRunning == true) {
-    logInfo('Cancelling New UI Sonos speaker discovery')
-    stopDiscovery()
-    return
-  }
-  logInfo('Starting New UI Sonos speaker discovery')
-  startDiscoverySession()
-}
-
-void applySettingsButton() { configure() }
-
-void saveGroup() {
-  if(!state.userGroups) { state.userGroups = [:] }
-  String editingGroup = app.getSetting('editDeleteGroup')
-  String newName = app.getSetting('newGroupName')
-
-  // If editing and name changed, rename the existing device in place
-  // This preserves dashboard tiles, rules, and automations that reference the device
-  if(editingGroup && editingGroup != newName) {
-    if(state.userGroups.containsKey(newName)) {
-      logWarn("Cannot rename group '${editingGroup}' to '${newName}': a group with that name already exists")
-      return
-    }
-    String oldDni = "${app.id}-SonosGroupDevice-${editingGroup}"
-    String newDni = "${app.id}-SonosGroupDevice-${newName}"
-    DeviceWrapper existingDevice = getChildDevice(oldDni)
-    if(existingDevice) {
-      try {
-        existingDevice.setDeviceNetworkId(newDni)
-      } catch (Exception e) {
-        logError("Failed to rename group device from '${editingGroup}' to '${newName}': ${e.message}")
-        return
-      }
-      try {
-        existingDevice.setLabel("Sonos Group: ${newName}")
-      } catch (Exception e) {
-        logWarn("Renamed group device DNI for '${editingGroup}', but could not update the label: ${e.message}")
-      }
-      logInfo("Renamed group device from '${editingGroup}' to '${newName}'")
-    }
-    state.userGroups.remove(editingGroup)
-  }
-
-  state.userGroups[newName] = [groupCoordinatorId:app.getSetting('newGroupCoordinator'), playerIds:app.getSetting('newGroupPlayers')]
-  app.removeSetting('newGroupName')
-  app.removeSetting('newGroupPlayers')
-  app.removeSetting('newGroupCoordinator')
-  app.removeSetting('editDeleteGroup')
-
-  createGroupDevices()
-  runIn(1, 'subscribeToGroupCommandRequests')
-}
-
-void deleteGroup() {
-  String groupName = app.getSetting('editDeleteGroup') ?: app.getSetting('newGroupName')
-  if(!groupName) {
-    logWarn('No group selected to delete')
-    return
-  }
-  if(!state.userGroups?.containsKey(groupName)) {
-    logWarn("Group '${groupName}' not found, nothing to delete")
-  }
-  state.userGroups.remove(groupName)
-  app.removeSetting('newGroupName')
-  app.removeSetting('newGroupPlayers')
-  app.removeSetting('newGroupCoordinator')
-  app.removeSetting('editDeleteGroup')
-  state.refreshGroupPage = true
-  // Update groupDevices setting to match remaining groups so removeOrphans() can detect the orphaned device
-  app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
-  removeOrphans()
-  runIn(1, 'subscribeToGroupCommandRequests')
-}
-
-void cancelGroupEdit() {
-  app.removeSetting('newGroupName')
-  app.removeSetting('newGroupPlayers')
-  app.removeSetting('newGroupCoordinator')
-  app.removeSetting('editDeleteGroup')
-}
-// =============================================================================
-// End Button Handlers
-// =============================================================================
-
-
-
-// =============================================================================
-// Initialize() and Configure()
-// =============================================================================
 void installed() { initialize() }
 void updated() { configure(false) }
 void initialize() { configure(true) }
@@ -2929,9 +1114,9 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
 
 void configure(Boolean startup = false) {
   applyLogLevelChange()
+  synchronizeDiscoveryChildLogLevel()
   logInfo("${app.name} updated")
-  // Copy-then-prune: migrate legacy keys before whitelist removal deletes them.
-  migrateLegacyAppStateOnce()
+  // Prune retired parent keys after management state has moved to the child app.
   Map<String, Object> pruneResult = pruneOrphanedAppPersistence()
   // Log summary is already emitted by prune; keep reference for debugging.
   logDebug("App persistence prune completed: ${pruneResult}")
@@ -2951,8 +1136,6 @@ void configure(Boolean startup = false) {
   if(settings.groupAnnouncementMode == null) { settings.groupAnnouncementMode = 'alwaysNonInterrupting' }
   if(settings.highPriorityAnnouncementMode == null) { settings.highPriorityAnnouncementMode = 'alwaysNonInterrupting' }
 
-  try { createPlayerDevices() }
-  catch (Exception e) { logError("createPlayerDevices() Failed: ${e}")}
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
   try { configureAlarmManagement() }
@@ -2973,9 +1156,11 @@ void configure(Boolean startup = false) {
   if(state[GROUP_COMMAND_QUEUE_STATE_KEY] instanceof Map) {
     runIn(1, 'drainGroupCommandRequests', [overwrite: true])
   }
+  if(state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY] instanceof Map && !((Map)state[PENDING_PLAYER_PROVISIONING_REQUESTS_KEY]).isEmpty()) {
+    runIn(1, 'drainPlayerProvisioningRequests', [overwrite: false])
+  }
 
   unschedule('appGetFavoritesLocal')
-  stopDiscovery()
 
   // Schedule TTS voice cache refresh: 30s delay for hub readiness, then daily at 3 AM
   unschedule('refreshTTSVoiceCache')
@@ -2986,6 +1171,18 @@ void configure(Boolean startup = false) {
   unschedule('refreshFavoritesAndPlaylists')
   schedule('0 5 3 * * ?', 'refreshFavoritesAndPlaylists')
   rearmPlayerStateUpdateDrainAfterRestart()
+}
+
+/** Keep discovery diagnostics under the parent app's logging preference. */
+void synchronizeDiscoveryChildLogLevel() {
+  String selectedLevel = getConfiguredLogLevel()
+  List<InstalledAppWrapper> children = getChildApps() as List<InstalledAppWrapper>
+  InstalledAppWrapper discoveryChild = children?.find { InstalledAppWrapper candidate ->
+    candidate.getName() == 'Sonos Advanced Controller - Discovery & Management'
+  }
+  if(discoveryChild && discoveryChild.getSetting('logLevel')?.toString() != selectedLevel) {
+    discoveryChild.updateSetting('logLevel', [type: 'enum', value: selectedLevel])
+  }
 }
 
 void systemStartHandler(Object event = null) {
@@ -3630,46 +1827,36 @@ void refreshFavoritesAndPlaylists() {
 // Create Child Devices
 // =============================================================================
 void createGroupDevices() {
-  if(!state.userGroups) {return}
-  logDebug('Creating group devices...')
-  state.userGroups.each{ it ->
-    if(!it.value?.groupCoordinatorId || !it.value?.playerIds) {
-      logWarn("Skipping group '${it.key}': saved group state is missing coordinator or player list")
+  // Group definitions are owned by the discovery child app. Existing group
+  // devices persist their coordinator and follower IDs in device data values.
+  refreshStaticDriverActivePlayerRoster(false)
+}
+
+void upsertGroupDevice(String groupName, Map definition) {
+  String name = groupName?.trim()
+  String coordinatorId = definition?.groupCoordinatorId?.toString()
+  List<String> followerIds = normalizeGroupPlayerIds(definition?.playerIds)
+  if(!name || !coordinatorId || followerIds.isEmpty()) { return }
+  String dni = "${app.id}-SonosGroupDevice-${name}"
+  DeviceWrapper device = app.getChildDevice(dni)
+  if(device == null) {
+    try {
+      device = app.addChildDevice('dwinks', 'Sonos Advanced Group', dni,
+          [name: 'Sonos Group', label: "Sonos Group: ${name}"])
+    } catch(UnknownDeviceTypeException e) {
+      logError("Sonos Advanced Group driver not found: ${e.message}")
       return
     }
-    String dni = "${app.id}-SonosGroupDevice-${it.key}"
-    DeviceWrapper device = getChildDevice(dni)
-    if (device == null) {
-      try {
-        logDebug("Creating group device for ${it.key}")
-        device = addChildDevice('dwinks', 'Sonos Advanced Group', dni, [name: 'Sonos Group', label: "Sonos Group: ${it.key}"])
-
-
-      } catch (UnknownDeviceTypeException e) {logError("Sonos Advanced Group driver not found: ${e.message}")}
-    }
-    if(device == null) {
-      logWarn("Skipping group '${it.key}' because the child device could not be created")
-    } else {
-      String groupCoordinatorId = it.value.groupCoordinatorId as String
-      String playerIds =  it.value.playerIds.join(',')
-      ChildDeviceWrapper coordDev = app.getChildDevices().find{ cd -> cd.getDataValue('id') == groupCoordinatorId}
-      device.updateDataValue('groupCoordinatorId', groupCoordinatorId)
-      device.updateDataValue('playerIds', playerIds)
-      if(coordDev == null) {
-        logWarn("Skipping household ID update for group '${it.key}': coordinator '${groupCoordinatorId}' was not found")
-      } else {
-        String householdId = coordDev.getDataValue('householdId')
-        if(householdId != null && householdId != '') {
-          device.updateDataValue('householdId', householdId)
-        } else {
-          logWarn("Skipping household ID update for group '${it.key}': coordinator '${groupCoordinatorId}' has no householdId")
-        }
-      }
-    }
   }
-  app.removeSetting('groupDevices')
-  app.updateSetting('groupDevices', [type: 'enum', value: getUserGroupsDNIsFromUserGroups()])
-  removeOrphans()
+  if(device == null) { return }
+  device.updateDataValue('groupCoordinatorId', coordinatorId)
+  device.updateDataValue('playerIds', followerIds.join(','))
+  ChildDeviceWrapper coordinator = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
+    player.getDataValue('id')?.toString() == coordinatorId
+  }
+  String householdId = coordinator?.getDataValue('householdId')?.toString()
+  if(householdId) { device.updateDataValue('householdId', householdId) }
+  device.setLabel("Sonos Group: ${name}")
 }
 
 /** Set up child event subscriptions used by player and alarm request paths. */
@@ -3739,241 +1926,71 @@ void updatePlayerPolicySnapshotValue(ChildDeviceWrapper player, String key, Obje
   if(player.getDataValue(key)?.toString() != normalized) { player.updateDataValue(key, normalized) }
 }
 
-void createPlayerDevicesWithFeedback() {
-  List<String> willBeCreated = settings.playerDevices ? (settings.playerDevices - getCreatedPlayerDevices()) : []
-  if(willBeCreated.size() == 0) {
-    state.playerCreationFeedback = "No new players to create"
-    state.playerCreationTimestamp = now()
-    return
-  }
-
-  Integer createdCount = createPlayerDevices()
-
-  // Defer settings update to allow Hubitat to register new child devices
-  runIn(3, 'finalizePlayerCreation', [data: [createdCount: createdCount, expectedCount: willBeCreated.size()]])
-}
-
-void finalizePlayerCreation(Map data) {
+void finalizeProvisionedPlayerCreation(Map data) {
   refreshStaticDriverActivePlayerRoster()
-  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
   runIn(1, 'subscribeToGroupCommandRequests')
-  Integer createdCount = data.createdCount as Integer
-  Integer expectedCount = data.expectedCount as Integer
-  if(createdCount == expectedCount) {
-    state.playerCreationFeedback = "Successfully created ${createdCount} player(s)"
-  } else {
-    state.playerCreationFeedback = "Created ${createdCount} of ${expectedCount} player(s) - check logs for errors"
-  }
-  state.playerCreationTimestamp = now()
 }
 
-void removePlayerDevicesWithFeedback() {
-  List<ChildDeviceWrapper> willBeRemoved = getCurrentPlayerDevices().findAll { p -> (!settings.playerDevices?.contains(p.getDeviceNetworkId())) }
-  if(willBeRemoved.size() == 0) {
-    state.playerRemovalFeedback = "No players to remove"
-    state.playerRemovalTimestamp = now()
-    return
-  }
-
-  Integer removedCount = 0
-  willBeRemoved.each { child ->
-    try {
-      String dni = child.getDeviceNetworkId()
-      logInfo("Removing player device: ${child.label}")
-      app.deleteChildDevice(dni)
-      removedCount++
-    } catch(Exception e) {
-      logError("Failed to remove device ${child.label}: ${e.message}")
-    }
-  }
-
-  // Defer settings update to allow Hubitat to unregister deleted child devices
-  runIn(3, 'finalizePlayerRemoval', [data: [removedCount: removedCount]])
-}
-
-void finalizePlayerRemoval(Map data) {
-  refreshStaticDriverActivePlayerRoster()
-  app.updateSetting('playerDevices', [type: 'enum', value: getCreatedPlayerDevices()])
-  Integer removedCount = data.removedCount as Integer
-  state.playerRemovalFeedback = "Successfully removed ${removedCount} player(s)"
-  state.playerRemovalTimestamp = now()
-}
-
-Integer createPlayerDevices() {
-  return createPlayerDevices(null)
-}
-
-Integer createPlayerDevices(List<String> requestedPlayerDevices) {
+Integer createPlayerDevicesFromProvisioning(List<String> selectedPlayerDevices,
+    Map<String, Map> playerInfoByDni, Map<String, Map> secondaryInfoByDni) {
   Integer createdCount = 0
-  List<String> selectedPlayerDevices = requestedPlayerDevices != null
-      ? requestedPlayerDevices
-      : getConfiguredPlayerDeviceKeys()
-
-  // Safety check: ensure playerDevices selection exists
-  if(selectedPlayerDevices.isEmpty()) {
-    logWarn("No player devices selected, skipping device creation")
-    return createdCount
-  }
-
-  // Safety check: ensure discovery maps are initialized
-  if(discoveredSonoses == null) {
-    logError("discoveredSonoses is null, cannot create devices")
-    return createdCount
-  }
-  if(discoveredSonosSecondaries == null) {
-    discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
-    logDebug("Initialized empty discoveredSonosSecondaries map")
-  }
-
-  selectedPlayerDevices.each{ dni ->
-    if(!dni) {
-      logWarn("Encountered null or empty DNI in playerDevices, skipping")
-      return
-    }
-
+  if(selectedPlayerDevices == null || selectedPlayerDevices.isEmpty()) { return createdCount }
+  selectedPlayerDevices.each { String dni ->
+    Map playerInfo = playerInfoByDni[dni]
+    if(!dni || !(playerInfo instanceof Map)) { return }
     ChildDeviceWrapper cd = app.getChildDevice(dni)
-    Map playerInfo = discoveredSonoses[dni]
-
-    if(cd) {
-      String deviceName = cd.getDataValue('name')
-      logDebug("Not creating ${deviceName ?: dni}, child already exists.")
-    } else {
-      if(playerInfo) {
-        logInfo("Creating Sonos Advanced Player device for ${playerInfo?.name}")
-        try {
-          cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni, [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo?.name}"])
-          if(cd) { createdCount++ }
-        } catch (UnknownDeviceTypeException e) {
-          logError("Sonos Advanced Player driver not found: ${e.message}")
-        } catch (Exception e) {
-          logError("Failed to create device for ${dni}: ${e.message}")
-          // Device may have been persisted before the lifecycle exception — re-check
-          cd = app.getChildDevice(dni)
-          if(cd) {
-            logWarn("Device '${playerInfo?.name}' (${dni}) was created despite lifecycle error - will attempt configuration")
-            createdCount++
-          }
-        }
-      } else {
-        logInfo("Skipping selected device ${dni}: it was not found in the current Sonos discovery results, so no Sonos player configuration is available. It may be offline or may not be a Sonos player.")
+    if(cd == null) {
+      try {
+        cd = addChildDevice('dwinks', 'Sonos Advanced Player', dni,
+            [name: 'Sonos Advanced Player', label: "Sonos Advanced - ${playerInfo.name}"])
+        if(cd) { createdCount++ }
+      } catch(UnknownDeviceTypeException e) {
+        logError("Sonos Advanced Player driver not found: ${e.message}")
+      } catch(Exception e) {
+        logError("Failed to create device for ${dni}: ${e.message}")
+        cd = app.getChildDevice(dni)
+        if(cd) { createdCount++ }
       }
     }
-
-    // Only update device info if we have both a valid device and player info
-    if(cd && playerInfo) {
-      try {
-        logInfo("Updating player info with latest info from discovery...")
-
-        // First, update all basic player info
-        playerInfo.each { key, value ->
-          if(key != null && value != null) {
-            cd.updateDataValue(key as String, value as String)
-          }
-        }
-
-        // Then handle secondaries
-        LinkedHashMap<String,String> macToRincon = discoveredSonoses.collectEntries{ k,v ->
-          if(k != null && v != null && v.id != null) {
-            return [(k as String): (v.id as String)]
-          }
-          return [:]
-        }
-        String rincon = macToRincon[dni]
-
-        if(rincon) {
-          LinkedHashMap<String,Map> secondaries = discoveredSonosSecondaries.findAll{k,v ->
-            v != null && v.primaryDeviceId != null && v.primaryDeviceId == rincon
-          }
-          if(secondaries){
-            List<String> secondaryDeviceIps = secondaries.collect{it.value?.deviceIp}.findAll{it != null}
-            List<String> secondaryIds = secondaries.collect{it.value?.id}.findAll{it != null}
-            if(secondaryDeviceIps && secondaryIds) {
-              cd.updateDataValue('secondaryDeviceIps', secondaryDeviceIps.join(','))
-              cd.updateDataValue('secondaryIds', secondaryIds.join(','))
-            }
-          }
-        }
-
-        // Validate critical device data fields are populated
-        List<String> criticalFields = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
-        List<String> missingFields = []
-        criticalFields.each { field ->
-          String value = cd.getDataValue(field)
-          if(!value || value == 'null') {
-            missingFields << field
-          }
-        }
-
-        if(missingFields.size() > 0) {
-          logWarn("Device ${cd.label} is missing critical data fields: ${missingFields.join(', ')}. This may cause issues.")
-          logWarn("Player info available: ${playerInfo.keySet().join(', ')}")
-          // Schedule a retry of secondaryConfiguration in case data gets populated later
-          runIn(10, 'retryDeviceConfiguration', [data: [dni: dni]])
-        } else {
-          // Defer secondaryConfiguration to ensure all data values are committed
-          runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
-        }
-      } catch (Exception e) {
-        logError("Failed to configure device ${dni}: ${e.message}")
-      }
-    } else if(!cd) {
-      logWarn("Skipping device configuration for ${dni} - device not created")
-    } else if(!playerInfo) {
-      logInfo("Skipping configuration for selected device ${dni}: it was not found in the current Sonos discovery results, so no Sonos player configuration is available. It may be offline or may not be a Sonos player.")
+    if(!cd) { return }
+    playerInfo.each { Object key, Object value ->
+      if(key != null && value != null) { cd.updateDataValue(key.toString(), value.toString()) }
+    }
+    String rincon = playerInfo.id?.toString()
+    List<Map> secondaries = secondaryInfoByDni.values().findAll { Object raw ->
+      raw instanceof Map && ((Map)raw).primaryDeviceId?.toString() == rincon
+    } as List<Map>
+    List<String> ips = secondaries.collect { Map value -> value.deviceIp?.toString() }.findAll { String value -> value }
+    List<String> ids = secondaries.collect { Map value -> value.id?.toString() }.findAll { String value -> value }
+    if(ips && ids) {
+      cd.updateDataValue('secondaryDeviceIps', ips.join(','))
+      cd.updateDataValue('secondaryIds', ids.join(','))
+    }
+    List<String> critical = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+    List<String> missing = critical.findAll { String key -> !cd.getDataValue(key)?.toString() }
+    if(missing) {
+      logWarn("Device ${cd.label} is missing critical data fields: ${missing.join(', ')}")
+      runIn(10, 'retryProvisionedDeviceConfiguration', [data: [dni: dni, playerInfo: playerInfo]])
+    } else {
+      runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
     }
   }
-  // Note: removeOrphans() is now handled by the explicit Remove Players button
   refreshStaticDriverActivePlayerRoster()
   return createdCount
 }
 
-void retryDeviceConfiguration(Map data) {
-  String dni = data?.dni
-  if(!dni) {
-    logWarn('retryDeviceConfiguration called without DNI')
-    return
-  }
-
-  ChildDeviceWrapper cd = app.getChildDevice(dni)
-  if(!cd) {
-    logWarn("Cannot retry configuration for ${dni} - device not found")
-    return
-  }
-
-  Map playerInfo = discoveredSonoses[dni]
-  if(!playerInfo) {
-    logInfo("Skipping configuration retry for ${dni}: the device is no longer present in the current Sonos discovery results, so no Sonos player configuration is available.")
-    return
-  }
-
-  logInfo("Retrying device configuration for ${cd.label}...")
-
-  // Re-apply all device data
-  playerInfo.each { key, value ->
-    if(key != null && value != null) {
-      String currentValue = cd.getDataValue(key as String)
-      if(!currentValue || currentValue == 'null') {
-        logDebug("Setting missing field ${key} = ${value}")
-        cd.updateDataValue(key as String, value as String)
-      }
+void retryProvisionedDeviceConfiguration(Map data) {
+  String dni = data?.dni?.toString()
+  ChildDeviceWrapper cd = dni ? app.getChildDevice(dni) : null
+  Map playerInfo = data?.playerInfo instanceof Map ? (Map)data.playerInfo : [:]
+  if(!cd || playerInfo.isEmpty()) { return }
+  playerInfo.each { Object key, Object value ->
+    if(key != null && value != null && !cd.getDataValue(key.toString())) {
+      cd.updateDataValue(key.toString(), value.toString())
     }
   }
-
-  // Validate again
-  List<String> criticalFields = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
-  List<String> stillMissing = []
-  criticalFields.each { field ->
-    String value = cd.getDataValue(field)
-    if(!value || value == 'null') {
-      stillMissing << field
-    }
-  }
-
-  if(stillMissing.size() > 0) {
-    logError("Device ${cd.label} still missing critical fields after retry: ${stillMissing.join(', ')}")
-    logError("This device may not function correctly. Try deleting and re-discovering it.")
-  } else {
-    logInfo("Device ${cd.label} configuration completed successfully on retry")
+  List<String> critical = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+  if(critical.every { String key -> cd.getDataValue(key)?.toString() }) {
     runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
   }
 }
@@ -3986,792 +2003,13 @@ void runSecondaryConfiguration(Map data) {
 }
 
 void removeOrphans() {
-  // Single getChildDevices() call partitioned into groups and players
-  // Copy the platform collection before deleting any child; Hubitat may return
-  // a live list, and mutating it during iteration can skip devices or throw.
-  List<ChildDeviceWrapper> allChildren = new ArrayList<ChildDeviceWrapper>(app.getChildDevices())
-  List<String> configuredGroupDevices = state.userGroups instanceof Map
-      ? getUserGroupsDNIsFromUserGroups()
-      : normalizeNewUiGroupPlayerIds(settings.groupDevices)
-  allChildren.each { child ->
-    String id = child.getDataValue('id')
-    String dni = child.getDeviceNetworkId()
-    if(dni?.contains(ALARM_SWITCH_DNI_MARKER) || dni?.contains(ALARM_MANAGER_DNI_MARKER)) {
-      return
-    }
-    if(id == null) {
-      // Group device
-      if(!(dni in configuredGroupDevices)) {
-        logInfo("Removing group device not found in selected devices list: ${child} (DNI: ${dni}; configured: ${configuredGroupDevices})")
-        app.deleteChildDevice(dni)
-      }
-    } else if(!settings.skipOrphanRemoval) {
-      // Player device
-      if(!(dni in settings.playerDevices)) {
-        logInfo("Removing player device not found in selected devices list: ${child}")
-        app.deleteChildDevice(dni)
-      }
-    }
-  }
+  // Group removal is explicit from the discovery child app. The coordination
+  // parent does not infer deletion from missing table settings.
   refreshStaticDriverActivePlayerRoster()
 }
 // =============================================================================
 // End Create Child Devices
 // =============================================================================
-
-
-
-// =============================================================================
-// Local Discovery
-//
-// This section implements dual discovery methods for Sonos devices:
-// 1. SSDP (Simple Service Discovery Protocol) - Legacy method, works on most networks
-// 2. mDNS (Multicast DNS) - Modern method added in Hubitat 2.4.1+, more reliable
-//
-// Duplicate Prevention:
-// - Devices are keyed by MAC address (primary identifier)
-// - Additional checks prevent duplicates by playerId and IP address
-// - Selection page deduplicates by playerId to handle edge cases
-// =============================================================================
-void persistDiscoveredSonosSecondaries() {
-  LinkedHashMap<String, Map> persistedSecondaries = new LinkedHashMap<String, Map>()
-  discoveredSonosSecondaries.each { Object discoveryKey, Object rawInfo ->
-    if(discoveryKey != null && rawInfo instanceof Map) {
-      persistedSecondaries[discoveryKey.toString()] = new LinkedHashMap<String, Object>((Map)rawInfo)
-    }
-  }
-  state[DISCOVERED_SONOS_SECONDARIES_STATE_KEY] = persistedSecondaries
-}
-
-void restoreDiscoveredSonosSecondaries() {
-  if(discoveredSonosSecondaries == null) {
-    discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
-  }
-  if(!discoveredSonosSecondaries.isEmpty()) { return }
-
-  Object persisted = state[DISCOVERED_SONOS_SECONDARIES_STATE_KEY]
-  if(!(persisted instanceof Map)) { return }
-
-  ((Map)persisted).each { Object discoveryKey, Object rawInfo ->
-    if(discoveryKey != null && rawInfo instanceof Map) {
-      discoveredSonosSecondaries[discoveryKey.toString()] = new LinkedHashMap<String, Object>((Map)rawInfo)
-    }
-  }
-}
-
-void stopDiscovery() {
-  if(atomicState.discoveryRunning == true) {
-    logInfo('Stopping discovery...')
-  }
-  // Set flags FIRST so all guard checks see the stop immediately
-  atomicState.discoveryRunning = false
-  atomicState.discoveryEndTime = null
-  app.sendEvent(name: 'discoveryTimer', value: '0')
-  // Clean up legacy state keys (migration from state → atomicState)
-  state.remove('discoveryRunning')
-  state.remove('discoveryEndTime')
-
-  try {
-    unsubscribe(location, 'ssdpTerm.upnp:rootdevice')
-    unsubscribe(location, 'ssdpTerm.urn:schemas-upnp-org:device:ZonePlayer:1')
-  } catch(Exception e) { logWarn("Error unsubscribing SSDP: ${e.message}") }
-
-  try {
-    unschedule('sendFoundSonosEvents')
-    unschedule('processMdnsDiscovery')
-    unschedule('stopDiscovery')
-    unschedule('updateDiscoveryTimer')
-  } catch(Exception e) { logWarn("Error unscheduling discovery tasks: ${e.message}") }
-
-  try {
-    if(this.respondsTo('unregisterMDNSListener')) {
-      unregisterMDNSListener('_sonos._tcp')
-      unregisterMDNSListener('_http._tcp')
-    }
-  } catch(Exception e) { logDebug("Could not unregister mDNS listeners: ${e.message}") }
-}
-
-void updateDiscoveryTimer() {
-  if(atomicState.discoveryRunning != true || !atomicState.discoveryEndTime) {
-    logDebug("updateDiscoveryTimer: stopping - discoveryRunning=${atomicState.discoveryRunning}, discoveryEndTime=${atomicState.discoveryEndTime}")
-    return
-  }
-
-  Integer remainingSecs = Math.max(0, (Integer)(((atomicState.discoveryEndTime as Long) - now()) / 1000))
-  logDebug("updateDiscoveryTimer: sending event with ${remainingSecs} seconds remaining")
-  app.sendEvent(name: 'discoveryTimer', value: "Discovery time remaining: ${remainingSecs} seconds")
-
-  if(remainingSecs > 0) {
-    runIn(1, 'updateDiscoveryTimer')
-  } else {
-    logDebug("updateDiscoveryTimer: timer reached 0, stopping updates")
-  }
-}
-
-void extendDiscovery(Integer seconds) {
-  logInfo("Extending discovery by ${seconds} seconds")
-  if(atomicState.discoveryRunning != true) {
-    // Restart discovery without clearing already-discovered devices
-    logDebug('Starting a fresh discovery session while retaining devices already found')
-    atomicState.discoveryRunning = true
-    atomicState.discoveryProbeAttempts = [:]
-    subscribeToSsdpEvents(location)
-    sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
-    sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
-    startMdnsDiscovery()
-    runIn(1, 'updateDiscoveryTimer')
-  }
-  // Add seconds to current remaining time (or from now if already expired)
-  Long currentEnd = atomicState.discoveryEndTime ? (atomicState.discoveryEndTime as Long) : now()
-  Long newEnd = Math.max(currentEnd, now()) + (seconds * 1000L)
-  atomicState.discoveryEndTime = newEnd
-  Long remainingMillis = newEnd - now()
-  Integer totalRemaining = (Integer)(remainingMillis / 1000L)
-  unschedule('stopDiscovery')
-  runIn(totalRemaining, 'stopDiscovery')
-}
-
-String renderNewUiDiscoveryTimerMarkup() {
-  String discoveryIcon = atomicState.discoveryRunning == true ?
-    "<svg viewBox='0 0 24 24' aria-hidden='true' fill='currentColor'><rect x='6' y='6' width='12' height='12' rx='1'></rect></svg>" :
-    "<svg viewBox='0 0 24 24' aria-hidden='true' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M4 12a8 8 0 0 1 13.7-5.7L20 8.5'></path><path d='M20 4v4.5h-4.5'></path><path d='M20 12a8 8 0 0 1-13.7 5.7L4 15.5'></path><path d='M4 20v-4.5h4.5'></path></svg>"
-  String actionLabel = atomicState.discoveryRunning == true ? 'Cancel discovery' : 'Discover speakers'
-  String buttonTitle = atomicState.discoveryRunning == true ? 'Cancel speaker discovery' : 'Discover speakers for 60 seconds'
-  String discoveryButton = newUiButtonLink('btnNewUiDiscoverSpeakers', "${discoveryIcon}<span>${actionLabel}</span>", '#fff', '14px', buttonTitle, 'new-ui-discovery-button')
-  String statusMarkup
-  if(atomicState.discoveryRunning == true && atomicState.discoveryEndTime) {
-    Long endTime = atomicState.discoveryEndTime as Long
-    Integer remainingSecs = Math.max(0, (Integer)((endTime - now()) / 1000))
-    statusMarkup = "<div class='new-ui-discovery-status'><span class='new-ui-discovery-indicator new-ui-discovery-indicator-running' aria-hidden='true'></span><div class='new-ui-discovery-copy'><div class='new-ui-discovery-title'>Searching for Sonos speakers</div><div class='new-ui-discovery-detail'>About ${remainingSecs} seconds remaining</div></div></div>"
-  } else {
-    statusMarkup = "<div class='new-ui-discovery-status'><span class='new-ui-discovery-indicator' aria-hidden='true'></span><div class='new-ui-discovery-copy'><div class='new-ui-discovery-title'>Discovery is stopped</div><div class='new-ui-discovery-detail'>Start a scan to refresh available speakers</div></div></div>"
-  }
-  return "${statusMarkup}<div class='new-ui-device-section-title'>Sonos Players</div>${discoveryButton}"
-}
-
-void ssdpDiscover() {
-  logDebug("Starting SSDP Discovery...")
-  discoveredSonoses = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
-  discoveredSonosSecondaries = new java.util.concurrent.ConcurrentHashMap<String, LinkedHashMap>()
-	atomicState.discoveryProbeAttempts = [:]
-	sendHubCommand(new hubitat.device.HubAction("lan discovery upnp:rootdevice", hubitat.device.Protocol.LAN))
-	sendHubCommand(new hubitat.device.HubAction("lan discovery ssdp:all", hubitat.device.Protocol.LAN))
-
-  // Also start mDNS discovery
-  startMdnsDiscovery()
-}
-
-void startMdnsDiscovery() {
-  try {
-    // Register mDNS listener for Sonos devices
-    // Sonos uses _sonos._tcp for its mDNS service
-    registerMDNSListener('_sonos._tcp')
-    logDebug("Registered mDNS listener for Sonos devices (_sonos._tcp)")
-
-    // Also listen for general device services that Sonos might broadcast
-    registerMDNSListener('_http._tcp')
-    logDebug("Registered mDNS listener for HTTP services (_http._tcp)")
-
-    // Schedule processing of mDNS entries after a delay to allow discovery
-    runIn(5, 'processMdnsDiscovery')
-  } catch(Exception e) {
-    logWarn("mDNS discovery registration failed: ${e.message}")
-  }
-}
-
-void processMdnsDiscovery() {
-  if(atomicState.discoveryRunning != true) {
-    logDebug("processMdnsDiscovery: discovery not running, skipping")
-    return
-  }
-  try {
-    logDebug("Processing mDNS discovered devices...")
-
-    Integer totalEntries = 0
-    ['_sonos._tcp', '_http._tcp'].each { String serviceType ->
-      List<Map> mdnsEntries = (getMDNSEntries(serviceType) ?: []) as List<Map>
-      totalEntries += mdnsEntries.size()
-      logDebug("Found ${mdnsEntries.size()} entries for mDNS service ${serviceType}")
-      mdnsEntries.each { Map entry ->
-        String serviceName = (entry.server ?: entry.name ?: '').toString()
-        String addresses = (entry.ip4Addresses ?: entry.ipAddress ?: '').toString()
-        String ipAddress = splitTokens(addresses, ',')?.first()?.trim()
-        Integer port = (entry.port ?: 0) as Integer
-
-        logPayloadAtTrace("mDNS entry service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}; payload omitted",
-            "mDNS entry: service=${serviceType}, name=${serviceName}, ip=${ipAddress}, port=${port}, raw=${entry}")
-
-        if(serviceType == '_sonos._tcp' || serviceName.toLowerCase(Locale.ROOT).contains('sonos') || (ipAddress && port == 1400)) {
-          logDebug("Found potential Sonos device via mDNS: ${serviceName} at ${ipAddress}:${port}")
-          processDiscoveredSonosDevice(ipAddress)
-        } else {
-          logDebug("Ignoring non-Sonos mDNS entry ${serviceName} (${serviceType}) at ${ipAddress}:${port}")
-        }
-      }
-    }
-
-    logDebug("Processed ${totalEntries} mDNS entries")
-
-    runIn(2, 'sendFoundSonosEvents')
-  } catch(Exception e) {
-    logWarn("Error processing mDNS discovery: ${e.message}")
-  }
-}
-
-Boolean isIpAlreadyDiscovered(String ipAddress) {
-  Boolean alreadyDiscovered = discoveredSonoses.values().any { it.deviceIp == ipAddress }
-  Boolean alreadyDiscoveredSecondary = discoveredSonosSecondaries.values().any { it.deviceIp == ipAddress }
-  return alreadyDiscovered || alreadyDiscoveredSecondary
-}
-
-Boolean reserveDiscoveryProbe(String ipAddress) {
-  if(!ipAddress) {
-    logDebug('Skipping discovery probe because the candidate IP address is empty')
-    return false
-  }
-  if(atomicState.discoveryRunning != true) {
-    logDebug("Skipping discovery probe for ${ipAddress}; discovery session is stopped")
-    return false
-  }
-  synchronized(this) {
-    Map attempts = (atomicState.discoveryProbeAttempts ?: [:]) as Map
-    // Keep every IP reserved for the full discovery session, including failures and
-    // unsupported secondary speakers. A new session resets this map in ssdpDiscover().
-    if(attempts.containsKey(ipAddress)) {
-      logDebug("Skipping discovery probe for ${ipAddress}; already attempted this session at ${attempts[ipAddress]}")
-      return false
-    }
-    Map updated = new LinkedHashMap(attempts)
-    updated[ipAddress] = now()
-    atomicState.discoveryProbeAttempts = updated
-    logDebug("Reserved ${ipAddress} for a discovery probe; ${updated.size()} unique IP(s) attempted this session")
-    return true
-  }
-}
-
-void requestDiscoveryDeviceDescription(String ipAddress, LinkedHashMap playerInfo) {
-  if(atomicState.discoveryRunning != true) {
-    logDebug("Skipping device-description request for ${ipAddress}; discovery stopped before player-info callback")
-    return
-  }
-  requestSonosDeviceDescription(ipAddress, playerInfo, 'discoveryDeviceDescriptionCallback', [ipAddress: ipAddress])
-}
-
-Boolean requestSonosDeviceDescription(String ipAddress, LinkedHashMap playerInfo, String callback,
-    Map callbackData) {
-  Map params = [uri: "http://${ipAddress}:1400/xml/device_description.xml", timeout: 3,
-    requestContentType: 'application/xml', contentType: 'application/xml']
-  Map data = new LinkedHashMap(callbackData ?: [:])
-  data.ipAddress = ipAddress
-  data.playerInfo = playerInfo
-  try {
-    logDebug("Dispatching asynchronous device-description probe for ${ipAddress} (timeout=3s)")
-    asynchttpGet(callback, params, data)
-    return true
-  } catch(Exception e) {
-    logDebug("Could not dispatch device-description probe for ${ipAddress}: ${e.message}")
-    return false
-  }
-}
-
-void discoveryPlayerInfoCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { logDebug('Player-info callback received without an IP address'); return }
-  if(atomicState.discoveryRunning != true) {
-    logDebug("Ignoring player-info callback for ${ipAddress}; discovery session has stopped")
-    return
-  }
-  if(response == null || response.hasError()) {
-    logDebug("Player-info probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    Map playerInfo = response.getJson() as Map
-    if(!playerInfo) {
-      logDebug("Player-info probe for ${ipAddress} returned an empty or non-object JSON response (status=${response.status})")
-      return
-    }
-    logDebug("Player-info probe succeeded for ${ipAddress} (status=${response.status}, playerId=${playerInfo.playerId}, name=${playerInfo.device?.name})")
-    requestDiscoveryDeviceDescription(ipAddress, new LinkedHashMap(playerInfo))
-  } catch(Exception e) { logDebug("Could not parse player-info response for ${ipAddress} (status=${response.status}): ${e.message}") }
-}
-
-void discoveryDeviceDescriptionCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  if(!ipAddress) { logDebug('Device-description callback received without an IP address'); return }
-  if(atomicState.discoveryRunning != true) {
-    logDebug("Ignoring device-description callback for ${ipAddress}; discovery session has stopped")
-    return
-  }
-  if(response == null || response.hasError()) {
-    logDebug("Device-description probe failed for ${ipAddress}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    String responseBody = response.getData() as String
-    if(!responseBody) {
-      logDebug("Device-description probe for ${ipAddress} returned an empty body (status=${response.status})")
-      return
-    }
-    GPathResult description = new XmlSlurper().parseText(responseBody)
-    logDebug("Device-description probe succeeded for ${ipAddress} (status=${response.status}, model=${description.device.modelName.text()})")
-    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress)
-  } catch(Exception e) { logDebug("Could not parse device-description response for ${ipAddress} (status=${response.status}): ${e.message}") }
-}
-
-void requestDiscoveryPlayerInfo(String ipAddress) {
-  if(atomicState.discoveryRunning != true) {
-    logDebug("Skipping player-info request for ${ipAddress}; discovery session has stopped")
-    return
-  }
-  requestSonosPlayerInfo(ipAddress, 'discoveryPlayerInfoCallback', [ipAddress: ipAddress])
-}
-
-Boolean requestSonosPlayerInfo(String ipAddress, String callback, Map callbackData) {
-  Map params = [uri: "${getLocalApiPrefix("${ipAddress}:1443")}/players/local/info",
-    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
-    requestContentType: 'application/json', contentType: 'application/json', ignoreSSLIssues: true, timeout: 3]
-  try {
-    logDebug("Dispatching asynchronous player-info probe for ${ipAddress}:1443 (timeout=3s)")
-    asynchttpGet(callback, params, callbackData ?: [ipAddress: ipAddress])
-    return true
-  } catch(Exception e) {
-    logDebug("Could not dispatch player-info probe for ${ipAddress}: ${e.message}")
-    return false
-  }
-}
-
-void processDiscoveredSonosDevice(String ipAddress) {
-  if(!ipAddress) { return }
-  if(atomicState.discoveryRunning != true) {
-    logDebug("processDiscoveredSonosDevice: discovery not running, skipping")
-    return
-  }
-
-  logDebug("Considering mDNS discovery candidate at ${ipAddress}")
-  if(isIpAlreadyDiscovered(ipAddress)) {
-    logDebug("Skipping mDNS candidate ${ipAddress}; device is already in discovered results")
-    return
-  }
-  if(!reserveDiscoveryProbe(ipAddress)) { return }
-  requestDiscoveryPlayerInfo(ipAddress)
-}
-
-@CompileStatic
-void subscribeToSsdpEvents(Location location) {
-  logDebug("Subscribing to SSDP Discovery events...")
-  // SSDP responses carry the responder's concrete ST as the event value, so there is
-  // no 'ssdpTerm.ssdp:all' event. The 'lan discovery ssdp:all' search elicits Sonos
-  // responses with the ZonePlayer URN as their ST -- subscribe to that to catch
-  // players whose upnp:rootdevice response was missed.
-	subscribe(location, 'ssdpTerm.upnp:rootdevice', 'ssdpEventHandler')
-	subscribe(location, 'ssdpTerm.urn:schemas-upnp-org:device:ZonePlayer:1', 'ssdpEventHandler')
-}
-
-void ssdpEventHandler(Event event) {
-  if(atomicState.discoveryRunning != true) { return }
-  LinkedHashMap parsedEvent = parseLanMessage(event?.description)
-  processParsedSsdpEvent(parsedEvent)
-}
-
-@CompileStatic
-void processParsedSsdpEvent(LinkedHashMap event) {
-  String ipAddress = convertHexToIP(event?.networkAddress as String)
-  String ipPort = convertHexToInt(event?.deviceAddress as String).toString()
-  logDebug("Considering SSDP discovery candidate at ${ipAddress}:${ipPort}")
-
-  // Devices send multiple SSDP responses; reserve each IP before issuing async probes.
-  if(isIpAlreadyDiscovered(ipAddress)) {
-    logDebug("Skipping SSDP candidate ${ipAddress}; device is already in discovered results")
-    return
-  }
-  if(!reserveDiscoveryProbe(ipAddress)) {
-    return
-  }
-
-  requestDiscoveryPlayerInfo(ipAddress)
-}
-
-@CompileStatic
-void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescription, String ipAddress,
-    Map topologyInfo = null, Boolean publishDiscoveryUpdates = true) {
-  LinkedHashMap playerInfoDevice = playerInfo?.device as LinkedHashMap
-
-  String modelName = deviceDescription['device']['modelName']
-	String mac = (deviceDescription['device']['MACAddress']).toString().replace(':','')
-  String playerName = playerInfoDevice?.name
-  String playerDni = mac
-  String swGen = playerInfoDevice?.swGen
-  String websocketUrl = playerInfoDevice?.websocketUrl
-  String householdId = playerInfo?.householdId
-  String playerId = playerInfo?.playerId
-  String groupId = playerInfo?.groupId
-  List<String> deviceCapabilities = playerInfoDevice?.capabilities as List<String>
-
-  if(mac && playerInfoDevice?.name) {
-    logDebug("Processing Sonos device: MAC=${mac}, name=${playerInfoDevice?.name}, IP=${ipAddress}")
-  }
-
-  // Use MAC as primary key, but also check for duplicate IPs/playerIds to prevent same device listed multiple times
-  // Check against both primary and secondary maps
-  // O(1) MAC check first (most common case), then .any{} for early exit on IP/playerId match
-  boolean isDuplicate = false
-  if(discoveredSonoses.containsKey(mac)) {
-    isDuplicate = true
-    // Update the existing entry with latest info to keep it fresh
-    LinkedHashMap existingDevice = discoveredSonoses[mac] as LinkedHashMap
-    existingDevice.deviceIp = ipAddress
-    existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
-    existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
-    existingDevice.localUpnpHost = "${ipAddress}:1400"
-    if(topologyInfo) { existingDevice.topologyInfo = new LinkedHashMap(topologyInfo) }
-    logDebug("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
-  }
-  if(!isDuplicate) {
-    isDuplicate = discoveredSonoses.any { key, value ->
-      LinkedHashMap existingDevice = value as LinkedHashMap
-      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
-    }
-    if(isDuplicate) { logDebug("Device already discovered in primaries (IP/ID match) - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
-  }
-  if(!isDuplicate) {
-    isDuplicate = discoveredSonosSecondaries.containsKey(mac) || discoveredSonosSecondaries.any { key, value ->
-      LinkedHashMap existingDevice = value as LinkedHashMap
-      existingDevice.id == playerId || existingDevice.deviceIp == ipAddress
-    }
-    if(isDuplicate) { logDebug("Device already discovered in secondaries - MAC: ${mac}, playerId: ${playerId}, IP: ${ipAddress}") }
-  }
-
-  if(isDuplicate) {
-    if(topologyInfo) {
-      [discoveredSonoses, discoveredSonosSecondaries].each { Map<String, LinkedHashMap> devices ->
-        Object match = devices.values().find { Object rawCandidate ->
-          if(!(rawCandidate instanceof Map)) { return false }
-          Map candidate = (Map)rawCandidate
-          return candidate.id?.toString() == playerId || candidate.deviceIp?.toString() == ipAddress
-        }
-        if(match instanceof Map) { ((Map)match).topologyInfo = new LinkedHashMap(topologyInfo) }
-      }
-    }
-    return
-  }
-
-  LinkedHashMap discoveredSonos = [
-    name: playerName,
-    id: playerId,
-    swGen: swGen,
-    capabilities: deviceCapabilities,
-    modelName: modelName,
-    householdId: householdId,
-    websocketUrl: websocketUrl,
-    deviceIp: "${ipAddress}",
-    localApiUrl: "https://${ipAddress}:1443/api/v1/",
-    localUpnpUrl: "http://${ipAddress}:1400",
-    localUpnpHost: "${ipAddress}:1400",
-    topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
-  ]
-  // Handle secondary/satellite devices (subs, surrounds, right channel in stereo pair)
-  if(playerInfoDevice?.primaryDeviceId) {
-    LinkedHashMap discoveredSonosSecondary = [
-      primaryDeviceId: playerInfoDevice?.primaryDeviceId,
-      id: playerId,
-      swGen: swGen,
-      capabilities: deviceCapabilities,
-      modelName: modelName,
-      householdId: householdId,
-      websocketUrl: websocketUrl,
-      deviceIp: "${ipAddress}",
-      localApiUrl: "https://${ipAddress}:1443/api/v1/",
-      localUpnpUrl: "http://${ipAddress}:1400",
-      localUpnpHost: "${ipAddress}:1400",
-      topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
-    ]
-    // Check for duplicate secondaries
-    boolean secondaryExists = discoveredSonosSecondaries.values().any { secondaryDevice ->
-      LinkedHashMap secondary = secondaryDevice as LinkedHashMap
-      return secondary.id == playerId
-    }
-    if(!secondaryExists) {
-      discoveredSonosSecondaries[mac] = discoveredSonosSecondary
-      persistDiscoveredSonosSecondaries()
-      logInfo("Discovered secondary ${modelName} (${playerId}) for primary ${playerInfoDevice?.primaryDeviceId}")
-    }
-    if(publishDiscoveryUpdates) { requestQuickTopologyDuringDiscovery(ipAddress) }
-    // Secondary devices should never appear in the main discovered list
-    if(publishDiscoveryUpdates) { scheduleMethod(2, 'sendFoundSonosEvents') }
-    return
-  }
-
-  // Only primary (standalone) devices reach here
-  if(discoveredSonos?.name != null && discoveredSonos?.name != 'null') {
-    discoveredSonoses[mac] = discoveredSonos
-    logInfo("Discovered Sonos device: ${playerName} (${modelName}) at ${ipAddress}")
-    if(publishDiscoveryUpdates) {
-      requestQuickTopologyDuringDiscovery(ipAddress)
-      scheduleMethod(2, 'sendFoundSonosEvents')
-    }
-  } else {
-    logDebug("Device id:${discoveredSonos?.id} responded to discovery, but did not provide device name. This is expected for right channel speakers on stereo pairs, subwoofers, and other 'non primary' devices.")
-  }
-}
-
-/** Use one already-known speaker to discover the rest of the Sonos topology. */
-void requestQuickTopologyRefresh(String preferredIp = null) {
-  if(state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]) { return }
-  String speakerIp = preferredIp?.trim()
-  if(!speakerIp) {
-    ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
-      String ip = candidate.getDataValue('deviceIp')?.toString()?.trim()
-      return ip != null && !ip.isEmpty()
-    }
-    speakerIp = player?.getDataValue('deviceIp')?.toString()?.trim()
-  }
-  if(!speakerIp && discoveredSonoses instanceof Map) {
-    Map known = discoveredSonoses.values().find { Object raw ->
-      raw instanceof Map && ((Map)raw).deviceIp
-    } as Map
-    speakerIp = known?.deviceIp?.toString()?.trim()
-  }
-  if(!speakerIp && discoveredSonosSecondaries instanceof Map) {
-    Map known = discoveredSonosSecondaries.values().find { Object raw ->
-      raw instanceof Map && ((Map)raw).deviceIp
-    } as Map
-    speakerIp = known?.deviceIp?.toString()?.trim()
-  }
-  if(!speakerIp) { return }
-
-  String requestId = UUID.randomUUID().toString()
-  String service = 'urn:schemas-upnp-org:service:ZoneGroupTopology:1'
-  String body = "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetZoneGroupState xmlns:u=\"${service}\"></u:GetZoneGroupState></s:Body></s:Envelope>"
-  Map params = [uri: "http://${speakerIp}:1400/ZoneGroupTopology/Control",
-    headers: [SOAPAction: "${service}#GetZoneGroupState"],
-    requestContentType: 'text/xml', contentType: 'text/xml', timeout: 5, body: body]
-  state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY] = requestId
-  try {
-    logInfo("Querying Sonos topology from ${speakerIp}")
-    asynchttpPost('quickTopologyCallback', params, [requestId: requestId, sourceIp: speakerIp])
-  } catch(Exception e) {
-    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Could not query Sonos topology from ${speakerIp}: ${e.message}")
-  }
-}
-
-void requestQuickTopologyDuringDiscovery(String speakerIp) {
-  if(atomicState.discoveryRunning != true || atomicState[QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY] == true) { return }
-  atomicState[QUICK_TOPOLOGY_QUERIED_DURING_DISCOVERY_STATE_KEY] = true
-  requestQuickTopologyRefresh(speakerIp)
-}
-
-void quickTopologyCallback(AsyncResponse response, Map data) {
-  String requestId = data?.requestId?.toString()
-  if(!requestId || requestId != state[QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY]?.toString()) { return }
-  if(response == null || response.hasError()) {
-    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Sonos topology query failed from ${data?.sourceIp}: status=${response?.status}, error=${response?.getErrorMessage()}")
-    return
-  }
-  try {
-    String body = response.getData()?.toString()
-    GPathResult envelope = new XmlSlurper().parseText(body)
-    GPathResult responseNode = findXmlDescendantByLocalName(envelope, 'GetZoneGroupStateResponse')
-    GPathResult topologyNode = findDirectXmlChild(responseNode, 'ZoneGroupState')
-    List<GPathResult> members = []
-    collectXmlDescendantsByLocalName(topologyNode, 'ZoneGroupMember', members)
-    if(members.isEmpty()) {
-      String nestedXml = topologyNode?.text()?.toString()
-      if(nestedXml) {
-        GPathResult topology = new XmlSlurper().parseText(nestedXml)
-        collectXmlDescendantsByLocalName(topology, 'ZoneGroupMember', members)
-      }
-    }
-    LinkedHashMap<String, Map> devicesByIp = new LinkedHashMap<String, Map>()
-    members.each { GPathResult member ->
-      addQuickTopologyDevice(devicesByIp, member, false, null)
-      String primaryId = xmlAttribute(member, 'UUID')
-      List<GPathResult> satellites = []
-      collectXmlDescendantsByLocalName(member, 'Satellite', satellites)
-      satellites.each { GPathResult satellite -> addQuickTopologyDevice(devicesByIp, satellite, true, primaryId) }
-    }
-    String sourceIp = data?.sourceIp?.toString()
-    List<String> pendingIps = new ArrayList<String>(devicesByIp.keySet())
-    if(pendingIps.isEmpty()) {
-      state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-      return
-    }
-    state[QUICK_TOPOLOGY_BATCH_STATE_KEY] = [
-      requestId: requestId,
-      devicesByIp: devicesByIp,
-      pendingIps: pendingIps
-    ]
-    pendingIps.each { String ip -> requestQuickTopologySpeakerInfo(ip, requestId) }
-    logInfo("Sonos topology query found ${devicesByIp.size()} speaker locations; gathering details before refreshing the page")
-  } catch(Exception e) {
-    state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-    logWarn("Could not parse Sonos topology response: ${e.message}")
-  }
-}
-
-void addQuickTopologyDevice(Map<String, Map> devicesByIp, GPathResult deviceNode,
-    Boolean secondary, String primaryDeviceId) {
-  String ip = null
-  try { ip = new URI(xmlAttribute(deviceNode, 'Location')).host } catch(Exception ignored) { }
-  if(!ip) { return }
-  Map<String, String> topologyInfo = [:]
-  QUICK_TOPOLOGY_DEVICE_ATTRIBUTE_NAMES.each { String name ->
-    String value = xmlAttribute(deviceNode, name)
-    if(value != null) { topologyInfo[name] = value }
-  }
-  devicesByIp[ip] = [ipAddress: ip, secondary: secondary, primaryDeviceId: primaryDeviceId,
-    topologyInfo: topologyInfo]
-}
-
-void addQuickTopologyIp(Set<String> ips, String location) {
-  try {
-    String ip = location ? new URI(location).host : null
-    if(ip) { ips.add(ip) }
-  } catch(Exception ignored) { }
-}
-
-void requestQuickTopologySpeakerInfo(String ipAddress, String requestId) {
-  Boolean dispatched = requestSonosPlayerInfo(ipAddress, 'quickTopologySpeakerInfoCallback',
-      [ipAddress: ipAddress, requestId: requestId])
-  if(!dispatched) { completeQuickTopologySpeaker(ipAddress, requestId) }
-}
-
-void quickTopologySpeakerInfoCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  String requestId = data?.requestId?.toString()
-  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
-      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
-  if(!ipAddress || !requestId || batch.requestId?.toString() != requestId) { return }
-  if(response == null || response.hasError()) {
-    completeQuickTopologySpeaker(ipAddress, requestId)
-    return
-  }
-  try {
-    Map playerInfo = response.getJson() as Map
-    if(!(playerInfo instanceof Map)) {
-      completeQuickTopologySpeaker(ipAddress, requestId)
-      return
-    }
-    Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
-    Map topologyDevice = devicesByIp[ipAddress] ?: [:]
-    if(topologyDevice.secondary == true && topologyDevice.primaryDeviceId && playerInfo.device instanceof Map) {
-      Map playerDevice = (Map)playerInfo.device
-      if(!playerDevice.primaryDeviceId) {
-        playerDevice.primaryDeviceId = topologyDevice.primaryDeviceId
-      }
-    }
-    Boolean dispatched = requestSonosDeviceDescription(ipAddress, new LinkedHashMap(playerInfo),
-        'quickTopologyDeviceDescriptionCallback', [ipAddress: ipAddress, requestId: requestId])
-    if(!dispatched) { completeQuickTopologySpeaker(ipAddress, requestId) }
-  } catch(Exception e) {
-    logDebug("Could not process topology player info from ${ipAddress}: ${e.message}")
-    completeQuickTopologySpeaker(ipAddress, requestId)
-  }
-}
-
-void quickTopologyDeviceDescriptionCallback(AsyncResponse response, Map data) {
-  String ipAddress = data?.ipAddress?.toString()
-  String requestId = data?.requestId?.toString()
-  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
-      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
-  if(!ipAddress || !requestId || batch.requestId?.toString() != requestId) { return }
-  if(response == null || response.hasError()) {
-    completeQuickTopologySpeaker(ipAddress, requestId)
-    return
-  }
-  try {
-    GPathResult description = new XmlSlurper().parseText(response.getData()?.toString())
-    Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
-    Map topologyDevice = devicesByIp[ipAddress] ?: [:]
-    processSonosDeviceInfo(data.playerInfo as LinkedHashMap, description, ipAddress,
-        topologyDevice.topologyInfo instanceof Map ? (Map)topologyDevice.topologyInfo : [:], false)
-  } catch(Exception e) {
-    logDebug("Could not process topology device description from ${ipAddress}: ${e.message}")
-  }
-  completeQuickTopologySpeaker(ipAddress, requestId)
-}
-
-void completeQuickTopologySpeaker(String ipAddress, String requestId) {
-  Map batch = state[QUICK_TOPOLOGY_BATCH_STATE_KEY] instanceof Map
-      ? (Map)state[QUICK_TOPOLOGY_BATCH_STATE_KEY] : [:]
-  if(!requestId || batch.requestId?.toString() != requestId) { return }
-  List<String> pendingIps = batch.pendingIps instanceof Collection
-      ? new ArrayList<String>((Collection<String>)batch.pendingIps) : []
-  pendingIps.remove(ipAddress)
-  if(!pendingIps.isEmpty()) {
-    batch.pendingIps = pendingIps
-    state[QUICK_TOPOLOGY_BATCH_STATE_KEY] = batch
-    return
-  }
-
-  applyQuickTopologyFallbackDevices(batch)
-  state.remove(QUICK_TOPOLOGY_BATCH_STATE_KEY)
-  state.remove(QUICK_TOPOLOGY_REQUEST_ID_STATE_KEY)
-  logInfo("Sonos topology speaker details complete; refreshing the player page once")
-  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-}
-
-void applyQuickTopologyFallbackDevices(Map batch) {
-  Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
-  devicesByIp.each { String ipAddress, Map topologyDevice ->
-    Boolean secondary = topologyDevice.secondary == true
-    Map<String, String> topologyInfo = topologyDevice.topologyInfo instanceof Map
-        ? (Map<String, String>)topologyDevice.topologyInfo : [:]
-    String playerId = topologyInfo.UUID?.toString()
-    String primaryDeviceId = topologyDevice.primaryDeviceId?.toString()
-    Map target = secondary ? (Map)discoveredSonosSecondaries : (Map)discoveredSonoses
-    Boolean alreadyKnown = target.values().any { Object raw ->
-      raw instanceof Map && ((Map)raw).deviceIp?.toString() == ipAddress
-    }
-    if(alreadyKnown) { return }
-    String playerName = topologyInfo.ZoneName?.toString() ?: playerId ?: "Sonos speaker at ${ipAddress}"
-    Map fallback = [id: playerId ?: ipAddress, name: playerName,
-      primaryDeviceId: primaryDeviceId, modelName: topologyInfo.ModelName,
-      modelDisplayName: topologyInfo.ModelDisplayName, swGen: topologyInfo.SWGen,
-      capabilities: [], deviceIp: ipAddress, localApiUrl: "https://${ipAddress}:1443/api/v1/",
-      localUpnpUrl: "http://${ipAddress}:1400", localUpnpHost: "${ipAddress}:1400",
-      topologyInfo: topologyInfo]
-    target[ipAddress] = new LinkedHashMap(fallback)
-  }
-}
-
-@CompileStatic
-String getFoundSonoses() {
-  String foundDevices = ''
-  List<String> discoveredSonosesNames = discoveredSonoses.collect{Object k, Object v -> ((LinkedHashMap)v)?.name as String }
-  discoveredSonosSecondaries.each{ Object k, Object v ->
-    LinkedHashMap secondary = (LinkedHashMap)v
-    String primaryDeviceId = secondary?.primaryDeviceId as String
-    String modelName = secondary?.modelDisplayName ?: secondary?.modelName ?: 'Secondary'
-    if(primaryDeviceId) {
-      String primaryDNI = getDNIFromRincon(primaryDeviceId)
-      if(discoveredSonoses.containsKey(primaryDNI)) {
-        LinkedHashMap primary = (LinkedHashMap)discoveredSonoses[primaryDNI]
-        discoveredSonosesNames.add("${primary?.name as String} (${modelName})".toString())
-      }
-    }
-  }
-  discoveredSonosesNames.sort()
-  discoveredSonosesNames.each{ discoveredSonos -> foundDevices += "\n${discoveredSonos}" }
-  return foundDevices
-}
-
-void sendFoundSonosEvents() {
-  if(atomicState.discoveryRunning != true) {
-    logDebug("sendFoundSonosEvents: discovery not running, skipping")
-    app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-    return
-  }
-  app.sendEvent(name: 'sonosDiscoveredCount', value: "Found Devices (${discoveredSonoses.size()} primary, ${discoveredSonosSecondaries.size()} secondary): ")
-  app.sendEvent(name: 'sonosDiscovered', value: getFoundSonoses())
-  app.sendEvent(name: 'newUiSpeakerTable', value: 'updated')
-}
-// =============================================================================
-// End Local Discovery
-// =============================================================================
-
 
 
 
@@ -4789,21 +2027,6 @@ List<String> splitTokens(String value, String delimiters) {
 String processServerSideRender(Map event) {
   if(event?.name == 'newUiUpdateNotice') {
     return renderNewUiUpdateNoticeMarkup()
-  }
-  if(event?.name == 'newUiSettings') {
-    return renderCustomSettingsMarkup()
-  }
-  if(event?.name == 'discoveryTimer') {
-    return renderNewUiDiscoveryTimerMarkup()
-  }
-  if(event?.name == 'newUiSpeakerTable') {
-    return "<div id='new-ui-speaker-table-wrapper'>${renderNewUiSpeakerTableMarkup()}</div>${renderNewUiSpeakerMobileListMarkup()}"
-  }
-  if(event?.name == NEW_UI_GROUP_EDITOR_EVENT) {
-    return renderNewUiGroupEditorMarkup()
-  }
-  if(event?.name == NEW_UI_GROUP_TABLE_EVENT) {
-    return "<div id='new-ui-group-table-wrapper'>${renderNewUiGroupTableMarkup()}</div>${renderNewUiGroupTableMobileListMarkup()}"
   }
   return ''
 }
@@ -4869,8 +2092,6 @@ String renderCustomSettingsMarkup() {
   html.append(renderCustomSettingCard('enableAlarmSwitches', 'Sonos alarm switches', 'Create a switch device for each alarm found on the Sonos household.'))
   html.append(renderCustomSettingCard('autoCheckUpdates', 'Check for updates automatically', 'Schedule checks for new app releases.'))
   html.append(renderCustomSettingCard('autoInstallUpdates', 'Install updates automatically', 'Install available updates using the schedule below.'))
-  Map<String, String> logLevelOptions = [trace: 'Trace', debug: 'Debug', info: 'Info', warn: 'Warn', error: 'Error', off: 'Off']
-  html.append(renderCustomSelectCard('logLevel', 'Logging level', 'Choose the amount of detail written to Hubitat logs.', logLevelOptions, getConfiguredLogLevel()))
   Map<String, String> retentionOptions = [
     '1': '1 minute', '3': '3 minutes', '5': '5 minutes', '10': '10 minutes',
     '15': '15 minutes', '30': '30 minutes', '60': '1 hour', '120': '2 hours',
@@ -9514,10 +6735,9 @@ List<String> getCreatedGroupDevices() {
 }
 
 List<String> getUserGroupsDNIsFromUserGroups() {
-  List<String> dnis = state.userGroups.collect { Object groupName, Object ignored ->
-    "${app.id}-SonosGroupDevice-${groupName}".toString()
-  }
-  return dnis
+  return getCurrentGroupDevices().collect { ChildDeviceWrapper group ->
+    group.getDeviceNetworkId()?.toString()
+  }.findAll { String dni -> dni }
 }
 
 List<ChildDeviceWrapper> getCurrentPlayerDevices() {
@@ -9610,21 +6830,13 @@ Map getConfiguredGroupDefinition(DeviceWrapper groupDevice) {
 }
 
 Map getConfiguredGroupDefinitionByDni(String groupDni) {
-  if(!groupDni || !(state.userGroups instanceof Map)) {
-    return [:]
-  }
-  String groupName = extractGroupNameFromDni(groupDni)
-  if(groupName && state.userGroups[groupName] instanceof Map) {
-    return (Map)state.userGroups[groupName]
-  }
-  Map definition = null
-  state.userGroups.each { Object savedGroupName, Object groupValue ->
-    String expectedDni = "${app.id}-SonosGroupDevice-${savedGroupName}"
-    if(expectedDni == groupDni && groupValue instanceof Map) {
-      definition = (Map)groupValue
-    }
-  }
-  return definition ?: [:]
+  if(!groupDni) { return [:] }
+  ChildDeviceWrapper group = app.getChildDevice(groupDni)
+  if(group == null) { return [:] }
+  String coordinatorId = group.getDataValue('groupCoordinatorId')?.toString()
+  List<String> playerIds = normalizeGroupPlayerIds(group.getDataValue('playerIds'))
+  return coordinatorId && !playerIds.isEmpty()
+      ? [groupCoordinatorId: coordinatorId, playerIds: playerIds] : [:]
 }
 
 String extractGroupNameFromDni(String groupDni) {

@@ -8,6 +8,14 @@
       "namespace": "dwinks",
       "primary": true,
       "required": true
+    },
+    {
+      "id": "27435da9-39f3-4a8c-b52e-2fe887936411",
+      "location": "https://github.com/DanielWinks/Hubitat-Public/releases/download/v0.18.9/SonosAdvancedDiscoveryApp.groovy",
+      "betaLocation": "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/sonos-beta/Apps/SonosAdvancedDiscoveryApp.groovy",
+      "name": "Sonos Advanced Controller - Discovery & Management",
+      "namespace": "dwinks",
+      "required": false
     }
   ],
   "author": "Daniel Winks",

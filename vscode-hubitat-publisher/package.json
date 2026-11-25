@@ -1,0 +1,40 @@
+{
+  "name": "hubitat-dynamic-publisher",
+  "displayName": "Hubitat Dynamic Publisher",
+  "description": "Publish the active Hubitat app or driver by resolving its ID on the selected hub.",
+  "version": "0.1.0",
+  "publisher": "dwinks",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "files": ["extension.js", "README.md", "LICENSE", "package.json"],
+  "activationEvents": ["onCommand:hubitatDynamicPublisher.publishActive"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [{ "command": "hubitatDynamicPublisher.publishActive", "title": "Hubitat: Publish Active App or Driver" }],
+    "keybindings": [{ "command": "hubitatDynamicPublisher.publishActive", "key": "ctrl+alt+u", "mac": "cmd+alt+u", "when": "editorTextFocus && resourceExtname == .groovy" }],
+    "configuration": {
+      "title": "Hubitat Dynamic Publisher",
+      "properties": {
+        "hubitatDynamicPublisher.hubs": {
+          "type": "array",
+          "default": [],
+          "description": "Hubitat hubs available for publishing. Select one each time you publish.",
+          "items": {
+            "type": "object",
+            "required": ["name", "host"],
+            "properties": {
+              "name": { "type": "string" },
+              "host": { "type": "string", "description": "Host or URL, for example http://192.168.1.3" }
+            }
+          }
+        },
+        "hubitatDynamicPublisher.requestTimeoutSeconds": {
+          "type": "number", "default": 180, "minimum": 10,
+          "description": "Timeout for Hubitat publish requests."
+        }
+      }
+    }
+  },
+  "scripts": {},
+  "license": "MIT"
+}

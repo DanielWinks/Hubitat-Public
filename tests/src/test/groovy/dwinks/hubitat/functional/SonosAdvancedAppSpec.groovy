@@ -194,8 +194,6 @@ class SonosAdvancedAppSpec extends Specification {
 
   def setup() {
     appScript = ScriptLoader.instantiate(appScriptClass)
-    appScript.discoveredSonoses.clear()
-    appScript.discoveredSonosSecondaries.clear()
     appScript.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     appScript.logs.clear()
     appScript.events.clear()
@@ -601,11 +599,8 @@ class SonosAdvancedAppSpec extends Specification {
   def "group operation target recovers missing group device data from its saved definition"() {
     given:
     group.deviceNetworkId = '42-SonosGroupDevice-Arc + Kitchen'
-    group.dataValues.remove('groupCoordinatorId')
-    group.dataValues.remove('playerIds')
-    appScript.state.userGroups = [
-      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    ]
+    group.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    group.dataValues.playerIds = 'RINCON_FOLLOW'
 
     expect:
     appScript.getAllPlayersForGroupDevice(group) == ['RINCON_COORD', 'RINCON_FOLLOW']
@@ -615,9 +610,8 @@ class SonosAdvancedAppSpec extends Specification {
   def "group definition lookup uses the group name encoded in the device DNI"() {
     given:
     group.deviceNetworkId = 'different-app-id-SonosGroupDevice-Arc + Kitchen'
-    appScript.state.userGroups = [
-      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    ]
+    group.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    group.dataValues.playerIds = 'RINCON_FOLLOW'
 
     expect:
     appScript.getConfiguredGroupDefinition(group).groupCoordinatorId == 'RINCON_COORD'
@@ -626,11 +620,8 @@ class SonosAdvancedAppSpec extends Specification {
   def "eviction operation retains the recovered configured coordinator"() {
     given:
     group.deviceNetworkId = 'different-app-id-SonosGroupDevice-Arc + Kitchen'
-    group.dataValues.remove('groupCoordinatorId')
-    group.dataValues.remove('playerIds')
-    appScript.state.userGroups = [
-      'Arc + Kitchen': [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    ]
+    group.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    group.dataValues.playerIds = 'RINCON_FOLLOW'
 
     when:
     appScript.startGroupTopologyOperation(group, 'EXPLICIT', [evictUnlistedOnly: true])
@@ -2296,338 +2287,112 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.groupMute == 'muted'
   }
 
-  def "new UI speaker table merges discovery with created players and escapes display values"() {
+  def "parent page is a coordination shell without player or group tables"() {
     given:
-    appScript.discoveredSonoses.clear()
-    appScript.discoveredSonosSecondaries.clear()
-    appScript.discoveredSonoses['AA:BB:CC:DD:EE:01'] = [
-      id: 'RINCON_COORD', name: 'Kitchen <Main>', modelDisplayName: 'Arc', deviceIp: '192.168.1.10'
-    ]
-    appScript.discoveredSonoses['AA:BB:CC:DD:EE:03'] = [
-      id: 'RINCON_UNCREATED', name: 'Bedroom', modelDisplayName: 'One', deviceIp: '192.168.1.12'
-    ]
-    appScript.discoveredSonosSecondaries['AA:BB:CC:DD:EE:02'] = [
-      id: 'RINCON_SECONDARY', primaryDeviceId: 'RINCON_COORD', modelDisplayName: 'Sub', deviceIp: '192.168.1.11'
-    ]
-    coordinator.dataValues.name = 'Kitchen <Main>'
-    coordinator.dataValues.modelDisplayName = 'Arc'
-    coordinator.dataValues.deviceIp = '192.168.1.10'
-
-    when:
-    String markup = appScript.renderNewUiSpeakerTableMarkup()
-
-    then:
-    markup.contains('Kitchen &lt;Main&gt;')
-    markup.contains('Secondary Speakers')
-    markup.contains('1 discovered')
-    markup.contains('Sub')
-    markup.contains('192.168.1.11')
-    markup.contains("class='mdl-data-table'")
-    markup.contains("material-symbols:delete-outline")
-    markup.contains("material-symbols:add-circle-outline-rounded")
-    markup.contains('newUiDeletePlayer|AA:BB:CC:DD:EE:01')
-    markup.contains('newUiCreatePlayer|AA:BB:CC:DD:EE:03')
-    markup.contains("href='/device/edit/${coordinator.id}' target='_blank'")
-    markup.contains('<th>Action</th>')
-    markup.contains("<th class='new-ui-speaker-name'>Speaker</th>")
-    markup.contains("<th class='new-ui-secondary-speakers'>Secondary Speakers</th>")
-    markup.contains('<th>Network</th>')
-    markup.contains('<th>Create Group From</th>')
-    markup.contains("material-symbols:group-add")
-    markup.contains('newUiCreateGroup|RINCON_COORD')
-    !markup.contains('AV Transport')
-    !markup.contains('Rendering Control')
-    !markup.contains('Zone Group')
-    !markup.contains('WebSocket')
-    markup.contains('No primary Sonos speakers have been discovered yet.') == false
-  }
-
-  def "new UI matches a discovered companion to its installed primary by stable RINCON ID"() {
-    given:
-    appScript.discoveredSonoses.clear()
-    appScript.discoveredSonosSecondaries.clear()
-    coordinator.dataValues.id = 'RINCON_PRIMARY_STABLE'
-    coordinator.dataValues.name = 'Kids Room'
-    coordinator.dataValues.deviceIp = '192.168.1.34'
-    coordinator.dataValues.secondaryIds = 'RINCON_COMPANION_STABLE'
-    appScript.discoveredSonoses['AA:BB:CC:DD:EE:39'] = [
-      id: 'RINCON_COMPANION_STABLE', name: 'Kids Room', modelDisplayName: 'SYMFONISK Bookshelf',
-      deviceIp: '192.168.1.39'
-    ]
-
-    when:
-    List<Map> rows = appScript.buildNewUiSpeakerRows()
-
-    then:
-    !rows.any { Map row -> row.id == 'RINCON_COMPANION_STABLE' }
-    Map primaryRow = rows.find { Map row -> row.id == 'RINCON_PRIMARY_STABLE' }
-    primaryRow.created == true
-    primaryRow.secondaryDevices.any { Map secondary -> secondary.id == 'RINCON_COMPANION_STABLE' }
-  }
-
-  def "main page defaults to the new UI and switches to the two old UI links"() {
-    given:
-    appScript.atomicState = [discoveryRunning: false]
-    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false, useOldUi: false])
+    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false])
     appScript.binding.setVariable('autoCheckUpdates', false)
     appScript.binding.setVariable('autoInstallUpdates', false)
 
     when:
-    Map newUiPage = appScript.mainPage()
+    Map page = appScript.mainPage()
 
     then:
-    newUiPage.title == '<p hidden>Sonos Advanced Controller</p>'
-    appScript.pageHrefs.empty
-
-    when:
-    appScript.pageHrefs.clear()
-    appScript.settings.useOldUi = true
-    Map oldUiPage = appScript.mainPage()
-
-    then:
-    oldUiPage.title == 'Sonos Advanced Controller'
-    appScript.pageHrefs.size() == 2
-    appScript.pageHrefs*.first()*.page == ['localPlayerPage', 'groupPage']
+    page.title == 'Sonos Advanced Controller'
+    appScript.app.childApps.size() == 1
+    appScript.pageHrefs.any { List args ->
+      args[0] instanceof Map && args[0].url == '/installedapp/configure/134/discoveryPage'
+    }
+    !appScript.metaClass.respondsTo(appScript, 'renderNewUiSpeakerTableMarkup')
+    !appScript.metaClass.respondsTo(appScript, 'renderNewUiGroupTableMarkup')
   }
 
-  def "quick topology refresh uses the first known speaker IP and the topology control endpoint"() {
+  def "main page creates one child on first open and opens it directly thereafter"() {
     given:
-    coordinator.dataValues.deviceIp = '192.0.2.10'
+    appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false])
+    appScript.binding.setVariable('autoCheckUpdates', false)
+    appScript.binding.setVariable('autoInstallUpdates', false)
 
     when:
-    appScript.requestQuickTopologyRefresh()
+    Map page = appScript.mainPage()
+    Map reopenedPage = appScript.mainPage()
 
     then:
-    appScript.asyncCalls.size() == 1
-    appScript.asyncCalls[0].params.uri == 'http://192.0.2.10:1400/ZoneGroupTopology/Control'
-    appScript.asyncCalls[0].params.body.contains('GetZoneGroupState')
-    appScript.asyncCalls[0].params.headers.SOAPAction.endsWith('#GetZoneGroupState')
+    page.title == 'Sonos Advanced Controller'
+    reopenedPage.title == 'Sonos Advanced Controller'
+    appScript.app.childApps.size() == 1
+    appScript.pageHrefs.count { List args -> args[0] instanceof Map && args[0].url == '/installedapp/configure/134/discoveryPage' } == 2
   }
 
-  def "quick topology refresh batches rich speaker lookups before one page update"() {
+  def "management snapshot exposes detached player and group rows without a parent table cache"() {
     given:
-    appScript.atomicState = [discoveryRunning: true]
-    coordinator.dataValues.deviceIp = '192.0.2.10'
-    appScript.requestQuickTopologyRefresh()
-    Map topologyRequest = appScript.asyncCalls[0]
-    String topologyXml = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1">' +
-      '<s:Body><u:GetZoneGroupStateResponse><ZoneGroupState><ZoneGroups><ZoneGroup>' +
-      '<ZoneGroupMember UUID="RINCON_COORD" Location="http://192.0.2.10:1400" ZoneName="Arc">' +
-      '<Satellite UUID="RINCON_SUB" Location="http://192.0.2.12:1400" ModelName="Sub Mini"/></ZoneGroupMember>' +
-      '<ZoneGroupMember UUID="RINCON_FOLLOW" Location="http://192.0.2.11:1400" ZoneName="Kitchen"/>' +
-      '</ZoneGroup></ZoneGroups></ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>'
+    coordinator.dataValues.secondaryIds = 'RINCON_SUB'
+    coordinator.dataValues.secondaryDeviceIps = '192.0.2.12'
+    group.deviceNetworkId = "${appScript.app.id}-SonosGroupDevice-Family"
+    group.dataValues.groupCoordinatorId = 'RINCON_COORD'
+    group.dataValues.playerIds = 'RINCON_FOLLOW'
 
     when:
-    appScript.quickTopologyCallback(new AsyncResponse(status: 200, data: topologyXml), topologyRequest.data as Map)
-    List<Map> infoRequests = appScript.asyncCalls.findAll { Map call -> call.cb == 'quickTopologySpeakerInfoCallback' }
-    infoRequests.each { Map call ->
-      String ip = call.data.ipAddress.toString()
-      String id = ip.endsWith('.10') ? 'RINCON_COORD' : (ip.endsWith('.11') ? 'RINCON_FOLLOW' : 'RINCON_SUB')
-      String name = ip.endsWith('.10') ? 'Arc' : (ip.endsWith('.11') ? 'Kitchen' : 'Sub Mini')
-      Map info = [playerId: id, householdId: 'HOUSE', groupId: 'GROUP', device: [name: name,
-        swGen: '2', capabilities: []]]
-      appScript.quickTopologySpeakerInfoCallback(new AsyncResponse(status: 200, data: JsonOutput.toJson(info)), call.data as Map)
-    }
-    List<Map> descriptionRequests = appScript.asyncCalls.findAll { Map call -> call.cb == 'quickTopologyDeviceDescriptionCallback' }
-    descriptionRequests.eachWithIndex { Map call, Integer index ->
-      String mac = ['AA:BB:CC:DD:EE:10', 'AA:BB:CC:DD:EE:11', 'AA:BB:CC:DD:EE:12'][index]
-      String model = index == 2 ? 'Sub Mini' : 'Sonos One'
-      appScript.quickTopologyDeviceDescriptionCallback(new AsyncResponse(status: 200,
-        data: "<root><device><modelName>${model}</modelName><MACAddress>${mac}</MACAddress></device></root>"), call.data as Map)
-    }
+    Map snapshot = appScript.getProvisioningSnapshot()
 
     then:
-    assert infoRequests.size() == 3, appScript.logs.join('\n')
-    descriptionRequests.size() == 3
-    appScript.app.events.count { Map event -> event.name == 'newUiSpeakerTable' } == 1
-    appScript.discoveredSonoses.values().any { Map item -> item.id == 'RINCON_FOLLOW' && item.topologyInfo.ZoneName == 'Kitchen' }
-    !appScript.discoveredSonoses.values().any { Map item -> item.id == 'RINCON_SUB' }
-    appScript.discoveredSonosSecondaries.values().any { Map item -> item.id == 'RINCON_SUB' && item.topologyInfo.UUID == 'RINCON_SUB' }
-    appScript.discoveredSonosSecondaries.values().any { Map item -> item.id == 'RINCON_SUB' && item.primaryDeviceId == 'RINCON_COORD' }
-    appScript.state.quickTopologyRequestId == null
-    appScript.state.quickTopologyRefreshBatch == null
+    snapshot.playerRows.any { Map row -> row.id == 'RINCON_COORD' && row.secondaries[0].id == 'RINCON_SUB' }
+    snapshot.groups.any { Map row -> row.name == 'Family' && row.followerIds == ['RINCON_FOLLOW'] }
+    !appScript.state.containsKey('playerTableRows')
+    !appScript.state.containsKey('groupTableRows')
+  }
+
+  def "legacy group configurations are exposed for child migration and pruned after acknowledgement"() {
+    given:
+    appScript.state.userGroups = [Family: [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]]
+
+    when:
+    Map migration = appScript.getLegacyDiscoveryState()
+    appScript.acknowledgeLegacyDiscoveryState()
+
+    then:
+    migration.groupConfigurations.Family.groupCoordinatorId == 'RINCON_COORD'
+    !appScript.state.containsKey('userGroups')
+  }
+
+  def "group configuration changes queue on the parent for deferred device coordination"() {
+    when:
+    Map result = appScript.submitGroupManagementRequest([schemaVersion: 1, requestId: 'group-1',
+      action: 'upsert', name: 'Family', groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']])
+
+    then:
+    result.accepted == true
+    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-Family") == null
+    appScript.state.pendingGroupConfigurationRequests['group-1'].name == 'Family'
+    appScript.scheduled.any { List item -> item[1] == 'drainGroupConfigurationRequests' }
   }
 
   def "main page renders cached installed version without changing the async update result"() {
     given:
-    appScript.atomicState = [discoveryRunning: false]
     appScript.state.putAll([updateAvailable: true, latestVersion: '99.0.0',
       installedAppVersion: '98.0.0', latestReleaseDate: '2026-11-01', latestReleaseUrl: 'https://example.com/release'])
     appScript.settings.putAll([autoCheckUpdates: false, autoInstallUpdates: false, useOldUi: false])
     appScript.binding.setVariable('autoCheckUpdates', false)
     appScript.binding.setVariable('autoInstallUpdates', false)
-    coordinator.dataValues.deviceIp = '192.0.2.10'
 
     when:
     Map page = appScript.mainPage()
     String noticeMarkup = appScript.renderNewUiUpdateNoticeMarkup()
 
     then:
-    page.title == '<p hidden>Sonos Advanced Controller</p>'
+    page.title == 'Sonos Advanced Controller'
     appScript.state.updateAvailable == true
     appScript.state.installedAppVersion == '98.0.0'
-    appScript.asyncCalls.size() == 1
-    appScript.asyncCalls[0].cb == 'quickTopologyCallback'
+    appScript.asyncCalls.empty
     noticeMarkup.contains('settings[btnInstallUpdate]')
     noticeMarkup.contains('settings[btnDismissUpdate]')
   }
 
-  def "new UI speaker table restores discovered secondaries after the volatile map is cleared"() {
-    given:
-    appScript.discoveredSonoses['AA:BB:CC:DD:EE:01'] = [
-      id: 'RINCON_COORD', name: 'Kitchen', modelDisplayName: 'Arc', deviceIp: '192.168.1.10'
-    ]
-    appScript.discoveredSonosSecondaries['AA:BB:CC:DD:EE:02'] = [
-      id: 'RINCON_SECONDARY', primaryDeviceId: 'RINCON_COORD', modelDisplayName: 'Sub Mini',
-      deviceIp: '192.168.1.11'
-    ]
-    appScript.persistDiscoveredSonosSecondaries()
-    appScript.discoveredSonosSecondaries.clear()
-
-    when:
-    String markup = appScript.renderNewUiSpeakerTableMarkup()
-
-    then:
-    markup.contains('1 discovered')
-    markup.contains('Sub Mini')
-    markup.contains('192.168.1.11')
-    appScript.discoveredSonosSecondaries['AA:BB:CC:DD:EE:02'].id == 'RINCON_SECONDARY'
-  }
-
-  def "new UI group table renders group device links, coordinator, followers, and actions"() {
-    given:
-    String groupName = 'Arc + 1 others'
-    group.deviceNetworkId = "${appScript.app.id}-SonosGroupDevice-${groupName}"
-    appScript.state.userGroups = [
-      (groupName): [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    ]
-
-    when:
-    String markup = appScript.renderNewUiGroupTableMarkup()
-    String groupTable = appScript.displayNewUiGroupTable()
-    String token = appScript.newUiGroupToken(groupName)
-
-    then:
-    markup.contains('<th>Action</th>')
-    markup.contains("<th class='new-ui-group-name'>Group Name</th>")
-    markup.contains("<th class='new-ui-group-coordinator'>Coordinator</th>")
-    markup.contains("<th class='new-ui-group-followers'>Followers</th>")
-    markup.contains("<colgroup><col style='width:6%'><col style='width:34%'><col style='width:23%'><col style='width:37%'></colgroup>")
-    markup.contains("<td class='new-ui-group-coordinator' data-label='Coordinator'>RINCON_COORD</td>")
-    markup.contains(groupName)
-    markup.contains('RINCON_COORD')
-    markup.contains('RINCON_FOLLOW')
-    markup.contains("href='/device/edit/${group.id}' target='_blank'")
-    markup.contains("newUiEditGroup|${token}")
-    markup.contains("newUiDeleteGroup|${token}")
-    markup.contains('material-symbols:delete-outline')
-    groupTable.contains("<div id='new-ui-group-table-wrapper'>")
-  }
-
-  def "new UI group editor uses registered settings and fixed field actions"() {
-    given:
-    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
-
-    when:
-    String markup = appScript.renderNewUiGroupEditorMarkup()
-
-    then:
-    markup.contains("[name='settings[newUiGroupName]']")
-    markup.contains("[name='settings[newUiGroupCoordinator]']")
-    markup.contains('syncNewUiGroupFields();buttonClick(this)')
-    markup.contains("btnNewUiGroupNameChanged.type")
-    markup.contains("btnNewUiGroupCoordinatorChanged.type")
-    markup.contains("newUiToggleGroupFollower|RINCON_FOLLOW")
-    markup.contains("new-ui-group-checkbox")
-    markup.contains("new-ui-group-checkbox-checked:after")
-    !markup.contains("<iconify-icon icon='material-symbols:check_box")
-    !markup.contains("new-ui-group-follower-checkbox")
-    !markup.contains("marker.name=action+'.type'")
-  }
-
-  def "new UI group creation persists a name, coordinator, followers, and child device"() {
-    given:
-    appScript.state.userGroups = [:]
-    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
-    appScript.settings.groupDevices = ["${appScript.app.id}-SonosGroupDevice-Family"]
-    appScript.settings.skipOrphanRemoval = true
-
-    when:
-    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
-    appScript.settings.newUiGroupName = 'Family'
-    appScript.appButtonHandler('btnNewUiGroupNameChanged')
-    appScript.settings.newUiGroupCoordinator = 'RINCON_COORD'
-    appScript.appButtonHandler('btnNewUiGroupCoordinatorChanged')
-    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
-    appScript.appButtonHandler('btnNewUiSaveGroup')
-
-    then:
-    appScript.state.userGroups['Family'] == [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-Family") != null
-    appScript.state.newUiGroupEditorMode == null
-    appScript.app.updatedSettings.groupDevices == ["${appScript.app.id}-SonosGroupDevice-Family"]
-    appScript.logs.any { String entry -> entry.contains("New UI created Sonos group 'Family'") }
-  }
-
-  def "new UI follower selection sentinel preserves the empty selection for validation"() {
-    given:
-    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
-
-    when:
-    appScript.appButtonHandler('btnNewUiSaveGroup')
-
-    then:
-    appScript.state.newUiGroupError == 'Select at least one follower before saving the group.'
-    appScript.state.newUiGroupEditorMode == 'create'
-  }
-
-  def "new UI follower action updates and removes the configured follower"() {
-    given:
-    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
-
-    when:
-    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
-    List<String> added = appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft())
-    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
-    List<String> removed = appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft())
-
-    then:
-    added == ['RINCON_FOLLOW']
-    removed.empty
-    (appScript.state.newUiGroupDraft.followerIds as List<String>).empty
-  }
-
-  def "new UI group editor renders the latest draft while settings refresh is pending"() {
-    given:
-    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
-    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
-    appScript.settings.newUiGroupFollowers = []
-
-    when:
-    String markup = appScript.renderNewUiGroupEditorMarkup()
-
-    then:
-    markup.contains("option value='RINCON_COORD' selected")
-    markup.contains('new-ui-group-checkbox-checked')
-    markup.contains("value='RINCON_COORD + RINCON_FOLLOW'")
-    appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft()) == ['RINCON_FOLLOW']
-  }
-
-  def "new UI automatic group name updates in the same follower selection action"() {
-    given:
-    coordinator.dataValues.name = 'Arc'
-    follower.dataValues.name = 'Kitchen'
-    extra.dataValues.name = "Kids' Room"
-    appScript.appButtonHandler('newUiCreateGroup|RINCON_COORD')
-
-    when:
-    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_FOLLOW')
-    appScript.appButtonHandler('newUiToggleGroupFollower|RINCON_EXTRA')
-
-    then:
-    appScript.getNewUiGroupDraft().name == 'Arc + 2 others'
-    appScript.app.updatedSettings.newUiGroupName == 'Arc + 2 others'
-    appScript.getNewUiGroupFollowers(appScript.getNewUiGroupDraft()) == ['RINCON_FOLLOW', 'RINCON_EXTRA']
+  def "runtime app does not retain discovery cache keys"() {
+    expect:
+    !appScript.state.containsKey('discoveredSonoses')
+    !appScript.state.containsKey('discoveredSonosSecondaries')
+    !appScript.atomicState.containsKey('discoveryRunning')
+    !appScript.atomicState.containsKey('discoveryProbeAttempts')
   }
 
   def "audio clip group completion waits one second after the first terminal player callback"() {
@@ -2677,154 +2442,21 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.logs.any { String entry -> entry.contains('finished (DONE)') }
   }
 
-  def "new UI automatic group names use the follower name for one follower"() {
-    expect:
-    appScript.buildNewUiAutomaticGroupName('RINCON_COORD', [], [RINCON_COORD: 'Cora\'s Room']) == "Cora's Room + 0 others"
-    appScript.buildNewUiAutomaticGroupName('RINCON_COORD', ['RINCON_FOLLOW'], [
-      RINCON_COORD: 'Cora\'s Room', RINCON_FOLLOW: 'Kitchen'
-    ]) == "Cora's Room + Kitchen"
-    appScript.buildNewUiAutomaticGroupName('RINCON_COORD', ['RINCON_FOLLOW', 'RINCON_EXTRA'], [
-      RINCON_COORD: 'Cora\'s Room', RINCON_FOLLOW: 'Kitchen', RINCON_EXTRA: 'Bedroom'
-    ]) == "Cora's Room + 2 others"
-  }
-
-  def "new UI group editing renames the child device and preserves its configuration"() {
+  def "player provisioning request is validated, queued, and deferred by the parent"() {
     given:
-    String oldName = 'Old Name'
-    String newName = 'New Name'
-    group.deviceNetworkId = "${appScript.app.id}-SonosGroupDevice-${oldName}"
-    appScript.state.userGroups = [
-      (oldName): [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    ]
-    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId, extra.deviceNetworkId]
-    appScript.settings.groupDevices = ["${appScript.app.id}-SonosGroupDevice-${newName}"]
-    appScript.settings.skipOrphanRemoval = true
+    Map player = [id: 'RINCON_NEW', name: 'Bedroom', modelName: 'One', deviceIp: '192.168.1.12',
+      localApiUrl: 'https://192.168.1.12:1443/api/v1/', localUpnpUrl: 'http://192.168.1.12:1400',
+      localUpnpHost: '192.168.1.12:1400', websocketUrl: 'wss://192.168.1.12:1443/websocket']
 
     when:
-    appScript.appButtonHandler("newUiEditGroup|${appScript.newUiGroupToken(oldName)}")
-    appScript.settings.newUiGroupName = newName
-    appScript.appButtonHandler('btnNewUiGroupNameChanged')
-    appScript.settings.newUiGroupCoordinator = 'RINCON_COORD'
-    appScript.appButtonHandler('btnNewUiGroupCoordinatorChanged')
-    appScript.settings.newUiGroupFollowers = ['RINCON_FOLLOW']
-    appScript.appButtonHandler('btnNewUiSaveGroup')
+    Map result = appScript.submitPlayerProvisioningRequest([schemaVersion: 1, requestId: 'request-1',
+      selected: ['AA:BB:CC:DD:EE:03'], players: ['AA:BB:CC:DD:EE:03': player], secondaries: [:]])
 
     then:
-    appScript.state.userGroups[oldName] == null
-    appScript.state.userGroups[newName] == [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-${oldName}") == null
-    appScript.app.getChildDevice("${appScript.app.id}-SonosGroupDevice-${newName}") == group
-    group.label == "Sonos Group: ${newName}"
-  }
-
-  def "new UI group deletion uses confirmation and removes the group child device"() {
-    given:
-    String groupName = 'Arc + 1 others'
-    group.deviceNetworkId = "${appScript.app.id}-SonosGroupDevice-${groupName}"
-    appScript.state.userGroups = [
-      (groupName): [groupCoordinatorId: 'RINCON_COORD', playerIds: ['RINCON_FOLLOW']]
-    ]
-    appScript.settings.groupDevices = [group.deviceNetworkId]
-
-    when:
-    appScript.appButtonHandler("newUiDeleteGroup|${appScript.newUiGroupToken(groupName)}")
-
-    then:
-    appScript.state.pendingNewUiDeleteGroup == appScript.newUiGroupToken(groupName)
-    appScript.logs.any { String entry -> entry.contains('New UI delete requested for Sonos group') }
-
-    when:
-    appScript.appButtonHandler('btnConfirmNewUiDeleteGroup')
-
-    then:
-    appScript.state.userGroups[groupName] == null
-    appScript.state.pendingNewUiDeleteGroup == null
-    appScript.app.getChildDevice(group.deviceNetworkId) == null
-    appScript.app.updatedSettings.groupDevices == []
-    appScript.logs.any { String entry -> entry.contains("Removed Sonos group '${groupName}'") }
-  }
-
-  def "new UI create action creates the selected discovered player and logs the result"() {
-    given:
-    appScript.discoveredSonoses.clear()
-    appScript.discoveredSonosSecondaries.clear()
-    appScript.settings.playerDevices = []
-    appScript.discoveredSonoses['AA:BB:CC:DD:EE:03'] = [
-      id: 'RINCON_NEW', name: 'Bedroom', modelDisplayName: 'One', deviceIp: '192.168.1.12',
-      localApiUrl: 'https://192.168.1.12:1443/api/v1/',
-      localUpnpUrl: 'http://192.168.1.12:1400', localUpnpHost: '192.168.1.12:1400',
-      websocketUrl: 'wss://192.168.1.12:1443/websocket'
-    ]
-
-    when:
-    appScript.appButtonHandler('newUiCreatePlayer|AA:BB:CC:DD:EE:03')
-
-    then:
-    appScript.app.getChildDevice('AA:BB:CC:DD:EE:03') != null
-    appScript.app.getChildDevice('AA:BB:CC:DD:EE:03').getDataValue('id') == 'RINCON_NEW'
-    appScript.app.updatedSettings.playerDevices == ['AA:BB:CC:DD:EE:03']
-    appScript.scheduled.any { List item -> item[0] == 3 && item[1] == 'finalizeNewUiPlayerCreation' }
-    appScript.logs.any { String entry -> entry.contains("New UI created Sonos Advanced Player 'Bedroom'") }
-  }
-
-  def "new UI player deletion logs, requires confirmation, and removes the confirmed player"() {
-    given:
-    appScript.discoveredSonoses.clear()
-    appScript.discoveredSonosSecondaries.clear()
-    appScript.settings.playerDevices = [coordinator.deviceNetworkId, follower.deviceNetworkId]
-
-    when:
-    appScript.appButtonHandler("newUiDeletePlayer|${coordinator.deviceNetworkId}")
-
-    then:
-    appScript.state.pendingNewUiDeletePlayer == coordinator.deviceNetworkId
-    appScript.logs.any { String entry -> entry.contains('New UI delete requested') }
-
-    when:
-    appScript.appButtonHandler('btnConfirmNewUiDeletePlayer')
-
-    then:
-    appScript.state.pendingNewUiDeletePlayer == null
-    appScript.app.getChildDevice(coordinator.deviceNetworkId) == null
-    appScript.app.updatedSettings.playerDevices == [follower.deviceNetworkId]
-    appScript.scheduled.any { List item -> item[1] == 'finalizeNewUiPlayerDeletion' }
-    appScript.logs.any { String entry -> entry.contains('Removing Sonos Advanced Player') }
-  }
-
-  def "new UI discovery button starts a fresh 60 second discovery session"() {
-    given:
-    appScript.atomicState = [discoveryRunning: false]
-    appScript.discoveredSonoses['STALE_PRIMARY'] = [id: 'RINCON_STALE', name: 'Stale']
-    appScript.discoveredSonosSecondaries['STALE_SECONDARY'] = [
-      id: 'RINCON_STALE_SECONDARY', primaryDeviceId: 'RINCON_STALE', modelName: 'Sub'
-    ]
-
-    when:
-    appScript.appButtonHandler('btnNewUiDiscoverSpeakers')
-
-    then:
-    appScript.atomicState.discoveryRunning == true
-    (appScript.atomicState.discoveryEndTime as Long) > appScript.now()
-    appScript.discoveredSonoses.isEmpty()
-    appScript.discoveredSonosSecondaries.isEmpty()
-    appScript.scheduled.any { List item -> item[0] == 60 && item[1] == 'stopDiscovery' }
-    appScript.scheduled.any { List item -> item[1] == 'updateDiscoveryTimer' }
-    appScript.logs.any { String entry -> entry.contains('Starting New UI Sonos speaker discovery') }
-  }
-
-  def "new UI discovery timer is rendered through SSR events"() {
-    given:
-    appScript.atomicState = [
-      discoveryRunning: true,
-      discoveryEndTime: appScript.now() + 60000L
-    ]
-
-    when:
-    String timerMarkup = appScript.processServerSideRender([name: 'discoveryTimer'])
-
-    then:
-    timerMarkup.contains("<div class='new-ui-discovery-title'>Searching for Sonos speakers</div>")
-    timerMarkup ==~ /(?s).*<div class='new-ui-discovery-detail'>About [0-9]+ seconds remaining<\/div>.*/
+    result.accepted == true
+    appScript.app.getChildDevice('AA:BB:CC:DD:EE:03') == null
+    appScript.state.pendingPlayerProvisioningRequests['request-1'].selected == ['AA:BB:CC:DD:EE:03']
+    appScript.scheduled.any { List item -> item[1] == 'drainPlayerProvisioningRequests' }
   }
 
   def "player arrived and departed stubs log without persisting state"() {

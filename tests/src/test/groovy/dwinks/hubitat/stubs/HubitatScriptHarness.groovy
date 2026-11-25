@@ -3,6 +3,7 @@ package dwinks.hubitat.stubs
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import com.hubitat.app.ChildDeviceWrapper
+import com.hubitat.app.InstalledAppWrapper
 import com.hubitat.hub.domain.Location
 
 /**
@@ -152,6 +153,7 @@ class HubitatScriptHarness extends Script {
   List<String> delayBetween(List<String> commands, Number delay) { commands }
   void sendHubCommand(Object command) { hubCommands << command }
   void href(Object... args) { pageHrefs << args.toList() }
+  List<MockInstalledApp> getChildApps() { app.childApps }
 
   // ----- Setting updaters -----
   void updateSetting(String name, Map opts) { updatedSettings[name] = opts.value }
@@ -228,6 +230,7 @@ class MockApp {
   Long id = 42L
   String label = 'Test App'
   List children = []
+  List<MockInstalledApp> childApps = []
   List<Map> events = []
   Map<String, Object> updatedSettings = [:]
   String getId() { id?.toString() }
@@ -240,6 +243,21 @@ class MockApp {
   void updateSetting(String name, Object value) { updatedSettings[name] = value }
   void removeSetting(String name) { updatedSettings.remove(name) }
   void sendEvent(Map event) { events << event }
+  MockInstalledApp addChildApp(String namespace, String name, String childLabel, Map properties = [:]) {
+    MockInstalledApp existing = childApps.find { MockInstalledApp child -> child.name == name }
+    if(existing) { return existing }
+    MockInstalledApp child = new MockInstalledApp(id: (134L + childApps.size()) as Long,
+        namespace: namespace, name: name, label: childLabel)
+    childApps.add(child)
+    return child
+  }
+}
+
+/** Stand-in for a child InstalledAppWrapper. */
+class MockInstalledApp extends InstalledAppWrapper {
+  String namespace = ''
+  String name = ''
+  String getName() { name }
 }
 
 /** Minimal dynamic Z-Wave factory used by driver behavior tests. */
