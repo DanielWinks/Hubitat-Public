@@ -60,9 +60,64 @@ import org.apache.commons.lang3.math.NumberUtils
 import java.util.Locale
 
 @Field static final List<Integer> ANNOUNCEMENT_RESTORE_RETRY_DELAYS = [1, 2].asImmutable()
-@Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 @Field static final DateTimeFormatter SID_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MMM-dd h:mm:ss a', Locale.ENGLISH)
 
+// =============================================================================
+// General Helpers
+// =============================================================================
+// The shared utilities library is intentionally not included in this driver.
+// Keep the small timestamp formatter needed by the legacy SID visibility path
+// local so the standalone driver has the same behavior after publication.
+String formatEpoch(Long epochSeconds) {
+  ZoneId zoneId = location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()
+  return Instant.ofEpochSecond(epochSeconds).atZone(zoneId).format(SID_TIMESTAMP_FORMATTER)
+}
+
+void clearCurrentNextArtistAlbumTrackData() {
+  setCurrentArtistName(null)
+  setCurrentAlbumName(null)
+  setCurrentTrackName(null)
+  setCurrentTrackNumber(0)
+  setNextArtistAlbumTrack(null, null, null)
+}
+
+void clearTrackDataEvent() {
+  device.sendEvent(name: 'trackData', value: '{}')
+}
+
+/** Split using the same character-delimiter and empty-token rules as Groovy tokenize(). */
+List<String> splitTokens(String value, String delimiters) {
+  if(value == null || value.isEmpty()) { return [] }
+  String[] parts = StringUtils.split(value, delimiters)
+  return parts == null ? [] : parts.toList()
+}
+
+// textToSpeech() returns duration as a String on some TTS providers, so a raw
+// `duration > 0` on the Map value invokes String.compareTo(Integer) and throws
+// "Integer cannot be cast to String". Always coerce via coerceClipDuration() first.
+private Integer coerceClipDuration(Object raw) {
+  if(raw == null) { return null }
+  if(raw instanceof Number) { return ((Number) raw).intValue() }
+  try { return new BigDecimal(raw.toString().trim()).intValue() }
+  catch(NumberFormatException ignored) { return null }
+  catch(ArithmeticException ignored) { return null }
+}
+
+private Integer parseSonosDurationSeconds(String rawDuration) {
+  if(!rawDuration || !(rawDuration ==~ /\d{1,}:\d{2}:\d{2}/)) { return null }
+  try {
+    List<String> parts = rawDuration.split(':') as List<String>
+    return (NumberUtils.toInt(parts[0]) * 3600) + (NumberUtils.toInt(parts[1]) * 60) + NumberUtils.toInt(parts[2])
+  } catch(Exception ignored) { return null }
+}
+
+// =============================================================================
+// End General Helpers
+// =============================================================================
+
+// =============================================================================
+// Hubitat Helpers
+// =============================================================================
 ZoneId hubZoneId() {
   return location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()
 }
@@ -82,7 +137,140 @@ JsonSlurper getSharedJsonSlurper() {
   }
   return jsonSlurpers.computeIfAbsent('__shared__', { String ignored -> new JsonSlurper() } as java.util.function.Function<String, JsonSlurper>)
 }
+// Hubitat exposes asynchttpPost and state as script bindings rather than
+// statically declared methods/properties. Keep that dynamic boundary narrow so
+// callers can retain CompileStatic checking for their data transformations.
+void postAsyncHttp(String callback, Map params, Map data = null) {
+  if(data == null) {
+    asynchttpPost(callback, params)
+  } else {
+    asynchttpPost(callback, params, data)
+  }
+}
 
+void setDriverStateValue(String key, Object value) {
+  runtimeState[key] = value
+}
+
+Object getDriverStateValue(String key) {
+  return runtimeState[key]
+}
+
+Object removeDriverStateValue(String key) {
+  return runtimeState.remove(key)
+}
+// =============================================================================
+// Preference Getters And Passthrough Renames For Clarity
+// =============================================================================
+Boolean getDisableTrackDataEvents() { return settings.disableTrackDataEvents != null ? settings.disableTrackDataEvents : true }
+Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
+Boolean getIncludeTrackDataMetaData() { return settings.includeTrackDataMetaData != null ? settings.includeTrackDataMetaData : false }
+Integer getVolumeAdjustAmountLow() { return settings.volumeAdjustAmountLow != null ? settings.volumeAdjustAmountLow as Integer : 5 }
+Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != null ? settings.volumeAdjustAmountMid as Integer : 5 }
+Integer getVolumeAdjustAmount() { return settings.volumeAdjustAmount != null ? settings.volumeAdjustAmount as Integer : 5 }
+Integer getTTSBoostAmount() { return settings.ttsBoostAmount != null ? settings.ttsBoostAmount as Integer : 10 }
+Boolean getDisableArtistAlbumTrackEvents() { return settings.disableArtistAlbumTrackEvents != null ? settings.disableArtistAlbumTrackEvents : false }
+Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
+Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDevice != null ? settings.createCrossfadeChildDevice : false }
+Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
+Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
+Boolean getCreateRepeatAllChildDevice() { return settings.createRepeatAllChildDevice != null ? settings.createRepeatAllChildDevice : false }
+Boolean getCreateMuteChildDevice() { return settings.createMuteChildDevice != null ? settings.createMuteChildDevice : false }
+Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
+Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
+Boolean getCreatePlaylistChildDevice() { return settings.createPlaylistChildDevice != null ? settings.createPlaylistChildDevice : false }
+Boolean getCreateQueueChildDevice() { return settings.createQueueChildDevice != null ? settings.createQueueChildDevice : false }
+Boolean getCreateSleepTimerChildDevice() { return settings.createSleepTimerChildDevice != null ? settings.createSleepTimerChildDevice : false }
+Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
+Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
+Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
+Boolean getChimeBeforeStandardPriorityTTS() {
+  if(settings.chimeBeforeStandardPriorityTTS != null) { return settings.chimeBeforeStandardPriorityTTS }
+  return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
+}
+Boolean getChimeBeforeHighPriorityTTS() { return settings.chimeBeforeHighPriorityTTS != null ? settings.chimeBeforeHighPriorityTTS : false }
+// Retain the legacy setting for existing direct-player commands. Group
+// announcements use the parent app's single group policy instead.
+Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
+Boolean getEnableRawWebsocketLogging() { return settings.enableRawWebsocketLogging != null ? settings.enableRawWebsocketLogging : false }
+
+@CompileStatic
+Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
+@CompileStatic
+Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
+
+
+String getCurrentTTSVoice() {
+  return cachedTTSDefaultVoice != null ? cachedTTSDefaultVoice : 'Matthew'
+}
+
+List<String> getCachedTTSVoiceNames() {
+  if(cachedTTSVoiceNames != null && cachedTTSVoiceNames.size() > 0) { return cachedTTSVoiceNames }
+  return ['Matthew']
+}
+
+void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
+  cachedTTSVoiceNames = voiceNames
+  cachedTTSDefaultVoice = defaultVoice
+  logDebug("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
+}
+
+@CompileStatic
+Boolean hasHTPlaybackCapability() {
+  if(device != null) {
+    String caps = getDeviceDataValue('capabilities')
+    return caps != null && caps.contains('HT_PLAYBACK')
+  } else {return false}
+}
+
+@CompileStatic
+Boolean hasAudioClipCapability() {
+  if(device != null) {
+    String caps = getDeviceDataValue('capabilities')
+    return caps != null && caps.contains('AUDIO_CLIP')
+  } else {return false}
+}
+
+@CompileStatic
+Boolean hasLineInCapability() {
+  if(device != null) {
+    String caps = getDeviceDataValue('capabilities')
+    return caps != null && caps.contains('LINE_IN')
+  } else { return false }
+}
+// =============================================================================
+// End Preference Getters And Passthrough Renames For Clarity
+// =============================================================================
+
+DeviceWrapper getDevice() { return this.device }
+
+LinkedHashMap getDeviceSettings() { return this.settings }
+
+String getDeviceDataValue(String name) {
+  if(this.device != null) {
+    return this.device.getDataValue(name)
+  }
+}
+void setDeviceDataValue(String name, String value) {
+  if(this.device != null) {
+    this.device.updateDataValue(name, value)
+  }
+}
+
+Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
+  if(this.device != null) {
+    return this.device.currentValue(name, skipCache)
+  }
+}
+
+// =============================================================================
+// End Hubitat Helpers
+// =============================================================================
+
+// =============================================================================
+// Logging
+// =============================================================================
+@Field static final List<String> LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 void logError(String message) {
   if (loggingEnabled('error')) {
     if(device) log.error "${device.label ?: device.name }: ${message}"
@@ -157,13 +345,48 @@ void logWebSocketSubscriptionPayload(String json) {
   logPayloadAtTrace('Sending Sonos audioClip status subscription; payload omitted', json)
 }
 
-// The shared utilities library is intentionally not included in this driver.
-// Keep the small timestamp formatter needed by the legacy SID visibility path
-// local so the standalone driver has the same behavior after publication.
-String formatEpoch(Long epochSeconds) {
-  ZoneId zoneId = location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()
-  return Instant.ofEpochSecond(epochSeconds).atZone(zoneId).format(SID_TIMESTAMP_FORMATTER)
+String getConfiguredLogLevel() {
+  if(settings.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
+  if(settings.logEnable == false) { return 'off' }
+  if(settings.traceLogEnable == true) { return 'trace' }
+  if(settings.debugLogEnable == true) { return 'debug' }
+  return 'info'
 }
+
+String normalizeLogLevel(String level) {
+  String normalized = level?.toLowerCase(Locale.ROOT)
+  return LOG_LEVELS.contains(normalized) ? normalized : 'info'
+}
+
+Boolean loggingEnabled(String messageLevel) {
+  Integer configuredIndex = LOG_LEVELS.indexOf(getConfiguredLogLevel())
+  Integer messageIndex = LOG_LEVELS.indexOf(messageLevel)
+  return configuredIndex >= 0 && messageIndex >= configuredIndex && messageIndex < LOG_LEVELS.indexOf('off')
+}
+// Used by debug-only event timestamp and subscription diagnostics.
+Boolean isDebugLoggingEnabled() {
+  return loggingEnabled('debug')
+}
+
+String getFormattedLocalTimestamp() {
+  return ZonedDateTime.now(hubClock()).format(SID_TIMESTAMP_FORMATTER)
+}
+
+void updateEventTimestampDeviceData(String key) {
+  if(isDebugLoggingEnabled()) {
+    setDeviceDataValue(key, getFormattedLocalTimestamp())
+  }
+}
+
+void removeEventTimestampDeviceDataKeys() {
+  EVENT_TIMESTAMP_KEYS.each { String key ->
+    if(device.getDataValue(key) != null) { device.removeDataValue(key) }
+  }
+}
+
+// =============================================================================
+// End Logging
+// =============================================================================
 
 // =============================================================================
 // UPnP service definitions and SOAP/XML helpers
@@ -459,28 +682,6 @@ Map getSoapActionParams(String deviceIp, Map service, String action, Map control
   return [uri: uri, headers: [SOAPAction: soapAction], contentType: 'text/xml', body: body]
 }
 
-// Hubitat exposes asynchttpPost and state as script bindings rather than
-// statically declared methods/properties. Keep that dynamic boundary narrow so
-// callers can retain CompileStatic checking for their data transformations.
-void postAsyncHttp(String callback, Map params, Map data = null) {
-  if(data == null) {
-    asynchttpPost(callback, params)
-  } else {
-    asynchttpPost(callback, params, data)
-  }
-}
-
-void setDriverStateValue(String key, Object value) {
-  runtimeState[key] = value
-}
-
-Object getDriverStateValue(String key) {
-  return runtimeState[key]
-}
-
-Object removeDriverStateValue(String key) {
-  return runtimeState.remove(key)
-}
 
 metadata {
   definition(
@@ -665,109 +866,6 @@ metadata {
     }
   }
 }
-
-String getConfiguredLogLevel() {
-  if(settings.logLevel != null) { return normalizeLogLevel(settings.logLevel.toString()) }
-  if(settings.logEnable == false) { return 'off' }
-  if(settings.traceLogEnable == true) { return 'trace' }
-  if(settings.debugLogEnable == true) { return 'debug' }
-  return 'info'
-}
-
-String normalizeLogLevel(String level) {
-  String normalized = level?.toLowerCase(Locale.ROOT)
-  return LOG_LEVELS.contains(normalized) ? normalized : 'info'
-}
-
-Boolean loggingEnabled(String messageLevel) {
-  Integer configuredIndex = LOG_LEVELS.indexOf(getConfiguredLogLevel())
-  Integer messageIndex = LOG_LEVELS.indexOf(messageLevel)
-  return configuredIndex >= 0 && messageIndex >= configuredIndex && messageIndex < LOG_LEVELS.indexOf('off')
-}
-
-// =============================================================================
-// Preference Getters And Passthrough Renames For Clarity
-// =============================================================================
-Boolean getDisableTrackDataEvents() { return settings.disableTrackDataEvents != null ? settings.disableTrackDataEvents : true }
-Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
-Boolean getIncludeTrackDataMetaData() { return settings.includeTrackDataMetaData != null ? settings.includeTrackDataMetaData : false }
-Integer getVolumeAdjustAmountLow() { return settings.volumeAdjustAmountLow != null ? settings.volumeAdjustAmountLow as Integer : 5 }
-Integer getVolumeAdjustAmountMid() { return settings.volumeAdjustAmountMid != null ? settings.volumeAdjustAmountMid as Integer : 5 }
-Integer getVolumeAdjustAmount() { return settings.volumeAdjustAmount != null ? settings.volumeAdjustAmount as Integer : 5 }
-Integer getTTSBoostAmount() { return settings.ttsBoostAmount != null ? settings.ttsBoostAmount as Integer : 10 }
-Boolean getDisableArtistAlbumTrackEvents() { return settings.disableArtistAlbumTrackEvents != null ? settings.disableArtistAlbumTrackEvents : false }
-Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
-Boolean getCreateCrossfadeChildDevice() { return settings.createCrossfadeChildDevice != null ? settings.createCrossfadeChildDevice : false }
-Boolean getCreateShuffleChildDevice() { return settings.createShuffleChildDevice != null ? settings.createShuffleChildDevice : false }
-Boolean getCreateRepeatOneChildDevice() { return settings.createRepeatOneChildDevice != null ? settings.createRepeatOneChildDevice : false }
-Boolean getCreateRepeatAllChildDevice() { return settings.createRepeatAllChildDevice != null ? settings.createRepeatAllChildDevice : false }
-Boolean getCreateMuteChildDevice() { return settings.createMuteChildDevice != null ? settings.createMuteChildDevice : false }
-Boolean getCreateBatteryStatusChildDevice() { return settings.createBatteryStatusChildDevice != null ? settings.createBatteryStatusChildDevice : false }
-Boolean getCreateFavoritesChildDevice() { return settings.createFavoritesChildDevice != null ? settings.createFavoritesChildDevice : false }
-Boolean getCreatePlaylistChildDevice() { return settings.createPlaylistChildDevice != null ? settings.createPlaylistChildDevice : false }
-Boolean getCreateQueueChildDevice() { return settings.createQueueChildDevice != null ? settings.createQueueChildDevice : false }
-Boolean getCreateSleepTimerChildDevice() { return settings.createSleepTimerChildDevice != null ? settings.createSleepTimerChildDevice : false }
-Boolean getCreateRightChannelChildDevice() { return settings.createRightChannelChildDevice != null ? settings.createRightChannelChildDevice : false }
-Boolean getCreateNightModeChildDevice() { return settings.createNightModeChildDevice != null ? settings.createNightModeChildDevice : false }
-Boolean getCreateSpeechEnhancementChildDevice() { return settings.createSpeechEnhancementChildDevice != null ? settings.createSpeechEnhancementChildDevice : false }
-Boolean getChimeBeforeStandardPriorityTTS() {
-  if(settings.chimeBeforeStandardPriorityTTS != null) { return settings.chimeBeforeStandardPriorityTTS }
-  return settings.chimeBeforeTTS != null ? settings.chimeBeforeTTS : false
-}
-Boolean getChimeBeforeHighPriorityTTS() { return settings.chimeBeforeHighPriorityTTS != null ? settings.chimeBeforeHighPriorityTTS : false }
-// Retain the legacy setting for existing direct-player commands. Group
-// announcements use the parent app's single group policy instead.
-Boolean getEnableAirPlayUnmuteVolumeFix() { return settings.enableAirPlayUnmuteVolumeFix != null ? settings.enableAirPlayUnmuteVolumeFix : true }
-Boolean getEnableRawWebsocketLogging() { return settings.enableRawWebsocketLogging != null ? settings.enableRawWebsocketLogging : false }
-
-@CompileStatic
-Boolean processBatteryStatusChildDeviceMessages() {return getCreateBatteryStatusChildDevice()}
-@CompileStatic
-Boolean loadAudioClipOnRightChannel() {return getCreateRightChannelChildDevice()}
-
-
-String getCurrentTTSVoice() {
-  return cachedTTSDefaultVoice != null ? cachedTTSDefaultVoice : 'Matthew'
-}
-
-List<String> getCachedTTSVoiceNames() {
-  if(cachedTTSVoiceNames != null && cachedTTSVoiceNames.size() > 0) { return cachedTTSVoiceNames }
-  return ['Matthew']
-}
-
-void updateTTSVoiceCache(List<String> voiceNames, String defaultVoice) {
-  cachedTTSVoiceNames = voiceNames
-  cachedTTSDefaultVoice = defaultVoice
-  logDebug("TTS voice cache updated: ${voiceNames?.size()} voices, default: ${defaultVoice}")
-}
-
-@CompileStatic
-Boolean hasHTPlaybackCapability() {
-  if(device != null) {
-    String caps = getDeviceDataValue('capabilities')
-    return caps != null && caps.contains('HT_PLAYBACK')
-  } else {return false}
-}
-
-@CompileStatic
-Boolean hasAudioClipCapability() {
-  if(device != null) {
-    String caps = getDeviceDataValue('capabilities')
-    return caps != null && caps.contains('AUDIO_CLIP')
-  } else {return false}
-}
-
-@CompileStatic
-Boolean hasLineInCapability() {
-  if(device != null) {
-    String caps = getDeviceDataValue('capabilities')
-    return caps != null && caps.contains('LINE_IN')
-  } else { return false }
-}
-// =============================================================================
-// End Preference Getters And Passthrough Renames For Clarity
-// =============================================================================
-
 
 // =============================================================================
 // Fields
@@ -5830,27 +5928,6 @@ void unsubscribeContentDirectoryCallback(HubResponse response) {
 
 
 // =============================================================================
-// Misc helpers
-// =============================================================================
-void clearCurrentNextArtistAlbumTrackData() {
-  setCurrentArtistName(null)
-  setCurrentAlbumName(null)
-  setCurrentTrackName(null)
-  setCurrentTrackNumber(0)
-  setNextArtistAlbumTrack(null, null, null)
-}
-
-void clearTrackDataEvent() {
-  device.sendEvent(name: 'trackData', value: '{}')
-}
-// =============================================================================
-// End Misc Helpers
-// =============================================================================
-
-
-
-
-// =============================================================================
 // Getters and Setters
 // =============================================================================
 String getLocalApiUrl(){
@@ -5937,22 +6014,6 @@ void setHouseholdId(String householdId) {
   setDeviceDataValue('householdId', householdId)
 }
 
-String getFormattedLocalTimestamp() {
-  return ZonedDateTime.now(hubClock()).format(SID_TIMESTAMP_FORMATTER)
-}
-
-void updateEventTimestampDeviceData(String key) {
-  if(isDebugLoggingEnabled()) {
-    setDeviceDataValue(key, getFormattedLocalTimestamp())
-  }
-}
-
-void removeEventTimestampDeviceDataKeys() {
-  EVENT_TIMESTAMP_KEYS.each { String key ->
-    if(device.getDataValue(key) != null) { device.removeDataValue(key) }
-  }
-}
-
 @CompileStatic
 Long getLastInboundMrRcEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastMrRcEvent" as String)
@@ -6035,27 +6096,6 @@ Boolean lastWebsocketEventWithin(Integer seconds) {
   return (now - last) < seconds
 }
 
-DeviceWrapper getDevice() { return this.device }
-
-LinkedHashMap getDeviceSettings() { return this.settings }
-
-String getDeviceDataValue(String name) {
-  if(this.device != null) {
-    return this.device.getDataValue(name)
-  }
-}
-void setDeviceDataValue(String name, String value) {
-  if(this.device != null) {
-    this.device.updateDataValue(name, value)
-  }
-}
-
-Object getDeviceCurrentStateValue(String name, Boolean skipCache = false) {
-  if(this.device != null) {
-    return this.device.currentValue(name, skipCache)
-  }
-}
-
 // Favorites/playlists WS delegate helpers — only one player per household subscribes
 // NOTE: checkIsFavPlaylistDelegate() has a side effect — claims the delegate slot on first call.
 // For read-only checks use: favPlaylistDelegate.get(getHouseholdId()) == device.getDeviceNetworkId()
@@ -6083,11 +6123,6 @@ void releaseFavPlaylistDelegate() {
   if(!householdId) { return }
   String myDni = this.device?.getDeviceNetworkId()
   if(myDni) { favPlaylistDelegate.remove(householdId, myDni) }
-}
-
-// WS subscription status helpers — in-memory by default, also written to device data when debug logging is on
-Boolean isDebugLoggingEnabled() {
-  return loggingEnabled('debug')
 }
 
 // Track whether the inbound audioClip status subscription is active.
@@ -9008,33 +9043,6 @@ void publishGroupAnnouncementProgress(String correlationId, String phase, Map de
   publishPlayerStateUpdate(payload)
 }
 
-// textToSpeech() returns duration as a String on some TTS providers, so a raw
-// `duration > 0` on the Map value invokes String.compareTo(Integer) and throws
-// "Integer cannot be cast to String". Always coerce via coerceClipDuration() first.
-private Integer coerceClipDuration(Object raw) {
-  if(raw == null) { return null }
-  if(raw instanceof Number) { return ((Number) raw).intValue() }
-  try { return new BigDecimal(raw.toString().trim()).intValue() }
-  catch(NumberFormatException ignored) { return null }
-  catch(ArithmeticException ignored) { return null }
-}
-
-private Integer parseSonosDurationSeconds(String rawDuration) {
-  if(!rawDuration || !(rawDuration ==~ /\d{1,}:\d{2}:\d{2}/)) { return null }
-  try {
-    List<String> parts = rawDuration.split(':') as List<String>
-    return (NumberUtils.toInt(parts[0]) * 3600) + (NumberUtils.toInt(parts[1]) * 60) + NumberUtils.toInt(parts[2])
-  } catch(Exception ignored) { return null }
-}
-
 // =============================================================================
 // End Websocket Incoming Data Processing
 // =============================================================================
-
-/** Split using the same character-delimiter and empty-token rules as Groovy tokenize(). */
-List<String> splitTokens(String value, String delimiters) {
-  if(value == null || value.isEmpty()) { return [] }
-  String[] parts = StringUtils.split(value, delimiters)
-  return parts == null ? [] : parts.toList()
-}
-
