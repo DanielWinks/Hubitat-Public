@@ -434,7 +434,6 @@ preferences {
 @Field static final Integer GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS = 10
 @Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
 @Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
-@Field static final String LAST_SENT_CHILD_STATE_KEY = 'lastSentChildState'
 @Field static final String CHILD_STATE_DRAIN_SCHEDULED_KEY = 'childStateDrainScheduled'
 @Field static final String CHILD_STATE_DRAIN_DUE_AT_KEY = 'childStateDrainDueAt'
 @Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
@@ -489,7 +488,6 @@ preferences {
   DEFERRED_PLAYER_COMMANDS_STATE_KEY,
   PENDING_GROUP_STATE_QUEUE_KEY,
   PENDING_CHILD_EVENT_QUEUE_KEY,
-  LAST_SENT_CHILD_STATE_KEY,
   CHILD_STATE_DRAIN_SCHEDULED_KEY,
   CHILD_STATE_DRAIN_DUE_AT_KEY,
   GROUP_STATE_DRAIN_ATTEMPTS_KEY,
@@ -1608,17 +1606,10 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
     String dni = "${app.id}${ALARM_SWITCH_DNI_MARKER}${householdId}-${alarmId}"
     keep.add(dni)
     ChildDeviceWrapper child = getChildDevice(dni)
-    Boolean createdChild = child == null
     if(child == null) {
       try { child = addChildDevice('dwinks', 'Sonos Advanced Alarm Switch', dni,
         [name: 'Sonos Alarm', label: "Sonos Alarm: ${roomUuid} ${alarm.StartLocalTime ?: ''}", isComponent: true]) }
       catch(Exception e) { logWarn("Could not create Sonos alarm child ${alarmId}: ${e.message}"); return }
-    }
-    if(createdChild) {
-      Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
-          ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
-      lastSent.remove(dni)
-      state[LAST_SENT_CHILD_STATE_KEY] = lastSent
     }
     ChildDeviceWrapper roomPlayer = playersById[roomUuid]
     child.updateDataValue('householdId', householdId)
@@ -2499,22 +2490,15 @@ void sendChildEvent(String dni, Map event) {
 }
 
 /** Queue only changed values and coalesce them by child and attribute. */
- synchronized void queueChildStateBatch(String dni, Map attributes, Boolean forceSnapshot = false) {
+ synchronized void queueChildStateBatch(String dni, Map attributes) {
   if(!dni || !attributes) { return }
-  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
-  Map<String, Object> sentForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
   Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
   Map<String, Object> childEvents = pending[dni] instanceof Map ? pending[dni] : [:]
   attributes.each { Object rawName, Object value ->
     String name = rawName?.toString()
     if(name && value != null) {
-      Object prior = childEvents.containsKey(name) ? childEvents[name] : sentForChild[name]
-      if(forceSnapshot || ((!sentForChild.containsKey(name) && !childEvents.containsKey(name)) ||
-          !sameChildStateValue(prior, value))) {
-        childEvents[name] = value
-      }
+      childEvents[name] = value
     }
   }
   if(childEvents.isEmpty()) { return }
@@ -2550,10 +2534,6 @@ void sendChildEvent(String dni, Map event) {
 
 /** Drop only the initializing player's stale child publication and dedupe state. */
 
-
-Boolean sameChildStateValue(Object left, Object right) {
-  return left == right
-}
 
 /** Emit child attributes from the parent app so player and group drivers stay event-free. */
 Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<String, Object> attributes) {
@@ -2595,8 +2575,6 @@ Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<Strin
 
   Map<String, Map<String, Object>> failed = [:]
   Map<String, Map<String, Object>> deferred = [:]
-  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
   Integer deliveredOrAttempted = 0
   pending.each { String dni, Map<String, Object> eventsForChild ->
     if(deliveredOrAttempted >= CHILD_STATE_DRAIN_BATCH_SIZE) {
@@ -2612,11 +2590,7 @@ Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<Strin
     }
     try {
       Map<String, Object> failedAttributes = emitChildAttributeEvents(child, eventsForChild)
-      if(failedAttributes.isEmpty()) {
-        Map<String, Object> sentForChild = lastSent[dni] instanceof Map ? lastSent[dni] : [:]
-        sentForChild.putAll(eventsForChild)
-        lastSent[dni] = sentForChild
-      } else {
+      if(!failedAttributes.isEmpty()) {
         failed[dni] = failedAttributes
       }
     } catch(Exception e) {
@@ -2626,7 +2600,6 @@ Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<Strin
       logWarn("Child state batch delivery to ${dni} failed and will be retried: ${e.message}")
     }
   }
-  if(!lastSent.isEmpty()) { state[LAST_SENT_CHILD_STATE_KEY] = lastSent }
   if(!failed.isEmpty() || !deferred.isEmpty()) {
     Map<String, Map<String, Object>> retryAndNew = deferred
     failed.each { String dni, Map<String, Object> attrs ->
@@ -7161,7 +7134,7 @@ void applyGroupDeviceMembershipBatch(String coordinatorId, List<String> playersI
     Map<String, Object> attributes = new LinkedHashMap<String, Object>()
     attributes['switch'] = shouldBeActive ? 'on' : 'off'
     attributes['currentlyJoinedPlayers'] = joinedPlayersValue
-    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes, false)
+    queueGroupDeviceState(gd.getDeviceNetworkId(), attributes)
   }
   if(cursor < groupDnis.size()) {
     runIn(1, 'continueGroupDeviceMembershipUpdate', [overwrite: false, data: [
@@ -7185,25 +7158,18 @@ void continueGroupDeviceMembershipUpdate(Map data = [:]) {
  * app-to-group boundary: it never calls a group driver while processing a
  * player callback.
  */
-void queueGroupDeviceState(String groupDni, Map attributes, Boolean forceSnapshot = false) {
+void queueGroupDeviceState(String groupDni, Map attributes) {
   if(!groupDni || !attributes || attributes.isEmpty()) {
     return
   }
   Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY]
       : [:]
-  Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
-  Map<String, Object> sentForGroup = lastSent[groupDni] instanceof Map ? lastSent[groupDni] : [:]
   Map<String, Object> groupState = pending[groupDni] instanceof Map
       ? pending[groupDni]
       : [:]
   attributes.each { String name, Object value ->
-    Object previous = groupState.containsKey(name) ? groupState[name] : sentForGroup[name]
-    if(value != null && (forceSnapshot ||
-        ((!groupState.containsKey(name) && !sentForGroup.containsKey(name)) || !sameChildStateValue(previous, value)))) {
-      groupState[name] = value
-    }
+    if(value != null) { groupState[name] = value }
   }
   if(groupState.isEmpty()) { return }
   pending[groupDni] = groupState
@@ -7264,16 +7230,6 @@ void drainGroupStateUpdates() {
         throw new IllegalStateException("${failedAttributes.size()} group attribute event(s) failed")
       }
       logDebug("Delivered ${publishable.size()} group state event(s) to ${groupDni}")
-      Map<String, Map<String, Object>> lastSent = state[LAST_SENT_CHILD_STATE_KEY] instanceof Map
-          ? (Map<String, Map<String, Object>>)state[LAST_SENT_CHILD_STATE_KEY] : [:]
-      Map<String, Object> sentForGroup = lastSent[groupDni] instanceof Map ? lastSent[groupDni] : [:]
-      Map<String, Object> cachedAttributes = new LinkedHashMap<String, Object>(publishable)
-      if(cachedAttributes.volume instanceof Map && ((Map)cachedAttributes.volume).containsKey('value')) {
-        cachedAttributes.volume = ((Map)cachedAttributes.volume).value
-      }
-      sentForGroup.putAll(cachedAttributes)
-      lastSent[groupDni] = sentForGroup
-      state[LAST_SENT_CHILD_STATE_KEY] = lastSent
       attempts.remove(groupDni)
     } catch(Exception e) {
       Integer attempt = (attempts[groupDni] ?: 0) + 1

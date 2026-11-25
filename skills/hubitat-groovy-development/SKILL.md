@@ -31,8 +31,11 @@ Use for new features and refactors in `Apps/` and `Drivers/`.
 - Never synchronously call `parent.*` from `parse()`/hot paths or child commands
   inline under the app gate (both hold the `singleThreaded:true` gate — 120 s
   lock-order inversion). Defer via private queue + `runIn`/`runInMillis` flush/poll.
-  Keep bridge data in private queues, never in attributes (`sendEvent` always
-  clutters; `displayed:false` is a no-op). Hot driver queues use `@Field static
+  Keep bridge data in private queues, never in attributes (attributes and event
+  history are user-visible; `displayed:false` is a no-op). Hubitat normally
+  suppresses events when an attribute value is unchanged; only
+  `isStateChange: true` forces an unchanged-value event. Do not keep an app-side
+  last-sent cache solely for duplicate suppression. Hot driver queues use `@Field static
   ConcurrentHashMap` + `synchronized` claim-and-swap drains (`singleThreaded:false`
   makes `state` maps lose updates); app queues in `state` are safe (serialized).
   See `AGENTS.md` Parent/Child Async section for the full findings.

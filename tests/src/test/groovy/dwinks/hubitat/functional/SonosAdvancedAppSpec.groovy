@@ -213,6 +213,18 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.app.children = appScript.children
   }
 
+  def "orphan pruning removes the retired last sent child state cache"() {
+    given:
+    appScript.state.lastSentChildState = ['GROUP-DNI': [status: 'playing']]
+
+    when:
+    Map result = appScript.pruneOrphanedAppPersistence()
+
+    then:
+    result.stateRemoved.contains('lastSentChildState')
+    !appScript.state.containsKey('lastSentChildState')
+  }
+
   def "SAC escaping helpers preserve the existing HTML and XML entity output"() {
     expect:
     appScript.escapeNewUiHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
@@ -1365,6 +1377,18 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.childStateDrainScheduled == true
     appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
+  }
+
+  def "child state delivery does not keep a sent-value cache or suppress unchanged values in the app"() {
+    when:
+    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
+    appScript.drainQueuedChildEvents()
+    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
+    appScript.drainQueuedChildEvents()
+
+    then:
+    follower.events.count { Map event -> event.name == 'transportStatus' && event.value == 'playing' } == 2
+    !appScript.state.containsKey('lastSentChildState')
   }
 
 
