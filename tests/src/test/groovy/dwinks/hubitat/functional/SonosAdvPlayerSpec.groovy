@@ -1013,6 +1013,7 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   def setup() {
+    driver.metaClass = driver.class.metaClass
     parentPlayerUpdates.clear()
     parentPlayerRequests.clear()
     parentPlayerPresence.clear()
@@ -1036,6 +1037,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.clear()
     driver.device.events.clear()
     driver.device.dataValues.id = 'RINCON_TEST'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.zgtMemberHostByPlayerId.clear()
     driver.metaClass.getParent = { -> new Expando(
       playerStateUpdate: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
@@ -1239,6 +1241,8 @@ class SonosAdvPlayerSpec extends Specification {
     rawRequests[0].contains('NT: upnp:event')
     rawRequests[0].contains('TIMEOUT: Second-3600')
     rawRequests[0].contains('Connection: close')
+    rawConnections[0].options.timeout == 60000
+    driver.UPNP_REQUEST_TIMEOUT_SECONDS == 60
 
     when:
     rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:test-subscription\r\nTIMEOUT: Second-1800\r\n\r\n')
@@ -1386,7 +1390,42 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     rawRequests.size() == 3
     driver.scheduled.count { List row -> row[1] == 'retryUpnpSid1' } == 2
+    driver.scheduled.findAll { List row -> row[1] == 'retryUpnpSid1' }*.getAt(0) == [60, 120]
     driver.logs.any { String line -> line.contains('retry limit reached') }
+  }
+
+  def "permanent UPnP client rejection does not retry while transient statuses do"() {
+    when:
+    driver.upnpSubscribeGeneric('subscribeToHtControlEvents', 'sid5', '/htcontrol', 'callback', '/HTControl/Event')
+    rawConnections[0].options.inputReader.call('HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\n\r\n')
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /HTControl/Event HTTP/1.1')
+    !driver.scheduled.any { List row -> row[1] == 'retryUpnpSid5' }
+    driver.logs.any { String line -> line.contains('HTTP 405') && line.contains('not retrying') && line.contains('allow=GET') }
+
+    when:
+    driver.upnpSubscribeGeneric('subscribeToAVTransport', 'sid1', '/avt', 'callback', '/MediaRenderer/AVTransport/Event')
+    rawConnections.last().options.inputReader.call('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+
+    then:
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpSid1' && row[0] == driver.UPNP_RETRY_BASE_DELAY_SECONDS }
+  }
+
+  def "HTControl subscription uses the service event URL accepted by Sonos"() {
+    when:
+    driver.subscribeToHtControlEvents()
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /HTControl/Event HTTP/1.1')
+
+    when:
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:htcontrol\r\nTIMEOUT: Second-3600\r\n\r\n')
+
+    then:
+    driver.getSid('sid5') == 'uuid:htcontrol'
+    !driver.scheduled.any { List row -> row[1] == 'retryUpnpSid5' }
+    driver.scheduled.any { List row -> row[1] == 'resubscribeToHtControlEvents' }
   }
 
   def "scheduled retry callback accepts Hubitat LazyMap payloads"() {
@@ -1661,9 +1700,26 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     snapshot.streamInfo == '84934714'
     events.find { Map event -> event.name == 'audioInputFormat' }?.value == 'Dolby Digital Plus 5.1'
+    driver.formatSonosAudioInput('33554490') == 'Dolby Digital Plus 2.0'
     driver.formatSonosAudioInput('84934713') == 'Dolby Digital 5.1'
     driver.formatSonosAudioInput('63') == 'Dolby Atmos (MAT 2.0)'
     driver.formatSonosAudioInput('123456') == '123456'
+  }
+
+  def "AVTransport reads audio input format from CurrentTrackMetaData DIDL"() {
+    given:
+    String didl = '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/"><item id="-1" parentID="0"><r:streamInfo>33554490</r:streamInfo></item></DIDL-Lite>'
+    String innerEvent = '<Event xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/"><InstanceID val="0"><r:CurrentTrackMetaData val="' + StringEscapeUtils.escapeXml10(didl) + '"/></InstanceID></Event>'
+    String xml = '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(innerEvent) + '</LastChange></property></propertyset>'
+
+    when:
+    Map snapshot = driver.parseAvtFullSnapshot(xml)
+    List<Map> events = driver.buildAvtEvents(snapshot, [:])
+
+    then:
+    snapshot.hasStreamInfo
+    snapshot.streamInfo == '33554490'
+    events.find { Map event -> event.name == 'audioInputFormat' }?.value == 'Dolby Digital Plus 2.0'
   }
 
   def "AVT explicitly clears next-track fields when NextTrackMetaData is empty"() {
@@ -2078,14 +2134,14 @@ class SonosAdvPlayerSpec extends Specification {
     driver.settings.logLevel = 'info'
 
     when:
-    driver.logZgtXmlAtTrace('TEST-DNI', xml)
+    driver.logUpnpXmlAtTrace('AVTransport', 'TEST-DNI', xml)
 
     then:
     driver.logs.empty
 
     when:
     driver.settings.logLevel = 'debug'
-    driver.logZgtXmlAtTrace('TEST-DNI', xml)
+    driver.logUpnpXmlAtTrace('AVTransport', 'TEST-DNI', xml)
 
     then:
     driver.logs.size() == 2
@@ -2094,9 +2150,9 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.logs.clear()
     driver.settings.logLevel = 'trace'
-    driver.logZgtXmlAtTrace('TEST-DNI', xml)
+    driver.logUpnpXmlAtTrace('AVTransport', 'TEST-DNI', xml)
     List<Map> chunks = driver.logs.findAll { String entry ->
-      entry.startsWith('TRACE Test Device: UPnP ZGT NOTIFY XML;')
+      entry.startsWith('TRACE Test Device: UPnP AVTransport NOTIFY XML;')
     }.collect { String entry ->
       List<String> marker = (entry =~ /chunk=(\d+)\/(\d+)/)[0] as List<String>
       [index: marker[1] as Integer, data: entry.substring(entry.indexOf(' data=') + 6)]
@@ -2105,8 +2161,9 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     chunks.size() > 1
     chunks.every { Map chunk -> chunk.data.toString().length() <= 900 }
-    chunks.collect { Map chunk -> chunk.data }.join() == xml
-    driver.logs.findAll { String entry -> entry.contains('UPnP ZGT NOTIFY XML;') }
+    chunks.collect { Map chunk -> chunk.data }.join() == StringEscapeUtils.escapeHtml4(xml)
+    chunks.any { Map chunk -> chunk.data.toString().contains('&lt;') }
+    driver.logs.findAll { String entry -> entry.contains('UPnP AVTransport NOTIFY XML;') }
       .every { String entry -> entry.length() < 1400 }
   }
 
@@ -2447,106 +2504,17 @@ class SonosAdvPlayerSpec extends Specification {
     driver.WS_PING_INTERVAL_SECONDS > 0
   }
 
-  def "SOAP state changes expect a matching UPnP event and renew its subscription on timeout"() {
+  def "SOAP dispatch does not track post-command UPnP event expectations"() {
     given:
-    Map params = [uri: 'http://192.168.1.50:1400/MediaRenderer/RenderingControl/Control',
-        headers: [SOAPAction: 'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume']]
+    Map params = [uri: 'http://192.168.1.50:1400/MediaRenderer/AVTransport/Control',
+        headers: [SOAPAction: 'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI']]
 
     when:
     driver.postSonosSoapAsync('localControlCallback', params)
-    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
-    pending[0].deadlineAt = driver.now() - 1L
-    driver.watchExpectedUpnpSubscriptionEvents()
-
-    then:
-    driver.asyncCalls.size() == 1
-    pending[0].sidKey == 'sid2'
-    pending[0].attempts == 1
-    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/RenderingControl/Event HTTP/1.1')
-
-    when:
-    driver.observeExpectedUpnpSubscriptionEvent('sid2')
 
     then:
     driver.runtimeState.upnpExpectedSubscriptionEvents == null
-  }
-
-  def "UPnP event expectations cover state-changing SOAP actions only"() {
-    expect:
-    driver.expectedUpnpSidForSoapAction([headers: [SOAPAction: soapAction]]) == expectedSid
-
-    where:
-    soapAction                                                                                         || expectedSid
-    'urn:schemas-upnp-org:service:AVTransport:1#Play'                                                  || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#Pause'                                                 || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#Stop'                                                  || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#Next'                                                  || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#Previous'                                              || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#Seek'                                                  || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI'                                     || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#RemoveAllTracksFromQueue'                              || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#AddURIToQueue'                                         || 'sid1'
-    'urn:schemas-upnp-org:service:AVTransport:1#ConfigureSleepTimer'                                 || 'sid1'
-    'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume'                                        || 'sid2'
-    'urn:schemas-upnp-org:service:RenderingControl:1#SetMute'                                           || 'sid2'
-    'urn:schemas-upnp-org:service:RenderingControl:1#SetBass'                                           || 'sid2'
-    'urn:schemas-upnp-org:service:RenderingControl:1#SetTreble'                                         || 'sid2'
-    'urn:schemas-upnp-org:service:RenderingControl:1#SetLoudness'                                       || 'sid2'
-    'urn:schemas-upnp-org:service:RenderingControl:1#SetEQ'                                            || 'sid2'
-    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupVolume'                              || 'sid4'
-    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetRelativeGroupVolume'                      || 'sid4'
-    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupMute'                                || 'sid4'
-    'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'                                      || null
-    'urn:schemas-upnp-org:service:RenderingControl:1#GetVolume'                                         || null
-  }
-
-  def "UPnP expectation retries once and then stops when no event arrives"() {
-    given:
-    driver.armExpectedUpnpSubscriptionEvent('sid1', 'Play')
-    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
-    pending[0].deadlineAt = driver.now() - 1L
-
-    when:
-    driver.watchExpectedUpnpSubscriptionEvents()
-
-    then:
-    pending[0].attempts == 1
-    rawRequests.size() == 1
-    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/AVTransport/Event HTTP/1.1')
-
-    when:
-    pending[0].deadlineAt = driver.now() - 1L
-    driver.watchExpectedUpnpSubscriptionEvents()
-
-    then:
-    driver.runtimeState.upnpExpectedSubscriptionEvents == null
-    rawRequests.size() == 1
-    driver.logs.any { it.toString().contains('No UPnP sid1 event arrived after resubscription for Play') }
-  }
-
-  def "GroupRenderingControl expectation resubscribes after player becomes ungrouped"() {
-    given:
-    driver.device.currentValues.isGrouped = 'off'
-    driver.armExpectedUpnpSubscriptionEvent('sid4', 'SetGroupVolume')
-    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
-    pending[0].deadlineAt = driver.now() - 1L
-
-    when:
-    driver.watchExpectedUpnpSubscriptionEvents()
-
-    then:
-    pending[0].attempts == 1
-    rawRequests.size() == 1
-    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/GroupRenderingControl/Event HTTP/1.1')
-  }
-
-  def "AVTransport event receipt records a per-player diagnostic timestamp"() {
-    when:
-    driver.setLastInboundAVTransportEvent()
-
-    then:
-    driver.getLastInboundAVTransportEventEpoch() > 0L
-    driver.EVENT_TIMESTAMP_KEYS.contains('lastAVTransportEvent')
+    !driver.scheduled.any { List job -> job[1] == 'watchExpectedUpnpSubscriptionEvents' }
   }
 
   def "empty groups responses emit a negative topology observation"() {
