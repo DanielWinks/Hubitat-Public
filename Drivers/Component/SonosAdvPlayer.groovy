@@ -135,19 +135,21 @@ void logPayloadAtTrace(String debugMessage, String traceMessage) {
   }
 }
 
-void logZgtXmlAtTrace(String dni, String xmlBody) {
+void logUpnpXmlAtTrace(String serviceType, String dni, String xmlBody) {
+  String label = serviceType ?: 'unknown'
   if(getConfiguredLogLevel() != 'trace') {
-    logDebug("Received ZGT NOTIFY for ${dni}; XML body omitted; bodyLength=${xmlBody.length()}")
+    logDebug("Received ${label} NOTIFY for ${dni}; XML body omitted; bodyLength=${xmlBody.length()}")
     return
   }
+  String escapedXml = StringEscapeUtils.escapeHtml4(xmlBody ?: '')
   Integer chunkSize = 900
-  Integer chunkCount = (Integer)Math.ceil(xmlBody.length() / (double)chunkSize)
+  Integer chunkCount = (Integer)Math.ceil(escapedXml.length() / (double)chunkSize)
   String payloadHash = Integer.toHexString(xmlBody.hashCode())
   for(Integer chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
     Integer start = chunkIndex * chunkSize
-    Integer end = Math.min(start + chunkSize, xmlBody.length())
-    String chunk = xmlBody.substring(start, end)
-    logTrace("UPnP ZGT NOTIFY XML; dni=${dni}; chunk=${chunkIndex + 1}/${chunkCount}; totalLength=${xmlBody.length()}; hash=${payloadHash}; data=${chunk}")
+    Integer end = Math.min(start + chunkSize, escapedXml.length())
+    String chunk = escapedXml.substring(start, end)
+    logTrace("UPnP ${label} NOTIFY XML; dni=${dni}; chunk=${chunkIndex + 1}/${chunkCount}; totalLength=${xmlBody.length()}; hash=${payloadHash}; data=${chunk}")
   }
 }
 
@@ -801,8 +803,10 @@ Boolean hasLineInCapability() {
 // UPnP subscriptions share one per-player socket, so all service requests
 // pass through a single in-memory queue for this device.
 @Field static ConcurrentHashMap<String, Map> upnpRequestQueues = new ConcurrentHashMap<String, Map>()
-@Field static final Integer UPNP_REQUEST_TIMEOUT_SECONDS = 5
+@Field static final Integer UPNP_REQUEST_TIMEOUT_SECONDS = 60
 @Field static final Integer UPNP_REQUEST_MAX_ATTEMPTS = 3
+@Field static final Integer UPNP_RETRY_BASE_DELAY_SECONDS = 60
+@Field static final Integer UPNP_RETRY_MAX_DELAY_SECONDS = 900
 @Field static final Integer UPNP_MAX_HEADER_BYTES = 16384
 @Field static final Integer SUBSCRIBE_RETRY_MAX_ATTEMPTS = 3
 @Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
@@ -864,7 +868,7 @@ Boolean hasLineInCapability() {
 @Field private final String MRGRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromMrGrcEventsCallback'
 @Field private final String MRGRC_EVENTS_DOMAIN  =  'MediaRenderer/GroupRenderingControl'
 
-@Field private final String HTCONTROL_EVENTS = '/MediaRenderer/HTControl/Event'
+@Field private final String HTCONTROL_EVENTS = '/HTControl/Event'
 @Field private final String HTCONTROL_EVENTS_CALLBACK = 'subscribeResubscribeToHtControlCallback'
 @Field private final String HTCONTROL_EVENTS_UNSUB_CALLBACK = 'unsubscribeFromHtControlEventsCallback'
 
@@ -940,7 +944,6 @@ Boolean hasLineInCapability() {
   'sid4-expires',
   'sid5-expires',
   'sid6-expires',
-  'lastAVTransportEvent',
   'lastMrRcEvent',
   'lastZgtEvent',
   'lastMrGrcEvent',
@@ -3842,6 +3845,7 @@ void parse(String raw) {
         case 'ZoneGroupTopology':
           try {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             Map snapshot = parseZgtFullSnapshot(xmlBody)
             if(snapshot == null) { return }
             cacheZgtMemberHosts((List<Map>)snapshot.groups)
@@ -3853,6 +3857,7 @@ void parse(String raw) {
         case 'AVTransport':
           try {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AVT event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             Map snapshot = parseAvtFullSnapshot(xmlBody)
             if(snapshot == null) { return }
             String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
@@ -3866,8 +3871,8 @@ void parse(String raw) {
             logDebug('RenderingControl event processing beginning')
             setLastInboundMrRcEvent()
             String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            logZgtXmlAtTrace(rcDni, xmlBody)
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML RC event payload'); return }
+            logUpnpXmlAtTrace(serviceType, rcDni, xmlBody)
             deferOrProcessRenderingControlPayload(rcDni, xmlBody, seq, sid)
             logDebug('RenderingControl event processing completed')
           } catch (Exception e) { logException('RenderingControl event processing failed', e) }
@@ -3875,6 +3880,7 @@ void parse(String raw) {
         case 'GroupRenderingControl':
           try {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             Map snapshot = parseGrcFullSnapshot(xmlBody)
             if(snapshot == null) { return }
             String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
@@ -3887,12 +3893,14 @@ void parse(String raw) {
           try {
             setLastInboundHtControlEvent()
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML HTControl event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             handleHtControlPayload(xmlBody)
           } catch(Exception e) { logWarn("Ran into an issue parsing HTControl: ${e}") }
           return
         case 'ContentDirectory':
           try {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ContentDirectory event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             handleContentDirectoryPayload(xmlBody)
           } catch(Exception e) { logWarn("Ran into an issue parsing ContentDirectory: ${e}") }
           return
@@ -4100,7 +4108,8 @@ Map<String, Object> parseAvtMetaData(String rawDidl) {
     GPathResult item = findDirectXmlChild(meta, 'item')
     if(item == null) { return [:] }
     Map<String, String> streamInfo = [:]
-    String si = findDirectXmlChild(item, 'streamInfo')?.text()?.toString()
+    String rawStreamInfo = findDirectXmlChild(item, 'streamInfo')?.text()?.toString()?.trim()
+    String si = rawStreamInfo
     if(si) { si.split(',').each { String kv -> if(kv.contains(':')) { def ab = kv.split(':', 2); streamInfo[ab[0].trim()] = ab[1].trim() } } }
     String albumArt = findDirectXmlChild(item, 'albumArtURI')?.text()?.toString() ?: ''
     while(albumArt?.contains('&amp;')) { albumArt = StringEscapeUtils.unescapeXml(albumArt) }
@@ -4118,6 +4127,7 @@ Map<String, Object> parseAvtMetaData(String rawDidl) {
       resMD: findDirectXmlChild(item, 'resMD')?.text()?.toString(),
       favoriteType: findDirectXmlChild(item, 'type')?.text()?.toString(),
       streamInfo: streamInfo,
+      audioStreamInfo: rawStreamInfo,
       streamContent: findDirectXmlChild(item, 'streamContent')?.text()?.toString(),
       description: findDirectXmlChild(item, 'description')?.text()?.toString()
     ]
@@ -4140,6 +4150,10 @@ Map parseAvtFullSnapshot(String xmlString) {
     if(iid.size() == 0) { return null }
     def normalizeUri = { Object v -> v != null && v.toString() != '' ? StringEscapeUtils.unescapeXml(v.toString()) : null }
     String curUriRaw = iid['CurrentTrackURI']['@val']?.toString()
+    GPathResult directStreamInfoNode = findDirectXmlChild(iid, 'streamInfo')
+    String directStreamInfo = directStreamInfoNode?.text()?.toString()?.trim()
+    Map<String, Object> currentTrackMetaData = parseAvtMetaData(iid['CurrentTrackMetaData']['@val']?.toString())
+    String metadataStreamInfo = currentTrackMetaData.audioStreamInfo?.toString()?.trim()
     GPathResult nextTrackUriNode = findDirectXmlChild(iid, 'NextTrackURI')
     GPathResult nextTrackMetaDataNode = findDirectXmlChild(iid, 'NextTrackMetaData')
     String nextTrackMetaDataRaw = xmlAttribute(nextTrackMetaDataNode, 'val')
@@ -4150,8 +4164,8 @@ Map parseAvtFullSnapshot(String xmlString) {
       playMode: iid['CurrentPlayMode']['@val']?.toString(),
       hasCrossfadeMode: iid['CurrentCrossfadeMode'].size() > 0,
       crossfadeMode: iid['CurrentCrossfadeMode']['@val']?.toString(),
-      hasStreamInfo: findDirectXmlChild(iid, 'streamInfo') != null,
-      streamInfo: findDirectXmlChild(iid, 'streamInfo')?.text()?.toString()?.trim(),
+      hasStreamInfo: directStreamInfoNode != null || metadataStreamInfo,
+      streamInfo: directStreamInfo ?: metadataStreamInfo,
       numberOfTracks: iid['NumberOfTracks']['@val']?.toString(),
       hasTrack: iid['CurrentTrack'].size() > 0,
       track: iid['CurrentTrack']['@val']?.toString(),
@@ -4162,7 +4176,7 @@ Map parseAvtFullSnapshot(String xmlString) {
       currentTrackDuration: iid['CurrentTrackDuration']['@val']?.toString(),
       hasCurrentTrackMetaData: iid['CurrentTrackMetaData'].size() > 0,
       currentTrackMetaDataRaw: iid['CurrentTrackMetaData']['@val']?.toString(),
-      currentTrackMetaData: parseAvtMetaData(iid['CurrentTrackMetaData']['@val']?.toString()),
+      currentTrackMetaData: currentTrackMetaData,
       hasNextTrackURI: nextTrackUriNode != null,
       nextTrackURI: normalizeUri(xmlAttribute(nextTrackUriNode, 'val')),
       hasNextTrackMetaData: nextTrackMetaDataNode != null,
@@ -4316,6 +4330,7 @@ String formatSonosAudioInput(String rawCode) {
   if(!code) { return 'Unknown' }
   switch(code) {
     case '33554434': return 'Stereo PCM 2.0'
+    case '33554490': return 'Dolby Digital Plus 2.0'
     case '84934713': return 'Dolby Digital 5.1'
     case '84934714': return 'Dolby Digital Plus 5.1'
     case '84934658': return 'Multichannel PCM 5.1'
@@ -5314,8 +5329,10 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
       if(request.expectedCurrentSid && getSid(request.sidKey as String) == request.expectedCurrentSid) {
         deleteSid(request.sidKey as String)
       }
-      logDebug("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe")
-      scheduleUpnpRetry(request, request.expectedCurrentSid ? 5 : 60)
+      logDebug("UPnP renewal rejected with 412 guid=${request.guid} sidKey=${request.sidKey} hadSid=${request.sid != null}; scheduling fresh subscribe after ${UPNP_RETRY_BASE_DELAY_SECONDS}s")
+      scheduleUpnpRetry(request, UPNP_RETRY_BASE_DELAY_SECONDS)
+    } else if(status != null && status >= 400 && status < 500 && !(status in [408, 425, 429])) {
+      logWarn("UPnP ${request.operation} rejected for ${request.sidKey} with HTTP ${status}; not retrying this permanent client error (allow=${headers['allow'] ?: 'unspecified'})")
     } else {
       logDebug("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
@@ -5372,7 +5389,10 @@ void scheduleUpnpRetry(Map request, Integer delayOverride = null) {
   scheduleUpnpRetryCallback(request, retryRequest, delayOverride)
 }
 void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverride = null) {
-  Integer delay = delayOverride != null ? delayOverride : (5 * (request.attempts as Integer))
+  Integer exponent = Math.max(0, Math.min(4, ((request.attempts as Integer) - 1)))
+  Integer backoffMultiplier = 1 << exponent
+  Integer delay = delayOverride != null ? delayOverride : Math.min(UPNP_RETRY_MAX_DELAY_SECONDS,
+      UPNP_RETRY_BASE_DELAY_SECONDS * backoffMultiplier)
   Map options = [data: [request: retryRequest], overwrite: true]
   logDebug("Scheduling UPnP retry guid=${request.guid} operation=${request.operation} sidKey=${request.sidKey} attempt=${request.attempts} delaySeconds=${delay} generation=${request.lifecycleGeneration}")
   switch(request.sidKey) {
@@ -5741,7 +5761,7 @@ void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 // /////////////////////////////////////////////////////////////////////////////
-// '/MediaRenderer/HTControl/Event' //sid5
+// '/HTControl/Event' //sid5
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToHtControlEvents() {
@@ -5934,16 +5954,6 @@ void removeEventTimestampDeviceDataKeys() {
 }
 
 @CompileStatic
-Long getLastInboundAVTransportEventEpoch() {
-  Long ts = eventTimestamps.get("${getDeviceDNI()}-lastAVTransportEvent" as String)
-  return ts != null ? ts : 0L
-}
-@CompileStatic
-void setLastInboundAVTransportEvent() {
-  eventTimestamps.put("${getDeviceDNI()}-lastAVTransportEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastAVTransportEvent')
-}
-@CompileStatic
 Long getLastInboundMrRcEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastMrRcEvent" as String)
   return ts != null ? ts : 0L
@@ -6082,7 +6092,7 @@ Boolean isDebugLoggingEnabled() {
 
 // Track whether the inbound audioClip status subscription is active.
 @Field static final List<String> WS_NAMESPACES = ['audioClip']
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastAVTransportEvent', 'lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
@@ -8053,138 +8063,12 @@ void localControlCallback(AsyncResponse response, Map data) {
   }
 }
 
-String expectedUpnpSidForSoapAction(Map params) {
-  String soapAction = params?.headers?.SOAPAction?.toString() ?: ''
-  Integer separator = soapAction.lastIndexOf('#')
-  if(separator < 0) { return null }
-  String service = soapAction.substring(0, separator)
-  String action = soapAction.substring(separator + 1)
-  if(service.contains('AVTransport') && action in ['Play', 'Pause', 'Stop', 'Next', 'Previous', 'Seek',
-      'SetAVTransportURI', 'RemoveAllTracksFromQueue', 'AddURIToQueue', 'ConfigureSleepTimer',
-      'SetPlayMode', 'SetCrossfadeMode']) { return 'sid1' }
-  if(service.contains('GroupRenderingControl') && action in ['SetGroupVolume', 'SetRelativeGroupVolume', 'SetGroupMute']) { return 'sid4' }
-  if(service.contains('RenderingControl') && action in ['SetVolume', 'SetMute', 'SetRelativeVolume',
-      'SetBass', 'SetTreble', 'SetLoudness', 'SetEQ']) { return 'sid2' }
-  return null
-}
-
 void postSonosSoapAsync(String callback, Map params) {
-  String sidKey = expectedUpnpSidForSoapAction(params)
-  String guid = sidKey ? armExpectedUpnpSubscriptionEvent(sidKey, params?.headers?.SOAPAction?.toString()) : null
-  try {
-    asynchttpPost(callback, params)
-  } catch(Exception e) {
-    if(guid) { cancelExpectedUpnpSubscriptionEvent(guid) }
-    throw e
-  }
+  asynchttpPost(callback, params)
 }
 
 void postSonosSoapAsync(String callback, Map params, Map data) {
-  String sidKey = expectedUpnpSidForSoapAction(params)
-  String guid = sidKey ? armExpectedUpnpSubscriptionEvent(sidKey, params?.headers?.SOAPAction?.toString()) : null
-  try {
-    asynchttpPost(callback, params, data)
-  } catch(Exception e) {
-    if(guid) { cancelExpectedUpnpSubscriptionEvent(guid) }
-    throw e
-  }
-}
-
-String armExpectedUpnpSubscriptionEvent(String sidKey, String action) {
-  String guid = UUID.randomUUID().toString()
-  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
-      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
-  pending.add([guid: guid, sidKey: sidKey, action: action, attempts: 0,
-      deadlineAt: now() + UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L])
-  runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending
-  logDebug("Armed UPnP subscription event watchdog guid=${guid} action=${action} expected=${sidKey}")
-  scheduleExpectedUpnpEventWatchdog()
-  return guid
-}
-
-void cancelExpectedUpnpSubscriptionEvent(String guid) {
-  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
-      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
-  pending.removeAll { Map item -> item.guid?.toString() == guid }
-  if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
-  else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
-  scheduleExpectedUpnpEventWatchdog()
-}
-
-void observeExpectedUpnpSubscriptionEvent(String sidKey) {
-  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
-      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
-  List<Map> observed = pending.findAll { Map item -> item.sidKey?.toString() == sidKey }
-  if(observed.isEmpty()) { return }
-  pending.removeAll(observed)
-  logDebug("Received ${sidKey} UPnP event; satisfied ${observed.size()} command expectation(s)")
-  if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
-  else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
-  scheduleExpectedUpnpEventWatchdog()
-}
-
-void scheduleExpectedUpnpEventWatchdog() {
-  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
-      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
-  if(pending.isEmpty()) {
-    unschedule('watchExpectedUpnpSubscriptionEvents')
-    return
-  }
-  Long earliest = pending.collect { Map item -> item.deadlineAt as Long }.min() as Long
-  Integer delay = Math.max(1, (int)Math.ceil((earliest - now()) / 1000.0d))
-  runIn(delay, 'watchExpectedUpnpSubscriptionEvents', [overwrite: true])
-}
-
-void watchExpectedUpnpSubscriptionEvents() {
-  List<Map> pending = runtimeState[UPNP_EXPECTED_EVENTS_KEY] instanceof List
-      ? (List<Map>)runtimeState[UPNP_EXPECTED_EVENTS_KEY] : []
-  Long currentTime = now()
-  Long currentTimeEpoch = currentTime.longValue().intdiv(1000L)
-  List<Map> due = pending.findAll { Map item -> (item.deadlineAt as Long) <= currentTime }
-  due.each { Map expectation ->
-    String sidKey = expectation.sidKey?.toString()
-    Long lastEventEpoch = getLastInboundUpnpEventEpoch(sidKey)
-    String lastEventAge = lastEventEpoch > 0L
-        ? "${Math.max(0L, currentTimeEpoch - lastEventEpoch)}s ago"
-        : 'not observed in this runtime'
-    if(((expectation.attempts ?: 0) as Integer) < 1) {
-      logWarn("No UPnP ${sidKey} subscription event arrived after ${expectation.action}; last event ${lastEventAge}; resubscribing (guid=${expectation.guid})")
-      resubscribeUpnpSid(sidKey)
-      expectation.attempts = 1
-      expectation.deadlineAt = currentTime + UPNP_EXPECTED_EVENT_TIMEOUT_SECONDS * 1000L
-    } else {
-      logWarn("No UPnP ${sidKey} event arrived after resubscription for ${expectation.action}; last event ${lastEventAge} (guid=${expectation.guid})")
-      pending.remove(expectation)
-    }
-  }
-  if(pending.isEmpty()) { runtimeState.remove(UPNP_EXPECTED_EVENTS_KEY) }
-  else { runtimeState[UPNP_EXPECTED_EVENTS_KEY] = pending }
-  scheduleExpectedUpnpEventWatchdog()
-}
-
-@CompileStatic
-Long getLastInboundUpnpEventEpoch(String sidKey) {
-  switch(sidKey) {
-    case 'sid1': return getLastInboundAVTransportEventEpoch()
-    case 'sid2': return getLastInboundMrRcEventEpoch()
-    case 'sid3': return getLastInboundZgtEventEpoch()
-    case 'sid4': return getLastInboundMrGrcEventEpoch()
-    case 'sid5': return getLastInboundHtControlEventEpoch()
-    case 'sid6': return 0L
-    default: return 0L
-  }
-}
-
-void resubscribeUpnpSid(String sidKey) {
-  switch(sidKey) {
-    case 'sid1': resubscribeToAVTransport(); break
-    case 'sid2': resubscribeToMrRcEvents(); break
-    case 'sid3': resubscribeToZgtEvents(); break
-    case 'sid4': resubscribeToMrGrcEvents(); break
-    case 'sid5': resubscribeToHtControlEvents(); break
-    case 'sid6': resubscribeToContentDirectory(); break
-    default: logWarn("No UPnP resubscribe handler for ${sidKey}")
-  }
+  asynchttpPost(callback, params, data)
 }
 
 void httpPostAsync(Map params, String callback = 'localControlCallback') {
