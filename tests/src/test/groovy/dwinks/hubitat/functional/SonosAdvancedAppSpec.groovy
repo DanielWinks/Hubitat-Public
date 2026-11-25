@@ -2342,6 +2342,29 @@ class SonosAdvancedAppSpec extends Specification {
     markup.contains('No primary Sonos speakers have been discovered yet.') == false
   }
 
+  def "new UI matches a discovered companion to its installed primary by stable RINCON ID"() {
+    given:
+    appScript.discoveredSonoses.clear()
+    appScript.discoveredSonosSecondaries.clear()
+    coordinator.dataValues.id = 'RINCON_PRIMARY_STABLE'
+    coordinator.dataValues.name = 'Kids Room'
+    coordinator.dataValues.deviceIp = '192.168.1.34'
+    coordinator.dataValues.secondaryIds = 'RINCON_COMPANION_STABLE'
+    appScript.discoveredSonoses['AA:BB:CC:DD:EE:39'] = [
+      id: 'RINCON_COMPANION_STABLE', name: 'Kids Room', modelDisplayName: 'SYMFONISK Bookshelf',
+      deviceIp: '192.168.1.39'
+    ]
+
+    when:
+    List<Map> rows = appScript.buildNewUiSpeakerRows()
+
+    then:
+    !rows.any { Map row -> row.id == 'RINCON_COMPANION_STABLE' }
+    Map primaryRow = rows.find { Map row -> row.id == 'RINCON_PRIMARY_STABLE' }
+    primaryRow.created == true
+    primaryRow.secondaryDevices.any { Map secondary -> secondary.id == 'RINCON_COMPANION_STABLE' }
+  }
+
   def "main page defaults to the new UI and switches to the two old UI links"() {
     given:
     appScript.atomicState = [discoveryRunning: false]
@@ -2402,7 +2425,7 @@ class SonosAdvancedAppSpec extends Specification {
       String id = ip.endsWith('.10') ? 'RINCON_COORD' : (ip.endsWith('.11') ? 'RINCON_FOLLOW' : 'RINCON_SUB')
       String name = ip.endsWith('.10') ? 'Arc' : (ip.endsWith('.11') ? 'Kitchen' : 'Sub Mini')
       Map info = [playerId: id, householdId: 'HOUSE', groupId: 'GROUP', device: [name: name,
-        primaryDeviceId: ip.endsWith('.12') ? 'RINCON_COORD' : null, swGen: '2', capabilities: []]]
+        swGen: '2', capabilities: []]]
       appScript.quickTopologySpeakerInfoCallback(new AsyncResponse(status: 200, data: JsonOutput.toJson(info)), call.data as Map)
     }
     List<Map> descriptionRequests = appScript.asyncCalls.findAll { Map call -> call.cb == 'quickTopologyDeviceDescriptionCallback' }
@@ -2418,7 +2441,9 @@ class SonosAdvancedAppSpec extends Specification {
     descriptionRequests.size() == 3
     appScript.app.events.count { Map event -> event.name == 'newUiSpeakerTable' } == 1
     appScript.discoveredSonoses.values().any { Map item -> item.id == 'RINCON_FOLLOW' && item.topologyInfo.ZoneName == 'Kitchen' }
+    !appScript.discoveredSonoses.values().any { Map item -> item.id == 'RINCON_SUB' }
     appScript.discoveredSonosSecondaries.values().any { Map item -> item.id == 'RINCON_SUB' && item.topologyInfo.UUID == 'RINCON_SUB' }
+    appScript.discoveredSonosSecondaries.values().any { Map item -> item.id == 'RINCON_SUB' && item.primaryDeviceId == 'RINCON_COORD' }
     appScript.state.quickTopologyRequestId == null
     appScript.state.quickTopologyRefreshBatch == null
   }

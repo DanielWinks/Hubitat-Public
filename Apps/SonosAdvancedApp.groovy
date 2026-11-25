@@ -1366,12 +1366,32 @@ String renderNewUiSpeakerMobileListMarkup() {
 List<Map> buildNewUiSpeakerRows() {
   restoreDiscoveredSonosSecondaries()
   LinkedHashMap<String, Map> rowsById = new LinkedHashMap<String, Map>()
+  List<ChildDeviceWrapper> installedPlayers = getCurrentPlayerDevices()
+  Map<String, String> installedSecondaryOwners = [:]
+  installedPlayers.each { ChildDeviceWrapper player ->
+    String primaryId = player.getDataValue('id')?.toString()
+    String secondaryIds = player.getDataValue('secondaryIds')?.toString()
+    if(primaryId && secondaryIds) {
+      secondaryIds.split(',').each { String secondaryId ->
+        String normalizedSecondaryId = secondaryId?.trim()
+        if(normalizedSecondaryId) { installedSecondaryOwners[normalizedSecondaryId] = primaryId }
+      }
+    }
+  }
+  Map<String, List<Map>> installedSecondaryDetails = [:].withDefault { [] }
 
   discoveredSonoses.each { Object discoveryKey, Object rawInfo ->
     Map info = rawInfo instanceof Map ? (Map)rawInfo : [:]
     String discoveryId = discoveryKey?.toString()
     String playerId = info.id?.toString() ?: discoveryId
     if(playerId) {
+      String installedOwnerId = installedSecondaryOwners[playerId]
+      if(installedOwnerId) {
+        Map secondaryInfo = new LinkedHashMap(info)
+        secondaryInfo.primaryDeviceId = installedOwnerId
+        installedSecondaryDetails[installedOwnerId].add(secondaryInfo)
+        return
+      }
       rowsById[playerId] = [
         id: playerId,
         discoveryKey: discoveryId,
@@ -1385,7 +1405,7 @@ List<Map> buildNewUiSpeakerRows() {
     }
   }
 
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+  installedPlayers.each { ChildDeviceWrapper player ->
     String playerId = player.getDataValue('id')?.toString() ?: player.getDeviceNetworkId()?.toString()
     if(playerId) {
       Map row = rowsById[playerId] ?: [
@@ -1404,7 +1424,13 @@ List<Map> buildNewUiSpeakerRows() {
       row.model = (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString() ?: row.model
       row.ip = (player.getDataValue('deviceIp') ?: player.getDataValue('localUpnpHost'))?.toString() ?: row.ip
       row.discoveryKey = row.discoveryKey ?: player.getDeviceNetworkId()?.toString()
-      row.secondaryDevices = getNewUiSecondaryDevices(playerId)
+      List<Map> secondaryDevices = getNewUiSecondaryDevices(playerId)
+      (installedSecondaryDetails[playerId] ?: []).each { Map secondary ->
+        if(!secondaryDevices.any { Map existing -> existing.id?.toString() == secondary.id?.toString() }) {
+          secondaryDevices.add(secondary)
+        }
+      }
+      row.secondaryDevices = secondaryDevices
       rowsById[playerId] = row
     }
   }
@@ -4627,6 +4653,14 @@ void quickTopologySpeakerInfoCallback(AsyncResponse response, Map data) {
     if(!(playerInfo instanceof Map)) {
       completeQuickTopologySpeaker(ipAddress, requestId)
       return
+    }
+    Map<String, Map> devicesByIp = batch.devicesByIp instanceof Map ? (Map<String, Map>)batch.devicesByIp : [:]
+    Map topologyDevice = devicesByIp[ipAddress] ?: [:]
+    if(topologyDevice.secondary == true && topologyDevice.primaryDeviceId && playerInfo.device instanceof Map) {
+      Map playerDevice = (Map)playerInfo.device
+      if(!playerDevice.primaryDeviceId) {
+        playerDevice.primaryDeviceId = topologyDevice.primaryDeviceId
+      }
     }
     Boolean dispatched = requestSonosDeviceDescription(ipAddress, new LinkedHashMap(playerInfo),
         'quickTopologyDeviceDescriptionCallback', [ipAddress: ipAddress, requestId: requestId])
