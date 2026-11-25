@@ -13,6 +13,7 @@ class SonosDiscoveryParentDouble {
   Map removalRequest
   Map groupSyncRequest
   Map groupManagementRequest
+  Map groupManagementResult = [status: 'pending']
   Integer acknowledgements = 0
   Boolean childOwner = true
 
@@ -22,7 +23,8 @@ class SonosDiscoveryParentDouble {
   void acknowledgeLegacyDiscoveryState() { acknowledgements++ }
   Map getProvisioningSnapshot() { return snapshot }
   Map submitGroupConfigurationSync(Map request) { groupSyncRequest = request; return [accepted: true] }
-  Map submitGroupManagementRequest(Map request) { groupManagementRequest = request; return [accepted: true] }
+  Map submitGroupManagementRequest(Map request) { groupManagementRequest = request; return [accepted: true, requestId: request.requestId] }
+  Map getGroupManagementResult(String requestId) { return groupManagementResult }
   Map submitPlayerProvisioningRequest(Map request) { provisioningRequest = request; return [accepted: true] }
   Map submitPlayerRemovalRequest(Map request) { removalRequest = request; return [accepted: true] }
 }
@@ -63,6 +65,37 @@ class SonosAdvancedDiscoveryAppSpec extends Specification {
     app.state.discoveredSonoses.isEmpty()
     app.scheduled.any { List item -> item[0] == 60 && item[1] == 'stopDiscovery' }
     app.asyncCalls.empty
+  }
+
+  def 'automatic updates renders a closed HTML disclosure with its settings cards'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+
+    when:
+    String markup = app.displayAutoUpdateSettingsMarkup()
+
+    then:
+    markup.contains("<details class='sonos-update-settings-disclosure'><summary>Automatic updates</summary>")
+    markup.indexOf('Check for updates automatically') > markup.indexOf('</summary>')
+    markup.endsWith('</div></details>')
+    markup.contains(':not(:has(.sonos-update-settings-disclosure[open]))')
+    !markup.contains('<script')
+  }
+
+  def 'announcements and alarms render separate HTML disclosures that start open'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+
+    when:
+    String announcements = app.displayAnnouncementSettingsMarkup()
+    String alarms = app.displayAlarmSettingsMarkup()
+
+    then:
+    announcements.contains("<details class='sonos-managed-disclosure sonos-announcement-disclosure' open><summary>Announcements</summary>")
+    announcements.count("<details class='sonos-managed-select'>") == 3
+    announcements.endsWith('</div></details>')
+    alarms.contains("<details class='sonos-managed-disclosure' open><summary>Alarm management</summary>")
+    alarms.endsWith('</div></details>')
   }
 
   def 'topology fallback adds primary and secondary discovery results to child state'() {
@@ -218,6 +251,7 @@ class SonosAdvancedDiscoveryAppSpec extends Specification {
 
     then:
     page.name == 'discoveryPage'
+    page.title == ''
     !page.containsKey('nextPage')
   }
 
@@ -226,18 +260,107 @@ class SonosAdvancedDiscoveryAppSpec extends Specification {
     HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
     SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
     app.parent = parent
-    app.settings.managedGroupName = 'Family'
+    app.state.managementOwner = true
+    app.settings.managedGroupEditorPayload = JsonOutput.toJson([
+      name: 'Cora’s room + Kitchen', coordinator: 'RINCON_MAIN', followers: ['RINCON_FOLLOW']
+    ])
+
+    when:
+    Map page = app.discoveryPage()
+
+    then:
+    page.name == 'discoveryPage'
+    parent.groupManagementRequest.action == 'upsert'
+    parent.groupManagementRequest.name == 'Cora’s room + Kitchen'
+    parent.groupManagementRequest.playerIds == ['RINCON_FOLLOW']
+    app.state.groupConfigurations['Cora’s room + Kitchen'].groupCoordinatorId == 'RINCON_MAIN'
+    !app.state.groupEditorOpen
+    app.state.pendingGroupDeviceAcknowledgement.requestId == parent.groupManagementRequest.requestId
+  }
+
+  def 'group creation acknowledgement refreshes the server-rendered group table after device creation'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.state.pendingGroupDeviceAcknowledgement = [requestId: 'request-1', name: 'Family', attempts: 0]
+    parent.groupManagementResult = [status: 'created', name: 'Family', deviceId: '42']
+
+    when:
+    app.pollGroupDeviceAcknowledgement()
+
+    then:
+    app.state.pendingGroupDeviceAcknowledgement == null
+    app.app.events.any { Map event -> event.name == 'newUiGroupsTable' && event.value == '42' }
+  }
+
+  def 'group editor preselects its coordinator and followers in native controls'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    app.state.groupEditorOriginalName = 'Family'
+    app.settings.managedGroupName = "Family's group"
     app.settings.managedGroupCoordinator = 'RINCON_MAIN'
     app.settings.managedGroupFollowers = ['RINCON_FOLLOW']
 
     when:
-    app.saveManagedGroup()
+    String markup = app.renderManagedGroupEditor([RINCON_MAIN: 'Kitchen', RINCON_FOLLOW: 'Living & dining'])
 
     then:
-    parent.groupManagementRequest.action == 'upsert'
-    parent.groupManagementRequest.name == 'Family'
-    parent.groupManagementRequest.playerIds == ['RINCON_FOLLOW']
-    app.state.groupConfigurations.Family.groupCoordinatorId == 'RINCON_MAIN'
+    markup.contains("<div class='new-ui-groups-card sonos-group-editor' data-original-name='Family'")
+    markup.contains("<div class='new-ui-group-toolbar-container'><div class='new-ui-group-toolbar'>")
+    markup.contains("<div class='new-ui-group-toolbar-title' role='heading' aria-level='3'>Edit Sonos group</div>")
+    markup.contains("<div class='sonos-group-editor-fields'><label for='sonos-group-name'>")
+    markup.contains("</select></label></div><fieldset onchange=")
+    !markup.contains('\n')
+    markup.contains("value='Family&#39;s group'")
+    markup.contains("<option value='RINCON_MAIN' selected>")
+    markup.contains("<label hidden><input type='checkbox' value='RINCON_MAIN'>")
+    markup.contains("<input type='checkbox' value='RINCON_FOLLOW' checked>")
+    markup.contains('Living &amp; dining')
+    markup.contains('settings[managedGroupEditorPayload]')
+    markup.contains('payload.dispatchEvent(new Event(')
+    !markup.contains('buttonClick(this)')
+    markup.contains("onclick=\"this.closest('.sonos-group-editor').hidden = true\">Cancel</button>")
+    !markup.contains("name='settings[cancelManagedGroup]'")
+  }
+
+  def 'group creation opens a hidden editor without a Hubitat button submission'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    app.parent = new SonosDiscoveryParentDouble()
+
+    when:
+    String table = app.displayNewUiGroupTable()
+    String editor = app.renderManagedGroupEditor([:], false)
+
+    then:
+    table.contains("class='sonos-local-action new-ui-group-create-button'")
+    table.contains("document.getElementById('sonos-group-editor-open')")
+    !table.contains("name='settings[btnNewUiCreateGroup]'")
+    editor.contains("data-auto-name='' hidden onclick='event.stopPropagation()'")
+    editor.contains("<span id='sonos-group-editor-open' hidden")
+    table.contains('opener.onclick()')
+    !table.contains('opener.click()')
+    !editor.contains(".click()")
+  }
+
+  def 'invalid group submission keeps the editor open and skips the parent queue'() {
+    given:
+    HubitatScriptHarness app = ScriptLoader.load(APP_FILE)
+    SonosDiscoveryParentDouble parent = new SonosDiscoveryParentDouble()
+    app.parent = parent
+    app.state.managementOwner = true
+    app.settings.managedGroupEditorPayload = JsonOutput.toJson([
+      name: 'Family', coordinator: 'RINCON_MAIN', followers: []
+    ])
+
+    when:
+    app.consumeManagedGroupSave()
+
+    then:
+    app.state.groupEditorOpen == true
+    app.state.groupManagementMessage.contains('follower')
+    !parent.groupManagementRequest
   }
 
   def 'player creation request crosses to the parent as a detached versioned DTO'() {

@@ -66,6 +66,7 @@ import org.quartz.CronExpression
 // Library: Utilities and Logging (inlined)
 // =============================================================================
 @Field static final List<String> APP_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
+@Field static final String GROUP_MANAGEMENT_RESULTS_KEY = 'groupManagementResults'
 @Field static final Integer CHILD_STATE_DRAIN_BATCH_SIZE = 2
 @Field static final DateTimeFormatter APP_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss')
 @Field static final JsonSlurper SHARED_JSON_SLURPER = new JsonSlurper()
@@ -343,6 +344,14 @@ preferences {
 @Field static final String PLAYER_PROVISIONING_REQUEST_STATUS_KEY = 'playerProvisioningRequestStatus'
 @Field static final String PENDING_GROUP_CONFIGURATION_REQUESTS_KEY = 'pendingGroupConfigurationRequests'
 @Field static final String DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY = 'discoveryManagementChildInstanceId'
+@Field static final String CHILD_MANAGED_SETTINGS_STATE_KEY = 'childManagedSettings'
+@Field static final List<String> CHILD_MANAGED_SETTING_NAMES = [
+  'maximumTtsRetention', 'groupAnnouncementMode', 'highPriorityAnnouncementMode',
+  'queueChimeSeparatelyFromTTS', 'suppressChimeOnSuccessiveTTS',
+  'enableAlarmManagement', 'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates',
+  'updateCheckFrequency', 'autoInstallTime', 'autoInstallNextOccurrence', 'autoInstallDayOfWeek',
+  'hubSecurityUsername', 'hubSecurityPassword'
+]
 
 @Field static final String LOCAL_CONTROL_RETRY_STATE_KEY = 'localControlRetryAttemptCount'
 @Field static final String LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY = 'lastLocalControlRetryRequest'
@@ -496,6 +505,7 @@ preferences {
   ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY,
   'userGroups',
   'alarmManagementPreferencesApplied',
+  CHILD_MANAGED_SETTINGS_STATE_KEY,
   'sonosAlarmRefreshRequestIds',
   'receivedGroupCommandRequestIds',
   'ttsVoiceRefreshRequestId',
@@ -516,7 +526,6 @@ preferences {
   'maintenanceJob',
   'pendingDriverMismatches',
   'duplicateCleanupResult',
-  'lastLibraryPublish',
   'hubCookie',
   'hubCookieTime',
   'updateCheckRequestId',
@@ -547,8 +556,6 @@ preferences {
   'autoInstallDayOfWeek',
   'hubSecurityUsername',
   'hubSecurityPassword',
-  'libraryIdSMAPI',
-  'libraryIdUtilities',
   'groupDevices',
   'skipOrphanRemoval',
   'descriptionTextEnable',
@@ -725,6 +732,68 @@ Map getLegacyDiscoveryState() {
     groupConfigurations: state.userGroups instanceof Map ? new LinkedHashMap((Map)state.userGroups) : [:]]
 }
 
+/** Provide pre-migration preferences to the management child before parent cleanup. */
+Map getChildManagedSettingsForMigration() {
+  Map<String, Object> legacy = [:]
+  CHILD_MANAGED_SETTING_NAMES.each { String key ->
+    if(settings[key] != null) { legacy[key] = settings[key] }
+  }
+  return legacy
+}
+
+/** Commit child-owned preferences to runtime state and remove their parent preference entries. */
+Map acknowledgeChildManagedSettings(Map values) {
+  Map<String, Object> managed = state[CHILD_MANAGED_SETTINGS_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[CHILD_MANAGED_SETTINGS_STATE_KEY]) : [:]
+  CHILD_MANAGED_SETTING_NAMES.each { String key ->
+    if(values?.containsKey(key)) { managed[key] = values[key] }
+    else if(settings[key] != null) { managed[key] = settings[key] }
+  }
+  managed.remove('libraryIdSMAPI')
+  managed.remove('libraryIdUtilities')
+  state[CHILD_MANAGED_SETTINGS_STATE_KEY] = managed
+  CHILD_MANAGED_SETTING_NAMES.each { String key -> removeAppSetting(key) }
+  removeAppSetting('libraryIdSMAPI')
+  removeAppSetting('libraryIdUtilities')
+  List<String> staleManagementInputs = new ArrayList<String>(settings.keySet()).collect { Object key -> key?.toString() }
+      .findAll { String key -> key && (key.startsWith('newUi') || key.startsWith('btnNewUi') ||
+          key.startsWith('btnConfirmNewUi') || key.startsWith('btnCancelNewUi') ||
+          key in ['btnExtend60', 'btnExtend300', 'createSelectedPlayers', 'removeUnselectedPlayers',
+            'createPlayerDevices', 'saveManagedGroup', 'deleteManagedGroup', 'cancelManagedGroup']) }
+  staleManagementInputs.each { String key -> removeAppSetting(key) }
+  return [accepted: true]
+}
+
+void updateChildManagedSettings(Map values) {
+  Map<String, Object> managed = state[CHILD_MANAGED_SETTINGS_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Object>((Map<String, Object>)state[CHILD_MANAGED_SETTINGS_STATE_KEY]) : [:]
+  CHILD_MANAGED_SETTING_NAMES.each { String key ->
+    if(values?.containsKey(key)) { managed[key] = values[key] }
+  }
+  state[CHILD_MANAGED_SETTINGS_STATE_KEY] = managed
+  runIn(1, 'applyChildManagedSettings', [overwrite: true])
+}
+
+void applyChildManagedSettings() {
+  try { configureAlarmManagement() }
+  catch(Exception e) { logError("Alarm management settings update failed: ${e.message}") }
+  refreshPlayerAnnouncementPolicySnapshots(false)
+  scheduleUpdateCheck()
+  checkForUpdates()
+}
+
+void removeAppSetting(String key) {
+  try { app.removeSetting(key) } catch(Exception ignored) { }
+  try { settings.remove(key) } catch(Exception ignored) { }
+  try { app.updatedSettings?.remove(key) } catch(Exception ignored) { }
+}
+
+Object getAppPreference(String key, Object defaultValue = null) {
+  Map managed = state[CHILD_MANAGED_SETTINGS_STATE_KEY] instanceof Map
+      ? (Map)state[CHILD_MANAGED_SETTINGS_STATE_KEY] : [:]
+  return managed.containsKey(key) ? managed[key] : (settings[key] != null ? settings[key] : defaultValue)
+}
+
 void acknowledgeLegacyDiscoveryState() {
   state.remove(LEGACY_DISCOVERY_SECONDARIES_STATE_KEY)
   state.remove('userGroups')
@@ -862,6 +931,14 @@ Map submitGroupManagementRequest(Map request) {
   return [accepted: true, requestId: requestId]
 }
 
+Map getGroupManagementResult(String requestId) {
+  if(!requestId || requestId.length() > 80) { return [status: 'invalid_request'] }
+  Map results = state[GROUP_MANAGEMENT_RESULTS_KEY] instanceof Map
+      ? (Map)state[GROUP_MANAGEMENT_RESULTS_KEY] : [:]
+  Map result = results[requestId] instanceof Map ? (Map)results[requestId] : null
+  return result ? new LinkedHashMap(result) : [status: 'pending']
+}
+
 void drainGroupConfigurationRequests() {
   Map queue = state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY] instanceof Map
       ? new LinkedHashMap((Map)state[PENDING_GROUP_CONFIGURATION_REQUESTS_KEY]) : [:]
@@ -887,6 +964,10 @@ void drainGroupConfigurationRequests() {
         }
       }
       upsertGroupDevice(name, request)
+      String dni = "${app.id}-SonosGroupDevice-${name}"
+      DeviceWrapper createdDevice = app.getChildDevice(dni)
+      recordGroupManagementResult(requestId, [status: createdDevice ? 'created' : 'failed',
+        name: name, deviceId: createdDevice?.getId()?.toString()])
     } else {
       Map groups = request.groups instanceof Map ? (Map)request.groups : [:]
       groups.each { String name, Map definition -> upsertGroupDevice(name, definition) }
@@ -894,8 +975,19 @@ void drainGroupConfigurationRequests() {
     runIn(1, 'subscribeToGroupCommandRequests')
   } catch(Exception e) {
     logError("Group configuration sync ${requestId} failed: ${e.message}")
+    if(request.action == 'upsert') {
+      recordGroupManagementResult(requestId, [status: 'failed', name: request.name?.toString()])
+    }
   }
   if(queue) { runIn(1, 'drainGroupConfigurationRequests', [overwrite: false]) }
+}
+
+void recordGroupManagementResult(String requestId, Map result) {
+  Map results = state[GROUP_MANAGEMENT_RESULTS_KEY] instanceof Map
+      ? new LinkedHashMap((Map)state[GROUP_MANAGEMENT_RESULTS_KEY]) : [:]
+  results[requestId] = new LinkedHashMap(result) + [completedAt: now()]
+  while(results.size() > 16) { results.remove(results.keySet().iterator().next()) }
+  state[GROUP_MANAGEMENT_RESULTS_KEY] = results
 }
 
 Map submitPlayerProvisioningRequest(Map request) {
@@ -1129,12 +1221,6 @@ void configure(Boolean startup = false) {
   // Initialize settings with defaults
   if(settings.skipOrphanRemoval == null) { settings.skipOrphanRemoval = false }
   if(settings.descriptionTextEnable == null) { settings.descriptionTextEnable = true }
-  // Hubitat does not persist a newly introduced preference's default on existing apps.
-  if(settings.maximumTtsRetention == null) { settings.maximumTtsRetention = '60' }
-  // These app-level announcement policies were added after installs already existed.
-  // Persist the safe default only when the setting is missing; keep user selections.
-  if(settings.groupAnnouncementMode == null) { settings.groupAnnouncementMode = 'alwaysNonInterrupting' }
-  if(settings.highPriorityAnnouncementMode == null) { settings.highPriorityAnnouncementMode = 'alwaysNonInterrupting' }
 
   try { createGroupDevices() }
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
@@ -1278,8 +1364,8 @@ void handlePolledPlayerRequest(ChildDeviceWrapper player, Map request) {
 // Alarm management (local Sonos AlarmClock UPnP service)
 // =============================================================================
 void configureAlarmManagement() {
-  Boolean managerEnabled = settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true'
-  Boolean switchesEnabled = settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true'
+  Boolean managerEnabled = getAppPreference('enableAlarmManagement', false) == true || getAppPreference('enableAlarmManagement', false)?.toString() == 'true'
+  Boolean switchesEnabled = getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true'
   state.alarmManagementPreferencesApplied = [manager: managerEnabled, switches: switchesEnabled]
 
   if(!managerEnabled) { removeAlarmManagerDevices() }
@@ -1305,8 +1391,8 @@ void configureAlarmManagement() {
 }
 
 void applyAlarmManagementPreferenceChanges() {
-  Boolean managerEnabled = settings.enableAlarmManagement == true || settings.enableAlarmManagement?.toString() == 'true'
-  Boolean switchesEnabled = settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true'
+  Boolean managerEnabled = getAppPreference('enableAlarmManagement', false) == true || getAppPreference('enableAlarmManagement', false)?.toString() == 'true'
+  Boolean switchesEnabled = getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true'
   Map applied = state.alarmManagementPreferencesApplied instanceof Map ? (Map)state.alarmManagementPreferencesApplied : null
   if(applied == null || applied.manager != managerEnabled || applied.switches != switchesEnabled) {
     configureAlarmManagement()
@@ -1314,7 +1400,7 @@ void applyAlarmManagementPreferenceChanges() {
 }
 
 void refreshAllSonosAlarms() {
-  if(!(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true')) { return }
+  if(!(getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true')) { return }
   Map<String, ChildDeviceWrapper> householdPlayers = [:]
   getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
     String householdId = player.getDataValue('householdId')?.toString()
@@ -1364,7 +1450,7 @@ void removeAlarmDevices() {
 }
 
 void refreshSonosAlarms(String householdId, ChildDeviceWrapper player) {
-  if(!(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true')) { return }
+  if(!(getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true')) { return }
   String host = player?.getDataValue('localUpnpHost')?.toString()
   if(!householdId || !host) { logWarn("Cannot refresh alarms for household ${householdId}: no local Sonos player endpoint"); return }
   String requestId = UUID.randomUUID().toString()
@@ -1389,7 +1475,7 @@ void sonosAlarmListCallback(AsyncResponse response, Map data) {
   if(!householdId || requests[householdId] != data?.requestId) { return }
   requests.remove(householdId)
   state.sonosAlarmRefreshRequestIds = requests
-  if(!(settings.enableAlarmSwitches == true || settings.enableAlarmSwitches?.toString() == 'true')) {
+  if(!(getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true')) {
     removeAlarmSwitchDevices()
     return
   }
@@ -2107,7 +2193,7 @@ String renderCustomSettingsMarkup() {
   html.append(renderCustomSelectCard('groupAnnouncementMode', 'Normal priority announcement method', 'Automatic uses synchronized clips when playback is active or the target players are not already grouped. Standard stream uses the current coordinator group without changing membership.', announcementOptions, 'alwaysNonInterrupting'))
   html.append(renderCustomSelectCard('highPriorityAnnouncementMode', 'High priority announcement method', 'Automatic uses synchronized clips when playback is active or the target players are not already grouped. Standard stream uses the current coordinator group without changing membership.', announcementOptions, 'alwaysNonInterrupting'))
   html.append(renderCustomSettingCard('queueChimeSeparatelyFromTTS', 'Queue chime separately from TTS for better sync', 'Coordinate the chime release across group members, then prepare and release the TTS clips together.'))
-  if(settings.queueChimeSeparatelyFromTTS == true || settings.queueChimeSeparatelyFromTTS?.toString() == 'true') {
+  if(getAppPreference('queueChimeSeparatelyFromTTS', false) == true || getAppPreference('queueChimeSeparatelyFromTTS', false)?.toString() == 'true') {
     html.append("<div class='sonos-setting-warning'><b>Warning:</b> This may cause a slight delay between chime and TTS start.</div>")
   }
   html.append(renderCustomSettingCard('suppressChimeOnSuccessiveTTS', 'Suppress chime on successive TTS messages', 'Skip a chime when another TTS announcement is active or already waiting in the group queue.'))
@@ -3223,8 +3309,8 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
   List<Map> pendingAnnouncements = queue.pending instanceof List ? (List<Map>)queue.pending : []
   Boolean hasEarlierTts = queue.active?.isTts == true || queue.priorityActive?.isTts == true ||
       pendingAnnouncements.any { Map queued -> queued.isTts == true }
-  Boolean suppressSuccessiveChime = settings.suppressChimeOnSuccessiveTTS == true ||
-      settings.suppressChimeOnSuccessiveTTS?.toString() == 'true'
+  Boolean suppressSuccessiveChime = getAppPreference('suppressChimeOnSuccessiveTTS', false) == true ||
+      getAppPreference('suppressChimeOnSuccessiveTTS', false)?.toString() == 'true'
   if(item.isTts == true && hasEarlierTts && suppressSuccessiveChime) {
     item.chimeBeforeStandardPriorityTTS = false
     item.chimeBeforeHighPriorityTTS = false
@@ -3241,8 +3327,8 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
   if(command == 'playHighPriorityTrack' && queue.active instanceof Map) {
     String highPriorityMode = getAnnouncementMode(true)
     if(highPriorityMode != 'alwaysCoordinatorStream') {
-      Boolean separateChime = settings.queueChimeSeparatelyFromTTS == true ||
-          settings.queueChimeSeparatelyFromTTS?.toString() == 'true'
+      Boolean separateChime = getAppPreference('queueChimeSeparatelyFromTTS', false) == true ||
+          getAppPreference('queueChimeSeparatelyFromTTS', false)?.toString() == 'true'
       Boolean highPriorityChime = item.containsKey('chimeBeforeHighPriorityTTS')
           ? item.chimeBeforeHighPriorityTTS == true
           : (item.isTts == true && players.any { ChildDeviceWrapper player ->
@@ -3349,7 +3435,7 @@ void startNextGroupAnnouncement(String groupDni) {
 
 /** Return the configured queued-TTS age limit, or null when retention is unlimited. */
 Long getMaximumTtsRetentionMs() {
-  String configuredValue = settings.maximumTtsRetention?.toString() ?: '60'
+  String configuredValue = getAppPreference('maximumTtsRetention', '60')?.toString() ?: '60'
   if(configuredValue == 'unlimited') { return null }
   try {
     return Duration.ofMinutes(Long.parseLong(configuredValue)).toMillis()
@@ -3398,8 +3484,8 @@ void dispatchGroupAnnouncementByPolicy(String groupDni, Map queue, Map item,
 
 String getAnnouncementMode(Boolean highPriority = false) {
   String configured = highPriority
-      ? settings.highPriorityAnnouncementMode?.toString()?.trim()
-      : settings.groupAnnouncementMode?.toString()?.trim()
+      ? getAppPreference('highPriorityAnnouncementMode', 'alwaysNonInterrupting')?.toString()?.trim()
+      : getAppPreference('groupAnnouncementMode', 'alwaysNonInterrupting')?.toString()?.trim()
   return configured in ['automatic', 'alwaysNonInterrupting', 'alwaysCoordinatorStream']
       ? configured
       : 'automatic'
@@ -3479,8 +3565,8 @@ void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, B
   String chimeSettingKey = highPriority ? 'chimeBeforeHighPriorityTTS' : 'chimeBeforeStandardPriorityTTS'
   Boolean chimeBeforeTTS = item.isTts == true && item.containsKey(chimeSettingKey) &&
       item[chimeSettingKey] == true
-  Boolean separateChimeEnabled = settings.queueChimeSeparatelyFromTTS == true ||
-      settings.queueChimeSeparatelyFromTTS?.toString() == 'true'
+  Boolean separateChimeEnabled = getAppPreference('queueChimeSeparatelyFromTTS', false) == true ||
+      getAppPreference('queueChimeSeparatelyFromTTS', false)?.toString() == 'true'
   Boolean separateChime = separateChimeEnabled && item.isTts == true && chimeBeforeTTS
   item.chimePhase = separateChime
   String playerNames = players.collect { ChildDeviceWrapper player ->
@@ -7238,7 +7324,7 @@ void checkInstalledVersions() {
     versionCheckRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', headers:hubCookieHeaders(job.cookie as String), timeout:15, ignoreSSLIssues:true])
   } else {
     versionCheckRequest(job, 'login', [uri:'http://127.0.0.1:8080', path:'/login', requestContentType:'application/x-www-form-urlencoded',
-      body:[username:settings.hubSecurityUsername?.toString() ?: '', password:settings.hubSecurityPassword?.toString() ?: '', submit:'Login'],
+      body:[username:getAppPreference('hubSecurityUsername', '')?.toString() ?: '', password:getAppPreference('hubSecurityPassword', '')?.toString() ?: '', submit:'Login'],
       followRedirects:false, textParser:true, timeout:15], 'POST')
   }
 }
@@ -7301,16 +7387,6 @@ void versionCheckCallback(AsyncResponse response, Map data) {
       job.manifest = manifest
       job.artifacts = []
       ((Collection)(manifest.drivers ?: [])).each { Object item -> if(item instanceof Map) { Map d = new LinkedHashMap((Map)item); d.type='driver'; d.namespace=d.namespace ?: 'dwinks'; d.expectedVersion=d.version ?: job.appVersion; job.artifacts << d } }
-      Boolean canCheckLibraries = settings.libraryIdSMAPI && settings.libraryIdUtilities
-      ((Collection)(manifest.files ?: [])).each { Object item ->
-        if(!(item instanceof Map)) { return }
-        Map f = (Map)item
-        String fileName = f.name?.toString() ?: ''
-        Integer libraryId = fileName.contains('SMAPILibrary') ? (settings.libraryIdSMAPI as Integer) : (fileName.contains('UtilitiesAndLoggingLibrary') ? (settings.libraryIdUtilities as Integer) : null)
-        String expectedName = fileName.contains('SMAPILibrary') ? 'SMAPILibrary' : (fileName.contains('UtilitiesAndLoggingLibrary') ? 'UtilitiesAndLoggingLibrary' : '')
-        if(canCheckLibraries && libraryId && expectedName) { job.artifacts << [type:'library', name:expectedName, fileName:fileName, namespace:'dwinks', id:libraryId, expectedVersion:job.appVersion] }
-        else { state.installedVersions << [name:fileName, installedVersion:'N/A', expectedVersion:job.appVersion, status:canCheckLibraries ? "⚠ Configure ${expectedName} ID in settings" : '⚠ Configure Library IDs in settings'] }
-      }
       versionCheckDriverList(job)
       return
     }
@@ -7320,7 +7396,7 @@ void versionCheckCallback(AsyncResponse response, Map data) {
       versionCheckNextArtifact(job)
       return
     }
-    if(stage == 'driverCode' || stage == 'libraryCode') {
+    if(stage == 'driverCode') {
       Map artifact = (Map)job.artifact
       String source = null
       if(ok) {
@@ -7331,12 +7407,6 @@ void versionCheckCallback(AsyncResponse response, Map data) {
       String error = null
       if(stage == 'driverCode' && source) {
         def matcher = source =~ /version:\s*['"]([^'"]+)['"]/; if(matcher.find()) { installedVersion = matcher.group(1) }
-      } else if(stage == 'libraryCode' && source) {
-        def nameMatch = source =~ /library\s*\([^)]*name\s*:\s*['"]([^'"]+)['"]/; def namespaceMatch = source =~ /library\s*\([^)]*namespace\s*:\s*['"]([^'"]+)['"]/; def versionMatch = source =~ /version:\s*['"]([^'"]+)['"]/
-        String actualName = nameMatch.find() ? nameMatch.group(1) : null
-        String actualNamespace = namespaceMatch.find() ? namespaceMatch.group(1) : null
-        if(actualName != artifact.name || actualNamespace != artifact.namespace) { error = "Library ID ${artifact.id} contains ${actualName ?: 'unknown'}/${actualNamespace ?: 'unknown'}, expected ${artifact.name}/${artifact.namespace}" }
-        else if(versionMatch.find()) { installedVersion = versionMatch.group(1) }
       }
       versionCheckRecordArtifact(artifact, installedVersion, error)
       versionCheckNextArtifact(job)
@@ -7362,8 +7432,6 @@ void versionCheckNextArtifact(Map job) {
     Map driver = (Map)(((Collection)(job.drivers ?: [])).find { Object entry -> entry instanceof Map && ((Map)entry).type == 'usr' && ((Map)entry).name == artifact.name && ((Map)entry).namespace == artifact.namespace } ?: [:])
     if(!driver.id) { versionCheckRecordArtifact(artifact, null, null); versionCheckNextArtifact(job); return }
     versionCheckRequest(job, 'driverCode', [uri:'http://127.0.0.1:8080', path:'/driver/ajax/code', query:[id:driver.id], headers:hubCookieHeaders(job.cookie as String), timeout:15])
-  } else {
-    versionCheckRequest(job, 'libraryCode', [uri:'http://127.0.0.1:8080', path:'/library/ajax/code', query:[id:artifact.id.toString()], headers:hubCookieHeaders(job.cookie as String), timeout:15])
   }
 }
 
@@ -7372,7 +7440,7 @@ void versionCheckRecordArtifact(Map artifact, String installedVersion, String er
   if(error) {
     state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:'Error', expectedVersion:expected, status:error]
   } else if(installedVersion && installedVersion != expected) {
-    state.versionMismatches << [name:artifact.name, fileName:artifact.fileName, namespace:artifact.namespace, installedVersion:installedVersion, expectedVersion:expected, location:artifact.location, libraryId:artifact.id, type:artifact.type]
+    state.versionMismatches << [name:artifact.name, fileName:artifact.fileName, namespace:artifact.namespace, installedVersion:installedVersion, expectedVersion:expected, location:artifact.location, type:artifact.type]
     state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:installedVersion, expectedVersion:expected, status:'Mismatch']
   } else if(installedVersion) {
     state.installedVersions << [name:artifact.fileName ?: artifact.name, installedVersion:installedVersion, expectedVersion:expected, status:'OK']
@@ -7462,68 +7530,6 @@ String getInstalledDriverVersion(String driverName, String namespace) {
   return foundVersion
 }
 
-/**
- * Get the installed version of a library from the hub and validate its identity.
- * @param libraryId The library ID on the hub
- * @param expectedName The expected library name (e.g., 'SMAPILibrary')
- * @param expectedNamespace The expected namespace (e.g., 'dwinks')
- * @return Map with [version: String, error: String] - version is null if error occurred
- */
-Map getInstalledLibraryVersionWithValidation(Integer libraryId, String expectedName, String expectedNamespace) {
-  Map result = [version: null, error: null]
-
-  try {
-    logInfo("Getting library version for ID ${libraryId}...")
-    // Get authentication cookie
-    String cookie = login()
-    if(cookie == null) {
-      result.error = 'Failed to authenticate with hub'
-      logWarn(result.error)
-      return result
-    }
-
-    // Get library code using /library/ajax/code
-    logInfo("Fetching library code for ID ${libraryId}...")
-    Map libraryData = getLibraryCode(libraryId, cookie)
-    logInfo("Library data received: ${libraryData ? 'Yes' : 'No'}, has source: ${libraryData?.source ? 'Yes' : 'No'}")
-
-    if(!libraryData?.source) {
-      result.error = "Library ID ${libraryId} not found on hub"
-      logWarn(result.error)
-      return result
-    }
-
-    String source = libraryData.source
-
-    // Extract library name and namespace from source
-    def nameMatch = (source =~ /library\s*\([^)]*name\s*:\s*['"]([^'"]+)['"]/)
-    def namespaceMatch = (source =~ /library\s*\([^)]*namespace\s*:\s*['"]([^'"]+)['"]/)
-
-    String actualName = nameMatch ? nameMatch[0][1] : null
-    String actualNamespace = namespaceMatch ? namespaceMatch[0][1] : null
-
-    logInfo("Library ID ${libraryId} - Expected: ${expectedName}/${expectedNamespace}, Found: ${actualName}/${actualNamespace}")
-
-    // Validate library identity
-    if(actualName != expectedName || actualNamespace != expectedNamespace) {
-      result.error = "⚠ Library ID ${libraryId} is '${actualName}' (${actualNamespace}), not '${expectedName}' (${expectedNamespace})"
-      logWarn(result.error)
-      return result
-    }
-
-    // Extract version from library() definition
-    result.version = extractLibraryVersion(source)
-    logInfo("Extracted version ${result.version} from library ${actualName}")
-
-  } catch(Exception e) {
-    result.error = "Error: ${e.message}"
-    logWarn("Error getting library version for ID ${libraryId}: ${e.message}")
-    logError("Stack trace: ${e}")
-  }
-
-  return result
-}
-
 String getDriverVersionForUpdate(String driverName, String namespace) {
   String hubVersion = null
 
@@ -7569,24 +7575,13 @@ String getDriverVersionForUpdate(String driverName, String namespace) {
 
 void fixVersionMismatches() {
   if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
-  if(!state.versionMismatches || state.versionMismatches.size() == 0) {
-    logInfo('No version mismatches to fix')
-    return
-  }
-  List libraries = []
-  List drivers = []
-  state.versionMismatches.each { Map mismatch ->
-    if(mismatch.type == 'library') {
-      libraries << [id:mismatch.libraryId as Integer, name:mismatch.name, fileName:mismatch.fileName,
-        location:"https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${mismatch.expectedVersion}/Libraries/${mismatch.fileName}"]
-    } else if(mismatch.type == 'driver') {
-      drivers << [name:mismatch.name, namespace:mismatch.namespace ?: 'dwinks', location:mismatch.location]
-    }
-  }
-  Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', libraries:libraries,
-    drivers:drivers, errors:[], successCount:0]
+  List<Map> driverMismatches = ((List<Map>)(state.versionMismatches ?: [])).findAll { Map item -> item.type == 'driver' }
+  if(driverMismatches.isEmpty()) { logInfo('No driver version mismatches to fix'); return }
+  Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', drivers:driverMismatches.collect { Map item ->
+    [name:item.name, namespace:item.namespace ?: 'dwinks', location:item.location]
+  }, errors:[], successCount:0]
   state.maintenanceJob = job
-  job.pendingRequest = [stage:'nextLibrary']
+  job.pendingRequest = [stage:'nextDriver']
   maintenanceAuthenticate(job)
 }
 
@@ -7597,7 +7592,7 @@ void fixDriverMismatches() {
   if(!driverMismatches) { checkInstalledVersions(); return }
   Map job = [id:UUID.randomUUID().toString(), op:'repairVersions', drivers:driverMismatches.collect { Map item ->
     [name:item.name, namespace:item.namespace ?: 'dwinks', location:item.location]
-  }, libraries:[], errors:[], successCount:0]
+  }, errors:[], successCount:0]
   state.maintenanceJob = job
   job.pendingRequest = [stage:'nextDriver']
   maintenanceAuthenticate(job)
@@ -7613,174 +7608,6 @@ void cleanupDuplicates() {
   state.duplicateCleanupResult = 'Checking for duplicate apps and drivers...'
   job.pendingRequest = [stage:'duplicateApps']
   maintenanceAuthenticate(job)
-}
-
-/**
- * Publish libraries to the hub using the configured library IDs.
- * Downloads the latest library files from GitHub and publishes them to the hub.
- */
-void publishLibraries() {
-  if(state.maintenanceJob instanceof Map) { logWarn('A maintenance operation is already in progress'); return }
-  if(!settings.libraryIdSMAPI || !settings.libraryIdUtilities) {
-    logWarn("Library IDs not configured. Please enter both library IDs in settings.")
-    state.lastLibraryPublish = "Failed: Library IDs not configured"
-    return
-  }
-
-  String appVersion = getCurrentVersion()
-  List libraries = [
-    [
-      id: settings.libraryIdSMAPI as Integer,
-      name: 'SMAPILibrary',
-      namespace: 'dwinks',
-      location: "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/Libraries/SMAPILibrary.groovy"
-    ],
-    [
-      id: settings.libraryIdUtilities as Integer,
-      name: 'UtilitiesAndLoggingLibrary',
-      namespace: 'dwinks',
-      location: "https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/v${appVersion}/Libraries/UtilitiesAndLoggingLibrary.groovy"
-    ]
-  ]
-
-  Map job = [id:UUID.randomUUID().toString(), op:'publishLibraries', libraries:libraries,
-    totalLibraries:libraries.size(), successCount:0, errors:[]]
-  state.maintenanceJob = job
-  state.lastLibraryPublish = 'Publishing libraries...'
-  job.pendingRequest = [stage:'nextLibrary']
-  maintenanceAuthenticate(job)
-}
-
-/**
- * Extract version from library source code by parsing the library() definition.
- * @param sourceCode The library source code
- * @return The version string, or '1.0.0' if not found
- */
-String extractLibraryVersion(String sourceCode) {
-  logWarn("Extracting library version from source code...")
-  try {
-    // Look for version: 'x.x.x' or version: "x.x.x" in library() block
-    def versionMatch = (sourceCode =~ /library\s*\([^)]*version\s*:\s*['"]([\d.]+)['"]/)
-    if(versionMatch) {
-      return versionMatch[0][1]
-    }
-  } catch(Exception e) {
-    logWarn("Failed to extract library version: ${e.message}")
-  }
-  return '1.0.0' // Default version if not found
-}
-
-/**
- * Publish a library to the hub using the library ID.
- * Uses the same endpoint pattern as apps/drivers: /library/ajax/update
- * @param libraryId The library ID on the hub
- * @param sourceCode The library source code
- * @param version The library version (for reference)
- * @return true if successful, false otherwise
- */
-Boolean publishLibraryToHub(Integer libraryId, String sourceCode, String version) {
-  try {
-    // Get authentication cookie
-    String cookie = login()
-    if(cookie == null) {
-      logWarn("Failed to authenticate with hub for library publish")
-      return false
-    }
-
-    // First, check if library exists and get current version
-    Map currentLibrary = getLibraryCode(libraryId, cookie)
-
-    if(currentLibrary == null) {
-      logWarn("Library with ID ${libraryId} not found on hub. Please verify the library ID is correct.")
-      return false
-    }
-
-    logInfo("Current library version on hub: ${currentLibrary.version}")
-
-    // Prepare form body for update (same format as apps/drivers)
-    String body = "id=${libraryId}&version=${currentLibrary.version ?: 0}&source=${URLEncoder.encode(sourceCode, 'UTF-8')}"
-
-    // Post update to hub
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/library/ajax/update',
-      headers: hubCookieHeaders(cookie) + [
-        'Content-Type': 'application/x-www-form-urlencoded'
-      ],
-      body: body,
-      timeout: 30,
-      ignoreSSLIssues: true
-    ]
-
-    Map result = null
-    httpPost(params) { resp ->
-      if(resp?.status == 200 && resp?.data) {
-        result = resp.data
-        logDebug("Library update response: ${result}")
-      } else {
-        logWarn("Unexpected response status: ${resp?.status}")
-        return false
-      }
-    }
-
-    // Check if update was successful
-    if(result?.status == 'success') {
-      logInfo("Library update successful")
-      return true
-    } else {
-      logWarn("Library update failed: ${result?.errorMessage ?: 'Unknown error'}")
-      return false
-    }
-
-  } catch(Exception e) {
-    logError("Error publishing library to hub: ${e.message}")
-    return false
-  }
-}
-
-/**
- * Get library code from hub by ID.
- * @param libraryId The library ID
- * @param cookie Authentication cookie
- * @return Map with id, version, source, or null if not found
- */
-Map getLibraryCode(Integer libraryId, String cookie) {
-  try {
-    logInfo("Requesting library code for ID ${libraryId} from /library/ajax/code...")
-    Map params = [
-      uri: "http://127.0.0.1:8080",
-      path: '/library/ajax/code',
-      query: [id: libraryId.toString()],
-      headers: hubCookieHeaders(cookie),
-      timeout: 15,
-      ignoreSSLIssues: true
-    ]
-
-    Map libraryData = null
-    httpGet(params) { resp ->
-      logInfo("Library code response status: ${resp?.status}")
-      if(resp?.status == 200 && resp?.data) {
-        libraryData = resp.data
-        logInfo("Library data ID: ${libraryData?.id}, has source: ${libraryData?.source ? 'Yes' : 'No'}")
-      } else {
-        logWarn("Unexpected response: status ${resp?.status}, data: ${resp?.data}")
-      }
-    }
-
-    // Verify the library ID matches (apps return 200 with empty payload when not found)
-    if(libraryData?.id == libraryId) {
-      logInfo("Library ID ${libraryId} found and verified")
-      return libraryData
-    } else {
-      logWarn("Library ID mismatch or not found. Requested: ${libraryId}, Received: ${libraryData?.id}")
-      return null
-    }
-
-  } catch(Exception e) {
-    logWarn("Error getting library code: ${e.message}")
-    logError("Stack trace: ${e}")
-    return null
-  }
 }
 
 void uploadBundle(Map bundle) {
@@ -8142,14 +7969,14 @@ String getActualInstalledAppVersion() {
 
 void checkForUpdates(Boolean manual = false) {
   // Check if auto-check is enabled or if this is a manual check
-  if(!manual && autoCheckUpdates != true) { return }
+  if(!manual && getAppPreference('autoCheckUpdates', false) != true) { return }
 
   // Check frequency limits for automatic checks
   if(!manual && state.lastUpdateCheck) {
     Long lastCheck = state.lastUpdateCheck as Long
     Instant nowInstant = hubNowInstant()
-    if(updateCheckFrequency == 'Daily' && Duration.between(Instant.ofEpochMilli(lastCheck), nowInstant).compareTo(Duration.ofDays(1)) < 0) { return }
-    if(updateCheckFrequency == 'Weekly' && Duration.between(Instant.ofEpochMilli(lastCheck), nowInstant).compareTo(Duration.ofDays(7)) < 0) { return }
+    if(getAppPreference('updateCheckFrequency', 'Daily') == 'Daily' && Duration.between(Instant.ofEpochMilli(lastCheck), nowInstant).compareTo(Duration.ofDays(1)) < 0) { return }
+    if(getAppPreference('updateCheckFrequency', 'Daily') == 'Weekly' && Duration.between(Instant.ofEpochMilli(lastCheck), nowInstant).compareTo(Duration.ofDays(7)) < 0) { return }
   }
 
   Long startedAt = state.updateCheckStartedAt instanceof Number ? (state.updateCheckStartedAt as Long) : 0L
@@ -8191,7 +8018,7 @@ void updateCheckCallback(AsyncResponse response, Map data) {
     } else {
       asynchttpPost('updateCheckLoginCallback', [uri: 'http://127.0.0.1:8080', path: '/login',
         requestContentType: 'application/x-www-form-urlencoded',
-        body: [username: settings.hubSecurityUsername?.toString() ?: '', password: settings.hubSecurityPassword?.toString() ?: '', submit: 'Login'],
+        body: [username: getAppPreference('hubSecurityUsername', '')?.toString() ?: '', password: getAppPreference('hubSecurityPassword', '')?.toString() ?: '', submit: 'Login'],
         followRedirects: false, textParser: true, timeout: 15], next)
     }
   } catch(Exception e) {
@@ -8285,7 +8112,7 @@ void completeUpdateCheck(Map data, String currentVersion) {
     app.updateLabel('Sonos Advanced Controller [Update Available]')
     logInfo("Update available: ${latestVersion} (current: ${currentVersion})")
     if(manual) { runIn(1, 'refreshPage') }
-    if(settings.autoInstallUpdates == true && !manual) { scheduleAutoInstall() }
+    if(getAppPreference('autoInstallUpdates', false) == true && !manual) { scheduleAutoInstall() }
   } else {
     state.updateAvailable = false
     state.latestVersion = null
@@ -8362,8 +8189,7 @@ void maintenanceAuthenticate(Map job) {
   if(state.hubCookie != null && cookieAge != null && cookieAge < HUB_COOKIE_MAX_AGE_MS) {
     job.cookie = state.hubCookie
     Map pending = (Map)job.pendingRequest
-    if(pending.stage == 'nextLibrary') { maintenanceNextLibrary(job) }
-    else if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
+    if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
     else if(pending.stage == 'duplicateDeletes') { maintenanceNextDuplicateDelete(job) }
     else { maintenanceRequest(job, pending.stage as String, (Map)pending.params, pending.method as String) }
     return
@@ -8373,7 +8199,7 @@ void maintenanceAuthenticate(Map job) {
     String requestId = UUID.randomUUID().toString()
     job.activeRequestId = requestId
     asynchttpPost('maintenanceHttpCallback', [uri:'http://127.0.0.1:8080', path:'/login', requestContentType:'application/x-www-form-urlencoded',
-      body:[username:settings.hubSecurityUsername?.toString() ?: '', password:settings.hubSecurityPassword?.toString() ?: '', submit:'Login'],
+      body:[username:getAppPreference('hubSecurityUsername', '')?.toString() ?: '', password:getAppPreference('hubSecurityPassword', '')?.toString() ?: '', submit:'Login'],
       followRedirects:false, textParser:true, timeout:15], [jobId:job.id, requestId:requestId, stage:'login'])
   } catch(Exception e) { logError("Maintenance login failed to start: ${e.message}"); maintenanceAdvanceFailure(job, 'login') }
 }
@@ -8389,13 +8215,12 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
   String stage = data.stage?.toString()
   Boolean ok = response != null && !response.hasError() && response.status in [200, 302]
   try {
-    if(stage == 'downloadApp' || stage == 'downloadDriver' || stage == 'downloadLibrary') {
+    if(stage == 'downloadApp' || stage == 'downloadDriver') {
       String source = ok ? response.data?.toString() : null
       if(!source) { maintenanceAdvanceFailure(job, stage); return }
       job.source = source
       if(stage == 'downloadApp') { maintenanceRequest(job, 'appList', [uri:'http://127.0.0.1:8080', path:'/hub2/userAppTypes', timeout:15, ignoreSSLIssues:true]) }
-      else if(stage == 'downloadDriver') { maintenanceRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15]) }
-      else { maintenanceRequest(job, 'libraryCode', [uri:'http://127.0.0.1:8080', path:'/library/ajax/code', query:[id:job.artifact.id.toString()], headers:hubCookieHeaders(job.cookie as String), timeout:15]) }
+      else { maintenanceRequest(job, 'driverList', [uri:'http://127.0.0.1:8080', path:'/device/drivers', headers:hubCookieHeaders(job.cookie as String), timeout:15]) }
       return
     }
     if(stage == 'login') {
@@ -8411,8 +8236,7 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       state.hubCookie = job.cookie
       state.hubCookieTime = now()
       Map pending = (Map)job.pendingRequest
-      if(pending.stage == 'nextLibrary') { maintenanceNextLibrary(job) }
-      else if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
+      if(pending.stage == 'nextDriver') { maintenanceStartDrivers(job) }
       else if(pending.stage == 'duplicateDeletes') { maintenanceNextDuplicateDelete(job) }
       else { maintenanceRequest(job, pending.stage as String, (Map)pending.params, pending.method as String) }
       return
@@ -8492,23 +8316,6 @@ void maintenanceHttpCallback(AsyncResponse response, Map data) {
       maintenanceNextDriver(job)
       return
     }
-    if(stage == 'downloadLibrary') {
-      job.librarySource = job.source
-      maintenanceRequest(job, 'libraryCode', [uri:'http://127.0.0.1:8080', path:'/library/ajax/code', query:[id:job.artifact.id.toString()], headers:hubCookieHeaders(job.cookie as String), timeout:15])
-      return
-    }
-    if(stage == 'libraryCode') {
-      Map payload = ok && response.getJson() instanceof Map ? (Map)response.getJson() : [:]
-      if(payload.id == null) { maintenanceAdvanceFailure(job, stage); return }
-      String body = "id=${job.artifact.id}&version=${payload.version ?: 0}&source=${URLEncoder.encode(job.librarySource ?: job.source, 'UTF-8')}"
-      maintenanceRequest(job, 'libraryUpdate', [uri:'http://127.0.0.1:8080', path:'/library/ajax/update', headers:hubCookieHeaders(job.cookie as String)+['Content-Type':'application/x-www-form-urlencoded'], body:body, timeout:30, ignoreSSLIssues:true], 'POST')
-      return
-    }
-    if(stage == 'libraryUpdate') {
-      if(!ok || response.getJson()?.status != 'success') { job.errors << "Failed to publish ${job.artifact.name}" }
-      else { job.successCount = (job.successCount ?: 0) + 1 }
-      maintenanceNextLibrary(job)
-    }
   } catch(Exception e) {
     logError("Maintenance callback ${stage} failed: ${e.message}")
     maintenanceAdvanceFailure(job, stage)
@@ -8524,7 +8331,6 @@ void maintenanceAdvanceFailure(Map job, String stage) {
     else { maintenanceFinish(job) }
   }
   else if(stage.startsWith('driver') || stage == 'downloadDriver') { maintenanceNextDriver(job) }
-  else if(stage.startsWith('library') || stage == 'downloadLibrary') { maintenanceNextLibrary(job) }
   else if(job.manifest?.drivers) { maintenanceStartDrivers(job) }
   else { maintenanceFinish(job) }
 }
@@ -8544,16 +8350,6 @@ void maintenanceNextDriver(Map job) {
     job.source = null
     maintenanceRequest(job, 'downloadDriver', [uri:artifact.location, contentType:'text/plain', textParser:true, timeout:30])
   } else { maintenanceFinish(job) }
-}
-
-void maintenanceNextLibrary(Map job) {
-  if(job.libraries && !job.libraries.isEmpty()) {
-    Map artifact = (Map)job.libraries.remove(0)
-    job.artifact = artifact
-    job.source = null
-    maintenanceRequest(job, 'downloadLibrary', [uri:artifact.location, contentType:'text/plain', textParser:true, timeout:30])
-  } else if(job.op == 'repairVersions') { maintenanceStartDrivers(job) }
-  else { maintenanceFinish(job) }
 }
 
 List duplicateCodeDeletes(List entries, String kind) {
@@ -8598,11 +8394,6 @@ void maintenanceFinish(Map job) {
       state.duplicateCleanupResult = 'No duplicates found'
       logInfo('No duplicate apps or drivers found')
     }
-  } else if(job.op == 'publishLibraries') {
-    Integer successes = job.successCount ?: 0
-    String timestamp = ZonedDateTime.now(location?.timeZone ? ZoneId.of(location.timeZone.ID) : ZoneId.systemDefault()).format(APP_TIMESTAMP_FORMATTER)
-    state.lastLibraryPublish = successes == job.totalLibraries ? "✓ ${timestamp}: Successfully published ${successes} libraries" : (successes ? "⚠ ${timestamp}: Published ${successes}, failed ${job.errors.size()} (${job.errors.join(', ')})" : "✗ ${timestamp}: Failed to publish libraries (${job.errors.join(', ')})")
-    if(successes > 0) { runIn(1, 'checkInstalledVersions') }
   } else if(job.op == 'repairVersions') {
     if(job.errors.isEmpty()) { runIn(2, 'checkInstalledVersions') }
     else { logWarn("Version repair completed with errors: ${job.errors.join(', ')}") }
@@ -9016,8 +8807,7 @@ Boolean uninstallDriverCode(String driverCodeId, String cookie) {
 
 String login() {
   // Reuse a recent cookie, but treat it as stale after HUB_COOKIE_MAX_AGE_MS --
-  // hub sessions expire, and a cookie trusted forever breaks version checks and
-  // library publishing until it is manually cleared.
+  // Hub sessions expire, so discard stale credentials before app and driver checks.
   Long cookieAgeMs = millisSince(state.hubCookieTime as Long)
   if(state.hubCookie != null && cookieAgeMs != null && cookieAgeMs < HUB_COOKIE_MAX_AGE_MS) {
     logDebug("Reusing existing cookie")
@@ -9032,8 +8822,8 @@ String login() {
       path: '/login',
       requestContentType: 'application/x-www-form-urlencoded',
       body: [
-        username: settings.hubSecurityUsername?.toString() ?: '',
-        password: settings.hubSecurityPassword?.toString() ?: '',
+        username: getAppPreference('hubSecurityUsername', '')?.toString() ?: '',
+        password: getAppPreference('hubSecurityPassword', '')?.toString() ?: '',
         submit: 'Login'
       ],
       followRedirects: false,
@@ -9132,43 +8922,43 @@ Map hubCookieHeaders(String cookie) {
 void scheduleUpdateCheck() {
   unschedule('checkForUpdates')
 
-  if(autoCheckUpdates == true) {
-    if(updateCheckFrequency == 'Daily') {
+  if(getAppPreference('autoCheckUpdates', false) == true) {
+    if(getAppPreference('updateCheckFrequency', 'Daily') == 'Daily') {
       schedule('0 0 2 * * ?', 'checkForUpdates')  // 2 AM daily
-    } else if(updateCheckFrequency == 'Weekly') {
+    } else if(getAppPreference('updateCheckFrequency', 'Daily') == 'Weekly') {
       schedule('0 0 2 ? * MON', 'checkForUpdates')  // 2 AM Monday
     }
   }
 }
 
 void scheduleAutoInstall() {
-  if(!autoInstallUpdates || !autoInstallTime || !state.updateAvailable) {
+  if(!(getAppPreference('autoInstallUpdates', false) == true) || !getAppPreference('autoInstallTime') || !state.updateAvailable) {
     unschedule('performScheduledInstall')
     return
   }
 
   try {
-    Date installTime = timeToday(autoInstallTime, location.timeZone)
+    Date installTime = timeToday(getAppPreference('autoInstallTime'), location.timeZone)
     String cronExpression
     ZoneId zone = hubZoneId()
     Clock clock = hubClock()
 
-    if(autoInstallNextOccurrence == true) {
+    if(getAppPreference('autoInstallNextOccurrence', false) == true) {
       cronExpression = "0 ${installTime.minutes} ${installTime.hours} * * ?"
       ZonedDateTime nowDateTime = ZonedDateTime.now(clock)
       ZonedDateTime installDateTime = atInstallTime(installTime, zone)
       if(installDateTime.isBefore(nowDateTime)) {
-        logDebug("Auto-install time has passed today, will install tomorrow at ${autoInstallTime}")
+        logDebug("Auto-install time has passed today, will install tomorrow at ${getAppPreference('autoInstallTime')}")
       } else {
-        logDebug("Auto-install scheduled for today at ${autoInstallTime}")
+        logDebug("Auto-install scheduled for today at ${getAppPreference('autoInstallTime')}")
       }
     } else {
-      DayOfWeek weekday = parseDayOfWeek(autoInstallDayOfWeek ?: 'Sunday')
+      DayOfWeek weekday = parseDayOfWeek(getAppPreference('autoInstallDayOfWeek', 'Sunday') ?: 'Sunday')
       String cronDay = weekday.name().substring(0, 3)
       cronExpression = "0 ${installTime.minutes} ${installTime.hours} ? * ${cronDay}"
       LocalTime time = LocalTime.of(installTime.hours, installTime.minutes)
       ZonedDateTime nextFire = nextWeeklyOccurrence(time, weekday, zone)
-      logDebug("Auto-install scheduled for ${weekday}s at ${autoInstallTime}; next fire ${nextFire.format(APP_TIMESTAMP_FORMATTER)}")
+      logDebug("Auto-install scheduled for ${weekday}s at ${getAppPreference('autoInstallTime')}; next fire ${nextFire.format(APP_TIMESTAMP_FORMATTER)}")
     }
 
     CronExpression cron = new CronExpression(cronExpression)

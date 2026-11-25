@@ -4,6 +4,8 @@ package com.hubitat.app
 class InstalledAppWrapper {
   Long id = 42L
   String label = 'Test App'
+  List<Map> events = []
   String getLabel() { label }
   String getId()    { id?.toString() }
+  void sendEvent(Map event) { events << event }
 }
