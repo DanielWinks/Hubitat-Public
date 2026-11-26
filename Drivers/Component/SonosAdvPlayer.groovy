@@ -4408,6 +4408,36 @@ void relayPlayerReadingToParent() {
   sendParentAppRequestDirect('playerReading', args)
 }
 
+/**
+ * Read this coordinator's group volume and mute from Sonos and send them to the parent app. The app
+ * uses this when a live group has a speaker without a Hubitat device, so averaging readings would be wrong.
+ */
+void readGroupRendering() {
+  String ip = getDeviceDataValue('localUpnpHost')
+  if(!ip) { return }
+  postSonosSoapAsync('groupRenderingReadCallback', getSoapActionParams(ip, GroupRenderingControl, 'GetGroupVolume'), [kind: 'volume'])
+  postSonosSoapAsync('groupRenderingReadCallback', getSoapActionParams(ip, GroupRenderingControl, 'GetGroupMute'), [kind: 'mute'])
+}
+
+void groupRenderingReadCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    logDebug("Group rendering read failed: ${response?.getErrorMessage() ?: response?.status}")
+    return
+  }
+  try {
+    GPathResult xml = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    if(data?.kind == 'volume') {
+      String raw = findXmlDescendantByLocalName(xml, 'CurrentVolume')?.text()
+      if(raw) { sendParentAppRequestDirect('groupRendering', [groupVolume: raw as Integer]) }
+    } else {
+      String raw = findXmlDescendantByLocalName(xml, 'CurrentMute')?.text()
+      if(raw) { sendParentAppRequestDirect('groupRendering', [groupMute: raw == '1' ? 'muted' : 'unmuted']) }
+    }
+  } catch(Exception e) {
+    logDebug("Could not parse group rendering read: ${e.message}")
+  }
+}
+
 /** Convert only values represented in this RC notification to the player's event names. */
 List<Map> buildRcEvents(Map snap) {
   List<Map> events = []

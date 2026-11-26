@@ -81,6 +81,21 @@ class WhitelistMigrationSpec extends Specification {
     (result.stateRemoved as List).contains('favs')
   }
 
+  def "app save keeps calculated group volume caches"() {
+    given:
+    app.state['groupPreferencesByDni'] = [g: [useProportionalVolume: false]]
+    app.state['playerReadingsByRincon'] = [A: [volume: 10]]
+    app.state['pendingVolumeRecalculation'] = [players: ['A'], groups: [], all: false]
+
+    when:
+    app.pruneOrphanedAppPersistence()
+
+    then:
+    app.state.containsKey('groupPreferencesByDni')
+    app.state.containsKey('playerReadingsByRincon')
+    app.state.containsKey('pendingVolumeRecalculation')
+  }
+
   def "app prunes orphan atomicState keys"() {
     given:
     app.atomicState['discoveryRunning'] = true

@@ -2421,6 +2421,8 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted'], B: [mute: 'unmuted']]).mute == 'unmuted'
     appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted']]).mute == 'unmuted'
     appScript.calculateVolumeState(['A'], [A: [mute: 'unmuted']]).mute == 'unmuted'
+    appScript.hasUnmanagedMember(['A', 'B'], ['A'] as Set)
+    !appScript.hasUnmanagedMember(['A'], ['A'] as Set)
   }
 
   def "players without valid readings are skipped and no volume is published without any"() {
