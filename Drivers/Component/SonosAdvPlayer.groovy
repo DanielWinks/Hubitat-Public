@@ -908,6 +908,21 @@ metadata {
 @Field static final Long DRIVER_EPOCH = Instant.now().toEpochMilli()
 @Field static final ConcurrentHashMap<String, Long> PARENT_SEQUENCE_BY_DNI = new ConcurrentHashMap<String, Long>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
+// Keys that older releases kept in state/atomicState and that now live in runtimeState.
+// Everything else (for example lastError*) stays in state.
+@Field static final String RUNTIME_MIGRATION_MARKER_KEY = 'runtimeStateMigrationVersion'
+@Field static final String RUNTIME_MIGRATION_VERSION = '1'
+@Field static final List<String> LEGACY_RUNTIME_STATE_KEYS = [
+  'wsRetryCount', 'parentCommandSequence', 'playbackState', 'playbackStateObservedAt',
+  'htControlTosLinkConnected', 'htControlObservedAt', 'favoriteLoadRequestId', 'playlistLoadRequestId',
+  'playlistAddRequestId', 'queueBrowseRequestId', 'groupAnnouncementStream', 'announcementPlaybackRestore',
+  'directStreamTtsRestore', 'directStreamTrackVolumeRestore', 'directStreamTtsVolumeRestore',
+  'streamTransportIntentGuid', 'pendingGroupAnnouncementTakeover', 'lastTransportPlaybackSnapshot',
+  'groupTopologyOperationId', 'groupTopologyOperationRequestId', 'avtMatchKeys', 'pendingRandomMediaLoads',
+  'websocketOpenedAt', 'lastAnnouncementPlaybackRestoreFailure', 'websocketConnectPending', 'wsDisconnectedSince',
+  'wsRetryScheduled', 'transportCommandQueue', 'activeTransportCommand', 'transportStatusSnapshot',
+  'trackPositionSnapshot', 'announcementPlaybackSnapshot', 'websocketStatus', 'websocketShutdown'
+].asImmutable()
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
 @Field static final Integer WS_CONNECT_TIMEOUT_SECONDS = 20
@@ -1058,6 +1073,7 @@ metadata {
   'rightChannelDeviceIp',
   'zgtSub',
   'zgtSubExpires',
+  RUNTIME_MIGRATION_MARKER_KEY,
   'normalAnnouncementMode',
   'highPriorityAnnouncementMode',
   'sid1',
@@ -1522,53 +1538,22 @@ ConcurrentHashMap<String, Object> getRuntimeState() {
 
 
 void migrateLegacyRuntimeState() {
-  Map<String, Object> legacy = [:]
+  if(device.getDataValue(RUNTIME_MIGRATION_MARKER_KEY) == RUNTIME_MIGRATION_VERSION) { return }
   try {
-    legacy.putAll(state as Map<String, Object>)
-    legacy.putAll(atomicState as Map<String, Object>)
-  } catch(Exception e) {
-    logWarn("Could not read legacy device state for migration: ${e.message}")
-    return
-  }
-  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
-  legacy.each { String key, Object value ->
-    if(value != null) {
-      Object decodedValue = isHiddenJsonStateKey(key) ? fetchHiddenJsonStateValue(value) : value
-      if(decodedValue != null) { runtime.putIfAbsent(key, decodedValue) }
+    ConcurrentHashMap<String, Object> runtime = getRuntimeState()
+    Map<String, Object> legacyState = state as Map<String, Object>
+    Map<String, Object> legacyAtomic = atomicState as Map<String, Object>
+    LEGACY_RUNTIME_STATE_KEYS.each { String key ->
+      Object value = legacyState[key] != null ? legacyState[key] : legacyAtomic[key]
+      if(value != null) { runtime.putIfAbsent(key, value) }
+      state.remove(key)
+      atomicState.remove(key)
     }
-  }
-  state.clear()
-  atomicState.clear()
-}
-
-Boolean isHiddenJsonStateKey(String name) {
-  return false
-}
-
-String escapeHiddenStateHtml(String value) {
-  return StringEscapeUtils.escapeHtml4(StringUtils.defaultString(value)).replace("'", '&#39;')
-}
-
-void storeHiddenJsonState(String name, String visibleText, Object value) {
-  if(value == null) {
-    state.remove(name)
+  } catch(Exception e) {
+    logWarn("Could not migrate legacy device state: ${e.message}")
     return
   }
-  String encoded = Base64.encodeBase64String(JsonOutput.toJson(value).getBytes('UTF-8'))
-  state[name] = "<root><span class=\"visible-data\">${escapeHiddenStateHtml(visibleText)}</span><span class=\"hidden-data\" style=\"display:none\">${encoded}</span></root>"
-}
-
-Object fetchHiddenJsonStateValue(Object storedValue) {
-  if(!(storedValue instanceof CharSequence) || !storedValue.toString().contains('class="hidden-data"')) { return storedValue }
-  try {
-    GPathResult xml = new XmlSlurper().parseText(storedValue.toString())
-    String encoded = xml.span.find { GPathResult span -> span.@class.toString() == 'hidden-data' }?.text()
-    if(!encoded) { return null }
-    return getSharedJsonSlurper().parseText(new String(Base64.decodeBase64(encoded), 'UTF-8'))
-  } catch(Exception e) {
-    logWarn("Could not decode hidden JSON state: ${e.message}")
-    return null
-  }
+  device.updateDataValue(RUNTIME_MIGRATION_MARKER_KEY, RUNTIME_MIGRATION_VERSION)
 }
 
 void setHiddenJsonRuntimeState(String name, Object value) {

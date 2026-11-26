@@ -1168,7 +1168,6 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "player escaping helpers handle HTML, XML, and layered XML entities consistently"() {
     expect:
-    driver.escapeHiddenStateHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
     driver.escapeQueueHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
     driver.escapeSoapXmlText("A&B <'\"") == 'A&amp;B &lt;&apos;&quot;'
     driver.unEscapeMetaData('&amp;lt;title&amp;gt;A&amp;lt;/title&amp;gt;') == '<title>A</title>'
@@ -2894,9 +2893,12 @@ class SonosAdvPlayerSpec extends Specification {
     websocketMessages.every { String message -> !message.contains('loadAudioClip') }
   }
 
-  def "legacy player state migrates to the DNI runtime map and is cleared from Hubitat state"() {
+  def "legacy player state migrates listed keys once and leaves other state alone"() {
     given:
     driver.state.parentCommandSequence = 4
+    driver.state.lastError = 'Playlist load failed'
+    driver.state.lastErrorReason = 'boom'
+    driver.state.lastErrorObservedAt = 123L
     driver.binding.setVariable('atomicState', [wsRetryCount: 2])
 
     when:
@@ -2905,8 +2907,36 @@ class SonosAdvPlayerSpec extends Specification {
     then:
     driver.runtimeState.parentCommandSequence == 4
     driver.runtimeState.wsRetryCount == 2
-    driver.state.isEmpty()
+    !driver.state.containsKey('parentCommandSequence')
     driver.binding.getVariable('atomicState').isEmpty()
+    driver.state.lastError == 'Playlist load failed'
+    driver.state.lastErrorReason == 'boom'
+    driver.state.lastErrorObservedAt == 123L
+    driver.device.getDataValue('runtimeStateMigrationVersion') == '1'
+
+    when: 'a later initialize or save runs the migration again'
+    driver.state.parentCommandSequence = 9
+    driver.migrateLegacyRuntimeState()
+
+    then:
+    driver.state.parentCommandSequence == 9
+    driver.runtimeState.parentCommandSequence == 4
+    driver.state.lastError == 'Playlist load failed'
+  }
+
+  def "runtime migration marker survives the device data prune so migration runs once"() {
+    given:
+    driver.migrateLegacyRuntimeState()
+
+    when:
+    driver.pruneOrphanedDriverPersistence()
+    driver.binding.setVariable('atomicState', [wsRetryCount: 5])
+    driver.migrateLegacyRuntimeState()
+
+    then:
+    driver.device.getDataValue('runtimeStateMigrationVersion') == '1'
+    driver.binding.getVariable('atomicState').wsRetryCount == 5
+    driver.runtimeState.wsRetryCount != 5
   }
 
   def "favorite lookup finds an item by Sonos favorite ID instead of map key"() {
