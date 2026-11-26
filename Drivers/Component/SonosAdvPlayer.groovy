@@ -931,6 +931,12 @@ metadata {
 @Field static final Integer UPNP_RETRY_BASE_DELAY_SECONDS = 60
 @Field static final Integer UPNP_RETRY_MAX_DELAY_SECONDS = 900
 @Field static final Integer UPNP_MAX_HEADER_BYTES = 16384
+// Treat a lease as valid until shortly before its real expiry. Using half of
+// the requested lease here made Sonos grants shorter than one hour appear
+// invalid almost immediately, so an ordinary repeated subscribe replaced the
+// live SID and caused the scheduled renewal to fail with 412.
+@Field static final Integer UPNP_SUBSCRIPTION_EXPIRY_SAFETY_SECONDS = 60
+@Field static final Integer UPNP_RENEWAL_PERCENT = 85
 @Field static final Integer SUBSCRIBE_RETRY_MAX_ATTEMPTS = 3
 @Field static ConcurrentHashMap<String, Integer> subscribeRetryAttempts = new ConcurrentHashMap<String, Integer>()
 @Field static ConcurrentHashMap<String, ArrayList<DeviceWrapper>> groupsRegistry = new ConcurrentHashMap<String, ArrayList<DeviceWrapper>>()
@@ -1009,7 +1015,6 @@ metadata {
 @Field static ConcurrentHashMap<String, Long> lastGroupVolumeFadeCallTime = new ConcurrentHashMap<String, Long>()
 @Field static final String ZGT_SUB_DEVICE_KEY = 'zgtSub'
 @Field static final String ZGT_SUB_EXPIRES_DEVICE_KEY = 'zgtSubExpires'
-@Field static final String ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY = 'zgtSubExpiresEpoch'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
 @Field static volatile List<String> cachedTTSVoiceNames = null
@@ -1035,9 +1040,6 @@ metadata {
 @Field static final Set<String> ACTIVE_PLAYER_DEVICE_DATA_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   'id',
   'name',
-  'localUpnpHost',
-  'localUpnpPort',
-  'websocketUrl',
   'capabilities',
   'householdId',
   'hasBattery',
@@ -1051,24 +1053,21 @@ metadata {
   'rightChannelDeviceIp',
   'zgtSub',
   'zgtSubExpires',
-  'zgtSubExpiresEpoch',
   'staticDriverActivePlayerRoster',
   'normalAnnouncementMode',
   'highPriorityAnnouncementMode',
   'sid1',
   'sid2',
-  'sid3',
   'sid4',
   'sid5',
   'sid6',
   'sid1-expires',
   'sid2-expires',
-  'sid3-expires',
   'sid4-expires',
   'sid5-expires',
   'sid6-expires',
   'lastMrRcEvent',
-  'lastZgtEvent',
+  'ZgtLastUpdated',
   'lastMrGrcEvent',
   'lastHtControlEvent',
   'lastWebsocketEvent',
@@ -1182,16 +1181,8 @@ List<String> pruneOrphanStateKeys(Map persisted, Set<String> active) {
 
 Boolean isActiveSidDataKey(String key) {
   if(key == null) { return false }
-  if(key ==~ /^sid[1-6]$/) { return true }
-  if(key ==~ /^sid[1-6]-expires$/) { return true }
-  return false
-}
-
-Boolean isActiveWsDebugDataKey(String key) {
-  if(key == null) { return false }
-  if(key.startsWith('WS-')) {
-    return isDebugLoggingEnabled()
-  }
+  if(key ==~ /^sid[12456]$/) { return true }
+  if(key ==~ /^sid[12456]-expires$/) { return true }
   return false
 }
 
@@ -1201,7 +1192,7 @@ List<String> pruneOrphanDeviceData(Object dev, Set<String> active) {
     Map data = dev.getData()
     if(data == null) { return [] }
     List<String> toRemove = new ArrayList<String>(data.keySet())
-      .findAll { String k -> !active.contains(k) && !isActiveSidDataKey(k) && !isActiveWsDebugDataKey(k) }
+      .findAll { String k -> !active.contains(k) && !isActiveSidDataKey(k) }
     toRemove.each { String k -> dev.removeDataValue(k) }
     return toRemove
   } catch(Exception e) {
@@ -1342,8 +1333,8 @@ void performImmediateInitialization(Boolean subscribeToZgt = true) {
 void clearPlayerSubscriptionsForInitialization() {
   String dni = device.getDeviceNetworkId()
   if(!dni) { return }
-  String sid = device.getDataValue(ZGT_SUB_DEVICE_KEY) ?: getSid('sid3')
-  Boolean hadValid = subValid('sid3') || sid
+  String sid = getSid('zgt')
+  Boolean hadValid = subValid('zgt') || sid
   Boolean hadContentDirectorySubscription = subValid('sid6') || getSid('sid6') != null
   invalidateUpnpRequestsForDevice()
   if(hadContentDirectorySubscription) {
@@ -1351,10 +1342,7 @@ void clearPlayerSubscriptionsForInitialization() {
         'sid6', null, CONTENT_DIRECTORY_UNSUB_CALLBACK, CONTENT_DIRECTORY_EVENTS)
   }
   // Synchronous local delete after generation bump — stale callbacks are guarded by generation
-  deleteSid('sid3')
-  device.removeDataValue(ZGT_SUB_DEVICE_KEY)
-  device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
-  device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
+  deleteSid('zgt')
   deleteSid('sid1')
   deleteSid('sid2')
   deleteSid('sid4')
@@ -1362,12 +1350,11 @@ void clearPlayerSubscriptionsForInitialization() {
   deleteSid('sid6')
   device.removeDataValue('sid1-expires')
   device.removeDataValue('sid2-expires')
-  device.removeDataValue('sid3-expires')
   device.removeDataValue('sid4-expires')
   device.removeDataValue('sid5-expires')
   device.removeDataValue('sid6-expires')
   if(hadValid) {
-    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'sid3', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
+    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'zgt', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
   }
 }
 
@@ -1590,7 +1577,7 @@ void reconnectWebsocket(String reason) {
 
 void secondaryConfiguration() {
   // Validate critical device data before proceeding
-  List<String> criticalFields = ['id', 'deviceIp', 'localUpnpHost', 'websocketUrl']
+  List<String> criticalFields = ['id', 'deviceIp']
   List<String> missingFields = []
   criticalFields.each { field ->
     String value = device.getDataValue(field)
@@ -1644,8 +1631,8 @@ void secondaryConfigurationPhase4() {
 
   // After device data is configured, establish this player’s UPnP subscriptions
   // and WebSocket connection locally.
-  String localUpnpHost = device.getDataValue('localUpnpHost')
-  String websocketUrl = device.getDataValue('websocketUrl')
+  String localUpnpHost = getLocalUpnpHost()
+  String websocketUrl = getLocalWsUrl()
 
   if(localUpnpHost && websocketUrl) {
     performImmediateInitialization(shouldSubscribeToZgt())
@@ -1685,7 +1672,7 @@ void migrationCleanup() {
   if(settings.enableAirPlayUnmuteVolumeFix == null) { settings.enableAirPlayUnmuteVolumeFix = true }
   if(settings.enableRawWebsocketLogging == null) { settings.enableRawWebsocketLogging = false }
   if(settings.createMuteChildDevice == null) { settings.createMuteChildDevice = false }
-  // Whitelist prune now handles debug-only WS-* keys, event timestamps,
+  // Whitelist prune now handles WS-* keys, endpoint URLs, event timestamps,
   // and stale sid-expiresFormatted keys (see pruneOrphanDeviceData).
   // Kept here only for explicit log-level transitions that need immediate cleanup.
 }
@@ -2720,7 +2707,7 @@ void setNightMode(String mode) {
     logWarn("Night Mode is only supported on Sonos soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)")
     return
   }
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [EQType: 'NightMode', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
   postSonosSoapAsync('localControlCallback', params)
@@ -2730,7 +2717,7 @@ void setSpeechEnhancement(String mode) {
     logWarn("Speech Enhancement is only supported on Sonos soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)")
     return
   }
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: mode == 'on' ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
   postSonosSoapAsync('localControlCallback', params)
@@ -2750,7 +2737,7 @@ void selectLineInRincon(String rinconId) {
   }
   String lineInURI = "x-rincon-stream:${rinconId}"
   logInfo("Switching to Line-In source: ${lineInURI}")
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [CurrentURI: lineInURI]
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
   postSonosSoapAsync('localControlCallback', params)
@@ -2767,7 +2754,7 @@ void selectTV() {
   String rinconId = getId()
   String tvURI = "x-sonos-htastream:${rinconId}:spdif"
   logInfo("Switching to TV source: ${tvURI}")
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [CurrentURI: tvURI]
   Map params = getSoapActionParams(ip, AVTransport, 'SetAVTransportURI', controlValues)
   postSonosSoapAsync('localControlCallback', params)
@@ -3762,7 +3749,7 @@ void setSleepTimer(String duration) {
     logWarn("setSleepTimer: invalid duration '${duration}'; minutes and seconds must be 00-59")
     return
   }
-  String host = getDeviceDataValue('localUpnpHost')
+  String host = getLocalUpnpHost()
   Map params = getSoapActionParams(host, AVTransport, 'ConfigureSleepTimer',
     [NewSleepTimerDuration: duration])
   postSonosSoapAsync('sleepTimerSetCallback', params,
@@ -3771,7 +3758,7 @@ void setSleepTimer(String duration) {
 
 void cancelSleepTimer() {
   if(!requireSleepTimerCoordinator()) { return }
-  String host = getDeviceDataValue('localUpnpHost')
+  String host = getLocalUpnpHost()
   Map params = getSoapActionParams(host, AVTransport, 'ConfigureSleepTimer',
     [NewSleepTimerDuration: ''])
   postSonosSoapAsync('sleepTimerSetCallback', params,
@@ -3780,7 +3767,7 @@ void cancelSleepTimer() {
 
 void getSleepTimer() {
   if(!requireSleepTimerCoordinator()) { return }
-  String host = getDeviceDataValue('localUpnpHost')
+  String host = getLocalUpnpHost()
   Map params = getSoapActionParams(host, AVTransport, 'GetRemainingSleepTimerDuration')
   asynchttpPost('sleepTimerGetCallback', params,
     [sleepTimerChildDni: getSleepTimerChildDNI()])
@@ -5068,32 +5055,32 @@ void processRenderingControlMessages(String xmlString) {
   // sonosEventSubscribe('/SystemProperties/Event', host, RESUB_INTERVAL, dni)
   // sonosEventSubscribe('/AlarmClock/Event', host, RESUB_INTERVAL, dni)
 
-String getlocalUpnpHost() {return device.getDataValue('localUpnpHost')}
 String getDNI() {return device.getDeviceNetworkId()}
 Boolean hasSid(String sid) {
-  return device.getDataValue(sid) != null
+  return getSid(sid) != null
 }
 
 DeviceWrapper getThisDevice() {
   return this.device as DeviceWrapper
 }
 String getSid(String sid) {
-  return device.getDataValue(sid)
+  return device.getDataValue(sid == 'zgt' ? ZGT_SUB_DEVICE_KEY : sid)
 }
 void setSid(String sid, String value) {
-  setDeviceDataValue(sid, value)
+  setDeviceDataValue(sid == 'zgt' ? ZGT_SUB_DEVICE_KEY : sid, value)
 }
 void deleteSid(String sid) {
   logDebug("Removing SID for ${sid}")
-  device.removeDataValue(sid)
-  device.removeDataValue("${sid}-expires")
+  String sidDataKey = sid == 'zgt' ? ZGT_SUB_DEVICE_KEY : sid
+  String expiryDataKey = sid == 'zgt' ? ZGT_SUB_EXPIRES_DEVICE_KEY : "${sid}-expires"
+  device.removeDataValue(sidDataKey)
+  device.removeDataValue(expiryDataKey)
   // Clean up in-memory expiry
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   eventTimestamps.remove(expiryKey)
-  if(sid == 'sid3') {
-    device.removeDataValue(ZGT_SUB_DEVICE_KEY)
-    device.removeDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY)
-    device.removeDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY)
+  if(sid == 'zgt') {
+    // Remove the previous persisted epoch value; the formatted expiry is retained separately.
+    device.removeDataValue('zgtSubExpiresEpoch')
   }
 }
 @CompileStatic
@@ -5101,14 +5088,9 @@ Boolean subValid(String sid) {
   String expiryKey = "${getDeviceDNI()}-${sid}-expires"
   Long exp = eventTimestamps.get(expiryKey)
   if(exp == null) { return false }
-  long expiryEpoch = exp.longValue()
-  long resubHalfInterval = RESUB_INTERVAL.intdiv(2).longValue()
   long nowEpoch = Instant.now().getEpochSecond()
-  if((expiryEpoch - resubHalfInterval) > nowEpoch && hasSid(sid) == true) {
-    return true
-  } else {
-    return false
-  }
+  long renewalSafetyEpoch = nowEpoch + UPNP_SUBSCRIPTION_EXPIRY_SAFETY_SECONDS.longValue()
+  return exp.longValue() > renewalSafetyEpoch && hasSid(sid)
 }
 @CompileStatic
 void updateSid(String sid, Map headers, Long grantedTimeout = null) {
@@ -5119,22 +5101,24 @@ void updateSid(String sid, Map headers, Long grantedTimeout = null) {
   eventTimestamps.put(expiryKey, expiresEpoch)
   // Write human-readable expiry to device data for visibility
   String formatted = formatEpoch(expiresEpoch)
-  setDeviceDataValue("${sid}-expires", formatted)
+  String expiryDataKey = sid == 'zgt' ? ZGT_SUB_EXPIRES_DEVICE_KEY : "${sid}-expires"
+  setDeviceDataValue(expiryDataKey, formatted)
   if(headers["SID"]) {setSid(sid, headers["SID"].toString())}
   if(headers["sid"]) {setSid(sid, headers["sid"].toString())}
-  if(sid == 'sid3') {
-    String sidValue = headers["SID"]?.toString() ?: headers["sid"]?.toString() ?: getSid('sid3')
-    if(sidValue) { setDeviceDataValue(ZGT_SUB_DEVICE_KEY, sidValue) }
-    setDeviceDataValue(ZGT_SUB_EXPIRES_DEVICE_KEY, formatted)
-    setDeviceDataValue(ZGT_SUB_EXPIRES_EPOCH_DEVICE_KEY, expiresEpoch.toString())
+  if(sid == 'zgt') {
+    device.removeDataValue('zgtSubExpiresEpoch')
   }
 }
 
 void scheduleResubscriptionToEvents(String eventsToResub, Long grantedTimeout = null) {
-  // Stagger the 1-hour resub window deterministically per device so that
-  // multiple players don't all hit the hub at the same second.
+  // Renew at 85% of the actual granted lease, following common Sonos UPnP
+  // clients. Sonos may grant a longer lease than requested; using the grant
+  // avoids needlessly opening a new socket every hour. Stagger players so
+  // their renewals do not all contend for the hub at once.
   Integer jitterSeconds = getDeviceResubJitterSeconds()
-  Integer renewalDelay = grantedTimeout != null ? Math.max(30, Math.min(RESUB_INTERVAL, grantedTimeout.intValue()) - 100 - jitterSeconds) : RESUB_INTERVAL - 100 - jitterSeconds
+  Long leaseSeconds = grantedTimeout != null && grantedTimeout.longValue() > 0L
+      ? grantedTimeout.longValue() : 2L * RESUB_INTERVAL.longValue()
+  Integer renewalDelay = Math.max(30, (int)Math.floor(leaseSeconds.doubleValue() * UPNP_RENEWAL_PERCENT.doubleValue() / 100.0d) - jitterSeconds)
   runIn(renewalDelay, eventsToResub, [overwrite: true])
   clearSubscriptionRetryAttempts(eventsToResub)
 }
@@ -5188,7 +5172,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','sid3','sid4','sid5','sid6'].contains(sidKey)) { return }
+  if(entry == null || !['sid1','sid2','zgt','sid4','sid5','sid6'].contains(sidKey)) { return }
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
@@ -5221,7 +5205,7 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
       switch(sidKey) {
         case 'sid1': unschedule('retryUpnpSid1'); break
         case 'sid2': unschedule('retryUpnpSid2'); break
-        case 'sid3': unschedule('retryUpnpSid3'); break
+        case 'zgt': unschedule('retryUpnpZgt'); break
         case 'sid4': unschedule('retryUpnpSid4'); break
         case 'sid5': unschedule('retryUpnpSid5'); break
         case 'sid6': unschedule('retryUpnpSid6'); break
@@ -5237,10 +5221,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', sid3: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory'][sidKey]
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', sid3: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory'][sidKey]
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -5263,7 +5247,7 @@ void dispatchNextUpnpRequest(Map entry) {
 }
 
 Map getUpnpEndpoint() {
-  String configuredHost = getlocalUpnpHost()
+  String configuredHost = getLocalUpnpHost()
   String host = configuredHost ?: ''
   String port = '1400'
   if(configuredHost?.startsWith('[')) {
@@ -5307,7 +5291,7 @@ void dispatchUpnpRequest(Map entry, Map request) {
   if(missingUnsubscribeSid) { completeUpnpWithoutResponse(entry, request, 'no-sid'); return }
   Map endpoint = getUpnpEndpoint()
   String host = endpoint.host as String
-  String portValue = (device.getDataValue('localUpnpPort') ?: endpoint.port ?: '1400').toString()
+  String portValue = (endpoint.port ?: '1400').toString()
   String verb = request.operation == 'unsubscribe' ? 'UNSUBSCRIBE' : 'SUBSCRIBE'
   String target = request.eventUrl as String
   Boolean sidHeaderSent = request.operation == 'unsubscribe' || (request.operation == 'renew' && request.sid != null)
@@ -5463,8 +5447,8 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
         if(sidValue) { updateSid(request.sidKey as String, [SID: sidValue], timeout) }
         else { updateSid(request.sidKey as String, [SID: request.sid], timeout) }
         logDebug("UPnP SID accepted guid=${request.guid} sidKey=${request.sidKey} sidPresent=${sidValue != null} grantedTimeoutSeconds=${timeout} resubscribe=${request.resub ?: 'none'}")
-        if(request.sidKey == 'sid3') {
-          logDebug("ZGT subscription ${request.operation} accepted with SID, device-data zgtSub updated")
+        if(request.sidKey == 'zgt') {
+          logDebug("ZGT subscription ${request.operation} accepted with SID, device data zgtSub updated")
         }
         removeResub(request.subscribeMethod as String)
         if(request.resub) { scheduleResubscriptionToEvents(request.resub as String, timeout) }
@@ -5484,7 +5468,7 @@ void completeUpnpCurrent(Map entry, Map request, Map response, String error) {
     } else {
       logDebug("UPnP response requires retry guid=${request.guid} operation=${request.operation} status=${status ?: 'none'} error=${error ?: 'none'}")
       scheduleUpnpRetry(request)
-      if(request.sidKey == 'sid3' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS) {
+      if(request.sidKey == 'zgt' && request.attempts >= UPNP_REQUEST_MAX_ATTEMPTS) {
         logWarn("ZGT subscription ${request.operation} exhausted retries (status=${status ?: 'none'}, error=${error ?: 'none'})")
       }
     }
@@ -5546,7 +5530,7 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
   switch(request.sidKey) {
     case 'sid1': runIn(delay, 'retryUpnpSid1', options); break
     case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
-    case 'sid3': runIn(delay, 'retryUpnpSid3', options); break
+    case 'zgt': runIn(delay, 'retryUpnpZgt', options); break
     case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
     case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
     case 'sid6': runIn(delay, 'retryUpnpSid6', options); break
@@ -5554,7 +5538,7 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
 }
 void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
-void retryUpnpSid3(Map data) { retryUpnpRequest(data) }
+void retryUpnpZgt(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid6(Map data) { retryUpnpRequest(data) }
@@ -5633,7 +5617,7 @@ void invalidateUpnpRequestsForDevice() {
     logDebug("Invalidated UPnP queue dni=${dni} generation=${entry.generation} previousActiveGuid=${activeGuid ?: 'none'} discardedQueued=${queuedCount}")
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
-    unschedule('retryUpnpSid3')
+    unschedule('retryUpnpZgt')
     unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
     unschedule('retryUpnpSid6')
@@ -5665,7 +5649,7 @@ void retireUpnpRequestsForDevice() {
     unschedule('upnpSubscriptionWatchdog')
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
-    unschedule('retryUpnpSid3')
+    unschedule('retryUpnpZgt')
     unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
     unschedule('retryUpnpSid6')
@@ -5698,7 +5682,7 @@ Integer cleanupUpnpRequestQueues(Set<String> activeDnis) {
 void unlockSubscribeMutexAfterTimeout(String sid) { logDebug("Ignoring legacy UPnP fallback for ${sid}") }
 void unlockSid1SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockSid2SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSid3SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
+void unlockZgtSubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockSid4SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockUnsubscribeMutexAfterTimeout() { logDebug('Ignoring legacy UPnP fallback') }
@@ -5810,13 +5794,13 @@ void unsubscribeFromMrRcEventsCallback(HubResponse response) {
 }
 
 // /////////////////////////////////////////////////////////////////////////////
-// '/ZoneGroupTopology/Event' //sid3
+// '/ZoneGroupTopology/Event' //zgt
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
 void subscribeToZgtEvents() {
-  if(subValid('sid3')) { return }
+  if(subValid('zgt')) { return }
   String sub = 'subscribeToZgtEvents'
-  String subId = 'sid3'
+  String subId = 'zgt'
   String subPath = '/zgt'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_CALLBACK
@@ -5828,7 +5812,7 @@ void subscribeToZgtEvents() {
 @CompileStatic
 void resubscribeToZgtEvents() {
   String resub = 'resubscribeToZgtEvents'
-  String subId = 'sid3'
+  String subId = 'zgt'
   String subPath = '/zgt'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_CALLBACK
@@ -5839,7 +5823,7 @@ void resubscribeToZgtEvents() {
 void subscribeResubscribeToZgtCallback(HubResponse response) {
   String sub = 'subscribeToZgtEvents'
   String resub = 'resubscribeToZgtEvents'
-  String subId = 'sid3'
+  String subId = 'zgt'
   String domain = ZGT_EVENTS_DOMAIN
   subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
 }
@@ -5847,7 +5831,7 @@ void subscribeResubscribeToZgtCallback(HubResponse response) {
 @CompileStatic
 void unsubscribeFromZgtEvents() {
   String unsub = 'unsubscribeFromZgtEvents'
-  String subId = 'sid3'
+  String subId = 'zgt'
   String resub = 'resubscribeToZgtEvents'
   String evtSub = ZGT_EVENTS
   String callback = ZGT_EVENTS_UNSUB_CALLBACK
@@ -5856,7 +5840,7 @@ void unsubscribeFromZgtEvents() {
 
 @CompileStatic
 void unsubscribeFromZgtEventsCallback(HubResponse response) {
-  String subId = 'sid3'
+  String subId = 'zgt'
   String domain = ZGT_EVENTS_DOMAIN
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
@@ -5981,37 +5965,55 @@ void unsubscribeContentDirectoryCallback(HubResponse response) {
 // Getters and Setters
 // =============================================================================
 String getLocalApiUrl(){
-  String deviceIp = getDeviceDataValue('deviceIp')
-  if(deviceIp == null || deviceIp == '') { return null }
+  String deviceIp = getDeviceIpForUrl()
+  if(!deviceIp) { return null }
   return "https://${deviceIp}:1443/api/v1/"
 }
 String getLocalUpnpHost(){
-  String deviceIp = getDeviceDataValue('deviceIp')
-  if(deviceIp == null || deviceIp == '') { return null }
+  String deviceIp = getDeviceIpForUrl()
+  if(!deviceIp) { return null }
   return "${deviceIp}:1400"
 }
 String getLocalUpnpUrl(){
-  String deviceIp = getDeviceDataValue('deviceIp')
-  if(deviceIp == null || deviceIp == '') { return null }
+  String deviceIp = getDeviceIpForUrl()
+  if(!deviceIp) { return null }
   return "http://${deviceIp}:1400"
 }
 String getLocalWsUrl(){
-  String deviceIp = getDeviceDataValue('deviceIp')
-  if(deviceIp == null || deviceIp == '') { return null }
+  String deviceIp = getDeviceIpForUrl()
+  if(!deviceIp) { return null }
   return "wss://${deviceIp}:1443/websocket/api"
+}
+String getDeviceIpForUrl() {
+  return formatDeviceIpForUrl(getDeviceIp())
+}
+String formatDeviceIpForUrl(String deviceIp) {
+  String normalized = deviceIp?.trim()
+  if(!normalized) { return null }
+  if(normalized.startsWith('[') && normalized.endsWith(']')) { return normalized }
+  return normalized.count(':') > 1 ? "[${normalized}]" : normalized
 }
 
 List<String> getLocalApiUrlSecondaries(){
   List<String> secondaryDeviceIps = getSecondaryDeviceIps()
-  return secondaryDeviceIps.collect{"https://${it}:1443/api/v1/"}
+  return secondaryDeviceIps.collect { String ip ->
+    String host = formatDeviceIpForUrl(ip)
+    return host ? "https://${host}:1443/api/v1/" : null
+  }.findAll { String url -> url != null }
 }
 List<String> getLocalUpnpHostSecondaries(){
   List<String> secondaryDeviceIps = getSecondaryDeviceIps()
-  return secondaryDeviceIps.collect{"${it}:1400"}
+  return secondaryDeviceIps.collect { String ip ->
+    String host = formatDeviceIpForUrl(ip)
+    return host ? "${host}:1400" : null
+  }.findAll { String host -> host != null }
 }
 List<String> getLocalUpnpUrlSecondaries(){
   List<String> secondaryDeviceIps = getSecondaryDeviceIps()
-  return secondaryDeviceIps.collect{"http://${it}:1400"}
+  return secondaryDeviceIps.collect { String ip ->
+    String host = formatDeviceIpForUrl(ip)
+    return host ? "http://${host}:1400" : null
+  }.findAll { String url -> url != null }
 }
 
 String getRightChannelRincon() {
@@ -6090,7 +6092,8 @@ Long getLastInboundZgtEventEpoch() {
 @CompileStatic
 void setLastInboundZgtEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastZgtEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastZgtEvent')
+  device.removeDataValue('lastZgtEvent')
+  updateEventTimestampDeviceData('ZgtLastUpdated')
 }
 @CompileStatic
 Boolean lastZgtEventWithin(Integer seconds) {
@@ -6176,8 +6179,7 @@ void releaseFavPlaylistDelegate() {
 }
 
 // Track whether the inbound audioClip status subscription is active.
-@Field static final List<String> WS_NAMESPACES = ['audioClip']
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
@@ -6186,23 +6188,10 @@ String getWsSubscriptionValue(String namespace) {
 void setWsSubscriptionValue(String namespace, String value) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
   wsSubscriptionStatus.put(key, value)
-  // Also persist to device data for visibility when debug logging is enabled
-  if(isDebugLoggingEnabled()) {
-    setDeviceDataValue("WS-${namespace}", value)
-  }
 }
 void clearWsSubscriptionStatus() {
   String prefix = "${this.device?.getDeviceNetworkId()}-WS-"
   wsSubscriptionStatus.keySet().removeAll { String k -> k.startsWith(prefix) }
-  // Also clear device data entries
-  WS_NAMESPACES.each { String ns ->
-    if(device.getDataValue("WS-${ns}") != null) { device.removeDataValue("WS-${ns}") }
-  }
-}
-void removeWsDeviceDataKeys() {
-  WS_NAMESPACES.each { String ns ->
-    if(device.getDataValue("WS-${ns}") != null) { device.removeDataValue("WS-${ns}") }
-  }
 }
 
 void sendChildEvent(ChildDeviceWrapper child, String name, Object value) {
@@ -6980,7 +6969,7 @@ void wsConnect() {
     logTrace("Skipping primary WebSocket connect; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     return
   }
-  String websocketUrl = getDeviceDataValue('websocketUrl')
+  String websocketUrl = getLocalWsUrl()
   if(!websocketUrl) {
     logDebug('WebSocket URL is not configured; waiting for player configuration before connecting')
     return
@@ -7383,7 +7372,7 @@ void playerSetPlayModes(Map playModes) {
 
 @CompileStatic
 void playerSetPlayerVolume(Integer volume) {
-  String host = getDeviceDataValue('localUpnpHost')
+  String host = getLocalUpnpHost()
   if(!host) { logWarn('Cannot set player volume: local UPnP host is unavailable'); return }
   Map params = getSoapActionParams(host, RenderingControl, 'SetVolume', [DesiredVolume: volume])
   postSonosSoapAsync('localControlCallback', params)
@@ -7391,7 +7380,7 @@ void playerSetPlayerVolume(Integer volume) {
 
 @CompileStatic
 void playerSetPlayerMute(Boolean muted) {
-  String host = getDeviceDataValue('localUpnpHost')
+  String host = getLocalUpnpHost()
   if(!host) { logWarn('Cannot set player mute: local UPnP host is unavailable'); return }
   Map params = getSoapActionParams(host, RenderingControl, 'SetMute', [DesiredMute: muted])
   postSonosSoapAsync('localControlCallback', params)
@@ -7399,7 +7388,7 @@ void playerSetPlayerMute(Boolean muted) {
 
 @CompileStatic
 void playerSetPlayerRelativeVolume(Integer volumeDelta) {
-  String host = getDeviceDataValue('localUpnpHost')
+  String host = getLocalUpnpHost()
   if(!host) { logWarn('Cannot adjust player volume: local UPnP host is unavailable'); return }
   Map params = getSoapActionParams(host, RenderingControl, 'SetRelativeVolume', [Adjustment: volumeDelta])
   postSonosSoapAsync('localControlCallback', params)
@@ -8112,7 +8101,7 @@ void groupControlSoapCallback(AsyncResponse response, Map data = null) {
 // =============================================================================
 @CompileStatic
 void setNightMode(Boolean desiredValue) {
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [EQType: 'NightMode', DesiredValue: desiredValue ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
   httpPostAsync(params)
@@ -8121,7 +8110,7 @@ void setNightMode(Boolean desiredValue) {
 @CompileStatic
 void setDialogMode(Boolean desiredValue) {
   logDebug('setDialogMode')
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [EQType: 'DialogLevel', DesiredValue: desiredValue ? 1 : 0]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetEQ', controlValues)
   httpPostAsync(params)
@@ -8129,7 +8118,7 @@ void setDialogMode(Boolean desiredValue) {
 
 @CompileStatic
 void componentSetBassLocal(DeviceWrapper device, BigDecimal level) {
-  String ip = getDeviceDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [DesiredBass: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
   httpPostAsync(params)
@@ -8169,7 +8158,7 @@ void httpPostAsync(Map params, String callback = 'localControlCallback') {
 // Local Control Component Methods
 // =============================================================================
 String getLocalUpnpHostForGroupOperation() {
-  String localHost = getlocalUpnpHost()
+  String localHost = getLocalUpnpHost()
   if(getIsGrouped() && !getIsGroupCoordinator()) {
     // A follower can still be invoked directly by an external automation. Use
     // its local endpoint rather than synchronously looking up the coordinator
@@ -8647,7 +8636,7 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
         String album = findQueueXmlText(item, 'album')
         String albumArtURI = findQueueXmlText(item, 'albumArtURI')
         String trackUri = findQueueXmlText(item, 'res')
-        if(albumArtURI?.startsWith('/')) { albumArtURI = "${getDeviceDataValue('localUpnpUrl')}${albumArtURI}" }
+        if(albumArtURI?.startsWith('/')) { albumArtURI = "${getLocalUpnpUrl()}${albumArtURI}" }
         entries.add([objectId: objectId, updateId: updateId, title: title ?: 'Unknown track', artist: artist ?: '', album: album ?: '', albumArtURI: albumArtURI ?: '', trackUri: normalizeQueueTrackUri(trackUri)])
       }
     }
@@ -8844,27 +8833,27 @@ void componentSetStreamUrlLocal(String streamUrl, BigDecimal volume = null) {
 }
 
 void getDeviceStateAsync(String callbackMethod = 'localControlCallback', Map service, String action, Map data = null, Map controlValues = null) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map params = getSoapActionParams(ip, service, action, controlValues)
   postSonosSoapAsync(callbackMethod, params, data)
 }
 
 void componentSetPlayerLevelLocal(BigDecimal level) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [DesiredVolume: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetVolume', controlValues)
   postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetTrebleLocal(BigDecimal level) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [DesiredTreble: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetTreble', controlValues)
   postSonosSoapAsync('localControlCallback', params)
 }
 
 void componentSetBassLocal(BigDecimal level) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [DesiredBass: level]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetBass', controlValues)
   postSonosSoapAsync('localControlCallback', params)
@@ -8875,7 +8864,7 @@ void componentSetBalanceLocal(BigDecimal level) {
     logWarn("Can not set balance on non-stereo pair.")
     return
   }
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   level *= 5
   if(level < 0) {
     level = level < -100 ? -100 : level
@@ -8904,7 +8893,7 @@ void componentSetBalanceLocal(BigDecimal level) {
 }
 
 void componentSetLoudnessLocal(Boolean desiredLoudness) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getLocalUpnpHost()
   Map controlValues = [DesiredLoudness: desiredLoudness]
   Map params = getSoapActionParams(ip, RenderingControl, 'SetLoudness', controlValues)
   postSonosSoapAsync('localControlCallback', params)

@@ -25,7 +25,7 @@ class SonosAdvPlayerSpec extends Specification {
   @Shared Object rawSocket
 
   void seedUpnpFavorite(String favoriteId, String uri = "x-sonos-http:song%3a${favoriteId}.mp4?sid=204&flags=8232&sn=9") {
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.getFavoritesMap()["test-${favoriteId}"] = [id: favoriteId, name: "Favorite ${favoriteId}",
       service: 'Apple Music', upnpUri: uri,
       upnpMetadata: '<DIDL-Lite><item id="10032028song%3a' + favoriteId + '"><dc:title>Favorite ' + favoriteId + '</dc:title></item></DIDL-Lite>',
@@ -33,7 +33,7 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   void seedUpnpPlaylist(String playlistId) {
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.getPlaylistsMap()[playlistId] = [id: playlistId, objectId: "SQ:${playlistId}", name: "Playlist ${playlistId}",
       upnpUri: "x-rincon-cpcontainer:SQ:${playlistId}",
       upnpMetadata: '<DIDL-Lite><item id="SQ:' + playlistId + '"><dc:title>Playlist ' + playlistId + '</dc:title></item></DIDL-Lite>']
@@ -69,9 +69,27 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parseSonosMessageXML('<Event><title>A &lt; B &gt; C &quot;D&quot; &apos;E&apos;</title></Event>').getAt('title').text() == 'A < B > C "D" \'E\''
   }
 
+  def "player endpoint helpers derive URLs from device IP without storing endpoints"() {
+    when:
+    driver.setSecondaryDeviceIps(['192.168.1.51', '2001:db8::51'])
+    driver.setWsSubscriptionValue('audioClip', 'Subscribed')
+
+    then:
+    driver.getLocalApiUrl() == 'https://192.168.1.50:1443/api/v1/'
+    driver.getLocalUpnpHost() == '192.168.1.50:1400'
+    driver.getLocalUpnpUrl() == 'http://192.168.1.50:1400'
+    driver.getLocalWsUrl() == 'wss://192.168.1.50:1443/websocket/api'
+    driver.getLocalApiUrlSecondaries() == ['https://192.168.1.51:1443/api/v1/', 'https://[2001:db8::51]:1443/api/v1/']
+    driver.getLocalUpnpHostSecondaries() == ['192.168.1.51:1400', '[2001:db8::51]:1400']
+    driver.getLocalUpnpUrlSecondaries() == ['http://192.168.1.51:1400', 'http://[2001:db8::51]:1400']
+    !driver.device.dataValues.keySet().any { String key ->
+      key in ['localApiUrl', 'localUpnpUrl', 'localUpnpHost', 'websocketUrl', 'WS-audioClip']
+    }
+  }
+
   def "favorites are browsed and correlated to AVTransport by their UPnP resource URI"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     String uri = 'x-sonos-http:song%3a933958518.mp4?sid=204&flags=8232&sn=9'
     String embedded = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
       'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
@@ -109,7 +127,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "ContentDirectory updates refresh only the changed active catalog over UPnP"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
     driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getPlaylistChildDNI())
     String favoritesEvent = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><FavoritesUpdateID>RINCON_TEST,101</FavoritesUpdateID></e:property></e:propertyset>'
@@ -127,7 +145,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "ContentDirectory subscription is active when a favorite or playlist child exists"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.children << new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getFavoritesChildDNI())
 
     when:
@@ -703,7 +721,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "mute child commands send player mute requests"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     com.hubitat.app.DeviceWrapper child = new com.hubitat.app.DeviceWrapper(dataValues: [command: 'Mute'])
 
     when:
@@ -1050,8 +1068,7 @@ class SonosAdvPlayerSpec extends Specification {
       putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
-    driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
-    driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.location.metaClass.getHub = { -> new Expando(localIP: '192.168.1.4', localSrvPortTCP: 39501) }
     driver.upnpRequestQueues.clear()
     driver.eventTimestamps.clear()
@@ -1129,8 +1146,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "player initialization starts subscriptions and websocket locally"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
-    driver.device.dataValues.websocketUrl = 'wss://192.168.1.50:1443/websocket/api'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_OTHER'
     driver.device.currentValues.isGroupCoordinator = 'off'
 
@@ -1252,6 +1268,73 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues['sid1-expires'] != null
     driver.scheduled.any { List row -> row[1] == 'resubscribeToAVTransport' }
     driver.upnpRequestQueues.get('SONOS-TEST-DNI').active == null
+  }
+
+  def "live subscription remains valid for its granted lease and repeated subscribe is coalesced"() {
+    given:
+    driver.setSid('zgt', 'uuid:zgt-live')
+    driver.eventTimestamps.put('SONOS-TEST-DNI-zgt-expires', Instant.now().getEpochSecond() + 1800L)
+
+    expect:
+    driver.subValid('zgt')
+
+    when:
+    driver.subscribeToZgtEvents()
+
+    then:
+    rawRequests.isEmpty()
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI') == null
+  }
+
+  def "ZGT subscription metadata uses its established expiry key"() {
+    when:
+    driver.updateSid('zgt', [SID: 'uuid:zgt-test'], 1800L)
+
+    then:
+    driver.device.dataValues.zgtSub == 'uuid:zgt-test'
+    driver.device.dataValues.zgtSubExpires != null
+    !driver.device.dataValues.containsKey('zgt')
+    !driver.device.dataValues.containsKey('zgt-expires')
+    !driver.device.dataValues.containsKey('zgtSubExpiresEpoch')
+  }
+
+  def "last ZGT event timestamp uses the grouped ZGT device data name"() {
+    given:
+    driver.device.dataValues.lastZgtEvent = 'old timestamp'
+
+    when:
+    driver.setLastInboundZgtEvent()
+
+    then:
+    driver.device.dataValues.ZgtLastUpdated != null
+    !driver.device.dataValues.containsKey('lastZgtEvent')
+    driver.eventTimestamps.get('SONOS-TEST-DNI-lastZgtEvent') != null
+  }
+
+  def "subscription is invalid when its SID is missing or lease is near expiry"() {
+    given:
+    driver.setSid('zgt', 'uuid:zgt-live')
+    driver.eventTimestamps.put('SONOS-TEST-DNI-zgt-expires', Instant.now().getEpochSecond() + 30L)
+
+    expect:
+    !driver.subValid('zgt')
+
+    when:
+    driver.eventTimestamps.put('SONOS-TEST-DNI-zgt-expires', Instant.now().getEpochSecond() + 1800L)
+    driver.deleteSid('zgt')
+
+    then:
+    !driver.subValid('zgt')
+  }
+
+  def "subscription renewal follows the granted Sonos lease with per-player jitter"() {
+    when:
+    driver.scheduleResubscriptionToEvents('resubscribeToZgtEvents', 86400L)
+
+    then:
+    List job = driver.scheduled.find { List row -> row[1] == 'resubscribeToZgtEvents' }
+    job != null
+    job[0] == 73440 - driver.getDeviceResubJitterSeconds()
   }
 
   def "expired renewal accepts the replacement SID returned by a fresh subscribe"() {
@@ -2032,7 +2115,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "group topology is queried through ZoneGroupTopology UPnP"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     String zones = '<ZoneGroups><ZoneGroup ID="GROUP-TEST" Coordinator="RINCON_TEST"><ZoneGroupMember UUID="RINCON_TEST" ZoneName="Test" Location="http://192.168.1.50:1400/xml/device_description.xml"/><ZoneGroupMember UUID="RINCON_B" ZoneName="Bedroom" Location="http://192.168.1.51:1400/xml/device_description.xml"/></ZoneGroup></ZoneGroups>'
 
     when:
@@ -2053,7 +2136,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "group membership retries after refreshing topology when a sibling host is not cached"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
     driver.device.dataValues.id = 'RINCON_TEST'
     driver.zgtMemberHostByPlayerId.clear()
@@ -2069,7 +2152,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "group creation adds members with UPnP SetAVTransportURI"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.dataValues.groupPlayerIds = 'RINCON_TEST'
     seedGroupTopology('RINCON_TEST', [RINCON_TEST: '192.168.1.50', RINCON_B: '192.168.1.51'])
 
@@ -2085,7 +2168,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "group removal makes a follower a standalone coordinator over UPnP"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.dataValues.groupPlayerIds = 'RINCON_TEST,RINCON_B'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
     seedGroupTopology('RINCON_TEST', [RINCON_TEST: '192.168.1.50', RINCON_B: '192.168.1.51'])
@@ -2286,7 +2369,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "random favorite load waits for the asynchronous favorites query when the cache is empty"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
 
     when:
     driver.loadFavorite()
@@ -2307,7 +2390,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "favorite autoplay follows the accepted UPnP load"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.getFavoritesMap()['object-service-account'] = [
       id: '353', name: 'Favorite 353', service: 'Amazon Music',
       upnpUri: 'x-sonos-http:song%3a353.mp4?sid=204&flags=8232&sn=9',
@@ -2332,7 +2415,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "stop is queued even when the reported playback state is stopped"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.currentValues.transportStatus = 'stopped'
 
     when:
@@ -2347,7 +2430,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "stop sends a playback stop request when playback is active"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.currentValues.transportStatus = 'playing'
 
     when:
@@ -2360,7 +2443,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "short media load overloads enable crossfade in the outgoing command"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     if(method.toLowerCase(Locale.ROOT).contains('favorite')) { seedUpnpFavorite('42') }
     else { seedUpnpPlaylist('42') }
 
@@ -2470,7 +2553,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "grouped player volume is staggered without issuing playback commands"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
     driver.device.currentValues.isGrouped = 'on'
     driver.device.dataValues.groupPlayerIds = 'RINCON_FIRST,RINCON_TEST,RINCON_THIRD'
 
@@ -2499,7 +2582,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "setVolumeZero sends a direct player volume command with zero"() {
     given:
-    driver.device.dataValues.localUpnpHost = '192.168.1.50'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
 
     when:
     driver.setVolumeZero()

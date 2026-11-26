@@ -21,7 +21,8 @@ class SonosAdvSecondariesSpec extends Specification {
 
   def "secondary initialization removes secondary websocket data without opening a socket"() {
     given:
-    driver.device.dataValues = [id: 'RIGHT', deviceIp: '192.168.1.51', websocketUrl: 'wss://192.168.1.51:1443/websocket/api',
+    driver.device.dataValues = [id: 'RIGHT', deviceIp: '192.168.1.51',
+      websocketUrl: 'wss://192.168.1.51:1443/websocket/api', localUpnpHost: '192.168.1.51:1400',
       websocketStatus: 'open', householdId: 'HOUSE']
 
     when:

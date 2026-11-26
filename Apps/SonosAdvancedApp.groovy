@@ -643,7 +643,38 @@ Boolean requestSonosDeviceDescription(String ipAddress, LinkedHashMap playerInfo
 
 String getLocalUpnpHostForCoordinatorId(String groupCoordinatorId) {
   ChildDeviceWrapper dev = getDeviceFromRincon(groupCoordinatorId)
-  return dev?.getDataValue('localUpnpHost')
+  return getSonosLocalUpnpHost(dev)
+}
+
+String getSonosDeviceIp(DeviceWrapper dev) {
+  return dev?.getDataValue('deviceIp')?.toString()?.trim()
+}
+
+String formatSonosDeviceIpForUrl(String deviceIp) {
+  String normalized = deviceIp?.trim()
+  if(!normalized) { return null }
+  if(normalized.startsWith('[') && normalized.endsWith(']')) { return normalized }
+  return normalized.count(':') > 1 ? "[${normalized}]" : normalized
+}
+
+String getSonosLocalUpnpHost(DeviceWrapper dev) {
+  String ip = formatSonosDeviceIpForUrl(getSonosDeviceIp(dev))
+  return ip ? "${ip}:1400" : null
+}
+
+String getSonosLocalUpnpUrl(DeviceWrapper dev) {
+  String ip = formatSonosDeviceIpForUrl(getSonosDeviceIp(dev))
+  return ip ? "http://${ip}:1400" : null
+}
+
+String getSonosLocalApiUrl(DeviceWrapper dev) {
+  String ip = formatSonosDeviceIpForUrl(getSonosDeviceIp(dev))
+  return ip ? "https://${ip}:1443/api/v1/" : null
+}
+
+String getSonosWebsocketUrl(DeviceWrapper dev) {
+  String ip = formatSonosDeviceIpForUrl(getSonosDeviceIp(dev))
+  return ip ? "wss://${ip}:1443/websocket/api" : null
 }
 
 
@@ -844,7 +875,7 @@ Map getProvisioningSnapshot() {
         id: player.getDataValue('id')?.toString() ?: dni,
         name: players[dni],
         model: (player.getDataValue('modelDisplayName') ?: player.getDataValue('modelName'))?.toString(),
-        ip: (player.getDataValue('deviceIp') ?: player.getDataValue('localUpnpHost'))?.toString(),
+        ip: getSonosDeviceIp(player),
         secondaries: secondaries])
     }
   }
@@ -1006,22 +1037,20 @@ Map submitPlayerProvisioningRequest(Map request) {
       selected.any { String dni -> dni.length() > 128 || !(dni ==~ /[A-Za-z0-9:._-]+/) }) {
     return [accepted: false, error: 'invalid_selection']
   }
-  Set<String> allowedFields = ['id', 'name', 'deviceIp', 'localApiUrl', 'localUpnpUrl', 'localUpnpHost',
-      'websocketUrl', 'swGen', 'capabilities', 'modelName', 'householdId', 'topologyInfo'] as Set<String>
+  Set<String> allowedFields = ['id', 'name', 'deviceIp', 'swGen', 'capabilities', 'modelName', 'householdId', 'topologyInfo'] as Set<String>
   Map<String, Map> validatedPlayers = [:]
   selected.each { String dni ->
     Object raw = players[dni]
     if(!(raw instanceof Map)) { return }
     Map player = (Map)raw
-    List<String> required = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+    List<String> required = ['id', 'deviceIp']
     Map<String, Object> detachedPlayer = detachProvisioningMap(player, allowedFields)
     if(required.every { String key -> detachedPlayer[key] != null && detachedPlayer[key].toString().trim() }) {
       validatedPlayers[dni] = detachedPlayer
     }
   }
   if(validatedPlayers.size() != selected.size()) { return [accepted: false, error: 'invalid_player_data'] }
-  Set<String> allowedSecondaryFields = ['id', 'primaryDeviceId', 'deviceIp', 'localApiUrl', 'localUpnpUrl',
-      'localUpnpHost', 'websocketUrl', 'swGen', 'capabilities', 'modelName', 'modelDisplayName',
+  Set<String> allowedSecondaryFields = ['id', 'primaryDeviceId', 'deviceIp', 'swGen', 'capabilities', 'modelName', 'modelDisplayName',
       'householdId', 'topologyInfo'] as Set<String>
   Map<String, Map> validatedSecondaries = [:]
   secondaries.each { Object key, Object raw ->
@@ -1451,7 +1480,7 @@ void removeAlarmDevices() {
 
 void refreshSonosAlarms(String householdId, ChildDeviceWrapper player) {
   if(!(getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true')) { return }
-  String host = player?.getDataValue('localUpnpHost')?.toString()
+  String host = getSonosLocalUpnpHost(player)
   if(!householdId || !host) { logWarn("Cannot refresh alarms for household ${householdId}: no local Sonos player endpoint"); return }
   String requestId = UUID.randomUUID().toString()
   state.sonosAlarmRefreshRequestIds = (state.sonosAlarmRefreshRequestIds instanceof Map ? state.sonosAlarmRefreshRequestIds : [:]) + [(householdId): requestId]
@@ -1618,7 +1647,7 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
     child.updateDataValue('alarmId', alarmId)
     child.updateDataValue('roomUuid', roomUuid)
     child.updateDataValue('playerDni', roomPlayer?.deviceNetworkId ?: '')
-    child.updateDataValue('localUpnpHost', roomPlayer?.getDataValue('localUpnpHost')?.toString() ?: '')
+    child.updateDataValue('deviceIp', getSonosDeviceIp(roomPlayer) ?: '')
     child.updateDataValue('alarmData', JsonOutput.toJson(alarm))
     child.updateDataValue('parentAppId', app.id.toString())
     Map<String, Object> alarmAttributes = [
@@ -1646,7 +1675,7 @@ void createSonosAlarm(String householdId, Map alarm) {
   ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
     candidate.getDataValue('householdId')?.toString() == householdId
   }
-  String host = player?.getDataValue('localUpnpHost')?.toString()
+  String host = getSonosLocalUpnpHost(player)
   if(!host) { logWarn("Cannot create Sonos alarm in ${householdId}: no local player endpoint"); return }
   List<String> required = ['StartLocalTime','Duration','Recurrence','Enabled','RoomUUID','ProgramURI','ProgramMetaData','PlayMode','Volume','IncludeLinkedZones']
   if(required.any { String key -> alarm[key] == null }) { logWarn('Cannot create Sonos alarm: one or more required settings are missing'); return }
@@ -1719,7 +1748,9 @@ void destroySonosAlarm(String householdId, String alarmId, String roomUuid) {
     candidate.getDataValue('householdId')?.toString() == householdId && candidate.getDataValue('id')?.toString() == roomUuid
   }
   if(player == null) { logWarn("Cannot delete Sonos alarm ${alarmId}: room player ${roomUuid} was not found"); return }
-  Map params = [uri: "http://${player.getDataValue('localUpnpHost')}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
+  String host = getSonosLocalUpnpHost(player)
+  if(!host) { logWarn("Cannot delete Sonos alarm ${alarmId}: room player ${roomUuid} has no device IP"); return }
+  Map params = [uri: "http://${host}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
     headers: [SOAPAction: "${SONOS_ALARM_SERVICE_TYPE}#DestroyAlarm"], body: sonosAlarmSoapBody('DestroyAlarm', [ID: alarmId]), timeout: 10]
   asynchttpPost('sonosAlarmDestroyCallback', params, [householdId: householdId, playerDni: player.deviceNetworkId])
 }
@@ -1737,7 +1768,7 @@ void updateSonosAlarm(String dni, Map changes) {
   Map alarm = [:]
   try { alarm = (Map)getSharedJsonSlurper().parseText(child?.getDataValue('alarmData')?.toString() ?: '{}') }
   catch(Exception e) { logWarn("Cannot update Sonos alarm ${dni}: cached alarm data is invalid"); return }
-  String host = child?.getDataValue('localUpnpHost')?.toString()
+  String host = getSonosLocalUpnpHost(child)
   if(!host) { logWarn("Cannot update Sonos alarm ${dni}: its room player is unavailable"); return }
   alarm.putAll(changes)
   alarm.ID = child.getDataValue('alarmId')?.toString()
@@ -1758,7 +1789,7 @@ void updateSonosAlarm(String dni, Map changes) {
     logWarn("Cannot update Sonos alarm ${alarm.ID}: required alarm settings are missing from the cached record")
     return
   }
-  String requestHost = targetPlayer?.getDataValue('localUpnpHost')?.toString() ?: host
+  String requestHost = getSonosLocalUpnpHost(targetPlayer) ?: host
   Map params = [uri: "http://${requestHost}${SONOS_ALARM_CONTROL_URL}", contentType: 'text/xml', requestContentType: 'text/xml',
     headers: [SOAPAction: "${SONOS_ALARM_SERVICE_TYPE}#UpdateAlarm"], body: sonosAlarmSoapBody('UpdateAlarm', bodyValues), timeout: 10]
   asynchttpPost('sonosAlarmUpdateCallback', params, [householdId: child.getDataValue('householdId')?.toString(), playerDni: targetPlayer?.deviceNetworkId ?: child.getDataValue('playerDni')?.toString(), alarmDni: dni])
@@ -1883,7 +1914,7 @@ void refreshTTSVoiceCacheCallback(AsyncResponse response, Map data) {
 void refreshFavoritesAndPlaylists() {
   logDebug('Refreshing favorites and playlists...')
   try {
-    ChildDeviceWrapper player = getCurrentPlayerDevices().find { it.getDataValue('websocketUrl') }
+    ChildDeviceWrapper player = getCurrentPlayerDevices().find { it.getDataValue('deviceIp') }
     if(player) {
       player.getFavorites()
       player.getPlaylists()
@@ -2045,7 +2076,7 @@ Integer createPlayerDevicesFromProvisioning(List<String> selectedPlayerDevices,
       cd.updateDataValue('secondaryDeviceIps', ips.join(','))
       cd.updateDataValue('secondaryIds', ids.join(','))
     }
-    List<String> critical = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+    List<String> critical = ['id', 'deviceIp']
     List<String> missing = critical.findAll { String key -> !cd.getDataValue(key)?.toString() }
     if(missing) {
       logWarn("Device ${cd.label} is missing critical data fields: ${missing.join(', ')}")
@@ -2068,7 +2099,7 @@ void retryProvisionedDeviceConfiguration(Map data) {
       cd.updateDataValue(key.toString(), value.toString())
     }
   }
-  List<String> critical = ['id', 'deviceIp', 'localUpnpHost', 'localUpnpUrl', 'websocketUrl']
+  List<String> critical = ['id', 'deviceIp']
   if(critical.every { String key -> cd.getDataValue(key)?.toString() }) {
     runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
   }
@@ -2389,7 +2420,7 @@ ChildDeviceWrapper resolvePlayerIdentifier(String identifier) {
     if(normalizedIp) {
       matches = players.findAll { ChildDeviceWrapper player ->
         normalizePlayerIp(player.getDataValue('deviceIp')?.toString()) == normalizedIp ||
-            normalizePlayerIp(player.getDataValue('localUpnpHost')?.toString()) == normalizedIp
+            normalizePlayerIp(getSonosLocalUpnpHost(player)?.toString()) == normalizedIp
       }
     }
   }
@@ -6012,17 +6043,7 @@ String resolveAlbumArtUrl(String rawAlbumArtURI, String artworkSourceId) {
   if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') { return 'Not Available' }
   if(!rawAlbumArtURI.startsWith('/')) { return rawAlbumArtURI }
   ChildDeviceWrapper source = findPlayerBySonosId(artworkSourceId)
-  String baseUrl = source?.getDataValue('localUpnpUrl')?.toString()?.trim()
-  if(!baseUrl) {
-    String host = source?.getDataValue('localUpnpHost')?.toString()?.trim()
-    if(!host) {
-      String ip = source?.getDataValue('deviceIp')?.toString()?.trim()
-      if(ip) { host = ip.contains(':') ? ip : "${ip}:1400" }
-    } else if(!host.contains(':')) {
-      host = "${host}:1400"
-    }
-    if(host) { baseUrl = "http://${host}" }
-  }
+  String baseUrl = getSonosLocalUpnpUrl(source)
   if(baseUrl?.endsWith('/')) { baseUrl = baseUrl[0..-2] }
   return baseUrl ? "${baseUrl}${rawAlbumArtURI}" : rawAlbumArtURI
 }
@@ -6964,14 +6985,13 @@ void getPlayerInfoLocalCallback(AsyncResponse response, Map data) {
   String playerName = respJson?.device?.name
   String playerDni = (splitTokens(respJson?.device?.serialNumber?.replace('-', ''), ':'))[0]
   String swGen = respJson?.device?.swGen
-  String websocketUrl = respJson?.device?.websocketUrl
-  String householdId = respJson?.householdId
+    String householdId = respJson?.householdId
   String playerId = respJson?.playerId
   String groupId = respJson?.groupId
 }
 
 void getZoneGroupAttributesAsync(DeviceWrapper device, String callbackMethod = 'getZoneGroupAttributesAsyncCallback', Map data = null) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getSonosLocalUpnpHost(device)
   Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
   asynchttpPost(callbackMethod, params, data)
 }
@@ -6981,7 +7001,7 @@ void getZoneGroupAttributesAsyncCallback(AsyncResponse response, Map data) {
 }
 
 List<DeviceWrapper> getCurrentGroupedDevices(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getSonosLocalUpnpHost(device)
   List<String> groupedRincons
   Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
   httpPost(params) { resp ->
@@ -7009,7 +7029,7 @@ List<DeviceWrapper> getGroupedPlayerDevicesFromGetZoneGroupAttributes(GPathResul
 }
 
 String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getSonosLocalUpnpHost(device)
   String groupId
   Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
   httpPost(params) { resp ->
@@ -7023,9 +7043,9 @@ String getGroupForPlayerDeviceLocal(DeviceWrapper device) {
 }
 
 DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getSonosLocalUpnpHost(device)
   if(ip == null) {
-    logWarn("No localUpnpHost found for ${device?.displayName}; cannot determine group coordinator")
+    logWarn("No deviceIp found for ${device?.displayName}; cannot determine group coordinator")
     return null
   }
   String groupId
@@ -7052,7 +7072,7 @@ DeviceWrapper getGroupCoordinatorForPlayerDeviceLocal(DeviceWrapper device) {
 }
 
 String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
-  String ip = device.getDataValue('localUpnpHost')
+  String ip = getSonosLocalUpnpHost(device)
   String groupId
   Map params = getSoapActionParams(ip, ZoneGroupTopology, 'GetZoneGroupAttributes')
   httpPost(params) { resp ->
@@ -7067,7 +7087,7 @@ String getHouseholdForPlayerDeviceLocal(DeviceWrapper device) {
 
 Boolean hasLeftAndRightChannelsSync(DeviceWrapper device) {
   String householdId = device.getDataValue('householdId')
-  String localApiUrl = device.getDataValue('localApiUrl')
+  String localApiUrl = getSonosLocalApiUrl(device)
   String endpoint = "households/${householdId}/groups"
   String uri = "${localApiUrl}${endpoint}"
   Map params = [uri: uri]

@@ -1413,7 +1413,7 @@ String renderNewUiSecondaryDevices(Map row) {
   secondaries.each { Map secondary ->
     String name = (secondary.modelDisplayName ?: secondary.modelName ?: 'Secondary speaker').toString()
     String id = secondary.id?.toString()
-    String ip = (secondary.deviceIp ?: secondary.localUpnpHost)?.toString()
+    String ip = secondary.deviceIp?.toString()
     String detail = [ip, id]
         .findAll { Object value -> value }
         .collect { Object value -> escapeNewUiHtml(value) }
@@ -2313,7 +2313,6 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
   String playerName = playerInfoDevice?.name
   String playerDni = mac
   String swGen = playerInfoDevice?.swGen
-  String websocketUrl = playerInfoDevice?.websocketUrl
   String householdId = playerInfo?.householdId
   String playerId = playerInfo?.playerId
   String groupId = playerInfo?.groupId
@@ -2332,9 +2331,10 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     // Update the existing entry with latest info to keep it fresh
     LinkedHashMap existingDevice = discoveredSonoses[mac] as LinkedHashMap
     existingDevice.deviceIp = ipAddress
-    existingDevice.localApiUrl = "https://${ipAddress}:1443/api/v1/"
-    existingDevice.localUpnpUrl = "http://${ipAddress}:1400"
-    existingDevice.localUpnpHost = "${ipAddress}:1400"
+    existingDevice.remove('localApiUrl')
+    existingDevice.remove('localUpnpUrl')
+    existingDevice.remove('localUpnpHost')
+    existingDevice.remove('websocketUrl')
     if(topologyInfo) { existingDevice.topologyInfo = new LinkedHashMap(topologyInfo) }
     logDebug("Device already discovered in primaries (MAC match) - MAC: ${mac}, IP: ${ipAddress}")
   }
@@ -2374,11 +2374,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
     capabilities: deviceCapabilities,
     modelName: modelName,
     householdId: householdId,
-    websocketUrl: websocketUrl,
     deviceIp: "${ipAddress}",
-    localApiUrl: "https://${ipAddress}:1443/api/v1/",
-    localUpnpUrl: "http://${ipAddress}:1400",
-    localUpnpHost: "${ipAddress}:1400",
     topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
   ]
   // Handle secondary/satellite devices (subs, surrounds, right channel in stereo pair)
@@ -2390,11 +2386,7 @@ void processSonosDeviceInfo(LinkedHashMap playerInfo, GPathResult deviceDescript
       capabilities: deviceCapabilities,
       modelName: modelName,
       householdId: householdId,
-      websocketUrl: websocketUrl,
       deviceIp: "${ipAddress}",
-      localApiUrl: "https://${ipAddress}:1443/api/v1/",
-      localUpnpUrl: "http://${ipAddress}:1400",
-      localUpnpHost: "${ipAddress}:1400",
       topologyInfo: topologyInfo ? new LinkedHashMap(topologyInfo) : [:]
     ]
     // Check for duplicate secondaries
@@ -2646,8 +2638,7 @@ void applyQuickTopologyFallbackDevices(Map batch) {
     Map fallback = [id: playerId ?: ipAddress, name: playerName,
       primaryDeviceId: primaryDeviceId, modelName: topologyInfo.ModelName,
       modelDisplayName: topologyInfo.ModelDisplayName, swGen: topologyInfo.SWGen,
-      capabilities: [], deviceIp: ipAddress, localApiUrl: "https://${ipAddress}:1443/api/v1/",
-      localUpnpUrl: "http://${ipAddress}:1400", localUpnpHost: "${ipAddress}:1400",
+      capabilities: [], deviceIp: ipAddress,
       topologyInfo: topologyInfo]
     target[ipAddress] = new LinkedHashMap(fallback)
   }

@@ -186,22 +186,31 @@ class WhitelistMigrationSpec extends Specification {
     !playerDriver.state.containsKey('orphanState')
   }
 
-  def "player prunes orphan device data but keeps sid keys"() {
+  def "player prunes orphan device data but keeps ZGT subscription data"() {
     given:
     playerDriver.device.dataValues['id'] = 'RINCON_123'
-    playerDriver.device.dataValues['sid3'] = 'sid-value'
-    playerDriver.device.dataValues['sid3-expires'] = '2024-01-01'
+    playerDriver.device.dataValues['zgtSub'] = 'uuid:zgt-subscription'
+    playerDriver.device.dataValues['zgtSubExpires'] = '2024-01-01'
     playerDriver.device.dataValues['orphanData'] = 'gone'
-    playerDriver.device.dataValues['localUpnpHost'] = '192.168.1.50'
+    playerDriver.device.dataValues['deviceIp'] = '192.168.1.50'
+    playerDriver.device.dataValues['localUpnpHost'] = 'stale endpoint'
+    playerDriver.device.dataValues['localUpnpUrl'] = 'http://192.168.1.50:1400'
+    playerDriver.device.dataValues['localApiUrl'] = 'https://192.168.1.50:1443/api/v1/'
+    playerDriver.device.dataValues['websocketUrl'] = 'wss://192.168.1.50:1443/websocket/api'
+    playerDriver.device.dataValues['WS-audioClip'] = 'Subscribed'
 
     when:
     playerDriver.pruneOrphanedDriverPersistence()
 
     then:
     playerDriver.device.dataValues.containsKey('id')
-    playerDriver.device.dataValues.containsKey('sid3')
-    playerDriver.device.dataValues.containsKey('sid3-expires')
-    playerDriver.device.dataValues.containsKey('localUpnpHost')
+    playerDriver.device.dataValues.containsKey('zgtSub')
+    playerDriver.device.dataValues.containsKey('zgtSubExpires')
+    !playerDriver.device.dataValues.containsKey('localUpnpHost')
+    !playerDriver.device.dataValues.containsKey('localUpnpUrl')
+    !playerDriver.device.dataValues.containsKey('localApiUrl')
+    !playerDriver.device.dataValues.containsKey('websocketUrl')
+    !playerDriver.device.dataValues.containsKey('WS-audioClip')
     !playerDriver.device.dataValues.containsKey('orphanData')
   }
 

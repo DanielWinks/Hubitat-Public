@@ -29,7 +29,7 @@ class SonosAdvQueueManagementSpec extends Specification {
     player.device.dataValues.clear()
     player.device.currentValues.clear()
     player.device.dataValues.id = 'RINCON_TEST'
-    player.device.dataValues.localUpnpHost = '192.168.1.50:1400'
+    player.device.dataValues.deviceIp = '192.168.1.50'
     player.device.dataValues.name = 'Test Player'
     player.device.deviceNetworkId = 'SONOS-TEST-DNI'
     player.device.id = 22L
@@ -171,7 +171,7 @@ class SonosAdvQueueManagementSpec extends Specification {
     given:
     player.getQueue()
     Map oldRequest = player.asyncCalls.last()
-    player.device.dataValues.remove('localUpnpHost')
+    player.device.dataValues.remove('deviceIp')
 
     when:
     player.getQueue()

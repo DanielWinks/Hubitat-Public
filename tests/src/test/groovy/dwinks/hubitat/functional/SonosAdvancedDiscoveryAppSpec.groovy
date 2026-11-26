@@ -370,9 +370,7 @@ class SonosAdvancedDiscoveryAppSpec extends Specification {
     app.parent = parent
     app.settings.playerDevices = ['AABBCCDDEEFF']
     app.discoveredSonoses['AABBCCDDEEFF'] = [id: 'RINCON_MAIN', name: 'Kitchen',
-      deviceIp: '192.0.2.2', localApiUrl: 'https://192.0.2.2:1443/api/v1/',
-      localUpnpUrl: 'http://192.0.2.2:1400', localUpnpHost: '192.0.2.2:1400',
-      websocketUrl: 'wss://192.0.2.2:1443/websocket']
+      deviceIp: '192.0.2.2']
 
     when:
     app.submitSelectedPlayers()
@@ -381,6 +379,7 @@ class SonosAdvancedDiscoveryAppSpec extends Specification {
     parent.provisioningRequest.schemaVersion == 1
     parent.provisioningRequest.selected == ['AABBCCDDEEFF']
     parent.provisioningRequest.players['AABBCCDDEEFF'].id == 'RINCON_MAIN'
+    parent.provisioningRequest.players['AABBCCDDEEFF'].keySet() == ['id', 'name', 'deviceIp'] as Set
     app.state.playerRequestMessage == 'Speaker creation has been queued.'
   }
 }

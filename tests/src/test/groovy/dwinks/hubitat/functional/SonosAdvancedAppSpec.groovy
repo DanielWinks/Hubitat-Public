@@ -248,6 +248,14 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.groupCommandRequestSequence([sequence: 'invalid']) == Integer.MAX_VALUE
   }
 
+  def "Sonos endpoint helpers derive URLs from device IP"() {
+    expect:
+    appScript.getSonosLocalUpnpHost(coordinator) == '192.0.2.10:1400'
+    appScript.getSonosLocalUpnpUrl(coordinator) == 'http://192.0.2.10:1400'
+    appScript.getSonosLocalApiUrl(coordinator) == 'https://192.0.2.10:1443/api/v1/'
+    appScript.getSonosWebsocketUrl(coordinator) == 'wss://192.0.2.10:1443/websocket/api'
+  }
+
   SonosAppPlayerDouble createPlayer(String id, String groupId, String coordinatorId,
       String playerIds, Boolean isCoordinator) {
     SonosAppPlayerDouble player = new SonosAppPlayerDouble(
@@ -260,7 +268,6 @@ class SonosAdvancedAppSpec extends Specification {
     player.dataValues.groupCoordinatorId = coordinatorId
     player.dataValues.groupPlayerIds = playerIds
     player.dataValues.deviceIp = id == 'RINCON_COORD' ? '192.0.2.10' : '192.0.2.11'
-    player.dataValues.websocketUrl = "ws://192.0.2.${id.hashCode().abs() % 200 + 1}:1443/websocket/api"
     player.currentValues.transportStatus = 'stopped'
     player
   }
@@ -2482,9 +2489,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "player provisioning request is validated, queued, and deferred by the parent"() {
     given:
-    Map player = [id: 'RINCON_NEW', name: 'Bedroom', modelName: 'One', deviceIp: '192.168.1.12',
-      localApiUrl: 'https://192.168.1.12:1443/api/v1/', localUpnpUrl: 'http://192.168.1.12:1400',
-      localUpnpHost: '192.168.1.12:1400', websocketUrl: 'wss://192.168.1.12:1443/websocket']
+    Map player = [id: 'RINCON_NEW', name: 'Bedroom', modelName: 'One', deviceIp: '192.168.1.12']
 
     when:
     Map result = appScript.submitPlayerProvisioningRequest([schemaVersion: 1, requestId: 'request-1',
@@ -2689,7 +2694,6 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "AVT artwork is rendered and group preference controls only group size attributes"() {
     given:
-    coordinator.dataValues.localUpnpUrl = 'http://192.0.2.10:1400'
     coordinator.settings.disableAlbumArtEvents = false
     coordinator.updatedSettings.disableAlbumArtEvents = false
     group.updatedSettings.disableAlbumArtEvents = true
