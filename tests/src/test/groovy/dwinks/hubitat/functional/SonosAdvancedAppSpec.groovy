@@ -225,6 +225,20 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.containsKey('lastSentChildState')
   }
 
+  def "first batteryless player reporting ready wins ZGT subscription and winner can retry"() {
+    expect:
+    appScript.readyForZgt('DNI-FIRST') == 'proceed'
+    appScript.readyForZgt('DNI-SECOND') == 'wait'
+    appScript.readyForZgt('DNI-FIRST') == 'proceed'
+    appScript.state.readyForZgt == ['DNI-FIRST', 'DNI-SECOND']
+  }
+
+  def "empty DNI is not registered as ready for ZGT"() {
+    expect:
+    appScript.readyForZgt(null) == 'wait'
+    appScript.state.readyForZgt == null
+  }
+
   def "SAC escaping helpers preserve the existing HTML and XML entity output"() {
     expect:
     appScript.escapeNewUiHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'

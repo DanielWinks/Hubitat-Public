@@ -1995,6 +1995,41 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.device.dataValues.containsKey('zgtLeaderGeneration')
   }
 
+  def "batteryless player subscribes to ZGT only when parent elects it"() {
+    given:
+    List<String> zgtCalls = []
+    List<String> readinessRequests = []
+    driver.device.dataValues.hasBattery = 'false'
+    driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
+    driver.metaClass.subscribeToMrGrcEvents = { -> }
+    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni ->
+      readinessRequests << dni
+      'proceed'
+    }) }
+
+    when:
+    driver.initialize()
+
+    then:
+    readinessRequests == ['SONOS-TEST-DNI']
+    zgtCalls == ['subscribe']
+  }
+
+  def "batteryless player does not subscribe to ZGT when another player won election"() {
+    given:
+    List<String> zgtCalls = []
+    driver.device.dataValues.hasBattery = 'false'
+    driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
+    driver.metaClass.subscribeToMrGrcEvents = { -> }
+    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni -> 'wait' }) }
+
+    when:
+    driver.initialize()
+
+    then:
+    zgtCalls.isEmpty()
+  }
+
   def "group topology is queried through ZoneGroupTopology UPnP"() {
     given:
     driver.device.dataValues.localUpnpHost = '192.168.1.50'

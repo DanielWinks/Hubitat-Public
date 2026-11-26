@@ -1260,7 +1260,22 @@ void installed() { initialize() }
 void updated() { handleSettingsUpdate() }
 
 void initialize() {
-  performImmediateInitialization()
+  Boolean subscribeToZgt = shouldSubscribeToZgt()
+  performImmediateInitialization(subscribeToZgt)
+}
+
+Boolean shouldSubscribeToZgt() {
+  String hasBattery = device.getDataValue(HAS_BATTERY_DEVICE_KEY)
+  if(hasBattery == null || !hasBattery.equalsIgnoreCase('false')) { return true }
+
+  try {
+    String response = parent.readyForZgt(getDeviceDNI())?.toString()
+    logDebug("Parent ZGT readiness response for ${getDeviceDNI()}: ${response ?: 'none'}")
+    return response == 'proceed'
+  } catch(Exception e) {
+    logWarn("Could not request ZGT subscriber election from parent: ${e.message}")
+    return false
+  }
 }
 
 void handleSettingsUpdate() {
@@ -1287,7 +1302,7 @@ void clearLegacyBridgeAttributesForInitialization() {
   logDebug("Cleared stale bridge attributes for ${dni} before fresh initialization snapshot")
 }
 
-void performImmediateInitialization() {
+void performImmediateInitialization(Boolean subscribeToZgt = true) {
   if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
     try { wsClose() }
     catch(Exception e) { logDebug("Could not close WebSocket before player initialization: ${e.message}") }
@@ -1308,7 +1323,7 @@ void performImmediateInitialization() {
   subscribeToMrRcEvents()
   subscribeToMrGrcEvents()
   if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
-  subscribeToZgtEvents()
+  if(subscribeToZgt) { subscribeToZgtEvents() }
   // AVTransport remains subscribed regardless of group role. The parent filters
   // follower AVT payloads using its own ZGT topology.
   subscribeToAVTransport()
@@ -1633,7 +1648,7 @@ void secondaryConfigurationPhase4() {
   String websocketUrl = device.getDataValue('websocketUrl')
 
   if(localUpnpHost && websocketUrl) {
-    performImmediateInitialization()
+    performImmediateInitialization(shouldSubscribeToZgt())
   } else {
     logWarn('Device data still incomplete after validation - subscriptions not established')
   }
@@ -1892,7 +1907,12 @@ String extractEventTimestampDni(String key) {
 }
 
 void clearStaticDriverStateForCurrentDevice() {
+  // Stop this device's in-flight UPnP work first so callbacks and queued
+  // requests cannot keep using state that is about to be removed.
   retireUpnpRequestsForDevice()
+
+  // Coordinate with the periodic orphan sweep when possible. Uninstall
+  // cleanup still proceeds if the short, best-effort lock acquisition fails.
   Boolean cleanupMutexAcquired = false
   try {
     cleanupMutexAcquired = staticStateCleanupMutex.tryAcquire(100, TimeUnit.MILLISECONDS)
@@ -1904,6 +1924,8 @@ void clearStaticDriverStateForCurrentDevice() {
   String dni = getDeviceDNI()
 
   try {
+    // These registries are keyed by Hubitat's device ID and contain cached
+    // catalogs, group membership, and volume-ramp bookkeeping for this player.
     if(playerId != null && playerId != '') {
       groupsRegistry?.remove(playerId)
       statesRegistry?.remove(playerId)
@@ -1917,6 +1939,8 @@ void clearStaticDriverStateForCurrentDevice() {
       zgtMemberHostByPlayerId?.remove(playerId)
     }
 
+    // Runtime caches and retry/timestamp entries use this device's DNI as
+    // their key or prefix; remove only entries owned by this device.
     if(dni != null && dni != '') {
       runtimeStateByDni?.remove(dni)
       lastWsEventLog?.remove(dni)
@@ -1932,6 +1956,7 @@ void clearStaticDriverStateForCurrentDevice() {
       subscribeRetryAttempts?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
     }
 
+    // Release this player's household-level favorites/playlist delegate claim.
     releaseFavPlaylistDelegate()
   } finally {
     if(cleanupMutexAcquired) {

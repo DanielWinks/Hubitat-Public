@@ -359,6 +359,7 @@ preferences {
 // Hub login sessions expire; re-login when the cached cookie is older than this.
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
 @Field static final String ZGT_LAST_REPORT_STATE_KEY = 'zgtLastReport'
+@Field static final String READY_FOR_ZGT_STATE_KEY = 'readyForZgt'
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final String GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY = 'groupAnnouncementProgressQueue'
 @Field static final String GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY = 'groupAnnouncementDueAt'
@@ -464,6 +465,7 @@ preferences {
 // =============================================================================
 @Field final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   ZGT_LAST_REPORT_STATE_KEY,
+  READY_FOR_ZGT_STATE_KEY,
   LAST_PROCESSED_TOPOLOGY_STATE_KEY,
   GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY,
   GROUP_ANNOUNCEMENT_DUE_AT_STATE_KEY,
@@ -2953,6 +2955,20 @@ void alarmRequestHandler(Event event) {
 /** Handle player requests sent directly by the child player driver. */
 Boolean playerAppRequest(Map request) {
   return playerAppRequestHandler(request)
+}
+
+/** Elect the first batteryless player that reports ready as the household ZGT subscriber. */
+String readyForZgt(String dni) {
+  if(!dni) { return 'wait' }
+
+  List<String> readyPlayers = state[READY_FOR_ZGT_STATE_KEY] instanceof List
+      ? new ArrayList<String>((List<String>)state[READY_FOR_ZGT_STATE_KEY]) : []
+  if(!readyPlayers.contains(dni)) { readyPlayers.add(dni) }
+  state[READY_FOR_ZGT_STATE_KEY] = readyPlayers
+
+  // Keep the original winner stable across repeated initialize calls; only it
+  // may retry its subscription after a restart or a failed UPnP request.
+  return readyPlayers[0] == dni ? 'proceed' : 'wait'
 }
 
 Boolean playerAppRequestHandler(Object event) {
