@@ -1077,7 +1077,7 @@ metadata {
   'rightChannelDeviceIp',
   'zgtSub',
   'zgtSubExpires',
-  RUNTIME_MIGRATION_MARKER_KEY,
+  'runtimeStateMigrationVersion', // literal value of RUNTIME_MIGRATION_MARKER_KEY: Hubitat rejects constant refs in static Set initializers
   'normalAnnouncementMode',
   'highPriorityAnnouncementMode',
   'sid1',
