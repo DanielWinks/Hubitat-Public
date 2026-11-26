@@ -4472,10 +4472,23 @@ List<Map> buildFavoriteMatchEvents(Map<String, String> keys) {
   }
   return [
     [name: 'currentFavorite', value: matchedFavorite != null
-        ? "Favorite #${matchedFavorite.id} ${matchedFavorite.name}".toString() : 'No favorite playing'],
+        ? formatCurrentFavorite(matchedFavorite) : 'No favorite playing'],
     [name: 'currentPlaylist', value: matchedPlaylist?.name
         ? "Playlist #${matchedPlaylist.id} ${matchedPlaylist.name}".toString() : 'No playlist playing']
   ]
+}
+
+/** Label plus favorite artwork markup; relative artwork paths resolve against this player's UPnP host. */
+String formatCurrentFavorite(Map favorite) {
+  String label = "Favorite #${favorite.id} ${favorite.name}".toString()
+  String image = favorite.imageUrl?.toString()
+  if(!image) { return label }
+  if(image.startsWith('/')) {
+    String base = getLocalUpnpUrl()
+    if(!base) { return label }
+    image = "${base}${image}".toString()
+  }
+  return "${label} <br><img src=\"${StringEscapeUtils.escapeHtml4(image)}\" width=\"200\" height=\"200\" >".toString()
 }
 
 String normalizeFavoriteResourceId(String resourceId) {

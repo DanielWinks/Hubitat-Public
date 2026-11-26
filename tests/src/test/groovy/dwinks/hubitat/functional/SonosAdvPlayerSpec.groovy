@@ -121,6 +121,7 @@ class SonosAdvPlayerSpec extends Specification {
     request.params.body.contains('<ObjectID>FV:2</ObjectID>')
     driver.findFavoriteById('14').name == 'Peepers On Crane Pond'
     matchEvents.find { Map event -> event.name == 'currentFavorite' }.value.contains('Favorite #14 Peepers On Crane Pond')
+    matchEvents.find { Map event -> event.name == 'currentFavorite' }.value.contains('<img src="https://example.test/cover.jpg"')
   }
 
   def "ContentDirectory notifications are ignored by players that are not the elected catalog refresher"() {
