@@ -3231,11 +3231,14 @@ void enqueuePlayerAudioClipItem(Map item) {
 
 void enqueuePlayerAudioClipItems(List<Map> items, Boolean deferDispatch = false) {
   Set<String> playerIds = new LinkedHashSet<String>()
+  // A deferred batch reserves its clips so a pending single-player dispatch cannot claim one first.
+  String batchId = deferDispatch ? UUID.randomUUID().toString() : null
   synchronized(appLock('work')) {
     Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
     items.each { Map item ->
       String playerId = item?.playerId?.toString()
       if(!playerId) { return }
+      if(batchId) { item.reservedBatch = batchId }
       Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : [regular: [], high: []]
       List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
       List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
@@ -3250,7 +3253,8 @@ void enqueuePlayerAudioClipItems(List<Map> items, Boolean deferDispatch = false)
   if(playerIds.isEmpty()) { return }
   if(deferDispatch) {
     // The caller holds appLock('work'). Send from a new execution so the lock is not held while POSTing.
-    runInMillis(1, 'dispatchNextPlayerAudioClipsCallback', [data: [playerIds: new ArrayList<String>(playerIds)], overwrite: false])
+    runInMillis(1, 'dispatchNextPlayerAudioClipsCallback', [data: [playerIds: new ArrayList<String>(playerIds),
+      batchId: batchId], overwrite: false])
   } else {
     dispatchNextPlayerAudioClips(playerIds)
   }
@@ -3262,17 +3266,17 @@ void dispatchNextPlayerAudioClip(String playerId) {
 
 void dispatchNextPlayerAudioClipsCallback(Map data = [:]) {
   List ids = data?.playerIds instanceof List ? (List)data.playerIds : []
-  if(ids) { dispatchNextPlayerAudioClips(ids.collect { Object id -> id.toString() }) }
+  if(ids) { dispatchNextPlayerAudioClips(ids.collect { Object id -> id.toString() }, data?.batchId?.toString()) }
 }
 
 /**
  * Prepare every POST first, then send them back to back with nothing else in the loop. No logging, lock or
  * lookup happens between two asynchttpPost calls, so the spread between players is only the send cost.
  */
-void dispatchNextPlayerAudioClips(Collection<String> playerIds) {
+void dispatchNextPlayerAudioClips(Collection<String> playerIds, String batchId = null) {
   Long prepStartedAt = now()
   List<Map> notes = []
-  List<Map> posts = prepareNextPlayerAudioClipPosts(playerIds, notes)
+  List<Map> posts = prepareNextPlayerAudioClipPosts(playerIds, notes, batchId)
   Long prepEndedAt = now()
   Integer count = posts.size()
   List<Long> sentAt = new ArrayList<Long>(count)
@@ -3291,10 +3295,23 @@ void dispatchNextPlayerAudioClips(Collection<String> playerIds) {
   finishAudioClipDispatch(posts, sentAt, failures, notes, prepStartedAt, prepEndedAt)
 }
 
-List<Map> prepareNextPlayerAudioClipPosts(Collection<String> playerIds, List<Map> notes) {
+List<Map> prepareNextPlayerAudioClipPosts(Collection<String> playerIds, List<Map> notes, String batchId = null) {
   List<Map> posts = []
   synchronized(appLock('work')) {
     Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
+    if(batchId) {
+      // The batch claims what is free in this same lock block; clips for busy players become ordinary queue entries.
+      queues.values().each { Object value ->
+        Map queue = value instanceof Map ? (Map)value : [:]
+        [queue.high, queue.regular].each { Object list ->
+          if(list instanceof List) {
+            ((List)list).each { Object entry ->
+              if(entry instanceof Map && ((Map)entry).reservedBatch == batchId) { ((Map)entry).remove('reservedBatch') }
+            }
+          }
+        }
+      }
+    }
     Map<String, ChildDeviceWrapper> playersById = [:]
     if(playerIds.any { String id -> queues[id] instanceof Map }) {
       getCurrentPlayerDevices().each { ChildDeviceWrapper candidate ->
@@ -3324,7 +3341,16 @@ void finishAudioClipDispatch(List<Map> posts, List<Long> sentAt, List<String> fa
         Map active = queue?.active instanceof Map ? (Map)queue.active : null
         if(active == null || active.name?.toString() != data.name?.toString()) { continue }
         active.postSentAt = sentAt.get(i)
+        active.remove('posting')
         changed = true
+        if(active.activeAt instanceof Number) {
+          // ACTIVE arrived while the batch was still sending; report the latency now that both times exist.
+          notes.add([level: 'debug', message: "audioClip player=${playerId}, name=${data.name}, postToActiveMs=${((Number)active.activeAt).longValue() - sentAt.get(i)}".toString()])
+        }
+        List<Map> pendingHigh = queue.high instanceof List ? (List<Map>)queue.high : []
+        if(active.priority != 'HIGH' && !pendingHigh.isEmpty()) {
+          runInMillis(1, 'dispatchNextPlayerAudioClipCallback', [data: [playerId: playerId], overwrite: false])
+        }
         if(failures.get(i) != null) {
           notes.add([level: 'warn', message: "Could not send audioClip POST for ${playerId}: ${failures.get(i)}".toString()])
           runInMillis(1, 'completePlayerAudioClipCallback', [overwrite: false,
@@ -3342,7 +3368,9 @@ void finishAudioClipDispatch(List<Map> posts, List<Long> sentAt, List<String> fa
         "send spread ${sentAt.get(posts.size() - 1) - first}ms [${offsets.join(', ')}]")
   }
   notes.each { Map note ->
-    if(note.level == 'warn') { logWarn(note.message.toString()) } else { logInfo(note.message.toString()) }
+    if(note.level == 'warn') { logWarn(note.message.toString()) }
+    else if(note.level == 'debug') { logDebug(note.message.toString()) }
+    else { logInfo(note.message.toString()) }
   }
 }
 
@@ -3357,8 +3385,12 @@ Map prepareNextPlayerAudioClipPost(String playerId, Map<String, ChildDeviceWrapp
   List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
   List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
   Map active = queue.active instanceof Map ? (Map)queue.active : null
+  Map head = high ? (Map)high.get(0) : (regular ? (Map)regular.get(0) : null)
+  // A clip reserved for a group batch is sent by that batch only.
+  if(head?.reservedBatch != null) { return null }
   if(active != null) {
-    if(active.priority == 'HIGH' || high.isEmpty()) { return null }
+    // A clip whose POST is still being submitted cannot be preempted; finishAudioClipDispatch re-dispatches after.
+    if(active.priority == 'HIGH' || high.isEmpty() || active.posting == true) { return null }
     queue.suspended = active
     queue.remove('active')
   }
@@ -3411,6 +3443,7 @@ Map prepareNextPlayerAudioClipPost(String playerId, Map<String, ChildDeviceWrapp
   next.appId = AUDIO_CLIP_APP_ID
   next.dispatchedAt = now()
   next.phase = 'POST_PENDING'
+  next.posting = true
   queue.active = next
   queues[playerId] = queue
   saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
@@ -3488,7 +3521,8 @@ void completePlayerAudioClip(String playerId, Map completed, String phase) {
 /** Child entry point: accept one audioClip status report from a player driver and apply it from a new execution. */
 void putAudioClipStatus(String dni, Map status, Object epoch, Object sequence) {
   if(!dni || !(status instanceof Map) || status.appId?.toString() != AUDIO_CLIP_APP_ID) { return }
-  if(!acceptSequence("clip:${dni}".toString(), epoch, sequence)) {
+  // Marks are per player and clip name so a later callback for another clip cannot drop this clip's DONE.
+  if(!acceptSequence("clip:${dni}:${status.name}".toString(), epoch, sequence)) {
     logDebug("Ignoring stale audioClip status ${status.status} for ${dni}")
     return
   }
@@ -3500,8 +3534,8 @@ void audioClipStatusCallback(Map data) {
   String dni = data?.dni?.toString()
   Map payload = data?.status instanceof Map ? (Map)data.status : null
   if(!dni || payload == null) { return }
-  if(!applySequence("clip:${dni}".toString(), data.epoch, data.sequence)) { return }
   synchronized(appLock('work')) {
+    if(!applySequence("clip:${dni}:${payload.name}".toString(), data.epoch, data.sequence)) { return }
     ChildDeviceWrapper player = getChildDevice(dni)
     String playerId = player?.getDataValue('id')?.toString()
     String name = payload.name?.toString()
@@ -3513,7 +3547,8 @@ void audioClipStatusCallback(Map data) {
     if(payload.id != null) { active.sonosId = payload.id.toString() }
     active.phase = phase
     Long postSentAt = active.postSentAt instanceof Number ? ((Number)active.postSentAt).longValue() : null
-    if(phase == 'ACTIVE' && postSentAt != null) { active.activeAt = now() }
+    // Capture ACTIVE at receipt even while the batch is still sending; the send path reports the latency then.
+    if(phase == 'ACTIVE') { active.activeAt = now() }
     queues[playerId] = queue
     saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
     String latency = phase == 'ACTIVE' && postSentAt != null ? ", postToActiveMs=${now() - postSentAt}" : ''

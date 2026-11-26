@@ -6633,6 +6633,8 @@ void webSocketStatus(String message) {
       return
     }
     setWebSocketStatus('closing')
+    // The transport is going away; recover now instead of waiting for the health check.
+    scheduleWebSocketReconnect()
   }
   else {
     setWebSocketStatus('unknown')
@@ -6642,15 +6644,20 @@ void webSocketStatus(String message) {
 }
 
 void scheduleWebSocketReconnect() {
-  if(runtimeState[WS_RETRY_SCHEDULED_KEY] == true) { return }
-  if(runtimeState[WS_DISCONNECTED_SINCE_KEY] == null) { runtimeState[WS_DISCONNECTED_SINCE_KEY] = now() }
+  Integer delaySeconds
+  Integer retryCount
+  // Callbacks run concurrently; the check-and-set of the scheduled flag and the retry counter must be atomic.
+  synchronized(getRuntimeState()) {
+    if(runtimeState[WS_RETRY_SCHEDULED_KEY] == true) { return }
+    if(runtimeState[WS_DISCONNECTED_SINCE_KEY] == null) { runtimeState[WS_DISCONNECTED_SINCE_KEY] = now() }
 
-  Long disconnectedSince = runtimeState[WS_DISCONNECTED_SINCE_KEY] as Long
-  Long elapsedSeconds = Math.max(0L, (now() - disconnectedSince).intdiv(1000L))
-  Integer delaySeconds = webSocketRetryIntervalSeconds(elapsedSeconds)
-  Integer retryCount = (runtimeState.wsRetryCount ?: 0) as Integer
-  runtimeState.wsRetryCount = retryCount + 1
-  runtimeState[WS_RETRY_SCHEDULED_KEY] = true
+    Long disconnectedSince = runtimeState[WS_DISCONNECTED_SINCE_KEY] as Long
+    Long elapsedSeconds = Math.max(0L, (now() - disconnectedSince).intdiv(1000L))
+    delaySeconds = webSocketRetryIntervalSeconds(elapsedSeconds)
+    retryCount = (runtimeState.wsRetryCount ?: 0) as Integer
+    runtimeState.wsRetryCount = retryCount + 1
+    runtimeState[WS_RETRY_SCHEDULED_KEY] = true
+  }
 
   logInfo("WebSocket connection failed. Retry ${retryCount + 1} in ${delaySeconds} seconds...")
   runIn(delaySeconds, 'retryWebSocketConnection', [overwrite: true])
@@ -6702,6 +6709,7 @@ void wsConnect() {
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
     unschedule('renewWebsocketConnection')
     unschedule('retryWebSocketConnection')
+    runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
     scheduleResubscriptionToEvents('renewWebsocketConnection')
   } catch(Exception e) {
     runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)

@@ -68,6 +68,21 @@ class SandboxRuleSpec extends Specification {
     'getProperty'| "getProperty('user.dir')"
   }
 
+  def "fully qualified java.lang.System.nanoTime is flagged"() {
+    given:
+    ParseResult pr = parse('''
+      definition(name: 'F', namespace: 'dwinks', author: 'Foo')
+      preferences { page(name: 'p') }
+      void doIt() { Object x = java.lang.System.nanoTime() }
+    '''.stripIndent())
+
+    when:
+    List<Violation> v = new SandboxRule().check(pr)
+
+    then:
+    v.any { it.message.contains("'System.nanoTime") }
+  }
+
   def "now() and UUID are not flagged"() {
     given:
     ParseResult pr = parse('''

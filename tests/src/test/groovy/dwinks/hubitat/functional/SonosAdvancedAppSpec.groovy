@@ -2423,6 +2423,75 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.correlationId == 'regular-A'
   }
 
+  def "a pending single-player dispatch cannot claim a clip reserved for a group batch"() {
+    when: 'a group batch is queued and a stale single-player dispatch runs before it'
+    appScript.enqueuePlayerAudioClipItems([[correlationId: 'batch-clip', playerId: 'RINCON_COORD',
+      uri: 'http://example.test/group.mp3', duration: 3, priority: 'REGULAR', origin: 'test']], true)
+    appScript.dispatchNextPlayerAudioClip('RINCON_COORD')
+
+    then: 'the clip stays queued for its batch'
+    appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.isEmpty()
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.regular.size() == 1
+
+    when: 'the batch runs'
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
+
+    then:
+    appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 1
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.correlationId == 'batch-clip'
+  }
+
+  def "a clip is not preempted until its POST is submitted, and ACTIVE seen first still reports latency"() {
+    given:
+    Map regular = [correlationId: 'regular-A', playerId: 'RINCON_COORD', uri: 'http://example.test/regular.mp3',
+      volume: 10, duration: 5, priority: 'REGULAR', origin: 'test']
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD = [regular: [regular], high: []]
+    List<Map> notes = []
+    List<Map> posts = appScript.prepareNextPlayerAudioClipPosts(['RINCON_COORD'], notes)
+    Map regularBody = new JsonSlurper().parseText(posts[0].params.body as String) as Map
+
+    when: 'a HIGH clip arrives before the regular POST has been submitted'
+    appScript.enqueuePlayerAudioClipItem([correlationId: 'high-H', playerId: 'RINCON_COORD',
+      uri: 'http://example.test/high.mp3', volume: 20, duration: 2, priority: 'HIGH', origin: 'test'])
+
+    then: 'the regular clip stays active and nothing else is sent'
+    appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.isEmpty()
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.correlationId == 'regular-A'
+
+    when: 'ACTIVE arrives before the send time is recorded'
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId,
+      status: [appId: regularBody.appId, name: regularBody.name, status: 'ACTIVE']])
+
+    then:
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.activeAt instanceof Number
+
+    when: 'the POST is submitted'
+    appScript.finishAudioClipDispatch(posts, [appScript.now()], [null], notes, 0L, 0L)
+
+    then: 'latency is reported and the HIGH clip preempts afterwards'
+    notes.any { Map note -> note.message.toString().contains('postToActiveMs=') }
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.postSentAt instanceof Number
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipCallback'])
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.correlationId == 'high-H'
+  }
+
+  def "clip sequence marks are per clip so another clip's callback cannot drop an active clip's DONE"() {
+    given:
+    appScript.enqueuePlayerAudioClipItem([correlationId: 'clip-A', playerId: 'RINCON_COORD',
+      uri: 'http://example.test/a.mp3', volume: 10, duration: 5, priority: 'REGULAR', origin: 'test'])
+    Map body = new JsonSlurper().parseText(appScript.asyncCalls.last().params.body as String) as Map
+    Long epoch = 1000L
+
+    when: 'a callback for a different clip is applied with a newer sequence first'
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId, epoch: epoch, sequence: 6L,
+      status: [appId: body.appId, name: 'some-other-clip', status: 'ACTIVE']])
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId, epoch: epoch, sequence: 5L,
+      status: [appId: body.appId, name: body.name, status: 'DONE']])
+
+    then: 'the active clip still completes'
+    appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD?.active == null
+  }
+
   def "successive queued TTS skips its group chime when suppression is enabled"() {
     given:
     makeAnnouncementRosterExact()

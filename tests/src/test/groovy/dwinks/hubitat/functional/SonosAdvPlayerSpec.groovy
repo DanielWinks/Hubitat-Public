@@ -1261,6 +1261,20 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
   }
 
+  def "closing callback schedules a reconnect once"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+
+    when:
+    driver.webSocketStatus('status: closing')
+    driver.webSocketStatus('status: closing')
+
+    then:
+    driver.device.getDataValue('websocketStatus') == 'closing'
+    driver.scheduled.count { List job -> job[1] == 'retryWebSocketConnection' } == 1
+    driver.runtimeState.wsRetryCount == 1
+  }
+
   def "websocket playback status remains private without publishing lastUpdated"() {
     when:
     driver.processWebsocketMessage(JsonOutput.toJson([

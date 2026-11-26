@@ -110,10 +110,11 @@ class SandboxRule implements Rule {
         // Use Map.get explicitly here. Groovy's statically compiled map
         // subscript can coerce an absent-key fallback map to the declared
         // Set value type for some parsed Hubitat scripts.
-        Set<String> blocked = DISALLOWED_CALLS.get(receiver)
+        String simpleReceiver = receiver.startsWith('java.lang.') ? receiver.substring('java.lang.'.length()) : receiver
+        Set<String> blocked = DISALLOWED_CALLS.get(simpleReceiver)
         if (blocked != null && blocked.contains(mname)) {
           out << new Violation(file, call.lineNumber, call.columnNumber, ruleName, Severity.ERROR,
-            "Disallowed call '${receiver}.${mname}(...)' - Hubitat sandbox will reject this.")
+            "Disallowed call '${simpleReceiver}.${mname}(...)' - Hubitat sandbox will reject this.")
         }
         if (DISALLOWED_RECEIVERS.contains(receiver)) {
           out << new Violation(file, call.lineNumber, call.columnNumber, ruleName, Severity.ERROR,
