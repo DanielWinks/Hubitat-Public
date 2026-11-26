@@ -66,7 +66,7 @@ class WhitelistMigrationSpec extends Specification {
     given:
     app.state['userGroups'] = [:]
     app.state['activeOrphan'] = 'to-be-removed'
-    app.state['pendingPlayerStateUpdates'] = []
+    app.state['pendingPlayerStateUpdates'] = []  // retired child->app queue, pruned
     app.state['favs'] = ['old': true]  // legacy, should be pruned
 
     when:
@@ -74,26 +74,36 @@ class WhitelistMigrationSpec extends Specification {
 
     then:
     app.state.containsKey('userGroups')
-    app.state.containsKey('pendingPlayerStateUpdates')
+    !app.state.containsKey('pendingPlayerStateUpdates')
     !app.state.containsKey('activeOrphan')
     !app.state.containsKey('favs')
     (result.stateRemoved as List).contains('activeOrphan')
     (result.stateRemoved as List).contains('favs')
+    (result.stateRemoved as List).contains('pendingPlayerStateUpdates')
   }
 
-  def "app save keeps calculated group volume caches"() {
+  def "app save migrates shared data to atomicState and prunes retired queue and memory keys from state"() {
     given:
     app.state['groupPreferencesByDni'] = [g: [useProportionalVolume: false]]
+    app.state['activeGroupTopologyOperation'] = [operationId: 'op']
     app.state['playerReadingsByRincon'] = [A: [volume: 10]]
     app.state['pendingVolumeRecalculation'] = [players: ['A'], groups: [], all: false]
+    app.state['groupAnnouncementQueues'] = [G: [pending: []]]
 
     when:
+    app.migrateSharedDataToAtomicState()
     app.pruneOrphanedAppPersistence()
 
-    then:
-    app.state.containsKey('groupPreferencesByDni')
-    app.state.containsKey('playerReadingsByRincon')
-    app.state.containsKey('pendingVolumeRecalculation')
+    then: 'shared read-modify-write data moved to atomicState with its value'
+    app.atomicState.groupPreferencesByDni == [g: [useProportionalVolume: false]]
+    app.atomicState.activeGroupTopologyOperation == [operationId: 'op']
+    !app.state.containsKey('groupPreferencesByDni')
+    !app.state.containsKey('activeGroupTopologyOperation')
+
+    and: 'caches and queues that now live in app memory are pruned from state'
+    !app.state.containsKey('playerReadingsByRincon')
+    !app.state.containsKey('pendingVolumeRecalculation')
+    !app.state.containsKey('groupAnnouncementQueues')
   }
 
   def "app prunes orphan atomicState keys"() {

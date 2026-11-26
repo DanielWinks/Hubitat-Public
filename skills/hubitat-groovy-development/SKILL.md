@@ -28,17 +28,20 @@ Use for new features and refactors in `Apps/` and `Drivers/`.
   callback protection, and explicit online/offline state where useful.
 - Organize larger files with comment sections for imports/constants, logging,
   metadata/preferences, lifecycle, events, device commands, HTTP, and helpers.
-- Never synchronously call `parent.*` from `parse()`/hot paths or child commands
-  inline under the app gate (both hold the `singleThreaded:true` gate — 120 s
-  lock-order inversion). Defer via private queue + `runIn`/`runInMillis` flush/poll.
-  Keep bridge data in private queues, never in attributes (attributes and event
-  history are user-visible; `displayed:false` is a no-op). Hubitat normally
-  suppresses events when an attribute value is unchanged; only
-  `isStateChange: true` forces an unchanged-value event. Do not keep an app-side
-  last-sent cache solely for duplicate suppression. Hot driver queues use `@Field static
-  ConcurrentHashMap` + `synchronized` claim-and-swap drains (`singleThreaded:false`
-  makes `state` maps lose updates); app queues in `state` are safe (serialized).
-  See `AGENTS.md` Parent/Child Async section for the full findings.
+- Sonos Advanced is multi-threaded (`singleThreaded: false` for the app, player and
+  group drivers). Children call `parent.*` directly; a child entry point only reads/writes
+  app data and returns, or ends with `runInMillis(1, '<callback>', [data:..., overwrite:false])`
+  for anything that writes a child. No child-to-app queue, drain, ack or retry loop.
+- Shared data: `state` commits per key, so a read-modify-write of one `state` key loses
+  updates even inside a lock. Use `@Field static ConcurrentHashMap` working data under
+  `synchronized(appLock(key))`, or `atomicState` through `mutateAppData`. Never use a
+  `synchronized` method modifier (it locks only the per-execution instance).
+- Order ordered streams with `[epoch, sequence]` stamped by the driver (per-DNI `AtomicLong`,
+  `DRIVER_EPOCH`) and checked with `acceptSequence` (entry) and `applySequence` (callback).
+- Keep bridge data out of attributes and location events (attributes and event history are
+  user-visible; `displayed:false` is a no-op). Hubitat suppresses unchanged-value events;
+  only `isStateChange: true` forces one. Do not keep an app-side last-sent cache for that.
+  See `AGENTS.md` "Parent/Child Calls and the Multi-Threaded Execution Model".
 
 Inspect nearby examples and test stubs for exact Hubitat API shapes. Run
 targeted lint and relevant tests after coding.

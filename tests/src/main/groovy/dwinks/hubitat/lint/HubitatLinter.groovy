@@ -5,6 +5,7 @@ import dwinks.hubitat.lint.reporters.GitHubAnnotationReporter
 import dwinks.hubitat.lint.reporters.Reporter
 import dwinks.hubitat.lint.rules.CapabilityRequiredMethodsRule
 import dwinks.hubitat.lint.rules.CompileStaticRule
+import dwinks.hubitat.lint.rules.ConcurrencyRule
 import dwinks.hubitat.lint.rules.DriverDefinitionRule
 import dwinks.hubitat.lint.rules.DuplicateFieldRule
 import dwinks.hubitat.lint.rules.DuplicateMethodRule
@@ -69,6 +70,7 @@ class HubitatLinter {
       CapabilityRequiredMethodsRule.fromResource(),
       new DuplicateMethodRule(),
       new DuplicateFieldRule(),
+      new ConcurrencyRule(),
       new SandboxRule()
     ]
 

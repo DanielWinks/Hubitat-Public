@@ -25,7 +25,7 @@ import groovy.transform.Field
 import groovy.transform.CompileStatic
 import groovy.json.JsonOutput
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.time.Instant
 import org.apache.commons.lang3.StringUtils
 import java.util.Locale
 import java.math.BigDecimal
@@ -81,11 +81,9 @@ void logTrace(String message) {
   'groupingMode',
   'groupOperationStatus'
 ]
-@Field static final String PARENT_REQUEST_DRAIN_SCHEDULED_KEY = 'parentRequestDrainScheduled'
-@Field static final Integer PARENT_REQUEST_DRAIN_MS = 1
-@Field static final Integer PARENT_REQUEST_MAX_ITEMS = 32
-@Field static final Integer PARENT_REQUEST_RETRY_MS = 1000
-@Field static ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>> pendingGroupRequests = new ConcurrentHashMap<String, ConcurrentLinkedQueue<Map>>()
+// Parent-bound requests carry [epoch, sequence]: epoch identifies this driver load, sequence is a per-DNI counter.
+@Field static final Long DRIVER_EPOCH = Instant.now().toEpochMilli()
+@Field static final ConcurrentHashMap<String, Long> PARENT_SEQUENCE_BY_DNI = new ConcurrentHashMap<String, Long>()
 
 @Field static final Set<String> ACTIVE_GROUP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([]))
 
@@ -164,7 +162,7 @@ metadata {
     namespace: 'dwinks',
     author: 'Daniel Winks',
     component: true,
-    singleThreaded: true,
+    singleThreaded: false,
     importUrl:'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvGroup.groovy',
     dashboardTypes: [
       "MusicPlayer"
@@ -421,28 +419,32 @@ void requestGroupCommand(String command, Map args = [:]) {
   if(!command) {
     return
   }
-  Integer sequence = ((runtimeState.groupCommandSequence ?: 0) as Integer) + 1
-  runtimeState.groupCommandSequence = sequence
+  String dni = device.getDeviceNetworkId()
+  Long nextSequence
+  synchronized(PARENT_SEQUENCE_BY_DNI) {
+    nextSequence = (PARENT_SEQUENCE_BY_DNI.get(dni) ?: 0L) + 1L
+    PARENT_SEQUENCE_BY_DNI.put(dni, nextSequence)
+  }
   Map payload = [
     version: 1,
     channel: 'groupAppRequest',
-    groupDni: device.getDeviceNetworkId(),
+    groupDni: dni,
     requestId: UUID.randomUUID().toString(),
-    sequence: sequence,
+    epoch: DRIVER_EPOCH,
+    sequence: nextSequence,
     createdAt: now(),
     command: command,
     args: args ?: [:]
   ]
-  logDebug("Queued parent app request action=${command}, requestId=${payload.requestId}, sourceDni=${payload.groupDni}")
-  enqueueGroupAppRequest(payload)
+  logDebug("Sending parent app request action=${command}, requestId=${payload.requestId}, sourceDni=${payload.groupDni}")
+  sendGroupAppRequest(payload)
 }
 
-void enqueueGroupAppRequest(Map payload) {
-  if(payload == null) { return }
+/** Direct call: the app's entry point validates, schedules its own callback and returns. */
+void sendGroupAppRequest(Map payload) {
+  if(payload == null || parent == null) { return }
   try { parent.groupAppRequest(new LinkedHashMap(payload)) } catch(Exception e) { logWarn("parent.groupAppRequest failed: ${e.message}") }
 }
-List<Map> drainPendingGroupRequestsForPoll() { return [] }
-List<Map> flushPendingGroupRequests() { return [] }
 
 private Map getFavoriteLoadOptionsFromPlayMode(String playMode) {
   String normalizedPlayMode = playMode != null ? playMode.toUpperCase() : 'NORMAL'
@@ -532,25 +534,20 @@ void clearPendingCommandsForInitialization() {
     runtimeState.remove(key)
   }
   unschedule('drainGroupCommandQueue')
+  unschedule('publishGroupPreferenceSnapshot')
   unschedule('retryActiveGroupCommandRequest')
   unschedule('groupDeviceVolumeFadeStep')
   String dni = device.getDeviceNetworkId()
   groupDeviceVolumeFadeState.remove(dni)
   lastGroupDeviceVolumeFadeCallTime.remove(dni)
-  runInMillis(1, 'purgeParentGroupCommandsAfterInitialization', [
-    overwrite: true,
-    data: [deviceDni: dni]
-  ])
-  logInfo("Cleared pending group commands for initialization (${dni}); parent purge scheduled")
+  unschedule('purgeParentGroupCommandsAfterInitialization')
+  purgeParentGroupCommandsAfterInitialization(dni)
+  logInfo("Cleared pending group commands for initialization (${dni})")
 }
 
-/** Notify the parent after the driver lifecycle callback releases its device gate. */
-void purgeParentGroupCommandsAfterInitialization(Map data = [:]) {
-  String dni = data?.deviceDni?.toString()
-  if(!dni || dni != device.getDeviceNetworkId()?.toString()) {
-    logDebug("Ignoring stale parent command purge for ${dni ?: '(unknown device)'}")
-    return
-  }
+/** Tell the parent to drop this group's pending work; the app clears it and returns. */
+void purgeParentGroupCommandsAfterInitialization(String dni) {
+  if(!dni || dni != device.getDeviceNetworkId()?.toString() || parent == null) { return }
   try {
     Map payload = [version: 1, channel: 'groupAppRequest', action: 'initializationPurge',
       groupDni: dni, createdAt: now(), requestId: UUID.randomUUID().toString()]
@@ -563,18 +560,18 @@ void purgeParentGroupCommandsAfterInitialization(Map data = [:]) {
 
 void installed() {
   initialize()
-  scheduleGroupPreferenceSnapshot()
+  sendGroupPreferencesToParent()
 }
 
 void updated() {
   initialize()
   configure()
   runInMillis(1, 'refresh', [overwrite: true])
-  scheduleGroupPreferenceSnapshot()
+  sendGroupPreferencesToParent()
 }
 
-/** Copy the app-required settings after updated() releases this driver's gate. */
-void scheduleGroupPreferenceSnapshot() {
+/** Send the app-required settings to the parent. */
+void sendGroupPreferencesToParent() {
   String dni = device?.getDeviceNetworkId()?.toString()
   if(!dni) { return }
   Map<String, Object> preferences = [
@@ -585,15 +582,8 @@ void scheduleGroupPreferenceSnapshot() {
     useProportionalVolume: getUseProportionalVolumeSetting(),
     controlUngroupedIndividually: getControlUngroupedIndividuallySetting()
   ]
-  runInMillis(1, 'publishGroupPreferenceSnapshot', [overwrite: true,
-      data: [deviceDni: dni, preferences: preferences]])
-}
-
-void publishGroupPreferenceSnapshot(Map data = [:]) {
-  String dni = data?.deviceDni?.toString()
-  if(!dni || dni != device?.getDeviceNetworkId()?.toString() || !(data?.preferences instanceof Map)) { return }
   try {
-    parent.groupPreferencesUpdated([deviceDni: dni, preferences: new LinkedHashMap((Map)data.preferences)])
+    parent.groupPreferencesUpdated([deviceDni: dni, preferences: preferences])
   } catch(Exception e) {
     logWarn("Could not send group preference snapshot to parent for ${dni}: ${e.message}")
   }

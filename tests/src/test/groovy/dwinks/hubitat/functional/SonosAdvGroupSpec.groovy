@@ -39,7 +39,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.locationEvents.clear()
     driver.runtimeState.clear()
     driver.state.clear()
-    driver.pendingGroupRequests.clear()
+    driver.PARENT_SEQUENCE_BY_DNI.clear()
     driver.device.deviceNetworkId = 'SONOS-GROUP-TEST-DNI'
     driver.device.dataValues.clear()
     driver.device.currentValues.clear()
@@ -48,13 +48,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.parent = new SonosGroupParentDouble()
   }
 
-  private void drainGroupRequests() {
-    List<Map> batch = driver.flushPendingGroupRequests() ?: []
-    batch.each { Map request -> ((SonosGroupParentDouble)driver.parent).requests << new LinkedHashMap(request) }
-  }
-
   private List<Map> groupRequests() {
-    drainGroupRequests()
     return ((SonosGroupParentDouble)driver.parent).requests.findAll { Map request -> request.command }
   }
 
@@ -65,7 +59,7 @@ class SonosAdvGroupSpec extends Specification {
     ]]])
   }
 
-  def "group preference save schedules the existing full refresh command"() {
+  def "group preference save schedules the full refresh and sends the snapshot directly"() {
     given:
     driver.metaClass.initialize = { -> }
     driver.metaClass.configure = { -> }
@@ -81,13 +75,7 @@ class SonosAdvGroupSpec extends Specification {
 
     then:
     driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'refresh' }
-    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'publishGroupPreferenceSnapshot' }
-
-    when:
-    Map snapshotData = driver.scheduled.find { List call -> call[1] == 'publishGroupPreferenceSnapshot' }[2].data
-    driver.publishGroupPreferenceSnapshot(snapshotData)
-
-    then:
+    !driver.scheduled.any { List call -> call[1] == 'publishGroupPreferenceSnapshot' }
     driver.parent.preferenceUpdates.size() == 1
     driver.parent.preferenceUpdates[0].deviceDni == 'SONOS-GROUP-TEST-DNI'
     driver.parent.preferenceUpdates[0].preferences == [
@@ -166,14 +154,13 @@ class SonosAdvGroupSpec extends Specification {
     driver.parent.requests[0].sequence == 1
   }
 
-  def "group commands survive concurrent enqueue without lost updates"() {
+  def "group commands reach the parent in call order"() {
     given:
     driver.parent = new SonosGroupParentDouble()
 
     when:
     driver.requestGroupCommand('refresh')
     driver.requestGroupCommand('play')
-    drainGroupRequests()
 
     then:
     groupRequests()*.command == ['refresh', 'play']
@@ -200,27 +187,15 @@ class SonosAdvGroupSpec extends Specification {
     driver.lastGroupDeviceVolumeFadeCallTime.isEmpty()
     driver.unschedules.contains('drainGroupCommandQueue')
     driver.unschedules.contains('retryActiveGroupCommandRequest')
-    ((SonosGroupParentDouble)driver.parent).requests.isEmpty()
-    driver.scheduled.any { List item ->
-      item[1] == 'purgeParentGroupCommandsAfterInitialization' &&
-        item[2].data.deviceDni == 'SONOS-GROUP-TEST-DNI'
-    }
-    driver.scheduled.any { List item -> item[1] == 'refresh' }
-
-    when:
-    driver.events.clear()
-    driver.purgeParentGroupCommandsAfterInitialization([deviceDni: 'SONOS-GROUP-TEST-DNI'])
-
-    then:
+    !driver.scheduled.any { List item -> item[1] == 'purgeParentGroupCommandsAfterInitialization' }
     ((SonosGroupParentDouble)driver.parent).requests.count { Map request -> request.action == 'initializationPurge' } == 1
+    driver.scheduled.any { List item -> item[1] == 'refresh' }
     driver.events.isEmpty()
   }
 
   def "group preference snapshot includes both volume settings with documented defaults"() {
     when:
-    driver.scheduleGroupPreferenceSnapshot()
-    Map data = driver.scheduled.find { List item -> item[1] == 'publishGroupPreferenceSnapshot' }[2].data
-    driver.publishGroupPreferenceSnapshot(data)
+    driver.sendGroupPreferencesToParent()
     Map update = ((SonosGroupParentDouble)driver.parent).preferenceUpdates.last()
 
     then:
@@ -236,8 +211,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.settings.controlUngroupedIndividually = true
 
     when:
-    driver.scheduleGroupPreferenceSnapshot()
-    driver.publishGroupPreferenceSnapshot(driver.scheduled.find { List item -> item[1] == 'publishGroupPreferenceSnapshot' }[2].data)
+    driver.sendGroupPreferencesToParent()
     Map update = ((SonosGroupParentDouble)driver.parent).preferenceUpdates.last()
 
     then:
@@ -313,11 +287,11 @@ class SonosAdvGroupSpec extends Specification {
     groupRequests().drop(11).every { Map request -> request.args.volume == '-1' }
   }
 
-  def "group command request IDs stay unique when the in-memory sequence resets"() {
+  def "group command request IDs stay unique when the in-memory sequence resets with a new epoch"() {
     when:
     driver.requestGroupCommand('refresh')
     String firstRequestId = groupRequests()[0].requestId as String
-    driver.runtimeState.remove('groupCommandSequence')
+    driver.PARENT_SEQUENCE_BY_DNI.clear()
     driver.requestGroupCommand('refresh')
     String secondRequestId = groupRequests()[1].requestId as String
 
@@ -367,7 +341,7 @@ class SonosAdvGroupSpec extends Specification {
     ]
   }
 
-  def "polled group requests never call the parent and only require the poll"() {
+  def "group requests call the parent directly with no outbox or flush"() {
     given:
     List<Map> direct = []
     driver.parent = new SonosGroupParentDouble() {
@@ -379,17 +353,16 @@ class SonosAdvGroupSpec extends Specification {
 
     when:
     driver.refresh()
-    List<Map> batch = driver.flushPendingGroupRequests()
+    driver.refresh()
 
     then:
-    // direct parent call — poll stubs are no-ops for backward compat
-    direct.size() == 1
-    direct[0].command == 'refresh'
-    batch.isEmpty()
+    direct*.command == ['refresh', 'refresh']
+    direct*.epoch.unique() == [driver.DRIVER_EPOCH]
+    direct*.sequence == [1L, 2L]
     !driver.scheduled.any { List call -> call[1] == 'flushPendingGroupRequests' }
   }
 
-  def "group refresh is also deferred through the request boundary"() {
+  def "group refresh calls the parent directly"() {
     when:
     driver.refresh()
 
@@ -398,7 +371,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.events.empty
   }
 
-  def "polled group commands never call the parent synchronously"() {
+  def "group commands schedule no retry or flush job"() {
     given:
     List<Map> direct = []
     driver.parent = new SonosGroupParentDouble() {
@@ -452,7 +425,7 @@ class SonosAdvGroupSpec extends Specification {
     driver.state.isEmpty()
   }
 
-  def "refresh migrates legacy group variables before queuing its parent request"() {
+  def "refresh migrates legacy group variables before sending its parent request"() {
     given:
     driver.state.groupCommandSequence = 8
 
@@ -461,7 +434,7 @@ class SonosAdvGroupSpec extends Specification {
 
     then:
     !driver.state.containsKey('groupCommandSequence')
-    driver.runtimeState.groupCommandSequence == 9
+    groupRequests().last().sequence == 1L
     UUID.fromString(groupRequests().last().requestId as String).toString() ==
       groupRequests().last().requestId
     groupRequests().last().command == 'refresh'

@@ -115,7 +115,13 @@ class ScriptLoader {
 
   /** Create an isolated harness instance from a previously compiled script class. */
   static HubitatScriptHarness instantiate(Class<? extends HubitatScriptHarness> scriptClass) {
-    scriptClass.getDeclaredConstructor(Binding).newInstance(new Binding())
+    HubitatScriptHarness script = scriptClass.getDeclaredConstructor(Binding).newInstance(new Binding())
+    // Static in-memory app data (@Field static maps) outlives instances because the compiled
+    // class is cached; forget it so specs stay isolated, as a hub code save would.
+    if (script.metaClass.respondsTo(script, 'resetAppRuntimeMemory')) {
+      script.invokeMethod('resetAppRuntimeMemory', null)
+    }
+    return script
   }
 
   /**

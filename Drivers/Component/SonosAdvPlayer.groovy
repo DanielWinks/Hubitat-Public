@@ -50,6 +50,7 @@ import java.time.Clock
 import org.apache.commons.codec.binary.Base64
 import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
+import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -689,7 +690,7 @@ metadata {
     version: '0.18.9',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    singleThreaded: true,
+    singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
   // Capabilities (alphabetical)
@@ -905,8 +906,11 @@ metadata {
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
-// Parent app requests queued per player DNI; every access holds this map's lock.
-@Field static ConcurrentHashMap<String, List<Map>> pendingParentRequestsByDni = new ConcurrentHashMap<String, List<Map>>()
+// Parent-bound payloads carry [epoch, sequence]: epoch identifies this driver load (a hub reboot or code
+// save starts a new one) and sequence is a per-DNI counter stamped when the payload is first observed.
+// The app orders every stream from these numbers; there is no driver-side outbox.
+@Field static final Long DRIVER_EPOCH = Instant.now().toEpochMilli()
+@Field static final ConcurrentHashMap<String, Long> PARENT_SEQUENCE_BY_DNI = new ConcurrentHashMap<String, Long>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
@@ -1031,7 +1035,6 @@ metadata {
 // Legacy names used before the ContentDirectory subscription got descriptive keys. Read only for migration.
 @Field static final String LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY = 'sid6'
 @Field static final String LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY = 'sid6-expires'
-@Field static final String PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY = 'pendingCatalogSnapshots'
 @Field static final String ZGT_ELIGIBLE_RUNTIME_KEY = 'zgtElectionEligible'
 @Field static final String CATALOG_REFRESH_OWNER_RUNTIME_KEY = 'catalogRefreshOwner'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
@@ -1043,14 +1046,6 @@ metadata {
 // Whitelisted persistence — pruning helper surfaces (standalone copy, no #include)
 // =============================================================================
 @Field static final Set<String> ACTIVE_PLAYER_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
-  'favoriteLoadRequestId',
-  'playlistLoadRequestId',
-  'playlistAddRequestId',
-  'queueBrowseRequestId',
-  'playbackState',
-  'playbackStateObservedAt',
-  'htControlTosLinkConnected',
-  'htControlObservedAt',
   'lastError',
   'lastErrorReason',
   'lastErrorObservedAt',
@@ -1272,11 +1267,11 @@ void uninstalled() {
 }
 void installed() {
   initialize()
-  schedulePlayerPreferenceSnapshot()
+  sendPlayerPreferencesToParent()
 }
 void updated() {
   handleSettingsUpdate()
-  schedulePlayerPreferenceSnapshot()
+  sendPlayerPreferencesToParent()
 }
 
 void initialize() {
@@ -1302,8 +1297,8 @@ void handleSettingsUpdate() {
   sendParentAppRequest('needCurrentlyPlayingStates')
 }
 
-/** Copy the app-required settings after updated() releases this driver's gate. */
-void schedulePlayerPreferenceSnapshot() {
+/** Send the app-required settings to the parent after updated() finishes. */
+void sendPlayerPreferencesToParent() {
   String dni = device?.getDeviceNetworkId()?.toString()
   if(!dni) { return }
   Map<String, Object> preferences = [
@@ -1316,15 +1311,8 @@ void schedulePlayerPreferenceSnapshot() {
     chimeBeforeStandardPriorityTTS: getChimeBeforeStandardPriorityTTS(),
     ttsBoostAmount: getTTSBoostAmount()
   ]
-  runInMillis(1, 'publishPlayerPreferenceSnapshot', [overwrite: true,
-      data: [deviceDni: dni, preferences: preferences]])
-}
-
-void publishPlayerPreferenceSnapshot(Map data = [:]) {
-  String dni = data?.deviceDni?.toString()
-  if(!dni || dni != device?.getDeviceNetworkId()?.toString() || !(data?.preferences instanceof Map)) { return }
   try {
-    parent.playerPreferencesUpdated([deviceDni: dni, preferences: new LinkedHashMap((Map)data.preferences)])
+    parent.playerPreferencesUpdated([deviceDni: dni, preferences: preferences])
   } catch(Exception e) {
     logWarn("Could not send player preference snapshot to parent for ${dni}: ${e.message}")
   }
@@ -1437,10 +1425,12 @@ void clearPendingCommandsForInitialization() {
   }
   cancelVolumeFade()
 
-  // Older releases persisted command queues in state/atomicState. Remove them
-  // before migrateLegacyRuntimeState() can copy them back into runtimeState.
+  // Older releases persisted command queues, request tokens and playback readings in state/atomicState.
+  // Remove them before migrateLegacyRuntimeState() can copy them back into runtimeState.
   ['pendingParentAppTtsRequests', 'pendingParentCoordinatorCommands',
    'activeParentCoordinatorCommand', 'parentCommandSequence',
+   'favoriteLoadRequestId', 'playlistLoadRequestId', 'playlistAddRequestId', 'queueBrowseRequestId',
+   'playbackState', 'playbackStateObservedAt', 'htControlTosLinkConnected', 'htControlObservedAt',
    TRANSPORT_QUEUE_KEY, TRANSPORT_ACTIVE_KEY,
    'groupAnnouncementStream', 'announcementPlaybackRestore', 'directStreamTtsRestore',
    ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY, 'streamTransportIntentGuid'].each { String key ->
@@ -1448,8 +1438,11 @@ void clearPendingCommandsForInitialization() {
     atomicState.remove(key)
     runtimeState.remove(key)
   }
-  unschedule('drainParentCoordinatorCommandQueue')
-  unschedule('retryParentCoordinatorCommand')
+  ['drainParentCoordinatorCommandQueue', 'retryParentCoordinatorCommand', 'flushParentAppRequests',
+   'flushPendingGroupTopologyOperationEvents', 'relayZgtToParent', 'relayParsedUpnpToParent', 'relayAvtToParent',
+   'relayCoordinatorEventsRequest', 'relayCatalogSnapshotsToParent', 'publishPlayerPreferenceSnapshot'].each { String retired ->
+    unschedule(retired)
+  }
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
@@ -2000,7 +1993,7 @@ void clearStaticDriverStateForCurrentDevice() {
     // their key or prefix; remove only entries owned by this device.
     if(dni != null && dni != '') {
       runtimeStateByDni?.remove(dni)
-      synchronized(pendingParentRequestsByDni) { pendingParentRequestsByDni.remove(dni) }
+      PARENT_SEQUENCE_BY_DNI?.remove(dni)
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
@@ -2241,56 +2234,33 @@ Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
 
 
 
+/** Stamp a parent-bound payload with this driver load's epoch and the next per-DNI sequence. */
+Map stampParentPayload(Map payload) {
+  String dni = device?.getDeviceNetworkId()
+  Long next
+  synchronized(PARENT_SEQUENCE_BY_DNI) {
+    next = (PARENT_SEQUENCE_BY_DNI.get(dni) ?: 0L) + 1L
+    PARENT_SEQUENCE_BY_DNI.put(dni, next)
+  }
+  payload.put('epoch', DRIVER_EPOCH)
+  payload.put('sequence', next)
+  return payload
+}
+
 /**
- * Queue a request for the parent app and return immediately. The caller never
- * blocks on the app's single-threaded gate; flushParentAppRequests delivers it
- * from its own scheduled execution after the caller has released this
- * driver's gate.
+ * Send a request to the parent app. The call is direct: the app's entry point only stores data and returns
+ * (or schedules its own callback), so nothing here waits on another device.
  */
 Boolean sendParentAppRequest(String action, Map args = [:]) {
   String dni = device?.getDeviceNetworkId()
   if(!dni || parent == null) { return false }
-  Map payload = [version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action,
-    args: args ?: [:], requestId: UUID.randomUUID().toString()]
-  logDebug("Queued parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${dni}")
-  synchronized(pendingParentRequestsByDni) {
-    List<Map> pending = pendingParentRequestsByDni.get(dni)
-    Boolean wakeup = pending == null
-    if(wakeup) {
-      pending = new ArrayList<Map>()
-      pendingParentRequestsByDni.put(dni, pending)
-    }
-    pending.add(payload)
-    // The wakeup flag is the queue's presence, so check-and-set shares this lock.
-    if(wakeup) { runInMillis(1, 'flushParentAppRequests', [overwrite: false]) }
-  }
-  return true
-}
-
-/**
- * Deliver this player's queued parent requests in order. The queue stays registered
- * while delivering, so requests enqueued meanwhile join it and no second drain starts;
- * the loop ends (and unregisters) only when a claim finds the queue empty.
- */
-void flushParentAppRequests() {
-  String dni = device?.getDeviceNetworkId()
-  if(!dni) { return }
-  while(true) {
-    List<Map> claimed
-    synchronized(pendingParentRequestsByDni) {
-      List<Map> pending = pendingParentRequestsByDni.get(dni)
-      if(pending == null) { return }
-      if(pending.isEmpty()) {
-        pendingParentRequestsByDni.remove(dni)
-        return
-      }
-      claimed = new ArrayList<Map>(pending)
-      pending.clear()
-    }
-    claimed.each { Map payload ->
-      try { parent.playerAppRequest(payload) }
-      catch(Exception e) { logWarn("parent.playerAppRequest failed for ${payload.action}: ${e.message}") }
-    }
+  Map payload = stampParentPayload([version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action,
+    args: args ?: [:], requestId: UUID.randomUUID().toString()])
+  logDebug("Sending parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${dni}")
+  try { return parent.playerAppRequest(payload) as Boolean }
+  catch(Exception e) {
+    logWarn("parent.playerAppRequest failed for ${action}: ${e.message}")
+    return false
   }
 }
 
@@ -2395,7 +2365,7 @@ void restoreGroupAnnouncementPlayback(String correlationId) {
     String announcementUri = matchingSnapshot ? snapshot.announcementUri?.toString() : announcement?.uri?.toString()
     String currentSource = device.currentValue('audioSource')?.toString()
     if(currentSource && announcementUri && currentSource != announcementUri &&
-        state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+        runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
       logInfo("Skipping playback and volume restore for ${correlationId}; another source is active")
       runtimeState.remove(ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY)
       runtimeState.remove('groupAnnouncementStream')
@@ -2451,7 +2421,7 @@ void retryAnnouncementPlaybackUri(Map data = null) {
     Map snapshot = active.snapshot as Map
     String source = device.currentValue('audioSource')?.toString()
     if(source && snapshot.announcementUri && source != snapshot.announcementUri &&
-        state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+        runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
       completeAnnouncementPlaybackRestore(correlationId, false, 'external-playback')
       return
     }
@@ -2877,32 +2847,28 @@ void selectTV() {
   play()
 }
 
-/**
- * Defer follower-to-coordinator forwarding through the parent app's event
- * queue. A direct parent call from a player method can deadlock when the app
- * is already waiting for a child method to return.
- */
+/** Ask the parent app to run a command on this player's coordinator; the boolean return is the acknowledgement. */
 void requestParentCoordinatorCommand(String command, List args = []) {
-  if(!command) {
+  if(!command || parent == null) {
     return
   }
-  Integer sequence = ((runtimeState.parentCommandSequence ?: 0) as Integer) + 1
-  runtimeState.parentCommandSequence = sequence
-  Map payload = [
+  Map payload = stampParentPayload([
     playerDni: device.getDeviceNetworkId(),
     requestId: UUID.randomUUID().toString(),
-    sequence: sequence,
     createdAt: now(),
     command: command,
     args: args ?: []
-  ]
-  List<Map> pending = runtimeState.pendingParentCoordinatorCommands instanceof List
-      ? (List<Map>)runtimeState.pendingParentCoordinatorCommands
-      : []
-  pending.add(payload)
-  runtimeState.pendingParentCoordinatorCommands = pending
-  logDebug("Queued parent command ${command} (${payload.requestId}); pending=${pending.size()}")
-  runIn(1, 'drainParentCoordinatorCommandQueue', [overwrite: true])
+  ])
+  try {
+    Boolean accepted = parent.playerCommandRequest(payload) as Boolean
+    if(accepted) {
+      logDebug("Parent accepted command ${command} (${payload.requestId})")
+    } else {
+      logWarn("Parent rejected command ${command} (${payload.requestId})")
+    }
+  } catch(Exception e) {
+    logWarn("Parent command ${command} (${payload.requestId}) failed: ${e.message}")
+  }
 }
 
 /** Route group-wide playback changes from a follower to its current coordinator. */
@@ -2918,54 +2884,6 @@ Boolean deferCommandToParentDuringGroupOperation(String command, List args = [])
   if(!runtimeState.groupTopologyOperationId) { return false }
   requestParentCoordinatorCommand(command, args)
   return true
-}
-
-void drainParentCoordinatorCommandQueue() {
-  if(runtimeState.activeParentCoordinatorCommand instanceof Map) { return }
-  List<Map> pending = runtimeState.pendingParentCoordinatorCommands instanceof List
-      ? (List<Map>)runtimeState.pendingParentCoordinatorCommands
-      : []
-  if(pending.isEmpty()) { return }
-  Map payload = pending.remove(0)
-  runtimeState.pendingParentCoordinatorCommands = pending
-  runtimeState.activeParentCoordinatorCommand = payload
-  emitParentCoordinatorCommand(payload)
-}
-
-void emitParentCoordinatorCommand(Map data) {
-  Map payload = data?.payload instanceof Map ? (Map)data.payload : data
-  if(payload?.command) {
-    try {
-      Boolean accepted = parent.playerCommandRequest(new LinkedHashMap(payload)) as Boolean
-      if(accepted) {
-        logDebug("Parent accepted command ${payload.command} (${payload.requestId})")
-        acknowledgeParentCommand(payload.requestId?.toString())
-      } else {
-        logWarn("Parent rejected command ${payload.command} (${payload.requestId}); retrying")
-        runIn(5, 'retryParentCoordinatorCommand', [overwrite: true])
-      }
-    } catch(Exception e) {
-      logWarn("Parent command ${payload.command} (${payload.requestId}) failed: ${e.message}")
-      runIn(5, 'retryParentCoordinatorCommand', [overwrite: true])
-    }
-  }
-}
-
-void retryParentCoordinatorCommand() {
-  Map payload = runtimeState.activeParentCoordinatorCommand instanceof Map ? (Map)runtimeState.activeParentCoordinatorCommand : null
-  if(payload) {
-    logWarn("Retrying unacknowledged parent command ${payload.command} (${payload.requestId})")
-    emitParentCoordinatorCommand(payload)
-  }
-}
-
-void acknowledgeParentCommand(String requestId) {
-  Map active = runtimeState.activeParentCoordinatorCommand instanceof Map ? (Map)runtimeState.activeParentCoordinatorCommand : null
-  if(!active || !requestId || requestId != active.requestId) { return }
-  unschedule('retryParentCoordinatorCommand')
-  runtimeState.remove('activeParentCoordinatorCommand')
-  logDebug("Controller acknowledged parent command ${active.command} (${requestId})")
-  runIn(1, 'drainParentCoordinatorCommandQueue', [overwrite: true])
 }
 
 void muteGroup(){
@@ -3279,51 +3197,17 @@ void clearGroupTopologyOperation(String operationId = null) {
 
 void emitGroupTopologyOperationEvent(String eventName, Map data = [:]) {
   String operationId = runtimeState.groupTopologyOperationId as String
-  if(!operationId || !eventName) { return }
-  Map payload = [
+  if(!operationId || !eventName || parent == null) { return }
+  Map payload = stampParentPayload([
     operationId: operationId,
     requestId: data?.requestId?.toString() ?: runtimeState.groupTopologyOperationRequestId as String,
     event: eventName,
     playerId: getId(),
     observedAt: now(),
     data: data ?: [:]
-  ]
-  synchronized(runtimeState) {
-    List<Map> pending = runtimeState.pendingGroupTopologyOperationEvents instanceof List
-        ? (List<Map>)runtimeState.pendingGroupTopologyOperationEvents : []
-    pending.add(payload)
-    runtimeState.pendingGroupTopologyOperationEvents = pending
-    if(runtimeState.groupTopologyOperationDispatchScheduled != true) {
-      runtimeState.groupTopologyOperationDispatchScheduled = true
-      runInMillis(1, 'flushPendingGroupTopologyOperationEvents', [overwrite: true])
-    }
-  }
-}
-
-void flushPendingGroupTopologyOperationEvents() {
-  List<Map> pending
-  synchronized(runtimeState) {
-    pending = runtimeState.pendingGroupTopologyOperationEvents instanceof List
-        ? new ArrayList<Map>((List<Map>)runtimeState.pendingGroupTopologyOperationEvents) : []
-    runtimeState.remove('pendingGroupTopologyOperationEvents')
-    runtimeState.remove('groupTopologyOperationDispatchScheduled')
-  }
-  pending.each { Map payload ->
-    try { parent.playerGroupTopologyOperationUpdate(payload) }
-    catch(Exception e) {
-      logWarn("Deferred group topology update failed: ${e.message}")
-      synchronized(runtimeState) {
-        List<Map> retry = runtimeState.pendingGroupTopologyOperationEvents instanceof List
-            ? (List<Map>)runtimeState.pendingGroupTopologyOperationEvents : []
-        retry.add(payload)
-        runtimeState.pendingGroupTopologyOperationEvents = retry
-        if(runtimeState.groupTopologyOperationDispatchScheduled != true) {
-          runtimeState.groupTopologyOperationDispatchScheduled = true
-          runIn(1, 'flushPendingGroupTopologyOperationEvents', [overwrite: true])
-        }
-      }
-    }
-  }
+  ])
+  try { parent.playerGroupTopologyOperationUpdate(payload) }
+  catch(Exception e) { logWarn("Group topology update failed: ${e.message}") }
 }
 
 // Playlist Methods
@@ -4099,7 +3983,7 @@ void parse(String raw) {
             logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             Map<String, Object> payload = zgtParse(xmlBody)
             if(payload == null) { return }
-            scheduleZgtParentHandoff(payload)
+            sendZgtToParent(payload)
           } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
           return
         case 'AVTransport':
@@ -4142,7 +4026,7 @@ void parse(String raw) {
             logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             Map<String, String> alarmClockValues = parseAlarmClockPayload(xmlBody)
             if(alarmClockValues.isEmpty()) { logDebug('Ignoring AlarmClock event without documented fields'); return }
-            scheduleParsedUpnpParentHandoff([service: 'AlarmClock', sourceDni: device.getDeviceNetworkId()?.toString(),
+            sendUpnpEventsToParent([service: 'AlarmClock', sourceDni: device.getDeviceNetworkId()?.toString(),
                 values: alarmClockValues])
           } catch(Exception e) { logWarn("Ran into an issue parsing AlarmClock: ${e}") }
           return
@@ -4219,77 +4103,54 @@ Map<String, Object> zgtPayloadFromGroups(List<Map> groups) {
   return [followersByCoordinator: followersByCoordinator, groupNamesById: groupNamesById]
 }
 
-/** Parent handoff occurs after the driver parse gate is released. */
-void scheduleZgtParentHandoff(Map<String, Object> payload) {
+/** Send the parsed ZGT snapshot straight to the parent app. */
+void sendZgtToParent(Map<String, Object> payload) {
   if(payload == null || parent == null) { return }
-  runInMillis(1, 'relayZgtToParent', [overwrite: false, data: new LinkedHashMap<String, Object>(payload)])
-}
-
-void relayZgtToParent(Map<String, Object> payload) {
-  if(payload == null || parent == null) { return }
+  Map<String, Object> stamped = new LinkedHashMap<String, Object>(payload)
+  stamped.put('sourceDni', device.getDeviceNetworkId()?.toString())
+  stampParentPayload(stamped)
   try {
-    parent.setZgtPayload(new LinkedHashMap<String, Object>(payload))
+    parent.setZgtPayload(stamped)
   } catch(Exception e) {
-    logWarn("Could not relay ZGT data to parent: ${e.message}")
+    logWarn("Could not send ZGT data to parent: ${e.message}")
   }
 }
 
-// Parent callbacks run after parse() releases the player gate.
-void scheduleParsedUpnpParentHandoff(Map payload) {
+/** Send parsed AlarmClock/AlarmRunning data straight to the parent app. */
+void sendUpnpEventsToParent(Map payload) {
   if(payload == null || parent == null) { return }
-  runInMillis(1, 'relayParsedUpnpToParent', [overwrite: false, data: new LinkedHashMap(payload)])
-}
-
-void relayParsedUpnpToParent(Map data) {
-  if(data == null || parent == null) { return }
+  Map stamped = stampParentPayload(new LinkedHashMap(payload))
   try {
-    parent.putPlayerUpnpEvents(new LinkedHashMap(data))
+    parent.putPlayerUpnpEvents(stamped)
   } catch(Exception e) {
-    logWarn("Could not relay parsed UPnP ${data.service ?: 'unknown'} data to parent: ${e.message}")
+    logWarn("Could not send parsed UPnP ${payload.service ?: 'unknown'} data to parent: ${e.message}")
   }
 }
 
-// =============================================================================
-// AVT relay
-// Coordinators hand their sendEvent-ready AVT maps to the parent; followers only ask
-// the parent to replay the coordinator's cached events to them. Both run in a
-// scheduled callback so parse() has released before any parent call is made.
-// =============================================================================
-void scheduleAvtRelay(List<Map> events, Map matchKeys, Boolean rematch = false) {
+void sendAvtToParent(List<Map> events, Map matchKeys, Boolean rematch = false) {
   if(parent == null) { return }
-  runInMillis(1, 'relayAvtToParent', [overwrite: false,
-      data: [events: new ArrayList<Map>(events), matchKeys: new LinkedHashMap(matchKeys ?: [:]), rematch: rematch]])
-}
-
-void relayAvtToParent(Map data) {
-  if(data == null || parent == null) { return }
-  List<Map> events = data.events instanceof List ? new ArrayList<Map>((List<Map>)data.events) : []
-  Map newKeys = data.matchKeys instanceof Map ? (Map)data.matchKeys : [:]
+  List<Map> outgoing = events != null ? new ArrayList<Map>(events) : []
+  Map newKeys = matchKeys != null ? new LinkedHashMap(matchKeys) : [:]
   if(!newKeys.isEmpty()) {
     Map merged = runtimeState.avtMatchKeys instanceof Map ? new LinkedHashMap((Map)runtimeState.avtMatchKeys) : [:]
     merged.putAll(newKeys)
     runtimeState.avtMatchKeys = merged
   }
-  if((!newKeys.isEmpty() || data.rematch == true) && runtimeState.avtMatchKeys instanceof Map) {
+  if((!newKeys.isEmpty() || rematch) && runtimeState.avtMatchKeys instanceof Map) {
     ensureFavoritesAndPlaylistsLoaded()
-    events.addAll(buildFavoriteMatchEvents((Map<String, String>)runtimeState.avtMatchKeys))
+    outgoing.addAll(buildFavoriteMatchEvents((Map<String, String>)runtimeState.avtMatchKeys))
   }
-  if(events.isEmpty()) { return }
+  if(outgoing.isEmpty()) { return }
+  Map stamp = stampParentPayload([:])
   try {
-    parent.putAvtEvents(device.getDeviceNetworkId(), events)
+    parent.putAvtEvents(device.getDeviceNetworkId(), outgoing, stamp.epoch, stamp.sequence)
   } catch(Exception e) {
-    logWarn("Could not relay AVT events to parent: ${e.message}")
+    logWarn("Could not send AVT events to parent: ${e.message}")
   }
 }
 
-void scheduleCoordinatorEventsRequest(String coordinatorRincon) {
+void requestCoordinatorEventsFromParent(String coordinatorRincon) {
   if(parent == null || !coordinatorRincon) { return }
-  runInMillis(1, 'relayCoordinatorEventsRequest', [overwrite: false, data: [coordinatorRincon: coordinatorRincon]])
-}
-
-void relayCoordinatorEventsRequest(Map data) {
-  String coordinatorRincon = data?.coordinatorRincon?.toString()
-  if(!coordinatorRincon || parent == null) { return }
   try {
     parent.requestCoordinatorEvents(coordinatorRincon, device.getDeviceNetworkId())
   } catch(Exception e) {
@@ -4703,7 +4564,6 @@ void handleGrcNotification(String xmlBody) {
   buildGrcEvents(snapshot).each { Map event ->
     if(event?.name && event.containsKey('value')) { args[event.name.toString()] = event.value }
   }
-  // Queued, not sent: flushParentAppRequests is the only scheduled handoff after parse() releases its gate.
   if(!args.isEmpty()) { sendParentAppRequest('groupRendering', args) }
 }
 
@@ -4712,19 +4572,19 @@ void handleAvtNotification(String xmlBody) {
   if(avt == null) { return }
   Map<String, String> alarmRunning = avt.alarmRunning instanceof Map ? (Map<String, String>)avt.alarmRunning : [:]
   if(!alarmRunning.isEmpty()) {
-    // Delivered through the deferred parent handoff; the app maps it to the matching alarm switch.
-    scheduleParsedUpnpParentHandoff([service: 'AlarmRunning', sourceDni: device.getDeviceNetworkId()?.toString(),
+    // The app maps this to the matching alarm switch.
+    sendUpnpEventsToParent([service: 'AlarmRunning', sourceDni: device.getDeviceNetworkId()?.toString(),
         values: new LinkedHashMap<String, String>(alarmRunning)])
   }
   if(avt.kind == 'follower') {
     // A follower's own transport describes its stream from the coordinator, not playable content.
     runtimeState.remove('avtMatchKeys')
     runtimeState.remove('lastTransportPlaybackSnapshot')
-    scheduleCoordinatorEventsRequest(avt.coordinatorRincon.toString())
+    requestCoordinatorEventsFromParent(avt.coordinatorRincon.toString())
     return
   }
   observeUpnpPlaybackSource(recordTransportPlaybackSnapshot((Map<String, Object>)avt.transport))
-  scheduleAvtRelay((List<Map>)avt.events, (Map)avt.matchKeys)
+  sendAvtToParent((List<Map>)avt.events, (Map)avt.matchKeys)
 }
 
 @CompileStatic
@@ -5193,7 +5053,7 @@ Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGrou
   if(!isPlausibleXmlPayload(xmlString)) { return false }
   Map<String, Object> payload = zgtParse(xmlString)
   if(payload == null) { return false }
-  scheduleZgtParentHandoff(payload)
+  sendZgtToParent(payload)
   return true
 }
 
@@ -5201,7 +5061,7 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   if(topology == null || !(topology.groups instanceof List)) { return false }
   Map<String, Object> payload = zgtPayloadFromGroups((List<Map>)topology.groups)
   if(payload == null) { return false }
-  scheduleZgtParentHandoff(payload)
+  sendZgtToParent(payload)
   return true
 }
 
@@ -6952,34 +6812,16 @@ Boolean isGroupedFollowerForPlayback() {
   return getGroupPlayerIds().size() > 1 && !getIsGroupCoordinator()
 }
 
-void publishPlayerStateUpdate(Map payload) {
-  if(payload == null || payload.isEmpty()) { return }
-  Map eventData = new LinkedHashMap(payload)
-  eventData['playerDni'] = device.getDeviceNetworkId()
-  enqueueParentStateUpdate(eventData)
-}
-
-void enqueueParentStateUpdate(Map payload) {
-  dispatchParentStateUpdateDirect(payload)
-}
-
-Boolean dispatchParentStateUpdateDirect(Map payload) {
-  if(payload == null || payload.isEmpty()) { return true }
-  String kind = payload?.kind?.toString()
-  String dni = payload?.playerDni?.toString() ?: device.getDeviceNetworkId()
+void publishGroupAnnouncementProgressToParent(Map payload) {
+  if(payload == null || payload.isEmpty() || parent == null) { return }
+  Map stamped = stampParentPayload(new LinkedHashMap(payload))
+  String dni = device.getDeviceNetworkId()
+  stamped.put('playerDni', dni)
   try {
-    if(kind == 'groupAnnouncementProgress') {
-      parent.groupAnnouncementProgress(payload?.correlationId?.toString(), payload?.phase?.toString(), payload, dni)
-      return true
-    }
-    if(kind == 'deviceAttributes') {
-      parent.playerAttributeUpdate(payload)
-      return true
-    }
+    parent.groupAnnouncementProgress(stamped.correlationId?.toString(), stamped.phase?.toString(), stamped, dni)
   } catch(Exception e) {
-    logWarn("direct parent dispatch failed for kind=${kind}: ${e.message}")
+    logWarn("Could not send announcement progress to parent: ${e.message}")
   }
-  return false
 }
 
 
@@ -7304,8 +7146,8 @@ void transportStatusSoapCallback(AsyncResponse response, Map data = null) {
     String playbackState = transportState == 'PLAYING' ? 'PLAYBACK_STATE_PLAYING' :
         (transportState == 'PAUSED_PLAYBACK' ? 'PLAYBACK_STATE_PAUSED' :
         (transportState == 'STOPPED' ? 'PLAYBACK_STATE_IDLE' : 'PLAYBACK_STATE_BUFFERING'))
-    state.playbackState = transportState
-    state.playbackStateObservedAt = now()
+    runtimeState.playbackState = transportState
+    runtimeState.playbackStateObservedAt = now()
     observeTransportPlaybackStatus([playbackState: playbackState])
   } catch(Exception e) {
     logWarn("Could not parse UPnP playback-status response: ${e.message}")
@@ -7750,7 +7592,7 @@ void cacheUpnpFavorites(List<Map> favorites) {
   }
   html += '</div></body></html>'
   setChildFavs(html)
-  enqueueCatalogSnapshot('favorites', favorites)
+  sendCatalogSnapshotToParent('favorites', favorites)
   rematchLatestUpnpPlaybackSnapshot()
 }
 
@@ -7831,7 +7673,7 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
     }
     html += '</div></body></html>'
     setChildPlaylists(html)
-    enqueueCatalogSnapshot('playlists', accumulated)
+    sendCatalogSnapshotToParent('playlists', accumulated)
     removeDriverStateValue('playlistsBrowseRequestId')
     removeDriverStateValue('playlistsBrowseItems')
     logInfo("Loaded ${accumulated.size()} Sonos Playlists through UPnP (total=${total}, updateId=${findSoapBodyField(envelope, 'UpdateID') ?: 'unknown'})")
@@ -7844,9 +7686,8 @@ void playlistsBrowseCallback(AsyncResponse response, Map data = null) {
   }
 }
 
-/** Re-run favorite/playlist matching for the last coordinator AVT after the favorites or playlists were reloaded. */
-/** Latest-wins catalog snapshot handoff; the parent call runs in a scheduled callback, never inline. */
-void enqueueCatalogSnapshot(String catalogType, List<Map> records) {
+/** Send the normalized catalog snapshot straight to the parent app (latest wins there). */
+void sendCatalogSnapshotToParent(String catalogType, List<Map> records) {
   if(parent == null || !catalogType) { return }
   List<Map> normalized = []
   records?.each { Map record ->
@@ -7854,42 +7695,15 @@ void enqueueCatalogSnapshot(String catalogType, List<Map> records) {
     if(!id) { return }
     normalized.add([id: id, name: record?.name?.toString(), imageUrl: record?.imageUrl?.toString()])
   }
-  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
-  synchronized(runtime) {
-    Map pending = runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] instanceof Map
-        ? (Map)runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] : new LinkedHashMap<String, List<Map>>()
-    pending.put(catalogType, normalized)
-    runtime.put(PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY, pending)
-  }
-  runInMillis(1, 'relayCatalogSnapshotsToParent', [overwrite: true])
-}
-
-void relayCatalogSnapshotsToParent() {
-  Map pending = null
-  ConcurrentHashMap<String, Object> runtime = getRuntimeState()
-  synchronized(runtime) {
-    pending = runtime.remove(PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY) as Map
-  }
-  if(pending == null || pending.isEmpty() || parent == null) { return }
-  pending.each { Object catalogType, Object records ->
-    try {
-      parent.putCatalogSnapshot(device.getDeviceNetworkId(), catalogType.toString(), new ArrayList<Map>((List<Map>)records))
-    } catch(Exception e) {
-      logWarn("Could not relay ${catalogType} catalog snapshot to parent; will retry: ${e.message}")
-      // Requeue unless a newer snapshot for this catalog arrived meanwhile.
-      synchronized(runtime) {
-        Map requeued = runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] instanceof Map
-            ? (Map)runtime[PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY] : new LinkedHashMap<String, List<Map>>()
-        if(!requeued.containsKey(catalogType)) { requeued.put(catalogType, records) }
-        runtime.put(PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY, requeued)
-      }
-      runInMillis(30000, 'relayCatalogSnapshotsToParent', [overwrite: true])
-    }
+  try {
+    parent.putCatalogSnapshot(device.getDeviceNetworkId(), catalogType, normalized)
+  } catch(Exception e) {
+    logWarn("Could not send ${catalogType} catalog snapshot to parent: ${e.message}")
   }
 }
 
 void rematchLatestUpnpPlaybackSnapshot() {
-  if(runtimeState.avtMatchKeys instanceof Map) { scheduleAvtRelay([], [:], true) }
+  if(runtimeState.avtMatchKeys instanceof Map) { sendAvtToParent([], [:], true) }
 }
 
 @CompileStatic
@@ -7964,20 +7778,20 @@ void loadFavoriteOverUpnp(Map request) {
         EnqueueAsNext: action == 'INSERT_NEXT'])
   }
   String requestId = UUID.randomUUID().toString()
-  state.favoriteLoadRequestId = requestId
+  runtimeState.favoriteLoadRequestId = requestId
   logInfo("Loading Sonos favorite ${favoriteId} (${favorite.name ?: 'unnamed'}) through UPnP; action=${action}")
   try {
     postSonosSoapAsync('favoriteLoadSoapCallback', params, [requestId: requestId,
         favoriteId: favoriteId, action: action, playOnCompletion: request.playOnCompletion == true])
   } catch(Exception e) {
-    state.remove('favoriteLoadRequestId')
+    runtimeState.remove('favoriteLoadRequestId')
     logWarn("Could not send UPnP load for favorite ${favoriteId}: ${e.message}")
   }
 }
 
 void favoriteLoadSoapCallback(AsyncResponse response, Map data = null) {
-  if(data?.requestId?.toString() != state.favoriteLoadRequestId?.toString()) { return }
-  state.remove('favoriteLoadRequestId')
+  if(data?.requestId?.toString() != runtimeState.favoriteLoadRequestId?.toString()) { return }
+  runtimeState.remove('favoriteLoadRequestId')
   if(response?.status != 200 || response.hasError()) {
     logWarn("UPnP load of favorite ${data?.favoriteId} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     return
@@ -8040,14 +7854,14 @@ void loadPlaylistOverUpnp(Map request) {
           EnqueuedURIMetaData: metadata, DesiredFirstTrackNumberEnqueued: 0,
           EnqueueAsNext: action == 'INSERT_NEXT'])
   String requestId = UUID.randomUUID().toString()
-  state.playlistLoadRequestId = requestId
+  runtimeState.playlistLoadRequestId = requestId
   postSonosSoapAsync('playlistLoadSoapCallback', params, [requestId: requestId,
       playlistId: playlistId, action: action, playOnCompletion: request.playOnCompletion == true])
 }
 
 void playlistLoadSoapCallback(AsyncResponse response, Map data = null) {
-  if(data?.requestId?.toString() != state.playlistLoadRequestId?.toString()) { return }
-  state.remove('playlistLoadRequestId')
+  if(data?.requestId?.toString() != runtimeState.playlistLoadRequestId?.toString()) { return }
+  runtimeState.remove('playlistLoadRequestId')
   if(response?.status != 200 || response.hasError()) {
     reportPlaylistLoadError(data?.playlistId?.toString(), 'UPNP_LOAD_FAILED',
         "UPnP load failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
@@ -8448,7 +8262,7 @@ void restoreDirectStreamTtsVolume(Map data = null) {
   if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
   String currentSource = device.currentValue('audioSource')?.toString()
   if(currentSource && currentSource != active.streamUri?.toString() &&
-      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+      runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
     logInfo("Skipping direct TTS volume restore ${correlationId}; another source is active")
     runtimeState.remove('directStreamTtsVolumeRestore')
     return
@@ -8465,7 +8279,7 @@ void scheduleDirectStreamTrackVolumeRestore(Map data = null) {
   if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
   String currentSource = device.currentValue('audioSource')?.toString()
   if(currentSource && currentSource != active.streamUri?.toString() &&
-      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+      runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
     logInfo("Skipping high priority track volume restore ${correlationId}; another source is active")
     runtimeState.remove('directStreamTrackVolumeRestore')
     return
@@ -8497,7 +8311,7 @@ void restoreDirectStreamTrackVolume(Map data = null) {
   if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
   String currentSource = device.currentValue('audioSource')?.toString()
   if(currentSource && currentSource != active.streamUri?.toString() &&
-      state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
+      runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING']) {
     logInfo("Skipping high priority track volume restore ${correlationId}; another source is active")
     runtimeState.remove('directStreamTrackVolumeRestore')
     return
@@ -8557,7 +8371,7 @@ void restoreDirectStreamTts(Map data = null) {
     if(!correlationId || active?.correlationId?.toString() != correlationId) { return }
     String currentSource = device.currentValue('audioSource')?.toString()
     if(currentSource && currentSource != active.streamUri?.toString()) {
-      if(!(state.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING'])) {
+      if(!(runtimeState.playbackState in ['PLAYBACK_STATE_PLAYING', 'PLAYBACK_STATE_BUFFERING'])) {
         restoreTemporaryAnnouncementVolume(correlationId, active.previousGroupVolume as Integer,
             active.announcementVolume as Integer)
         runtimeState.remove('directStreamTtsRestore')
@@ -8682,7 +8496,7 @@ void commitPendingGroupAnnouncementTakeover(String transportGuid) {
   publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
     externalPlayback: true,
     replacementUri: pending.replacementUri?.toString(),
-    playbackState: state.playbackState?.toString(),
+    playbackState: runtimeState.playbackState?.toString(),
     sourceUri: device.currentValue('audioSource')?.toString()
   ])
   runtimeState.remove('groupAnnouncementStream')
@@ -8737,7 +8551,7 @@ void addCurrentlyPlayingToPlaylist(String playlistIdOrName) {
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) { logWarn("addCurrentlyPlayingToPlaylist: coordinator UPnP host unavailable for ${device.displayName}"); return }
   String requestId = UUID.randomUUID().toString()
-  state.playlistAddRequestId = requestId
+  runtimeState.playlistAddRequestId = requestId
   Map params = getSoapActionParams(host, ContentDirectory, 'Browse', [ObjectID: objectId,
     BrowseFlag: 'BrowseMetadata', Filter: '*', StartingIndex: 0, RequestedCount: 0, SortCriteria: ''])
   postSonosSoapAsync('playlistAddBrowseCallback', params, [requestId: requestId, host: host,
@@ -8745,9 +8559,9 @@ void addCurrentlyPlayingToPlaylist(String playlistIdOrName) {
 }
 
 void playlistAddBrowseCallback(AsyncResponse response, Map data = null) {
-  if(data?.requestId?.toString() != state.playlistAddRequestId?.toString()) { return }
+  if(data?.requestId?.toString() != runtimeState.playlistAddRequestId?.toString()) { return }
   if(response?.status != 200 || response.hasError()) {
-    state.remove('playlistAddRequestId')
+    runtimeState.remove('playlistAddRequestId')
     logWarn("Could not read Sonos Playlist '${data?.playlistName}' before adding the track (HTTP ${response?.status})")
     return
   }
@@ -8761,14 +8575,14 @@ void playlistAddBrowseCallback(AsyncResponse response, Map data = null) {
     postSonosSoapAsync('playlistAddTrackCallback', params, [requestId: data.requestId,
       playlistName: data.playlistName])
   } catch(Exception e) {
-    state.remove('playlistAddRequestId')
+    runtimeState.remove('playlistAddRequestId')
     logWarn("Could not prepare the track for Sonos Playlist '${data?.playlistName}': ${e.message}")
   }
 }
 
 void playlistAddTrackCallback(AsyncResponse response, Map data = null) {
-  if(data?.requestId?.toString() != state.playlistAddRequestId?.toString()) { return }
-  state.remove('playlistAddRequestId')
+  if(data?.requestId?.toString() != runtimeState.playlistAddRequestId?.toString()) { return }
+  runtimeState.remove('playlistAddRequestId')
   if(response?.status == 200 && !response.hasError()) {
     logInfo("Added currently playing track to Sonos Playlist '${data?.playlistName}'")
     return
@@ -8816,13 +8630,13 @@ String escapeSoapXmlAttribute(String value) { return escapeSoapXmlText(value) }
 void getQueue() {
   String host = getLocalUpnpHostForGroupOperation()
   if(!host) {
-    state.remove('queueBrowseRequestId')
+    runtimeState.remove('queueBrowseRequestId')
     logWarn("getQueue: could not determine coordinator UPnP host for ${device.displayName}")
     setChildQueue('<p>Queue unavailable: player network address is missing.</p>')
     return
   }
   String requestId = UUID.randomUUID().toString()
-  state.queueBrowseRequestId = requestId
+  runtimeState.queueBrowseRequestId = requestId
   requestQueuePage(host, 0, [], requestId)
 }
 
@@ -8841,7 +8655,7 @@ void removeCurrentlyPlayingItemFromQueue() {
     return
   }
   String requestId = UUID.randomUUID().toString()
-  state.queueBrowseRequestId = requestId
+  runtimeState.queueBrowseRequestId = requestId
   requestQueuePage(host, 0, [], requestId, 'remove-current', currentTrackUri, currentTrackPosition)
 }
 
@@ -8856,9 +8670,9 @@ void requestQueuePage(String host, Integer startingIndex, List<Map> entries, Str
 }
 
 void queueBrowseCallback(AsyncResponse response, Map data) {
-  if(data?.requestId?.toString() != state.queueBrowseRequestId?.toString()) { return }
+  if(data?.requestId?.toString() != runtimeState.queueBrowseRequestId?.toString()) { return }
   if(response?.status != 200 || response.hasError()) {
-    state.remove('queueBrowseRequestId')
+    runtimeState.remove('queueBrowseRequestId')
     logWarn("Queue Browse failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
     setChildQueue('<p>Could not retrieve the Sonos queue. Tap Refresh to try again.</p>')
     return
@@ -8895,7 +8709,7 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
       requestQueuePage(data.host.toString(), nextIndex, entries, data.requestId.toString(), data.action?.toString() ?: 'display',
         data.currentTrackUri?.toString(), data.currentTrackPosition?.toString())
     } else {
-      state.remove('queueBrowseRequestId')
+      runtimeState.remove('queueBrowseRequestId')
       if(data.action == 'remove-current') {
         Integer currentTrackPosition = null
         try { currentTrackPosition = data.currentTrackPosition?.toString()?.toInteger() } catch(Exception ignored) { }
@@ -8935,7 +8749,7 @@ void queueBrowseCallback(AsyncResponse response, Map data) {
       }
     }
   } catch(Exception e) {
-    state.remove('queueBrowseRequestId')
+    runtimeState.remove('queueBrowseRequestId')
     logWarn("Could not parse Sonos queue response: ${e.message}")
     setChildQueue('<p>Could not read the Sonos queue response. Tap Refresh to try again.</p>')
   }
@@ -9028,13 +8842,13 @@ void invalidateGroupAnnouncementStream(String reason, String replacementUri = nu
       ? (Map)runtimeState.groupAnnouncementStream : null
   if(announcement == null) { return }
   String correlationId = announcement.correlationId?.toString()
-  logDebug("Group announcement interruption candidate player=${getId()}, correlation=${correlationId}, phase=${announcement.phase}, activeObserved=${announcement.activeObserved}, reason=${reason}, replacementUri=${replacementUri}, playbackState=${state.playbackState}, audioSource=${device.currentValue('audioSource')}")
+  logDebug("Group announcement interruption candidate player=${getId()}, correlation=${correlationId}, phase=${announcement.phase}, activeObserved=${announcement.activeObserved}, reason=${reason}, replacementUri=${replacementUri}, playbackState=${runtimeState.playbackState}, audioSource=${device.currentValue('audioSource')}")
   logInfo("Interrupting group announcement stream ${correlationId} (${reason}); replacement=${replacementUri ?: 'unknown'}")
   if(correlationId && announcement.activeObserved == true) {
     publishGroupAnnouncementProgress(correlationId, 'INTERRUPTED', [
       externalPlayback: true,
       replacementUri: replacementUri,
-      playbackState: state.playbackState?.toString(),
+      playbackState: runtimeState.playbackState?.toString(),
       sourceUri: device.currentValue('audioSource')?.toString()
     ])
   } else if(correlationId) {
@@ -9277,7 +9091,7 @@ void observeUpnpPlaybackSource(Map snapshot) {
   if(uri) { sendEvent(name: 'audioSource', value: uri) }
   String signalStatus = 'not-ht'
   if(isHomeTheater) {
-    Object connected = state.htControlTosLinkConnected
+    Object connected = runtimeState.htControlTosLinkConnected
     signalStatus = connected == null ? 'unknown' : (connected.toString() == '1' ? 'signal' : 'no-signal')
   }
   sendEvent(name: 'audioSourceSignalStatus', value: signalStatus)
@@ -9299,8 +9113,8 @@ void handleHtControlPayload(String xmlBody) {
   if(!(connected in ['0', '1'])) { return }
   List<Map> events = [[name: 'htControlTosLinkConnected', value: connected]]
   events.each { Map event -> device.sendEvent(name: event.name.toString(), value: event.value) }
-  state.htControlTosLinkConnected = connected
-  state.htControlObservedAt = now()
+  runtimeState.htControlTosLinkConnected = connected
+  runtimeState.htControlObservedAt = now()
   observeUpnpPlaybackSource(getLastTransportPlaybackSnapshot() ?: [:])
   logDebug("UPnP HTControl TOSLinkConnected=${connected} player=${getId()}")
 }
@@ -9324,7 +9138,7 @@ void publishGroupAnnouncementProgress(String correlationId, String phase, Map de
   Map payload = [kind: 'groupAnnouncementProgress', correlationId: correlationId,
     phase: phase, playerId: getId()]
   if(details instanceof Map) { payload.putAll(details) }
-  publishPlayerStateUpdate(payload)
+  publishGroupAnnouncementProgressToParent(payload)
 }
 
 // =============================================================================

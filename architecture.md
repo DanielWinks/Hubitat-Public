@@ -10,7 +10,7 @@ Sonos Advanced is a Hubitat package in the `dwinks` namespace. HPM metadata is i
 | --- | --- |
 | `Apps/SonosAdvancedApp.groovy` | Parent controller: UI and configuration, local discovery, Sonos protocol/network work, child-device lifecycle, state fanout, grouping, announcements, alarms, updates and package maintenance. It is `singleThreaded:true`. |
 | `Drivers/Component/SonosAdvPlayer.groovy` | Primary speaker device commands, playback state, WebSocket connection/command handling, and player-to-app request/state callbacks. |
-| `Drivers/Component/SonosAdvGroup.groovy` | Configured logical groups and group-level commands/announcements. It maintains group runtime state and queues requests to the app. |
+| `Drivers/Component/SonosAdvGroup.groovy` | Configured logical groups and group-level commands/announcements. It maintains group runtime state and calls the app directly. |
 | `Drivers/Component/SonosAdvSecondaries.groovy` | Secondary/paired speaker representation and related topology/device data. |
 | `Drivers/Component/SonosAdvSnapshot.groovy` | Snapshot/restore command surface delegated to the parent app. |
 | `Drivers/Component/SonosAdvFavorites.groovy`, `SonosAdvPlaylist.groovy` | Favorite and playlist controls and display state, delegated to the app. |
@@ -25,17 +25,17 @@ The app currently contains both end-user Sonos functionality and administrative 
 
 ```mermaid
 flowchart TD
-  UI[Hubitat app UI / preferences] --> App[SonosAdvancedApp\nserialized parent controller]
+  UI[Hubitat app UI / preferences] --> App[SonosAdvancedApp\nmulti-threaded parent controller]
   User[Rules, dashboards, user commands] --> Player[Player driver]
   User --> Group[Group driver]
   User --> Feature[Feature child drivers]
-  Player -->|queued app request / state callback| App
-  Group -->|queued app request| App
+  Player -->|direct parent call, epoch+sequence| App
+  Group -->|direct parent call, epoch+sequence| App
   Feature -->|parent delegation or request event| App
   App -->|local HTTP, SOAP/UPnP, SSDP/mDNS| Speakers[Sonos household]
   Speakers -->|UPnP notifications / WebSocket| App
   Speakers -->|WebSocket playback events| Player
-  App -->|queued child attribute batches| Player
+  App -->|runInMillis callback applies attributes| Player
   App -->|state/display updates| Group
   App -->|child lifecycle and feature state| Feature
 ```
@@ -82,23 +82,23 @@ The app persists configured device selections and user-defined groups in setting
 
 ### Playback state
 
-Player WebSocket events update the player driver. The driver reports playback state to the app through its app-request/state callback path. The app normalizes and coalesces player state updates, then queues attribute batches for relevant player and group children. Drains are bounded and scheduled to limit app-gate time and Hubitat event churn; unchanged values are skipped and failed child delivery can be retried. Group playback state is derived from coordinator/topology context and published separately from raw per-player state. Track-position updates are optional.
+Player WebSocket events update the player driver. The driver reports playback state to the app by calling the app directly (each payload carries `[epoch, sequence]`). The app's entry point accepts it (dropping anything not newer than the last accepted for that stream) and schedules one `runInMillis` callback that applies the attributes to the player and group children, skipping any attribute a newer report already applied. Unchanged values are skipped by Hubitat's event filtering. Group playback state is derived from coordinator/topology context and published separately from raw per-player state. Track-position updates are optional.
 
 UPnP AVTransport/RenderingControl events and ZoneGroupTopology (ZGT) observations also feed app-side state/topology processing. Cached AVTransport state can be replayed when a player becomes a coordinator. Album-art URLs are normalized/resized at fanout. Avoid adding a second source of truth for attributes without defining precedence against WebSocket and UPnP ownership.
 
 ### Commands and concurrency
 
-Player and group drivers enqueue requests to the app; app drains process those requests and dispatch local Sonos commands. Player requests and group requests have distinct queues. Group commands may be deferred behind active topology operations; playback commands can wait for grouping to settle. Grouping itself is a stateful operation: the app builds a target, sends topology commands, observes fresh topology, checks stability/deadlines/retries, and publishes completion/failure.
+Player and group drivers call the app directly. A child entry point (listed in the app's `CHILD_ENTRY_POINTS`) only reads and writes app data, reads child wrappers and calls `asynchttp*`, then returns (the return value is the acknowledgement) or ends with a single `runInMillis(1, '<callback>', [data: ..., overwrite: false])`; any write to a child happens in that callback. There is no driver outbox, app queue, drain, received-ID dedupe or ack/retry loop for child-to-app traffic. Group commands may be deferred behind active topology operations; playback commands can wait for grouping to settle. Grouping itself is a stateful operation: the app builds a target, sends topology commands, observes fresh topology, checks stability/deadlines/retries, and publishes completion/failure.
 
-Hubitat serializes the app's entry points because it is single-threaded. A synchronous child-to-parent call holds the child's execution while waiting on the app gate; app-to-child calls can create the reverse lock ordering. Hot paths therefore enqueue work and return, with app drains and child event/state drains scheduled separately. In particular, do not call parent app methods from a player's high-frequency `parse` path or drain a queue by synchronously calling child commands while holding the app gate. Keep bridge traffic in private queues/callback payloads; user-visible attributes should represent product state, not internal transport.
+The app, `SonosAdvPlayer` and `SonosAdvGroup` are `singleThreaded: false`, so no member of this family holds an execution gate while waiting for another; the 120 s gate-timeout deadlock cannot form. The Discovery, Favorites and Playlists child apps stay `singleThreaded: true` and wait on nothing. Because callbacks and executions run in parallel, order comes from numbers rather than queues: every ordered stream carries a driver-stamped `[epoch, sequence]` (per-DNI `AtomicLong`, `DRIVER_EPOCH` set at class load) and the app checks it at the entry point (accept gate) and again in the callback (apply gate), per attribute or event name for partial payloads. Absolute commands (transport, volume, mute, repeat, shuffle, crossfade, set track) are latest-wins per target and family; additive commands (group membership, line-in, favorite/playlist loads, announcements) keep arrival order.
 
-Player drivers use in-memory concurrent runtime queues for hot work where concurrent `parse` executions are possible. Queue updates are guarded by locks and drained using claim/swap patterns. App queues are serialized through the app gate and generally live in `state`. Any refactor of queue ownership must preserve restart recovery, stale-request handling, bounded drains, and acknowledgement semantics.
+Data follows one of three storage patterns per key. `state` commits per changed key, so a read-modify-write of one key loses updates even inside a lock; `state` is therefore only for overwrite-only or single-writer keys. Shared read-modify-write and recoverable work state (preference snapshots, ZGT election list, active group operation, deferred operation commands) live in `atomicState` through `mutateAppData` (a per-key static lock). Re-derivable caches and transient work (AVT cache, volume readings, GRC, announcement and clip queues, catalog snapshots, sequence marks) live in `@Field static ConcurrentHashMap` working data keyed by `app.id` under `appLock(key)`, and are emptied by a reboot or code save. Group operation, announcement and clip work share one `appLock('work')`. A driver at `singleThreaded: false` keeps hot queues in `@Field static ConcurrentHashMap` (`runtimeState`) with `synchronized(runtimeState)` read-modify-write. The `ConcurrencyRule` lint enforces pure entry points, the key access paths, no `synchronized` method modifiers, and no pure parent hops in drivers. Keep bridge traffic out of attributes: user-visible attributes represent product state, not internal transport.
 
 ### Announcements and audio clips
 
-The app owns per-group announcement queues and policy, including priority, retention, chime behavior, and serialization. It selects a playback strategy based on the source and current household topology: standard stream/temporary stream holder or synchronized audio clips; AirPlay bypasses stream-holder handoff. Audio clip work is queued per player and dispatched to a local app endpoint, with callbacks/status events driving progression. Group announcement progress is correlated back to queue items; completion restores playback/topology as applicable before advancing. Queue state and identifiers are persisted to support recovery and stale-work rejection.
+The app owns per-group announcement queues and policy, including priority, retention, chime behavior, and serialization. It selects a playback strategy based on the source and current household topology: standard stream/temporary stream holder or synchronized audio clips; AirPlay bypasses stream-holder handoff. Audio clip work is queued per player and dispatched to a local app endpoint, with callbacks/status events driving progression. Group announcement progress is correlated back to queue items; completion restores playback/topology as applicable before advancing. Queue state is app memory; correlation identifiers reject stale work.
 
-Preserve the separation between command acceptance, clip/announcement progress, restore completion, and queue advancement. These are asynchronous transitions, not one synchronous operation.
+Preserve the separation between command acceptance, clip/announcement progress, restore completion, and queue advancement. These are asynchronous transitions, not one synchronous operation. Announcement and clip queues live in app memory (a reboot or code save empties them and drops pending announcements), so there is no persisted queue to recover; stale callbacks are rejected by correlation ID and sequence.
 
 ### Alarms and feature children
 
@@ -116,10 +116,11 @@ The same app includes optional update checking and installation/maintenance flow
 | --- | --- | --- |
 | User configuration (selected players/groups, feature toggles, announcement and update preferences) | App `settings` | Preference names/types are compatibility-sensitive. |
 | Discovery in progress and probe counters | App `atomicState` | Low-frequency discovery coordination. |
-| Pending app work (player/group commands, child state/events, topology, announcements, clips, retries) | App `state` | App is serialized; scheduled drains provide bounded processing and some restart recovery. |
-| Live socket, pending WebSocket commands and hot player queues | Player driver runtime state / static concurrent structures and driver `state` | Some hot concurrent paths require lock-protected in-memory queues. Check each driver before relocating data. |
+| Pending app work: announcement and clip queues, AVT/GRC/reading caches, catalog snapshots, sequence marks | App memory (`@Field static ConcurrentHashMap`) under `appLock` | Multi-threaded app; emptied by reboot or code save; subscriptions refill the caches. |
+| Recoverable work: active group operation, deferred operation commands, preference snapshots, ZGT election list | App `atomicState` through `mutateAppData` | Per-key lock; survives reboot so a group operation can recover. |
+| Live socket, pending WebSocket commands, hot player queues, request tokens and playback readings | Player driver `runtimeState` / static concurrent structures; driver `state` keeps only last-error diagnostics | Some hot concurrent paths require lock-protected in-memory queues. Check each driver before relocating data. |
 | Current product attributes | Child driver state/events | App delivers state batches; driver attributes are visible to Hubitat users and automations. |
-| Group runtime cache / operation state | Group driver plus app operation state | Group driver queues commands; app owns topology orchestration. |
+| Group runtime cache / operation state | Group driver plus app operation state | Group driver sends commands directly; app owns topology orchestration. |
 
 The tables above are a map, not a complete schema. The `ACTIVE_*` whitelists in the app and drivers are the code-level inventory of deliberately retained persistence keys.
 
@@ -127,12 +128,12 @@ The tables above are a map, not a complete schema. The `ACTIVE_*` whitelists in 
 
 These are constraints visible in the implementation and repository guidance; proposed design changes should make any deliberate change explicit.
 
-1. **Keep Hubitat entry points short.** Network callbacks, player parsing, and child command entry points should enqueue/defer work when processing could call across the app/driver boundary or do substantial work.
+1. **Keep Hubitat entry points short.** Child-to-app entry points only touch app data and return, or schedule one `runInMillis` callback for any child write. Network callbacks and player parsing stay short.
 2. **Preserve parent-child contracts as a unit.** App and driver releases are version-synchronized. Change both sides together; do not add old-version fallback shims.
 3. **Preserve persisted names or migrate intentionally.** Settings and state can survive code updates on installed hubs. A rename/removal needs an explicit migration and tests.
 4. **Keep state provenance clear.** Define the owner and freshness/precedence of WebSocket, UPnP, topology, and derived group values before splitting or duplicating processing.
 5. **Keep asynchronous operations explicit.** Requests, acknowledgements, callbacks, deadlines, retries, queue progression, and stale-work cancellation are observable states that need their own contracts.
-6. **Bound fanout and drains.** Preserve batching/coalescing and failure retry behavior to avoid long app-gate holds and excess event writes.
+6. **Bound fanout.** Preserve batching/coalescing for app-to-child delivery to avoid long lock holds and excess event writes.
 7. **Keep production artifacts standalone where practical.** New app/driver code should not introduce shared-library includes. Existing library/package behavior is legacy and should be migrated only with an explicit compatibility plan.
 8. **Keep protocol parsing and pure transformations separable.** Typed parsers, formatters, and calculations are good candidates for isolated helpers and regression tests; Hubitat APIs and dynamic device dispatch belong at narrow edges.
 9. **Do not edit generated bundles.** Update source and package metadata/workflows as appropriate; let CI regenerate `Bundles/`.
@@ -142,7 +143,7 @@ These are constraints visible in the implementation and repository guidance; pro
 These are candidate seams inferred from the current file layout, not a prescribed target architecture:
 
 - The app is roughly 12,000 lines and combines UI, discovery, protocol transport, event processing, command queues, group operation state machines, announcements, alarms, and package administration. Its section boundaries are the likely first decomposition map.
-- Several independent queues and drain schedulers live in the app. A refactor can clarify a queue contract (producer, payload, coalescing key, retry/ack policy, persisted lifetime) without changing the app/driver boundary first.
+- App-to-child delivery still has a coalescing queue for group state (`drainGroupStateUpdates`); with everything ungated it can become a direct `sendEvent` in a later change. The Alarm Switch, Alarm Manager and Discovery children have not yet been audited against the child-entry-point rule.
 - State ingestion spans player WebSocket callbacks and app-side UPnP/ZGT processing. A normalization/ownership map should precede extraction to avoid races or stale overwrites.
 - Group topology operations and announcement restoration both observe/change household topology. Their coordination boundary and cancellation behavior deserve explicit state diagrams before moving code.
 - The app mixes user control with Hubitat code maintenance and self-update behavior. These can be documented and tested as separate subsystems even while hosted by one app.

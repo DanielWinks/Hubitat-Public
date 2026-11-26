@@ -115,21 +115,71 @@ subscribe(device, 'attribute', 'handlerMethod')
 sendEvent(name: 'attribute', value: data)
 ```
 
-### Parent/Child Async and Deadlock Avoidance (Sonos 120 s gate incident, 2026-11-20)
+### Parent/Child Calls and the Multi-Threaded Execution Model (Sonos Advanced)
 
-Hubitat serializes every entry point of a `singleThreaded:true` instance (schedules, callbacks, endpoints, events, and child calls into the parent) on one gate with a 120 s acquire timeout. `parent.method()` (child → parent) and `child.method()` (parent → child via `getChildDevice(dni)`) are **synchronous**: the caller thread blocks holding its own execution while waiting for the callee's gate. If a device holds its execution waiting for the app gate while the app holds the app gate waiting for a child gate, both sides time out at exactly `120 s` (`method X ran for 120,018ms` + `Failed to acquire single-threaded gate ... within 120 seconds`). This is a lock-order inversion, not CPU work — `parse` of a small WebSocket JSON payload is ms when the gate is free. Never call `parent.*` from `parse()` or any high-frequency/hot path; never drain an app gate by calling child commands inline (notably time-sensitive group announcements). Defer instead: enqueue to a private queue + `runIn`/`runInMillis` so the caller returns and releases its gate before the callee runs (community-endorsed `runIn(1,'flush...',[data:...])` break).
+The Sonos Advanced app, `SonosAdvPlayer` and `SonosAdvGroup` are all `singleThreaded: false`. Nothing in this
+family holds an execution gate while waiting for another device, so the 120 s gate timeout (2026-11-20 incident: an
+app gate held while it waited on a child gate, with the child holding its gate while it waited on the app) cannot
+form. The Discovery, Favorites and Playlists child apps stay `singleThreaded: true`; they wait on nothing when they
+call the ungated parent, and the parent holds nothing while it calls them. Any other still-gated child that calls
+`parent.*` must never be called while an app lock (`appLock(...)`) is held.
 
-`sendEvent` is async (non-blocking) and normally generates an event only when the new value differs from the current attribute value. Hubitat's app API documents `isStateChange: true` as the opt-in to generate an event even when the value is unchanged; device subscriptions default to filtering unchanged values unless that flag is set. Do not keep app-side last-sent value caches solely to suppress duplicate events. Pending queues may still coalesce values before delivery and retry failures for scheduling, gate-avoidance, or reliability. `displayed:false` does nothing in Hubitat (staff-confirmed carryover from SmartThings). Do not use `sendEvent` or location events for parent-child bridge traffic — they expose bridge data as user-visible attributes/event history. Bridge data stays in private queues (`state`/`runtimeState`), never in attributes. Intended playback attributes (`trackName`, `groupVolume`, etc.) delivered via `applyStateBatch` + `sendEvent` are the product and stay.
+**Contract.**
 
-Confinement and thread-safety rules:
+1. Child drivers call parent app methods **directly**. There is no driver-side outbox, flush callback, or
+   `runInMillis` hop whose only job is to release a gate (the `ConcurrencyRule` lint fails a driver hop whose target
+   only calls `parent.*`). A hop is fine when it has its own work, for example reading attributes after they settle.
+2. A parent method a child calls (a **child entry point**, listed in the app's `CHILD_ENTRY_POINTS`) only reads and
+   writes app data, reads child wrappers (`getDataValue`, `currentValue`, `getDeviceNetworkId`) and calls
+   `asynchttp*`. It ends with a plain `return` (the return value is the acknowledgement) or with
+   `runInMillis(1, '<callback>', [data: ..., overwrite: false])`. Anything that writes to a child goes in that
+   callback, which runs in a new execution. "Writes to a child" means driver methods, child-app methods,
+   `child.sendEvent`, app-level `sendEvent(dni, ...)` and `updateDataValue`. `ChildEntryPurity` follows the local call
+   graph from every entry point and fails on a reachable child write.
+3. No `PENDING_*` queue, `*DrainScheduled` flag, received-ID dedupe, ack or retry loop exists only to carry
+   child-to-app traffic. Hubitat's scheduler is the only deferral mechanism. Order comes from sequence numbers.
+4. Bridge data never becomes an attribute or location event. `sendEvent` generates an event only when the value
+   changes (`isStateChange: true` forces one); `displayed:false` does nothing. Do not keep an app-side last-sent cache
+   just to suppress duplicates. Intended product attributes (`trackName`, `groupVolume`, ...) are the product.
+5. Do not flip a gated child app, or any driver the app calls while holding an app lock, without auditing it.
 
-- `state` is realtime within one execution and committed at exit; another execution sees it only after the writer returns. That ordering suffices for cross-execution handoff (driver enqueue → app drain a scheduler tick later) — no `atomicState` needed for the bridge. `atomicState` is immediate DB persistence at a per-call performance hit; it only matters for parallel-thread same-data updates and is app-only/legacy in drivers. Reserve it for low-frequency app flags (e.g. discovery), not for per-`parse` queues.
-- A driver at `singleThreaded:false` (e.g. `SonosAdvPlayer`) can run two `parse` executions concurrently. A `state` map outbox then loses updates (two executions load the same snapshot; last writer wins). Hot queues must live in `@Field static ConcurrentHashMap` (in-memory `runtimeState` pattern: `pendingGroupDeviceUpdates`, `pendingTopology*ByDni`) with all read-modify-write under `synchronized(lock)` and a claim-and-swap drain (enqueue `put`; drain swaps the map out under lock, processes outside). The `scheduled` flag check-and-set must be inside the same lock or a wakeup is lost. The app at `singleThreaded:true` may keep its `PENDING_*` queues in `state` (serialized — safe).
-- Drivers cannot `subscribe` to `location` events (apps only); `sendLocationEvent` is a global cross-app bus, not a parent-child primitive. Prefer the private-queue + flush/poll design over both.
-- Official component pattern (`HubitatPublic` `componentSwitch` / `genericComponentParentDemo`): child calls `parent.componentX(device)` synchronously but short/non-reentrant; parent pushes state via `child.parse(List<Map>)` / `sendEvent`. Production integrations (CoCoHue `bridgeAsyncPutV2`, VeSync `sendBypassRequest`) queue through the parent app instead of blocking HTTP/child work inline. Do not replicate the synchronous parts that hold a gate across heavy work.
-- Player app/driver reference for this repo: player state is delivered through subscribed player attributes; offline polling via a `lastUpdated` attribute has been removed. Driver-to-app requests use `parent.groupAppRequest` / `parent.playerAppRequest`; group and player drivers queue those calls before dispatch. App-to-child state delivery uses `drainQueuedChildEvents` → `child.applyStateBatch`. Review any new parent-child calls for gate ordering before extending these paths.
-- Do not "fix" gate contention by flipping `singleThreaded:false` on the app — that replaces deadlock with `state` races. Keep `singleThreaded:true` and break the call chains.
-- `updated()` does **not** run when app/driver code is saved — only on Done/Save Preferences in the UI (staff-confirmed). Devices pick up driver code automatically, but apps must be re-saved (or rebooted) for `configure()`/`updated()` re-arming. Deploy procedure must include that save, or rely on self-arming from persisted periodic jobs (e.g. roster refresh) with up to one period of latency. Never assume code-publish alone starts new schedules.
+**Data layer.** `state` commits **per changed key** when an execution ends. Any read-modify-write of one `state` key
+loses updates, **even inside a lock** (the lock is released before the commit). `atomicState` read-modify-write is
+safe only inside a static lock. A Groovy `synchronized` *method modifier* locks only the per-execution instance and
+excludes nothing; only `synchronized(<static object>)` blocks do (`ConcurrencyRule` bans the modifier). Pick one
+storage pattern per key and never mix paths:
+
+| Class | Storage |
+| --- | --- |
+| Overwrite-only or single-writer (update-check info, policy snapshots, last-error diagnostics, whole-value ZGT payload/topology) | `state`, no lock |
+| Low-frequency shared read-modify-write (preference snapshots, ZGT election list, last-processed topology) and recoverable work state (active group operation, deferred operation commands) | `atomicState` through `mutateAppData(key) { current -> next }`, which locks per key (`ATOMIC_MIGRATED_STATE_KEYS`) |
+| In-memory working data: re-derivable caches and transient work (AVT cache, readings, GRC, announcement and clip queues, catalog snapshots, sequence marks, command clear times, pending group state) | `@Field static ConcurrentHashMap` keyed by `app.id` (`appMemoryMap`/`withMemoryMap`), mutated under `appLock(key)`; a reboot or code save empties it (`APP_MEMORY_KEYS`; `AppDataAccess` forbids `state` access to these keys) |
+
+Group operation, announcement and clip work share the single `appLock('work')` lock so lock order can never invert.
+Hold an app lock only around app data and local calls; never around a call into a child that could call back from
+another thread. A driver at `singleThreaded: false` can run `parse` concurrently: its hot queues live in
+`@Field static ConcurrentHashMap` (`runtimeState`) with read-modify-write under `synchronized(runtimeState)`, and
+hot or transient keys (`playbackState`, request tokens, `htControl*`) live in `runtimeState`, not `state`.
+
+**Ordering.** Callbacks and child executions run in parallel (24 simultaneous `runInMillis` callbacks were measured
+on a C-7), so every ordered stream carries `[epoch, sequence]` from the driver: `sequence` is a per-DNI `AtomicLong`
+stamped where the payload is first observed, `epoch` is `DRIVER_EPOCH`, set when the driver class loads (a reboot or
+code save resets the counters and gets a new epoch). The app checks each stream twice: `acceptSequence` in the entry
+point (drop anything not newer than the last accepted) and `applySequence` in the callback (drop anything older than
+the last applied). Partial payloads (attribute updates, AVT deltas, GRC/readings) are gated per attribute or event
+name so a late delta cannot drop names a newer one did not carry. Marks live in app memory, so after an app restart
+the first arrival on each stream is accepted. Absolute commands (play/pause/stop, set volume, mute, repeat, shuffle,
+crossfade, set track) are latest-wins per target and family; additive commands (group membership, line-in,
+favorite/playlist loads, announcements) are never dropped and keep arrival order. UPnP `SEQ`/`SID` are not used.
+
+`updated()` does **not** run when app/driver code is saved, only on Done/Save Preferences (staff-confirmed). Devices
+pick up driver code automatically, but apps must be re-saved (or rebooted) for `configure()`/`updated()` re-arming.
+Never assume a code publish alone starts new schedules.
+
+Community patterns this follows: `HubitatPublic` `componentSwitch` / `genericComponentParentDemo` (a short,
+non-reentrant `parent.componentX(device)` call; parent pushes state by `child.parse`/`sendEvent`), CoCoHue
+`bridgeAsyncPutV2` and VeSync `sendBypassRequest` (production integrations that queue through the app instead of
+blocking on HTTP or child work inline).
 
 ### Standalone App/Driver Structure
 
@@ -237,8 +287,10 @@ Two layers of automation live under `tests/`:
 1. **Static analyzer** (`./gradlew lint` from `tests/`) - parses every Groovy
    file with the official Groovy AST and runs rules covering syntax,
    metadata blocks, the Hubitat sandbox import allowlist, `@CompileStatic`
-   correctness, capability/command/attribute consistency, and method-name
-   references like `runIn('foo')`.
+   correctness, capability/command/attribute consistency, method-name
+   references like `runIn('foo')`, and the parent/child concurrency rules
+   (`ConcurrencyRule`: no `synchronized` method modifiers, pure child entry
+   points, no `state` access to memory/atomic keys, no pure parent hops).
 2. **Spock unit tests** (`./gradlew test` from `tests/`) - load library files
    into a `HubitatScriptHarness` (which stubs `state`, `settings`, `log`,
    scheduling, events, etc.) and assert behavior of individual methods.

@@ -64,7 +64,11 @@ java.util.TimeZone
 java.util.TreeMap
 java.util.TreeSet
 java.util.UUID
-java.util.concurrent.*
+java.util.concurrent.ConcurrentHashMap
+java.util.concurrent.ConcurrentLinkedQueue
+java.util.concurrent.Semaphore
+java.util.concurrent.TimeUnit
+java.util.concurrent.atomic.AtomicInteger
 
 # --- java.text / java.time / java.math ---
 java.text.SimpleDateFormat

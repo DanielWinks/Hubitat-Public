@@ -66,7 +66,7 @@ class ImportRuleSpec extends Specification {
   def "star imports are checked against the allowlist"() {
     given:
     ParseResult pr = parse('''
-      import java.util.concurrent.*
+      import hubitat.helper.*
 
       library(name: 'X', namespace: 'dwinks', author: 'Daniel')
     '''.stripIndent())
