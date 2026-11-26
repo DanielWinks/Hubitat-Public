@@ -16,7 +16,7 @@ import org.codehaus.groovy.control.SourceUnit
  * Catches things that are syntactically valid Groovy but rejected by the
  * Hubitat installation/runtime sandbox:
  *   - `package` declarations (Hubitat strips/rejects them)
- *   - direct `System.exit(...)`, `Runtime.getRuntime()`, `Thread.start { }` etc.
+ *   - direct `System.exit(...)`, `System.nanoTime()`, `Runtime.getRuntime()`, `Thread.start { }` etc.
  *   - `new File(...)` or any `java.io.File` use - the sandbox blocks the file system
  *   - reflection (`Class.forName`, `getClass().getMethod` etc.)
  *   - `eval`/`Eval`
@@ -29,7 +29,10 @@ class SandboxRule implements Rule {
 
   /** Disallowed receiver-method pairs. Receiver is matched by *simple* name or FQN. */
   static final Map<String, Set<String>> DISALLOWED_CALLS = [
-    'System'      : (['exit', 'gc', 'load', 'loadLibrary'] as Set),
+    // nanoTime is rejected by the hub at save time ("Expression [MethodCallExpression] is not allowed");
+    // use now() or a UUID instead. The others expose the host environment.
+    'System'      : (['exit', 'gc', 'load', 'loadLibrary', 'nanoTime', 'getenv', 'getProperty', 'getProperties',
+                      'setProperty'] as Set),
     'Runtime'     : (['getRuntime', 'exec'] as Set),
     'Class'       : (['forName'] as Set),
     'Thread'      : (['start', 'sleep'] as Set),

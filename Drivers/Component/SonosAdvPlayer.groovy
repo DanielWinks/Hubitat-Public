@@ -8746,7 +8746,7 @@ void processWebsocketMessage(String message) {
           Map clip = (Map)rawClip
           Map statusEvent = [appId: clip.appId, name: clip.name, id: clip.id,
             priority: clip.priority, clipType: clip.clipType, status: clip.status]
-          sendEvent(name: 'audioClipStatus', value: JsonOutput.toJson(statusEvent))
+          sendAudioClipStatusToParent(statusEvent)
         }
       }
     }
@@ -8754,6 +8754,17 @@ void processWebsocketMessage(String message) {
   }
 
   logDebug('WebSocket status message processing completed')
+}
+
+/** Send one audioClip status straight to the parent app; the app orders it by the stamp. */
+void sendAudioClipStatusToParent(Map statusEvent) {
+  if(parent == null) { return }
+  Map stamp = stampParentPayload([:])
+  try {
+    parent.putAudioClipStatus(device.getDeviceNetworkId(), statusEvent, stamp.epoch, stamp.sequence)
+  } catch(Exception e) {
+    logWarn("Could not send audioClip status to parent: ${e.message}")
+  }
 }
 
 void observeUpnpPlaybackSource(Map snapshot) {

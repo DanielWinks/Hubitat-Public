@@ -519,7 +519,7 @@ preferences {
 @Field static final List<String> CHILD_ENTRY_POINTS = [
   'playerAppRequest', 'playerCommandRequest', 'groupAppRequest', 'groupAnnouncementProgress',
   'playerAttributeUpdate', 'putPlayerUpnpEvents', 'setZgtPayload', 'putAvtEvents', 'requestCoordinatorEvents',
-  'putRcEvents', 'putCatalogSnapshot', 'playerPreferencesUpdated', 'groupPreferencesUpdated', 'playerGroupTopologyOperationUpdate'
+  'putRcEvents', 'putCatalogSnapshot', 'putAudioClipStatus', 'playerPreferencesUpdated', 'groupPreferencesUpdated', 'playerGroupTopologyOperationUpdate'
 ]
 // Working data that lives only in app memory (see appMemoryMap/withMemoryMap); never read or written through state.
 @Field final List<String> APP_MEMORY_KEYS = [
@@ -2359,8 +2359,8 @@ void subscribeToGroupCommandRequests() {
   }
   getCurrentPlayerDevices().each { ChildDeviceWrapper playerDevice ->
     unsubscribe(playerDevice, 'sonosPlayerAppRequest', 'playerAppRequestHandler')
+    // Clip status now arrives through putAudioClipStatus; drop the subscription earlier versions left on the hub.
     unsubscribe(playerDevice, 'audioClipStatus', 'audioClipStatusHandler')
-    subscribe(playerDevice, 'audioClipStatus', 'audioClipStatusHandler')
     unsubscribe(playerDevice, 'groupCoordinatorId', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'groupMemberCount', 'topologyAttributeHandler')
     unsubscribe(playerDevice, 'isGroupCoordinator', 'topologyAttributeHandler')
@@ -3229,10 +3229,10 @@ void enqueuePlayerAudioClipItem(Map item) {
   enqueuePlayerAudioClipItems([item])
 }
 
-void enqueuePlayerAudioClipItems(List<Map> items) {
+void enqueuePlayerAudioClipItems(List<Map> items, Boolean deferDispatch = false) {
+  Set<String> playerIds = new LinkedHashSet<String>()
   synchronized(appLock('work')) {
     Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
-    Set<String> playerIds = new LinkedHashSet<String>()
     items.each { Map item ->
       String playerId = item?.playerId?.toString()
       if(!playerId) { return }
@@ -3246,6 +3246,12 @@ void enqueuePlayerAudioClipItems(List<Map> items) {
       playerIds.add(playerId)
     }
     saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+  }
+  if(playerIds.isEmpty()) { return }
+  if(deferDispatch) {
+    // The caller holds appLock('work'). Send from a new execution so the lock is not held while POSTing.
+    runInMillis(1, 'dispatchNextPlayerAudioClipsCallback', [data: [playerIds: new ArrayList<String>(playerIds)], overwrite: false])
+  } else {
     dispatchNextPlayerAudioClips(playerIds)
   }
 }
@@ -3254,86 +3260,163 @@ void dispatchNextPlayerAudioClip(String playerId) {
   dispatchNextPlayerAudioClips([playerId])
 }
 
-void dispatchNextPlayerAudioClips(Collection<String> playerIds) {
-  List<Map> preparedPosts = []
-  playerIds.each { String playerId ->
-    Map prepared = prepareNextPlayerAudioClipPost(playerId)
-    if(prepared != null) { preparedPosts.add(prepared) }
-  }
-  preparedPosts.each { Map post -> asynchttpPost('audioClipPostCallback', post.params, post.data) }
+void dispatchNextPlayerAudioClipsCallback(Map data = [:]) {
+  List ids = data?.playerIds instanceof List ? (List)data.playerIds : []
+  if(ids) { dispatchNextPlayerAudioClips(ids.collect { Object id -> id.toString() }) }
 }
 
-Map prepareNextPlayerAudioClipPost(String playerId) {
+/**
+ * Prepare every POST first, then send them back to back with nothing else in the loop. No logging, lock or
+ * lookup happens between two asynchttpPost calls, so the spread between players is only the send cost.
+ */
+void dispatchNextPlayerAudioClips(Collection<String> playerIds) {
+  Long prepStartedAt = now()
+  List<Map> notes = []
+  List<Map> posts = prepareNextPlayerAudioClipPosts(playerIds, notes)
+  Long prepEndedAt = now()
+  Integer count = posts.size()
+  List<Long> sentAt = new ArrayList<Long>(count)
+  List<String> failures = new ArrayList<String>(count)
+  for(Integer i = 0; i < count; i++) {
+    Map post = posts.get(i)
+    sentAt.add(now())
+    String failure = null
+    try {
+      asynchttpPost('audioClipPostCallback', (Map)post.params, (Map)post.data)
+    } catch(Exception e) {
+      failure = e.message ?: e.class.simpleName
+    }
+    failures.add(failure)
+  }
+  finishAudioClipDispatch(posts, sentAt, failures, notes, prepStartedAt, prepEndedAt)
+}
+
+List<Map> prepareNextPlayerAudioClipPosts(Collection<String> playerIds, List<Map> notes) {
+  List<Map> posts = []
   synchronized(appLock('work')) {
     Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
-    Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
-    if(queue == null) { return null }
-    List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
-    List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
-    Map active = queue.active instanceof Map ? (Map)queue.active : null
-    if(active != null) {
-      if(active.priority == 'HIGH' || high.isEmpty()) { return null }
-      queue.suspended = active
-      queue.remove('active')
+    Map<String, ChildDeviceWrapper> playersById = [:]
+    if(playerIds.any { String id -> queues[id] instanceof Map }) {
+      getCurrentPlayerDevices().each { ChildDeviceWrapper candidate ->
+        String id = candidate.getDataValue('id')?.toString()
+        if(id) { playersById[id] = candidate }
+      }
     }
-    Map next = high ? high.remove(0) : (regular ? regular.remove(0) : null)
-    queue.high = high
-    queue.regular = regular
-    if(next == null) {
-      queues.remove(playerId)
-      saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
-      return null
+    playerIds.each { String playerId ->
+      Map prepared = prepareNextPlayerAudioClipPost(playerId, playersById, notes)
+      if(prepared != null) { posts.add(prepared) }
     }
-    ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
-      candidate.getDataValue('id')?.toString() == playerId
+  }
+  return posts
+}
+
+/** After the send loop: record send times, fail POSTs that could not be sent, and write the one log line. */
+void finishAudioClipDispatch(List<Map> posts, List<Long> sentAt, List<String> failures, List<Map> notes,
+    Long prepStartedAt, Long prepEndedAt) {
+  if(!posts.isEmpty()) {
+    synchronized(appLock('work')) {
+      Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
+      Boolean changed = false
+      for(Integer i = 0; i < posts.size(); i++) {
+        Map data = (Map)posts.get(i).data
+        String playerId = data.playerId.toString()
+        Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+        Map active = queue?.active instanceof Map ? (Map)queue.active : null
+        if(active == null || active.name?.toString() != data.name?.toString()) { continue }
+        active.postSentAt = sentAt.get(i)
+        changed = true
+        if(failures.get(i) != null) {
+          notes.add([level: 'warn', message: "Could not send audioClip POST for ${playerId}: ${failures.get(i)}".toString()])
+          runInMillis(1, 'completePlayerAudioClipCallback', [overwrite: false,
+            data: [playerId: playerId, item: active, phase: 'FAILED']])
+        }
+      }
+      if(changed) { saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues) }
     }
-    String ip = player?.getDataValue('deviceIp')?.toString()
-    String name = UUID.randomUUID().toString()
-    next.name = name
-    if(player?.currentValue('mute')?.toString() == 'muted') {
-      queue.active = next
-      queues[playerId] = queue
-      saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
-      logInfo("Skipping audioClip for muted player ${playerId}, correlation=${next.correlationId}")
-      // Completion reaches back into group devices, so it runs from a new execution, not this request.
-      runInMillis(1, 'completePlayerAudioClipCallback', [overwrite: false, data: [playerId: playerId, item: next, phase: 'DISMISSED']])
-      return null
+    Long first = sentAt.get(0)
+    List<String> offsets = []
+    for(Integer i = 0; i < posts.size(); i++) {
+      offsets.add("${posts.get(i).summary}@+${sentAt.get(i) - first}ms".toString())
     }
-    if(!player || !ip) {
-      logWarn("Cannot POST audioClip for ${playerId}: player device or IP is unavailable")
-      queue.active = next
-      queues[playerId] = queue
-      saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
-      runInMillis(1, 'completePlayerAudioClipCallback', [overwrite: false, data: [playerId: playerId, item: next, phase: 'FAILED']])
-      return null
-    }
-    String priority = next.priority == 'HIGH' ? 'HIGH' : null
-    BigDecimal requestedVolume = toBigDecimal(next.volume)
-    Integer currentVolume = toBigDecimal(player.currentValue('volume')?.toString())?.intValue() ?: 0
-    Integer boost = toBigDecimal(getPlayerPreference(player, 'ttsBoostAmount', 10)?.toString())?.intValue() ?: 10
-    BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
-    Integer resolvedVolume = requestedVolume != null && (requestedVolume.compareTo(BigDecimal.ZERO) == 0 ||
-        requestedVolume.compareTo(BigDecimal.valueOf(-1L)) == 0)
-        ? 0 : Math.max(0, Math.min(baseVolume.add(new BigDecimal(boost)).setScale(0, RoundingMode.HALF_UP).intValue(), 100))
-    Map body = [name: name, appId: AUDIO_CLIP_APP_ID,
-      volume: resolvedVolume]
-    if(priority) { body.priority = priority }
-    if(next.uri) { body.streamUrl = next.uri }
-    if(next.clipType) { body.clipType = next.clipType }
-    Map params = [uri: "${getLocalApiPrefix("${ip}:1443")}${AUDIO_CLIP_ENDPOINT}",
-      headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
-      requestContentType: 'application/json', contentType: 'application/json',
-      ignoreSSLIssues: true, timeout: 5, body: JsonOutput.toJson(body)]
-    next.appId = AUDIO_CLIP_APP_ID
-    next.dispatchedAt = now()
-    next.phase = 'POST_PENDING'
+    logInfo("Sent ${posts.size()} audioClip POST(s): prepared in ${prepEndedAt - prepStartedAt}ms, " +
+        "send spread ${sentAt.get(posts.size() - 1) - first}ms [${offsets.join(', ')}]")
+  }
+  notes.each { Map note ->
+    if(note.level == 'warn') { logWarn(note.message.toString()) } else { logInfo(note.message.toString()) }
+  }
+}
+
+/**
+ * Build one player's next POST. Runs inside the caller's appLock('work') block and never logs or calls out:
+ * anything worth logging goes into notes so it is written after the POSTs have been sent.
+ */
+Map prepareNextPlayerAudioClipPost(String playerId, Map<String, ChildDeviceWrapper> playersById, List<Map> notes) {
+  Map<String, Map> queues = appMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY)
+  Map queue = queues[playerId] instanceof Map ? (Map)queues[playerId] : null
+  if(queue == null) { return null }
+  List<Map> high = queue.high instanceof List ? (List<Map>)queue.high : []
+  List<Map> regular = queue.regular instanceof List ? (List<Map>)queue.regular : []
+  Map active = queue.active instanceof Map ? (Map)queue.active : null
+  if(active != null) {
+    if(active.priority == 'HIGH' || high.isEmpty()) { return null }
+    queue.suspended = active
+    queue.remove('active')
+  }
+  Map next = high ? high.remove(0) : (regular ? regular.remove(0) : null)
+  queue.high = high
+  queue.regular = regular
+  if(next == null) {
+    queues.remove(playerId)
+    saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+    return null
+  }
+  ChildDeviceWrapper player = playersById[playerId]
+  String ip = player?.getDataValue('deviceIp')?.toString()
+  String name = UUID.randomUUID().toString()
+  next.name = name
+  if(player?.currentValue('mute')?.toString() == 'muted') {
     queue.active = next
     queues[playerId] = queue
     saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
-    logInfo("Prepared audioClip POST ${name} for player ${playerId}, priority=${priority}, origin=${next.origin}")
-    return [params: params, data: [playerId: playerId, name: name,
-      appId: AUDIO_CLIP_APP_ID, correlationId: next.correlationId]]
+    notes.add([level: 'info', message: "Skipping audioClip for muted player ${playerId}, correlation=${next.correlationId}".toString()])
+    // Completion reaches back into group devices, so it runs from a new execution, not this request.
+    runInMillis(1, 'completePlayerAudioClipCallback', [overwrite: false, data: [playerId: playerId, item: next, phase: 'DISMISSED']])
+    return null
   }
+  if(!player || !ip) {
+    notes.add([level: 'warn', message: "Cannot POST audioClip for ${playerId}: player device or IP is unavailable".toString()])
+    queue.active = next
+    queues[playerId] = queue
+    saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+    runInMillis(1, 'completePlayerAudioClipCallback', [overwrite: false, data: [playerId: playerId, item: next, phase: 'FAILED']])
+    return null
+  }
+  String priority = next.priority == 'HIGH' ? 'HIGH' : null
+  BigDecimal requestedVolume = toBigDecimal(next.volume)
+  Integer currentVolume = toBigDecimal(player.currentValue('volume')?.toString())?.intValue() ?: 0
+  Integer boost = toBigDecimal(getPlayerPreference(player, 'ttsBoostAmount', 10)?.toString())?.intValue() ?: 10
+  BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
+  Integer resolvedVolume = requestedVolume != null && (requestedVolume.compareTo(BigDecimal.ZERO) == 0 ||
+      requestedVolume.compareTo(BigDecimal.valueOf(-1L)) == 0)
+      ? 0 : Math.max(0, Math.min(baseVolume.add(new BigDecimal(boost)).setScale(0, RoundingMode.HALF_UP).intValue(), 100))
+  Map body = [name: name, appId: AUDIO_CLIP_APP_ID,
+    volume: resolvedVolume]
+  if(priority) { body.priority = priority }
+  if(next.uri) { body.streamUrl = next.uri }
+  if(next.clipType) { body.clipType = next.clipType }
+  Map params = [uri: "${getLocalApiPrefix("${ip}:1443")}${AUDIO_CLIP_ENDPOINT}",
+    headers: ['X-Sonos-Api-Key': '123e4567-e89b-12d3-a456-426655440000'],
+    requestContentType: 'application/json', contentType: 'application/json',
+    ignoreSSLIssues: true, timeout: 5, body: JsonOutput.toJson(body)]
+  next.appId = AUDIO_CLIP_APP_ID
+  next.dispatchedAt = now()
+  next.phase = 'POST_PENDING'
+  queue.active = next
+  queues[playerId] = queue
+  saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
+  return [params: params, data: [playerId: playerId, name: name,
+    appId: AUDIO_CLIP_APP_ID, correlationId: next.correlationId],
+    summary: "${playerId}:${priority ?: 'REGULAR'}:${next.origin}".toString()]
 }
 
 void dispatchNextPlayerAudioClipCallback(Map data = [:]) {
@@ -3402,18 +3485,24 @@ void completePlayerAudioClip(String playerId, Map completed, String phase) {
   }
 }
 
-void audioClipStatusHandler(Object event) {
+/** Child entry point: accept one audioClip status report from a player driver and apply it from a new execution. */
+void putAudioClipStatus(String dni, Map status, Object epoch, Object sequence) {
+  if(!dni || !(status instanceof Map) || status.appId?.toString() != AUDIO_CLIP_APP_ID) { return }
+  if(!acceptSequence("clip:${dni}".toString(), epoch, sequence)) {
+    logDebug("Ignoring stale audioClip status ${status.status} for ${dni}")
+    return
+  }
+  runInMillis(1, 'audioClipStatusCallback', [overwrite: false,
+    data: [dni: dni, status: new LinkedHashMap(status), epoch: epoch, sequence: sequence]])
+}
+
+void audioClipStatusCallback(Map data) {
+  String dni = data?.dni?.toString()
+  Map payload = data?.status instanceof Map ? (Map)data.status : null
+  if(!dni || payload == null) { return }
+  if(!applySequence("clip:${dni}".toString(), data.epoch, data.sequence)) { return }
   synchronized(appLock('work')) {
-    Map payload
-    try {
-      String raw = event?.value?.toString()
-      payload = raw?.trim()?.startsWith('{') ? (Map)new JsonSlurper().parseText(raw) : [:]
-    } catch(Exception e) {
-      logWarn("Ignoring malformed audioClipStatus event: ${e.message}")
-      return
-    }
-    if(!(payload instanceof Map) || payload.appId?.toString() != AUDIO_CLIP_APP_ID) { return }
-    ChildDeviceWrapper player = resolveEventPlayer(event)
+    ChildDeviceWrapper player = getChildDevice(dni)
     String playerId = player?.getDataValue('id')?.toString()
     String name = payload.name?.toString()
     String phase = payload.status?.toString()
@@ -3423,29 +3512,18 @@ void audioClipStatusHandler(Object event) {
     if(active?.name?.toString() != name || !phase) { return }
     if(payload.id != null) { active.sonosId = payload.id.toString() }
     active.phase = phase
+    Long postSentAt = active.postSentAt instanceof Number ? ((Number)active.postSentAt).longValue() : null
+    if(phase == 'ACTIVE' && postSentAt != null) { active.activeAt = now() }
     queues[playerId] = queue
     saveAppMemoryMap(AUDIO_CLIP_QUEUES_STATE_KEY, queues)
-    logDebug("audioClip status player=${playerId}, name=${name}, id=${payload.id ?: 'pending'}, status=${phase}")
+    String latency = phase == 'ACTIVE' && postSentAt != null ? ", postToActiveMs=${now() - postSentAt}" : ''
+    logDebug("audioClip status player=${playerId}, name=${name}, id=${payload.id ?: 'pending'}, status=${phase}${latency}")
     if(phase == 'ACTIVE' && active.groupCorrelationId) {
       handleGroupAnnouncementProgress(player, [correlationId: active.groupCorrelationId, phase: 'ACTIVE'])
     } else if(phase in ['DONE', 'ERROR', 'DISMISSED', 'INTERRUPTED']) {
       completePlayerAudioClip(playerId, active, phase in ['ERROR', 'INTERRUPTED'] ? 'FAILED' : phase)
     }
   }
-}
-
-void audioClipStatusEventHandler(Event event) { audioClipStatusHandler(event) }
-
-ChildDeviceWrapper resolveEventPlayer(Object event) {
-  if(event instanceof Event) { return resolveTopologyEventPlayer((Event)event) }
-  String dni = event?.device?.getDeviceNetworkId()?.toString() ?: event?.deviceNetworkId?.toString()
-  if(!dni && event?.deviceId != null) {
-    dni = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
-      player.id?.toString() == event.deviceId.toString()
-    }?.deviceNetworkId?.toString()
-  }
-  if(dni) { return getChildDevice(dni) }
-  return null
 }
 
 /** Queue group announcements so a coordinator stream and subsequent messages cannot race. */
@@ -3766,7 +3844,7 @@ void dispatchGroupAnnouncementClip(Map item, List<ChildDeviceWrapper> players, B
         priority: highPriority ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()])
     }
   }
-  enqueuePlayerAudioClipItems(queuedItems)
+  enqueuePlayerAudioClipItems(queuedItems, true)
   logDebug("Queued group audioClip ${correlationId} on ${players.size()} players")
 }
 
@@ -3931,7 +4009,7 @@ void releaseGroupAnnouncementTTSAfterChime(Map data = null) {
         volume: toBigDecimal(item.volume), duration: item.duration,
         priority: prioritySidecar ? 'HIGH' : 'REGULAR', origin: 'group-tts', submittedAt: now()]
     }
-    enqueuePlayerAudioClipItems(queuedItems)
+    enqueuePlayerAudioClipItems(queuedItems, true)
     queues[groupDni] = queue
     saveAppMemoryMap(GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY, queues)
   }

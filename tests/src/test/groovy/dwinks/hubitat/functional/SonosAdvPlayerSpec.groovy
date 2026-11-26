@@ -1180,9 +1180,13 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
 
-  def "audioClip websocket statuses are forwarded as undeclared JSON events"() {
+  def "audioClip websocket statuses are sent straight to the parent app"() {
     given:
     driver.device.events.clear()
+    parentPlayerUpdates.clear()
+    driver.metaClass.getParent = { -> new Expando(
+      putAudioClipStatus: { String dni, Map status, Object epoch, Object sequence ->
+        parentPlayerUpdates << [kind:'audioClipStatus', dni:dni, status:new LinkedHashMap(status), epoch:epoch, sequence:sequence] }) }
     String message = JsonOutput.toJson([
       [namespace: 'audioClip:1', name: 'audioClipStatus', type: 'audioClipStatus'],
       [_objectType: 'audioClipStatus', audioClips: [[_objectType: 'audioClip',
@@ -1194,10 +1198,13 @@ class SonosAdvPlayerSpec extends Specification {
     driver.processWebsocketMessage(message)
 
     then:
-    Map event = driver.events.find { Map item -> item.name == 'audioClipStatus' }
-    event != null
-    new JsonSlurper().parseText(event.value as String) == [appId: 'com.dwinks.sonos.advanced',
-      name: 'request-name', id: 'sonos-clip-id', priority: 'HIGH', clipType: 'CUSTOM', status: 'ACTIVE']
+    !driver.events.any { Map item -> item.name == 'audioClipStatus' }
+    Map update = parentPlayerUpdates.find { Map item -> item.kind == 'audioClipStatus' }
+    update != null
+    update.status == [appId: 'com.dwinks.sonos.advanced', name: 'request-name', id: 'sonos-clip-id',
+      priority: 'HIGH', clipType: 'CUSTOM', status: 'ACTIVE']
+    update.epoch != null
+    update.sequence != null
   }
 
   def "every primary websocket open subscribes to audioClip"() {

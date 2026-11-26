@@ -929,7 +929,8 @@ void setVolume(BigDecimal level, BigDecimal duration = null) {
   // transitions are serialized on the fade map and every step carries the generation it was scheduled for.
   synchronized(groupDeviceVolumeFadeState) {
     cancelGroupDeviceVolumeFade()
-    Long generation = System.nanoTime()
+    // Hubitat's sandbox rejects System.nanoTime(); a UUID is unique per fade and needs no clock.
+    String generation = UUID.randomUUID().toString()
     Map fadeState = [
       targetVolume: targetVolume,
       startVolume: currentVolume,

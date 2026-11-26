@@ -47,6 +47,39 @@ class SandboxRuleSpec extends Specification {
     v.any { it.message.contains("'System.exit") }
   }
 
+  def "System.#method is flagged because the hub rejects it at save time"() {
+    given:
+    ParseResult pr = parse("""
+      definition(name: 'F', namespace: 'dwinks', author: 'Foo')
+      preferences { page(name: 'p') }
+      void doIt() { Object x = System.${call} }
+    """.stripIndent())
+
+    when:
+    List<Violation> v = new SandboxRule().check(pr)
+
+    then:
+    v.any { it.message.contains("'System.${method}") }
+
+    where:
+    method       | call
+    'nanoTime'   | 'nanoTime()'
+    'getenv'     | "getenv('HOME')"
+    'getProperty'| "getProperty('user.dir')"
+  }
+
+  def "now() and UUID are not flagged"() {
+    given:
+    ParseResult pr = parse('''
+      definition(name: 'F', namespace: 'dwinks', author: 'Foo')
+      preferences { page(name: 'p') }
+      void doIt() { Long a = now(); String b = UUID.randomUUID().toString() }
+    '''.stripIndent())
+
+    expect:
+    new SandboxRule().check(pr).isEmpty()
+  }
+
   def "@Grab is forbidden"() {
     given:
     ParseResult pr = parse('''

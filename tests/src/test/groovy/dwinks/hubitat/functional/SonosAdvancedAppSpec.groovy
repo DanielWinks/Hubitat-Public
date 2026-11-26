@@ -197,7 +197,7 @@ class SonosAdvancedAppSpec extends Specification {
     'processUpnpNotificationCallback', 'groupTopologyOperationEventHandler', 'applyAvtCallback', 'applyRcCallback',
     'recalculateVolumeStateCallback', 'publishGroupRenderingCallback', 'deliverCatalogSnapshot',
     'processPlayerCommandRequest', 'processGroupCommandRequest', 'refreshPlayerPolicyCallback',
-    'completePlayerAudioClipCallback']
+    'completePlayerAudioClipCallback', 'dispatchNextPlayerAudioClipsCallback']
 
   /** Run the recorded runInMillis callbacks (and any they schedule) in submission order, as the hub would. */
   void runScheduledCallbacks(Collection<String> only = NEW_CALLBACKS) {
@@ -2220,6 +2220,7 @@ class SonosAdvancedAppSpec extends Specification {
       correlationId: correlationId
     ])])
 
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
     then:
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.every { Map call ->
@@ -2241,6 +2242,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     when: 'no group preference is supplied'
     appScript.dispatchGroupAnnouncementClip(item, [coordinator, follower], false)
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
 
     then: 'individual player preferences are ignored'
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
@@ -2253,12 +2255,34 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.asyncCalls.clear()
     item.chimeBeforeStandardPriorityTTS = true
     appScript.dispatchGroupAnnouncementClip(item, [coordinator, follower], false)
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
 
     then: 'both group members receive the group-selected chime'
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
     appScript.asyncCalls.every { Map call ->
       (new JsonSlurper().parseText(call.params.body as String) as Map).clipType == 'CHIME'
     }
+  }
+
+  def "a group clip POSTs every player back to back and logs once after the send loop"() {
+    given:
+    makeAnnouncementRosterExact()
+    appScript.logs.clear()
+    Map item = [correlationId: 'tight-group', uri: 'http://example.test/tts.mp3', volume: '10', duration: 5]
+
+    when:
+    appScript.dispatchGroupAnnouncementClip(item, [coordinator, follower], false)
+    Map queues = appScript.appMemoryMap('audioClipQueuesByPlayer')
+
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
+    then: 'both POSTs left, each stamped with its send time'
+    appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
+    queues.RINCON_COORD.active.postSentAt instanceof Number
+    queues.RINCON_FOLLOW.active.postSentAt instanceof Number
+
+    and: 'one summary line replaces the per-player prepare logs'
+    appScript.logs.count { it.toString().contains('Sent 2 audioClip POST(s)') } == 1
+    appScript.logs.every { !it.toString().contains('Prepared audioClip POST') }
   }
 
   def "separate group chime phase holds each player's TTS until the chime release"() {
@@ -2271,6 +2295,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.dispatchGroupAnnouncementClip(item, [coordinator, follower], false)
 
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
     then:
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
     appScript.asyncCalls.findAll { Map call ->
@@ -2302,9 +2327,9 @@ class SonosAdvancedAppSpec extends Specification {
     body.volume == 15
 
     when:
-    appScript.audioClipStatusHandler([deviceNetworkId: coordinator.deviceNetworkId,
-      value: JsonOutput.toJson([appId: body.appId, name: body.name, id: 'sonos-id-1',
-        priority: 'HIGH', clipType: 'CUSTOM', status: 'ACTIVE'])])
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId,
+      status: [appId: body.appId, name: body.name, id: 'sonos-id-1',
+        priority: 'HIGH', clipType: 'CUSTOM', status: 'ACTIVE']])
 
     then:
     appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.phase == 'ACTIVE'
@@ -2313,9 +2338,9 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.audioClipPostCallback(new AsyncResponse(status: 200,
       data: '{"_objectType":"audioClip","id":"sonos-id-1"}'), post.data as Map)
-    appScript.audioClipStatusHandler([deviceNetworkId: coordinator.deviceNetworkId,
-      value: JsonOutput.toJson([appId: body.appId, name: body.name, id: 'sonos-id-1',
-        priority: 'HIGH', clipType: 'CUSTOM', status: 'DONE'])])
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId,
+      status: [appId: body.appId, name: body.name, id: 'sonos-id-1',
+        priority: 'HIGH', clipType: 'CUSTOM', status: 'DONE']])
 
     then:
     appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active == null
@@ -2348,9 +2373,9 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.scheduled.any { List job -> job[1] == 'audioClipPlayerWatchdog' }
 
     when: 'the available member reports completion'
-    appScript.audioClipStatusHandler([deviceNetworkId: coordinator.deviceNetworkId,
-      value: JsonOutput.toJson([appId: coordinatorBody.appId, name: coordinatorBody.name,
-        id: 'available-sonos-id', priority: 'REGULAR', clipType: 'CUSTOM', status: 'DONE'])])
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId,
+      status: [appId: coordinatorBody.appId, name: coordinatorBody.name,
+        id: 'available-sonos-id', priority: 'REGULAR', clipType: 'CUSTOM', status: 'DONE']])
 
     then:
     appScript.appMemoryMap('groupAnnouncementQueues')['GROUP-DNI'].active.correlationId == groupCorrelationId
@@ -2385,9 +2410,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.appMemoryMap('audioClipQueuesByPlayer').RINCON_COORD.active.correlationId == 'high-H'
 
     when:
-    appScript.audioClipStatusHandler([deviceNetworkId: coordinator.deviceNetworkId,
-      value: JsonOutput.toJson([appId: highBody.appId, name: highBody.name, id: 'sonos-high',
-        priority: 'HIGH', clipType: 'CUSTOM', status: 'DONE'])])
+    appScript.audioClipStatusCallback([dni: coordinator.deviceNetworkId,
+      status: [appId: highBody.appId, name: highBody.name, id: 'sonos-high',
+        priority: 'HIGH', clipType: 'CUSTOM', status: 'DONE']])
     appScript.dispatchNextPlayerAudioClip('RINCON_COORD')
     Map resumedPost = appScript.asyncCalls.last()
     Map resumedBody = new JsonSlurper().parseText(resumedPost.params.body as String) as Map
@@ -2476,6 +2501,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.dispatchGroupAnnouncementByPolicy('GROUP-DNI', queue, item, [coordinator, follower], coordinator)
 
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
     then:
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
     ![coordinator, follower, extra].any { SonosAppPlayerDouble player ->
@@ -2613,6 +2639,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     appScript.startNextGroupAnnouncement('GROUP-DNI')
 
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
     then:
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
     !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
@@ -2638,6 +2665,7 @@ class SonosAdvancedAppSpec extends Specification {
       replacementUri: 'https://music.example.test/track.mp3'])
     appScript.startNextGroupAnnouncement('GROUP-DNI')
 
+    runScheduledCallbacks(['dispatchNextPlayerAudioClipsCallback'])
     then:
     appScript.asyncCalls.findAll { Map call -> call.cb == 'audioClipPostCallback' }.size() == 2
     !coordinator.commands.any { it.name == 'playerPlayGroupAnnouncementStream' }
