@@ -1093,6 +1093,7 @@ class SonosAdvPlayerSpec extends Specification {
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       setZgtPayload: { Map payload -> parentPlayerUpdates << [kind:'zgtPayload', payload:new LinkedHashMap(payload)] },
+      playerPreferencesUpdated: { Map payload -> parentPlayerUpdates << [kind:'playerPreferences', payload:new LinkedHashMap(payload)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
       playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
@@ -2135,6 +2136,47 @@ class SonosAdvPlayerSpec extends Specification {
 
     where:
     batteryValue << ['true', null]
+  }
+
+  def "player updated publishes the complete app preference snapshot after its gate"() {
+    given:
+    driver.metaClass.handleSettingsUpdate = { -> }
+    driver.settings.putAll([
+      disableAlbumArtEvents: false,
+      disableArtistAlbumTrackEvents: true,
+      disableTrackDataEvents: false,
+      enableTrackPositionUpdates: true,
+      includeTrackDataMetaData: true,
+      chimeBeforeHighPriorityTTS: true,
+      chimeBeforeStandardPriorityTTS: false,
+      ttsBoostAmount: 15
+    ])
+
+    when:
+    driver.updated()
+
+    then:
+    driver.scheduled.any { List job -> job[0] == 1 && job[1] == 'publishPlayerPreferenceSnapshot' }
+    parentPlayerUpdates.isEmpty()
+
+    when:
+    Map callbackData = driver.scheduled.find { List job -> job[1] == 'publishPlayerPreferenceSnapshot' }[2].data
+    driver.publishPlayerPreferenceSnapshot(callbackData)
+
+    then:
+    parentPlayerUpdates.size() == 1
+    parentPlayerUpdates[0].kind == 'playerPreferences'
+    parentPlayerUpdates[0].payload.deviceDni == 'SONOS-TEST-DNI'
+    parentPlayerUpdates[0].payload.preferences == [
+      disableAlbumArtEvents: false,
+      disableArtistAlbumTrackEvents: true,
+      disableTrackDataEvents: false,
+      enableTrackPositionUpdates: true,
+      includeTrackDataMetaData: true,
+      chimeBeforeHighPriorityTTS: true,
+      chimeBeforeStandardPriorityTTS: false,
+      ttsBoostAmount: 15
+    ]
   }
 
   def "player subscribes to ZGT only when parent elects it"() {

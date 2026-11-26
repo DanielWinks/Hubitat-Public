@@ -327,6 +327,7 @@ Boolean getChimeBeforeHighPriorityTTSSetting() { return settings.chimeBeforeHigh
 Boolean getControlUngroupedIndividuallySetting() { return settings.controlUngroupedIndividually != null ? settings.controlUngroupedIndividually : false }
 Boolean getUseProportionalVolumeSetting() { return settings.useProportionalVolume != null ? settings.useProportionalVolume : true }
 Boolean getEnableTrackPositionUpdates() { return settings.enableTrackPositionUpdates != null ? settings.enableTrackPositionUpdates : false }
+Boolean getDisableAlbumArtEvents() { return settings.disableAlbumArtEvents != null ? settings.disableAlbumArtEvents : true }
 
 // =============================================================================
 // Migration-Prune Helpers — whitelist-driven for-each removal
@@ -560,12 +561,40 @@ void purgeParentGroupCommandsAfterInitialization(Map data = [:]) {
   }
 }
 
-void installed() { initialize() }
+void installed() {
+  initialize()
+  scheduleGroupPreferenceSnapshot()
+}
 
 void updated() {
   initialize()
   configure()
   runInMillis(1, 'refresh', [overwrite: true])
+  scheduleGroupPreferenceSnapshot()
+}
+
+/** Copy the app-required settings after updated() releases this driver's gate. */
+void scheduleGroupPreferenceSnapshot() {
+  String dni = device?.getDeviceNetworkId()?.toString()
+  if(!dni) { return }
+  Map<String, Object> preferences = [
+    chimeBeforeStandardPriorityTTS: getChimeBeforeStandardPriorityTTSSetting(),
+    chimeBeforeHighPriorityTTS: getChimeBeforeHighPriorityTTSSetting(),
+    disableAlbumArtEvents: getDisableAlbumArtEvents(),
+    enableTrackPositionUpdates: getEnableTrackPositionUpdates()
+  ]
+  runInMillis(1, 'publishGroupPreferenceSnapshot', [overwrite: true,
+      data: [deviceDni: dni, preferences: preferences]])
+}
+
+void publishGroupPreferenceSnapshot(Map data = [:]) {
+  String dni = data?.deviceDni?.toString()
+  if(!dni || dni != device?.getDeviceNetworkId()?.toString() || !(data?.preferences instanceof Map)) { return }
+  try {
+    parent.groupPreferencesUpdated([deviceDni: dni, preferences: new LinkedHashMap((Map)data.preferences)])
+  } catch(Exception e) {
+    logWarn("Could not send group preference snapshot to parent for ${dni}: ${e.message}")
+  }
 }
 
 void uninstalled() {

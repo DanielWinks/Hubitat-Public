@@ -359,6 +359,8 @@ preferences {
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
 @Field static final String ZGT_LAST_REPORT_STATE_KEY = 'zgtLastReport'
 @Field static final String ZGT_PAYLOAD_STATE_KEY = 'zgtPayload'
+@Field static final String PLAYER_PREFERENCES_BY_DNI_STATE_KEY = 'playerPreferencesByDni'
+@Field static final String GROUP_PREFERENCES_BY_DNI_STATE_KEY = 'groupPreferencesByDni'
 @Field static final String READY_FOR_ZGT_STATE_KEY = 'readyForZgt'
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final String GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY = 'groupAnnouncementProgressQueue'
@@ -462,6 +464,8 @@ preferences {
 @Field final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   ZGT_LAST_REPORT_STATE_KEY,
   ZGT_PAYLOAD_STATE_KEY,
+  PLAYER_PREFERENCES_BY_DNI_STATE_KEY,
+  GROUP_PREFERENCES_BY_DNI_STATE_KEY,
   READY_FOR_ZGT_STATE_KEY,
   LAST_PROCESSED_TOPOLOGY_STATE_KEY,
   GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY,
@@ -804,6 +808,90 @@ void applyChildManagedSettings() {
   refreshPlayerAnnouncementPolicySnapshots(false)
   scheduleUpdateCheck()
   checkForUpdates()
+}
+
+/** Receive a complete player preference snapshot after the child releases its device gate. */
+void playerPreferencesUpdated(Map payload) {
+  String dni = payload?.deviceDni?.toString()
+  ChildDeviceWrapper player = dni ? getChildDevice(dni) : null
+  if(player == null || !player.getDataValue('id')) { return }
+  Map<String, Object> preferences = normalizePlayerPreferenceSnapshot(
+      payload?.preferences instanceof Map ? (Map)payload.preferences : [:])
+  Map<String, Map<String, Object>> snapshots = state[PLAYER_PREFERENCES_BY_DNI_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[PLAYER_PREFERENCES_BY_DNI_STATE_KEY]) : [:]
+  snapshots[dni] = preferences
+  state[PLAYER_PREFERENCES_BY_DNI_STATE_KEY] = snapshots
+}
+
+/** Receive a complete group preference snapshot after the child releases its device gate. */
+void groupPreferencesUpdated(Map payload) {
+  String dni = payload?.deviceDni?.toString()
+  ChildDeviceWrapper groupDevice = dni ? getChildDevice(dni) : null
+  if(groupDevice == null || groupDevice.getDataValue('id') ||
+      (!dni.contains(GROUP_DEVICE_DNI_MARKER) && groupDevice.getDataValue('groupCoordinatorId') == null)) { return }
+  Map<String, Object> preferences = normalizeGroupPreferenceSnapshot(
+      payload?.preferences instanceof Map ? (Map)payload.preferences : [:])
+  Map<String, Map<String, Object>> snapshots = state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[GROUP_PREFERENCES_BY_DNI_STATE_KEY]) : [:]
+  snapshots[dni] = preferences
+  state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] = snapshots
+}
+
+Map<String, Object> normalizePlayerPreferenceSnapshot(Map values) {
+  Integer boost = toBigDecimal(values?.ttsBoostAmount)?.intValue()
+  if(!(boost in [-10, -5, 0, 5, 10, 15, 20])) { boost = 10 }
+  return [
+    disableAlbumArtEvents: toBooleanPreference(values?.disableAlbumArtEvents, true),
+    disableArtistAlbumTrackEvents: toBooleanPreference(values?.disableArtistAlbumTrackEvents, false),
+    disableTrackDataEvents: toBooleanPreference(values?.disableTrackDataEvents, true),
+    enableTrackPositionUpdates: toBooleanPreference(values?.enableTrackPositionUpdates, false),
+    includeTrackDataMetaData: toBooleanPreference(values?.includeTrackDataMetaData, false),
+    chimeBeforeHighPriorityTTS: toBooleanPreference(values?.chimeBeforeHighPriorityTTS, false),
+    chimeBeforeStandardPriorityTTS: toBooleanPreference(values?.chimeBeforeStandardPriorityTTS, false),
+    ttsBoostAmount: boost
+  ]
+}
+
+Map<String, Object> normalizeGroupPreferenceSnapshot(Map values) {
+  return [
+    chimeBeforeStandardPriorityTTS: toBooleanPreference(values?.chimeBeforeStandardPriorityTTS, false),
+    chimeBeforeHighPriorityTTS: toBooleanPreference(values?.chimeBeforeHighPriorityTTS, false),
+    disableAlbumArtEvents: toBooleanPreference(values?.disableAlbumArtEvents, true),
+    enableTrackPositionUpdates: toBooleanPreference(values?.enableTrackPositionUpdates, false)
+  ]
+}
+
+Boolean toBooleanPreference(Object raw, Boolean defaultValue) {
+  if(raw == null) { return defaultValue }
+  if(raw instanceof Boolean) { return (Boolean)raw }
+  String normalized = raw.toString().trim().toLowerCase(Locale.ROOT)
+  if(normalized in ['true', '1', 'on', 'yes']) { return true }
+  if(normalized in ['false', '0', 'off', 'no']) { return false }
+  return defaultValue
+}
+
+Map<String, Object> getPlayerPreferenceSnapshot(ChildDeviceWrapper player) {
+  String dni = player?.getDeviceNetworkId()?.toString()
+  Map snapshots = state[PLAYER_PREFERENCES_BY_DNI_STATE_KEY] instanceof Map
+      ? (Map)state[PLAYER_PREFERENCES_BY_DNI_STATE_KEY] : [:]
+  return snapshots[dni] instanceof Map ? (Map<String, Object>)snapshots[dni] : [:]
+}
+
+Map<String, Object> getGroupPreferenceSnapshot(ChildDeviceWrapper groupDevice) {
+  String dni = groupDevice?.getDeviceNetworkId()?.toString()
+  Map snapshots = state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] instanceof Map
+      ? (Map)state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] : [:]
+  return snapshots[dni] instanceof Map ? (Map<String, Object>)snapshots[dni] : [:]
+}
+
+Object getPlayerPreference(ChildDeviceWrapper player, String key, Object defaultValue = null) {
+  Map<String, Object> snapshot = getPlayerPreferenceSnapshot(player)
+  return snapshot.containsKey(key) ? snapshot[key] : defaultValue
+}
+
+Object getGroupPreference(ChildDeviceWrapper groupDevice, String key, Object defaultValue = null) {
+  Map<String, Object> snapshot = getGroupPreferenceSnapshot(groupDevice)
+  return snapshot.containsKey(key) ? snapshot[key] : defaultValue
 }
 
 void removeAppSetting(String key) {
@@ -2566,6 +2654,10 @@ synchronized void playerAttributeUpdate(Map payload) {
   String playerDni = payload?.playerDni?.toString()
   Map incoming = payload?.attributes instanceof Map ? new LinkedHashMap((Map)payload.attributes) : [:]
   incoming.keySet().removeAll { Object name -> name?.toString() in SOAP_EVENT_OWNED_ATTRIBUTES }
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  if(player != null) {
+    incoming.keySet().removeAll { Object name -> isPlayerAttributeDisabled(player, name?.toString()) }
+  }
   if(!playerDni || incoming.isEmpty()) { return }
   Map<String, Map<String, Object>> pending = state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_PLAYER_ATTRIBUTE_UPDATES_STATE_KEY] : [:]
@@ -2952,7 +3044,13 @@ void enqueuePlayerAudioClip(ChildDeviceWrapper player, Map args) {
     clipType: clipType, origin: args.origin?.toString() ?: 'player-request',
     submittedAt: now()]
   List<Map> items = []
-  if(args.chimeBeforeTTS == true) {
+  Boolean chimeBeforeTTS = args.chimeBeforeTTS == true
+  if(args.containsKey('chimeBeforeTTS')) {
+    String preferenceKey = item.priority == 'HIGH'
+        ? 'chimeBeforeHighPriorityTTS' : 'chimeBeforeStandardPriorityTTS'
+    chimeBeforeTTS = getPlayerPreference(player, preferenceKey, chimeBeforeTTS) == true
+  }
+  if(chimeBeforeTTS) {
     items.add([correlationId: UUID.randomUUID().toString(), playerId: playerId,
       volume: item.volume, duration: 8, priority: item.priority, clipType: 'CHIME',
       origin: 'player-chime', submittedAt: now()])
@@ -3045,7 +3143,7 @@ Map prepareNextPlayerAudioClipPost(String playerId) {
   String priority = next.priority == 'HIGH' ? 'HIGH' : null
   BigDecimal requestedVolume = toBigDecimal(next.volume)
   Integer currentVolume = toBigDecimal(player.currentValue('volume')?.toString())?.intValue() ?: 0
-  Integer boost = toBigDecimal(player.getSetting('ttsBoostAmount')?.toString())?.intValue() ?: 10
+  Integer boost = toBigDecimal(getPlayerPreference(player, 'ttsBoostAmount', 10)?.toString())?.intValue() ?: 10
   BigDecimal baseVolume = requestedVolume != null ? requestedVolume : new BigDecimal(currentVolume)
   Integer resolvedVolume = requestedVolume != null && (requestedVolume.compareTo(BigDecimal.ZERO) == 0 ||
       requestedVolume.compareTo(BigDecimal.valueOf(-1L)) == 0)
@@ -3191,10 +3289,12 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
     coordinatorId: coordinator.getDataValue('id')?.toString(),
     playerIds: players.collect { ChildDeviceWrapper p -> p.getDataValue('id')?.toString() }.findAll { it }]
   if(args.containsKey('chimeBeforeStandardPriorityTTS')) {
-    item.chimeBeforeStandardPriorityTTS = args.chimeBeforeStandardPriorityTTS == true
+    item.chimeBeforeStandardPriorityTTS = getGroupPreference(groupDevice,
+        'chimeBeforeStandardPriorityTTS', args.chimeBeforeStandardPriorityTTS) == true
   }
   if(args.containsKey('chimeBeforeHighPriorityTTS')) {
-    item.chimeBeforeHighPriorityTTS = args.chimeBeforeHighPriorityTTS == true
+    item.chimeBeforeHighPriorityTTS = getGroupPreference(groupDevice,
+        'chimeBeforeHighPriorityTTS', args.chimeBeforeHighPriorityTTS) == true
   }
   if(!item.uri) {
     logWarn("Ignoring group announcement ${correlationId}: missing stream URI")
@@ -3230,7 +3330,7 @@ void enqueueGroupAnnouncement(ChildDeviceWrapper groupDevice, ChildDeviceWrapper
       Boolean highPriorityChime = item.containsKey('chimeBeforeHighPriorityTTS')
           ? item.chimeBeforeHighPriorityTTS == true
           : (item.isTts == true && players.any { ChildDeviceWrapper player ->
-              player.getChimeBeforeHighPriorityTTS() == true
+              getPlayerPreference(player, 'chimeBeforeHighPriorityTTS', false) == true
             })
       if(separateChime && item.isTts == true && highPriorityChime) {
         item.mode = 'AUDIO_CLIP'
@@ -6000,8 +6100,22 @@ void deliverUpnpEventsToPlayer(String rincon, List<Map> events, String artworkSo
   List<Map> targetEvents = formatUpnpEventsForChild(events, artworkSourceId ?: rincon, player)
   targetEvents.each { Map event ->
     String name = event?.name?.toString()
-    if(name && event.containsKey('value')) { sendParentChildEvent(player, name, event.value) }
+    if(name && event.containsKey('value') && !isPlayerAttributeDisabled(player, name)) {
+      sendParentChildEvent(player, name, event.value)
+    }
   }
+}
+
+Boolean isPlayerAttributeDisabled(ChildDeviceWrapper player, String attributeName) {
+  if(!player || !attributeName) { return false }
+  if(attributeName == 'trackData') {
+    return toBooleanPreference(getPlayerPreference(player, 'disableTrackDataEvents', true), true)
+  }
+  if(attributeName in ['currentArtistName', 'currentAlbumName', 'currentTrackName', 'currentTrackNumber',
+      'nextArtistName', 'nextAlbumName', 'nextTrackName']) {
+    return toBooleanPreference(getPlayerPreference(player, 'disableArtistAlbumTrackEvents', false), false)
+  }
+  return false
 }
 
 /** Apply the artwork display preference and Hubitat image markup at the parent fanout boundary. */
@@ -6026,10 +6140,11 @@ List<Map> formatUpnpEventsForChild(List<Map> events, String artworkSourceId, Chi
 }
 
 Boolean isAlbumArtEventsDisabled(ChildDeviceWrapper target) {
-  Object raw = target?.getSetting('disableAlbumArtEvents')
-  if(raw == null) { return true }
-  if(raw instanceof Boolean) { return (Boolean)raw }
-  return raw.toString().trim().toLowerCase(Locale.ROOT) in ['true', '1', 'on', 'yes']
+  if(target == null) { return true }
+  Object raw = target.getDataValue('id') != null
+      ? getPlayerPreference(target, 'disableAlbumArtEvents', true)
+      : getGroupPreference(target, 'disableAlbumArtEvents', true)
+  return toBooleanPreference(raw, true)
 }
 
 Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String artworkSourceId,
@@ -6795,7 +6910,9 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
    'currentTrackNumber', 'nextArtistName', 'nextAlbumName', 'nextTrackName', 'nextTrackAlbumArtURI',
    'queueTrackTotal', 'queueTrackPosition', 'currentRepeatOneMode', 'currentRepeatAllMode',
    'currentCrossfadeMode', 'currentShuffleMode'].each { String name ->
-    if(name in ['trackPosition', 'trackPositionUpdated'] && !isPlayerTrackPositionUpdatesEnabled(coordinator)) { return }
+    if(name in ['trackPosition', 'trackPositionUpdated'] &&
+        (!isPlayerTrackPositionUpdatesEnabled(coordinator) || !isGroupTrackPositionUpdatesEnabled(groupDevice))) { return }
+    if(isPlayerAttributeDisabled(coordinator, name)) { return }
     Object value = coordinator.currentValue(name, true)
     if(value != null) { attributes[name] = value }
   }
@@ -6822,9 +6939,11 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
 }
 
 Boolean isPlayerTrackPositionUpdatesEnabled(ChildDeviceWrapper player) {
-  Object raw = player?.getSetting('enableTrackPositionUpdates')
-  if(raw instanceof Boolean) { return (Boolean)raw }
-  return raw?.toString()?.trim()?.toLowerCase(Locale.ROOT) in ['true', '1', 'on', 'yes']
+  return toBooleanPreference(getPlayerPreference(player, 'enableTrackPositionUpdates', false), false)
+}
+
+Boolean isGroupTrackPositionUpdatesEnabled(ChildDeviceWrapper groupDevice) {
+  return toBooleanPreference(getGroupPreference(groupDevice, 'enableTrackPositionUpdates', false), false)
 }
 
 /**

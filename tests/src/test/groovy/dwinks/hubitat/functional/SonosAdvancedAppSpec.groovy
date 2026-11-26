@@ -233,6 +233,39 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.readyForZgt == ['DNI-FIRST', 'DNI-SECOND']
   }
 
+  def "player and group preference snapshots are stored by child DNI and used by app operations"() {
+    given:
+    coordinator.settings.disableAlbumArtEvents = false
+    appScript.playerPreferencesUpdated([deviceDni: coordinator.deviceNetworkId, preferences: [
+      disableAlbumArtEvents: true,
+      disableArtistAlbumTrackEvents: true,
+      disableTrackDataEvents: true,
+      enableTrackPositionUpdates: true,
+      includeTrackDataMetaData: true,
+      chimeBeforeHighPriorityTTS: true,
+      chimeBeforeStandardPriorityTTS: false,
+      ttsBoostAmount: 15
+    ]])
+    appScript.groupPreferencesUpdated([deviceDni: group.deviceNetworkId, preferences: [
+      chimeBeforeStandardPriorityTTS: true,
+      chimeBeforeHighPriorityTTS: false,
+      disableAlbumArtEvents: false,
+      enableTrackPositionUpdates: true
+    ]])
+
+    expect:
+    appScript.state.playerPreferencesByDni[coordinator.deviceNetworkId].ttsBoostAmount == 15
+    appScript.state.playerPreferencesByDni[coordinator.deviceNetworkId].includeTrackDataMetaData == true
+    appScript.state.groupPreferencesByDni[group.deviceNetworkId].chimeBeforeStandardPriorityTTS == true
+    appScript.isAlbumArtEventsDisabled(coordinator)
+    !appScript.isAlbumArtEventsDisabled(group)
+    appScript.isPlayerTrackPositionUpdatesEnabled(coordinator)
+    appScript.isGroupTrackPositionUpdatesEnabled(group)
+    appScript.isPlayerAttributeDisabled(coordinator, 'trackData')
+    appScript.isPlayerAttributeDisabled(coordinator, 'currentArtistName')
+    !appScript.isPlayerAttributeDisabled(follower, 'currentTrackName')
+  }
+
   def "empty DNI is not registered as ready for ZGT"() {
     expect:
     appScript.readyForZgt(null) == 'wait'

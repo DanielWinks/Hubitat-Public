@@ -9,12 +9,15 @@ import spock.lang.Specification
 
 class SonosGroupParentDouble {
   List<Map> requests = []
+  List<Map> preferenceUpdates = []
   Boolean accepted = true
 
   Boolean groupAppRequest(Map request) {
     requests << request
     return accepted
   }
+
+  void groupPreferencesUpdated(Map payload) { preferenceUpdates << payload }
 }
 
 class SonosAdvGroupSpec extends Specification {
@@ -66,12 +69,33 @@ class SonosAdvGroupSpec extends Specification {
     given:
     driver.metaClass.initialize = { -> }
     driver.metaClass.configure = { -> }
+    driver.settings.putAll([
+      chimeBeforeStandardPriorityTTS: true,
+      chimeBeforeHighPriorityTTS: true,
+      disableAlbumArtEvents: false,
+      enableTrackPositionUpdates: true
+    ])
 
     when:
     driver.updated()
 
     then:
     driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'refresh' }
+    driver.scheduled.any { List call -> call[0] == 1 && call[1] == 'publishGroupPreferenceSnapshot' }
+
+    when:
+    Map snapshotData = driver.scheduled.find { List call -> call[1] == 'publishGroupPreferenceSnapshot' }[2].data
+    driver.publishGroupPreferenceSnapshot(snapshotData)
+
+    then:
+    driver.parent.preferenceUpdates.size() == 1
+    driver.parent.preferenceUpdates[0].deviceDni == 'SONOS-GROUP-TEST-DNI'
+    driver.parent.preferenceUpdates[0].preferences == [
+      chimeBeforeStandardPriorityTTS: true,
+      chimeBeforeHighPriorityTTS: true,
+      disableAlbumArtEvents: false,
+      enableTrackPositionUpdates: true
+    ]
   }
 
   def "group actions use app requests without publishing control attributes"() {

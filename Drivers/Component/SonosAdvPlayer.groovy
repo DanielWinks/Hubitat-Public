@@ -1247,8 +1247,14 @@ void uninstalled() {
   unschedule('retryUnconfirmedTransportCommand')
   clearStaticDriverStateForCurrentDevice()
 }
-void installed() { initialize() }
-void updated() { handleSettingsUpdate() }
+void installed() {
+  initialize()
+  schedulePlayerPreferenceSnapshot()
+}
+void updated() {
+  handleSettingsUpdate()
+  schedulePlayerPreferenceSnapshot()
+}
 
 void initialize() {
   Boolean subscribeToZgt = shouldSubscribeToZgt()
@@ -1279,6 +1285,34 @@ void handleSettingsUpdate() {
     favoritesMapInitialization()
   }
   sendParentAppRequest('needCurrentlyPlayingStates')
+}
+
+/** Copy the app-required settings after updated() releases this driver's gate. */
+void schedulePlayerPreferenceSnapshot() {
+  String dni = device?.getDeviceNetworkId()?.toString()
+  if(!dni) { return }
+  Map<String, Object> preferences = [
+    disableAlbumArtEvents: getDisableAlbumArtEvents(),
+    disableArtistAlbumTrackEvents: getDisableArtistAlbumTrackEvents(),
+    disableTrackDataEvents: getDisableTrackDataEvents(),
+    enableTrackPositionUpdates: getEnableTrackPositionUpdates(),
+    includeTrackDataMetaData: getIncludeTrackDataMetaData(),
+    chimeBeforeHighPriorityTTS: getChimeBeforeHighPriorityTTS(),
+    chimeBeforeStandardPriorityTTS: getChimeBeforeStandardPriorityTTS(),
+    ttsBoostAmount: getTTSBoostAmount()
+  ]
+  runInMillis(1, 'publishPlayerPreferenceSnapshot', [overwrite: true,
+      data: [deviceDni: dni, preferences: preferences]])
+}
+
+void publishPlayerPreferenceSnapshot(Map data = [:]) {
+  String dni = data?.deviceDni?.toString()
+  if(!dni || dni != device?.getDeviceNetworkId()?.toString() || !(data?.preferences instanceof Map)) { return }
+  try {
+    parent.playerPreferencesUpdated([deviceDni: dni, preferences: new LinkedHashMap((Map)data.preferences)])
+  } catch(Exception e) {
+    logWarn("Could not send player preference snapshot to parent for ${dni}: ${e.message}")
+  }
 }
 
 
