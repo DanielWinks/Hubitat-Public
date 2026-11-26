@@ -581,7 +581,9 @@ void scheduleGroupPreferenceSnapshot() {
     chimeBeforeStandardPriorityTTS: getChimeBeforeStandardPriorityTTSSetting(),
     chimeBeforeHighPriorityTTS: getChimeBeforeHighPriorityTTSSetting(),
     disableAlbumArtEvents: getDisableAlbumArtEvents(),
-    enableTrackPositionUpdates: getEnableTrackPositionUpdates()
+    enableTrackPositionUpdates: getEnableTrackPositionUpdates(),
+    useProportionalVolume: getUseProportionalVolumeSetting(),
+    controlUngroupedIndividually: getControlUngroupedIndividuallySetting()
   ]
   runInMillis(1, 'publishGroupPreferenceSnapshot', [overwrite: true,
       data: [deviceDni: dni, preferences: preferences]])

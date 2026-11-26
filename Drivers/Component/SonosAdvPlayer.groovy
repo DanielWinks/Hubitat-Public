@@ -899,7 +899,7 @@ metadata {
 // Fixed stripes bound lock storage while preserving per-DNI mutual exclusion.
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
-// App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
+// App owns ZGT/AVT storage; the driver keeps no snapshot copies (see plan storage rule).
 // SEQ/SID gate counters remain below: numbers deciding staleness, never payloads.
 // Transient member host cache for group SOAP targeting (playerId -> host); newest-wins, pruned like SEQ counters.
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
@@ -992,10 +992,6 @@ metadata {
 @Field private final String ZGT_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromZgtEventsCallback'
 @Field private final String ZGT_EVENTS_DOMAIN  =  'ZoneGroupTopology'
 
-@Field private final String MRGRC_EVENTS =  '/MediaRenderer/GroupRenderingControl/Event'
-@Field private final String MRGRC_EVENTS_CALLBACK  =  'subscribeResubscribeToMrGrcCallback'
-@Field private final String MRGRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromMrGrcEventsCallback'
-@Field private final String MRGRC_EVENTS_DOMAIN  =  'MediaRenderer/GroupRenderingControl'
 
 @Field private final String HTCONTROL_EVENTS = '/HTControl/Event'
 @Field private final String HTCONTROL_EVENTS_CALLBACK = 'subscribeResubscribeToHtControlCallback'
@@ -1058,17 +1054,14 @@ metadata {
   'highPriorityAnnouncementMode',
   'sid1',
   'sid2',
-  'sid4',
   'sid5',
   'sid6',
   'sid1-expires',
   'sid2-expires',
-  'sid4-expires',
   'sid5-expires',
   'sid6-expires',
   'lastMrRcEvent',
   'ZgtLastUpdated',
-  'lastMrGrcEvent',
   'lastHtControlEvent',
   'lastWebsocketEvent',
 ]))
@@ -1345,7 +1338,6 @@ void performImmediateInitialization(Boolean subscribeToZgt = true) {
   // Issue UPnP subscriptions first. These calls enqueue async requests locally;
   // starting the WebSocket does not wait for their callbacks.
   subscribeToMrRcEvents()
-  subscribeToMrGrcEvents()
   if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
   if(subscribeToZgt) { subscribeToZgtEvents() }
   // AVTransport remains subscribed regardless of group role. The parent filters
@@ -1378,12 +1370,10 @@ void clearPlayerSubscriptionsForInitialization() {
   deleteSid('zgt')
   deleteSid('sid1')
   deleteSid('sid2')
-  deleteSid('sid4')
   deleteSid('sid5')
   deleteSid('sid6')
   device.removeDataValue('sid1-expires')
   device.removeDataValue('sid2-expires')
-  device.removeDataValue('sid4-expires')
   device.removeDataValue('sid5-expires')
   device.removeDataValue('sid6-expires')
   if(hadValid) {
@@ -4037,16 +4027,9 @@ void parse(String raw) {
           } catch (Exception e) { logException('RenderingControl event processing failed', e) }
           return
         case 'GroupRenderingControl':
-          try {
-            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
-            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            Map snapshot = parseGrcFullSnapshot(xmlBody)
-            if(snapshot == null) { return }
-            String sourceDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            String rincon = getId()
-            List<Map> events = buildGrcEvents(snapshot)
-            scheduleParsedUpnpParentHandoff([service: 'GRC', sourceDni: sourceDni, rincon: rincon, events: events])
-          } catch (Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
+          // Group volume and mute are calculated by the app from player RenderingControl reports;
+          // this service is no longer subscribed, so ignore any NOTIFY from an old subscription.
+          logDebug('Ignoring GroupRenderingControl NOTIFY from a retired subscription')
           return
         case 'HTControl':
           try {
@@ -4605,49 +4588,6 @@ String normalizeFavoriteResourceId(String resourceId) {
   return normalized
 }
 
-@CompileStatic
-Map parseGrcFullSnapshot(String xmlString) {
-  if(!isPlausibleXmlPayload(xmlString)) { return null }
-  try {
-    XmlSlurper parser = new XmlSlurper()
-    GPathResult propertyset = parser.parseText(xmlString)
-    String volumeText = ((GPathResult)propertyset['property']['GroupVolume']).text()?.toString()?.trim()
-    String muteText = ((GPathResult)propertyset['property']['GroupMute']).text()?.toString()?.trim()
-    String changeableText = ((GPathResult)propertyset['property']['GroupVolumeChangeable']).text()?.toString()?.trim()
-    Integer groupVolume = null
-    if(volumeText) {
-      try {
-        Integer parsed = Integer.parseInt(volumeText)
-        if(parsed >= 0 && parsed <= 100) { groupVolume = parsed }
-        else { logDebug("Ignoring out-of-range GRC GroupVolume value=${volumeText}") }
-      } catch(Exception ignored) { logDebug("Ignoring non-numeric GRC GroupVolume value=${volumeText}") }
-    }
-    String groupMute = null
-    if(muteText) {
-      if(muteText == '1') { groupMute = 'muted' }
-      else if(muteText == '0') { groupMute = 'unmuted' }
-      else { logDebug("Ignoring unexpected GRC GroupMute value=${muteText}") }
-    }
-    Boolean changeable = null
-    if(changeableText) {
-      if(changeableText == '1') { changeable = true }
-      else if(changeableText == '0') { changeable = false }
-      else { logDebug("Ignoring unexpected GRC GroupVolumeChangeable value=${changeableText}") }
-    }
-    if(groupVolume == null && groupMute == null && changeable == null) { return null }
-    return [groupVolume: groupVolume, groupMute: groupMute, groupVolumeChangeable: changeable, observedAt: hubNowInstant().toEpochMilli()]
-  } catch(Exception e) {
-    logDebug("Could not parse GRC snapshot: ${e.message}")
-    return null
-  }
-}
-
-// App owns the GRC store; reads go through the parent getters, not a driver copy.
-
-void deferOrProcessGroupRenderingControlPayload(String dni, String xmlBody) {
-  deferOrProcessGroupRenderingControlPayload(dni, xmlBody, null, null)
-}
-
 void deferOrProcessRenderingControlPayload(String dni, String xmlBody) {
   deferOrProcessRenderingControlPayload(dni, xmlBody, null, null)
 }
@@ -4662,24 +4602,58 @@ void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer i
         device.sendEvent(name: event.name.toString(), value: event.value)
       }
     }
+    if(events.any { Map event -> event?.name?.toString() in ['volume', 'mute'] }) { queuePlayerReadingForParent() }
   }
 }
 
-void handleGrcFull(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
-  String deviceDni = dni ?: device.getDeviceNetworkId()
-  if(!deviceDni || !isPlausibleXmlPayload(xmlBody)) { return }
-  Map snapshot = parseGrcFullSnapshot(xmlBody)
-  if(snapshot == null) { return }
-  List<Map> events = buildGrcEvents(snapshot)
-  if(events) { scheduleParsedUpnpParentHandoff([service: 'GRC', sourceDni: deviceDni, rincon: getId(), events: events]) }
+/**
+ * Tell the parent app this player's latest volume and mute so it can calculate group state.
+ * The relay is deferred and coalesced so it never runs inside the event handler and bursts of
+ * RenderingControl changes send one update carrying the latest values.
+ */
+void queuePlayerReadingForParent() {
+  if(parent == null) { return }
+  runInMillis(1, 'relayPlayerReadingToParent', [overwrite: true])
 }
 
-// Stored as sendEvent-ready attribute maps for parent-app delivery.
-List<Map> buildGrcEvents(Map snap) {
-  List<Map> events = []
-  if(snap?.groupVolume != null) { events << [name: 'groupVolume', value: snap.groupVolume as Integer] }
-  if(snap?.groupMute != null) { events << [name: 'groupMute', value: snap.groupMute?.toString()] }
-  return events
+void relayPlayerReadingToParent() {
+  Object volume = device.currentValue('volume', true)
+  Object mute = device.currentValue('mute', true)
+  if(volume == null && mute == null) { return }
+  Map args = [:]
+  if(volume != null) { args.volume = volume }
+  if(mute != null) { args.mute = mute.toString() }
+  sendParentAppRequestDirect('playerReading', args)
+}
+
+/**
+ * Read this coordinator's group volume and mute from Sonos and send them to the parent app. The app
+ * uses this when a live group has a speaker without a Hubitat device, so averaging readings would be wrong.
+ */
+void readGroupRendering() {
+  String ip = getDeviceDataValue('localUpnpHost')
+  if(!ip) { return }
+  postSonosSoapAsync('groupRenderingReadCallback', getSoapActionParams(ip, GroupRenderingControl, 'GetGroupVolume'), [kind: 'volume'])
+  postSonosSoapAsync('groupRenderingReadCallback', getSoapActionParams(ip, GroupRenderingControl, 'GetGroupMute'), [kind: 'mute'])
+}
+
+void groupRenderingReadCallback(AsyncResponse response, Map data = null) {
+  if(response?.status != 200 || response.hasError()) {
+    logDebug("Group rendering read failed: ${response?.getErrorMessage() ?: response?.status}")
+    return
+  }
+  try {
+    GPathResult xml = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+    if(data?.kind == 'volume') {
+      String raw = findXmlDescendantByLocalName(xml, 'CurrentVolume')?.text()
+      if(raw) { sendParentAppRequestDirect('groupRendering', [groupVolume: raw as Integer]) }
+    } else {
+      String raw = findXmlDescendantByLocalName(xml, 'CurrentMute')?.text()
+      if(raw) { sendParentAppRequestDirect('groupRendering', [groupMute: raw == '1' ? 'muted' : 'unmuted']) }
+    }
+  } catch(Exception e) {
+    logDebug("Could not parse group rendering read: ${e.message}")
+  }
 }
 
 /** Convert only values represented in this RC notification to the player's event names. */
@@ -4697,8 +4671,6 @@ List<Map> buildRcEvents(Map snap) {
   if(snap?.dialogLevel != null) { events << [name: 'speechEnhancement', value: snap.dialogLevel] }
   return events
 }
-
-// GRC payloads use the same complete-batch relay as RC, ZGT, and AVT.
 
 @CompileStatic
 Map parseRcFullSnapshot(String xmlString) {
@@ -5046,10 +5018,6 @@ Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> old
   return true
 }
 
-void processGroupRenderingControlMessages(String xmlString) {
-  deferOrProcessGroupRenderingControlPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString)
-}
-
 @CompileStatic
 Integer getGroupVolumeState() {
   Object raw = getDevice().currentValue('groupVolume', true)
@@ -5213,7 +5181,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','zgt','sid4','sid5','sid6'].contains(sidKey)) { return }
+  if(entry == null || !['sid1','sid2','zgt','sid5','sid6'].contains(sidKey)) { return }
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
@@ -5247,8 +5215,7 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
         case 'sid1': unschedule('retryUpnpSid1'); break
         case 'sid2': unschedule('retryUpnpSid2'); break
         case 'zgt': unschedule('retryUpnpZgt'); break
-        case 'sid4': unschedule('retryUpnpSid4'); break
-        case 'sid5': unschedule('retryUpnpSid5'); break
+            case 'sid5': unschedule('retryUpnpSid5'); break
         case 'sid6': unschedule('retryUpnpSid6'); break
       }
     }
@@ -5262,10 +5229,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory'][sidKey]
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory'][sidKey]
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -5572,7 +5539,6 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
     case 'sid1': runIn(delay, 'retryUpnpSid1', options); break
     case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
     case 'zgt': runIn(delay, 'retryUpnpZgt', options); break
-    case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
     case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
     case 'sid6': runIn(delay, 'retryUpnpSid6', options); break
   }
@@ -5580,7 +5546,6 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
 void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
 void retryUpnpZgt(Map data) { retryUpnpRequest(data) }
-void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid6(Map data) { retryUpnpRequest(data) }
 
@@ -5659,7 +5624,6 @@ void invalidateUpnpRequestsForDevice() {
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpZgt')
-    unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
     unschedule('retryUpnpSid6')
     active = entry.active as Map
@@ -5691,7 +5655,6 @@ void retireUpnpRequestsForDevice() {
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpZgt')
-    unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
     unschedule('retryUpnpSid6')
     active = entry.active as Map
@@ -5724,7 +5687,6 @@ void unlockSubscribeMutexAfterTimeout(String sid) { logDebug("Ignoring legacy UP
 void unlockSid1SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockSid2SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockZgtSubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
-void unlockSid4SubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockSubscribeMutexAfterTimeoutCallback(Map data) { logDebug('Ignoring legacy UPnP fallback callback') }
 void unlockUnsubscribeMutexAfterTimeout() { logDebug('Ignoring legacy UPnP fallback') }
 void unlockUnsubscribeMutexAfterTimeoutCallback() { logDebug('Ignoring legacy UPnP fallback callback') }
@@ -5883,54 +5845,6 @@ void unsubscribeFromZgtEvents() {
 void unsubscribeFromZgtEventsCallback(HubResponse response) {
   String subId = 'zgt'
   String domain = ZGT_EVENTS_DOMAIN
-  upnpUnsubscribeCallbackGeneric(subId, domain, response)
-}
-// /////////////////////////////////////////////////////////////////////////////
-// '/MediaRenderer/GroupRenderingControl/Event' //sid4
-// /////////////////////////////////////////////////////////////////////////////
-@CompileStatic
-void subscribeToMrGrcEvents() {
-  String sub = 'subscribeToMrGrcEvents'
-  String subId = 'sid4'
-  String subPath = '/mgrc'
-  String evtSub = MRGRC_EVENTS
-  String callback = MRGRC_EVENTS_CALLBACK
-  upnpSubscribeGeneric(sub, subId, subPath, callback, evtSub)
-}
-
-@CompileStatic
-void resubscribeToMrGrcEvents() {
-  String resub = 'resubscribeToMrGrcEvents'
-  String subId = 'sid4'
-  String subPath = '/mgrc'
-  String evtSub = MRGRC_EVENTS
-  String callback = MRGRC_EVENTS_CALLBACK
-  upnpResubscribeGeneric(resub, subId, subPath, callback, evtSub)
-}
-
-@CompileStatic
-void subscribeResubscribeToMrGrcCallback(HubResponse response) {
-  String sub = 'subscribeToMrGrcEvents'
-  String resub = 'resubscribeToMrGrcEvents'
-  String subId = 'sid4'
-  String domain = MRGRC_EVENTS_DOMAIN
-  subscribeResubscribeGenericCallback(sub, resub, subId, domain, response)
-}
-
-@CompileStatic
-void unsubscribeFromMrGrcEvents() {
-  String unsub = 'unsubscribeFromMrGrcEvents'
-  String subId = 'sid4'
-  String resub = 'resubscribeToMrGrcEvents'
-  String evtSub = MRGRC_EVENTS
-  String callback = MRGRC_EVENTS_UNSUB_CALLBACK
-  upnpUnsubscribeGeneric(unsub, subId, resub, evtSub, callback)
-}
-
-@CompileStatic
-void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
-  String subId = 'sid4'
-  String domain = MRGRC_EVENTS_DOMAIN
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
 }
 // /////////////////////////////////////////////////////////////////////////////
@@ -6145,16 +6059,6 @@ Boolean lastZgtEventWithin(Integer seconds) {
 }
 
 @CompileStatic
-Long getLastInboundMrGrcEventEpoch() {
-  Long ts = eventTimestamps.get("${getDeviceDNI()}-lastMrGrcEvent" as String)
-  return ts != null ? ts : 0L
-}
-@CompileStatic
-void setLastInboundMrGrcEvent() {
-  eventTimestamps.put("${getDeviceDNI()}-lastMrGrcEvent" as String, Instant.now().getEpochSecond())
-  updateEventTimestampDeviceData('lastMrGrcEvent')
-}
-@CompileStatic
 Long getLastInboundHtControlEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastHtControlEvent" as String)
   return ts != null ? ts : 0L
@@ -6164,14 +6068,6 @@ void setLastInboundHtControlEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastHtControlEvent" as String, Instant.now().getEpochSecond())
   updateEventTimestampDeviceData('lastHtControlEvent')
 }
-@CompileStatic
-Boolean lastMrGrcEventWithin(Integer seconds) {
-  Long now = Instant.now().getEpochSecond()
-  Long last = getLastInboundMrGrcEventEpoch()
-  logDebug("lastMrGrcEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
-  return (now - last) < seconds
-}
-
 @CompileStatic
 Long getLastWebsocketEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastWebsocketEvent" as String)
@@ -6220,7 +6116,7 @@ void releaseFavPlaylistDelegate() {
 }
 
 // Track whether the inbound audioClip status subscription is active.
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastMrGrcEvent', 'lastHtControlEvent', 'lastWebsocketEvent']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()
@@ -6460,6 +6356,7 @@ void setPlayerVolume(Integer volume) {
       !(volume != this.device.currentValue('level') as Integer)) { return }
   if(volume != null) { device.sendEvent(name: 'level', value: volume) }
   if(volume != null) { device.sendEvent(name: 'volume', value: volume) }
+  queuePlayerReadingForParent()
   if(volume > 0) { runtimeState.restoreLevelAfterUnmute = volume }
 }
 void setBalanceState(Integer balance) {
@@ -6501,6 +6398,7 @@ void setMuteState(String muted) {
     }
   }
   if(muted != null) { device.sendEvent(name: 'mute', value: muted) }
+  queuePlayerReadingForParent()
   logDebug("setMuteState queued parent mute event; value=${muted}")
 }
 

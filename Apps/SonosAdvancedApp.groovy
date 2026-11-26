@@ -411,6 +411,8 @@ preferences {
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
+@Field static final String PLAYER_READINGS_STATE_KEY = 'playerReadingsByRincon'
+@Field static final String PENDING_VOLUME_RECALCULATION_STATE_KEY = 'pendingVolumeRecalculation'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupTopologyOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
 @Field static final String GROUP_COMMAND_QUEUE_STATE_KEY = 'pendingGroupCommandRequests'
@@ -481,6 +483,8 @@ preferences {
   AVT_EVENTS_BY_DNI_STATE_KEY,
   GROUP_DEVICE_COORDINATORS_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
+  PLAYER_READINGS_STATE_KEY,
+  PENDING_VOLUME_RECALCULATION_STATE_KEY,
   PENDING_UPNP_NOTIFICATION_QUEUE_KEY,
   GROUP_OPERATION_STATE_KEY,
   GROUPING_CONTEXTS_STATE_KEY,
@@ -833,8 +837,11 @@ void groupPreferencesUpdated(Map payload) {
       payload?.preferences instanceof Map ? (Map)payload.preferences : [:])
   Map<String, Map<String, Object>> snapshots = state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] instanceof Map
       ? new LinkedHashMap<String, Map<String, Object>>((Map<String, Map<String, Object>>)state[GROUP_PREFERENCES_BY_DNI_STATE_KEY]) : [:]
+  Boolean volumeChanged = snapshots[dni]?.useProportionalVolume != preferences.useProportionalVolume ||
+      snapshots[dni]?.controlUngroupedIndividually != preferences.controlUngroupedIndividually
   snapshots[dni] = preferences
   state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] = snapshots
+  if(volumeChanged) { queueVolumeRecalculation([], [dni], false) }
 }
 
 Map<String, Object> normalizePlayerPreferenceSnapshot(Map values) {
@@ -857,7 +864,9 @@ Map<String, Object> normalizeGroupPreferenceSnapshot(Map values) {
     chimeBeforeStandardPriorityTTS: toBooleanPreference(values?.chimeBeforeStandardPriorityTTS, false),
     chimeBeforeHighPriorityTTS: toBooleanPreference(values?.chimeBeforeHighPriorityTTS, false),
     disableAlbumArtEvents: toBooleanPreference(values?.disableAlbumArtEvents, true),
-    enableTrackPositionUpdates: toBooleanPreference(values?.enableTrackPositionUpdates, false)
+    enableTrackPositionUpdates: toBooleanPreference(values?.enableTrackPositionUpdates, false),
+    useProportionalVolume: toBooleanPreference(values?.useProportionalVolume, true),
+    controlUngroupedIndividually: toBooleanPreference(values?.controlUngroupedIndividually, false)
   ]
 }
 
@@ -1349,6 +1358,7 @@ void configure(Boolean startup = false) {
   try { configureAlarmManagement() }
   catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
   refreshStaticDriverActivePlayerRoster(false)
+  runIn(2, 'seedGroupPreferenceSnapshots', [overwrite: true])
   refreshPlayerAnnouncementPolicySnapshots(startup)
   unschedule('refreshStaticDriverActivePlayerRoster')
   schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
@@ -3023,6 +3033,12 @@ Boolean playerAppRequestHandler(Object event) {
       return true
     case 'enqueueAudioClip':
       enqueuePlayerAudioClip(player, args)
+      return true
+    case 'playerReading':
+      recordPlayerReading(player.getDataValue('id')?.toString(), args)
+      return true
+    case 'groupRendering':
+      applyDirectGroupRendering(player.getDataValue('id')?.toString(), args)
       return true
     default:
       logWarn("Ignoring unsupported player app request action '${request.action}'")
@@ -5961,10 +5977,10 @@ void playerDeparted(String rincon, String dni, String name) {
   logInfo("Sonos player departed: ${name} (${rincon}, ${dni})")
 }
 
-/** Queue complete GRC/ZGT notification batches; never coalesce their event lists. AVT uses putAvtEvents. */
+/** Queue complete ZGT notification batches; never coalesce their event lists. AVT uses putAvtEvents. */
 synchronized void putPlayerUpnpEvents(Map payload) {
   String service = payload?.service?.toString()
-  if(!(service in ['GRC', 'ZGT'])) { return }
+  if(service != 'ZGT') { return }
   Map copy = new LinkedHashMap(payload)
   if(payload.events instanceof List) { copy.events = ((List<Map>)payload.events).collect { Map e -> new LinkedHashMap(e) } }
   if(payload.eventsByGroupId instanceof Map) {
@@ -5991,14 +6007,7 @@ synchronized void drainUpnpNotificationQueue() {
 
 void processUpnpNotification(Map notification) {
   String service = notification?.service?.toString()
-  if(service == 'ZGT') { processUpnpTopologyNotification(notification); return }
-  String sourceId = notification?.rincon?.toString()
-  List<Map> events = notification?.events instanceof List ? (List<Map>)notification.events : []
-  if(!sourceId || events.isEmpty()) { return }
-  if(service == 'GRC') {
-    Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
-    deliverGrcEventsToGroup(coordinators[sourceId] ?: sourceId, events)
-  }
+  if(service == 'ZGT') { processUpnpTopologyNotification(notification) }
 }
 
 void processUpnpTopologyNotification(Map notification, Boolean publishTopologyAttributes = true) {
@@ -6006,7 +6015,12 @@ void processUpnpTopologyNotification(Map notification, Boolean publishTopologyAt
   Map<String, List<Map>> next = notification?.eventsByGroupId instanceof Map
       ? (Map<String, List<Map>>)notification.eventsByGroupId : [:]
   if(!sourceDni) { return }
+  Map<String, List<Map>> previous = getStoredZgtEventsMap()
   putZgtTopology(sourceDni, next)
+  // Group membership changes move every derived group volume and mute value.
+  if(buildLiveGroupRosters(previous) != buildLiveGroupRosters(getStoredZgtEventsMap())) {
+    queueVolumeRecalculation([], [], true)
+  }
   if(!publishTopologyAttributes) { return }
   next.each { String groupId, List<Map> events ->
     String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
@@ -6144,30 +6158,6 @@ List<String> getGroupDeviceDnisForCoordinator(String coordinatorId) {
   return registry.findAll { String dni, String id -> id == coordinatorId }.keySet().toList()
 }
 
-/** GRC volume/mute for a coordinator's group: players receive everything, group devices only volume and mute. */
-void deliverGrcEventsToGroup(String coordinatorId, List<Map> events) {
-  Map<String, List<Map>> topology = getStoredZgtEventsMap()
-  List<String> members = []
-  topology.each { String groupId, List<Map> groupEvents ->
-    String leader = groupEvents.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    if(leader == coordinatorId) { members = normalizeGroupPlayerIds(
-        groupEvents.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString()) }
-  }
-  if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
-  members.unique().each { String id -> deliverUpnpEventsToPlayer(id, events, coordinatorId) }
-  getGroupDevicesForCoordinator(coordinatorId).each { ChildDeviceWrapper groupDevice ->
-    List<Map> targetEvents = formatUpnpEventsForChild(events, coordinatorId, groupDevice)
-    targetEvents.each { Map event ->
-      if(event?.name && event.containsKey('value')) {
-        String name = event.name.toString()
-        if(name == 'groupVolume') { name = 'volume' }
-        else if(name == 'groupMute') { name = 'mute' }
-        if(name in ['volume', 'mute']) { sendParentChildEvent(groupDevice, name, event.value) }
-      }
-    }
-  }
-}
-
 void deliverUpnpEventsToPlayer(String rincon, List<Map> events, String artworkSourceId = null) {
   ChildDeviceWrapper player = findPlayerBySonosId(rincon)
   if(player == null || !events) { return }
@@ -6177,6 +6167,288 @@ void deliverUpnpEventsToPlayer(String rincon, List<Map> events, String artworkSo
     if(name && event.containsKey('value') && !isPlayerAttributeDisabled(player, name)) {
       sendParentChildEvent(player, name, event.value)
     }
+  }
+}
+
+// =============================================================================
+// Calculated group volume and mute
+// =============================================================================
+// Group volume is the average of the selected players' own volume, matching the Sonos group
+// volume definition. Players send their latest volume and mute to the app; the app combines
+// them with ZGT topology and each group device's cached settings, so a volume event never
+// reads a child device or its settings.
+
+/** Map each live coordinator RINCON to its member RINCONs from ZGT group events. */
+Map<String, List<String>> buildLiveGroupRosters(Map<String, List<Map>> topology) {
+  Map<String, List<String>> rosters = [:]
+  (topology ?: [:]).each { String groupId, List<Map> events ->
+    String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(!coordinatorId) { return }
+    List<String> members = normalizeGroupPlayerIds(
+        events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
+    if(!members.contains(coordinatorId)) { members.add(0, coordinatorId) }
+    rosters[coordinatorId] = members.unique()
+  }
+  return rosters
+}
+
+/** The player's live Sonos group members; an unknown or ungrouped player is its own group. */
+List<String> liveGroupMembers(String playerId, Map<String, String> coordinators, Map<String, List<String>> rosters) {
+  String coordinatorId = coordinators[playerId]
+  List<String> members = coordinatorId ? rosters[coordinatorId] : null
+  return members ? new ArrayList<String>(members) : [playerId]
+}
+
+Map<String, Map> getGroupPreferencesMap() {
+  return state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[GROUP_PREFERENCES_BY_DNI_STATE_KEY]) : [:]
+}
+
+/** Keep the volume settings in a refresh request cached for devices that have not published them yet. */
+void mergeGroupVolumePreferences(String groupDni, Map raw) {
+  if(!groupDni || !(raw instanceof Map) ||
+      (raw.useProportionalVolume == null && raw.controlUngroupedIndividually == null)) { return }
+  Map<String, Map> all = getGroupPreferencesMap()
+  Map<String, Object> merged = new LinkedHashMap<String, Object>(all[groupDni] instanceof Map ? (Map<String, Object>)all[groupDni] : [:])
+  Map<String, Object> normalized = normalizeGroupPreferenceSnapshot(merged + raw.subMap(['useProportionalVolume', 'controlUngroupedIndividually']))
+  if(all[groupDni] == normalized) { return }
+  all[groupDni] = normalized
+  state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] = all
+}
+
+Map<String, Map> getPlayerReadings() {
+  return state[PLAYER_READINGS_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PLAYER_READINGS_STATE_KEY]) : [:]
+}
+
+@CompileStatic
+Integer parseReadingVolume(Object raw) {
+  if(raw == null) { return null }
+  try {
+    Integer volume = new BigDecimal(raw.toString()).setScale(0, RoundingMode.HALF_UP).intValue()
+    return volume >= 0 && volume <= 100 ? volume : null
+  } catch(Exception ignored) { return null }
+}
+
+@CompileStatic
+String parseReadingMute(Object raw) {
+  String mute = raw?.toString()
+  return mute in ['muted', 'unmuted'] ? mute : null
+}
+
+/** Store the player's latest volume/mute and schedule recalculation when either changed. */
+void recordPlayerReading(String playerId, Map args) {
+  Integer volume = parseReadingVolume(args?.volume)
+  String mute = parseReadingMute(args?.mute)
+  if(!playerId || (volume == null && mute == null)) { return }
+  Map<String, Map> readings = getPlayerReadings()
+  Map prior = readings[playerId] instanceof Map ? (Map)readings[playerId] : [:]
+  Map next = new LinkedHashMap(prior)
+  if(volume != null) { next.volume = volume }
+  if(mute != null) { next.mute = mute }
+  if(next == prior) { return }
+  readings[playerId] = next
+  state[PLAYER_READINGS_STATE_KEY] = readings
+  queueVolumeRecalculation([playerId], [], false)
+}
+
+/** Fill readings for players that have not reported yet; never overwrites a reported value. */
+void seedPlayerReadings(List<ChildDeviceWrapper> players) {
+  Map<String, Map> readings = getPlayerReadings()
+  Boolean changed = false
+  (players ?: []).each { ChildDeviceWrapper player ->
+    String playerId = player?.getDataValue('id')?.toString()
+    if(!playerId || readings[playerId] != null) { return }
+    Map reading = [:]
+    Integer volume = parseReadingVolume(player.currentValue('volume', true))
+    String mute = parseReadingMute(player.currentValue('mute', true))
+    if(volume != null) { reading.volume = volume }
+    if(mute != null) { reading.mute = mute }
+    if(!reading.isEmpty()) { readings[playerId] = reading; changed = true }
+  }
+  if(changed) { state[PLAYER_READINGS_STATE_KEY] = readings }
+}
+
+/** Calculate average volume and aggregate mute for the given players from their latest readings. */
+@CompileStatic
+Map<String, Object> calculateVolumeState(Collection<String> playerIds, Map<String, Map> readings) {
+  Integer total = 0
+  Integer volumeCount = 0
+  Integer muteReports = 0
+  Boolean allMuted = !playerIds.isEmpty()
+  for(String playerId : playerIds) {
+    Map reading = readings[playerId] instanceof Map ? (Map)readings[playerId] : [:]
+    Integer volume = parseReadingVolume(reading.get('volume'))
+    if(volume != null) { total += volume; volumeCount++ }
+    String mute = parseReadingMute(reading.get('mute'))
+    if(mute != null) { muteReports++ }
+    if(mute != 'muted') { allMuted = false }
+  }
+  Map<String, Object> result = [:]
+  if(volumeCount > 0) {
+    result.put('volume', new BigDecimal(total).divide(new BigDecimal(volumeCount), 0, RoundingMode.HALF_UP).intValue())
+  }
+  if(muteReports > 0) { result.put('mute', allMuted ? 'muted' : 'unmuted') }
+  return result
+}
+
+/** True when any selected player has no Hubitat device, so its volume and mute are never reported. */
+@CompileStatic
+Boolean hasUnmanagedMember(Collection<String> playerIds, Set<String> managedIds) {
+  for(String playerId : playerIds) { if(!managedIds.contains(playerId)) { return true } }
+  return false
+}
+
+/** Calculate once per distinct player selection within a recalculation and reuse the result. */
+Map<String, Object> cachedVolumeState(Collection<String> playerIds, Map context) {
+  Map<String, Map<String, Object>> cache = (Map<String, Map<String, Object>>)context.cache
+  String key = playerIds.join('|')
+  Map<String, Object> hit = cache[key]
+  if(hit == null) {
+    hit = calculateVolumeState(playerIds, (Map<String, Map>)context.readings)
+    cache[key] = hit
+  }
+  return hit
+}
+
+/**
+ * Choose the players a group device reports on from its live Sonos state and cached settings:
+ * grouped + proportional follows the live group, grouped + not proportional uses the configured
+ * players, ungrouped uses the configured players only when controlled individually, otherwise the
+ * coordinator alone.
+ */
+List<String> selectGroupDevicePlayerIds(List<String> configuredPlayerIds, Map preferences,
+    Map<String, String> coordinators, Map<String, List<String>> rosters) {
+  Map<String, Object> settings = normalizeGroupPreferenceSnapshot(preferences)
+  String coordinatorId = configuredPlayerIds.find { String id -> coordinators[id] == id } ?: configuredPlayerIds[0]
+  List<String> liveMembers = rosters[coordinatorId] ?: [coordinatorId]
+  if(liveMembers.size() > 1) {
+    return settings.useProportionalVolume ? new ArrayList<String>(liveMembers) : configuredPlayerIds
+  }
+  return settings.controlUngroupedIndividually ? configuredPlayerIds : [coordinatorId]
+}
+
+Map buildVolumeCalculationContext() {
+  Map<String, List<Map>> topology = getStoredZgtEventsMap()
+  return [coordinators: buildPlayerCoordinatorMap(topology), rosters: buildLiveGroupRosters(topology),
+    readings: getPlayerReadings(), preferences: getGroupPreferencesMap(), cache: [:],
+    managed: getCurrentPlayerDevices().collect { ChildDeviceWrapper p -> p.getDataValue('id')?.toString() }
+        .findAll { it }.toSet()]
+}
+
+/** Volume, groupVolume, mute and groupMute attributes for one group device, omitting unknown values. */
+Map<String, Object> calculateGroupDeviceVolumeState(ChildDeviceWrapper groupDevice, Map context) {
+  List<String> configured = getAllPlayersForGroupDevice(groupDevice).unique()
+  if(configured.isEmpty()) { return [:] }
+  Map preferences = ((Map)context.preferences)[groupDevice.getDeviceNetworkId()] as Map
+  List<String> selected = selectGroupDevicePlayerIds(configured, preferences,
+      (Map<String, String>)context.coordinators, (Map<String, List<String>>)context.rosters)
+  Map<String, Object> calculated = cachedVolumeState(selected, context)
+  Map<String, Object> attributes = [:]
+  if(calculated.volume != null) { attributes.volume = calculated.volume; attributes.groupVolume = calculated.volume }
+  if(calculated.mute != null) { attributes.mute = calculated.mute; attributes.groupMute = calculated.mute }
+  return attributes
+}
+
+/** Merge a recalculation request; one debounced drain applies everything queued before it runs. */
+void queueVolumeRecalculation(Collection<String> playerIds, Collection<String> groupDnis, Boolean all) {
+  Map pending = state[PENDING_VOLUME_RECALCULATION_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_VOLUME_RECALCULATION_STATE_KEY] : [:]
+  Set<String> players = new LinkedHashSet<String>((pending.players ?: []) as Collection<String>)
+  Set<String> groups = new LinkedHashSet<String>((pending.groups ?: []) as Collection<String>)
+  players.addAll(playerIds ?: [])
+  groups.addAll(groupDnis ?: [])
+  state[PENDING_VOLUME_RECALCULATION_STATE_KEY] = [players: players.toList(), groups: groups.toList(),
+    all: all == true || pending.all == true]
+  runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'drainVolumeRecalculation', [overwrite: true])
+}
+
+void drainVolumeRecalculation() {
+  Map pending = state[PENDING_VOLUME_RECALCULATION_STATE_KEY] instanceof Map
+      ? (Map)state[PENDING_VOLUME_RECALCULATION_STATE_KEY] : [:]
+  state.remove(PENDING_VOLUME_RECALCULATION_STATE_KEY)
+  if(pending.isEmpty()) { return }
+  recalculateVolumeState((pending.players ?: []) as List<String>, (pending.groups ?: []) as List<String>, pending.all == true)
+}
+
+/**
+ * Recalculate player-level group state from each player's live Sonos group, and group-device state
+ * from its selected players. Only players and group devices touched by the change are published.
+ */
+void recalculateVolumeState(Collection<String> changedPlayerIds, Collection<String> changedGroupDnis, Boolean all) {
+  Map context = buildVolumeCalculationContext()
+  Map<String, String> coordinators = (Map<String, String>)context.coordinators
+  Map<String, List<String>> rosters = (Map<String, List<String>>)context.rosters
+  Set<String> managed = (Set<String>)context.managed
+  Set<String> affected = new LinkedHashSet<String>()
+  (changedPlayerIds ?: []).each { String id -> affected.addAll(liveGroupMembers(id, coordinators, rosters)) }
+  // Groups with a speaker that has no Hubitat device cannot be averaged from readings; ask the coordinator.
+  Set<String> directReadCoordinators = new LinkedHashSet<String>()
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String id = player.getDataValue('id')?.toString()
+    if(!id || !(all || affected.contains(id))) { return }
+    List<String> members = liveGroupMembers(id, coordinators, rosters)
+    if(hasUnmanagedMember(members, managed)) { directReadCoordinators.add(coordinators[id] ?: id); return }
+    Map<String, Object> calculated = cachedVolumeState(members, context)
+    if(calculated.volume != null) { sendParentChildEvent(player, 'groupVolume', calculated.volume) }
+    if(calculated.mute != null) { sendParentChildEvent(player, 'groupMute', calculated.mute) }
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    String groupDni = groupDevice.getDeviceNetworkId()
+    List<String> configured = getAllPlayersForGroupDevice(groupDevice).unique()
+    Map preferences = ((Map)context.preferences)[groupDni] as Map
+    List<String> selected = configured.isEmpty() ? [] : selectGroupDevicePlayerIds(configured, preferences, coordinators, rosters)
+    Boolean touched = all || (changedGroupDnis ?: []).contains(groupDni) || configured.any { String id -> affected.contains(id) } ||
+        selected.any { String id -> affected.contains(id) }
+    if(!touched) { return }
+    if(!selected.isEmpty() && hasUnmanagedMember(selected, managed)) {
+      String coordinatorId = configured.find { String id -> coordinators[id] == id } ?: configured[0]
+      directReadCoordinators.add(coordinatorId)
+      return
+    }
+    Map<String, Object> attributes = calculateGroupDeviceVolumeState(groupDevice, context)
+    if(!attributes.isEmpty()) { queueGroupDeviceState(groupDni, attributes) }
+  }
+  directReadCoordinators.each { String coordinatorId -> findPlayerBySonosId(coordinatorId)?.readGroupRendering() }
+}
+
+/**
+ * Apply a group volume or mute read directly from the Sonos coordinator to every player in its live
+ * group and to the group devices that follow that live group.
+ */
+void applyDirectGroupRendering(String coordinatorId, Map args) {
+  Map<String, Object> attributes = [:]
+  Integer volume = parseReadingVolume(args?.groupVolume)
+  String mute = parseReadingMute(args?.groupMute)
+  if(volume != null) { attributes.volume = volume; attributes.groupVolume = volume }
+  if(mute != null) { attributes.mute = mute; attributes.groupMute = mute }
+  if(!coordinatorId || attributes.isEmpty()) { return }
+  Map context = buildVolumeCalculationContext()
+  Map<String, String> coordinators = (Map<String, String>)context.coordinators
+  Map<String, List<String>> rosters = (Map<String, List<String>>)context.rosters
+  List<String> members = liveGroupMembers(coordinatorId, coordinators, rosters)
+  members.each { String id ->
+    ChildDeviceWrapper player = findPlayerBySonosId(id)
+    if(player == null) { return }
+    if(volume != null) { sendParentChildEvent(player, 'groupVolume', volume) }
+    if(mute != null) { sendParentChildEvent(player, 'groupMute', mute) }
+  }
+  getGroupDevicesForCoordinator(coordinatorId).each { ChildDeviceWrapper groupDevice ->
+    List<String> configured = getAllPlayersForGroupDevice(groupDevice).unique()
+    Map preferences = ((Map)context.preferences)[groupDevice.getDeviceNetworkId()] as Map
+    if(!configured.isEmpty() && selectGroupDevicePlayerIds(configured, preferences, coordinators, rosters) as Set == members as Set) {
+      queueGroupDeviceState(groupDevice.getDeviceNetworkId(), attributes)
+    }
+  }
+}
+
+/** Ask each group device whose cached settings predate the volume settings to publish them; runs after app Save. */
+void seedGroupPreferenceSnapshots() {
+  Map<String, Map> cached = getGroupPreferencesMap()
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    if(cached[groupDevice.getDeviceNetworkId()]?.containsKey('useProportionalVolume')) { return }
+    try { groupDevice.scheduleGroupPreferenceSnapshot() }
+    catch(Exception e) { logDebug("Could not request group preferences from ${groupDevice.displayName}: ${e.message}") }
   }
 }
 
@@ -6951,34 +7223,12 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
     return
   }
 
-  Boolean useProportional = groupCommandBoolean(args.useProportionalVolume, true)
   Map attributes = [:]
-  if(isSonosGrouped(coordinator) && useProportional) {
-    Object volume = coordinator.currentValue('groupVolume', true)
-    Object mute = coordinator.currentValue('groupMute', true)
-    if(volume != null) { attributes.volume = volume; attributes.groupVolume = volume }
-    if(mute != null) { attributes.mute = mute; attributes.groupMute = mute }
-  } else {
-    Boolean controlIndividually = groupCommandBoolean(args.controlUngroupedIndividually, false)
-    List<ChildDeviceWrapper> feedbackPlayers = !isSonosGrouped(coordinator) && !controlIndividually ?
-        [coordinator] : players
-    Integer totalVolume = 0
-    Integer volumeCount = 0
-    Boolean allMuted = !feedbackPlayers.isEmpty()
-    feedbackPlayers.each { ChildDeviceWrapper player ->
-      Integer volume = player.currentValue('volume', true) as Integer
-      if(volume != null) { totalVolume += volume; volumeCount++ }
-      if(player.currentValue('mute', true) != 'muted') { allMuted = false }
-    }
-    if(volumeCount > 0) {
-      Integer averageVolume = new BigDecimal(totalVolume).divide(new BigDecimal(volumeCount), 0, RoundingMode.HALF_UP).intValue()
-      attributes.volume = averageVolume
-      attributes.groupVolume = averageVolume
-    }
-    String mute = allMuted ? 'muted' : 'unmuted'
-    attributes.mute = mute
-    attributes.groupMute = mute
-  }
+  // The refresh request carries the current settings; keep the cache correct for devices that
+  // have not published a snapshot yet, and seed readings from players that have not reported.
+  mergeGroupVolumePreferences(groupDevice.getDeviceNetworkId(), args)
+  seedPlayerReadings(players)
+  attributes.putAll(calculateGroupDeviceVolumeState(groupDevice, buildVolumeCalculationContext()))
 
   ['status', 'transportStatus', 'trackData', 'trackDescription', 'currentTrackDuration',
    'trackPosition', 'trackPositionUpdated',

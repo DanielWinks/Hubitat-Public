@@ -94,7 +94,9 @@ class SonosAdvGroupSpec extends Specification {
       chimeBeforeStandardPriorityTTS: true,
       chimeBeforeHighPriorityTTS: true,
       disableAlbumArtEvents: false,
-      enableTrackPositionUpdates: true
+      enableTrackPositionUpdates: true,
+      useProportionalVolume: true,
+      controlUngroupedIndividually: false
     ]
   }
 
@@ -212,6 +214,50 @@ class SonosAdvGroupSpec extends Specification {
     then:
     ((SonosGroupParentDouble)driver.parent).requests.count { Map request -> request.action == 'initializationPurge' } == 1
     driver.events.isEmpty()
+  }
+
+  def "group preference snapshot includes both volume settings with documented defaults"() {
+    when:
+    driver.scheduleGroupPreferenceSnapshot()
+    Map data = driver.scheduled.find { List item -> item[1] == 'publishGroupPreferenceSnapshot' }[2].data
+    driver.publishGroupPreferenceSnapshot(data)
+    Map update = ((SonosGroupParentDouble)driver.parent).preferenceUpdates.last()
+
+    then:
+    update.deviceDni == 'SONOS-GROUP-TEST-DNI'
+    update.preferences.useProportionalVolume == true
+    update.preferences.controlUngroupedIndividually == false
+    groupRequests().isEmpty()
+  }
+
+  def "group preference snapshot reflects saved volume settings and does not queue a group command"() {
+    given:
+    driver.settings.useProportionalVolume = false
+    driver.settings.controlUngroupedIndividually = true
+
+    when:
+    driver.scheduleGroupPreferenceSnapshot()
+    driver.publishGroupPreferenceSnapshot(driver.scheduled.find { List item -> item[1] == 'publishGroupPreferenceSnapshot' }[2].data)
+    Map update = ((SonosGroupParentDouble)driver.parent).preferenceUpdates.last()
+
+    then:
+    update.preferences.useProportionalVolume == false
+    update.preferences.controlUngroupedIndividually == true
+    groupRequests().isEmpty()
+  }
+
+  def "group volume commands still carry both settings to the app command path"() {
+    given:
+    driver.settings.useProportionalVolume = false
+
+    when:
+    driver.setLevel(40G)
+
+    then:
+    groupRequests()[0].command == 'setVolume'
+    groupRequests()[0].args.level == 40
+    groupRequests()[0].args.useProportionalVolume == false
+    groupRequests()[0].args.controlUngroupedIndividually == false
   }
 
   def "track position updates default off when the preference is null"() {
