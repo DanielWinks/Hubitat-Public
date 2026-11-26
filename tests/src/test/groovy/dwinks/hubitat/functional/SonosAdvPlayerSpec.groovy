@@ -1428,7 +1428,8 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.volume = 5
     driver.metaClass.now = { -> 10000L }
     driver."${command}"(15G, 20G)
-    driver."${step}"()
+    driver."${step}"(driver.scheduled.findAll { List call -> call[1] == step }.last()[2].data)
+    Map staleData = driver.scheduled.findAll { List call -> call[1] == step }.last()[2].data
     driver.device.currentValues.volume = 6
     driver.metaClass.now = { -> 14000L }
     driver.unschedules.clear()
@@ -1437,7 +1438,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver."${command}"(6G, 10G)
-    driver."${step}"()
+    driver."${step}"(staleData)
 
     then:
     driver."${fadeMap}".isEmpty()
@@ -1449,6 +1450,79 @@ class SonosAdvPlayerSpec extends Specification {
     command          | step                  | fadeMap
     'setLevel'       | 'volumeFadeStep'      | 'volumeFadeState'
     'setGroupVolume' | 'groupVolumeFadeStep' | 'groupVolumeFadeState'
+  }
+
+  def "a fade step from a cancelled or replaced fade cannot send a volume or reschedule"() {
+    given:
+    driver.volumeFadeState.clear()
+    driver.groupVolumeFadeState.clear()
+    driver.lastVolumeFadeCallTime.clear()
+    driver.lastGroupVolumeFadeCallTime.clear()
+    driver.pendingGroupedPlayerVolumes.clear()
+    driver.device.currentValues.volume = 5
+    driver.metaClass.now = { -> 10000L }
+    driver."${command}"(30G, 20G)
+    Map oldData = driver.scheduled.findAll { List call -> call[1] == step }.last()[2].data
+
+    when: 'a step with the live generation runs'
+    driver.asyncCalls.clear()
+    driver.scheduled.clear()
+    driver."${step}"(oldData)
+
+    then: 'it sends one SOAP volume and schedules the next step with the same generation'
+    driver.asyncCalls.size() == 1
+    driver.asyncCalls[0].params.body.contains('<DesiredVolume>')
+    driver.scheduled.findAll { List call -> call[1] == step }*.get(2)*.data*.generation == [oldData.generation]
+
+    when: 'the fade is cancelled and a stale step then runs'
+    driver."${cancel}"()
+    driver.asyncCalls.clear()
+    driver.scheduled.clear()
+    driver."${step}"(oldData)
+
+    then:
+    driver."${fadeMap}".isEmpty()
+    driver.asyncCalls.isEmpty()
+    driver.scheduled.isEmpty()
+
+    when: 'a new fade replaces a running one and the old step runs'
+    driver.metaClass.now = { -> 20000L }
+    driver."${command}"(30G, 20G)
+    Map firstData = driver.scheduled.findAll { List call -> call[1] == step }.last()[2].data
+    driver.metaClass.now = { -> 30000L }
+    driver."${command}"(40G, 20G)
+    Map secondData = driver.scheduled.findAll { List call -> call[1] == step }.last()[2].data
+    Integer stepBefore = driver."${fadeMap}".values().first().currentStep
+    driver.asyncCalls.clear()
+    driver.scheduled.clear()
+    driver."${step}"(firstData)
+
+    then:
+    firstData.generation != secondData.generation
+    driver."${fadeMap}".values().first().generation == secondData.generation
+    driver."${fadeMap}".values().first().currentStep == stepBefore
+    driver.asyncCalls.isEmpty()
+    driver.scheduled.isEmpty()
+
+    where:
+    command          | step                  | fadeMap                | cancel
+    'setLevel'       | 'volumeFadeStep'      | 'volumeFadeState'      | 'cancelVolumeFade'
+    'setGroupVolume' | 'groupVolumeFadeStep' | 'groupVolumeFadeState' | 'cancelGroupVolumeFade'
+  }
+
+  def "volume locks are per player and the grouped flush sends nothing after a cancel"() {
+    expect:
+    driver.volumeLock('a').is(driver.volumeLock('a'))
+    !driver.volumeLock('a').is(driver.volumeLock('b'))
+
+    when:
+    driver.pendingGroupedPlayerVolumes.put(driver.getId(), 40)
+    driver.cancelVolumeFade()
+    driver.asyncCalls.clear()
+    driver.flushPendingGroupedPlayerVolume()
+
+    then:
+    driver.asyncCalls.isEmpty()
   }
 
   def "raw UPnP subscribe formats request and records SID expiry and renewal"() {

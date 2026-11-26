@@ -1024,6 +1024,9 @@ metadata {
 
 @Field static final List<String> PLAYLIST_QUEUE_ACTIONS = ['REPLACE', 'APPEND', 'INSERT', 'INSERT_NEXT']
 
+// One monitor per player so fade steps, immediate volume commands, cancellation and the grouped-volume flush
+// serialize for that player only; unrelated players in a multi-room fade stay independent.
+@Field static ConcurrentHashMap<String, Object> volumeLocks = new ConcurrentHashMap<String, Object>()
 @Field static ConcurrentHashMap<String, Map> volumeFadeState = new ConcurrentHashMap<String, Map>()
 // Sonos recommends avoiding a burst of individual player-volume commands when
 // a group is active. Keep the individual-player semantics, but serialize a
@@ -2382,7 +2385,23 @@ void devicePlayTrack(String uri, BigDecimal volume = null) {
 void mute(){ playerSetPlayerMute(true) }
 @CompileStatic
 void unmute(){ playerSetPlayerMute(false) }
+Object volumeLock(String deviceId) {
+  String key = deviceId ?: ''
+  Object lock = volumeLocks.get(key)
+  if(lock == null) {
+    Object created = new Object()
+    lock = volumeLocks.putIfAbsent(key, created) ?: created
+  }
+  return lock
+}
+
 void setLevel(BigDecimal level, BigDecimal duration = null) {
+  // Command selection, fade cancellation and dispatch are one critical section per player, so a newer fade
+  // cannot start between an immediate command's cancel and its send.
+  synchronized(volumeLock(getId())) { setLevelLocked(level, duration) }
+}
+
+private void setLevelLocked(BigDecimal level, BigDecimal duration) {
   Integer targetVolume = Math.max(0, Math.min(100, roundVolume(level)))
   if(duration == null || duration <= 0) {
     cancelVolumeFade()
@@ -2425,58 +2444,70 @@ void setLevel(BigDecimal level, BigDecimal duration = null) {
   steps = (Integer)(durationSeconds * 1000 / intervalMs)
   if(steps < 1) { steps = 1 }
   BigDecimal volumeStep = (BigDecimal)(targetVolume - currentVolume) / steps
-  // Cancel any existing fade and start new one
-  cancelVolumeFade()
-  Map fadeState = [
-    targetVolume: targetVolume,
-    startVolume: currentVolume,
-    volumeStep: volumeStep,
-    currentStep: 0,
-    totalSteps: steps,
-    intervalMs: intervalMs
-  ]
-  volumeFadeState.put(deviceId, fadeState)
-  logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
-  runInMillis(intervalMs, 'volumeFadeStep', [overwrite: true])
+  // Cancel any existing fade and start new one. The device runs unlocked (singleThreaded: false), so fade
+  // transitions are serialized on the fade map and every step carries the generation it was scheduled for.
+  synchronized(volumeLock(deviceId)) {
+    cancelVolumeFade()
+    // Hubitat's sandbox rejects System.nanoTime(); a UUID is unique per fade and needs no clock.
+    String generation = UUID.randomUUID().toString()
+    Map fadeState = [
+      targetVolume: targetVolume,
+      startVolume: currentVolume,
+      volumeStep: volumeStep,
+      currentStep: 0,
+      totalSteps: steps,
+      intervalMs: intervalMs,
+      generation: generation
+    ]
+    volumeFadeState.put(deviceId, fadeState)
+    logInfo("Starting volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
+    runInMillis(intervalMs, 'volumeFadeStep', [overwrite: true, data: [generation: generation]])
+  }
 }
 
-void volumeFadeStep() {
+void volumeFadeStep(Map data = [:]) {
   String deviceId = getId()
   if(!deviceId) { return }
-  Map fadeState = volumeFadeState.get(deviceId)
-  if(fadeState == null) { return }
-  Integer currentStep = (fadeState.currentStep as Integer) + 1
-  Integer totalSteps = fadeState.totalSteps as Integer
-  Integer targetVolume = fadeState.targetVolume as Integer
-  if(currentStep >= totalSteps) {
-    // Final step: set exact target volume and clean up
-    dispatchPlayerVolume(targetVolume)
-    volumeFadeState.remove(deviceId)
-    lastVolumeFadeCallTime.remove(deviceId)
-    logInfo("Volume fade complete: volume set to ${targetVolume}")
-    return
+  // The generation check, the volume dispatch and the reschedule are one critical section with cancel and
+  // start, so a step that was already running when a fade was cancelled can neither send a volume nor put
+  // the fade back.
+  synchronized(volumeLock(deviceId)) {
+    Map fadeState = volumeFadeState.get(deviceId)
+    if(fadeState == null || fadeState.generation != data?.generation) { return }
+    Integer currentStep = (fadeState.currentStep as Integer) + 1
+    Integer totalSteps = fadeState.totalSteps as Integer
+    Integer targetVolume = fadeState.targetVolume as Integer
+    if(currentStep >= totalSteps) {
+      // Final step: set exact target volume and clean up
+      volumeFadeState.remove(deviceId)
+      lastVolumeFadeCallTime.remove(deviceId)
+      dispatchPlayerVolume(targetVolume)
+      logInfo("Volume fade complete: volume set to ${targetVolume}")
+      return
+    }
+    Integer startVolume = fadeState.startVolume as Integer
+    BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
+    Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
+    newVolume = Math.max(0, Math.min(100, newVolume))
+    Map updated = new LinkedHashMap(fadeState)
+    updated.currentStep = currentStep
+    if(!volumeFadeState.replace(deviceId, fadeState, updated)) { return }
+    dispatchPlayerVolume(newVolume)
+    Integer intervalMs = fadeState.intervalMs as Integer
+    runInMillis(intervalMs, 'volumeFadeStep', [overwrite: true, data: [generation: fadeState.generation]])
   }
-  // Calculate intermediate volume
-  Integer startVolume = fadeState.startVolume as Integer
-  BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
-  Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
-  newVolume = Math.max(0, Math.min(100, newVolume))
-  dispatchPlayerVolume(newVolume)
-  // Update step counter and schedule next
-  fadeState.currentStep = currentStep
-  volumeFadeState.put(deviceId, fadeState)
-  Integer intervalMs = fadeState.intervalMs as Integer
-  runInMillis(intervalMs, 'volumeFadeStep', [overwrite: true])
 }
 
 void cancelVolumeFade() {
   String deviceId = getId()
-  if(deviceId) {
-    volumeFadeState.remove(deviceId)
-    pendingGroupedPlayerVolumes.remove(deviceId)
+  synchronized(volumeLock(deviceId)) {
+    if(deviceId) {
+      volumeFadeState.remove(deviceId)
+      pendingGroupedPlayerVolumes.remove(deviceId)
+    }
+    unschedule('volumeFadeStep')
+    unschedule('flushPendingGroupedPlayerVolume')
   }
-  unschedule('volumeFadeStep')
-  unschedule('flushPendingGroupedPlayerVolume')
 }
 
 /**
@@ -2488,6 +2519,10 @@ void cancelVolumeFade() {
  */
 void dispatchPlayerVolume(Integer volume) {
   String playerId = getId()
+  synchronized(volumeLock(playerId)) { dispatchPlayerVolumeLocked(playerId, volume) }
+}
+
+private void dispatchPlayerVolumeLocked(String playerId, Integer volume) {
   if(playerId == null || playerId == '') {
     playerSetPlayerVolume(volume)
     return
@@ -2512,9 +2547,12 @@ void flushPendingGroupedPlayerVolume() {
   if(playerId == null || playerId == '') {
     return
   }
-  Integer volume = pendingGroupedPlayerVolumes.remove(playerId)
-  if(volume != null) {
-    playerSetPlayerVolume(volume)
+  // Claim and send under the per-player lock so a cancel cannot clear the queue between the two.
+  synchronized(volumeLock(playerId)) {
+    Integer volume = pendingGroupedPlayerVolumes.remove(playerId)
+    if(volume != null) {
+      playerSetPlayerVolume(volume)
+    }
   }
 }
 
@@ -2653,12 +2691,17 @@ void unmuteGroup(){
 void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   Boolean isCoord = isGroupedAndCoordinator()
   Boolean isFollower = isGroupedAndNotCoordinator()
-  logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGroupedAndNotCoordinator: ${isFollower}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
   if(isFollower) {
+    // Delegation holds no player lock: it calls the parent app, which must never be reached under a driver lock.
     logDebug("setGroupVolume: Delegating to coordinator")
     requestParentCoordinatorCommand('setGroupVolume', [level, duration])
     return
   }
+  synchronized(volumeLock(getId())) { setGroupVolumeLocked(level, duration, isCoord) }
+}
+
+private void setGroupVolumeLocked(BigDecimal level, BigDecimal duration, Boolean isCoord) {
+  logDebug("setGroupVolume(${level}) - isGroupedAndCoordinator: ${isCoord}, isGrouped: ${this.device.currentValue('isGrouped', true)}, isGroupCoordinator: ${getIsGroupCoordinator()}")
   String deviceId = getId()
   Integer targetVolume = Math.max(0, Math.min(100, roundVolume(level)))
   Boolean useGroupApi = isCoord
@@ -2707,54 +2750,63 @@ void setGroupVolume(BigDecimal level, BigDecimal duration = null) {
   steps = (Integer)(durationSeconds * 1000 / intervalMs)
   if(steps < 1) { steps = 1 }
   BigDecimal volumeStep = (BigDecimal)(targetVolume - currentVolume) / steps
-  cancelGroupVolumeFade()
-  Map fadeState = [
-    targetVolume: targetVolume,
-    startVolume: currentVolume,
-    volumeStep: volumeStep,
-    currentStep: 0,
-    totalSteps: steps,
-    intervalMs: intervalMs,
-    useGroupApi: useGroupApi
-  ]
-  groupVolumeFadeState.put(deviceId, fadeState)
-  logInfo("Starting group volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
-  runInMillis(intervalMs, 'groupVolumeFadeStep', [overwrite: true])
+  synchronized(volumeLock(deviceId)) {
+    cancelGroupVolumeFade()
+    String generation = UUID.randomUUID().toString()
+    Map fadeState = [
+      targetVolume: targetVolume,
+      startVolume: currentVolume,
+      volumeStep: volumeStep,
+      currentStep: 0,
+      totalSteps: steps,
+      intervalMs: intervalMs,
+      useGroupApi: useGroupApi,
+      generation: generation
+    ]
+    groupVolumeFadeState.put(deviceId, fadeState)
+    logInfo("Starting group volume fade from ${currentVolume} to ${targetVolume} over ${durationSeconds}s (${steps} steps, ${intervalMs}ms interval)")
+    runInMillis(intervalMs, 'groupVolumeFadeStep', [overwrite: true, data: [generation: generation]])
+  }
 }
 
-void groupVolumeFadeStep() {
+void groupVolumeFadeStep(Map data = [:]) {
   String deviceId = getId()
   if(!deviceId) { return }
-  Map fadeState = groupVolumeFadeState.get(deviceId)
-  if(fadeState == null) { return }
-  Integer currentStep = (fadeState.currentStep as Integer) + 1
-  Integer totalSteps = fadeState.totalSteps as Integer
-  Integer targetVolume = fadeState.targetVolume as Integer
-  Boolean useGroupApi = fadeState.useGroupApi as Boolean
-  if(currentStep >= totalSteps) {
-    if(useGroupApi) { playerSetGroupVolume(targetVolume) }
-    else { playerSetPlayerVolume(targetVolume) }
-    groupVolumeFadeState.remove(deviceId)
-    lastGroupVolumeFadeCallTime.remove(deviceId)
-    logInfo("Group volume fade complete: volume set to ${targetVolume}")
-    return
+  synchronized(volumeLock(deviceId)) {
+    Map fadeState = groupVolumeFadeState.get(deviceId)
+    if(fadeState == null || fadeState.generation != data?.generation) { return }
+    Integer currentStep = (fadeState.currentStep as Integer) + 1
+    Integer totalSteps = fadeState.totalSteps as Integer
+    Integer targetVolume = fadeState.targetVolume as Integer
+    Boolean useGroupApi = fadeState.useGroupApi as Boolean
+    if(currentStep >= totalSteps) {
+      groupVolumeFadeState.remove(deviceId)
+      lastGroupVolumeFadeCallTime.remove(deviceId)
+      if(useGroupApi) { playerSetGroupVolume(targetVolume) }
+      else { playerSetPlayerVolume(targetVolume) }
+      logInfo("Group volume fade complete: volume set to ${targetVolume}")
+      return
+    }
+    Integer startVolume = fadeState.startVolume as Integer
+    BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
+    Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
+    newVolume = Math.max(0, Math.min(100, newVolume))
+    Map updated = new LinkedHashMap(fadeState)
+    updated.currentStep = currentStep
+    if(!groupVolumeFadeState.replace(deviceId, fadeState, updated)) { return }
+    if(useGroupApi) { playerSetGroupVolume(newVolume) }
+    else { playerSetPlayerVolume(newVolume) }
+    Integer intervalMs = fadeState.intervalMs as Integer
+    runInMillis(intervalMs, 'groupVolumeFadeStep', [overwrite: true, data: [generation: fadeState.generation]])
   }
-  Integer startVolume = fadeState.startVolume as Integer
-  BigDecimal volumeStep = fadeState.volumeStep as BigDecimal
-  Integer newVolume = Math.round(startVolume + (volumeStep * currentStep)) as Integer
-  newVolume = Math.max(0, Math.min(100, newVolume))
-  if(useGroupApi) { playerSetGroupVolume(newVolume) }
-  else { playerSetPlayerVolume(newVolume) }
-  fadeState.currentStep = currentStep
-  groupVolumeFadeState.put(deviceId, fadeState)
-  Integer intervalMs = fadeState.intervalMs as Integer
-  runInMillis(intervalMs, 'groupVolumeFadeStep', [overwrite: true])
 }
 
 void cancelGroupVolumeFade() {
   String deviceId = getId()
-  if(deviceId) { groupVolumeFadeState.remove(deviceId) }
-  unschedule('groupVolumeFadeStep')
+  synchronized(volumeLock(deviceId)) {
+    if(deviceId) { groupVolumeFadeState.remove(deviceId) }
+    unschedule('groupVolumeFadeStep')
+  }
 }
 
 @CompileStatic
