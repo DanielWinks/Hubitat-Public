@@ -3049,6 +3049,77 @@ class SonosAdvPlayerSpec extends Specification {
     driver.runtimeState.activeTransportCommand.command == 'stop'
   }
 
+  def "unconfirmed transport status schedules a retry that finishes an acknowledged command"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.pause()
+    driver.drainTransportCommandQueue()
+    String id = driver.runtimeState.activeTransportCommand.id
+    driver.transportCommandSoapAcknowledged(id, 'UPnP Pause')
+    driver.runtimeState.activeTransportCommand.statusQueryPending = true
+
+    when:
+    driver.observeTransportPlaybackStatus([playbackState: 'PLAYBACK_STATE_BUFFERING'])
+
+    then:
+    driver.scheduled.any { List call -> call[1] == 'retryUnconfirmedTransportCommand' }
+
+    when:
+    driver.retryUnconfirmedTransportCommand([commandId: id])
+
+    then:
+    driver.runtimeState.activeTransportCommand == null
+  }
+
+  def "transport deadline always clears the active slot and lets the queue drain"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.play()
+    driver.drainTransportCommandQueue()
+    String id = driver.runtimeState.activeTransportCommand.id
+    driver.enqueueTransportCommand('skipToNextTrack')
+
+    expect:
+    driver.scheduled.any { List call -> call[1] == 'transportCommandDeadline' }
+
+    when:
+    Integer drainsBefore = driver.scheduled.count { List call -> call[1] == 'drainTransportCommandQueue' }
+    driver.transportCommandDeadline([commandId: id])
+
+    then:
+    driver.runtimeState.activeTransportCommand == null
+    driver.scheduled.count { List call -> call[1] == 'drainTransportCommandQueue' } == drainsBefore + 1
+
+    when:
+    driver.drainTransportCommandQueue()
+
+    then:
+    driver.runtimeState.activeTransportCommand.command == 'skipToNextTrack'
+  }
+
+  def "an unconfirmed skip is not resent unless the speaker definitely rejected it"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.enqueueTransportCommand('skipToNextTrack')
+    driver.drainTransportCommandQueue()
+    String id = driver.runtimeState.activeTransportCommand.id
+    Integer sent = driver.asyncCalls.size()
+
+    when:
+    driver.retryUnconfirmedTransportCommand([commandId: id])
+
+    then:
+    driver.asyncCalls.size() == sent
+    driver.runtimeState.activeTransportCommand.id == id
+
+    when:
+    driver.runtimeState.activeTransportCommand.rejected = true
+    driver.retryUnconfirmedTransportCommand([commandId: id])
+
+    then:
+    driver.asyncCalls.size() == sent + 1
+  }
+
   def "stop sends a playback stop request when playback is active"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'

@@ -937,6 +937,7 @@ metadata {
 @Field static final String ANNOUNCEMENT_PLAYBACK_SNAPSHOT_KEY = 'announcementPlaybackSnapshot'
 @Field static final Integer TRANSPORT_WATCHDOG_SECONDS = 4
 @Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
+@Field static final Integer TRANSPORT_DEADLINE_SECONDS = 30
 @Field static final List<Long> WS_BACKOFF_STAGE_SECONDS = [600L, 600L, 600L, 7200L, 14400L, 21600L]
 @Field static final List<Integer> WS_BACKOFF_INTERVALS_SECONDS = [30, 60, 120, 300, 900, 1800, 3600]
 @Field static final String WS_STATUS_KEY = 'websocketStatus'
@@ -1269,6 +1270,7 @@ void uninstalled() {
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
+  unschedule('transportCommandDeadline')
   clearStaticDriverStateForCurrentDevice()
   shutdownWebSocket()
 }
@@ -1455,6 +1457,7 @@ void clearPendingCommandsForInitialization() {
   unschedule('drainTransportCommandQueue')
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
+  unschedule('transportCommandDeadline')
 
   invalidateUpnpRequestsForDevice()
 
@@ -6378,13 +6381,15 @@ void setCurrentTrackNumber(Integer currentTrackNumber) {
 Integer getCurrentTrackNumber() { return this.device.currentValue('currentTrackNumber') }
 
 void observeTransportTrackNumber(Integer currentTrackNumber) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || !(active.command in ['skipToNextTrack', 'skipToPreviousTrack'])) { return }
-  Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
-  Integer previous = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
-  if(previous != null && currentTrackNumber != null && previous != currentTrackNumber) {
-    finishTransportCommand(active, true, "confirmed by track number ${previous} -> ${currentTrackNumber}")
+  synchronized(getRuntimeState()) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(active == null || !(active.command in ['skipToNextTrack', 'skipToPreviousTrack'])) { return }
+    Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
+    Integer previous = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
+    if(previous != null && currentTrackNumber != null && previous != currentTrackNumber) {
+      finishTransportCommand(active, true, "confirmed by track number ${previous} -> ${currentTrackNumber}")
+    }
   }
 }
 
@@ -6855,28 +6860,36 @@ void getPlaybackStatus() {
 
 void transportStatusSoapCallback(AsyncResponse response, Map data = null) {
   String commandId = data?.transportCommandId?.toString()
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(commandId && (active == null || active.id?.toString() != commandId)) { return }
-  if(response?.status != 200 || response.hasError()) {
-    logWarn("UPnP playback-status query failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
-    if(active != null && (!commandId || active.id?.toString() == commandId)) {
-      active.statusQueryPending = false
-      active.lastFailureReason = 'UPnP GetTransportInfo failed'
+  synchronized(getRuntimeState()) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(commandId && (active == null || active.id?.toString() != commandId)) { return }
+    if(response?.status != 200 || response.hasError()) {
+      logWarn("UPnP playback-status query failed (HTTP ${response?.status}): ${response?.getErrorMessage()}")
+      if(active != null && (!commandId || active.id?.toString() == commandId)) {
+        active.statusQueryPending = false
+        active.lastFailureReason = 'UPnP GetTransportInfo failed'
+        scheduleTransportRetry(active.id?.toString())
+      }
+      return
     }
-    return
-  }
-  try {
-    GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
-    String transportState = findSoapBodyField(envelope, 'CurrentTransportState')
-    String playbackState = transportState == 'PLAYING' ? 'PLAYBACK_STATE_PLAYING' :
-        (transportState == 'PAUSED_PLAYBACK' ? 'PLAYBACK_STATE_PAUSED' :
-        (transportState == 'STOPPED' ? 'PLAYBACK_STATE_IDLE' : 'PLAYBACK_STATE_BUFFERING'))
-    runtimeState.playbackState = transportState
-    runtimeState.playbackStateObservedAt = now()
-    observeTransportPlaybackStatus([playbackState: playbackState])
-  } catch(Exception e) {
-    logWarn("Could not parse UPnP playback-status response: ${e.message}")
+    try {
+      GPathResult envelope = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
+      String transportState = findSoapBodyField(envelope, 'CurrentTransportState')
+      String playbackState = transportState == 'PLAYING' ? 'PLAYBACK_STATE_PLAYING' :
+          (transportState == 'PAUSED_PLAYBACK' ? 'PLAYBACK_STATE_PAUSED' :
+          (transportState == 'STOPPED' ? 'PLAYBACK_STATE_IDLE' : 'PLAYBACK_STATE_BUFFERING'))
+      runtimeState.playbackState = transportState
+      runtimeState.playbackStateObservedAt = now()
+      observeTransportPlaybackStatus([playbackState: playbackState])
+    } catch(Exception e) {
+      logWarn("Could not parse UPnP playback-status response: ${e.message}")
+      if(active != null && active.statusQueryPending == true) {
+        active.statusQueryPending = false
+        active.lastFailureReason = 'UPnP GetTransportInfo response could not be parsed'
+        scheduleTransportRetry(active.id?.toString())
+      }
+    }
   }
 }
 
@@ -6894,15 +6907,13 @@ void enqueueTransportCommand(String command) {
     if(!(command in ['play', 'pause', 'stop', 'skipToNextTrack', 'skipToPreviousTrack'])) { return }
     String intentGuid = recordStreamTransportIntent(command)
     List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
-        ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
-        : []
+        ? new ArrayList<Map>((List<Map>)runtimeState[TRANSPORT_QUEUE_KEY])
+        : new ArrayList<Map>()
     if(command in ['play', 'pause', 'stop']) {
       List<Map> retained = queued.findAll { Map item -> !(item.command in ['play', 'pause', 'stop']) }
       Integer replaced = queued.size() - retained.size()
-      queued = retained
-      Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-          ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-        if(replaced > 0) {
+      queued = new ArrayList<Map>(retained)
+      if(replaced > 0) {
         logDebug("Transport command ${command} replaced ${replaced} queued play/pause/stop command(s)")
       }
     }
@@ -6931,152 +6942,195 @@ void enqueueTransportCommand(String command) {
 }
 
 void drainTransportCommandQueue() {
-  if(runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map) { return }
-  List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
-      ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
-      : []
-  if(queued.isEmpty()) { return }
-  Map item = queued.remove(0)
-  runtimeState[TRANSPORT_QUEUE_KEY] = queued
-  Map baseline = runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] instanceof Map
-      ? new LinkedHashMap((Map)runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY])
-      : [:]
-  baseline.trackNumber = getCurrentTrackNumber()
-  Map active = [id: item.id, command: item.command, replayId: item.replayId,
-      attempts: 0, baseline: baseline,
-      statusQueryPending: false]
-  runtimeState[TRANSPORT_ACTIVE_KEY] = active
+  Map active = null
+  synchronized(getRuntimeState()) {
+    if(runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map) { return }
+    List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
+        ? new ArrayList<Map>((List<Map>)runtimeState[TRANSPORT_QUEUE_KEY])
+        : new ArrayList<Map>()
+    if(queued.isEmpty()) { return }
+    Map item = queued.remove(0)
+    runtimeState[TRANSPORT_QUEUE_KEY] = queued
+    Map baseline = runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] instanceof Map
+        ? new LinkedHashMap((Map)runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY])
+        : [:]
+    baseline.trackNumber = getCurrentTrackNumber()
+    active = [id: item.id, command: item.command, replayId: item.replayId,
+        attempts: 0, baseline: baseline,
+        statusQueryPending: false]
+    runtimeState[TRANSPORT_ACTIVE_KEY] = active
+    // Hard deadline: whatever happens, the active slot is cleared so the queue cannot stay blocked.
+    runIn(TRANSPORT_DEADLINE_SECONDS, 'transportCommandDeadline', [overwrite: true,
+        data: [commandId: active.id]])
+  }
   sendTransportCommandAttempt(active)
 }
 
-void sendTransportCommandAttempt(Map active) {
-  if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
-  String commandName = active.command as String
-  String action = commandName == 'skipToNextTrack' ? 'Next' :
-      (commandName == 'skipToPreviousTrack' ? 'Previous' : commandName.capitalize())
-  String host = getLocalUpnpHostForGroupOperation()
-  if(!host) {
-    active.lastFailureReason = 'local UPnP host is unavailable'
-    finishTransportCommand(active, false, active.lastFailureReason as String)
-    return
+void transportCommandDeadline(Map data = [:]) {
+  synchronized(getRuntimeState()) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(active == null || active.id?.toString() != data?.commandId?.toString()) { return }
+    String reason = active.lastFailureReason?.toString() ?:
+        "no confirmation within ${TRANSPORT_DEADLINE_SECONDS} seconds"
+    finishTransportCommand(active, false, "deadline reached; ${reason}")
   }
-  Map params = getSoapActionParams(host, AVTransport, action)
-  active.attempts = ((active.attempts ?: 0) as Integer) + 1
-  active.statusQueryPending = false
-  active.sentAt = now()
-  logDebug("Sending UPnP transport command ${commandName} as ${action}, attempt ${active.attempts} (${active.id})")
-  try {
-    postSonosSoapAsync('transportCommandSoapCallback', params,
-        [transportCommandId: active.id, action: action, command: commandName])
-    runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand', [overwrite: true,
-        data: [commandId: active.id]])
-  } catch(Exception e) {
-    active.lastFailureReason = "UPnP ${action} request could not be sent: ${e.message}"
-    retryUnconfirmedTransportCommand([commandId: active.id])
+}
+
+void scheduleTransportRetry(String commandId) {
+  if(!commandId) { return }
+  runIn(1, 'retryUnconfirmedTransportCommand', [overwrite: true, data: [commandId: commandId]])
+}
+
+void sendTransportCommandAttempt(Map active) {
+  synchronized(getRuntimeState()) {
+    if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
+    String commandName = active.command as String
+    String action = commandName == 'skipToNextTrack' ? 'Next' :
+        (commandName == 'skipToPreviousTrack' ? 'Previous' : commandName.capitalize())
+    String host = getLocalUpnpHostForGroupOperation()
+    if(!host) {
+      active.lastFailureReason = 'local UPnP host is unavailable'
+      finishTransportCommand(active, false, active.lastFailureReason as String)
+      return
+    }
+    Map params = getSoapActionParams(host, AVTransport, action)
+    active.attempts = ((active.attempts ?: 0) as Integer) + 1
+    active.statusQueryPending = false
+    active.rejected = false
+    active.sentAt = now()
+    logDebug("Sending UPnP transport command ${commandName} as ${action}, attempt ${active.attempts} (${active.id})")
+    try {
+      postSonosSoapAsync('transportCommandSoapCallback', params,
+          [transportCommandId: active.id, action: action, command: commandName])
+      runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand', [overwrite: true,
+          data: [commandId: active.id]])
+    } catch(Exception e) {
+      active.lastFailureReason = "UPnP ${action} request could not be sent: ${e.message}"
+      active.rejected = true
+      retryUnconfirmedTransportCommand([commandId: active.id])
+    }
   }
 }
 
 void transportCommandSoapCallback(AsyncResponse response, Map data = null) {
-  String commandId = data?.transportCommandId?.toString()
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || !commandId || active.id?.toString() != commandId) { return }
-  if(response?.status == 200 && !response.hasError()) {
-    transportCommandSoapAcknowledged(commandId, "UPnP ${data?.action}")
-    return
+  synchronized(getRuntimeState()) {
+    String commandId = data?.transportCommandId?.toString()
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(active == null || !commandId || active.id?.toString() != commandId) { return }
+    if(response?.status == 200 && !response.hasError()) {
+      transportCommandSoapAcknowledged(commandId, "UPnP ${data?.action}")
+      return
+    }
+    active.lastFailureReason = "UPnP ${data?.action} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}"
+    active.rejected = true
+    logWarn("Transport command ${data?.command} (${commandId}) failed: ${active.lastFailureReason}")
+    retryUnconfirmedTransportCommand([commandId: commandId])
   }
-  active.lastFailureReason = "UPnP ${data?.action} failed (HTTP ${response?.status}): ${response?.getErrorMessage()}"
-  logWarn("Transport command ${data?.command} (${commandId}) failed: ${active.lastFailureReason}")
-  retryUnconfirmedTransportCommand([commandId: commandId])
 }
 
 void transportCommandSoapAcknowledged(String commandId, String response) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null || !commandId || active.id?.toString() != commandId) { return }
-  active.soapAcknowledged = true
-  active.acknowledgedResponse = response
-  active.acknowledgedAt = now()
-  unschedule('retryUnconfirmedTransportCommand')
-  logDebug("Transport command ${active.command} (${commandId}) received successful UPnP response=${response}; suppressing resend attempts")
+  synchronized(getRuntimeState()) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(active == null || !commandId || active.id?.toString() != commandId) { return }
+    active.soapAcknowledged = true
+    active.acknowledgedResponse = response
+    active.acknowledgedAt = now()
+    logDebug("Transport command ${active.command} (${commandId}) received successful UPnP response=${response}; a scheduled retry will finish it without resending")
+  }
 }
 
 void watchTransportCommand(Map data = [:]) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  String commandId = data?.commandId?.toString()
-  if(active == null || active.id?.toString() != commandId) { return }
-  active.statusQueryPending = true
-  logDebug("Watchdog querying playback status for ${active.command} (${commandId})")
-  getPlaybackStatus()
+  synchronized(getRuntimeState()) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    String commandId = data?.commandId?.toString()
+    if(active == null || active.id?.toString() != commandId) { return }
+    active.statusQueryPending = true
+    logDebug("Watchdog querying playback status for ${active.command} (${commandId})")
+    getPlaybackStatus()
+  }
 }
 
 void retryUnconfirmedTransportCommand(Map data = [:]) {
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  String commandId = data?.commandId?.toString()
-  if(active == null || active.id?.toString() != commandId) { return }
-  if(active.soapAcknowledged == true) {
+  synchronized(getRuntimeState()) {
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    String commandId = data?.commandId?.toString()
+    if(active == null || active.id?.toString() != commandId) { return }
+    if(active.soapAcknowledged == true) {
+      String reason = active.lastFailureReason?.toString() ?:
+          'no confirming playback status arrived after the successful UPnP response'
+      finishTransportCommand(active, false,
+          "Sonos acknowledged ${active.acknowledgedResponse ?: active.command}; ${reason}; not retrying")
+      return
+    }
+    if(active.command in ['skipToNextTrack', 'skipToPreviousTrack'] && active.rejected != true) {
+      // Delivery is uncertain (GetTransportInfo cannot confirm a skip); resending could skip twice.
+      // Keep waiting for the track-change event; the hard deadline releases the slot.
+      logDebug("Not resending ${active.command} (${commandId}): no definite rejection; waiting for track confirmation")
+      return
+    }
+    Integer attempts = (active.attempts ?: 0) as Integer
     String reason = active.lastFailureReason?.toString() ?:
-        'no confirming playback status arrived after the successful UPnP response'
-    finishTransportCommand(active, false,
-        "Sonos acknowledged ${active.acknowledgedResponse ?: active.command}; ${reason}; not retrying")
-    return
+        "no confirming playback status after ${TRANSPORT_WATCHDOG_SECONDS} seconds"
+    if(attempts >= TRANSPORT_MAX_ATTEMPTS) {
+      logWarn("Transport command ${active.command} (${commandId}) was not confirmed after ${attempts} attempts; last reason: ${reason}")
+      finishTransportCommand(active, false, reason)
+      return
+    }
+    unschedule('watchTransportCommand')
+    unschedule('retryUnconfirmedTransportCommand')
+    logDebug("Retrying transport command ${active.command} (${commandId}), attempt ${attempts + 1}; reason: ${reason}")
+    sendTransportCommandAttempt(active)
   }
-  Integer attempts = (active.attempts ?: 0) as Integer
-  String reason = active.lastFailureReason?.toString() ?:
-      "no confirming playback status after ${TRANSPORT_WATCHDOG_SECONDS} seconds"
-  if(attempts >= TRANSPORT_MAX_ATTEMPTS) {
-    logWarn("Transport command ${active.command} (${commandId}) was not confirmed after ${attempts} attempts; last reason: ${reason}")
-    finishTransportCommand(active, false, reason)
-    return
-  }
-  unschedule('watchTransportCommand')
-  unschedule('retryUnconfirmedTransportCommand')
-  logDebug("Retrying transport command ${active.command} (${commandId}), attempt ${attempts + 1}; reason: ${reason}")
-  sendTransportCommandAttempt(active)
 }
 
 void observeTransportPlaybackStatus(Map eventData) {
-  if(!(eventData instanceof Map)) { return }
-  Map snapshot = [playbackState: eventData.playbackState?.toString(),
-      itemId: eventData.itemId?.toString(), positionMillis: eventData.positionMillis,
-      observedAt: now()]
-  runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] = snapshot
-  Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
-      ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
-  if(active == null) { return }
-  String command = active.command as String
-  String playbackState = snapshot.playbackState as String
-  if(command == 'play' && playbackState == 'PLAYBACK_STATE_BUFFERING') {
-    active.statusQueryPending = false
-    logDebug("Transport command play (${active.id}) is buffering; extending the confirmation window")
-    runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand',
-        [overwrite: true, data: [commandId: active.id]])
-    return
-  }
-  Boolean confirmed = false
-  if(command == 'play') { confirmed = playbackState == 'PLAYBACK_STATE_PLAYING' }
-  else if(command == 'pause') { confirmed = playbackState in ['PLAYBACK_STATE_PAUSED', 'PLAYBACK_STATE_IDLE'] }
-  else if(command == 'stop') { confirmed = playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_STOPPED'] }
-  else if(command in ['skipToNextTrack', 'skipToPreviousTrack']) {
-    Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
-    String priorItem = baseline.itemId?.toString()
-    String currentItem = snapshot.itemId?.toString()
-    Long priorPosition = toLongValue(baseline.positionMillis)
-    Long currentPosition = toLongValue(snapshot.positionMillis)
-    Integer priorTrackNumber = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
-    Integer currentTrackNumber = getCurrentTrackNumber()
-    confirmed = (priorItem && currentItem && priorItem != currentItem) ||
-        (priorTrackNumber != null && currentTrackNumber != null && priorTrackNumber != currentTrackNumber) ||
-        (priorPosition != null && currentPosition != null && priorPosition - currentPosition >= 3000L)
-  }
-  if(confirmed) {
-    finishTransportCommand(active, true, "confirmed by playback status ${playbackState}")
-  } else if(active.statusQueryPending == true) {
-    active.statusQueryPending = false
-    active.lastFailureReason = "status query returned ${playbackState ?: 'no playback state'} without confirming ${command}"
-    logDebug("Watchdog did not confirm ${command} (${active.id}); state=${playbackState}, itemId=${snapshot.itemId}, position=${snapshot.positionMillis}")
+  synchronized(getRuntimeState()) {
+    if(!(eventData instanceof Map)) { return }
+    Map snapshot = [playbackState: eventData.playbackState?.toString(),
+        itemId: eventData.itemId?.toString(), positionMillis: eventData.positionMillis,
+        observedAt: now()]
+    runtimeState[TRANSPORT_STATUS_SNAPSHOT_KEY] = snapshot
+    Map active = runtimeState[TRANSPORT_ACTIVE_KEY] instanceof Map
+        ? (Map)runtimeState[TRANSPORT_ACTIVE_KEY] : null
+    if(active == null) { return }
+    String command = active.command as String
+    String playbackState = snapshot.playbackState as String
+    if(command == 'play' && playbackState == 'PLAYBACK_STATE_BUFFERING') {
+      active.statusQueryPending = false
+      logDebug("Transport command play (${active.id}) is buffering; extending the confirmation window")
+      runIn(TRANSPORT_WATCHDOG_SECONDS, 'watchTransportCommand',
+          [overwrite: true, data: [commandId: active.id]])
+      return
+    }
+    Boolean confirmed = false
+    if(command == 'play') { confirmed = playbackState == 'PLAYBACK_STATE_PLAYING' }
+    else if(command == 'pause') { confirmed = playbackState in ['PLAYBACK_STATE_PAUSED', 'PLAYBACK_STATE_IDLE'] }
+    else if(command == 'stop') { confirmed = playbackState in ['PLAYBACK_STATE_IDLE', 'PLAYBACK_STATE_STOPPED'] }
+    else if(command in ['skipToNextTrack', 'skipToPreviousTrack']) {
+      Map baseline = active.baseline instanceof Map ? (Map)active.baseline : [:]
+      String priorItem = baseline.itemId?.toString()
+      String currentItem = snapshot.itemId?.toString()
+      Long priorPosition = toLongValue(baseline.positionMillis)
+      Long currentPosition = toLongValue(snapshot.positionMillis)
+      Integer priorTrackNumber = baseline.trackNumber != null ? (baseline.trackNumber as Integer) : null
+      Integer currentTrackNumber = getCurrentTrackNumber()
+      confirmed = (priorItem && currentItem && priorItem != currentItem) ||
+          (priorTrackNumber != null && currentTrackNumber != null && priorTrackNumber != currentTrackNumber) ||
+          (priorPosition != null && currentPosition != null && priorPosition - currentPosition >= 3000L)
+    }
+    if(confirmed) {
+      finishTransportCommand(active, true, "confirmed by playback status ${playbackState}")
+    } else if(active.statusQueryPending == true) {
+      active.statusQueryPending = false
+      active.lastFailureReason = "status query returned ${playbackState ?: 'no playback state'} without confirming ${command}"
+      logDebug("Watchdog did not confirm ${command} (${active.id}); state=${playbackState}, itemId=${snapshot.itemId}, position=${snapshot.positionMillis}")
+      scheduleTransportRetry(active.id?.toString())
+    }
   }
 }
 
@@ -7087,28 +7141,31 @@ Long toLongValue(Object value) {
 }
 
 void finishTransportCommand(Map active, Boolean succeeded, String detail) {
-  if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
-  if(!succeeded && active.soapAcknowledged != true &&
-      active.command in ['skipToNextTrack', 'skipToPreviousTrack'] && active.replayId) {
-    List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
-        ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
-        : []
-    Integer discarded = queued.count { Map item -> item.replayId?.toString() == active.replayId?.toString() }
-    if(discarded > 0) {
-      queued = queued.findAll { Map item -> item.replayId?.toString() != active.replayId?.toString() }
-      runtimeState[TRANSPORT_QUEUE_KEY] = queued
-      logWarn("Discarded ${discarded} queued skip command(s) from replay ${active.replayId} because ${active.command} was not confirmed")
+  synchronized(getRuntimeState()) {
+    if(active == null || runtimeState[TRANSPORT_ACTIVE_KEY]?.id != active.id) { return }
+    if(!succeeded && active.soapAcknowledged != true &&
+        active.command in ['skipToNextTrack', 'skipToPreviousTrack'] && active.replayId) {
+      List<Map> queued = runtimeState[TRANSPORT_QUEUE_KEY] instanceof List
+          ? (List<Map>)runtimeState[TRANSPORT_QUEUE_KEY]
+          : []
+      Integer discarded = queued.count { Map item -> item.replayId?.toString() == active.replayId?.toString() }
+      if(discarded > 0) {
+        queued = queued.findAll { Map item -> item.replayId?.toString() != active.replayId?.toString() }
+        runtimeState[TRANSPORT_QUEUE_KEY] = queued
+        logWarn("Discarded ${discarded} queued skip command(s) from replay ${active.replayId} because ${active.command} was not confirmed")
+      }
     }
+    unschedule('watchTransportCommand')
+    unschedule('retryUnconfirmedTransportCommand')
+    unschedule('transportCommandDeadline')
+    runtimeState.remove(TRANSPORT_ACTIVE_KEY)
+    if(succeeded) { logDebug("Transport command ${active.command} (${active.id}) confirmed: ${detail}") }
+    else if(active.soapAcknowledged == true) {
+      logWarn("Transport command ${active.command} (${active.id}) received a successful UPnP response but was not confirmed by playback status; no retry: ${detail}")
+    }
+    else { logWarn("Transport command ${active.command} (${active.id}) failed: ${detail}") }
+    runIn(1, 'drainTransportCommandQueue', [overwrite: true])
   }
-  unschedule('watchTransportCommand')
-  unschedule('retryUnconfirmedTransportCommand')
-  runtimeState.remove(TRANSPORT_ACTIVE_KEY)
-  if(succeeded) { logDebug("Transport command ${active.command} (${active.id}) confirmed: ${detail}") }
-  else if(active.soapAcknowledged == true) {
-    logWarn("Transport command ${active.command} (${active.id}) received a successful UPnP response but was not confirmed by playback status; no retry: ${detail}")
-  }
-  else { logWarn("Transport command ${active.command} (${active.id}) failed: ${detail}") }
-  runIn(1, 'drainTransportCommandQueue', [overwrite: true])
 }
 
 @CompileStatic
