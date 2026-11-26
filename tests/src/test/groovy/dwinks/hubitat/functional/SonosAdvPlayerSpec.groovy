@@ -307,12 +307,7 @@ class SonosAdvPlayerSpec extends Specification {
   }
 
   void drainParentBridge() {
-    List<Map> updates = driver.flushPendingParentUpdates() ?: []
-    updates.each { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) }
-    List<Map> requests = driver.flushPendingParentRequests() ?: []
-    requests.each { Map request ->
-      parentPlayerRequests << new LinkedHashMap(request)
-    }
+    driver.flushParentAppRequests()
   }
 
   List<Map> playerStateMessages() {
@@ -550,7 +545,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getMetaClass().initialize()
     driver.metaClass.getParent = { -> new Expando(
       playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
-      readyForZgt: { String dni -> 'proceed' },
       playerStateUpdate: { Map payload -> parentPlayerUpdates << payload },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }) }
     driver.metaClass.postSonosSoapAsync = { String callback, Map params, Map data ->
@@ -1185,6 +1179,8 @@ class SonosAdvPlayerSpec extends Specification {
     parentPlayerUpdates.clear()
     parentPlayerRequests.clear()
     parentPlayerPresence.clear()
+    // Static queue survives between features; drop requests a prior feature never flushed.
+    driver.pendingParentRequestsByDni.clear()
     driver.binding.getVariable('interfaces').rawSocket = rawSocket
     driver.settings = [logEnable: true, debugLogEnable: true, traceLogEnable: true]
     driver.logs.clear()
@@ -1228,7 +1224,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.isGroupCoordinator = 'on'
     driver.metaClass.getParent = { -> new Expando(
       playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
-      readyForZgt: { String dni -> 'proceed' },
       flushGroupDeviceState: { String coordinatorId, Map volumeAttrs, Map playbackAttrs ->
         parentPlayerUpdates << [kind: 'groupDeviceState', coordinatorId: coordinatorId,
           volumeAttrs: volumeAttrs ? new LinkedHashMap(volumeAttrs) : null,
@@ -1347,7 +1342,6 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     parentPlayerUpdates.empty
-    !driver.scheduled.any { List job -> job[1] == 'flushPendingParentUpdates' }
     !driver.device.events.any { Map event -> event.name == 'lastUpdated' }
 
     when:
@@ -2412,6 +2406,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.initialize()
+    driver.zgtElectionResult('proceed')
 
     then:
     zgtCalls == ['subscribe']
@@ -2428,17 +2423,18 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.hasBattery = batteryValue
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
     driver.metaClass.subscribeToMrGrcEvents = { -> }
-    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni ->
-      readinessRequests << dni
-      'proceed'
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload ->
+      readinessRequests << payload.action
+      true
     }) }
 
     when:
     driver.initialize()
+    driver.flushParentAppRequests()
 
     then:
     zgtCalls.isEmpty()
-    readinessRequests.isEmpty()
+    !readinessRequests.contains('requestZgtElection')
 
     where:
     batteryValue << ['true', null]
@@ -2485,6 +2481,52 @@ class SonosAdvPlayerSpec extends Specification {
     ]
   }
 
+  def "parent app requests queue under one id and flush once from a scheduled drain"() {
+    given:
+    List<Map> received = []
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload -> received << payload; true }) }
+
+    when:
+    driver.sendParentAppRequest('enqueueAudioClip', [uri: 'a'])
+    driver.sendParentAppRequest('enqueueAudioClip', [uri: 'b'])
+
+    then: 'nothing reaches the parent inline and only one drain is scheduled'
+    received.isEmpty()
+    driver.scheduled.count { List job -> job[1] == 'flushParentAppRequests' } == 1
+
+    when:
+    driver.flushParentAppRequests()
+    driver.flushParentAppRequests()
+
+    then:
+    received*.args*.uri == ['a', 'b']
+    received*.requestId.unique().size() == 2
+  }
+
+  def "request enqueued during delivery stays ordered behind the active drain"() {
+    given:
+    List<Map> received = []
+    Boolean injected = false
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload ->
+      received << payload
+      if(!injected) {
+        injected = true
+        driver.sendParentAppRequest('enqueueAudioClip', [uri: 'c'])
+      }
+      true
+    }) }
+
+    when:
+    driver.sendParentAppRequest('enqueueAudioClip', [uri: 'a'])
+    driver.sendParentAppRequest('enqueueAudioClip', [uri: 'b'])
+    driver.flushParentAppRequests()
+
+    then: 'the mid-delivery request is delivered after the claimed batch by the same drain'
+    received*.args*.uri == ['a', 'b', 'c']
+    driver.scheduled.count { List job -> job[1] == 'flushParentAppRequests' } == 1
+    driver.pendingParentRequestsByDni.isEmpty()
+  }
+
   def "player subscribes to ZGT only when parent elects it"() {
     given:
     List<String> zgtCalls = []
@@ -2492,16 +2534,27 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.hasBattery = 'false'
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
     driver.metaClass.subscribeToMrGrcEvents = { -> }
-    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni ->
-      readinessRequests << dni
-      'proceed'
+    Integer catalogRefreshes = 0
+    driver.metaClass.refreshUpnpMediaCatalogs = { -> if(driver.isCatalogRefreshOwner()) { catalogRefreshes++ } }
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload ->
+      readinessRequests << "${payload.action}:${payload.sourceDni}".toString()
+      true
     }) }
 
     when:
     driver.initialize()
 
+    then: 'initialize only queues the election request and never calls the parent inline'
+    readinessRequests.isEmpty()
+    zgtCalls.isEmpty()
+
+    when:
+    driver.flushParentAppRequests()
+    driver.zgtElectionResult('proceed')
+
     then:
-    readinessRequests == ['SONOS-TEST-DNI']
+    catalogRefreshes == 1
+    readinessRequests.count { it == 'requestZgtElection:SONOS-TEST-DNI' } == 1
     zgtCalls == ['subscribe']
   }
 
@@ -2512,10 +2565,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.dataValues.hasBattery = 'false'
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
     driver.metaClass.subscribeToMrGrcEvents = { -> grcCalls << 'subscribe' }
-    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni -> 'wait' }) }
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload -> true }) }
 
     when:
     driver.initialize()
+    driver.zgtElectionResult('wait')
 
     then:
     zgtCalls.isEmpty()
@@ -2529,10 +2583,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.subscribeToZgtEvents = { -> calls << 'zgt' }
     driver.metaClass.subscribeToAlarmClockEvents = { -> calls << 'alarmClock' }
     driver.metaClass.subscribeToMrGrcEvents = { -> }
-    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni -> election }) }
+    driver.metaClass.getParent = { -> new Expando(playerAppRequest: { Map payload -> true }) }
 
     when:
     driver.initialize()
+    driver.zgtElectionResult(election)
 
     then:
     calls == expected
@@ -3193,12 +3248,17 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /mgrc HTTP/1.1\r\n\r\n' + body)
-    List job = driver.scheduled.find { List row -> row[1] == 'relayGrcToParent' }
-    driver.relayGrcToParent(job[2].data as Map)
+
+    then: 'parse only queues; flushParentAppRequests is the one scheduled handoff'
+    parentPlayerRequests.isEmpty()
+    driver.scheduled.count { List row -> row[1] == 'flushParentAppRequests' } == 1
+    !driver.scheduled.any { List row -> row[1] == 'relayGrcToParent' }
+
+    when:
+    driver.flushParentAppRequests()
 
     then:
     driver.device.events.empty
-    job[0] == 1
     parentPlayerRequests.size() == 1
     parentPlayerRequests[0].action == 'groupRendering'
     parentPlayerRequests[0].sourceDni == 'SONOS-TEST-DNI'
@@ -3506,6 +3566,7 @@ class SonosAdvPlayerSpec extends Specification {
 
     when:
     driver.relayPlayerReadingToParent()
+    driver.flushParentAppRequests()
 
     then:
     parentPlayerRequests.size() == 1
@@ -3531,6 +3592,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.setPlayerVolume(33)
     driver.setMuteState('muted')
     driver.relayPlayerReadingToParent()
+    driver.flushParentAppRequests()
 
     then:
     driver.scheduled.any { List row -> row[1] == 'relayPlayerReadingToParent' }

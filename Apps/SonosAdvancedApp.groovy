@@ -3271,6 +3271,13 @@ Boolean playerAppRequestHandler(Object event) {
     case 'refreshPolicy':
       refreshPlayerAnnouncementPolicySnapshot(player)
       break
+    case 'requestZgtElection':
+      // Answer from a scheduled execution so no child call runs inside this request.
+      runInMillis(1, 'deliverZgtElection', [
+        overwrite: false,
+        data: [playerDni: playerDni, result: readyForZgt(playerDni)]
+      ])
+      return true
     case 'needCurrentlyPlayingStates':
       runInMillis(1, 'republishCurrentlyPlayingStates', [
         overwrite: true,
@@ -3291,6 +3298,15 @@ Boolean playerAppRequestHandler(Object event) {
       return false
   }
   return true
+}
+
+/** Deliver a ZGT election answer to its player after the requesting call has returned. */
+void deliverZgtElection(Map data) {
+  String playerDni = data?.playerDni?.toString()
+  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
+  if(player == null) { return }
+  try { player.zgtElectionResult(data.result?.toString()) }
+  catch(Exception e) { logWarn("Could not deliver ZGT election result to ${playerDni}: ${e.message}") }
 }
 
 /** Republish the complete latest leader AVT after a low-frequency settings save. */

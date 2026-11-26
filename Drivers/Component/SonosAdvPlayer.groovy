@@ -689,7 +689,7 @@ metadata {
     version: '0.18.9',
     namespace: 'dwinks',
     author: 'Daniel Winks',
-    singleThreaded: false,
+    singleThreaded: true,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
   // Capabilities (alphabetical)
@@ -905,6 +905,8 @@ metadata {
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
+// Parent app requests queued per player DNI; every access holds this map's lock.
+@Field static ConcurrentHashMap<String, List<Map>> pendingParentRequestsByDni = new ConcurrentHashMap<String, List<Map>>()
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final String WS_CONNECT_PENDING_STATE_KEY = 'websocketConnectPending'
 @Field static final Integer WS_PING_INTERVAL_SECONDS = 15
@@ -1030,6 +1032,7 @@ metadata {
 @Field static final String LEGACY_CONTENT_DIRECTORY_SID_DEVICE_KEY = 'sid6'
 @Field static final String LEGACY_CONTENT_DIRECTORY_EXPIRES_DEVICE_KEY = 'sid6-expires'
 @Field static final String PENDING_CATALOG_SNAPSHOTS_RUNTIME_KEY = 'pendingCatalogSnapshots'
+@Field static final String ZGT_ELIGIBLE_RUNTIME_KEY = 'zgtElectionEligible'
 @Field static final String CATALOG_REFRESH_OWNER_RUNTIME_KEY = 'catalogRefreshOwner'
 @Field static final String HAS_BATTERY_DEVICE_KEY = 'hasBattery'
 @Field static ConcurrentHashMap<String, String> lastWsEventLog = new ConcurrentHashMap<String, String>()
@@ -1277,21 +1280,13 @@ void updated() {
 }
 
 void initialize() {
-  Boolean subscribeToZgt = shouldSubscribeToZgt()
-  performImmediateInitialization(subscribeToZgt)
+  performImmediateInitialization()
 }
 
-Boolean shouldSubscribeToZgt() {
+/** Only mains-powered players may own the household ZGT subscription. */
+Boolean isZgtElectionEligible() {
   String hasBattery = device.getDataValue(HAS_BATTERY_DEVICE_KEY)
-  if(hasBattery == null || !hasBattery.equalsIgnoreCase('false')) { return false }
-  try {
-    String response = parent.readyForZgt(getDeviceDNI())?.toString()
-    logDebug("Parent ZGT readiness response for ${getDeviceDNI()}: ${response ?: 'none'}")
-    return response == 'proceed'
-  } catch(Exception e) {
-    logWarn("Could not request ZGT subscriber election from parent: ${e.message}")
-    return false
-  }
+  return hasBattery != null && hasBattery.equalsIgnoreCase('false')
 }
 
 void handleSettingsUpdate() {
@@ -1346,7 +1341,9 @@ void clearLegacyBridgeAttributesForInitialization() {
   logDebug("Cleared stale bridge attributes for ${dni} before fresh initialization snapshot")
 }
 
-void performImmediateInitialization(Boolean subscribeToZgt = true) {
+void performImmediateInitialization() {
+  // Read battery eligibility before cacheBatteryCapability refreshes it, as the election always has.
+  Boolean zgtEligible = isZgtElectionEligible()
   if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
     try { wsClose() }
     catch(Exception e) { logDebug("Could not close WebSocket before player initialization: ${e.message}") }
@@ -1369,13 +1366,11 @@ void performImmediateInitialization(Boolean subscribeToZgt = true) {
   // stays subscribed so a follower can report immediately if it becomes coordinator.
   subscribeToMrGrcEvents()
   if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
-  // The ZGT election winner is the household's single catalog-refresh player.
-  runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] = subscribeToZgt == true
-  if(subscribeToZgt) {
-    subscribeToZgtEvents()
-    // The ZGT election winner also owns the single AlarmClock subscription; no second election.
-    subscribeToAlarmClockEvents()
-  }
+  // The ZGT election winner is the household's single catalog-refresh player. Ownership
+  // starts false; the parent's deferred answer arrives through zgtElectionResult.
+  runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] = false
+  runtimeState[ZGT_ELIGIBLE_RUNTIME_KEY] = zgtEligible
+  if(zgtEligible) { sendParentAppRequest('requestZgtElection') }
   // AVTransport remains subscribed regardless of group role. The parent filters
   // follower AVT payloads using its own ZGT topology.
   subscribeToAVTransport()
@@ -1710,7 +1705,7 @@ void secondaryConfigurationPhase4() {
   String websocketUrl = getLocalWsUrl()
 
   if(localUpnpHost && websocketUrl) {
-    performImmediateInitialization(shouldSubscribeToZgt())
+    performImmediateInitialization()
   } else {
     logWarn('Device data still incomplete after validation - subscriptions not established')
   }
@@ -2005,6 +2000,7 @@ void clearStaticDriverStateForCurrentDevice() {
     // their key or prefix; remove only entries owned by this device.
     if(dni != null && dni != '') {
       runtimeStateByDni?.remove(dni)
+      synchronized(pendingParentRequestsByDni) { pendingParentRequestsByDni.remove(dni) }
       lastWsEventLog?.remove(dni)
       jsonSlurpers?.remove(dni)
       wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
@@ -2245,24 +2241,70 @@ Boolean shouldUseAnnouncementAudioClip(Boolean highPriority = false) {
 
 
 
+/**
+ * Queue a request for the parent app and return immediately. The caller never
+ * blocks on the app's single-threaded gate; flushParentAppRequests delivers it
+ * from its own scheduled execution after the caller has released this
+ * driver's gate.
+ */
 Boolean sendParentAppRequest(String action, Map args = [:]) {
-  Map payload = [version: 1, channel: 'playerAppRequest', action: action,
-    sourceDni: device.getDeviceNetworkId(), requestId: UUID.randomUUID().toString(), args: args ?: [:]]
-  logDebug("Queued parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${payload.sourceDni}")
-  sendParentAppRequestDirect(action, args)
+  String dni = device?.getDeviceNetworkId()
+  if(!dni || parent == null) { return false }
+  Map payload = [version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action,
+    args: args ?: [:], requestId: UUID.randomUUID().toString()]
+  logDebug("Queued parent app request action=${action}, eventRequestId=${payload.requestId}, ttsRequestId=${args?.requestId ?: 'none'}, sourceDni=${dni}")
+  synchronized(pendingParentRequestsByDni) {
+    List<Map> pending = pendingParentRequestsByDni.get(dni)
+    Boolean wakeup = pending == null
+    if(wakeup) {
+      pending = new ArrayList<Map>()
+      pendingParentRequestsByDni.put(dni, pending)
+    }
+    pending.add(payload)
+    // The wakeup flag is the queue's presence, so check-and-set shares this lock.
+    if(wakeup) { runInMillis(1, 'flushParentAppRequests', [overwrite: false]) }
+  }
   return true
 }
 
-void sendParentAppRequestDirect(String action, Map args) {
-  String dni = device.getDeviceNetworkId()
+/**
+ * Deliver this player's queued parent requests in order. The queue stays registered
+ * while delivering, so requests enqueued meanwhile join it and no second drain starts;
+ * the loop ends (and unregisters) only when a claim finds the queue empty.
+ */
+void flushParentAppRequests() {
+  String dni = device?.getDeviceNetworkId()
   if(!dni) { return }
-  Map payload = [version: 1, channel: 'playerAppRequest', sourceDni: dni, action: action, args: args ?: [:], requestId: UUID.randomUUID().toString()]
-  try { parent.playerAppRequest(payload) } catch(Exception e) { logWarn("parent.playerAppRequest failed for ${action}: ${e.message}") }
+  while(true) {
+    List<Map> claimed
+    synchronized(pendingParentRequestsByDni) {
+      List<Map> pending = pendingParentRequestsByDni.get(dni)
+      if(pending == null) { return }
+      if(pending.isEmpty()) {
+        pendingParentRequestsByDni.remove(dni)
+        return
+      }
+      claimed = new ArrayList<Map>(pending)
+      pending.clear()
+    }
+    claimed.each { Map payload ->
+      try { parent.playerAppRequest(payload) }
+      catch(Exception e) { logWarn("parent.playerAppRequest failed for ${payload.action}: ${e.message}") }
+    }
+  }
 }
-List<Map> drainPendingParentUpdatesForPoll() { return [] }
-List<Map> flushPendingParentUpdates() { return [] }
-List<Map> drainPendingParentRequestsForPoll() { return [] }
-List<Map> flushPendingParentRequests() { return [] }
+
+/** Parent's answer to requestZgtElection, delivered from an app-side scheduled execution. */
+void zgtElectionResult(String result) {
+  logDebug("Parent ZGT readiness response for ${getDeviceDNI()}: ${result ?: 'none'}")
+  if(result != 'proceed' || runtimeState[ZGT_ELIGIBLE_RUNTIME_KEY] != true) { return }
+  runtimeState[CATALOG_REFRESH_OWNER_RUNTIME_KEY] = true
+  subscribeToZgtEvents()
+  // The ZGT election winner also owns the single AlarmClock subscription; no second election.
+  subscribeToAlarmClockEvents()
+  // Startup's refresh ran before ownership was known, so browse now that this player owns it.
+  refreshUpnpMediaCatalogs()
+}
 
 
 void playHighPriorityTTS(String text, Object volume = null, String voice = null) {
@@ -4657,24 +4699,12 @@ List<Map> buildGrcEvents(Map<String, Object> snapshot) {
 void handleGrcNotification(String xmlBody) {
   Map<String, Object> snapshot = parseGrcFullSnapshot(xmlBody)
   if(snapshot == null) { return }
-  List<Map> events = buildGrcEvents(snapshot)
-  if(!events.isEmpty()) { scheduleGrcParentHandoff(events) }
-}
-
-/** Parent callbacks run after parse() releases the player gate, like the AVT relay. */
-void scheduleGrcParentHandoff(List<Map> events) {
-  if(parent == null || !events) { return }
-  List<Map> copy = events.collect { Map event -> new LinkedHashMap(event) }
-  runInMillis(1, 'relayGrcToParent', [overwrite: false, data: [events: copy]])
-}
-
-void relayGrcToParent(Map data) {
-  if(data == null || parent == null || !(data.events instanceof List)) { return }
   Map args = [:]
-  ((List<Map>)data.events).each { Map event ->
+  buildGrcEvents(snapshot).each { Map event ->
     if(event?.name && event.containsKey('value')) { args[event.name.toString()] = event.value }
   }
-  if(!args.isEmpty()) { sendParentAppRequestDirect('groupRendering', args) }
+  // Queued, not sent: flushParentAppRequests is the only scheduled handoff after parse() releases its gate.
+  if(!args.isEmpty()) { sendParentAppRequest('groupRendering', args) }
 }
 
 void handleAvtNotification(String xmlBody) {
@@ -4808,7 +4838,7 @@ void relayPlayerReadingToParent() {
   Map args = [:]
   if(volume != null) { args.volume = volume }
   if(mute != null) { args.mute = mute.toString() }
-  sendParentAppRequestDirect('playerReading', args)
+  sendParentAppRequest('playerReading', args)
 }
 
 /** Convert only values represented in this RC notification to the player's event names. */

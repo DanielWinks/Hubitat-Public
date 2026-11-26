@@ -15,29 +15,17 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Long id = 101L
   Map<String, Object> settings = [:]
   List<Map> commands = []
-  List<Map> pendingParentUpdatePoll = []
-  List<Map> pendingParentRequestPoll = []
 
   List<String> reads = []
+  List<String> zgtElectionResults = []
+
+  void zgtElectionResult(String result) { zgtElectionResults << result }
 
   Object getSetting(String name) { reads << "getSetting:${name}".toString(); return settings[name] }
   Object currentValue(String n, boolean skipCache = false) { reads << "currentValue:${n}".toString(); return currentValues[n] }
   void setGroupVolume(BigDecimal level, BigDecimal duration = null) { commands << [name: 'setGroupVolume', level: level] }
   void setLevel(BigDecimal level) { commands << [name: 'setLevel', level: level] }
 
-  List<Map> drainPendingParentUpdatesForPoll() {
-    List<Map> batch = []
-    batch.addAll(pendingParentUpdatePoll)
-    pendingParentUpdatePoll.clear()
-    return batch
-  }
-
-  List<Map> drainPendingParentRequestsForPoll() {
-    List<Map> batch = []
-    batch.addAll(pendingParentRequestPoll)
-    pendingParentRequestPoll.clear()
-    return batch
-  }
   Map favoritesMap = [:]
   Map playlistsMap = [:]
   List<String> acknowledgedParentRequests = []
@@ -231,6 +219,23 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     result.stateRemoved.contains('lastSentChildState')
     !appScript.state.containsKey('lastSentChildState')
+  }
+
+  def "ZGT election request is answered from a scheduled delivery, never inline"() {
+    when:
+    appScript.playerAppRequestHandler([channel: 'playerAppRequest', action: 'requestZgtElection',
+      sourceDni: coordinator.deviceNetworkId, requestId: 'zgt-1', args: [:]])
+
+    then:
+    coordinator.zgtElectionResults.isEmpty()
+    appScript.scheduled.any { List job -> job[1] == 'deliverZgtElection' }
+
+    when:
+    Map data = appScript.scheduled.find { List job -> job[1] == 'deliverZgtElection' }[2].data
+    appScript.deliverZgtElection(data)
+
+    then:
+    coordinator.zgtElectionResults == ['proceed']
   }
 
   def "first player reporting ready wins ZGT subscription and winner can retry"() {
