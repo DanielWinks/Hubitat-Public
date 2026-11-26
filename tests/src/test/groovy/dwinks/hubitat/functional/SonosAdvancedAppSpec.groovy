@@ -25,6 +25,10 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   Object currentValue(String n, boolean skipCache = false) { reads << "currentValue:${n}".toString(); return currentValues[n] }
   void setGroupVolume(BigDecimal level, BigDecimal duration = null) { commands << [name: 'setGroupVolume', level: level] }
   void setLevel(BigDecimal level) { commands << [name: 'setLevel', level: level] }
+  List<Map> controlSyncs = []
+  Integer preferenceRefreshes = 0
+  void sendPlayerPreferencesToParent() { preferenceRefreshes++ }
+  void syncRcControlChildren(Map values) { controlSyncs << new LinkedHashMap(values) }
 
   Map favoritesMap = [:]
   Map playlistsMap = [:]
@@ -182,6 +186,7 @@ class SonosAdvancedAppSpec extends Specification {
   SonosAppPlayerDouble follower
   SonosAppPlayerDouble extra
   Long topologyObservationSequence = 0L
+  Long rcObservationSequence = 0L
 
   def setupSpec() {
     assert appFile.exists(), "Could not find ${appFile.absolutePath}"
@@ -189,7 +194,7 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   static final List<String> NEW_CALLBACKS = ['applyPlayerAttributeUpdateCallback', 'groupAnnouncementProgressCallback',
-    'processUpnpNotificationCallback', 'groupTopologyOperationEventHandler', 'applyAvtCallback',
+    'processUpnpNotificationCallback', 'groupTopologyOperationEventHandler', 'applyAvtCallback', 'applyRcCallback',
     'recalculateVolumeStateCallback', 'publishGroupRenderingCallback', 'deliverCatalogSnapshot',
     'processPlayerCommandRequest', 'processGroupCommandRequest', 'refreshPlayerPolicyCallback',
     'completePlayerAudioClipCallback']
@@ -215,6 +220,7 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.pageHrefs.clear()
     appScript.state.clear()
     topologyObservationSequence = 0L
+    rcObservationSequence = 0L
 
     group = new SonosAppGroupDouble(deviceNetworkId: 'GROUP-DNI', displayName: 'Test Group', label: 'Test Group')
     group.dataValues.groupCoordinatorId = 'RINCON_COORD'
@@ -448,21 +454,204 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.atomicState.zgtPayload.groupNamesById == ['RINCON_COORD:1': 'Newer']
   }
 
-  def "player readings and group rendering are ordered per value and never touch a child inline"() {
-    given:
+  def "RC events are ordered per name, published by DNI from a callback, and never touch a child inline"() {
     when:
-    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading', sourceDni: coordinator.deviceNetworkId,
-      requestId: 'r1', epoch: 4L, sequence: 2L, args: [volume: 30]])
-    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading', sourceDni: coordinator.deviceNetworkId,
-      requestId: 'r2', epoch: 4L, sequence: 1L, args: [volume: 10]])
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'volume', value: 30], [name: 'level', value: 30]], 4L, 2L)
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'volume', value: 10], [name: 'level', value: 10]], 4L, 1L)
     appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'groupRendering', sourceDni: coordinator.deviceNetworkId,
       requestId: 'g1', epoch: 4L, sequence: 3L, args: [groupVolume: 44]])
 
-    then:
-    appScript.getPlayerReadings()['RINCON_COORD'].volume == 30
+    then: 'the older report was dropped at the entry point and nothing was written inline'
+    appScript.scheduled.count { List job -> job[1] == 'applyRcCallback' } == 1
     appScript.scheduled.count { List job -> job[1] == 'publishGroupRenderingCallback' } == 1
     coordinator.events.isEmpty()
     appScript.childEvents.isEmpty()
+
+    when:
+    runScheduledCallbacks(['applyRcCallback'])
+
+    then:
+    childEventsFor(coordinator.deviceNetworkId).findAll { Map event -> event.name == 'volume' }*.value == [30]
+    childEventsFor(coordinator.deviceNetworkId).findAll { Map event -> event.name == 'level' }*.value == [30]
+    appScript.getPlayerReadings()['RINCON_COORD'].volume == 30
+  }
+
+  def "an RC callback that was accepted first but runs late cannot overwrite a newer applied value"() {
+    given:
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'volume', value: 10]], 4L, 1L)
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'volume', value: 30]], 4L, 2L)
+    List<Map> jobs = appScript.scheduled.findAll { List job -> job[1] == 'applyRcCallback' }.collect { List job -> (Map)job[2].data }
+
+    when: 'the callbacks run in reverse order'
+    appScript.applyRcCallback(jobs[1])
+    appScript.applyRcCallback(jobs[0])
+
+    then:
+    childEventsFor(coordinator.deviceNetworkId).findAll { Map event -> event.name == 'volume' }*.value == [30]
+    appScript.getPlayerReadings()['RINCON_COORD'].volume == 30
+  }
+
+  def "a mute-only RC report does not block a later volume report and neither touches the other reading"() {
+    when:
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'mute', value: 'muted']], 4L, 5L)
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'volume', value: 20]], 4L, 4L)
+    runScheduledCallbacks(['applyRcCallback'])
+
+    then:
+    appScript.getPlayerReadings()['RINCON_COORD'] == [mute: 'muted', volume: 20]
+  }
+
+  private void rcReport(List<Map> events) {
+    appScript.putRcEvents(coordinator.deviceNetworkId, events, 1L, ++rcObservationSequence)
+    runScheduledCallbacks(['applyRcCallback'])
+  }
+
+  private void enableUnmuteFix(Boolean enabled = true) {
+    appScript.playerPreferencesUpdated([deviceDni: coordinator.deviceNetworkId,
+      preferences: [enableAirPlayUnmuteVolumeFix: enabled]])
+  }
+
+  private List<Map> setLevelCommands() {
+    coordinator.commands.findAll { Map command -> command.name == 'setLevel' }
+  }
+
+  def "unmuting restores the last non-zero volume when AirPlay comes back from mute at zero"() {
+    given:
+    enableUnmuteFix()
+
+    when:
+    rcReport([[name: 'volume', value: 35], [name: 'mute', value: 'unmuted']])
+    rcReport([[name: 'volume', value: 0], [name: 'mute', value: 'muted']])
+    rcReport([[name: 'mute', value: 'unmuted']])
+
+    then:
+    setLevelCommands() == [[name: 'setLevel', level: 35G]]
+  }
+
+  def "an ordinary unmute at a non-zero volume leaves the player alone"() {
+    given:
+    enableUnmuteFix()
+
+    when:
+    rcReport([[name: 'volume', value: 35], [name: 'mute', value: 'muted']])
+    rcReport([[name: 'mute', value: 'unmuted']])
+
+    then:
+    setLevelCommands().isEmpty()
+  }
+
+  def "the level restored is the last non-zero volume seen, including one set while muted"() {
+    given:
+    enableUnmuteFix()
+
+    when:
+    rcReport([[name: 'volume', value: 35], [name: 'mute', value: 'muted']])
+    rcReport([[name: 'volume', value: 50]])
+    rcReport([[name: 'volume', value: 0]])
+    rcReport([[name: 'mute', value: 'unmuted']])
+
+    then:
+    setLevelCommands()*.level == [50G]
+  }
+
+  def "a restore is dropped when a newer volume or mute report was applied first"() {
+    given:
+    enableUnmuteFix()
+    rcReport([[name: 'volume', value: 35], [name: 'mute', value: 'unmuted']])
+    rcReport([[name: 'volume', value: 0], [name: 'mute', value: 'muted']])
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'mute', value: 'unmuted']], 1L, ++rcObservationSequence)
+    Map unmute = (Map)appScript.scheduled.find { List job -> job[1] == 'applyRcCallback' }[2].data
+    appScript.scheduled.clear()
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'mute', value: 'muted']], 1L, ++rcObservationSequence)
+    Map newer = (Map)appScript.scheduled.find { List job -> job[1] == 'applyRcCallback' }[2].data
+
+    expect: 'the newer mute is applied first, then the older unmute arrives'
+    appScript.isLatestAppliedRc(coordinator.deviceNetworkId, 1L, unmute.sequence)
+    appScript.applyRcCallback(newer)
+    !appScript.isLatestAppliedRc(coordinator.deviceNetworkId, 1L, unmute.sequence)
+  }
+
+  def "the unmute restore needs a muted to unmuted transition"() {
+    given:
+    enableUnmuteFix()
+
+    when: 'the first report is unmuted, a repeat unmute follows, and a mute arrives'
+    rcReport([[name: 'volume', value: 0], [name: 'mute', value: 'unmuted']])
+    rcReport([[name: 'mute', value: 'unmuted']])
+    rcReport([[name: 'mute', value: 'muted']])
+
+    then:
+    setLevelCommands().isEmpty()
+  }
+
+  def "the unmute restore is skipped when the preference is off or no level is known"() {
+    when: 'the preference is off'
+    enableUnmuteFix(false)
+    rcReport([[name: 'volume', value: 35], [name: 'mute', value: 'muted']])
+    rcReport([[name: 'volume', value: 0]])
+    rcReport([[name: 'mute', value: 'unmuted']])
+
+    then:
+    setLevelCommands().isEmpty()
+
+    when: 'the preference is on but the player was muted before any non-zero volume was seen'
+    appScript.playerPreferencesUpdated([deviceDni: follower.deviceNetworkId,
+      preferences: [enableAirPlayUnmuteVolumeFix: true]])
+    appScript.putRcEvents(follower.deviceNetworkId, [[name: 'volume', value: 0], [name: 'mute', value: 'muted']], 1L, 1L)
+    appScript.putRcEvents(follower.deviceNetworkId, [[name: 'mute', value: 'unmuted']], 1L, 2L)
+    runScheduledCallbacks(['applyRcCallback'])
+
+    then:
+    follower.commands.findAll { Map command -> command.name == 'setLevel' }.isEmpty()
+    appScript.logs.any { it.toString().contains('no saved volume is known') }
+  }
+
+  def "a preference snapshot saved before the setting existed is refreshed instead of assumed enabled"() {
+    given:
+    appScript.atomicState['playerPreferencesByDni'] = [(coordinator.deviceNetworkId): [disableAlbumArtEvents: true]]
+
+    when:
+    rcReport([[name: 'volume', value: 35], [name: 'mute', value: 'muted']])
+    rcReport([[name: 'volume', value: 0]])
+    rcReport([[name: 'mute', value: 'unmuted']])
+
+    then:
+    setLevelCommands().isEmpty()
+    coordinator.preferenceRefreshes == 1
+  }
+
+  def "a first partial RC report after an app reload keeps the player's known mute state"() {
+    given:
+    coordinator.currentValues.volume = 20
+    coordinator.currentValues.mute = 'muted'
+    appScript.appMemoryMap('playerReadingsByRincon').clear()
+
+    when:
+    rcReport([[name: 'volume', value: 40]])
+
+    then:
+    appScript.getPlayerReadings()['RINCON_COORD'] == [volume: 40, mute: 'muted']
+  }
+
+  def "RC mute, night mode and speech enhancement are mirrored to the control switches in order"() {
+    when:
+    rcReport([[name: 'mute', value: 'muted'], [name: 'nightMode', value: 'on'], [name: 'speechEnhancement', value: 'off'],
+      [name: 'bass', value: 2]])
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'nightMode', value: 'off']], 1L, 1L)
+    runScheduledCallbacks(['applyRcCallback'])
+
+    then: 'the stale night-mode report was dropped and bass is not a control switch'
+    coordinator.controlSyncs == [[mute: 'muted', nightMode: 'on', speechEnhancement: 'off']]
+  }
+
+  def "RC bass, treble, loudness and mode events are published without becoming readings"() {
+    when:
+    appScript.putRcEvents(coordinator.deviceNetworkId, [[name: 'bass', value: 2], [name: 'loudness', value: 'on']], 4L, 1L)
+    runScheduledCallbacks(['applyRcCallback'])
+
+    then:
+    childEventsFor(coordinator.deviceNetworkId)*.name.toSet() == ['bass', 'loudness'] as Set
+    appScript.getPlayerReadings()['RINCON_COORD'] == null
   }
 
   def "readyForZgt keeps the first reporter under concurrent election requests"() {
@@ -2731,11 +2920,11 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   private void report(String rincon, Integer volume, String mute = null) {
-    Map args = [:]
-    if(volume != null) { args.volume = volume }
-    if(mute != null) { args.mute = mute }
-    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading',
-      sourceDni: "DNI-${rincon}".toString(), requestId: UUID.randomUUID().toString(), args: args])
+    List<Map> events = []
+    if(volume != null) { events << [name: 'volume', value: volume] << [name: 'level', value: volume] }
+    if(mute != null) { events << [name: 'mute', value: mute] }
+    appScript.putRcEvents("DNI-${rincon}".toString(), events, 1L, ++rcObservationSequence)
+    runScheduledCallbacks(['applyRcCallback'])
   }
 
   /** A coordinator's GroupRenderingControl report relayed by its player driver. */
@@ -2904,8 +3093,9 @@ class SonosAdvancedAppSpec extends Specification {
     when: 'one player reports and the rest are missing or invalid'
     report('RINCON_COORD', 30, 'unmuted')
     report('RINCON_FOLLOW', 150)
-    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading',
-      sourceDni: 'DNI-RINCON_EXTRA', args: [volume: 'loud', mute: 'maybe']])
+    appScript.putRcEvents('DNI-RINCON_EXTRA', [[name: 'volume', value: 'loud'], [name: 'mute', value: 'maybe']], 1L,
+      ++rcObservationSequence)
+    runScheduledCallbacks(['applyRcCallback'])
     attributes = settle()
 
     then:

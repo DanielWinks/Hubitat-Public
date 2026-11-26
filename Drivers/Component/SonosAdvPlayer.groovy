@@ -895,12 +895,10 @@ metadata {
 // Fields
 // =============================================================================
 @Field static ConcurrentHashMap<String, ConcurrentHashMap<String, Object>> runtimeStateByDni = new ConcurrentHashMap<String, ConcurrentHashMap<String, Object>>()
-// Fixed stripes bound lock storage while preserving per-DNI mutual exclusion.
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
-// App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
-// SEQ/SID gate counters remain below: numbers deciding staleness, never payloads.
-// Transient member host cache for group SOAP targeting (playerId -> host); newest-wins, pruned like SEQ counters.
+// The app owns ZGT/AVT/GRC/RC storage and publication; the driver keeps no snapshot copies.
+// Transient member host cache for group SOAP targeting (playerId -> host); newest-wins.
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
 // has no device attribute to store app-side. Not a snapshot: only the host string is kept, never membership.
 @Field static ConcurrentHashMap<String, String> zgtMemberHostByPlayerId = new ConcurrentHashMap<String, String>()
@@ -1300,7 +1298,8 @@ void sendPlayerPreferencesToParent() {
     includeTrackDataMetaData: getIncludeTrackDataMetaData(),
     chimeBeforeHighPriorityTTS: getChimeBeforeHighPriorityTTS(),
     chimeBeforeStandardPriorityTTS: getChimeBeforeStandardPriorityTTS(),
-    ttsBoostAmount: getTTSBoostAmount()
+    ttsBoostAmount: getTTSBoostAmount(),
+    enableAirPlayUnmuteVolumeFix: getEnableAirPlayUnmuteVolumeFix()
   ]
   try {
     parent.playerPreferencesUpdated([deviceDni: dni, preferences: preferences])
@@ -1430,7 +1429,8 @@ void clearPendingCommandsForInitialization() {
   }
   ['drainParentCoordinatorCommandQueue', 'retryParentCoordinatorCommand', 'flushParentAppRequests',
    'flushPendingGroupTopologyOperationEvents', 'relayZgtToParent', 'relayParsedUpnpToParent', 'relayAvtToParent',
-   'relayCoordinatorEventsRequest', 'relayCatalogSnapshotsToParent', 'publishPlayerPreferenceSnapshot'].each { String retired ->
+   'relayCoordinatorEventsRequest', 'relayCatalogSnapshotsToParent', 'publishPlayerPreferenceSnapshot',
+   'relayPlayerReadingToParent'].each { String retired ->
     unschedule(retired)
   }
   unschedule('drainTransportCommandQueue')
@@ -3130,6 +3130,18 @@ void componentRefresh(DeviceWrapper child) {
   }
 }
 
+/**
+ * Mirror the RC-driven mute, night-mode and speech-enhancement values onto their component switches.
+ * The app calls this right after it publishes those attributes to this player, so the switches follow the
+ * same ordered values. It only writes child events and never calls back into the parent.
+ */
+void syncRcControlChildren(Map values) {
+  if(values == null) { return }
+  if(values.mute != null) { sendChildEvent(getMuteControlChild(), 'switch', values.mute == 'muted' ? 'on' : 'off') }
+  if(values.nightMode != null) { sendChildEvent(getNightModeChild(), 'switch', values.nightMode) }
+  if(values.speechEnhancement != null) { sendChildEvent(getSpeechEnhancementChild(), 'switch', values.speechEnhancement) }
+}
+
 @CompileStatic
 void componentOn(DeviceWrapper child) {
   String command = child.getDataValue('command').toString()
@@ -3708,6 +3720,9 @@ void parse(String raw) {
     return
   }
   try {
+    // Stamp at notification entry, before header parsing, the timestamp update or any XML parsing, so a
+    // stalled older notification can never receive a higher sequence than a newer one.
+    Map notifyStamp = stampParentPayload([:])
     logDebug("UPnP NOTIFY parse entered; dni=${device?.getDeviceNetworkId() ?: 'unknown'}, payloadLength=${raw.length()}")
     LinkedHashMap message = getMapForRaw(raw)
     LinkedHashMap messageHeaders = (LinkedHashMap)message?.headers
@@ -3742,14 +3757,14 @@ void parse(String raw) {
             logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             Map<String, Object> payload = zgtParse(xmlBody)
             if(payload == null) { return }
-            sendZgtToParent(payload)
+            sendZgtToParent(payload, notifyStamp)
           } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
           return
         case 'AVTransport':
           try {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AVT event payload'); return }
             logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            handleAvtNotification(xmlBody)
+            handleAvtNotification(xmlBody, notifyStamp)
           } catch (Exception e) { logWarn("Ran into an issue parsing avt: ${e}") }
           return
         case 'RenderingControl':
@@ -3759,7 +3774,7 @@ void parse(String raw) {
             String rcDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML RC event payload'); return }
             logUpnpXmlAtTrace(serviceType, rcDni, xmlBody)
-            deferOrProcessRenderingControlPayload(rcDni, xmlBody, seq, sid)
+            processRenderingControlPayload(xmlBody, notifyStamp)
             logDebug('RenderingControl event processing completed')
           } catch (Exception e) { logException('RenderingControl event processing failed', e) }
           return
@@ -3863,11 +3878,16 @@ Map<String, Object> zgtPayloadFromGroups(List<Map> groups) {
 }
 
 /** Send the parsed ZGT snapshot straight to the parent app. */
-void sendZgtToParent(Map<String, Object> payload) {
+void sendZgtToParent(Map<String, Object> payload, Map observedStamp = null) {
   if(payload == null || parent == null) { return }
   Map<String, Object> stamped = new LinkedHashMap<String, Object>(payload)
   stamped.put('sourceDni', device.getDeviceNetworkId()?.toString())
-  stampParentPayload(stamped)
+  if(observedStamp != null) {
+    stamped.put('epoch', observedStamp.epoch)
+    stamped.put('sequence', observedStamp.sequence)
+  } else {
+    stampParentPayload(stamped)
+  }
   try {
     parent.setZgtPayload(stamped)
   } catch(Exception e) {
@@ -4326,11 +4346,11 @@ void handleGrcNotification(String xmlBody) {
   if(!args.isEmpty()) { sendParentAppRequest('groupRendering', args) }
 }
 
-void handleAvtNotification(String xmlBody) {
-  // Stamp the sequence where the notification is first observed. Parsing and favorite matching take
+void handleAvtNotification(String xmlBody, Map observedStamp = null) {
+  // The sequence is stamped where the notification is first observed. Parsing and favorite matching take
   // different amounts of time per notification, so stamping at publication could give an older
   // notification the higher number.
-  Map stamp = stampParentPayload([:])
+  Map stamp = observedStamp ?: stampParentPayload([:])
   Map<String, Object> avt = parseAvt(xmlBody)
   if(avt == null) { return }
   Map<String, String> alarmRunning = avt.alarmRunning instanceof Map ? (Map<String, String>)avt.alarmRunning : [:]
@@ -4426,42 +4446,25 @@ String normalizeFavoriteResourceId(String resourceId) {
   return normalized
 }
 
-void deferOrProcessRenderingControlPayload(String dni, String xmlBody) {
-  deferOrProcessRenderingControlPayload(dni, xmlBody, null, null)
-}
-
-void deferOrProcessRenderingControlPayload(String dni, String xmlBody, Integer incomingSeq, String incomingSid) {
+/**
+ * Parse a RenderingControl notification and hand the resulting events to the parent app, which orders
+ * them by the stamp, publishes them to this player and folds volume and mute into group state.
+ * The driver writes none of them itself.
+ */
+void processRenderingControlPayload(String xmlBody, Map stamp) {
   Map snapshot = parseRcFullSnapshot(xmlBody)
   if(snapshot == null) { return }
-  List<Map> events = buildRcEvents(snapshot)
-  if(events) {
-    events.each { Map event ->
-      if(event?.name != null && event?.value != null) {
-        device.sendEvent(name: event.name.toString(), value: event.value)
-      }
-    }
-    if(events.any { Map event -> event?.name?.toString() in ['volume', 'mute'] }) { queuePlayerReadingForParent() }
+  sendRcToParent(buildRcEvents(snapshot), stamp)
+}
+
+/** Send parsed RenderingControl events straight to the parent app. */
+void sendRcToParent(List<Map> events, Map stamp) {
+  if(parent == null || !events) { return }
+  try {
+    parent.putRcEvents(device.getDeviceNetworkId(), new ArrayList<Map>(events), stamp.epoch, stamp.sequence)
+  } catch(Exception e) {
+    logWarn("Could not send RC events to parent: ${e.message}")
   }
-}
-
-/**
- * Tell the parent app this player's latest volume and mute so it can calculate group state.
- * The relay is deferred and coalesced so it never runs inside the event handler and bursts of
- * RenderingControl changes send one update carrying the latest values.
- */
-void queuePlayerReadingForParent() {
-  if(parent == null) { return }
-  runInMillis(1, 'relayPlayerReadingToParent', [overwrite: true])
-}
-
-void relayPlayerReadingToParent() {
-  Object volume = device.currentValue('volume', true)
-  Object mute = device.currentValue('mute', true)
-  if(volume == null && mute == null) { return }
-  Map args = [:]
-  if(volume != null) { args.volume = volume }
-  if(mute != null) { args.mute = mute.toString() }
-  sendParentAppRequest('playerReading', args)
 }
 
 /** Convert only values represented in this RC notification to the player's event names. */
@@ -4479,8 +4482,6 @@ List<Map> buildRcEvents(Map snap) {
   if(snap?.dialogLevel != null) { events << [name: 'speechEnhancement', value: snap.dialogLevel] }
   return events
 }
-
-// GRC payloads use the same complete-batch relay as RC, ZGT, and AVT.
 
 @CompileStatic
 Map parseRcFullSnapshot(String xmlString) {
@@ -4840,25 +4841,8 @@ String getGroupMuteState() {
   return raw != null ? raw.toString() : 'unmuted'
 }
 
-@CompileStatic
-void setNightModeState(String value) {
-  if(!(value != this.device.currentValue('nightMode') as String)) { return }
-  if(value != null) { device.sendEvent(name: 'nightMode', value: value) }
-  sendChildEvent(getNightModeChild(), 'switch', value)
-}
-
-@CompileStatic
-void setDialogLevelState(String value) {
-  if(!(value != this.device.currentValue('speechEnhancement') as String)) { return }
-  if(value != null) { device.sendEvent(name: 'speechEnhancement', value: value) }
-  sendChildEvent(getSpeechEnhancementChild(), 'switch', value)
-}
 
 
-@CompileStatic
-void processRenderingControlMessages(String xmlString) {
-  deferOrProcessRenderingControlPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlString)
-}
 // =============================================================================
 // Parse Helper Methods
 // =============================================================================
@@ -6257,70 +6241,13 @@ void setStatusTransportStatus(String transportState, String source = 'transport 
 Integer getPlayerVolume() {
   return (this.device.currentValue('volume') as Integer) ?: 0
 }
-void setPlayerVolume(Integer volume) {
-  Integer oldVolume = getPlayerVolume()
-  if(!(volume != oldVolume) &&
-      !(volume != this.device.currentValue('level') as Integer)) { return }
-  if(volume != null) { device.sendEvent(name: 'level', value: volume) }
-  if(volume != null) { device.sendEvent(name: 'volume', value: volume) }
-  queuePlayerReadingForParent()
-  if(volume > 0) { runtimeState.restoreLevelAfterUnmute = volume }
-}
-void setBalanceState(Integer balance) {
-  Integer oldBalance = this.device.currentValue('balance') as Integer
-  if(!(balance != oldBalance)) { return }
-  if(balance != null) { device.sendEvent(name: 'balance', value: balance) }
-}
 Boolean getIsMuted() {
   return getMuteState() == 'muted'
 }
 String getMuteState() {
   return this.device.currentValue('mute')
 }
-void setMuteState(String muted) {
-  String observedMutedState = getMuteState()
-  String previousMutedState = observedMutedState != null ? observedMutedState : 'unmuted'
-  Boolean restoreEnabled = getEnableAirPlayUnmuteVolumeFix()
-  Object restoreLevel = runtimeState.restoreLevelAfterUnmute
-  logDebug("setMuteState entered; previous=${previousMutedState}, target=${muted}, unmuteRestoreEnabled=${restoreEnabled}, restoreLevel=${restoreLevel ?: 'unset'}")
-  sendChildEvent(getMuteControlChild(), 'switch', muted == 'muted' ? 'on' : 'off')
-  if(!(muted != observedMutedState)) {
-    logDebug("setMuteState deduplicated parent event; current=${previousMutedState}, target=${muted}")
-    return
-  }
-  if(muted == 'unmuted' && previousMutedState == 'muted' && restoreEnabled) {
-    logDebug("Unmute volume restoration beginning; restoreLevel=${restoreLevel ?: 'unset'}")
-    Integer restoreVolume = null
-    if(restoreLevel instanceof Number) {
-      try {
-        restoreVolume = new BigDecimal(restoreLevel.toString()).intValueExact()
-      } catch(Exception ignored) { }
-    }
-    if(restoreVolume != null && restoreVolume >= 0 && restoreVolume <= 100) {
-      logDebug("Restoring volume after unmute event to level: ${restoreVolume}")
-      setLevel(restoreVolume as BigDecimal)
-      logDebug('Unmute volume restoration dispatched')
-    } else {
-      logWarn('Skipping AirPlay unmute volume restore because the saved restore level is unavailable or invalid')
-    }
-  }
-  if(muted != null) { device.sendEvent(name: 'mute', value: muted) }
-  queuePlayerReadingForParent()
-  logDebug("setMuteState queued parent mute event; value=${muted}")
-}
 
-void setBassState(Integer bass) {
-  if(!(bass != this.device.currentValue('bass') as Integer)) { return }
-  if(bass != null) { device.sendEvent(name: 'bass', value: bass) }
-}
-void setTrebleState(Integer treble) {
-  if(!(treble != this.device.currentValue('treble') as Integer)) { return }
-  if(treble != null) { device.sendEvent(name: 'treble', value: treble) }
-}
-void setLoudnessState(String loudness) {
-  if(!(loudness != this.device.currentValue('loudness'))) { return }
-  if(loudness != null) { device.sendEvent(name: 'loudness', value: loudness) }
-}
 
 @CompileStatic
 void setPlayMode(String playMode){

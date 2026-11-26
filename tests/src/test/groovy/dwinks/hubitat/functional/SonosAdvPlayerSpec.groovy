@@ -810,39 +810,6 @@ class SonosAdvPlayerSpec extends Specification {
     0.0G  | 'LF'         | 100
   }
 
-  def "balance state updates deduplicate events without sending a speaker command"() {
-    given:
-    List<Map> requests = []
-    driver.metaClass.postSonosSoapAsync = { String callback, Map params -> requests.add(params) }
-
-    when:
-    driver.setBalanceState(10)
-    driver.device.currentValues.balance = 10
-    driver.setBalanceState(10)
-
-    then:
-    requests.empty
-    driver.device.events.findAll { Map event -> event.name == 'balance' }*.value == [10]
-  }
-
-  def "unmute skips AirPlay volume restore when saved level is missing or invalid"() {
-    given:
-    driver.settings.enableAirPlayUnmuteVolumeFix = true
-    driver.device.currentValues.mute = 'muted'
-    if(restoreLevel != null) { driver.runtimeState.restoreLevelAfterUnmute = restoreLevel }
-
-    when:
-    driver.setMuteState('unmuted')
-
-    then:
-    driver.device.events.findAll { Map event -> event.name == 'mute' }*.value == ['unmuted']
-    websocketMessages.empty
-    driver.logs.any { it.toString().contains('saved restore level is unavailable or invalid') }
-
-    where:
-    restoreLevel << [null, 'invalid', 101, -1, 10.5G]
-  }
-
   def "mute child commands send player mute requests"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
@@ -881,35 +848,6 @@ class SonosAdvPlayerSpec extends Specification {
     'muted'   | 'on'
     'unmuted' | 'off'
     null      | 'off'
-  }
-
-  def "player mute reports synchronize the child even when parent state is unchanged"() {
-    given:
-    dwinks.hubitat.stubs.MockDevice child = new dwinks.hubitat.stubs.MockDevice(
-      deviceNetworkId: driver.getMuteControlChildDNI())
-    driver.children.clear()
-    driver.children.add(child)
-    driver.settings.enableAirPlayUnmuteVolumeFix = false
-    driver.device.currentValues.mute = previousState
-    child.currentValues.switch = 'stale'
-
-    when:
-    driver.setMuteState(muteState)
-
-    then:
-    child.currentValue('switch') == switchState
-    driver.device.events.findAll { Map event -> event.name == 'mute' }*.value ==
-      (previousState == muteState ? [] : [muteState])
-
-    cleanup:
-    driver.children.clear()
-
-    where:
-    previousState | muteState | switchState
-    'unmuted' | 'muted'   | 'on'
-    'muted'   | 'unmuted' | 'off'
-    'muted'   | 'muted'   | 'on'
-    'unmuted' | 'unmuted' | 'off'
   }
 
   def "missing component child is ignored without scheduling a retry"() {
@@ -1189,6 +1127,7 @@ class SonosAdvPlayerSpec extends Specification {
       playerGroupTopologyOperationUpdate: { Map payload -> parentPlayerUpdates << [kind:'groupTopologyOperation', payload:new LinkedHashMap(payload)] },
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putAvtEvents: { String rincon, List<Map> events, Object epoch, Object sequence -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
+      putRcEvents: { String dni, List<Map> events, Object epoch, Object sequence -> parentPlayerUpdates << [kind:'rcEvents', dni:dni, events:new ArrayList(events), epoch:epoch, sequence:sequence] },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       setZgtPayload: { Map payload -> parentPlayerUpdates << [kind:'zgtPayload', payload:new LinkedHashMap(payload)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
@@ -1213,6 +1152,7 @@ class SonosAdvPlayerSpec extends Specification {
       },
       playerGroupTopologyOperationUpdate: { Map payload -> parentPlayerUpdates << [kind: 'groupTopologyOperation', payload: new LinkedHashMap(payload)] },
       putAvtEvents: { String rincon, List<Map> events, Object epoch, Object sequence -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
+      putRcEvents: { String dni, List<Map> events, Object epoch, Object sequence -> parentPlayerUpdates << [kind:'rcEvents', dni:dni, events:new ArrayList(events), epoch:epoch, sequence:sequence] },
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       setZgtPayload: { Map payload -> parentPlayerUpdates << [kind:'zgtPayload', payload:new LinkedHashMap(payload)] },
@@ -2432,7 +2372,8 @@ class SonosAdvPlayerSpec extends Specification {
       includeTrackDataMetaData: true,
       chimeBeforeHighPriorityTTS: true,
       chimeBeforeStandardPriorityTTS: false,
-      ttsBoostAmount: 15
+      ttsBoostAmount: 15,
+      enableAirPlayUnmuteVolumeFix: true
     ]
   }
 
@@ -3452,78 +3393,107 @@ class SonosAdvPlayerSpec extends Specification {
     driver.buildRcEvents([treble: 1]) == [[name: 'treble', value: 1]]
   }
 
-  def "RC XML events apply directly to the player device without a parent relay"() {
+  def "RC XML events go to the parent as sendEvent-ready maps and the driver publishes nothing itself"() {
     when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+    driver.processRenderingControlPayload(
       '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
       '<Event><InstanceID><Volume channel="Master" val="42"/><Mute channel="Master" val="0"/><Bass val="2"/>' +
-      '</InstanceID></Event>') + '</LastChange></property></propertyset>')
+      '</InstanceID></Event>') + '</LastChange></property></propertyset>', [epoch: 7L, sequence: 3L])
 
     then:
-    driver.device.currentValues.volume == 42
-    driver.device.currentValues.level == 42
-    driver.device.currentValues.mute == 'unmuted'
-    driver.device.currentValues.bass == 2
-    parentPlayerUpdates.isEmpty()
-  }
-
-  def "RC volume and mute events queue one deferred reading for the parent app"() {
-    given:
-    captureParentAudioClipRequests()
-
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
-      '<Event><InstanceID><Volume channel="Master" val="42"/><Mute channel="Master" val="1"/>' +
-      '</InstanceID></Event>') + '</LastChange></property></propertyset>')
-
-    then: 'nothing is sent from inside the event handler'
-    parentPlayerRequests.isEmpty()
-    driver.scheduled.count { List row -> row[1] == 'relayPlayerReadingToParent' } == 1
-
-    when:
-    driver.relayPlayerReadingToParent()
-
-    then:
-    parentPlayerRequests.size() == 1
-    parentPlayerRequests[0].action == 'playerReading'
-    parentPlayerRequests[0].args == [volume: 42, mute: 'muted']
-  }
-
-  def "RC events without volume or mute do not send a reading to the parent app"() {
-    when:
-    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
-      '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
-      '<Event><InstanceID><Bass val="2"/></InstanceID></Event>') + '</LastChange></property></propertyset>')
-
-    then:
+    driver.device.events.isEmpty()
+    driver.device.currentValues.volume == null
     !driver.scheduled.any { List row -> row[1] == 'relayPlayerReadingToParent' }
-  }
-
-  def "player volume and mute state changes also queue a parent reading"() {
-    given:
-    captureParentAudioClipRequests()
-
-    when:
-    driver.setPlayerVolume(33)
-    driver.setMuteState('muted')
-    driver.relayPlayerReadingToParent()
-
-    then:
-    driver.scheduled.any { List row -> row[1] == 'relayPlayerReadingToParent' }
-    parentPlayerRequests.last().action == 'playerReading'
-    parentPlayerRequests.last().args == [volume: 33, mute: 'muted']
-  }
-
-  def "reading relay with no known volume or mute sends nothing"() {
-    given:
-    captureParentAudioClipRequests()
-
-    when:
-    driver.relayPlayerReadingToParent()
-
-    then:
     parentPlayerRequests.isEmpty()
+    List<Map> sent = parentPlayerUpdates.findAll { Map item -> item.kind == 'rcEvents' }
+    sent.size() == 1
+    sent[0].dni == driver.device.deviceNetworkId
+    sent[0].epoch == 7L
+    sent[0].sequence == 3L
+    sent[0].events == [[name: 'volume', value: 42], [name: 'level', value: 42], [name: 'mute', value: 'unmuted'],
+      [name: 'bass', value: 2]]
+  }
+
+  def "RC notifications are stamped in observation order and carry the parsed values"() {
+    given:
+    String older = rcRaw('<Volume channel="Master" val="30"/>')
+    String newer = rcRaw('<Volume channel="Master" val="35"/>')
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
+    }
+
+    when: 'the notifications are observed in order, whatever order the app later receives them'
+    driver.parse(older)
+    driver.parse(newer)
+
+    then:
+    List<Map> sent = parentPlayerUpdates.findAll { Map item -> item.kind == 'rcEvents' }
+    sent*.sequence == [1L, 2L]
+    sent[0].events.find { Map event -> event.name == 'volume' }.value == 30
+    sent[1].events.find { Map event -> event.name == 'volume' }.value == 35
+    driver.device.events.isEmpty()
+  }
+
+  def "an RC notification is stamped before its headers are parsed, so a stalled older one cannot outrank a newer one"() {
+    given:
+    List<Long> sequenceAtHeaderParse = []
+    String dni = driver.device.deviceNetworkId
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      sequenceAtHeaderParse << driver.PARENT_SEQUENCE_BY_DNI.get(dni)
+      [headers: ['X-SONOS-SERVICETYPE': 'RenderingControl'], body: rawMessage.substring(rawMessage.indexOf('<propertyset'))]
+    }
+
+    when:
+    driver.parse(rcRaw('<Volume channel="Master" val="30"/>'))
+    driver.parse(rcRaw('<Volume channel="Master" val="35"/>'))
+
+    then: 'the number was already taken when header parsing began'
+    sequenceAtHeaderParse == [1L, 2L]
+    parentPlayerUpdates.findAll { Map item -> item.kind == 'rcEvents' }*.sequence == [1L, 2L]
+  }
+
+  private String rcRaw(String innerXml) {
+    'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /rc HTTP/1.1\r\nX-SONOS-SERVICETYPE: RenderingControl\r\n\r\n' +
+      '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event><InstanceID>' + innerXml + '</InstanceID></Event>') + '</LastChange></property></propertyset>'
+  }
+
+  def "the app's control sync drives the mute, night mode and speech enhancement switches"() {
+    given:
+    dwinks.hubitat.stubs.MockDevice muteChild = new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getMuteControlChildDNI())
+    dwinks.hubitat.stubs.MockDevice nightChild = new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getNightModeChildDNI())
+    dwinks.hubitat.stubs.MockDevice speechChild = new dwinks.hubitat.stubs.MockDevice(deviceNetworkId: driver.getSpeechEnhancementChildDNI())
+    driver.children.clear()
+    driver.children.addAll([muteChild, nightChild, speechChild])
+
+    when:
+    driver.syncRcControlChildren([mute: 'muted', nightMode: 'on', speechEnhancement: 'off'])
+
+    then:
+    muteChild.currentValue('switch') == 'on'
+    nightChild.currentValue('switch') == 'on'
+    speechChild.currentValue('switch') == 'off'
+
+    when:
+    driver.syncRcControlChildren([mute: 'unmuted'])
+
+    then:
+    muteChild.currentValue('switch') == 'off'
+    nightChild.currentValue('switch') == 'on'
+
+    cleanup:
+    driver.children.clear()
+  }
+
+  def "RC events without any mapped values send nothing to the parent"() {
+    when:
+    driver.processRenderingControlPayload(
+      '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event><InstanceID><Unmapped val="2"/></InstanceID></Event>') + '</LastChange></property></propertyset>',
+      [epoch: 7L, sequence: 1L])
+
+    then:
+    !parentPlayerUpdates.any { Map item -> item.kind == 'rcEvents' }
   }
 
 }

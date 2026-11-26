@@ -346,6 +346,7 @@ preferences {
 @Field static final String PLAYLISTS_CHILD_APP_NAME = 'Sonos Advanced Controller - Playlists'
 @Field static final String FAVORITES_CHILD_APP_NAME = 'Sonos Advanced Controller - Favorites'
 @Field static final String CATALOG_SNAPSHOTS_MEMORY_KEY = 'catalogSnapshots'
+@Field static final String UNMUTE_RESTORE_LEVELS_MEMORY_KEY = 'unmuteRestoreLevels'
 @Field static final String GROUP_COMMAND_INBOX_MEMORY_KEY = 'groupCommandInbox'
 @Field static final String CHILD_MANAGED_SETTINGS_STATE_KEY = 'childManagedSettings'
 @Field static final List<String> CHILD_MANAGED_SETTING_NAMES = [
@@ -518,13 +519,14 @@ preferences {
 @Field static final List<String> CHILD_ENTRY_POINTS = [
   'playerAppRequest', 'playerCommandRequest', 'groupAppRequest', 'groupAnnouncementProgress',
   'playerAttributeUpdate', 'putPlayerUpnpEvents', 'setZgtPayload', 'putAvtEvents', 'requestCoordinatorEvents',
-  'putCatalogSnapshot', 'playerPreferencesUpdated', 'groupPreferencesUpdated', 'playerGroupTopologyOperationUpdate'
+  'putRcEvents', 'putCatalogSnapshot', 'playerPreferencesUpdated', 'groupPreferencesUpdated', 'playerGroupTopologyOperationUpdate'
 ]
 // Working data that lives only in app memory (see appMemoryMap/withMemoryMap); never read or written through state.
 @Field final List<String> APP_MEMORY_KEYS = [
   AUDIO_CLIP_QUEUES_STATE_KEY, GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY, AVT_EVENTS_BY_DNI_STATE_KEY,
   PLAYER_READINGS_STATE_KEY, GROUP_RENDERING_STATE_KEY, PENDING_GROUP_RENDERING_STATE_KEY,
-  DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY, PENDING_GROUP_STATE_QUEUE_KEY, CATALOG_SNAPSHOTS_MEMORY_KEY, GROUP_COMMAND_INBOX_MEMORY_KEY
+  DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY, PENDING_GROUP_STATE_QUEUE_KEY, CATALOG_SNAPSHOTS_MEMORY_KEY, GROUP_COMMAND_INBOX_MEMORY_KEY,
+  UNMUTE_RESTORE_LEVELS_MEMORY_KEY
 ]
 @Field final List<String> ATOMIC_MIGRATED_STATE_KEYS = [
   ZGT_PAYLOAD_STATE_KEY,
@@ -1085,7 +1087,8 @@ Map<String, Object> normalizePlayerPreferenceSnapshot(Map values) {
     includeTrackDataMetaData: toBooleanPreference(values?.includeTrackDataMetaData, false),
     chimeBeforeHighPriorityTTS: toBooleanPreference(values?.chimeBeforeHighPriorityTTS, false),
     chimeBeforeStandardPriorityTTS: toBooleanPreference(values?.chimeBeforeStandardPriorityTTS, false),
-    ttsBoostAmount: boost
+    ttsBoostAmount: boost,
+    enableAirPlayUnmuteVolumeFix: toBooleanPreference(values?.enableAirPlayUnmuteVolumeFix, true)
   ]
 }
 
@@ -3138,12 +3141,6 @@ Boolean playerAppRequestHandler(Object event) {
       return true
     case 'enqueueAudioClip':
       enqueuePlayerAudioClip(player, args)
-      return true
-    case 'playerReading':
-      Set<String> readingNames = namesPassingSequence(SEQUENCE_ACCEPTED_MEMORY_KEY, "${playerDni}:reading".toString(),
-          ['volume', 'mute'].findAll { String name -> args[name] != null }, request.epoch, request.sequence, false)
-      Map readingArgs = args.subMap(readingNames)
-      if(!readingArgs.isEmpty()) { recordPlayerReading(player.getDataValue('id')?.toString(), readingArgs) }
       return true
     case 'groupRendering':
       Set<String> renderingNames = namesPassingSequence(SEQUENCE_ACCEPTED_MEMORY_KEY, "${playerDni}:grc".toString(),
@@ -6230,6 +6227,130 @@ void putAvtEvents(String dni, List<Map> events, Object epoch, Object sequence) {
   runInMillis(1, 'applyAvtCallback', [overwrite: false, data: [dni: dni, events: incoming, epoch: epoch, sequence: sequence]])
 }
 
+// =============================================================================
+// RC delivery
+// Players parse RenderingControl and hand the sendEvent-ready maps to putRcEvents, stamped where the
+// notification was first observed. The entry point only checks the sequence and schedules; the
+// callback applies each name no newer report already applied, under a per-player lock, with the
+// app-level sendEvent(dni, map), and folds volume and mute into the group-state readings.
+// =============================================================================
+
+void putRcEvents(String dni, List<Map> events, Object epoch, Object sequence) {
+  if(!dni || !(events instanceof List) || events.isEmpty()) { return }
+  List<Map> candidates = events.findAll { Map event -> event?.name && event.value != null }
+  Set<String> accepted = namesPassingSequence(SEQUENCE_ACCEPTED_MEMORY_KEY, "${dni}:rc".toString(),
+      candidates.collect { Map event -> event.name.toString() }, epoch, sequence, false)
+  List<Map> incoming = candidates.findAll { Map event -> accepted.contains(event.name.toString()) }
+      .collect { Map event -> new LinkedHashMap(event) }
+  if(incoming.isEmpty()) { return }
+  runInMillis(1, 'applyRcCallback', [overwrite: false, data: [dni: dni, events: incoming, epoch: epoch, sequence: sequence]])
+}
+
+void applyRcCallback(Map data) {
+  String dni = data?.dni?.toString()
+  List<Map> incoming = data?.events instanceof List ? (List<Map>)data.events : []
+  if(!dni || incoming.isEmpty()) { return }
+  Integer restoreLevel = null
+  Boolean refreshPreferences = false
+  // Claim and publish under one per-player lock so apply order matches sequence order.
+  synchronized(appLock("publish:${dni}:rc".toString())) {
+    Set<String> current = namesPassingSequence(SEQUENCE_APPLIED_MEMORY_KEY, "${dni}:rc".toString(),
+        incoming.collect { Map event -> event.name.toString() }, data.epoch, data.sequence, true)
+    List<Map> events = incoming.findAll { Map event -> current.contains(event.name.toString()) }
+    String playerId = getPlayerRinconByDni(dni)
+    Map reading = [:]
+    Map controlValues = [:]
+    events.each { Map event ->
+      String name = event.name.toString()
+      if(name == 'volume' || name == 'mute') { reading[name] = event.value }
+      if(name in ['mute', 'nightMode', 'speechEnhancement']) { controlValues[name] = event.value }
+    }
+    // A partial report must merge with the player's known state, so fill what this player has not reported
+    // yet from its attributes first, before this batch is published and they change. A batch that carries both
+    // values has nothing to merge, so it reads no child.
+    ChildDeviceWrapper player = reading.isEmpty() || (reading.containsKey('volume') && reading.containsKey('mute'))
+        ? null : getChildDevice(dni)
+    if(player != null) { seedPlayerReadings([player]) }
+    Map decision = unmuteRestoreDecision(dni, playerId, reading)
+    restoreLevel = (Integer)decision.level
+    refreshPreferences = decision.refreshPreferences == true
+    events.each { Map event -> sendChildEventByDni(dni, event.name.toString(), event.value) }
+    if(!reading.isEmpty()) { recordPlayerReading(playerId, reading) }
+    // The player mirrors these onto its component switches. That call only writes child events and never
+    // calls back into the app, so it stays inside the lock and the switches follow the same order.
+    if(!controlValues.isEmpty()) { syncPlayerControlChildren(dni, controlValues) }
+  }
+  // Calls that can reach back into the app run outside the lock.
+  if(refreshPreferences) { requestPlayerPreferenceSnapshot(dni) }
+  if(restoreLevel != null && isLatestAppliedRc(dni, data.epoch, data.sequence)) {
+    ChildDeviceWrapper player = getChildDevice(dni)
+    if(player != null) {
+      logDebug("Restoring ${dni} to volume ${restoreLevel} after unmute")
+      try { player.setLevel(restoreLevel as BigDecimal) }
+      catch(Exception e) { logWarn("Could not restore volume ${restoreLevel} on ${dni} after unmute: ${e.message}") }
+    }
+  }
+}
+
+/** True when no newer volume or mute report has been applied for this player since the given one. */
+Boolean isLatestAppliedRc(String dni, Object epochRaw, Object sequenceRaw) {
+  Long epoch = sequenceNumber(epochRaw)
+  Long sequence = sequenceNumber(sequenceRaw)
+  if(epoch == null || sequence == null) { return true }
+  synchronized(appLock('sequence')) {
+    Map<String, Map> marks = appMemoryMap(SEQUENCE_APPLIED_MEMORY_KEY)
+    return ['volume', 'mute'].every { String name ->
+      Map mark = marks.get("${dni}:rc:${name}".toString())
+      mark == null || (Long)mark.epoch < epoch || ((Long)mark.epoch == epoch && (Long)mark.sequence <= sequence)
+    }
+  }
+}
+
+/** Ask a player to resend its preference snapshot; a snapshot saved before a setting existed lacks it. */
+void requestPlayerPreferenceSnapshot(String dni) {
+  ChildDeviceWrapper player = getChildDevice(dni)
+  if(player == null) { return }
+  try { player.sendPlayerPreferencesToParent() }
+  catch(Exception e) { logWarn("Could not request the preference snapshot from ${dni}: ${e.message}") }
+}
+
+/**
+ * Track each player's last non-zero volume and decide whether this report calls for the AirPlay unmute fix:
+ * a muted to unmuted transition with the fix enabled while the player is at volume 0 (AirPlay streams can
+ * come back from mute there). A normal unmute at a non-zero volume is left alone so it never cancels a fade.
+ * Returns [level: Integer] to restore, [refreshPreferences: true] when the stored preference snapshot predates
+ * the setting, or an empty map. Callers hold the per-player RC publish lock, which orders the transitions.
+ */
+Map unmuteRestoreDecision(String dni, String playerId, Map reading) {
+  Integer volume = parseReadingVolume(reading.volume)
+  if(volume != null && volume > 0) {
+    withMemoryMap(UNMUTE_RESTORE_LEVELS_MEMORY_KEY) { Map<String, Object> levels -> levels[dni] = volume }
+  }
+  if(!playerId || parseReadingMute(reading.mute) != 'unmuted') { return [:] }
+  Map prior = (Map)withMemoryMap(PLAYER_READINGS_STATE_KEY) { Map<String, Map> readings ->
+    readings[playerId] instanceof Map ? new LinkedHashMap((Map)readings[playerId]) : new LinkedHashMap()
+  }
+  if(parseReadingMute(prior.mute) != 'muted') { return [:] }
+  Map<String, Object> snapshot = getPreferenceSnapshotByDni(PLAYER_PREFERENCES_BY_DNI_STATE_KEY, dni)
+  if(!snapshot.containsKey('enableAirPlayUnmuteVolumeFix')) { return [refreshPreferences: true] }
+  if(!toBooleanPreference(snapshot.enableAirPlayUnmuteVolumeFix, true)) { return [:] }
+  Integer knownVolume = volume != null ? volume : parseReadingVolume(prior.volume)
+  if(knownVolume != null && knownVolume > 0) { return [:] }
+  Integer level = (Integer)withMemoryMap(UNMUTE_RESTORE_LEVELS_MEMORY_KEY) { Map<String, Object> levels -> levels[dni] as Integer }
+  if(level == null) {
+    logWarn("Skipping AirPlay unmute volume restore for ${dni} because no saved volume is known")
+    return [:]
+  }
+  return [level: level]
+}
+
+void syncPlayerControlChildren(String dni, Map controlValues) {
+  ChildDeviceWrapper player = getChildDevice(dni)
+  if(player == null) { return }
+  try { player.syncRcControlChildren(controlValues) }
+  catch(Exception e) { logWarn("Could not sync control switches on ${dni}: ${e.message}") }
+}
+
 List<Map> getStoredAvtEvents(String dni) {
   return (List<Map>)withMemoryMap(AVT_EVENTS_BY_DNI_STATE_KEY) { Map<String, Map> store ->
     List<Map> stored = store[dni?.toString()] as List<Map>
@@ -6432,18 +6553,20 @@ void recordPlayerReading(String playerId, Map args) {
   if(changed) { queueVolumeRecalculation([playerId], [], false) }
 }
 
-/** Fill readings for players that have not reported yet; never overwrites a reported value. */
+/** Fill any volume or mute a player has not reported yet from its attributes; never overwrites a reported value. */
 void seedPlayerReadings(List<ChildDeviceWrapper> players) {
   withMemoryMap(PLAYER_READINGS_STATE_KEY) { Map<String, Map> readings ->
     (players ?: []).each { ChildDeviceWrapper player ->
       String playerId = player?.getDataValue('id')?.toString()
-      if(!playerId || readings[playerId] != null) { return }
-      Map reading = [:]
-      Integer volume = parseReadingVolume(player.currentValue('volume', true))
-      String mute = parseReadingMute(player.currentValue('mute', true))
+      if(!playerId) { return }
+      Map prior = readings[playerId] instanceof Map ? (Map)readings[playerId] : [:]
+      if(prior.volume != null && prior.mute != null) { return }
+      Map reading = new LinkedHashMap(prior)
+      Integer volume = reading.volume == null ? parseReadingVolume(player.currentValue('volume', true)) : null
+      String mute = reading.mute == null ? parseReadingMute(player.currentValue('mute', true)) : null
       if(volume != null) { reading.volume = volume }
       if(mute != null) { reading.mute = mute }
-      if(!reading.isEmpty()) { readings[playerId] = reading }
+      if(reading != prior) { readings[playerId] = reading }
     }
   }
 }
