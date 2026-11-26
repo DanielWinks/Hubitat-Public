@@ -7,3 +7,4 @@ xml.xml
 SonosXML/*
 logs
 scripts/hubitat_publish.log
+.mcp.json
