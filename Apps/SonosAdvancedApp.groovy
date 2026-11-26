@@ -67,7 +67,6 @@ import org.quartz.CronExpression
 // =============================================================================
 @Field static final List<String> APP_LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'off']
 @Field static final String GROUP_MANAGEMENT_RESULTS_KEY = 'groupManagementResults'
-@Field static final Integer CHILD_STATE_DRAIN_BATCH_SIZE = 2
 @Field static final DateTimeFormatter APP_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern('yyyy-MM-dd HH:mm:ss')
 @Field static final JsonSlurper SHARED_JSON_SLURPER = new JsonSlurper()
 
@@ -359,6 +358,7 @@ preferences {
 // Hub login sessions expire; re-login when the cached cookie is older than this.
 @Field static final Long HUB_COOKIE_MAX_AGE_MS = Duration.ofMinutes(10).toMillis()
 @Field static final String ZGT_LAST_REPORT_STATE_KEY = 'zgtLastReport'
+@Field static final String ZGT_PAYLOAD_STATE_KEY = 'zgtPayload'
 @Field static final String READY_FOR_ZGT_STATE_KEY = 'readyForZgt'
 @Field static final String LAST_PROCESSED_TOPOLOGY_STATE_KEY = 'lastProcessedTopologyByDni'
 @Field static final String GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY = 'groupAnnouncementProgressQueue'
@@ -434,10 +434,6 @@ preferences {
 @Field static final Integer GROUP_OPERATION_COMMAND_WAIT_SECONDS = 3
 @Field static final Integer GROUP_OPERATION_TOPOLOGY_COMMAND_WAIT_SECONDS = 10
 @Field static final String PENDING_GROUP_STATE_QUEUE_KEY = 'pendingGroupStateUpdates'
-@Field static final String PENDING_CHILD_EVENT_QUEUE_KEY = 'pendingChildEvents'
-@Field static final String CHILD_STATE_DRAIN_SCHEDULED_KEY = 'childStateDrainScheduled'
-@Field static final String CHILD_STATE_DRAIN_DUE_AT_KEY = 'childStateDrainDueAt'
-@Field static final String GROUP_STATE_DRAIN_ATTEMPTS_KEY = 'groupStateDrainAttempts'
 @Field static final String GROUP_STATE_DRAIN_SCHEDULED_KEY = 'groupStateDrainScheduled'
 @Field static Map SOURCES = [
   "\$": "None",
@@ -465,6 +461,7 @@ preferences {
 // =============================================================================
 @Field final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   ZGT_LAST_REPORT_STATE_KEY,
+  ZGT_PAYLOAD_STATE_KEY,
   READY_FOR_ZGT_STATE_KEY,
   LAST_PROCESSED_TOPOLOGY_STATE_KEY,
   GROUP_ANNOUNCEMENT_PROGRESS_QUEUE_STATE_KEY,
@@ -489,10 +486,6 @@ preferences {
   AUDIO_CLIP_QUEUES_STATE_KEY,
   DEFERRED_PLAYER_COMMANDS_STATE_KEY,
   PENDING_GROUP_STATE_QUEUE_KEY,
-  PENDING_CHILD_EVENT_QUEUE_KEY,
-  CHILD_STATE_DRAIN_SCHEDULED_KEY,
-  CHILD_STATE_DRAIN_DUE_AT_KEY,
-  GROUP_STATE_DRAIN_ATTEMPTS_KEY,
   GROUP_STATE_DRAIN_SCHEDULED_KEY,
   LEGACY_DISCOVERY_SECONDARIES_STATE_KEY,
   PENDING_PLAYER_PROVISIONING_REQUESTS_KEY,
@@ -1664,7 +1657,7 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
       String linkedZones = alarm.IncludeLinkedZones?.toString()?.toLowerCase(Locale.ROOT)
       alarmAttributes.includeGroupedRooms = linkedZones in ['1', 'true'] ? 'true' : 'false'
     }
-    queueChildStateBatch(dni, alarmAttributes)
+    sendChildAttributeEvents(child, alarmAttributes)
     child.setLabel("Sonos Alarm: ${roomPlayer?.label ?: roomUuid} ${alarm.StartLocalTime ?: ''}")
   }
   getChildDevices().findAll { ChildDeviceWrapper child -> child.getDeviceNetworkId()?.contains(ALARM_SWITCH_DNI_MARKER) && child.getDeviceNetworkId()?.contains("${ALARM_SWITCH_DNI_MARKER}${householdId}-") && !keep.contains(child.getDeviceNetworkId()) }
@@ -2510,68 +2503,17 @@ void addPlayerToCoordinatorGroup(ChildDeviceWrapper coordinator, String playerId
   coordinator.playerModifyGroupMembersRequest(JsonOutput.toJson([args: [[targetId], []]]))
 }
 
-/**
- * Queue a child event so player callbacks never synchronously fan out into
- * another child device. The queue is keyed by target DNI and attribute, so a
- * burst of state changes keeps only the newest value for each attribute.
- */
+/** Send the supplied child events once; event publication does not have a retry queue. */
 void sendChildEvent(String dni, Map event) {
-  if(!dni || !event?.name) {
-    return
-  }
-  queueChildStateBatch(dni, [(event.name as String): event.value])
+  if(!dni || !event?.name || !event.containsKey('value')) { return }
+  ChildDeviceWrapper child = getChildDevice(dni)
+  if(child == null) { return }
+  sendChildAttributeEvents(child, [(event.name.toString()): event.value])
 }
 
-/** Queue only changed values and coalesce them by child and attribute. */
- synchronized void queueChildStateBatch(String dni, Map attributes) {
-  if(!dni || !attributes) { return }
-  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
-  Map<String, Object> childEvents = pending[dni] instanceof Map ? pending[dni] : [:]
-  attributes.each { Object rawName, Object value ->
-    String name = rawName?.toString()
-    if(name && value != null) {
-      childEvents[name] = value
-    }
-  }
-  if(childEvents.isEmpty()) { return }
-  pending[dni] = childEvents
-  state[PENDING_CHILD_EVENT_QUEUE_KEY] = pending
-  scheduleQueuedChildEventDrain(1000)
-}
-
-/** Re-arm pending child delivery even when a persisted marker outlives its job. */
- synchronized void scheduleQueuedChildEventDrain(Integer delayMs) {
-  Map pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-      ? (Map)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
-  if(pending.isEmpty()) {
-    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
-    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
-    return
-  }
-  Long currentTime = now() as Long
-  Long requestedDueAt = currentTime + Math.max(1, delayMs ?: 1000) as Long
-  Long existingDueAt = state[CHILD_STATE_DRAIN_DUE_AT_KEY] as Long
-  Long dueAt = existingDueAt == null ? requestedDueAt : Math.min(existingDueAt, requestedDueAt)
-  Integer scheduleDelay = Math.max(1L, dueAt - currentTime) as Integer
-  state[CHILD_STATE_DRAIN_DUE_AT_KEY] = dueAt
-  state[CHILD_STATE_DRAIN_SCHEDULED_KEY] = true
-  try {
-    runInMillis(scheduleDelay, 'drainQueuedChildEvents', [overwrite: true])
-  } catch(Exception e) {
-    state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
-    state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
-    logWarn("Could not schedule child state drain: ${e.message}")
-  }
-}
-
-/** Drop only the initializing player's stale child publication and dedupe state. */
-
-
-/** Emit child attributes from the parent app so player and group drivers stay event-free. */
-Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<String, Object> attributes) {
-  Map<String, Object> failed = [:]
-  if(child == null || !(attributes instanceof Map)) { return attributes ?: [:] }
+/** Emit attributes once from the app context. Hubitat suppresses unchanged values by default. */
+void sendChildAttributeEvents(ChildDeviceWrapper child, Map<String, Object> attributes) {
+  if(child == null || !(attributes instanceof Map)) { return }
   attributes.each { String name, Object rawValue ->
     if(!name || rawValue == null) { return }
     try {
@@ -2583,72 +2525,8 @@ Map<String, Object> emitChildAttributeEvents(ChildDeviceWrapper child, Map<Strin
         child.sendEvent(name: name, value: rawValue)
       }
     } catch(Exception e) {
-      failed[name] = rawValue
-      logWarn("Could not emit ${name} to child ${child.getDeviceNetworkId()}; retaining it for retry: ${e.message}")
+      logWarn("Could not emit ${name} to child ${child.getDeviceNetworkId()}: ${e.message}")
     }
-  }
-  return failed
-}
-
-/**
- * Deliver queued child events after the originating player callback has
- * returned. This method intentionally performs only the final child event
- * delivery and never calls back into a player or group command.
- */
- synchronized void drainQueuedChildEvents() {
-  state.remove(CHILD_STATE_DRAIN_SCHEDULED_KEY)
-  state.remove(CHILD_STATE_DRAIN_DUE_AT_KEY)
-  Map<String, Map<String, Object>> pending = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-      ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY]
-      : [:]
-  state.remove(PENDING_CHILD_EVENT_QUEUE_KEY)
-  if(pending.isEmpty()) {
-    return
-  }
-
-  Map<String, Map<String, Object>> failed = [:]
-  Map<String, Map<String, Object>> deferred = [:]
-  Integer deliveredOrAttempted = 0
-  pending.each { String dni, Map<String, Object> eventsForChild ->
-    if(deliveredOrAttempted >= CHILD_STATE_DRAIN_BATCH_SIZE) {
-      deferred[dni] = eventsForChild
-      return
-    }
-    deliveredOrAttempted++
-    ChildDeviceWrapper child = getChildDevice(dni)
-    if(child == null) {
-      logWarn("drainQueuedChildEvents: no child device found for DNI ${dni}")
-      failed[dni] = eventsForChild
-      return
-    }
-    try {
-      Map<String, Object> failedAttributes = emitChildAttributeEvents(child, eventsForChild)
-      if(!failedAttributes.isEmpty()) {
-        failed[dni] = failedAttributes
-      }
-    } catch(Exception e) {
-      Map<String, Object> latest = failed[dni] instanceof Map ? failed[dni] : [:]
-      latest.putAll(eventsForChild)
-      failed[dni] = latest
-      logWarn("Child state batch delivery to ${dni} failed and will be retried: ${e.message}")
-    }
-  }
-  if(!failed.isEmpty() || !deferred.isEmpty()) {
-    Map<String, Map<String, Object>> retryAndNew = deferred
-    failed.each { String dni, Map<String, Object> attrs ->
-      Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
-      combined.putAll(attrs)
-      retryAndNew[dni] = combined
-    }
-    Map<String, Map<String, Object>> arrivals = state[PENDING_CHILD_EVENT_QUEUE_KEY] instanceof Map
-        ? (Map<String, Map<String, Object>>)state[PENDING_CHILD_EVENT_QUEUE_KEY] : [:]
-    arrivals.each { String dni, Map<String, Object> attrs ->
-      Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
-      combined.putAll(attrs)
-      retryAndNew[dni] = combined
-    }
-    state[PENDING_CHILD_EVENT_QUEUE_KEY] = retryAndNew
-    scheduleQueuedChildEventDrain(1000)
   }
 }
 
@@ -2725,7 +2603,7 @@ synchronized void drainPlayerAttributeUpdates() {
 void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes) {
   ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
   if(player == null || attributes == null || attributes.isEmpty()) { return }
-  queueChildStateBatch(playerDni, attributes)
+  sendChildAttributeEvents(player, attributes)
 }
 
 /** State snapshots are replaceable; lifecycle acknowledgements remain ordered events. */
@@ -2988,7 +2866,7 @@ Boolean playerAppRequest(Map request) {
   return playerAppRequestHandler(request)
 }
 
-/** Elect the first batteryless player that reports ready as the household ZGT subscriber. */
+/** Elect the first non-battery player that reports ready as the household ZGT subscriber. */
 String readyForZgt(String dni) {
   if(!dni) { return 'wait' }
 
@@ -5803,6 +5681,106 @@ void advanceGroupTopologyOperation(Map data = [:]) {
   completeGroupOperation(operation)
 }
 
+/** Store the elected subscriber's parsed ZGT snapshot and defer player event publication. */
+void setZgtPayload(Map<String, Object> payload) {
+  if(!(payload?.followersByCoordinator instanceof Map) || !(payload?.groupNamesById instanceof Map)) { return }
+  Map<String, List<String>> followersByCoordinator = [:]
+  ((Map)payload.followersByCoordinator).each { Object rawCoordinator, Object rawFollowers ->
+    String coordinator = rawCoordinator?.toString()
+    if(coordinator) {
+      List<String> followers = rawFollowers instanceof Collection
+          ? ((Collection)rawFollowers).collect { Object id -> id?.toString() }.findAll { String id -> id && id != coordinator }.unique()
+          : []
+      followersByCoordinator[coordinator] = followers
+    }
+  }
+  Map<String, String> groupNamesById = [:]
+  ((Map)payload.groupNamesById).each { Object rawId, Object rawName ->
+    String groupId = rawId?.toString()
+    if(groupId) { groupNamesById[groupId] = rawName?.toString() ?: groupId }
+  }
+  Map<String, Object> snapshot = [followersByCoordinator: followersByCoordinator, groupNamesById: groupNamesById]
+  state[ZGT_PAYLOAD_STATE_KEY] = snapshot
+  processUpnpTopologyNotification([sourceDni: 'elected-subscriber',
+      eventsByGroupId: buildZgtEventProjection(snapshot)], false)
+  runInMillis(1, 'publishZgtPlayerAttributes', [overwrite: true])
+}
+
+/** Convert the two-map transport into the existing internal topology event shape. */
+Map<String, List<Map>> buildZgtEventProjection(Map<String, Object> payload) {
+  Map<String, List<String>> followers = payload?.followersByCoordinator instanceof Map
+      ? (Map<String, List<String>>)payload.followersByCoordinator : [:]
+  Map<String, String> names = payload?.groupNamesById instanceof Map
+      ? (Map<String, String>)payload.groupNamesById : [:]
+  Map<String, List<Map>> projection = [:]
+  followers.each { String coordinator, List<String> ids ->
+    String groupId = names.keySet().find { String candidate -> candidate.startsWith("${coordinator}:") }
+    if(!groupId) { return }
+    List<String> memberIds = [coordinator]
+    memberIds.addAll(ids ?: [])
+    memberIds = memberIds.unique()
+    List<String> memberNames = memberIds.collect { String id -> getPlayerNameForRincon(id) }
+    String coordinatorName = getPlayerNameForRincon(coordinator)
+    List<Map> events = [
+      [name: 'groupCoordinatorId', value: coordinator],
+      [name: 'groupCoordinatorName', value: coordinatorName],
+      [name: 'groupId', value: groupId],
+      [name: 'groupMemberCount', value: memberIds.size()],
+      [name: 'groupMemberNames', value: memberNames.toString()],
+      [name: 'groupPlayerIds', value: memberIds.join(',')],
+      [name: 'isGroupCoordinator', value: 'on'],
+      [name: 'isGrouped', value: memberIds.size() > 1 ? 'on' : 'off'],
+      [name: 'groupName', value: names[groupId]]
+    ]
+    projection[groupId] = events
+  }
+  return projection
+}
+
+String getPlayerNameForRincon(String rincon) {
+  ChildDeviceWrapper player = findPlayerBySonosId(rincon)
+  return player?.getDataValue('name')?.toString() ?: player?.label?.toString() ?: rincon ?: ''
+}
+
+/** Publish all topology attributes to every player child, including singleton/reset states. */
+void publishZgtPlayerAttributes() {
+  Map payload = state[ZGT_PAYLOAD_STATE_KEY] instanceof Map ? (Map)state[ZGT_PAYLOAD_STATE_KEY] : [:]
+  Map<String, List<String>> followers = payload.followersByCoordinator instanceof Map
+      ? (Map<String, List<String>>)payload.followersByCoordinator : [:]
+  Map<String, String> groupNames = payload.groupNamesById instanceof Map
+      ? (Map<String, String>)payload.groupNamesById : [:]
+  Map<String, String> coordinatorByPlayer = [:]
+  Map<String, String> groupIdByCoordinator = [:]
+  followers.each { String coordinator, List<String> ids ->
+    String groupId = groupNames.keySet().find { String candidate -> candidate.startsWith("${coordinator}:") }
+    if(!groupId) { return }
+    groupIdByCoordinator[coordinator] = groupId
+    coordinatorByPlayer[coordinator] = coordinator
+    (ids ?: []).each { String rincon -> coordinatorByPlayer[rincon] = coordinator }
+  }
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String rincon = player?.getDataValue('id')?.toString() ?: player?.getDeviceNetworkId()?.toString()
+    if(!rincon) { return }
+    String coordinator = coordinatorByPlayer[rincon] ?: rincon
+    String groupId = groupIdByCoordinator[coordinator] ?: ''
+    List<String> members = groupId ? [coordinator] + (followers[coordinator] ?: []) : [rincon]
+    members = members.findAll { String id -> id }.unique()
+    String coordinatorName = getPlayerNameForRincon(coordinator)
+    List<String> memberNames = members.collect { String id -> getPlayerNameForRincon(id) }
+    Map<String, Object> attributes = [
+      groupCoordinatorId: coordinator,
+      groupCoordinatorName: coordinatorName,
+      groupId: groupId,
+      groupMemberCount: members.size(),
+      groupMemberNames: memberNames.toString(),
+      groupPlayerIds: members.join(','),
+      isGroupCoordinator: rincon == coordinator ? 'on' : 'off',
+      isGrouped: members.size() > 1 ? 'on' : 'off'
+    ]
+    sendChildAttributeEvents(player, attributes)
+  }
+}
+
 /** Pure set+return only: no child calls, so the flush→setter call cannot deadlock the single-threaded gate. */
 Map<String, List<Map>> putZgtTopology(String sourceDni, Map<String, List<Map>> eventsByGroupId) {
   Map<String, List<Map>> stored = [:]
@@ -5880,12 +5858,12 @@ void processUpnpNotification(Map notification) {
   }
 }
 
-void processUpnpTopologyNotification(Map notification) {
+void processUpnpTopologyNotification(Map notification, Boolean publishTopologyAttributes = true) {
   Map<String, List<Map>> previous = getStoredZgtEventsMap()
   String sourceDni = notification?.sourceDni?.toString()
   Map<String, List<Map>> next = notification?.eventsByGroupId instanceof Map
       ? (Map<String, List<Map>>)notification.eventsByGroupId : [:]
-  if(!sourceDni || next.isEmpty()) { return }
+  if(!sourceDni) { return }
   Map<String, String> oldCoordinators = buildPlayerCoordinatorMap(previous)
   putZgtTopology(sourceDni, next)
   Set<String> promotedPlayers = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
@@ -5899,7 +5877,7 @@ void processUpnpTopologyNotification(Map notification) {
     state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] = promotedPlayers.toList()
     runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'applyCachedAvtForPromotedCoordinators', [overwrite: true])
   }
-  next.each { String groupId, List<Map> events ->
+  if(publishTopologyAttributes) { next.each { String groupId, List<Map> events ->
     String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
     List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
     if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
@@ -5909,13 +5887,27 @@ void processUpnpTopologyNotification(Map notification) {
       playerTopologyEvents << [name: 'isGroupCoordinator', value: id == coordinatorId ? 'on' : 'off']
       deliverUpnpEventsToPlayer(id, playerTopologyEvents)
     }
-  }
+  } }
   next.each { String groupId, List<Map> events ->
     String leader = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
     if(!leader) { return }
     List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
-        .each { String follower -> replayLatestLeaderAvt(leader, follower) }
+    List<String> newFollowers = members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
+    if(publishTopologyAttributes) {
+      newFollowers.each { String follower -> replayLatestLeaderAvt(leader, follower) }
+    } else if(!newFollowers.isEmpty()) {
+      runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'replayZgtFollowerAvt', [overwrite: true,
+          data: [leaderId: leader, followerIds: newFollowers]])
+    }
+  }
+}
+
+void replayZgtFollowerAvt(Map data) {
+  String leader = data?.leaderId?.toString()
+  if(!leader || !(data?.followerIds instanceof Collection)) { return }
+  ((Collection)data.followerIds).each { Object rawId ->
+    String follower = rawId?.toString()
+    if(follower) { replayLatestLeaderAvt(leader, follower) }
   }
 }
 
@@ -7211,11 +7203,6 @@ void queueGroupDeviceState(String groupDni, Map attributes) {
   pending[groupDni] = groupState
   state[PENDING_GROUP_STATE_QUEUE_KEY] = pending
 
-  Map<String, Integer> attempts = state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] instanceof Map
-      ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
-      : [:]
-  attempts.remove(groupDni)
-  state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
   // Re-arm on every enqueue. The scheduled-job table can lose a job while the
   // persisted marker remains true (for example after an app update), which
   // would otherwise strand all subsequent group state updates.
@@ -7224,9 +7211,8 @@ void queueGroupDeviceState(String groupDni, Map attributes) {
 }
 
 /**
- * Deliver queued group state after the originating player callback has
- * returned. Failed batches remain queued and retry so transient child-device
- * invocation failures cannot silently drop the latest synchronized values.
+ * Deliver coalesced group state after the originating player callback returns.
+ * Each event is attempted once; event publication has no retry queue.
  */
 void drainGroupStateUpdates() {
   Map<String, Map<String, Object>> pending = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
@@ -7235,14 +7221,8 @@ void drainGroupStateUpdates() {
   state.remove(PENDING_GROUP_STATE_QUEUE_KEY)
   state.remove(GROUP_STATE_DRAIN_SCHEDULED_KEY)
   if(pending.isEmpty()) {
-    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
     return
   }
-
-  Map<String, Integer> attempts = state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] instanceof Map
-      ? (Map<String, Integer>)state[GROUP_STATE_DRAIN_ATTEMPTS_KEY]
-      : [:]
-  Map<String, Map<String, Object>> retryQueue = [:]
   Map<String, Map<String, Object>> deferred = [:]
   List<String> groupDnis = new ArrayList<String>(pending.keySet())
   Set<String> selected = new LinkedHashSet<String>(groupDnis.take(GROUP_STATE_DRAIN_MAX_ITEMS))
@@ -7254,45 +7234,24 @@ void drainGroupStateUpdates() {
     ChildDeviceWrapper groupDevice = getChildDevice(groupDni)
     if(groupDevice == null) {
       logWarn("drainGroupStateUpdates: no group device found for DNI ${groupDni}")
-      attempts[groupDni] = (attempts[groupDni] ?: 0) + 1
-      retryQueue[groupDni] = attributes
       return
     }
-    try {
-      logDebug("Delivering group state to ${groupDni}: attributes=${attributes.keySet()}")
-      Map<String, Object> publishable = new LinkedHashMap<String, Object>(attributes)
-      Map<String, Object> failedAttributes = emitChildAttributeEvents(groupDevice, publishable)
-      if(!failedAttributes.isEmpty()) {
-        throw new IllegalStateException("${failedAttributes.size()} group attribute event(s) failed")
-      }
-      logDebug("Delivered ${publishable.size()} group state event(s) to ${groupDni}")
-      attempts.remove(groupDni)
-    } catch(Exception e) {
-      Integer attempt = (attempts[groupDni] ?: 0) + 1
-      attempts[groupDni] = attempt
-      retryQueue[groupDni] = attributes
-      logWarn("Group state delivery to ${groupDni} failed (attempt ${attempt}); retaining it for retry: ${e.message}")
-    }
+    logDebug("Delivering group state to ${groupDni}: attributes=${attributes.keySet()}")
+    sendChildAttributeEvents(groupDevice, new LinkedHashMap<String, Object>(attributes))
+    logDebug("Attempted ${attributes.size()} group state event(s) for ${groupDni}")
   }
+  Map<String, Map<String, Object>> retryAndNew = new LinkedHashMap<String, Map<String, Object>>(deferred)
   Map<String, Map<String, Object>> arrivals = state[PENDING_GROUP_STATE_QUEUE_KEY] instanceof Map
       ? (Map<String, Map<String, Object>>)state[PENDING_GROUP_STATE_QUEUE_KEY] : [:]
-  Map<String, Map<String, Object>> retryAndNew = new LinkedHashMap<String, Map<String, Object>>(deferred)
-  retryQueue.each { String dni, Map<String, Object> attrs ->
-    Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
-    combined.putAll(attrs)
-    retryAndNew[dni] = combined
-  }
   arrivals.each { String dni, Map<String, Object> attrs ->
     Map<String, Object> combined = retryAndNew[dni] instanceof Map ? retryAndNew[dni] : [:]
     combined.putAll(attrs)
     retryAndNew[dni] = combined
   }
   if(retryAndNew.isEmpty()) {
-    state.remove(GROUP_STATE_DRAIN_ATTEMPTS_KEY)
     return
   }
   state[PENDING_GROUP_STATE_QUEUE_KEY] = retryAndNew
-  state[GROUP_STATE_DRAIN_ATTEMPTS_KEY] = attempts
   state[GROUP_STATE_DRAIN_SCHEDULED_KEY] = true
   runInMillis(1000, 'drainGroupStateUpdates', [overwrite: true])
 }

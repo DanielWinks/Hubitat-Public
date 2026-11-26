@@ -1257,8 +1257,7 @@ void initialize() {
 
 Boolean shouldSubscribeToZgt() {
   String hasBattery = device.getDataValue(HAS_BATTERY_DEVICE_KEY)
-  if(hasBattery == null || !hasBattery.equalsIgnoreCase('false')) { return true }
-
+  if(hasBattery == null || !hasBattery.equalsIgnoreCase('false')) { return false }
   try {
     String response = parent.readyForZgt(getDeviceDNI())?.toString()
     logDebug("Parent ZGT readiness response for ${getDeviceDNI()}: ${response ?: 'none'}")
@@ -3981,12 +3980,9 @@ void parse(String raw) {
           try {
             if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML ZGT event payload'); return }
             logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
-            Map snapshot = parseZgtFullSnapshot(xmlBody)
-            if(snapshot == null) { return }
-            cacheZgtMemberHosts((List<Map>)snapshot.groups)
-            String zgtDni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-            Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
-            scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: zgtDni, eventsByGroupId: eventsByGroupId])
+            Map<String, Object> payload = zgtParse(xmlBody)
+            if(payload == null) { return }
+            scheduleZgtParentHandoff(payload)
           } catch (Exception e) { logWarn("Ran into an issue parsing zgt: ${e}") }
           return
         case 'AVTransport':
@@ -4046,6 +4042,53 @@ void parse(String raw) {
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
 }
 
+/** Parse a complete ZGT snapshot into coordinator followers and group names. */
+Map<String, Object> zgtParse(String xmlBody) {
+  if(!isPlausibleXmlPayload(xmlBody)) { return null }
+  Map snapshot = parseZgtFullSnapshot(xmlBody)
+  if(!(snapshot?.groups instanceof List)) { return null }
+  return zgtPayloadFromGroups((List<Map>)snapshot.groups)
+}
+
+Map<String, Object> zgtPayloadFromGroups(List<Map> groups) {
+  if(!(groups instanceof List)) { return null }
+  cacheZgtMemberHosts(groups)
+  Map<String, List<String>> followersByCoordinator = [:]
+  Map<String, String> groupNamesById = [:]
+  groups.each { Map group ->
+    String coordinator = group?.coordinatorId?.toString()
+    String groupId = group?.groupId?.toString()
+    if(!coordinator || !groupId) { return }
+    List<String> followers = []
+    if(group.members instanceof List) {
+      ((List<Map>)group.members).each { Map member ->
+        String rincon = member?.playerId?.toString()
+        Boolean invisible = member?.invisible == true || member?.invisible?.toString() == '1'
+        if(rincon && rincon != coordinator && !invisible) { followers.add(rincon) }
+      }
+    }
+    followersByCoordinator[coordinator] = followers.unique()
+    String groupName = group?.groupName?.toString() ?: group?.coordinatorName?.toString() ?: coordinator
+    groupNamesById[groupId] = groupName
+  }
+  return [followersByCoordinator: followersByCoordinator, groupNamesById: groupNamesById]
+}
+
+/** Parent handoff occurs after the driver parse gate is released. */
+void scheduleZgtParentHandoff(Map<String, Object> payload) {
+  if(payload == null || parent == null) { return }
+  runInMillis(1, 'relayZgtToParent', [overwrite: false, data: new LinkedHashMap<String, Object>(payload)])
+}
+
+void relayZgtToParent(Map<String, Object> payload) {
+  if(payload == null || parent == null) { return }
+  try {
+    parent.setZgtPayload(new LinkedHashMap<String, Object>(payload))
+  } catch(Exception e) {
+    logWarn("Could not relay ZGT data to parent: ${e.message}")
+  }
+}
+
 // Parent callbacks run after parse() releases the player gate.
 void scheduleParsedUpnpParentHandoff(Map payload) {
   if(payload == null || parent == null) { return }
@@ -4059,23 +4102,6 @@ void relayParsedUpnpToParent(Map data) {
   } catch(Exception e) {
     logWarn("Could not relay parsed UPnP ${data.service ?: 'unknown'} data to parent: ${e.message}")
   }
-}
-
-// Stale payloads are dropped before enqueue because republished stale state has no value;
-// kept driver-side so concurrent parses cannot reorder the coalescing queue.
-void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody) {
-  deferOrProcessZoneGroupTopologyPayload(dni, xmlBody, null)
-}
-
-void deferOrProcessZoneGroupTopologyPayload(String dni, String xmlBody, Integer incomingSeq) {
-  String deviceDni = dni ?: device.getDeviceNetworkId()
-  if(!deviceDni || !isPlausibleXmlPayload(xmlBody)) { return }
-  Map snapshot = parseZgtFullSnapshot(xmlBody)
-  if(snapshot == null) { return }
-  List<Map> groups = (List<Map>)snapshot.groups
-  cacheZgtMemberHosts(groups)
-  Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId(groups)
-  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: deviceDni, eventsByGroupId: eventsByGroupId])
 }
 
 // Refresh the transient host cache (see field comment); parse is otherwise store-free.
@@ -4097,49 +4123,6 @@ void cacheZgtMemberHosts(List<Map> groups) {
       }
     }
   }
-}
-
-// Stored as sendEvent-ready attribute maps for parent-app delivery.
-Map<String, List<Map>> projectZgtEventsByGroupId(List<Map> groups) {
-  Map<String, List<Map>> eventsByGroupId = [:]
-  if(!(groups instanceof List)) { return eventsByGroupId }
-  groups.each { Map g ->
-    String groupId = g?.groupId?.toString()
-    if(!groupId) { return }
-    List<String> visibleIds = []
-    List<String> visibleNames = []
-    if(g?.members instanceof List) {
-      ((List<?>)g.members).each { Object mem ->
-        Map mm = (Map)mem
-        String pid = mm?.playerId?.toString()
-        Boolean isInvisible = (mm?.invisible == true || mm?.invisible?.toString() == '1')
-        if(pid && !isInvisible) {
-          visibleIds << pid
-          String zoneName = mm?.zoneName?.toString()
-          if(zoneName) { visibleNames << zoneName }
-        }
-      }
-    }
-    if(visibleIds.isEmpty() && g?.playerIds instanceof List) {
-      visibleIds = ((List<?>)g.playerIds).collect { Object id -> id?.toString() }.findAll { String id -> id }
-    }
-    String coordinatorId = g?.coordinatorId?.toString()
-    String coordinatorName = g?.coordinatorName?.toString()
-    String groupName = g?.groupName?.toString() ?: coordinatorName
-    List<Map> events = []
-    if(!visibleIds.isEmpty()) {
-      events << [name: 'groupPlayerIds', value: visibleIds.join(',')]
-    }
-    if(coordinatorId) { events << [name: 'groupCoordinatorId', value: coordinatorId] }
-    Integer memberCount = visibleIds.size()
-    events << [name: 'isGrouped', value: (memberCount > 1 ? 'on' : 'off')]
-    events << [name: 'groupMemberCount', value: memberCount]
-    if(groupName) { events << [name: 'groupName', value: groupName] }
-    if(coordinatorName) { events << [name: 'groupCoordinatorName', value: coordinatorName] }
-    if(!visibleNames.isEmpty()) { events << [name: 'groupMemberNames', value: visibleNames.toString()] }
-    if(!events.isEmpty()) { eventsByGroupId[groupId] = events }
-  }
-  return eventsByGroupId
 }
 
 Map<String, List<String>> parseChannelMap(String raw) {
@@ -4989,19 +4972,17 @@ Boolean isPlausibleXmlPayload(String payload) {
 
 Boolean processZoneGroupTopologyMessages(String xmlString, LinkedHashSet oldGroupedRincons) {
   if(!isPlausibleXmlPayload(xmlString)) { return false }
-  Map snapshot = parseZgtFullSnapshot(xmlString)
-  if(snapshot == null) { return false }
-  Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)snapshot.groups)
-  String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
+  Map<String, Object> payload = zgtParse(xmlString)
+  if(payload == null) { return false }
+  scheduleZgtParentHandoff(payload)
   return true
 }
 
 Boolean processZoneGroupTopologySnapshot(Map topology, LinkedHashSet<String> oldGroupedRincons) {
   if(topology == null || !(topology.groups instanceof List)) { return false }
-  Map<String, List<Map>> eventsByGroupId = projectZgtEventsByGroupId((List<Map>)topology.groups)
-  String dni = device.getDeviceNetworkId()?.toString() ?: 'unknown'
-  scheduleParsedUpnpParentHandoff([service: 'ZGT', sourceDni: dni, eventsByGroupId: eventsByGroupId])
+  Map<String, Object> payload = zgtPayloadFromGroups((List<Map>)topology.groups)
+  if(payload == null) { return false }
+  scheduleZgtParentHandoff(payload)
   return true
 }
 
@@ -7879,7 +7860,7 @@ void zoneGroupTopologySoapCallback(AsyncResponse response, Map data = null) {
       logWarn('Could not parse groups from UPnP ZoneGroupState response')
       return
     }
-    deferOrProcessZoneGroupTopologyPayload(device.getDeviceNetworkId()?.toString() ?: 'unknown', propertyset)
+    processZoneGroupTopologyMessages(propertyset, new LinkedHashSet<String>())
     List<Map> groups = (List<Map>)topology.groups
     List<Map> ledgerGroups = groups.collect { Map group ->
       List<Map> members = group.members instanceof List ? (List<Map>)group.members : []

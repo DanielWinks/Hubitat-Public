@@ -225,7 +225,7 @@ class SonosAdvancedAppSpec extends Specification {
     !appScript.state.containsKey('lastSentChildState')
   }
 
-  def "first batteryless player reporting ready wins ZGT subscription and winner can retry"() {
+  def "first player reporting ready wins ZGT subscription and winner can retry"() {
     expect:
     appScript.readyForZgt('DNI-FIRST') == 'proceed'
     appScript.readyForZgt('DNI-SECOND') == 'wait'
@@ -1361,105 +1361,30 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.scheduled.any { List job -> job[1] == 'drainQueuedPlayerStateUpdates' }
   }
 
-  def "child state drain dispatches a bounded number of children and reschedules the remainder"() {
+  def "child attribute events are sent once without queueing or retrying"() {
     given:
-    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
-    appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
-    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
+    follower.metaClass.sendEvent = { Map event -> throw new RuntimeException('simulated failure') }
 
     when:
-    appScript.drainQueuedChildEvents()
+    appScript.sendChildAttributeEvents(follower, [transportStatus: 'playing'])
+    appScript.sendChildAttributeEvents(extra, [transportStatus: 'paused'])
 
     then:
-    follower.emittedAttributes().transportStatus == 'playing'
     extra.emittedAttributes().transportStatus == 'paused'
-    coordinator.emittedAttributes().isEmpty()
-    appScript.state.pendingChildEvents == [(coordinator.deviceNetworkId): [transportStatus: 'stopped']]
-    appScript.state.childStateDrainScheduled == true
-    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
-
-    when:
-    appScript.drainQueuedChildEvents()
-
-    then:
-    coordinator.emittedAttributes().transportStatus == 'stopped'
-    appScript.state.pendingChildEvents == null
-    appScript.state.childStateDrainScheduled == null
+    !appScript.state.containsKey('pendingChildEvents')
+    !appScript.state.containsKey('childStateDrainScheduled')
+    !appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
+    appScript.logs.any { String line -> line.contains('Could not emit transportStatus') }
   }
 
-  def "child state enqueue re-arms a drain when the scheduled marker is stale"() {
-    given:
-    appScript.state.pendingChildEvents = [(follower.deviceNetworkId): [transportStatus: 'playing']]
-    appScript.state.childStateDrainScheduled = true
-
+  def "direct child event calls do not cache or suppress unchanged values"() {
     when:
-    appScript.queueChildStateBatch(follower.deviceNetworkId, [status: 'playing'])
-
-    then:
-    appScript.state.childStateDrainScheduled == true
-    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
-  }
-
-  def "child state delivery does not keep a sent-value cache or suppress unchanged values in the app"() {
-    when:
-    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
-    appScript.drainQueuedChildEvents()
-    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
-    appScript.drainQueuedChildEvents()
+    appScript.sendChildAttributeEvents(follower, [transportStatus: 'playing'])
+    appScript.sendChildAttributeEvents(follower, [transportStatus: 'playing'])
 
     then:
     follower.events.count { Map event -> event.name == 'transportStatus' && event.value == 'playing' } == 2
     !appScript.state.containsKey('lastSentChildState')
-  }
-
-
-
-  def "child state drain preserves events queued while a child batch is being delivered"() {
-    given:
-    follower.metaClass.sendEvent = { Map event ->
-      appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
-      follower.events << event
-      follower.currentValues[event.name.toString()] = event.value
-    }
-    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
-    appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
-    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
-
-    when:
-    appScript.drainQueuedChildEvents()
-
-    then:
-    follower.emittedAttributes().transportStatus == 'playing'
-    extra.emittedAttributes().transportStatus == 'paused'
-    coordinator.emittedAttributes().isEmpty()
-    appScript.state.pendingChildEvents == [(coordinator.deviceNetworkId): [transportStatus: 'playing']]
-    appScript.state.childStateDrainScheduled == true
-    appScript.scheduled.any { List call -> call[1] == 'drainQueuedChildEvents' }
-  }
-
-  def "failed child delivery retries behind unprocessed children"() {
-    given:
-    follower.metaClass.sendEvent = { Map event -> throw new RuntimeException('simulated failure') }
-    appScript.queueChildStateBatch(follower.deviceNetworkId, [transportStatus: 'playing'])
-    appScript.queueChildStateBatch(extra.deviceNetworkId, [transportStatus: 'paused'])
-    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'stopped'])
-
-    when:
-    appScript.drainQueuedChildEvents()
-
-    then:
-    extra.emittedAttributes().transportStatus == 'paused'
-    appScript.state.pendingChildEvents.keySet().toList() == [
-      coordinator.deviceNetworkId, follower.deviceNetworkId
-    ]
-
-    when:
-    appScript.drainQueuedChildEvents()
-
-    then:
-    coordinator.emittedAttributes().transportStatus == 'stopped'
-    appScript.state.pendingChildEvents.containsKey(follower.deviceNetworkId)
-    appScript.state.childStateDrainScheduled == true
   }
 
   def "alarm device request event dispatches through the parent app handler"() {
@@ -2250,8 +2175,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "parent app emits player and group attributes with child sendEvent"() {
     when:
-    appScript.queueChildStateBatch(coordinator.deviceNetworkId, [transportStatus: 'playing'])
-    appScript.drainQueuedChildEvents()
+    appScript.sendChildAttributeEvents(coordinator, [transportStatus: 'playing'])
     appScript.queueGroupDeviceState('GROUP-DNI', [
       switch: 'on', currentlyJoinedPlayers: 'Kitchen, Kids Room',
       currentTrackName: 'B.Y.O.B.', currentArtistName: 'System Of A Down',
@@ -2533,6 +2457,81 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.zgtLastReport.observedAt > 0L
     coordinator.events.isEmpty()
     follower.events.isEmpty()
+  }
+
+  def "ZGT payload publishes all topology attributes to every player on the scheduled pass"() {
+    given:
+    coordinator.updateDataValue('name', 'Living Room')
+    follower.updateDataValue('name', 'Kitchen')
+    extra.updateDataValue('name', 'Office')
+
+    when:
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']],
+      groupNamesById: ['RINCON_COORD:123': 'Downstairs']
+    ])
+
+    then:
+    appScript.state.zgtPayload.followersByCoordinator.RINCON_COORD == ['RINCON_FOLLOW']
+    appScript.scheduled.any { List job -> job[0] == 1 && job[1] == 'publishZgtPlayerAttributes' }
+    coordinator.events.isEmpty()
+    follower.events.isEmpty()
+    extra.events.isEmpty()
+
+    when:
+    appScript.publishZgtPlayerAttributes()
+    List<String> required = ['groupCoordinatorId', 'groupCoordinatorName', 'groupId',
+      'groupMemberCount', 'groupMemberNames', 'groupPlayerIds', 'isGroupCoordinator', 'isGrouped']
+    Map coordinatorAttrs = coordinator.emittedAttributes()
+    Map followerAttrs = follower.emittedAttributes()
+    Map extraAttrs = extra.emittedAttributes()
+
+    then:
+    required.every { String name -> coordinatorAttrs.containsKey(name) && followerAttrs.containsKey(name) && extraAttrs.containsKey(name) }
+    coordinatorAttrs.groupCoordinatorId == 'RINCON_COORD'
+    coordinatorAttrs.groupCoordinatorName == 'Living Room'
+    coordinatorAttrs.groupId == 'RINCON_COORD:123'
+    coordinatorAttrs.groupMemberCount == 2
+    coordinatorAttrs.groupPlayerIds == 'RINCON_COORD,RINCON_FOLLOW'
+    followerAttrs.isGroupCoordinator == 'off'
+    followerAttrs.isGrouped == 'on'
+    extraAttrs.groupCoordinatorId == 'RINCON_EXTRA'
+    extraAttrs.groupCoordinatorName == 'Office'
+    extraAttrs.groupId == ''
+    extraAttrs.groupMemberCount == 1
+    extraAttrs.groupPlayerIds == 'RINCON_EXTRA'
+    extraAttrs.isGroupCoordinator == 'on'
+    extraAttrs.isGrouped == 'off'
+    !appScript.state.containsKey('pendingChildEvents')
+    !appScript.scheduled.any { List job -> job[1] == 'drainQueuedChildEvents' }
+  }
+
+  def "a later ZGT snapshot resets every player omitted from its groups"() {
+    given:
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']],
+      groupNamesById: ['RINCON_COORD:old': 'Old Group']
+    ])
+    appScript.publishZgtPlayerAttributes()
+    coordinator.events.clear()
+    follower.events.clear()
+    extra.events.clear()
+
+    when:
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_EXTRA': []],
+      groupNamesById: ['RINCON_EXTRA:new': 'Office']
+    ])
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    coordinator.emittedAttributes().groupCoordinatorId == 'RINCON_COORD'
+    coordinator.emittedAttributes().groupId == ''
+    coordinator.emittedAttributes().isGrouped == 'off'
+    follower.emittedAttributes().groupCoordinatorId == 'RINCON_FOLLOW'
+    follower.emittedAttributes().groupId == ''
+    follower.emittedAttributes().isGrouped == 'off'
+    extra.emittedAttributes().groupId == 'RINCON_EXTRA:new'
   }
 
   def "UPnP notifications retain their order through the parent 500 ms debounce"() {

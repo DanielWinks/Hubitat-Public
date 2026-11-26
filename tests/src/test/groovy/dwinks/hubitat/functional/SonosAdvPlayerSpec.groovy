@@ -400,6 +400,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getMetaClass().initialize()
     driver.metaClass.getParent = { -> new Expando(
       playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
+      readyForZgt: { String dni -> 'proceed' },
       playerStateUpdate: { Map payload -> parentPlayerUpdates << payload },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }) }
     driver.metaClass.postSonosSoapAsync = { String callback, Map params, Map data ->
@@ -1063,6 +1064,7 @@ class SonosAdvPlayerSpec extends Specification {
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
+      setZgtPayload: { Map payload -> parentPlayerUpdates << [kind:'zgtPayload', payload:new LinkedHashMap(payload)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
       playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
       putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
@@ -1078,6 +1080,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.isGroupCoordinator = 'on'
     driver.metaClass.getParent = { -> new Expando(
       playerAttributeUpdate: { Map payload -> applyMockAppPlayerAttributes(payload) },
+      readyForZgt: { String dni -> 'proceed' },
       flushGroupDeviceState: { String coordinatorId, Map volumeAttrs, Map playbackAttrs ->
         parentPlayerUpdates << [kind: 'groupDeviceState', coordinatorId: coordinatorId,
           volumeAttrs: volumeAttrs ? new LinkedHashMap(volumeAttrs) : null,
@@ -1089,6 +1092,7 @@ class SonosAdvPlayerSpec extends Specification {
       putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
+      setZgtPayload: { Map payload -> parentPlayerUpdates << [kind:'zgtPayload', payload:new LinkedHashMap(payload)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
       playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
@@ -1617,6 +1621,27 @@ class SonosAdvPlayerSpec extends Specification {
     )
   }
 
+  def "ZGT payload excludes invisible members and bonded satellite devices"() {
+    given:
+    String topology = '<ZoneGroupState><ZoneGroups><ZoneGroup ID="RINCON_A:1" Coordinator="RINCON_A">' +
+      '<ZoneGroupMember UUID="RINCON_A" ZoneName="Living Room"/>' +
+      '<ZoneGroupMember UUID="RINCON_B" ZoneName="Kitchen"/>' +
+      '<ZoneGroupMember UUID="RINCON_HIDDEN" ZoneName="Hidden" Invisible="1"/>' +
+      '<ZoneGroupMember UUID="RINCON_BAR" ZoneName="Theater"><Satellite UUID="RINCON_SAT" ZoneName="Sub"/></ZoneGroupMember>' +
+      '</ZoneGroup></ZoneGroups></ZoneGroupState>'
+    String escaped = topology.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    String xml = '<propertyset><property><ZoneGroupState>' + escaped + '</ZoneGroupState></property></propertyset>'
+
+    when:
+    Map<String, Object> payload = driver.zgtParse(xml)
+
+    then:
+    payload.followersByCoordinator.RINCON_A == ['RINCON_B', 'RINCON_BAR']
+    !payload.followersByCoordinator.RINCON_A.contains('RINCON_HIDDEN')
+    !payload.followersByCoordinator.RINCON_A.contains('RINCON_SAT')
+    payload.groupNamesById['RINCON_A:1'] == 'Living Room'
+  }
+
   def "AVT parse relays sendEvent maps without publishing player events"() {
     given:
     String body = avtBody('<TransportState val="PLAYING"/>')
@@ -2058,14 +2083,25 @@ class SonosAdvPlayerSpec extends Specification {
     driver.parse(raw)
 
     then:
-    driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' &&
-      row[2].data.service == 'ZGT' && row[2].data.eventsByGroupId['G1'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST' }
+    driver.scheduled.any { List row -> row[1] == 'relayZgtToParent' &&
+      row[2].data.followersByCoordinator['RINCON_TEST'] == [] &&
+      row[2].data.groupNamesById['G1'] == 'Household' }
     parentPlayerUpdates.isEmpty()  // hand-off is queued; parent is called after parse returns
+
+    when:
+    Map callbackData = driver.scheduled.find { List row -> row[1] == 'relayZgtToParent' }[2].data
+    driver.relayZgtToParent(callbackData as Map<String, Object>)
+
+    then:
+    parentPlayerUpdates.size() == 1
+    parentPlayerUpdates[0].kind == 'zgtPayload'
+    parentPlayerUpdates[0].payload.followersByCoordinator.RINCON_TEST == []
   }
 
-  def "every player subscribes to ZGT without app election state"() {
+  def "non-battery player asks the app election before subscribing to ZGT"() {
     given:
     List<String> zgtCalls = []
+    driver.device.dataValues.hasBattery = 'false'
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
     driver.metaClass.subscribeToMrGrcEvents = { -> }
 
@@ -2078,7 +2114,30 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.device.dataValues.containsKey('zgtLeaderGeneration')
   }
 
-  def "batteryless player subscribes to ZGT only when parent elects it"() {
+  def "battery-powered or unknown devices do not subscribe to ZGT"() {
+    given:
+    List<String> zgtCalls = []
+    List<String> readinessRequests = []
+    driver.device.dataValues.hasBattery = batteryValue
+    driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
+    driver.metaClass.subscribeToMrGrcEvents = { -> }
+    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni ->
+      readinessRequests << dni
+      'proceed'
+    }) }
+
+    when:
+    driver.initialize()
+
+    then:
+    zgtCalls.isEmpty()
+    readinessRequests.isEmpty()
+
+    where:
+    batteryValue << ['true', null]
+  }
+
+  def "player subscribes to ZGT only when parent elects it"() {
     given:
     List<String> zgtCalls = []
     List<String> readinessRequests = []
@@ -2098,7 +2157,7 @@ class SonosAdvPlayerSpec extends Specification {
     zgtCalls == ['subscribe']
   }
 
-  def "batteryless player does not subscribe to ZGT when another player won election"() {
+  def "player does not subscribe to ZGT when another player won election"() {
     given:
     List<String> zgtCalls = []
     driver.device.dataValues.hasBattery = 'false'
@@ -2127,10 +2186,9 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     request.params.headers.SOAPAction == 'urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState'
-    Map relay = driver.scheduled.find { List job -> job[1] == 'relayParsedUpnpToParent' }[2].data
-    relay.service == 'ZGT'
-    relay.eventsByGroupId['GROUP-TEST'].find { Map e -> e.name == 'groupCoordinatorId' }.value == 'RINCON_TEST'
-    relay.eventsByGroupId['GROUP-TEST'].find { Map e -> e.name == 'groupPlayerIds' }.value == 'RINCON_TEST,RINCON_B'
+    Map relay = driver.scheduled.find { List job -> job[1] == 'relayZgtToParent' }[2].data
+    relay.followersByCoordinator['RINCON_TEST'] == ['RINCON_B']
+    relay.groupNamesById['GROUP-TEST'] == 'Test'
     driver.zgtMemberHostByPlayerId['RINCON_B'] == '192.168.1.51:1400'
   }
 
