@@ -2502,6 +2502,8 @@ class SonosAdvancedAppSpec extends Specification {
     extraAttrs.groupPlayerIds == 'RINCON_EXTRA'
     extraAttrs.isGroupCoordinator == 'on'
     extraAttrs.isGrouped == 'off'
+    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room, Kitchen'
+    group.emittedAttributes().switch == 'on'
     !appScript.state.containsKey('pendingChildEvents')
     !appScript.scheduled.any { List job -> job[1] == 'drainQueuedChildEvents' }
   }
@@ -2532,6 +2534,80 @@ class SonosAdvancedAppSpec extends Specification {
     follower.emittedAttributes().groupId == ''
     follower.emittedAttributes().isGrouped == 'off'
     extra.emittedAttributes().groupId == 'RINCON_EXTRA:new'
+    group.emittedAttributes().currentlyJoinedPlayers == ''
+    group.emittedAttributes().switch == 'off'
+  }
+
+  def "ZGT group switch requires the configured coordinator and exact follower roster"() {
+    given:
+    coordinator.updateDataValue('name', 'Living Room')
+    follower.updateDataValue('name', 'Kitchen')
+    extra.updateDataValue('name', 'Office')
+
+    when: 'the configured coordinator and all configured followers match exactly'
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW']],
+      groupNamesById: ['RINCON_COORD:exact': 'Exact']
+    ])
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    group.emittedAttributes().switch == 'on'
+    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room, Kitchen'
+
+    when: 'a configured follower is missing'
+    group.events.clear()
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_COORD': []],
+      groupNamesById: ['RINCON_COORD:missing': 'Missing']
+    ])
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    group.emittedAttributes().switch == 'off'
+    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room'
+
+    when: 'an unconfigured extra follower is present'
+    group.events.clear()
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_COORD': ['RINCON_FOLLOW', 'RINCON_EXTRA']],
+      groupNamesById: ['RINCON_COORD:extra': 'Extra']
+    ])
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    group.emittedAttributes().switch == 'off'
+    group.emittedAttributes().currentlyJoinedPlayers == 'Living Room, Kitchen, Office'
+
+    when: 'the configured coordinator is only a follower under a different active coordinator'
+    group.events.clear()
+    appScript.setZgtPayload([
+      followersByCoordinator: ['RINCON_FOLLOW': ['RINCON_COORD']],
+      groupNamesById: ['RINCON_FOLLOW:leader-changed': 'Leader Changed']
+    ])
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    group.emittedAttributes().switch == 'off'
+    group.emittedAttributes().currentlyJoinedPlayers == 'Kitchen, Living Room'
+  }
+
+  def "every group child receives both ZGT states even when its coordinator is missing"() {
+    given:
+    SonosAppGroupDouble unconfigured = new SonosAppGroupDouble(
+      deviceNetworkId: 'APP-ID-SonosGroupDevice-Unconfigured', displayName: 'Unconfigured', label: 'Unconfigured')
+    appScript.children << unconfigured
+    appScript.app.children = appScript.children
+
+    when:
+    appScript.setZgtPayload([followersByCoordinator: ['RINCON_COORD': []],
+      groupNamesById: ['RINCON_COORD:solo': 'Solo']])
+    appScript.publishZgtPlayerAttributes()
+
+    then:
+    unconfigured.emittedAttributes().containsKey('currentlyJoinedPlayers')
+    unconfigured.emittedAttributes().currentlyJoinedPlayers == ''
+    unconfigured.emittedAttributes().switch == 'off'
   }
 
   def "UPnP notifications retain their order through the parent 500 ms debounce"() {

@@ -5779,6 +5779,48 @@ void publishZgtPlayerAttributes() {
     ]
     sendChildAttributeEvents(player, attributes)
   }
+  publishZgtGroupAttributes(followers)
+}
+
+/** Publish live membership and exact configuration status to every group child. */
+void publishZgtGroupAttributes(Map<String, List<String>> followersByCoordinator) {
+  Map<String, String> coordinatorByPlayer = [:]
+  (followersByCoordinator ?: [:]).each { String coordinator, List<String> followers ->
+    coordinatorByPlayer[coordinator] = coordinator
+    (followers ?: []).each { String follower -> coordinatorByPlayer[follower] = coordinator }
+  }
+  Map<String, ChildDeviceWrapper> playersById = [:]
+  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
+    String rincon = player?.getDataValue('id')?.toString()
+    if(rincon) { playersById[rincon] = player }
+  }
+  List<ChildDeviceWrapper> groupDevices = getCurrentGroupDevices().findAll { ChildDeviceWrapper child ->
+    String dni = child?.getDeviceNetworkId()?.toString() ?: ''
+    dni.contains(GROUP_DEVICE_DNI_MARKER) || child?.getDataValue('groupCoordinatorId') != null
+  }
+  groupDevices.each { ChildDeviceWrapper groupDevice ->
+    String configuredCoordinator = groupDevice?.getDataValue('groupCoordinatorId')?.toString()
+    String activeCoordinator = configuredCoordinator ? coordinatorByPlayer[configuredCoordinator] : null
+    List<String> activeMembers = activeCoordinator
+        ? [activeCoordinator] + (followersByCoordinator[activeCoordinator] ?: []) : []
+    activeMembers = activeMembers.findAll { String id -> id }.unique()
+    List<String> configuredMembers = configuredCoordinator
+        ? normalizeGroupPlayerIds(getAllPlayersForGroupDevice(groupDevice)) : []
+    if(configuredMembers.isEmpty() && configuredCoordinator) { configuredMembers = [configuredCoordinator] }
+    Set<String> configuredSet = new LinkedHashSet<String>(configuredMembers)
+    Set<String> activeSet = new LinkedHashSet<String>(activeMembers)
+    Boolean exactMatch = configuredCoordinator != null && activeCoordinator == configuredCoordinator &&
+        configuredSet == activeSet
+    List<String> memberNames = activeMembers.collect { String id ->
+      ChildDeviceWrapper player = playersById[id]
+      player?.getDataValue('name')?.toString() ?: player?.label?.toString() ?: id
+    }
+    String joinedPlayers = memberNames.join(', ')
+    sendChildAttributeEvents(groupDevice, [
+      currentlyJoinedPlayers: joinedPlayers,
+      switch: exactMatch ? 'on' : 'off'
+    ])
+  }
 }
 
 /** Pure set+return only: no child calls, so the flush→setter call cannot deadlock the single-threaded gate. */
