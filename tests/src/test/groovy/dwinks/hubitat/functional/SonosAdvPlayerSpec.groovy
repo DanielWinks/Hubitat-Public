@@ -1139,7 +1139,7 @@ class SonosAdvPlayerSpec extends Specification {
     driver.upnpRequestQueues.clear()
     driver.eventTimestamps.clear()
     driver.device.dataValues.groupId = 'GROUP_TEST'
-    driver.device.dataValues.websocketStatus = 'open'
+    driver.runtimeState.websocketStatus = 'open'
     driver.device.dataValues.groupCoordinatorId = 'RINCON_TEST'
     driver.device.currentValues.isGroupCoordinator = 'on'
     driver.metaClass.getParent = { -> new Expando(
@@ -1235,7 +1235,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "duplicate open callback does not replay subscription setup"() {
     given:
-    driver.device.dataValues.websocketStatus = 'open'
+    driver.runtimeState.websocketStatus = 'open'
     driver.runtimeState.websocketConnectionGeneration = 4L
 
     when:
@@ -1249,30 +1249,153 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "closing callback from replaced socket does not cancel pending connect"() {
     given:
-    driver.device.dataValues.websocketStatus = 'connecting'
+    driver.runtimeState.websocketStatus = 'connecting'
     driver.runtimeState.websocketConnectPending = true
 
     when:
     driver.webSocketStatus('status: closing')
 
     then:
-    driver.device.getDataValue('websocketStatus') == 'connecting'
+    driver.getWebSocketStatus() == 'connecting'
     driver.runtimeState.websocketConnectPending == true
     !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
   }
 
   def "closing callback schedules a reconnect once"() {
     given:
-    driver.device.dataValues.websocketStatus = 'open'
+    driver.runtimeState.websocketStatus = 'open'
 
     when:
     driver.webSocketStatus('status: closing')
     driver.webSocketStatus('status: closing')
 
     then:
+    driver.getWebSocketStatus() == 'closing'
     driver.device.getDataValue('websocketStatus') == 'closing'
     driver.scheduled.count { List job -> job[1] == 'retryWebSocketConnection' } == 1
     driver.runtimeState.wsRetryCount == 1
+  }
+
+  def "failure callback while a connect is pending is ignored for the watchdog to settle"() {
+    given:
+    driver.runtimeState.websocketStatus = 'connecting'
+    driver.runtimeState.websocketConnectPending = true
+
+    when:
+    driver.webSocketStatus('failure: null')
+
+    then:
+    driver.runtimeState.websocketConnectPending == true
+    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
+  def "any failure callback without a pending connect reconnects"() {
+    given:
+    driver.runtimeState.websocketStatus = 'open'
+
+    when:
+    driver.webSocketStatus('failure: Connection refused')
+
+    then:
+    driver.getWebSocketStatus() == 'closed'
+    driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
+  def "wsConnect claims the connection once and reports connecting"() {
+    given:
+    driver.runtimeState.websocketStatus = 'closed'
+
+    when:
+    driver.wsConnect()
+    driver.wsConnect()
+
+    then:
+    websocketConnections.size() == 1
+    driver.getWebSocketStatus() == 'connecting'
+    driver.device.getDataValue('websocketStatus') == 'connecting'
+    driver.scheduled.any { List job -> job[1] == 'websocketConnectWatchdog' }
+  }
+
+  def "a status persisted as open before a restart does not look connected"() {
+    given:
+    driver.device.dataValues.websocketStatus = 'open'
+    driver.runtimeState.remove('websocketStatus')
+
+    expect:
+    !driver.isWebsocketConnected()
+  }
+
+  def "health check subscribes again when open without an audioClip subscription"() {
+    given:
+    driver.runtimeState.websocketStatus = 'open'
+    driver.clearWsSubscriptionStatus()
+
+    when:
+    driver.websocketHealthCheck()
+
+    then:
+    driver.logs.any { it.toString().contains('audioClip subscription is not confirmed') }
+    websocketMessages.any { String message ->
+      List parsed = (List)new JsonSlurper().parseText(message)
+      ((Map)parsed[0]).namespace == 'audioClip' && ((Map)parsed[0]).command == 'subscribe'
+    }
+    driver.scheduled.any { List job -> job[1] == 'websocketHealthCheck' }
+  }
+
+  def "connect watchdog and health check do not overwrite a socket that already opened"() {
+    given:
+    driver.runtimeState.websocketStatus = 'open'
+    driver.runtimeState.websocketConnectPending = true
+
+    when:
+    driver.websocketConnectWatchdog()
+    driver.websocketHealthCheck()
+
+    then:
+    driver.getWebSocketStatus() == 'open'
+    !driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
+  def "watchdog closes a connect that is still pending"() {
+    given:
+    driver.runtimeState.websocketStatus = 'connecting'
+    driver.runtimeState.websocketConnectPending = true
+
+    when:
+    driver.websocketConnectWatchdog()
+
+    then:
+    driver.getWebSocketStatus() == 'closed'
+    driver.scheduled.any { List job -> job[1] == 'retryWebSocketConnection' }
+  }
+
+  def "a retry that races uninstall cannot reopen the socket"() {
+    given:
+    driver.runtimeState.websocketStatus = 'open'
+
+    when:
+    driver.uninstalled()
+    websocketConnections.clear()
+    driver.retryWebSocketConnection()
+    driver.wsConnect()
+
+    then:
+    websocketConnections.isEmpty()
+    driver.runtimeState.websocketShutdown == true
+  }
+
+  def "uninstalled closes the socket and stops reconnecting"() {
+    given:
+    driver.runtimeState.websocketStatus = 'open'
+
+    when:
+    driver.uninstalled()
+    driver.webSocketStatus('status: closing')
+    driver.websocketHealthCheck()
+
+    then:
+    driver.runtimeState.websocketShutdown == true
+    !driver.scheduled.any { List job -> job[1] in ['retryWebSocketConnection', 'websocketHealthCheck'] }
   }
 
   def "websocket playback status remains private without publishing lastUpdated"() {
@@ -3074,7 +3197,7 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "websocket connection enables native ping liveness checks"() {
     given:
-    driver.device.dataValues.websocketStatus = 'closed'
+    driver.runtimeState.websocketStatus = 'closed'
 
     when:
     driver.wsConnect()

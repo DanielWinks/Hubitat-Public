@@ -924,7 +924,8 @@ metadata {
 @Field static final Integer TRANSPORT_MAX_ATTEMPTS = 3
 @Field static final List<Long> WS_BACKOFF_STAGE_SECONDS = [600L, 600L, 600L, 7200L, 14400L, 21600L]
 @Field static final List<Integer> WS_BACKOFF_INTERVALS_SECONDS = [30, 60, 120, 300, 900, 1800, 3600]
-@Field static final Integer WS_STALE_TIMEOUT_SECONDS = 900
+@Field static final String WS_STATUS_KEY = 'websocketStatus'
+@Field static final String WS_SHUTDOWN_KEY = 'websocketShutdown'
 // UPnP subscriptions share one per-player socket, so all service requests
 // pass through a single in-memory queue for this device.
 @Field static ConcurrentHashMap<String, Map> upnpRequestQueues = new ConcurrentHashMap<String, Map>()
@@ -1253,6 +1254,7 @@ void uninstalled() {
   unschedule('watchTransportCommand')
   unschedule('retryUnconfirmedTransportCommand')
   clearStaticDriverStateForCurrentDevice()
+  shutdownWebSocket()
 }
 void installed() {
   initialize()
@@ -1326,6 +1328,7 @@ void performImmediateInitialization() {
     try { wsClose() }
     catch(Exception e) { logDebug("Could not close WebSocket before player initialization: ${e.message}") }
   }
+  resetWebSocketRecoveryState()
   runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
   setWebSocketStatus('closed')
   clearPendingCommandsForInitialization()
@@ -1450,7 +1453,6 @@ void configure() {
   invalidateUpnpRequestsForDevice()
   migrateLegacyRuntimeState()
   pruneOrphanedDriverPersistence()
-  runtimeState.wsRetryCount = 0
   migrationCleanup()
   synchronizeTrackPositionPreference()
   reconcileChildDevices()
@@ -1599,11 +1601,13 @@ void scheduleWebsocketHealthCheck() {
 
 void websocketHealthCheck() {
   try {
+    if(runtimeState[WS_SHUTDOWN_KEY] == true) { return }
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
-      logWarn('WebSocket connection attempt exceeded timeout; retrying.')
-      runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
-      setWebSocketStatus('closed')
-      scheduleWebSocketReconnect()
+      // The connect watchdog normally handles this; this is the backstop if that job was lost.
+      if(applyWebSocketStatus('closed', 'connecting')) {
+        logWarn('WebSocket connection attempt exceeded timeout; retrying.')
+        scheduleWebSocketReconnect()
+      }
       return
     }
 
@@ -1613,19 +1617,16 @@ void websocketHealthCheck() {
       return
     }
 
+    // Open but not subscribed means the subscribe request or its response was lost.
+    if(getWsSubscriptionValue('audioClip') != 'Subscribed') {
+      logWarn('WebSocket is open but the audioClip subscription is not confirmed; subscribing again.')
+      subscribeToAudioClip()
+    }
   } finally {
-    scheduleWebsocketHealthCheck()
+    if(runtimeState[WS_SHUTDOWN_KEY] != true) { scheduleWebsocketHealthCheck() }
   }
 }
 
-void reconnectWebsocket(String reason) {
-  logInfo("Reconnecting WebSocket: ${reason}")
-  runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
-  try { wsClose() }
-  catch(Exception e) { logDebug("Could not close WebSocket during reconnect: ${e.message}") }
-  setWebSocketStatus('closed')
-  runIn(1, 'initializeWebsocketConnection', [overwrite: true])
-}
 
 
 void secondaryConfiguration() {
@@ -6460,27 +6461,64 @@ void setNextTrackAlbumArtURI(String nextTrackAlbumArtURI, Boolean isPlayingLocal
 }
 String getNextTrackAlbumArtURI() { return this.device.currentValue('nextTrackAlbumArtURI') }
 
+/** The in-memory status is authoritative so a value persisted before a reboot can never look open. */
 @CompileStatic
-Boolean isWebsocketConnected() {return getDeviceDataValue('websocketStatus') == 'open' }
+Boolean isWebsocketConnected() { return getWebSocketStatus() == 'open' }
 
 @CompileStatic
-String getWebSocketStatus() { return getDeviceDataValue('websocketStatus') }
+String getWebSocketStatus() {
+  Object status = getRuntimeState().get(WS_STATUS_KEY)
+  return status != null ? status.toString() : 'closed'
+}
 
-void setWebSocketStatus(String status) {
-  String previousStatus = getWebSocketStatus()
-  logDebug("Primary WebSocket status transition: previous=${previousStatus}, next=${status}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
+/**
+ * Record a status transition atomically. The device data value is only a display mirror for the app.
+ * 'connecting' keeps the connect-pending flag set; every other status clears it.
+ */
+void setWebSocketStatus(String status) { applyWebSocketStatus(status, null) }
+
+/**
+ * Apply a status transition only while the current status equals requiredCurrent (null means always).
+ * Timeout paths pass 'connecting' so they cannot overwrite an open callback that won the race.
+ */
+Boolean applyWebSocketStatus(String status, String requiredCurrent) {
+  String previousStatus
+  synchronized(getRuntimeState()) {
+    previousStatus = getWebSocketStatus()
+    if(requiredCurrent != null && previousStatus != requiredCurrent) { return false }
+    runtimeState[WS_STATUS_KEY] = status
+    if(status == 'connecting') { runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true }
+    else { runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY) }
+  }
+  logDebug("Primary WebSocket status transition: previous=${previousStatus}, next=${status}")
   setDeviceDataValue('websocketStatus', status)
   if(status == 'open') {
-    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     // Re-establish the audioClip status subscription after reconnecting.
     subscribeToAudioClip()
   }
-  else {
-    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
+  else if(status != 'connecting') {
     releaseFavPlaylistDelegate()
     clearWsSubscriptionStatus()
   }
+  return true
 }
+
+/** Atomically claim the right to open a connection; false when one is open or in flight. */
+Boolean claimWebSocketConnect() {
+  Boolean claimed = false
+  synchronized(getRuntimeState()) {
+    // Only initialization clears the shutdown flag, so a retry that raced uninstall can never reopen the socket.
+    if(runtimeState[WS_SHUTDOWN_KEY] != true && !isWebsocketConnected() &&
+        runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) {
+      runtimeState[WS_STATUS_KEY] = 'connecting'
+      runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
+      claimed = true
+    }
+  }
+  if(claimed) { setDeviceDataValue('websocketStatus', 'connecting') }
+  return claimed
+}
+
 
 /** Queue latest group-facing values behind a fixed maximum-wait drain. */
 @CompileStatic
@@ -6600,31 +6638,29 @@ void clearPlaylistsMap() {
 // Websocket Connection and Initialization
 // =============================================================================
 void webSocketStatus(String message) {
-  logDebug("Primary WebSocket status callback received: message=${message}, currentStatus=${getWebSocketStatus()}")
-  if(message == 'failure: null') {
-    setWebSocketStatus('closed')
-    scheduleWebSocketReconnect()
+  String text = message ?: ''
+  logDebug("Primary WebSocket status callback received: message=${text}, currentStatus=${getWebSocketStatus()}")
+  if(runtimeState[WS_SHUTDOWN_KEY] == true) {
+    logDebug('Ignoring primary WebSocket callback after shutdown')
+    return
   }
-  else if(message == 'failure: connect timed out') {
-    setWebSocketStatus('connect timed out')
-    scheduleWebSocketReconnect()
-  }
-  else if(message == 'status: open') {
+  if(text == 'status: open') {
     if(isWebsocketConnected() && runtimeState[WS_CONNECT_PENDING_STATE_KEY] != true) {
       logTrace('Ignoring duplicate primary WebSocket open callback')
       return
     }
     unschedule('websocketConnectWatchdog')
+    unschedule('retryWebSocketConnection')
     runtimeState.websocketOpenedAt = (now() / 1000L) as Long
     runtimeState.remove(WS_DISCONNECTED_SINCE_KEY)
     runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
-    setWebSocketStatus('open')
     runtimeState.wsRetryCount = 0 // Reset retry counter on successful connection
+    setWebSocketStatus('open')
   }
-  else if(message == 'status: closing') {
+  else if(text == 'status: closing') {
     if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
-      // connect() may replace the prior transport. A closing callback can belong
-      // to that transport while the replacement attempt is already in flight.
+      // connect() replaces the prior transport. A closing callback can belong to that
+      // transport while the replacement attempt is already in flight.
       logDebug('Ignoring primary WebSocket closing callback while replacement connection is pending')
       return
     }
@@ -6636,9 +6672,21 @@ void webSocketStatus(String message) {
     // The transport is going away; recover now instead of waiting for the health check.
     scheduleWebSocketReconnect()
   }
+  else if(text.startsWith('failure:')) {
+    if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
+      // Hubitat gives no socket identity, so a late failure from the replaced transport cannot be told
+      // apart from this attempt's. The connect watchdog settles a genuine failure within seconds.
+      logDebug("Ignoring primary WebSocket failure callback while connection is pending: ${text}")
+      return
+    }
+    String detail = text.substring('failure:'.length()).trim()
+    if(detail && detail != 'null') { logWarn("WebSocket failure: ${detail}") }
+    setWebSocketStatus(detail == 'connect timed out' ? 'connect timed out' : 'closed')
+    scheduleWebSocketReconnect()
+  }
   else {
     setWebSocketStatus('unknown')
-    logWarn("Websocket status: ${message}")
+    logWarn("Websocket status: ${text}")
     scheduleWebSocketReconnect()
   }
 }
@@ -6648,6 +6696,7 @@ void scheduleWebSocketReconnect() {
   Integer retryCount
   // Callbacks run concurrently; the check-and-set of the scheduled flag and the retry counter must be atomic.
   synchronized(getRuntimeState()) {
+    if(runtimeState[WS_SHUTDOWN_KEY] == true || isWebsocketConnected()) { return }
     if(runtimeState[WS_RETRY_SCHEDULED_KEY] == true) { return }
     if(runtimeState[WS_DISCONNECTED_SINCE_KEY] == null) { runtimeState[WS_DISCONNECTED_SINCE_KEY] = now() }
 
@@ -6663,16 +6712,6 @@ void scheduleWebSocketReconnect() {
   runIn(delaySeconds, 'retryWebSocketConnection', [overwrite: true])
 }
 
-Boolean restartWebSocketBackoff() {
-  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true || runtimeState[WS_DISCONNECTED_SINCE_KEY] == null) { return false }
-  unschedule('retryWebSocketConnection')
-  runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
-  runtimeState[WS_DISCONNECTED_SINCE_KEY] = now()
-  runtimeState.wsRetryCount = 0
-  scheduleWebSocketReconnect()
-  return true
-}
-
 Integer webSocketRetryIntervalSeconds(Long elapsedSeconds) {
   Long elapsed = Math.max(0L, elapsedSeconds)
   Long stageEnd = 0L
@@ -6685,34 +6724,37 @@ Integer webSocketRetryIntervalSeconds(Long elapsedSeconds) {
 
 void retryWebSocketConnection() {
   runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
+  if(runtimeState[WS_SHUTDOWN_KEY] == true) { return }
   logDebug("Attempting WebSocket reconnection...")
   wsConnect()
 }
 
 void wsConnect() {
-  if(isWebsocketConnected() || runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true) {
+  if(!claimWebSocketConnect()) {
     logTrace("Skipping primary WebSocket connect; status=${getWebSocketStatus()}, connectPending=${runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true}")
     return
   }
   String websocketUrl = getLocalWsUrl()
   if(!websocketUrl) {
+    setWebSocketStatus('closed')
     logDebug('WebSocket URL is not configured; waiting for player configuration before connecting')
     return
   }
   Map headers = ['X-Sonos-Api-Key':'123e4567-e89b-12d3-a456-426655440000']
-  runtimeState[WS_CONNECT_PENDING_STATE_KEY] = true
   try {
-    logInfo("Requesting primary WebSocket connection; previousStatus=${getWebSocketStatus()}, retryCount=${runtimeState.wsRetryCount ?: 0}")
+    logInfo("Requesting primary WebSocket connection; retryCount=${runtimeState.wsRetryCount ?: 0}")
     // Hubitat's native ping detects a half-open transport independently of application events.
     interfaces.webSocket.connect(websocketUrl, headers: headers,
         ignoreSSLIssues: true, pingInterval: WS_PING_INTERVAL_SECONDS)
+    if(runtimeState[WS_SHUTDOWN_KEY] == true) {
+      // Uninstall ran while this connect was in flight; close the socket it just opened.
+      try { interfaces.webSocket.close() } catch(Exception ignored) { }
+      return
+    }
     runIn(WS_CONNECT_TIMEOUT_SECONDS, 'websocketConnectWatchdog', [overwrite: true])
-    unschedule('renewWebsocketConnection')
     unschedule('retryWebSocketConnection')
     runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
-    scheduleResubscriptionToEvents('renewWebsocketConnection')
   } catch(Exception e) {
-    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
     setWebSocketStatus('closed')
     logWarn("WebSocket connect failed: ${e.message}")
     scheduleWebSocketReconnect()
@@ -6721,9 +6763,8 @@ void wsConnect() {
 
 void websocketConnectWatchdog() {
   if(runtimeState[WS_CONNECT_PENDING_STATE_KEY] == true && !isWebsocketConnected()) {
+    if(!applyWebSocketStatus('closed', 'connecting')) { return }
     logWarn('WebSocket connection attempt timed out; retrying.')
-    runtimeState.remove(WS_CONNECT_PENDING_STATE_KEY)
-    setWebSocketStatus('closed')
     scheduleWebSocketReconnect()
   }
 }
@@ -6733,10 +6774,26 @@ void wsClose() {
   interfaces.webSocket.close()
 }
 
-void initializeWebsocketConnection() { wsConnect() }
-void renewWebsocketConnection() {
-  if(!isWebsocketConnected()) { initializeWebsocketConnection() }
+/** Stop all reconnect work and close the socket; used when the device is removed. */
+void shutdownWebSocket() {
+  synchronized(getRuntimeState()) { runtimeState[WS_SHUTDOWN_KEY] = true }
+  ['websocketHealthCheck', 'retryWebSocketConnection', 'websocketConnectWatchdog',
+   'renewWebsocketConnection'].each { String job -> unschedule(job) }
+  try { wsClose() }
+  catch(Exception e) { logDebug("Could not close WebSocket during shutdown: ${e.message}") }
 }
+
+/** Forget backoff and obsolete jobs so a fresh initialization starts from a clean connection state. */
+void resetWebSocketRecoveryState() {
+  runtimeState.remove(WS_SHUTDOWN_KEY)
+  runtimeState.remove(WS_DISCONNECTED_SINCE_KEY)
+  runtimeState.remove(WS_RETRY_SCHEDULED_KEY)
+  runtimeState.wsRetryCount = 0
+  ['retryWebSocketConnection', 'websocketConnectWatchdog', 'renewWebsocketConnection'].each { String job ->
+    unschedule(job)
+  }
+}
+
 // =============================================================================
 // End Websocket Connection and Initialization
 // =============================================================================
