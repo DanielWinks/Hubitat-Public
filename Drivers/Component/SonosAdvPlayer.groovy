@@ -692,36 +692,77 @@ metadata {
     singleThreaded: false,
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvPlayer.groovy'
   ) {
-  capability 'MusicPlayer' //attributes: level - NUMBER mute - ENUM ["unmuted", "muted"] status - STRING trackData - JSON_OBJECT trackDescription - STRING
-
+  // Capabilities (alphabetical)
   capability 'AudioNotification'
-  capability "AudioVolume" //mute - ENUM ["unmuted", "muted"] volume - NUMBER, unit:%  //commands: volumeDown() volumeUp()
-  capability "MediaTransport" //attributes:  transportStatus - ENUM - ["playing", "paused", "stopped"]
-  capability 'SpeechSynthesis'
+  capability 'AudioVolume' // mute - ENUM ["unmuted", "muted"], volume - NUMBER (%); volumeDown()/volumeUp()
   capability 'Initialize'
+  capability 'MediaTransport' // transportStatus - ENUM ["playing", "paused", "stopped"]
+  capability 'MusicPlayer' // level - NUMBER, mute - ENUM, status - STRING, trackData - JSON_OBJECT, trackDescription - STRING
+  capability 'SpeechSynthesis'
   capability 'SwitchLevel' // Explicitly declare for WebCore compatibility - setLevel() command
 
-  command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
-  command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
-  command 'setShuffle', [[ name: 'Shuffle Mode', type: 'ENUM', constraints: ['on', 'off']]]
-  command 'shuffleOn'
-  command 'shuffleOff'
-  command 'ungroupPlayer'
-  command 'addPlayerToGroup', [[name: 'Player', type: 'STRING', description: 'RINCON ID, player name, IP address, MAC address, or Device Network ID']]
-  command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
-  command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
-  command 'setVolumeZero'
-  command 'groupVolumeUp'
-  command 'groupVolumeDown'
-  // App-to-player topology operations must be declared commands so Hubitat
-  // permits calls through a child device wrapper.
-  command 'playerCreateNewGroup'
-  command 'playerCreateGroupRequest', [[name: 'Request JSON', type: 'STRING']]
-  command 'playerModifyGroupMembersRequest', [[name: 'Request JSON', type: 'STRING']]
-  command 'muteGroup'
-  command 'unmuteGroup'
+  // Attributes: playback metadata and sources
+  attribute 'albumArtLarge', 'string'
+  attribute 'albumArtMedium', 'string'
+  attribute 'albumArtSmall', 'string'
+  attribute 'albumArtURI', 'string'
+  attribute 'audioInputFormat', 'string'
+  attribute 'audioSource', 'string'
+  attribute 'audioSourceSignalStatus', 'enum', ['not-ht', 'unknown', 'signal', 'no-signal']
+  attribute 'currentAlbumName', 'string'
+  attribute 'currentArtistName', 'string'
+  attribute 'currentFavorite', 'string'
+  attribute 'currentPlaylist', 'string'
+  attribute 'currentTrackDuration', 'string'
+  attribute 'currentTrackName', 'string'
+  attribute 'currentTrackNumber', 'number'
+  attribute 'nextAlbumName', 'string'
+  attribute 'nextArtistName', 'string'
+  attribute 'nextTrackAlbumArtURI', 'string'
+  attribute 'nextTrackName', 'string'
 
+  // Playback state and modes
+  attribute 'currentCrossfadeMode', 'enum', ['on', 'off']
+  attribute 'currentRepeatAllMode', 'enum', ['on', 'off']
+  attribute 'currentRepeatOneMode', 'enum', ['on', 'off']
+  attribute 'currentShuffleMode', 'enum', ['on', 'off']
+  attribute 'status', 'enum', ['playing', 'paused', 'stopped']
+  attribute 'transportStatus', 'enum', ['playing', 'paused', 'stopped']
+
+  // Group identity and membership
+  attribute 'groupCoordinatorId', 'string'
+  attribute 'groupCoordinatorName', 'string'
+  attribute 'groupId', 'string'
+  attribute 'groupMemberCount', 'number'
+  attribute 'groupMemberNames', 'JSON_OBJECT'
+  attribute 'groupName', 'string'
+  attribute 'groupPlayerIds', 'string'
+  attribute 'isGroupCoordinator', 'enum', ['on', 'off']
+  attribute 'isGrouped', 'enum', ['on', 'off']
+
+  // Group controls
+  attribute 'groupMute', 'string'
+  attribute 'groupVolume', 'number'
+
+  // Queue and position
+  attribute 'queueTrackPosition', 'string'
+  attribute 'queueTrackTotal', 'string'
+  attribute 'trackPosition', 'number'
+  attribute 'trackPositionUpdated', 'number'
+
+  // Equalizer and home theater controls
+  attribute 'balance', 'number'
+  attribute 'bass', 'number'
+  attribute 'htControlTosLinkConnected', 'enum', ['0', '1']
+  attribute 'loudness', 'enum', ['on', 'off']
+  attribute 'nightMode', 'enum', ['on', 'off']
+  attribute 'speechEnhancement', 'enum', ['on', 'off']
+  attribute 'treble', 'number'
+
+  // Commands: favorites and playlists
   command 'getFavorites'
+  command 'getPlaylists'
+  command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
   command 'loadFavoriteFull', [
     [ name: 'favoriteId', type: 'STRING'],
     [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
@@ -730,9 +771,7 @@ metadata {
     [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
     [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
   ]
-  command 'loadFavorite', [[ name: 'favoriteId', type: 'STRING']]
-
-  command 'getPlaylists'
+  command 'loadPlaylist', [[ name: 'playlistId', type: 'STRING']]
   command 'loadPlaylistFull', [
     [ name: 'playlistId', type: 'STRING'],
     [ name: 'repeatMode', type: 'ENUM', constraints: [ 'repeat all', 'repeat one', 'off', 'unchanged' ]],
@@ -741,124 +780,110 @@ metadata {
     [ name: 'autoPlay', type: 'ENUM', constraints: [ 'true', 'false' ]],
     [ name: 'crossfadeMode', type: 'ENUM', constraints: ['on', 'off']]
   ]
-  command 'loadPlaylist', [[ name: 'playlistId', type: 'STRING']]
 
-  command 'enableCrossfade'
+  // Group membership and topology
+  command 'addPlayerToGroup', [[name: 'Player', type: 'STRING', description: 'RINCON ID, player name, IP address, MAC address, or Device Network ID']]
+  // App-to-player topology operations must be declared commands so Hubitat permits calls through a child device wrapper.
+  command 'playerCreateGroupRequest', [[name: 'Request JSON', type: 'STRING']]
+  command 'playerCreateNewGroup'
+  command 'playerModifyGroupMembersRequest', [[name: 'Request JSON', type: 'STRING']]
+  command 'ungroupPlayer'
+
+  // Group volume and mute
+  command 'groupVolumeDown'
+  command 'groupVolumeUp'
+  command 'muteGroup'
+  command 'setGroupMute', [[ name: 'state', type: 'ENUM', constraints: ['muted', 'unmuted']]]
+  command 'setGroupVolume', [[name: 'Group Volume*', type: 'NUMBER', description: 'Volume level (0-100)'], [name: 'Fade Duration', type: 'NUMBER', description: 'Fade duration in seconds (optional)']]
+  command 'setVolumeZero'
+  command 'unmuteGroup'
+
+  // Playback modes
   command 'disableCrossfade'
-
-  command 'repeatOne'
+  command 'enableCrossfade'
   command 'repeatAll'
   command 'repeatNone'
+  command 'repeatOne'
+  command 'setCrossfade', [[ name: 'Crossfade Mode', type: 'ENUM', constraints: ['on', 'off']]]
+  command 'setRepeatMode', [[ name: 'Repeat Mode', type: 'ENUM', constraints: [ 'off', 'repeat one', 'repeat all' ]]]
+  command 'setShuffle', [[ name: 'Shuffle Mode', type: 'ENUM', constraints: ['on', 'off']]]
+  command 'shuffleOff'
+  command 'shuffleOn'
 
-  attribute 'currentRepeatOneMode', 'enum', [ 'on', 'off' ]
-  attribute 'currentRepeatAllMode', 'enum', [ 'on', 'off' ]
-  attribute 'currentCrossfadeMode', 'enum', [ 'on', 'off' ]
-  attribute 'currentShuffleMode' , 'enum', [ 'on', 'off' ]
-  attribute 'currentTrackDuration', 'string'
-  attribute 'trackPosition', 'number'
-  attribute 'trackPositionUpdated', 'number'
-  attribute 'currentArtistName', 'string'
-  attribute 'albumArtURI', 'string'
-  attribute 'albumArtSmall', 'string'
-  attribute 'albumArtMedium', 'string'
-  attribute 'albumArtLarge', 'string'
-  attribute 'audioSource', 'string'
-  attribute 'audioInputFormat', 'string'
-  attribute 'audioSourceSignalStatus', 'enum', ['not-ht', 'unknown', 'signal', 'no-signal']
-  attribute 'currentAlbumName', 'string'
-  attribute 'currentTrackName', 'string'
-  attribute 'currentFavorite', 'string'
-  attribute 'currentPlaylist', 'string'
-  attribute 'currentTrackNumber', 'number'
-  attribute 'nextArtistName', 'string'
-  attribute 'nextAlbumName', 'string'
-  attribute 'nextTrackName', 'string'
-  attribute 'nextTrackAlbumArtURI', 'string'
-  attribute 'queueTrackTotal', 'string'
-  attribute 'queueTrackPosition', 'string'
-
-  attribute 'treble', 'number'
-  attribute 'bass', 'number'
-  attribute 'loudness', 'enum', [ 'on', 'off' ]
-  attribute 'balance', 'number'
-  attribute 'nightMode', 'enum', [ 'on', 'off' ]
-  attribute 'speechEnhancement', 'enum', [ 'on', 'off' ]
-  attribute 'htControlTosLinkConnected', 'enum', [ '0', '1' ]
-  command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
-  command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
-  command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
-  command 'setBalance', [[name:'Left/Right Balance*', type:"NUMBER", description:"Left/Right Balance (-20..20)", constraints:["NUMBER"]]]
-  command 'setNightMode', [[ name: 'Night Mode (Soundbar only)*', type: 'ENUM', description: 'Toggle Night Mode on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
-  command 'setSpeechEnhancement', [[ name: 'Speech Enhancement (Soundbar only)*', type: 'ENUM', description: 'Toggle Speech Enhancement on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
-
+  // Source selection
   command 'selectLineIn', [[name: 'Source Player', type: 'STRING', description: 'RINCON ID, IP address, or player name of source device (optional, defaults to this player)']]
   command 'selectTV'
 
+  // Equalizer and home theater controls
+  command 'setBalance', [[name:'Left/Right Balance*', type:"NUMBER", description:"Left/Right Balance (-20..20)", constraints:["NUMBER"]]]
+  command 'setBass', [[name:'Bass Level*', type:"NUMBER", description:"Bass level (-10..10)", constraints:["NUMBER"]]]
+  command 'setLoudness', [[ name: 'Loudness Mode', type: 'ENUM', constraints: ['on', 'off']]]
+  command 'setNightMode', [[ name: 'Night Mode (Soundbar only)*', type: 'ENUM', description: 'Toggle Night Mode on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
+  command 'setSpeechEnhancement', [[ name: 'Speech Enhancement (Soundbar only)*', type: 'ENUM', description: 'Toggle Speech Enhancement on soundbar speakers (Arc, Beam, Ray, Playbar, Playbase)', constraints: ['on', 'off']]]
+  command 'setTreble', [[name:'Treble Level*', type:"NUMBER", description:"Treble level (-10..10)", constraints:["NUMBER"]]]
+
+  // Announcements
+  command 'playHighPriorityTrack', [
+    [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
+    [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
+  ]
   command 'playHighPriorityTTS', [
     [name:'Text*', type:"STRING", description:"Text to play", constraints:["STRING"]],
     [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]],
     [name: 'Voice name', type: "ENUM", constraints: getCachedTTSVoiceNames(), defaultValue: getCurrentTTSVoice()]
   ]
-
-  command 'playHighPriorityTrack', [
-    [name:'Track URI*', type:"STRING", description:"URI/URL of track to play", constraints:["STRING"]],
-    [name:'Volume Level', type:"NUMBER", description:"0 uses the current/default level; -1 explicitly requests zero; 1-100 sets the level", constraints:["NUMBER"]]
-  ]
-
-  attribute 'groupVolume', 'number'
-  attribute 'groupMute', 'string'
-  attribute 'groupName', 'string'
-  attribute 'groupCoordinatorName', 'string'
-  attribute 'isGroupCoordinator' , 'enum', [ 'on', 'off' ]
-  attribute 'groupId', 'string'
-  attribute 'groupCoordinatorId', 'string'
-  attribute 'isGrouped', 'enum', [ 'on', 'off' ]
-  attribute 'groupMemberCount', 'number'
-  attribute 'groupPlayerIds', 'string'
-  attribute 'groupMemberNames', 'JSON_OBJECT'
-  attribute 'status' , 'enum', [ 'playing', 'paused', 'stopped' ]
-  attribute 'transportStatus' , 'enum', [ 'playing', 'paused', 'stopped' ]
   }
 
   preferences {
     section('Device Settings') {
-      input 'enableTrackPositionUpdates', 'bool', title: 'Enable track position updates', required: false, defaultValue: false
+      // Child device creation
+      if(hasBatteryCapability()) {
+        input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
+      }
+      input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
+      input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
+      input 'createMuteChildDevice', 'bool', title: 'Create child device for mute control?', required: false, defaultValue: false
+      if(hasHTPlaybackCapability() == true) {
+        input 'createNightModeChildDevice', 'bool', title: 'Create child device for Night Mode control', required: false, defaultValue: false
+      }
+      input 'createPlaylistChildDevice', 'bool', title: 'Create child device for playlists?', required: false, defaultValue: false
+      input 'createQueueChildDevice', 'bool', title: 'Create child device for queue management?', required: false, defaultValue: false
+      input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
+      input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
+      if(getRightChannelRincon() != null && getRightChannelRincon() != '') {
+        input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
+      }
+      input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
+      input 'createSleepTimerChildDevice', 'bool', title: 'Add sleep timer child device', required: false, defaultValue: false
+      if(hasHTPlaybackCapability() == true) {
+        input 'createSpeechEnhancementChildDevice', 'bool', title: 'Create child device for Speech Enhancement control', required: false, defaultValue: false
+      }
+
+      // Event and track metadata behavior
+      input 'disableAlbumArtEvents', 'bool', title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)', required: false, defaultValue: true
+      input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
       input 'disableTrackDataEvents', 'bool', title: 'Disable track data events', required: false, defaultValue: true
+      input 'enableTrackPositionUpdates', 'bool', title: 'Enable track position updates', required: false, defaultValue: false
       input 'includeTrackDataMetaData', 'bool', title: 'Include metaData and trackMetaData in trackData JSON', required: false, defaultValue: false
+
+      // Playback and announcement behavior
+      if(hasAudioClipCapability() == true) {
+        input 'chimeBeforeHighPriorityTTS', 'bool', title: 'Play chime before high priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
+        input 'chimeBeforeStandardPriorityTTS', 'bool', title: 'Play chime before standard priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
+      }
+      input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
+      input name: 'ttsBoostAmount', title: 'TTS Volume boost/cut default:(+10%)', type: 'enum', required: false, defaultValue: 10,
+      options: [(-10):'-10%', (-5):'-5%', 0:'No Change', 5:'+5%', 10:'+10%', 15:'+15%', 20:'+20%']
+
+      // Volume adjustment
+      input name: 'volumeAdjustAmount', title: 'Volume up/down Adjust (Speaker Levels 21+)', type: 'enum', required: false, defaultValue: 5,
+      options: [1:'+/- 1%', 2:'+/- 2%', 3:'+/- 3%', 4:'+/- 4%', 5:'+/- 5%', 10:'+/- 10%', 20:'+/- 20%']
       input name: 'volumeAdjustAmountLow', title: 'Volume up/down Adjust (Speaker Levels 0-10)', type: 'enum', required: false, defaultValue: 5,
       options: [1:'+/- 1%', 2:'+/- 2%', 3:'+/- 3%', 4:'+/- 4%', 5:'+/- 5%', 10:'+/- 10%', 20:'+/- 20%']
       input name: 'volumeAdjustAmountMid', title: 'Volume up/down Adjust (Speaker Levels 11-20)', type: 'enum', required: false, defaultValue: 5,
       options: [1:'+/- 1%', 2:'+/- 2%', 3:'+/- 3%', 4:'+/- 4%', 5:'+/- 5%', 10:'+/- 10%', 20:'+/- 20%']
-      input name: 'volumeAdjustAmount', title: 'Volume up/down Adjust (Speaker Levels 21+)', type: 'enum', required: false, defaultValue: 5,
-      options: [1:'+/- 1%', 2:'+/- 2%', 3:'+/- 3%', 4:'+/- 4%', 5:'+/- 5%', 10:'+/- 10%', 20:'+/- 20%']
-      input name: 'ttsBoostAmount', title: 'TTS Volume boost/cut default:(+10%)', type: 'enum', required: false, defaultValue: 10,
-      options: [(-10):'-10%', (-5):'-5%', 0:'No Change', 5:'+5%', 10:'+10%', 15:'+15%', 20:'+20%']
-      input 'disableArtistAlbumTrackEvents', 'bool', title: 'Disable artist, album, and track events', required: false, defaultValue: false
-      input 'disableAlbumArtEvents', 'bool', title: 'Disable album art URL events (albumArtSmall, albumArtMedium, albumArtLarge)', required: false, defaultValue: true
-      input 'createCrossfadeChildDevice', 'bool', title: 'Create child device for crossfade control?', required: false, defaultValue: false
-      input 'createShuffleChildDevice', 'bool', title: 'Create child device for shuffle control?', required: false, defaultValue: false
-      input 'createRepeatOneChildDevice', 'bool', title: 'Create child device for "repeat one" control?', required: false, defaultValue: false
-      input 'createRepeatAllChildDevice', 'bool', title: 'Create child device for "repeat all" control?', required: false, defaultValue: false
-      input 'createMuteChildDevice', 'bool', title: 'Create child device for mute control?', required: false, defaultValue: false
-      if(hasBatteryCapability()) {
-        input 'createBatteryStatusChildDevice', 'bool', title: 'Create child device for battery status? (portable speakers only)', required: false, defaultValue: false
-      }
-      input 'createFavoritesChildDevice', 'bool', title: 'Create child device for favorites?', required: false, defaultValue: false
-      input 'createPlaylistChildDevice', 'bool', title: 'Create child device for playlists?', required: false, defaultValue: false
-      input 'createQueueChildDevice', 'bool', title: 'Create child device for queue management?', required: false, defaultValue: false
-      input 'createSleepTimerChildDevice', 'bool', title: 'Add sleep timer child device', required: false, defaultValue: false
-      if(getRightChannelRincon() != null && getRightChannelRincon() != '') {
-        input 'createRightChannelChildDevice', 'bool', title: 'Create child device right channel? (stereo pair only)', required: false, defaultValue: false
-      }
-      if(hasHTPlaybackCapability() == true) {
-        input 'createNightModeChildDevice', 'bool', title: 'Create child device for Night Mode control', required: false, defaultValue: false
-        input 'createSpeechEnhancementChildDevice', 'bool', title: 'Create child device for Speech Enhancement control', required: false, defaultValue: false
-      }
-      if(hasAudioClipCapability() == true) {
-        input 'chimeBeforeStandardPriorityTTS', 'bool', title: 'Play chime before standard priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
-        input 'chimeBeforeHighPriorityTTS', 'bool', title: 'Play chime before high priority non-interrupting (audioClip) TTS messages', required: false, defaultValue: false
-      }
-      input 'enableAirPlayUnmuteVolumeFix', 'bool', title: 'Enable volume restore fix for AirPlay unmute (fixes unmute issues with AirPlay streams)', required: false, defaultValue: true
+
+      // Diagnostics
       input 'enableRawWebsocketLogging', 'bool', title: 'Enable raw WebSocket message logging (verbose, requires trace logging enabled)', required: false, defaultValue: false
     }
     section('Logging Settings') {
