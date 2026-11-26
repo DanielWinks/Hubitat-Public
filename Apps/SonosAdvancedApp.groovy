@@ -60,7 +60,6 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.security.MessageDigest
-import groovy.json.JsonBuilder
 import org.quartz.CronExpression
 
 // =============================================================================
@@ -347,6 +346,7 @@ preferences {
 @Field static final String PLAYLISTS_CHILD_APP_NAME = 'Sonos Advanced Controller - Playlists'
 @Field static final String FAVORITES_CHILD_APP_NAME = 'Sonos Advanced Controller - Favorites'
 @Field static final String CATALOG_SNAPSHOTS_MEMORY_KEY = 'catalogSnapshots'
+@Field static final String GROUP_COMMAND_INBOX_MEMORY_KEY = 'groupCommandInbox'
 @Field static final String CHILD_MANAGED_SETTINGS_STATE_KEY = 'childManagedSettings'
 @Field static final List<String> CHILD_MANAGED_SETTING_NAMES = [
   'maximumTtsRetention', 'groupAnnouncementMode', 'highPriorityAnnouncementMode',
@@ -469,7 +469,6 @@ preferences {
 // =============================================================================
 @Field final Set<String> ACTIVE_APP_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
   ZGT_LAST_REPORT_STATE_KEY,
-  ZGT_PAYLOAD_STATE_KEY,
   GROUP_MEMBERSHIP_GENERATIONS_STATE_KEY,
   GROUP_DEVICE_COORDINATORS_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
@@ -481,7 +480,6 @@ preferences {
   DISCOVERY_MANAGEMENT_CHILD_ID_STATE_KEY,
   LOCAL_CONTROL_RETRY_STATE_KEY,
   LOCAL_CONTROL_RETRY_REQUEST_STATE_KEY,
-  STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY,
   ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY,
   'userGroups',
   'alarmManagementPreferencesApplied',
@@ -526,9 +524,10 @@ preferences {
 @Field final List<String> APP_MEMORY_KEYS = [
   AUDIO_CLIP_QUEUES_STATE_KEY, GROUP_ANNOUNCEMENT_QUEUES_STATE_KEY, AVT_EVENTS_BY_DNI_STATE_KEY,
   PLAYER_READINGS_STATE_KEY, GROUP_RENDERING_STATE_KEY, PENDING_GROUP_RENDERING_STATE_KEY,
-  DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY, PENDING_GROUP_STATE_QUEUE_KEY, CATALOG_SNAPSHOTS_MEMORY_KEY
+  DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY, PENDING_GROUP_STATE_QUEUE_KEY, CATALOG_SNAPSHOTS_MEMORY_KEY, GROUP_COMMAND_INBOX_MEMORY_KEY
 ]
 @Field final List<String> ATOMIC_MIGRATED_STATE_KEYS = [
+  ZGT_PAYLOAD_STATE_KEY,
   PLAYER_PREFERENCES_BY_DNI_STATE_KEY,
   GROUP_PREFERENCES_BY_DNI_STATE_KEY,
   READY_FOR_ZGT_STATE_KEY,
@@ -538,6 +537,7 @@ preferences {
   DEFERRED_PLAYER_COMMANDS_STATE_KEY
 ]
 @Field final Set<String> ACTIVE_APP_ATOMIC_STATE_KEYS = Collections.unmodifiableSet(new HashSet<String>([
+  ZGT_PAYLOAD_STATE_KEY,
   PLAYER_PREFERENCES_BY_DNI_STATE_KEY,
   GROUP_PREFERENCES_BY_DNI_STATE_KEY,
   READY_FOR_ZGT_STATE_KEY,
@@ -683,7 +683,10 @@ Map<String, Map> memoryMapCopy(String key) {
 /** Read-modify-write an atomicState key under its lock. The closure receives the current value. */
 Object mutateAppData(String key, Closure fn) {
   synchronized(appLock("atomic:${key}")) {
-    Object next = fn.call(atomicState[key])
+    Object current = atomicState[key]
+    Object next = fn.call(current)
+    // A no-change pass (including a volume command's unchanged preference merge) must not rewrite the value.
+    if(next == current) { return next }
     if(next == null) { atomicState.remove(key) } else { atomicState[key] = next }
     return next
   }
@@ -714,9 +717,13 @@ Boolean advanceSequenceMark(String memoryKey, String streamKey, Object epochRaw,
   synchronized(appLock('sequence')) {
     Map<String, Map> marks = appMemoryMap(memoryKey)
     Map mark = marks.get(streamKey)
-    if(mark != null && mark.epoch == epoch) {
-      Long last = (Long)mark.sequence
-      if(sequence < last || (sequence == last && !allowEqual)) { return false }
+    if(mark != null) {
+      Long markEpoch = (Long)mark.epoch
+      if(epoch < markEpoch) { return false }
+      if(epoch == markEpoch) {
+        Long last = (Long)mark.sequence
+        if(sequence < last || (sequence == last && !allowEqual)) { return false }
+      }
     }
     marks.remove(streamKey)
     marks.put(streamKey, [epoch: epoch, sequence: sequence])
@@ -1472,7 +1479,7 @@ void drainPlayerProvisioningRequests() {
         ChildDeviceWrapper player = dni ? app.getChildDevice(dni) : null
         if(player && player.getDataValue('id')) { app.deleteChildDevice(dni) }
       }
-      refreshStaticDriverActivePlayerRoster()
+      refreshGroupDeviceCoordinators()
       runIn(1, 'subscribeToGroupCommandRequests')
     } else {
       Integer created = createPlayerDevicesFromProvisioning((List<String>)request.selected,
@@ -1491,16 +1498,7 @@ void installed() { initialize() }
 void updated() { configure(false) }
 void initialize() { configure(true) }
 
-@Field static final String STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY = 'staticDriverActivePlayerRoster'
-@Field static final Integer STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION = 1
 @Field static final String ANNOUNCEMENT_POLICY_SETTINGS_STATE_KEY = 'announcementPolicySettings'
-
-/** Return the player roster published during app lifecycle/device changes. */
-Map<String, Object> getStaticDriverActivePlayerRoster() {
-  Object cachedRoster = state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY]
-  if(!(cachedRoster instanceof Map)) { return null }
-  return new LinkedHashMap<String, Object>((Map<String, Object>)cachedRoster)
-}
 
 /** Record each group device's coordinator RINCON so AVT delivery can address group devices by DNI alone. */
 void refreshGroupDeviceCoordinators(List<ChildDeviceWrapper> children = null) {
@@ -1511,51 +1509,6 @@ void refreshGroupDeviceCoordinators(List<ChildDeviceWrapper> children = null) {
     if(child.getDataValue('id') == null && coordinatorId && dni) { registry[dni] = coordinatorId }
   }
   state[GROUP_DEVICE_COORDINATORS_STATE_KEY] = registry
-}
-
-/** Refresh the driver cleanup snapshot after child-device changes. */
-void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChanges = true) {
-  try {
-    Map<String, Object> previousRoster = getStaticDriverActivePlayerRoster()
-    List<Map<String, String>> roster = []
-    List<ChildDeviceWrapper> children = app.getChildDevices()
-    if(children == null) {
-      logWarn('Could not refresh active player roster cache: child device list was unavailable')
-      return
-    }
-    children.each { ChildDeviceWrapper child ->
-      String playerId = child.getDataValue('id')
-      String dni = child.getDeviceNetworkId()
-      if(playerId != null && playerId != '' && dni != null && dni != '') {
-        roster.add([playerId: playerId, dni: dni])
-      }
-    }
-    refreshGroupDeviceCoordinators(children)
-    Long refreshedAt = (now() / 1000L) as Long
-    state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY] = [
-      version: STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION,
-      refreshedAt: refreshedAt,
-      players: roster
-    ]
-    Boolean rosterChanged = previousRoster?.players != roster
-    String serializedRoster = new JsonBuilder(state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY]).toString()
-    children.each { ChildDeviceWrapper child ->
-      if(child.getDeviceNetworkId() && child.getDataValue('id')) {
-        child.updateDataValue('staticDriverActivePlayerRoster', serializedRoster)
-      }
-    }
-    if(rosterChanged && refreshPoliciesWhenRosterChanges) {
-      Set<String> previousDnis = ((List<Map>)previousRoster?.players ?: []).collect { Map row ->
-        row?.dni?.toString()
-      }.findAll { String dni -> dni } as Set<String>
-      roster.findAll { Map<String, String> row -> !previousDnis.contains(row.dni) }.each { Map<String, String> row ->
-        ChildDeviceWrapper addedPlayer = getChildDevice(row.dni)
-        refreshPlayerAnnouncementPolicySnapshot(addedPlayer)
-      }
-    }
-  } catch(Exception e) {
-    logWarn("Could not refresh active player roster cache: ${e.message}")
-  }
 }
 
 void configure(Boolean startup = false) {
@@ -1581,10 +1534,9 @@ void configure(Boolean startup = false) {
   catch (Exception e) { logError("createGroupDevices() Failed: ${e}")}
   try { configureAlarmManagement() }
   catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
-  refreshStaticDriverActivePlayerRoster(false)
+  refreshGroupDeviceCoordinators()
   refreshPlayerAnnouncementPolicySnapshots(startup)
-  unschedule('refreshStaticDriverActivePlayerRoster')
-  schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
+  unschedule('refreshStaticDriverActivePlayerRoster') // retired 5-minute roster schedule from older versions
   subscribeToGroupCommandRequests()
   Map activeGroupOperation = getActiveGroupOperation()
   if(activeGroupOperation != null) {
@@ -2361,7 +2313,7 @@ void refreshTTSVoiceCacheCallback(AsyncResponse response, Map data) {
 void createGroupDevices() {
   // Group definitions are owned by the discovery child app. Existing group
   // devices persist their coordinator and follower IDs in device data values.
-  refreshStaticDriverActivePlayerRoster(false)
+  refreshGroupDeviceCoordinators()
 }
 
 void upsertGroupDevice(String groupName, Map definition) {
@@ -2459,7 +2411,6 @@ void updatePlayerPolicySnapshotValue(ChildDeviceWrapper player, String key, Obje
 }
 
 void finalizeProvisionedPlayerCreation(Map data) {
-  refreshStaticDriverActivePlayerRoster()
   runIn(1, 'subscribeToGroupCommandRequests')
 }
 
@@ -2488,6 +2439,7 @@ Integer createPlayerDevicesFromProvisioning(List<String> selectedPlayerDevices,
     playerInfo.each { Object key, Object value ->
       if(key != null && value != null) { cd.updateDataValue(key.toString(), value.toString()) }
     }
+    refreshPlayerAnnouncementPolicySnapshot(cd)
     String rincon = playerInfo.id?.toString()
     List<Map> secondaries = secondaryInfoByDni.values().findAll { Object raw ->
       raw instanceof Map && ((Map)raw).primaryDeviceId?.toString() == rincon
@@ -2507,7 +2459,7 @@ Integer createPlayerDevicesFromProvisioning(List<String> selectedPlayerDevices,
       runIn(1, 'runSecondaryConfiguration', [data: [dni: dni]])
     }
   }
-  refreshStaticDriverActivePlayerRoster()
+  refreshGroupDeviceCoordinators()
   return createdCount
 }
 
@@ -2537,7 +2489,7 @@ void runSecondaryConfiguration(Map data) {
 void removeOrphans() {
   // Group removal is explicit from the discovery child app. The coordination
   // parent does not infer deletion from missing table settings.
-  refreshStaticDriverActivePlayerRoster()
+  refreshGroupDeviceCoordinators()
 }
 // =============================================================================
 // End Create Child Devices
@@ -2984,11 +2936,15 @@ void applyPlayerAttributeUpdateCallback(Map data) {
   String playerDni = data?.playerDni?.toString()
   Map incoming = data?.attributes instanceof Map ? (Map)data.attributes : [:]
   if(!playerDni || incoming.isEmpty()) { return }
-  Set<String> current = namesPassingSequence(SEQUENCE_APPLIED_MEMORY_KEY, "${playerDni}:attr".toString(),
-      incoming.keySet().collect { Object name -> name.toString() }, data.epoch, data.sequence, true)
-  Map<String, Object> attributes = [:]
-  current.each { String name -> attributes[name] = incoming[name] }
-  applyPlayerAttributeUpdate(playerDni, attributes)
+  // Claiming the sequence and writing the event happen under one per-player lock, so a callback that
+  // claimed a name cannot pause and then emit its old value after a newer callback already emitted.
+  synchronized(appLock("publish:${playerDni}".toString())) {
+    Set<String> current = namesPassingSequence(SEQUENCE_APPLIED_MEMORY_KEY, "${playerDni}:attr".toString(),
+        incoming.keySet().collect { Object name -> name.toString() }, data.epoch, data.sequence, true)
+    Map<String, Object> attributes = [:]
+    current.each { String name -> attributes[name] = incoming[name] }
+    applyPlayerAttributeUpdate(playerDni, attributes)
+  }
 }
 
 void applyPlayerAttributeUpdate(String playerDni, Map<String, Object> attributes) {
@@ -3164,10 +3120,6 @@ Boolean playerAppRequestHandler(Object event) {
       ? Math.max(0L, now() - (args.createdAt as Long)) : -1L
   logDebug("Received player app request action=${request.action ?: 'unknown'}, eventRequestId=${request.requestId ?: 'unknown'}, ttsRequestId=${args.requestId ?: 'none'}, correlation=${args.correlationId ?: 'none'}, sourceDni=${playerDni}, ageMs=${eventAgeMs}")
   switch(request.action?.toString()) {
-    case 'refreshRoster':
-      // Roster refresh writes to every child; run it from a new execution.
-      runInMillis(1, 'refreshStaticDriverActivePlayerRoster', [overwrite: true])
-      return true
     case 'refreshPolicy':
       runInMillis(1, 'refreshPlayerPolicyCallback', [overwrite: false, data: [playerDni: playerDni]])
       return true
@@ -4082,8 +4034,31 @@ Boolean acceptGroupCommandRequest(Map request) {
     logDebug("Dropping superseded group command ${command} (${request.requestId ?: 'unknown'}) for ${groupDni}")
     return true
   }
-  runInMillis(1, 'processGroupCommandRequest', [overwrite: false, data: [request: new LinkedHashMap(request)]])
+  // Callbacks run in parallel and take the work lock in any order, so a group activation followed by Play
+  // could run Play first. Requests wait in an arrival-ordered inbox; each callback processes the oldest entry.
+  enqueueGroupCommandInbox(groupDni, new LinkedHashMap(request))
+  runInMillis(1, 'processGroupCommandRequest', [overwrite: false, data: [request: new LinkedHashMap(request), inbox: true]])
   return true
+}
+
+void enqueueGroupCommandInbox(String groupDni, Map request) {
+  withMemoryMap(GROUP_COMMAND_INBOX_MEMORY_KEY) { Map<String, Map> inbox ->
+    Map<String, Map> entries = inbox[groupDni] instanceof Map ? (Map<String, Map>)inbox[groupDni] : new LinkedHashMap<String, Map>()
+    entries.put(UUID.randomUUID().toString(), request)
+    inbox[groupDni] = entries
+  }
+}
+
+/** Remove and return the oldest queued command for a group, in arrival order. */
+Map popGroupCommandInbox(String groupDni) {
+  return (Map)withMemoryMap(GROUP_COMMAND_INBOX_MEMORY_KEY) { Map<String, Map> inbox ->
+    Map<String, Map> entries = inbox[groupDni] instanceof Map ? (Map<String, Map>)inbox[groupDni] : null
+    if(entries == null || entries.isEmpty()) { return null }
+    String oldest = entries.keySet().iterator().next()
+    Map request = entries.remove(oldest)
+    if(entries.isEmpty()) { inbox.remove(groupDni) }
+    return request
+  }
 }
 
 /**
@@ -4101,6 +4076,7 @@ void clearPendingCommandsForDevice(String deviceDni) {
 
     List<Map> deferredGroups = atomicState[DEFERRED_GROUP_COMMANDS_STATE_KEY] instanceof List
         ? (List<Map>)atomicState[DEFERRED_GROUP_COMMANDS_STATE_KEY] : []
+    withMemoryMap(GROUP_COMMAND_INBOX_MEMORY_KEY) { Map<String, Map> inbox -> inbox.remove(deviceDni) }
     deferredGroups = deferredGroups.findAll { Map request -> request.groupDni?.toString() != deviceDni }
     if(deferredGroups.isEmpty()) { atomicState.remove(DEFERRED_GROUP_COMMANDS_STATE_KEY) }
     else { atomicState[DEFERRED_GROUP_COMMANDS_STATE_KEY] = deferredGroups }
@@ -4207,6 +4183,10 @@ Boolean isRequestOlderThanDeviceCommandClear(String deviceDni, Object createdAt)
 void processGroupCommandRequest(Map data) {
   synchronized(appLock('work')) {
     Map request = data?.request instanceof Map ? (Map)data.request : null
+    if(data?.inbox && request != null) {
+      // Process the oldest queued command for this group, not necessarily the one that scheduled this callback.
+      request = popGroupCommandInbox(request.groupDni?.toString())
+    }
     String groupDni = request?.groupDni as String
     String command = request?.command as String
     if(!groupDni || !command) {
@@ -5980,10 +5960,13 @@ void advanceGroupTopologyOperation(Map data = [:]) {
   }
 }
 
-/** Store the elected subscriber's parsed ZGT snapshot and defer player event publication. */
+/**
+ * Store the elected subscriber's parsed ZGT snapshot and defer player event publication. The sequence check,
+ * the atomicState write and the topology store share one lock, so an older report that finishes building
+ * its projection late can never replace the newer topology. Publication reads the stored snapshot.
+ */
 void setZgtPayload(Map<String, Object> payload) {
   if(!(payload?.followersByCoordinator instanceof Map) || !(payload?.groupNamesById instanceof Map)) { return }
-  if(!acceptSequence("${payload.sourceDni}:zgt".toString(), payload.epoch, payload.sequence)) { return }
   Map<String, List<String>> followersByCoordinator = [:]
   ((Map)payload.followersByCoordinator).each { Object rawCoordinator, Object rawFollowers ->
     String coordinator = rawCoordinator?.toString()
@@ -6000,10 +5983,15 @@ void setZgtPayload(Map<String, Object> payload) {
     if(groupId) { groupNamesById[groupId] = rawName?.toString() ?: groupId }
   }
   Map<String, Object> snapshot = [followersByCoordinator: followersByCoordinator, groupNamesById: groupNamesById]
-  state[ZGT_PAYLOAD_STATE_KEY] = snapshot
-  storeUpnpTopology([sourceDni: 'elected-subscriber',
-      eventsByGroupId: buildZgtEventProjection(snapshot)])
-  runInMillis(1, 'publishZgtPlayerAttributes', [overwrite: true])
+  Boolean stored = false
+  synchronized(appLock('zgt')) {
+    if(!acceptSequence("${payload.sourceDni}:zgt".toString(), payload.epoch, payload.sequence)) { return }
+    atomicState[ZGT_PAYLOAD_STATE_KEY] = snapshot
+    storeUpnpTopology([sourceDni: 'elected-subscriber',
+        eventsByGroupId: buildZgtEventProjection(snapshot)])
+    stored = true
+  }
+  if(stored) { runInMillis(1, 'publishZgtPlayerAttributes', [overwrite: true]) }
 }
 
 /** Convert the two-map transport into the existing internal topology event shape. */
@@ -6044,7 +6032,7 @@ String getPlayerNameForRincon(String rincon) {
 
 /** Publish all topology attributes to every player child, including singleton/reset states. */
 void publishZgtPlayerAttributes() {
-  Map payload = state[ZGT_PAYLOAD_STATE_KEY] instanceof Map ? (Map)state[ZGT_PAYLOAD_STATE_KEY] : [:]
+  Map payload = atomicState[ZGT_PAYLOAD_STATE_KEY] instanceof Map ? (Map)atomicState[ZGT_PAYLOAD_STATE_KEY] : [:]
   Map<String, List<String>> followers = payload.followersByCoordinator instanceof Map
       ? (Map<String, List<String>>)payload.followersByCoordinator : [:]
   Map<String, String> groupNames = payload.groupNamesById instanceof Map
@@ -6220,10 +6208,12 @@ void processUpnpTopologyNotification(Map notification) {
 void putAvtEvents(String dni, List<Map> events, Object epoch, Object sequence) {
   if(!dni || !(events instanceof List) || events.isEmpty()) { return }
   List<Map> candidates = events.findAll { Map event -> event?.name && event.containsKey('value') }
-  Set<String> accepted = namesPassingSequence(SEQUENCE_ACCEPTED_MEMORY_KEY, "${dni}:avt".toString(),
-      candidates.collect { Map event -> event.name.toString() }, epoch, sequence, false)
   List<Map> incoming = []
+  // The sequence check and the cache merge share one lock, so an older report that stalls after
+  // passing the check can never overwrite values a newer report already stored.
   synchronized(appLock('avt')) {
+    Set<String> accepted = namesPassingSequence(SEQUENCE_ACCEPTED_MEMORY_KEY, "${dni}:avt".toString(),
+        candidates.collect { Map event -> event.name.toString() }, epoch, sequence, false)
     Map<String, Map> store = appMemoryMap(AVT_EVENTS_BY_DNI_STATE_KEY)
     // AVT LastChange payloads are deltas, so the cache keeps the latest value per event name.
     Map<String, Map> latestByName = new LinkedHashMap<String, Map>()
@@ -6265,17 +6255,20 @@ void applyAvtCallback(Map data) {
   String dni = data?.dni?.toString()
   if(!dni) { return }
   List<Map> events
-  if(data.events instanceof List) {
-    // Skip event names a newer AVT delta already applied.
-    Set<String> current = namesPassingSequence(SEQUENCE_APPLIED_MEMORY_KEY, "${dni}:avt".toString(),
-        ((List<Map>)data.events).collect { Map event -> event.name.toString() }, data.epoch, data.sequence, true)
-    events = ((List<Map>)data.events).findAll { Map event -> current.contains(event.name.toString()) }
-  } else {
-    events = getStoredAvtEvents(dni)
-  }
   List<String> targets = data.targetDnis instanceof Collection
       ? ((Collection)data.targetDnis).collect { Object id -> id.toString() } : null
-  applyAvtEvents(dni, events, targets)
+  // Claim and publish under one per-coordinator lock so apply order matches sequence order.
+  synchronized(appLock("publish:${dni}:avt".toString())) {
+    if(data.events instanceof List) {
+      // Skip event names a newer AVT delta already applied.
+      Set<String> current = namesPassingSequence(SEQUENCE_APPLIED_MEMORY_KEY, "${dni}:avt".toString(),
+          ((List<Map>)data.events).collect { Map event -> event.name.toString() }, data.epoch, data.sequence, true)
+      events = ((List<Map>)data.events).findAll { Map event -> current.contains(event.name.toString()) }
+    } else {
+      events = getStoredAvtEvents(dni)
+    }
+    applyAvtEvents(dni, events, targets)
+  }
 }
 
 /**
@@ -6310,17 +6303,14 @@ void sendChildEventByDni(String dni, String name, Object value) {
 
 String getPlayerDniByRincon(String rincon) {
   if(!rincon) { return null }
-  return getRosterPlayers().find { Map row -> row.playerId?.toString() == rincon }?.dni?.toString()
+  return getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
+    player.getDataValue('id')?.toString() == rincon
+  }?.getDeviceNetworkId()?.toString()
 }
 
 String getPlayerRinconByDni(String dni) {
   if(!dni) { return null }
-  return getRosterPlayers().find { Map row -> row.dni?.toString() == dni }?.playerId?.toString()
-}
-
-List<Map> getRosterPlayers() {
-  Map<String, Object> roster = getStaticDriverActivePlayerRoster()
-  return roster?.players instanceof List ? (List<Map>)roster.players : []
+  return getChildDevice(dni)?.getDataValue('id')?.toString()
 }
 
 List<String> getGroupMemberDnis(String coordinatorDni) {
@@ -6868,17 +6858,13 @@ void playerGroupTopologyOperationUpdate(Map payload) {
   runInMillis(1, 'groupTopologyOperationEventHandler', [overwrite: false, data: new LinkedHashMap(payload)])
 }
 
-void groupTopologyOperationEventHandler(Object event) {
+void groupTopologyOperationEventHandler(Map payload) {
   synchronized(appLock('work')) {
-    Map payload
-    if(event instanceof Map && !((Map)event).containsKey('value') && !((Map)event).containsKey('data')) {
-      payload = (Map)event
-    } else {
-      try { payload = (Map)parseJson(event?.value?.toString()) }
-      catch(Exception e) {
-        logWarn("Ignoring malformed group topology operation event: ${e.message}")
-        return
-      }
+    if(payload == null) { return }
+    // Apply-time gate inside the work lock: a callback holding an older observation must not overwrite a newer one.
+    if(!applySequence("${payload.playerId}:topologyOperation".toString(), payload.epoch, payload.sequence)) {
+      logDebug("Skipping superseded topology report from ${payload.playerId}")
+      return
     }
     Map operation = getActiveGroupOperation()
     if(operation == null || payload.operationId?.toString() != operation.operationId?.toString() ||

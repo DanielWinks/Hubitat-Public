@@ -445,13 +445,11 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.setZgtPayload(payload(1L, 'Older'))
 
     then:
-    appScript.state.zgtPayload.groupNamesById == ['RINCON_COORD:1': 'Newer']
+    appScript.atomicState.zgtPayload.groupNamesById == ['RINCON_COORD:1': 'Newer']
   }
 
   def "player readings and group rendering are ordered per value and never touch a child inline"() {
     given:
-    appScript.state.staticDriverActivePlayerRoster = [version: 1, players: [[playerId: 'RINCON_COORD', dni: coordinator.deviceNetworkId]]]
-
     when:
     appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading', sourceDni: coordinator.deviceNetworkId,
       requestId: 'r1', epoch: 4L, sequence: 2L, args: [volume: 30]])
@@ -763,19 +761,18 @@ class SonosAdvancedAppSpec extends Specification {
   void emitTopologyObservation(String playerId, String groupId, String coordinatorId, String playerIds,
       Long observedAt = null) {
     Long eventObservedAt = observedAt ?: appScript.now() + (++topologyObservationSequence * 1000L)
+    // The driver hands the app a plain Map with a `data` key; the scheduled callback receives it as is.
     appScript.groupTopologyOperationEventHandler([
-      value: JsonOutput.toJson([
-        operationId: appScript.getActiveGroupOperation().operationId,
-        playerId: playerId,
-        observedAt: eventObservedAt,
-        event: 'groups',
-        data: [
-          groupId: groupId,
-          coordinatorId: coordinatorId,
-          playerIds: playerIds.split(',') as List
-        ]
-      ])
-    ] as Event)
+      operationId: appScript.getActiveGroupOperation().operationId,
+      playerId: playerId,
+      observedAt: eventObservedAt,
+      event: 'groups',
+      data: [
+        groupId: groupId,
+        coordinatorId: coordinatorId,
+        playerIds: playerIds.split(',') as List
+      ]
+    ])
   }
 
   void emitRequiredTopology(String groupId = 'GROUP-1', String coordinatorId = 'RINCON_COORD',
@@ -1343,17 +1340,49 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   def "a superseded absolute command is skipped when its callback runs out of order"() {
-    given:
-    Map newer = [playerDni: follower.deviceNetworkId, command: 'play', epoch: 1L, sequence: 9L]
-    Map older = [playerDni: follower.deviceNetworkId, command: 'pause', epoch: 1L, sequence: 8L]
-    appScript.metaClass.processPlayerCommandBody = { Map r -> }
-    List<String> applied = []
-    appScript.applySequence('cmd:' + follower.deviceNetworkId + ':transport', 1L, 9L)
+    given: 'the older command is accepted first, then the newer one; both schedule a callback'
+    Map older = [playerDni: follower.deviceNetworkId, command: 'setGroupVolume', args: [10, null], epoch: 1L, sequence: 8L]
+    Map newer = [playerDni: follower.deviceNetworkId, command: 'setGroupVolume', args: [40, null], epoch: 1L, sequence: 9L]
+    appScript.playerCommandRequest(older)
+    appScript.playerCommandRequest(newer)
+    List<List> jobs = appScript.scheduled.findAll { List job -> job[1] == 'processPlayerCommandRequest' }
+    assert jobs.size() == 2
 
+    when: 'the newer callback runs first, then the older one'
+    appScript.processPlayerCommandRequest(jobs[1][2].data)
+    appScript.processPlayerCommandRequest(jobs[0][2].data)
+
+    then: 'the coordinator receives only the newer command'
+    coordinator.commands.findAll { it.name == 'setGroupVolume' }*.level == [40G]
+  }
+
+  def "a callback from an older driver epoch cannot apply after one from the new epoch"() {
     expect:
-    !appScript.applySequence('cmd:' + follower.deviceNetworkId + ':transport', 1L, 8L)
-    appScript.applySequence('cmd:' + follower.deviceNetworkId + ':transport', 1L, 9L)
-    appScript.applySequence('cmd:' + follower.deviceNetworkId + ':transport', 2L, 1L)
+    appScript.applySequence('stream', 2L, 5L)
+    !appScript.applySequence('stream', 1L, 99L)
+    appScript.applySequence('stream', 2L, 6L)
+    appScript.acceptSequence('other', 2L, 1L)
+    !appScript.acceptSequence('other', 1L, 50L)
+  }
+
+  def "group commands are processed in arrival order even when callbacks run in reverse"() {
+    given:
+    Map first = request('on', [:], 1)
+    Map second = request('play', [:], 2)
+    appScript.acceptGroupCommandRequest(first)
+    appScript.acceptGroupCommandRequest(second)
+    List<List> jobs = appScript.scheduled.findAll { List job -> job[1] == 'processGroupCommandRequest' }
+    assert jobs.size() == 2
+
+    when: 'the second callback is delivered first'
+    appScript.processGroupCommandRequest(jobs[1][2].data)
+    appScript.processGroupCommandRequest(jobs[0][2].data)
+
+    then: 'the activation is still processed before Play'
+    List<String> processing = appScript.logs.findAll { String line -> line.contains('Processing group command') }
+    processing.size() == 2
+    processing[0].contains('command on ')
+    processing[1].contains('command play ')
   }
 
   def "player identifier resolver accepts MAC DNI and IP forms"() {
@@ -1929,32 +1958,24 @@ class SonosAdvancedAppSpec extends Specification {
     body.contains('<ProgramURI>x?a=1&amp;b=&lt;two&gt;</ProgramURI>')
   }
 
-  def "player app cache refresh requests update driver roster and policy snapshots from new executions"() {
+  def "player app policy refresh requests update policy snapshots from new executions"() {
     given:
-    List<String> refreshed = []
-    appScript.metaClass.refreshStaticDriverActivePlayerRoster = { -> refreshed << 'roster' }
     appScript.settings.groupAnnouncementMode = 'alwaysNonInterrupting'
     appScript.settings.highPriorityAnnouncementMode = 'alwaysCoordinatorStream'
 
     when:
     appScript.playerAppRequestHandler([value: JsonOutput.toJson([
-      version: 1, channel: 'playerAppRequest', action: 'refreshRoster',
-      sourceDni: coordinator.deviceNetworkId, requestId: 'roster-request', args: [:]
-    ])] as Event)
-    appScript.playerAppRequestHandler([value: JsonOutput.toJson([
       version: 1, channel: 'playerAppRequest', action: 'refreshPolicy',
       sourceDni: coordinator.deviceNetworkId, requestId: 'policy-request', args: [:]
     ])] as Event)
 
-    then: 'both are acknowledged and deferred; nothing is written to a child inline'
-    refreshed.isEmpty()
+    then: 'the request is acknowledged and deferred; nothing is written to a child inline'
     coordinator.dataValues.normalAnnouncementMode == null
 
     when:
-    runScheduledCallbacks(['refreshPlayerPolicyCallback', 'refreshStaticDriverActivePlayerRoster'])
+    runScheduledCallbacks(['refreshPlayerPolicyCallback'])
 
     then:
-    refreshed == ['roster']
     coordinator.dataValues.normalAnnouncementMode == 'alwaysNonInterrupting'
     coordinator.dataValues.highPriorityAnnouncementMode == 'alwaysCoordinatorStream'
     !coordinator.dataValues.containsKey('useAudioClipForAirPlay')
@@ -2071,7 +2092,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "player requests POST to Sonos and correlate status events by app ID and name"() {
     given:
     coordinator.currentValues.volume = 20
-    coordinator.settings.ttsBoostAmount = 5
+    appScript.playerPreferencesUpdated([deviceDni: coordinator.deviceNetworkId, preferences: [ttsBoostAmount: 5]])
     Map request = [channel: 'playerAppRequest', action: 'enqueueAudioClip',
       sourceDni: coordinator.deviceNetworkId, requestId: 'request-1',
       args: [uri: 'http://example.test/clip.mp3', volume: 10, duration: 4,
@@ -2230,6 +2251,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "idle group announcement starts one stream on its coordinator"() {
     given:
+    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
     makeAnnouncementRosterExact()
     coordinator.currentValues.status = 'stopped'
     coordinator.currentValues.transportStatus = 'stopped'
@@ -2299,6 +2321,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "queued announcement stays on coordinator stream after the previous restore reports completion"() {
     given:
+    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
     makeAnnouncementRosterExact()
     coordinator.currentValues.status = 'stopped'
     coordinator.currentValues.transportStatus = 'stopped'
@@ -2356,6 +2379,7 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "announcement dispatch does not depend on lastUpdated offline polling"() {
     given:
+    appScript.settings.groupAnnouncementMode = 'alwaysCoordinatorStream'
     makeAnnouncementRosterExact()
     appScript.appMemory()['groupAnnouncementQueues'] = ['GROUP-DNI': [pending: [[
       correlationId: 'announcement-without-offline-poll', command: 'playAudioClip',
@@ -2556,9 +2580,9 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.appMemoryMap('pendingGroupStateUpdates')['GROUP-DNI'].currentlyJoinedPlayers.contains('RINCON_EXTRA')
   }
 
-  def "track position preference is read from player settings instead of device data"() {
+  def "track position preference is read from the app preference snapshot instead of device data"() {
     given:
-    coordinator.settings.enableTrackPositionUpdates = true
+    appScript.playerPreferencesUpdated([deviceDni: coordinator.deviceNetworkId, preferences: [enableTrackPositionUpdates: true]])
     coordinator.dataValues.enableTrackPositionUpdates = 'false'
 
     expect:
@@ -2716,10 +2740,6 @@ class SonosAdvancedAppSpec extends Specification {
 
   /** A coordinator's GroupRenderingControl report relayed by its player driver. */
   private void reportGrc(String rincon, Integer volume, String mute = null) {
-    if(!appScript.state.staticDriverActivePlayerRoster) {
-      appScript.state.staticDriverActivePlayerRoster = [version: 1, players: ['COORD', 'FOLLOW', 'EXTRA', 'UNMANAGED'].collect {
-        [playerId: "RINCON_${it}".toString(), dni: "DNI-RINCON_${it}".toString()] }]
-    }
     Map args = [:]
     if(volume != null) { args.groupVolume = volume }
     if(mute != null) { args.groupMute = mute }
@@ -3427,7 +3447,7 @@ class SonosAdvancedAppSpec extends Specification {
     ])
 
     then:
-    appScript.state.zgtPayload.followersByCoordinator.RINCON_COORD == ['RINCON_FOLLOW']
+    appScript.atomicState.zgtPayload.followersByCoordinator.RINCON_COORD == ['RINCON_FOLLOW']
     appScript.scheduled.any { List job -> job[0] == 1 && job[1] == 'publishZgtPlayerAttributes' }
     coordinator.events.isEmpty()
     follower.events.isEmpty()
@@ -3600,10 +3620,6 @@ class SonosAdvancedAppSpec extends Specification {
   }
 
   void seedAvtRegistry() {
-    appScript.state.staticDriverActivePlayerRoster = [version: 1, players: [
-      [playerId: 'RINCON_COORD', dni: 'DNI-RINCON_COORD'],
-      [playerId: 'RINCON_FOLLOW', dni: 'DNI-RINCON_FOLLOW'],
-      [playerId: 'RINCON_EXTRA', dni: 'DNI-RINCON_EXTRA']]]
     appScript.state.groupDeviceCoordinatorsByDni = ['GROUP-DNI': 'RINCON_COORD']
     appScript.state.zgtEventsByGroupId = ['GROUP-1': [
       [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
@@ -3621,8 +3637,8 @@ class SonosAdvancedAppSpec extends Specification {
     seedAvtRegistry()
 
     when:
-    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A'], [name: 'status', value: 'playing']])
-    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track B']])
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A'], [name: 'status', value: 'playing']], 1L, 1L)
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track B']], 1L, 2L)
 
     then:
     appScript.appMemoryMap('avtEventsByDni')['DNI-RINCON_COORD'] == [
@@ -3640,7 +3656,7 @@ class SonosAdvancedAppSpec extends Specification {
 
     when:
     appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A'],
-      [name: 'albumArtURI', value: 'http://192.0.2.10:1400/getaa?s=1&u=x']])
+      [name: 'albumArtURI', value: 'http://192.0.2.10:1400/getaa?s=1&u=x']], 1L, 1L)
     appScript.applyAvtCallback(appScript.scheduled.find { List job -> job[1] == 'applyAvtCallback' }[2].data)
 
     then:
@@ -3656,7 +3672,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "requestCoordinatorEvents replays the cached coordinator events only to the requesting follower"() {
     given:
     seedAvtRegistry()
-    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Latest leader track']])
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Latest leader track']], 1L, 1L)
     appScript.scheduled.clear()
     appScript.childEvents.clear()
 
@@ -3693,7 +3709,7 @@ class SonosAdvancedAppSpec extends Specification {
   def "ZGT topology changes never replay AVT and the AVT cache is cleared at hub start"() {
     given:
     seedAvtRegistry()
-    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A']])
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A']], 1L, 1L)
     appScript.scheduled.clear()
     appScript.childEvents.clear()
 

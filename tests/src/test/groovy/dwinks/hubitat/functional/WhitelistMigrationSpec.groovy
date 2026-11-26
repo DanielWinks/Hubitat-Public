@@ -108,14 +108,14 @@ class WhitelistMigrationSpec extends Specification {
 
   def "app prunes orphan atomicState keys"() {
     given:
-    app.atomicState['discoveryRunning'] = true
+    app.atomicState['readyForZgt'] = ['DNI-A']
     app.atomicState['legacyAtomicOrphan'] = true
 
     when:
     app.pruneOrphanedAppPersistence()
 
     then:
-    app.atomicState.containsKey('discoveryRunning')
+    app.atomicState.containsKey('readyForZgt')
     !app.atomicState.containsKey('legacyAtomicOrphan')
   }
 
@@ -143,7 +143,7 @@ class WhitelistMigrationSpec extends Specification {
      'enableAlarmManagement',
      'enableAlarmSwitches', 'autoCheckUpdates', 'autoInstallUpdates', 'updateCheckFrequency',
      'autoInstallTime', 'autoInstallNextOccurrence', 'autoInstallDayOfWeek',
-     'hubSecurityUsername', 'hubSecurityPassword', 'libraryIdSMAPI', 'libraryIdUtilities',
+     'hubSecurityUsername', 'hubSecurityPassword',
      'playerDevices', 'groupDevices', 'skipOrphanRemoval', 'descriptionTextEnable',
      'newUiGroupName', 'newUiGroupCoordinator', 'newUiGroupFollowers'].each { String k ->
       app.settings[k] = 'value'
@@ -153,22 +153,18 @@ class WhitelistMigrationSpec extends Specification {
     app.pruneOrphanedAppPersistence()
 
     then:
-    app.settings.size() == 26
+    app.settings.size() == 24
   }
 
-  def "app migrateLegacyAppStateOnce copies discovery keys to atomicState before prune"() {
+  def "app prunes retired discovery state keys"() {
     given:
     app.state['discoveryRunning'] = true
     app.state['discoveryEndTime'] = 12345L
-    app.atomicState.clear()
 
     when:
-    app.migrateLegacyAppStateOnce()
     Map result = app.pruneOrphanedAppPersistence()
 
     then:
-    app.atomicState['discoveryRunning'] == true
-    app.atomicState['discoveryEndTime'] == 12345L
     !app.state.containsKey('discoveryRunning')
     !app.state.containsKey('discoveryEndTime')
     (result.stateRemoved as List).contains('discoveryRunning')
@@ -345,11 +341,11 @@ class WhitelistMigrationSpec extends Specification {
     secondaryDriver.pruneOrphanedSecondaryPersistence()
 
     then:
-    secondaryDriver.state.containsKey('websocketConnectPending')
+    !secondaryDriver.state.containsKey('websocketConnectPending')
     !secondaryDriver.state.containsKey('orphanState')
     secondaryDriver.device.dataValues.containsKey('id')
     !secondaryDriver.device.dataValues.containsKey('orphanData')
-    secondaryDriver.device.currentValues.containsKey('websocketStatus')
+    !secondaryDriver.device.currentValues.containsKey('websocketStatus')
     !secondaryDriver.device.currentValues.containsKey('orphanAttr')
     secondaryDriver.settings.containsKey('logEnable')
     !secondaryDriver.settings.containsKey('orphanSetting')

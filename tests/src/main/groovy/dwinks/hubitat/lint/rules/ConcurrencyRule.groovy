@@ -168,10 +168,15 @@ class ConcurrencyRule implements Rule {
     List<Expression> entryExprs = listField(fields, 'CHILD_ENTRY_POINTS')
     if (entryExprs.isEmpty()) { return out }
     List<String> entries = namesIn(entryExprs, [:], false)
-    Map<String, MethodNode> methods = [:]
-    script.methods.each { MethodNode m -> if (!methods.containsKey(m.name)) { methods[m.name] = m } }
-    Map<String, CallCollector> bodies = [:]
-    methods.each { String n, MethodNode m -> bodies[n] = collect(m) }
+    // Every overload of a name is a candidate target of a local call, so all of them are visited.
+    Map<String, List<MethodNode>> methods = [:]
+    script.methods.each { MethodNode m ->
+      List<MethodNode> overloads = methods.get(m.name)
+      if (overloads == null) { overloads = new ArrayList<MethodNode>(); methods.put(m.name, overloads) }
+      overloads.add(m)
+    }
+    Map<String, List<CallCollector>> bodies = [:]
+    methods.each { String n, List<MethodNode> overloads -> bodies[n] = overloads.collect { MethodNode m -> collect(m) } }
 
     entries.each { String entry ->
       if (!methods.containsKey(entry)) {
@@ -185,9 +190,9 @@ class ConcurrencyRule implements Rule {
       while (!queue.isEmpty()) {
         String current = queue.remove(0)
         if (!seen.add(current)) { continue }
-        CallCollector body = bodies[current]
-        if (body == null) { continue }
-        body.calls.each { MethodCallExpression call ->
+        List<CallCollector> overloadBodies = bodies[current]
+        if (overloadBodies == null) { continue }
+        overloadBodies.each { CallCollector body -> body.calls.each { MethodCallExpression call ->
           String callee = AstUtil.methodName(call)
           if (callee == null) { return }
           String receiver = receiverName(call)
@@ -203,7 +208,7 @@ class ConcurrencyRule implements Rule {
             parentOf[callee] = current
             queue << callee
           }
-        }
+        } }
       }
     }
     out

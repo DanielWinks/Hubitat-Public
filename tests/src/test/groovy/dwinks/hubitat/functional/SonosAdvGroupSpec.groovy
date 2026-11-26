@@ -116,7 +116,9 @@ class SonosAdvGroupSpec extends Specification {
     driver.device.currentValues.volume = 5
     driver.metaClass.now = { -> 10000L }
     driver.setLevel(15G, 20G)
-    driver.groupDeviceVolumeFadeStep()
+    Map firstStep = driver.scheduled.find { List call -> call[1] == 'groupDeviceVolumeFadeStep' }[2].data
+    driver.groupDeviceVolumeFadeStep(firstStep)
+    Map inFlightStep = driver.scheduled.findAll { List call -> call[1] == 'groupDeviceVolumeFadeStep' }.last()[2].data
     driver.device.currentValues.volume = 6
     driver.metaClass.now = { -> 14000L }
     Integer existingRequestCount = groupRequests().size()
@@ -126,9 +128,9 @@ class SonosAdvGroupSpec extends Specification {
 
     when:
     driver.setLevel(6G, 10G)
-    driver.groupDeviceVolumeFadeStep()
+    driver.groupDeviceVolumeFadeStep(inFlightStep)
 
-    then:
+    then: 'a step that was already running when the fade was cancelled neither sends a volume nor reschedules'
     driver.groupDeviceVolumeFadeState.isEmpty()
     driver.unschedules.contains('groupDeviceVolumeFadeStep')
     groupRequests().size() == existingRequestCount

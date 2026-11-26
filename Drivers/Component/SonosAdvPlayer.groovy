@@ -52,8 +52,6 @@ import java.util.Random
 import java.util.concurrent.ConcurrentHashMap
 import java.time.Instant
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.Semaphore
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.apache.commons.lang3.StringEscapeUtils
 import org.apache.commons.lang3.StringUtils
@@ -972,12 +970,6 @@ metadata {
   "x-rincon-queue": "Sonos Q"
 ]
 @Field final Integer RESUB_INTERVAL = 3600
-@Field private final Integer STATIC_STATE_CLEANUP_INTERVAL_SECONDS = 900
-@Field private final Integer STATIC_STATE_ROSTER_MAX_AGE_SECONDS = 1200
-@Field private final Integer STATIC_STATE_ROSTER_VERSION = 1
-@Field static volatile Long lastStaticStateCleanupEpoch = 0L
-@Field static volatile Long lastStaticStateCleanupAttemptEpoch = 0L
-@Field static Semaphore staticStateCleanupMutex = new Semaphore(1)
 
 @Field private final String MRAVT_EVENTS =  '/MediaRenderer/AVTransport/Event'
 @Field private final String MRAVT_EVENTS_CALLBACK =  'subscribeResubscribeToMrAvTCallback'
@@ -1067,7 +1059,6 @@ metadata {
   'rightChannelDeviceIp',
   'zgtSub',
   'zgtSubExpires',
-  'staticDriverActivePlayerRoster',
   'normalAnnouncementMode',
   'highPriorityAnnouncementMode',
   'sid1',
@@ -1344,7 +1335,6 @@ void performImmediateInitialization() {
   pruneOrphanedDriverPersistence()
   cacheBatteryCapability()
   clearLegacyBridgeAttributesForInitialization()
-  maybeCleanupStaticDriverState()
   reconcileChildDevices()
 
   // Issue UPnP subscriptions first. These calls enqueue async requests locally;
@@ -1740,280 +1730,49 @@ void migrationCleanup() {
   // Kept here only for explicit log-level transitions that need immediate cleanup.
 }
 
-void maybeCleanupStaticDriverState() {
-  Long nowEpoch = hubNowInstant().epochSecond
-  Long lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
-  Long lastAttempt = lastStaticStateCleanupAttemptEpoch != null ? lastStaticStateCleanupAttemptEpoch : 0L
-  Long lastCheck = Math.max(lastCleanup, lastAttempt)
-  if((nowEpoch - lastCheck) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
-  lastStaticStateCleanupAttemptEpoch = nowEpoch
-
-  Map rosterSnapshot
-  String serializedRoster = device.getDataValue('staticDriverActivePlayerRoster')
-  if(serializedRoster) {
-    try { rosterSnapshot = (Map)getSharedJsonSlurper().parseText(serializedRoster) }
-    catch(Exception e) { logDebug("Ignoring malformed parent app roster snapshot: ${e.message}") }
-  }
-  if(rosterSnapshot == null) {
-    sendParentAppRequest('refreshRoster')
-    return
-  }
-  List<Map<String, String>> activePlayerRoster = validateStaticDriverActivePlayerRoster(rosterSnapshot, nowEpoch)
-  if(activePlayerRoster == null) { return }
-
-  if(!staticStateCleanupMutex.tryAcquire()) { return }
-
-  try {
-    lastCleanup = lastStaticStateCleanupEpoch != null ? lastStaticStateCleanupEpoch : 0L
-    if((nowEpoch - lastCleanup) < STATIC_STATE_CLEANUP_INTERVAL_SECONDS) { return }
-    cleanupStaticDriverState(activePlayerRoster)
-    lastStaticStateCleanupEpoch = nowEpoch
-  } finally {
-    staticStateCleanupMutex.release()
-  }
-}
-
-List<Map<String, String>> validateStaticDriverActivePlayerRoster(Map rosterSnapshot, Long nowEpoch) {
-  if(rosterSnapshot == null || !(rosterSnapshot.version instanceof Number)) { return null }
-  if(((Number)rosterSnapshot.version).intValue() != STATIC_STATE_ROSTER_VERSION) { return null }
-  if(!(rosterSnapshot.refreshedAt instanceof Number)) { return null }
-  Long refreshedAt = ((Number)rosterSnapshot.refreshedAt).longValue()
-  if(refreshedAt == null || refreshedAt <= 0L || refreshedAt > (nowEpoch + 60L)) { return null }
-  if((nowEpoch - refreshedAt) > STATIC_STATE_ROSTER_MAX_AGE_SECONDS) { return null }
-
-  Object rawPlayers = rosterSnapshot.players
-  if(!(rawPlayers instanceof List)) { return null }
-  List<Map<String, String>> activePlayerRoster = []
-  Set<String> seenPlayerIds = new HashSet<String>()
-  Set<String> seenDnis = new HashSet<String>()
-  for(Object rawPlayer : (List)rawPlayers) {
-    if(!(rawPlayer instanceof Map)) { return null }
-    Map player = (Map)rawPlayer
-    String playerId = player.playerId?.toString()?.trim()
-    String dni = player.dni?.toString()?.trim()
-    if(!playerId || !dni || !seenPlayerIds.add(playerId) || !seenDnis.add(dni)) { return null }
-    activePlayerRoster.add([playerId: playerId, dni: dni])
-  }
-  return activePlayerRoster
-}
-
-void cleanupStaticDriverState(List<Map<String, String>> activePlayerRoster) {
-  Set<String> activePlayerIds = new HashSet<String>()
-  Set<String> activePlayerDnis = new HashSet<String>()
-  (activePlayerRoster ?: []).each { Map<String, String> player ->
-    String playerId = player.playerId
-    String dni = player.dni
-    if(playerId != null && playerId != '' && dni != null && dni != '') {
-      activePlayerIds.add(playerId)
-      activePlayerDnis.add(dni)
-    }
-  }
-
-  if(activePlayerIds.isEmpty() && activePlayerDnis.isEmpty()) {
-    Integer clearedEntries = clearStaticMap(runtimeStateByDni)
-    clearedEntries += clearStaticMap(groupsRegistry)
-    clearedEntries += clearStaticMap(statesRegistry)
-    clearedEntries += clearStaticMap(favoritesMap)
-    clearedEntries += clearStaticMap(playlistsMap)
-    clearedEntries += clearStaticMap(volumeFadeState)
-    clearedEntries += clearStaticMap(pendingGroupedPlayerVolumes)
-    clearedEntries += clearStaticMap(groupVolumeFadeState)
-    clearedEntries += clearStaticMap(lastVolumeFadeCallTime)
-    clearedEntries += clearStaticMap(lastGroupVolumeFadeCallTime)
-    clearedEntries += clearStaticMap(lastWsEventLog)
-    clearedEntries += clearStaticMap(zgtMemberHostByPlayerId)
-    clearedEntries += clearStaticMap(wsSubscriptionStatus)
-    clearedEntries += clearStaticMap(jsonSlurpers)
-    clearedEntries += clearStaticMap(eventTimestamps)
-    clearedEntries += clearStaticMap(favPlaylistDelegate)
-    clearedEntries += cleanupUpnpRequestQueues([] as Set<String>)
-    clearedEntries += clearStaticMap(subscribeRetryAttempts)
-    if(clearedEntries > 0) {
-      logDebug("Cleared ${clearedEntries} orphaned static Sonos Advanced Player cache entries with no active players present")
-    }
-    return
-  }
-  if(activePlayerIds.isEmpty() || activePlayerDnis.isEmpty()) { return }
-
-  Integer removedEntries = 0
-  removedEntries += pruneStaticMapKeys(runtimeStateByDni, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(groupsRegistry, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(statesRegistry, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(favoritesMap, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(playlistsMap, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(volumeFadeState, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(pendingGroupedPlayerVolumes, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(groupVolumeFadeState, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(lastVolumeFadeCallTime, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(lastGroupVolumeFadeCallTime, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(lastWsEventLog, activePlayerDnis)
-  removedEntries += pruneStaticMapKeys(zgtMemberHostByPlayerId, activePlayerIds)
-  removedEntries += pruneStaticMapKeys(wsSubscriptionStatus, activePlayerDnis, '-WS-')
-  removedEntries += pruneStaticMapKeys(jsonSlurpers, activePlayerDnis)
-  removedEntries += pruneEventTimestampKeys(activePlayerDnis)
-  removedEntries += pruneFavPlaylistDelegates(activePlayerDnis)
-  removedEntries += cleanupUpnpRequestQueues(activePlayerDnis)
-  removedEntries += pruneDniPrefixedMap(subscribeRetryAttempts, activePlayerDnis)
-
-  if(removedEntries > 0) {
-    logDebug("Cleaned ${removedEntries} orphaned static Sonos Advanced Player cache entries")
-  }
-}
-
-@CompileStatic
-Integer clearStaticMap(Map map) {
-  if(map == null || map.isEmpty()) { return 0 }
-  Integer removedEntries = map.size()
-  map.clear()
-  return removedEntries
-}
-
-@CompileStatic
-Integer pruneStaticMapKeys(ConcurrentHashMap map, Set<String> activeKeys, String prefixDelimiter = null) {
-  if(map == null || map.isEmpty() || activeKeys == null || activeKeys.isEmpty()) { return 0 }
-
-  Integer removedEntries = 0
-  List<String> keys = new ArrayList<String>(map.keySet())
-  keys.each { String key ->
-    String normalizedKey = prefixDelimiter != null ? extractKeyPrefix(key, prefixDelimiter) : key
-    if(normalizedKey == null || !activeKeys.contains(normalizedKey)) {
-      if(map.remove(key) != null) {
-        removedEntries++
-      }
-    }
-  }
-  return removedEntries
-}
-
-@CompileStatic
-Integer pruneEventTimestampKeys(Set<String> activePlayerDnis) {
-  if(eventTimestamps == null || eventTimestamps.isEmpty() || activePlayerDnis == null || activePlayerDnis.isEmpty()) { return 0 }
-
-  Integer removedEntries = 0
-  List<String> keys = new ArrayList<String>(eventTimestamps.keySet())
-  keys.each { String key ->
-    String dni = extractEventTimestampDni(key)
-    if(dni == null || !activePlayerDnis.contains(dni)) {
-      if(eventTimestamps.remove(key) != null) {
-        removedEntries++
-      }
-    }
-  }
-  return removedEntries
-}
-
-@CompileStatic
-Integer pruneFavPlaylistDelegates(Set<String> activePlayerDnis) {
-  if(favPlaylistDelegate == null || favPlaylistDelegate.isEmpty() || activePlayerDnis == null || activePlayerDnis.isEmpty()) { return 0 }
-
-  Integer removedEntries = 0
-  List<String> householdIds = new ArrayList<String>(favPlaylistDelegate.keySet())
-  householdIds.each { String householdId ->
-    String delegateDni = favPlaylistDelegate.get(householdId)
-    if(delegateDni == null || !activePlayerDnis.contains(delegateDni)) {
-      if(favPlaylistDelegate.remove(householdId, delegateDni)) {
-        removedEntries++
-      }
-    }
-  }
-  return removedEntries
-}
-
-// Prune keys from a static map whose leading segment (before the first '-')
-// isn't an active DNI. Used for the per-device subscription/retry maps whose
-// keys are either "${dni}" or "${dni}-${suffix}". Safe assumption: Sonos
-// DNIs are RINCON_XXXX style with no '-' characters.
-@CompileStatic
-Integer pruneDniPrefixedMap(ConcurrentHashMap map, Set<String> activeDnis) {
-  if(map == null || map.isEmpty() || activeDnis == null || activeDnis.isEmpty()) { return 0 }
-  Integer removed = 0
-  List<String> keys = new ArrayList<String>(map.keySet())
-  keys.each { String key ->
-    Integer idx = key.indexOf('-')
-    String dni = idx < 0 ? key : key.substring(0, idx)
-    if(!activeDnis.contains(dni)) {
-      if(map.remove(key) != null) { removed++ }
-    }
-  }
-  return removed
-}
-
-@CompileStatic
-String extractKeyPrefix(String key, String delimiter) {
-  if(key == null || delimiter == null) { return null }
-  Integer delimiterIndex = key.indexOf(delimiter)
-  if(delimiterIndex < 0) { return key }
-  if(delimiterIndex == 0) { return null }
-  return key.substring(0, delimiterIndex)
-}
-
-@CompileStatic
-String extractEventTimestampDni(String key) {
-  String dni = extractKeyPrefix(key, '-last')
-  if(dni == null || dni == key) {
-    dni = extractKeyPrefix(key, '-sid')
-  }
-  return dni
-}
-
 void clearStaticDriverStateForCurrentDevice() {
   // Stop this device's in-flight UPnP work first so callbacks and queued
   // requests cannot keep using state that is about to be removed.
   retireUpnpRequestsForDevice()
 
-  // Coordinate with the periodic orphan sweep when possible. Uninstall
-  // cleanup still proceeds if the short, best-effort lock acquisition fails.
-  Boolean cleanupMutexAcquired = false
-  try {
-    cleanupMutexAcquired = staticStateCleanupMutex.tryAcquire(100, TimeUnit.MILLISECONDS)
-  } catch(InterruptedException e) {
-    logWarn("Interrupted while acquiring static state cleanup mutex: ${e.message}")
-  }
-
   String playerId = getId()
   String dni = getDeviceDNI()
 
-  try {
-    // These registries are keyed by Hubitat's device ID and contain cached
-    // catalogs, group membership, and volume-ramp bookkeeping for this player.
-    if(playerId != null && playerId != '') {
-      groupsRegistry?.remove(playerId)
-      statesRegistry?.remove(playerId)
-      favoritesMap?.remove(playerId)
-      playlistsMap?.remove(playerId)
-      volumeFadeState?.remove(playerId)
-      pendingGroupedPlayerVolumes?.remove(playerId)
-      groupVolumeFadeState?.remove(playerId)
-      lastVolumeFadeCallTime?.remove(playerId)
-      lastGroupVolumeFadeCallTime?.remove(playerId)
-      zgtMemberHostByPlayerId?.remove(playerId)
-    }
-
-    // Runtime caches and retry/timestamp entries use this device's DNI as
-    // their key or prefix; remove only entries owned by this device.
-    if(dni != null && dni != '') {
-      runtimeStateByDni?.remove(dni)
-      PARENT_SEQUENCE_BY_DNI?.remove(dni)
-      lastWsEventLog?.remove(dni)
-      jsonSlurpers?.remove(dni)
-      wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
-      eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
-      Map upnpEntry = upnpRequestQueues?.get(dni)
-      if(upnpEntry != null) {
-        synchronized(upnpEntry.lock) {
-          if(upnpEntry.active == null && (upnpEntry.queue as List<Map>).isEmpty()) { upnpRequestQueues.remove(dni, upnpEntry) }
-        }
-      }
-      subscribeRetryAttempts?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
-    }
-
-    // Release this player's household-level favorites/playlist delegate claim.
-    releaseFavPlaylistDelegate()
-  } finally {
-    if(cleanupMutexAcquired) {
-      staticStateCleanupMutex.release()
-    }
+  // These registries are keyed by Hubitat's device ID and contain cached
+  // catalogs, group membership, and volume-ramp bookkeeping for this player.
+  if(playerId != null && playerId != '') {
+    groupsRegistry?.remove(playerId)
+    statesRegistry?.remove(playerId)
+    favoritesMap?.remove(playerId)
+    playlistsMap?.remove(playerId)
+    volumeFadeState?.remove(playerId)
+    pendingGroupedPlayerVolumes?.remove(playerId)
+    groupVolumeFadeState?.remove(playerId)
+    lastVolumeFadeCallTime?.remove(playerId)
+    lastGroupVolumeFadeCallTime?.remove(playerId)
+    zgtMemberHostByPlayerId?.remove(playerId)
   }
+
+  // Runtime caches and retry/timestamp entries use this device's DNI as
+  // their key or prefix; remove only entries owned by this device.
+  if(dni != null && dni != '') {
+    runtimeStateByDni?.remove(dni)
+    PARENT_SEQUENCE_BY_DNI?.remove(dni)
+    lastWsEventLog?.remove(dni)
+    jsonSlurpers?.remove(dni)
+    wsSubscriptionStatus?.keySet()?.removeAll { String key -> key.startsWith("${dni}-WS-") }
+    eventTimestamps?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+    Map upnpEntry = upnpRequestQueues?.get(dni)
+    if(upnpEntry != null) {
+      synchronized(upnpEntry.lock) {
+        if(upnpEntry.active == null && (upnpEntry.queue as List<Map>).isEmpty()) { upnpRequestQueues.remove(dni, upnpEntry) }
+      }
+    }
+    subscribeRetryAttempts?.keySet()?.removeAll { String key -> key.startsWith("${dni}-") }
+  }
+
+  // Release this player's household-level favorites/playlist delegate claim.
+  releaseFavPlaylistDelegate()
 }
 
 void onUninstalled() {
@@ -4127,7 +3886,7 @@ void sendUpnpEventsToParent(Map payload) {
   }
 }
 
-void sendAvtToParent(List<Map> events, Map matchKeys, Boolean rematch = false) {
+void sendAvtToParent(List<Map> events, Map matchKeys, Boolean rematch = false, Map observedStamp = null) {
   if(parent == null) { return }
   List<Map> outgoing = events != null ? new ArrayList<Map>(events) : []
   Map newKeys = matchKeys != null ? new LinkedHashMap(matchKeys) : [:]
@@ -4141,7 +3900,7 @@ void sendAvtToParent(List<Map> events, Map matchKeys, Boolean rematch = false) {
     outgoing.addAll(buildFavoriteMatchEvents((Map<String, String>)runtimeState.avtMatchKeys))
   }
   if(outgoing.isEmpty()) { return }
-  Map stamp = stampParentPayload([:])
+  Map stamp = observedStamp ?: stampParentPayload([:])
   try {
     parent.putAvtEvents(device.getDeviceNetworkId(), outgoing, stamp.epoch, stamp.sequence)
   } catch(Exception e) {
@@ -4568,6 +4327,10 @@ void handleGrcNotification(String xmlBody) {
 }
 
 void handleAvtNotification(String xmlBody) {
+  // Stamp the sequence where the notification is first observed. Parsing and favorite matching take
+  // different amounts of time per notification, so stamping at publication could give an older
+  // notification the higher number.
+  Map stamp = stampParentPayload([:])
   Map<String, Object> avt = parseAvt(xmlBody)
   if(avt == null) { return }
   Map<String, String> alarmRunning = avt.alarmRunning instanceof Map ? (Map<String, String>)avt.alarmRunning : [:]
@@ -4584,7 +4347,7 @@ void handleAvtNotification(String xmlBody) {
     return
   }
   observeUpnpPlaybackSource(recordTransportPlaybackSnapshot((Map<String, Object>)avt.transport))
-  sendAvtToParent((List<Map>)avt.events, (Map)avt.matchKeys)
+  sendAvtToParent((List<Map>)avt.events, (Map)avt.matchKeys, false, stamp)
 }
 
 @CompileStatic
@@ -5743,20 +5506,6 @@ void retireUpnpRequestsForDevice() {
   synchronized(entry.lock) {
     if(active != null && entry.active?.guid == active.guid) { entry.active = null }
   }
-}
-
-Integer cleanupUpnpRequestQueues(Set<String> activeDnis) {
-  Integer removed = 0
-  upnpRequestQueues.each { String dni, Map entry ->
-    if(!activeDnis.contains(dni)) {
-      synchronized(entry.lock) {
-        if(entry.active == null && (entry.queue as List<Map>).isEmpty()) {
-          if(upnpRequestQueues.remove(dni, entry)) { removed++ }
-        }
-      }
-    }
-  }
-  return removed
 }
 
 // Retained legacy schedule/callback names. Old HubAction responses carry no GUID

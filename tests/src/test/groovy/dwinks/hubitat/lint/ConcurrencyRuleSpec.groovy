@@ -74,6 +74,23 @@ class ConcurrencyRuleSpec extends Specification {
     found[0].message.contains("'writes'")
   }
 
+  def "a child write in a later overload is found even when a pure overload comes first"() {
+    given:
+    ParseResult pr = parse(APP_HEADER + '''
+      @Field static final List<String> CHILD_ENTRY_POINTS = ['entry']
+      void entry(String dni) { helper(dni, 1) }
+      void helper(String dni) { getChildDevice(dni).getDataValue('id') }
+      void helper(String dni, Integer level) { def player = getChildDevice(dni); player.playerPlay() }
+    '''.stripIndent())
+
+    when:
+    List<Violation> found = new ConcurrencyRule().check(pr)
+
+    then:
+    found.size() == 1
+    found[0].message.contains("'entry'")
+  }
+
   def "a child write behind a runInMillis callback is not reachable from the entry point"() {
     given:
     ParseResult pr = parse(APP_HEADER + '''

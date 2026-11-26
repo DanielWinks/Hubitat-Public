@@ -8,7 +8,7 @@ Sonos Advanced is a Hubitat package in the `dwinks` namespace. HPM metadata is i
 
 | Part | Current responsibility |
 | --- | --- |
-| `Apps/SonosAdvancedApp.groovy` | Parent controller: UI and configuration, local discovery, Sonos protocol/network work, child-device lifecycle, state fanout, grouping, announcements, alarms, updates and package maintenance. It is `singleThreaded:true`. |
+| `Apps/SonosAdvancedApp.groovy` | Parent controller: UI and configuration, local discovery, Sonos protocol/network work, child-device lifecycle, state fanout, grouping, announcements, alarms, updates and package maintenance. It is `singleThreaded: false`. |
 | `Drivers/Component/SonosAdvPlayer.groovy` | Primary speaker device commands, playback state, WebSocket connection/command handling, and player-to-app request/state callbacks. |
 | `Drivers/Component/SonosAdvGroup.groovy` | Configured logical groups and group-level commands/announcements. It maintains group runtime state and calls the app directly. |
 | `Drivers/Component/SonosAdvSecondaries.groovy` | Secondary/paired speaker representation and related topology/device data. |
