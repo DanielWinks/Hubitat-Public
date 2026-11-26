@@ -406,8 +406,8 @@ preferences {
 @Field static final String PENDING_GROUP_TOPOLOGY_EVENTS_STATE_KEY = 'pendingGroupTopologyEvents'
 @Field static final String GROUP_TOPOLOGY_EVENT_DRAIN_SCHEDULED_STATE_KEY = 'groupTopologyEventDrainScheduled'
 @Field static final String DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY = 'deviceCommandClearTimes'
-@Field static final String AVT_STORE_STATE_KEY = 'avtStoreByRincon'
-@Field static final String PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY = 'pendingPromotedAvtPlayers'
+@Field static final String AVT_EVENTS_BY_DNI_STATE_KEY = 'avtEventsByDni'
+@Field static final String GROUP_DEVICE_COORDINATORS_STATE_KEY = 'groupDeviceCoordinatorsByDni'
 @Field static final String ZGT_EVENTS_STATE_KEY = 'zgtEventsByGroupId'
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
@@ -478,8 +478,8 @@ preferences {
   PLAYER_COMMAND_QUEUE_STATE_KEY,
   PLAYER_COMMAND_RECEIVED_IDS_STATE_KEY,
   DEVICE_COMMAND_CLEAR_TIMES_STATE_KEY,
-  AVT_STORE_STATE_KEY,
-  PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY,
+  AVT_EVENTS_BY_DNI_STATE_KEY,
+  GROUP_DEVICE_COORDINATORS_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
   PENDING_UPNP_NOTIFICATION_QUEUE_KEY,
   GROUP_OPERATION_STATE_KEY,
@@ -1270,6 +1270,17 @@ Map<String, Object> getStaticDriverActivePlayerRoster() {
   return new LinkedHashMap<String, Object>((Map<String, Object>)cachedRoster)
 }
 
+/** Record each group device's coordinator RINCON so AVT delivery can address group devices by DNI alone. */
+void refreshGroupDeviceCoordinators(List<ChildDeviceWrapper> children = null) {
+  Map<String, String> registry = [:]
+  (children ?: app.getChildDevices() ?: []).each { ChildDeviceWrapper child ->
+    String coordinatorId = child.getDataValue('groupCoordinatorId')
+    String dni = child.getDeviceNetworkId()
+    if(child.getDataValue('id') == null && coordinatorId && dni) { registry[dni] = coordinatorId }
+  }
+  state[GROUP_DEVICE_COORDINATORS_STATE_KEY] = registry
+}
+
 /** Refresh the driver cleanup snapshot after child-device changes. */
 void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChanges = true) {
   try {
@@ -1287,6 +1298,7 @@ void refreshStaticDriverActivePlayerRoster(Boolean refreshPoliciesWhenRosterChan
         roster.add([playerId: playerId, dni: dni])
       }
     }
+    refreshGroupDeviceCoordinators(children)
     Long refreshedAt = (now() / 1000L) as Long
     state[STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_STATE_KEY] = [
       version: STATIC_DRIVER_ACTIVE_PLAYER_ROSTER_VERSION,
@@ -1382,6 +1394,8 @@ void synchronizeDiscoveryChildLogLevel() {
 }
 
 void systemStartHandler(Object event = null) {
+  // Players re-subscribe after boot and Sonos sends a full AVT on subscribe, so the cache refills itself.
+  state.remove(AVT_EVENTS_BY_DNI_STATE_KEY)
   rearmPlayerStateUpdateDrainAfterRestart()
 }
 
@@ -2041,6 +2055,7 @@ void upsertGroupDevice(String groupName, Map definition) {
   }
   if(device == null) { return }
   device.updateDataValue('groupCoordinatorId', coordinatorId)
+  refreshGroupDeviceCoordinators()
   device.updateDataValue('playerIds', followerIds.join(','))
   ChildDeviceWrapper coordinator = getCurrentPlayerDevices().find { ChildDeviceWrapper player ->
     player.getDataValue('id')?.toString() == coordinatorId
@@ -3018,14 +3033,12 @@ Boolean playerAppRequestHandler(Object event) {
 
 /** Republish the complete latest leader AVT after a low-frequency settings save. */
 void republishCurrentlyPlayingStates(Map data = null) {
-  String playerDni = data?.playerDni?.toString()
-  ChildDeviceWrapper player = playerDni ? getChildDevice(playerDni) : null
-  String playerId = player?.getDataValue('id')?.toString()
+  String playerId = getPlayerRinconByDni(data?.playerDni?.toString())
   if(!playerId) { return }
   Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
-  String coordinatorId = coordinators[playerId] ?: playerId
-  List<Map> events = getStoredAvtEvents(coordinatorId)
-  if(events) { deliverUpnpEventsToGroup(coordinatorId, events, true) }
+  String coordinatorDni = getPlayerDniByRincon(coordinators[playerId] ?: playerId)
+  List<Map> events = coordinatorDni ? getStoredAvtEvents(coordinatorDni) : []
+  if(events) { applyAvtEvents(coordinatorDni, events) }
 }
 
 /** Accept an individual player's audioClip request into the app-owned scheduler. */
@@ -5948,10 +5961,10 @@ void playerDeparted(String rincon, String dni, String name) {
   logInfo("Sonos player departed: ${name} (${rincon}, ${dni})")
 }
 
-/** Queue complete UPnP notification batches; never coalesce their event lists. */
+/** Queue complete GRC/ZGT notification batches; never coalesce their event lists. AVT uses putAvtEvents. */
 synchronized void putPlayerUpnpEvents(Map payload) {
   String service = payload?.service?.toString()
-  if(!(service in ['GRC', 'ZGT', 'AVT'])) { return }
+  if(!(service in ['GRC', 'ZGT'])) { return }
   Map copy = new LinkedHashMap(payload)
   if(payload.events instanceof List) { copy.events = ((List<Map>)payload.events).collect { Map e -> new LinkedHashMap(e) } }
   if(payload.eventsByGroupId instanceof Map) {
@@ -5966,9 +5979,6 @@ synchronized void putPlayerUpnpEvents(Map payload) {
   pending.add(copy)
   state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] = pending
   runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'drainUpnpNotificationQueue', [overwrite: true])
-  if(service == 'ZGT') {
-    runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS * 2, 'applyCachedAvtForPromotedCoordinators', [overwrite: true])
-  }
 }
 
 /** Apply each notification in arrival order after the 500 ms parent debounce. */
@@ -5985,41 +5995,20 @@ void processUpnpNotification(Map notification) {
   String sourceId = notification?.rincon?.toString()
   List<Map> events = notification?.events instanceof List ? (List<Map>)notification.events : []
   if(!sourceId || events.isEmpty()) { return }
-  Map<String, List<Map>> topology = getStoredZgtEventsMap()
-  Map<String, String> coordinators = buildPlayerCoordinatorMap(topology)
-  String coordinatorId = coordinators[sourceId] ?: sourceId
-  if(service == 'AVT') {
-    putAvtEvents(sourceId, events)
-    if(coordinatorId == sourceId) {
-      deliverUpnpEventsToGroup(sourceId, events, true)
-    } else {
-      logDebug("Caching follower AVT from ${sourceId}; coordinator is ${coordinatorId}")
-    }
-  } else if(service == 'GRC') {
-    deliverUpnpEventsToGroup(coordinatorId, events, false)
+  if(service == 'GRC') {
+    Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
+    deliverGrcEventsToGroup(coordinators[sourceId] ?: sourceId, events)
   }
 }
 
 void processUpnpTopologyNotification(Map notification, Boolean publishTopologyAttributes = true) {
-  Map<String, List<Map>> previous = getStoredZgtEventsMap()
   String sourceDni = notification?.sourceDni?.toString()
   Map<String, List<Map>> next = notification?.eventsByGroupId instanceof Map
       ? (Map<String, List<Map>>)notification.eventsByGroupId : [:]
   if(!sourceDni) { return }
-  Map<String, String> oldCoordinators = buildPlayerCoordinatorMap(previous)
   putZgtTopology(sourceDni, next)
-  Set<String> promotedPlayers = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
-      ? new LinkedHashSet<String>((Collection<String>)state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY]) : new LinkedHashSet<String>()
-  buildPlayerCoordinatorMap(next).each { String playerId, String coordinatorId ->
-    if(coordinatorId == playerId && oldCoordinators[playerId] && oldCoordinators[playerId] != playerId) {
-      promotedPlayers.add(playerId)
-    }
-  }
-  if(!promotedPlayers.isEmpty()) {
-    state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] = promotedPlayers.toList()
-    runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'applyCachedAvtForPromotedCoordinators', [overwrite: true])
-  }
-  if(publishTopologyAttributes) { next.each { String groupId, List<Map> events ->
+  if(!publishTopologyAttributes) { return }
+  next.each { String groupId, List<Map> events ->
     String coordinatorId = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
     List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
     if(coordinatorId && !members.contains(coordinatorId)) { members.add(0, coordinatorId) }
@@ -6029,49 +6018,134 @@ void processUpnpTopologyNotification(Map notification, Boolean publishTopologyAt
       playerTopologyEvents << [name: 'isGroupCoordinator', value: id == coordinatorId ? 'on' : 'off']
       deliverUpnpEventsToPlayer(id, playerTopologyEvents)
     }
-  } }
-  next.each { String groupId, List<Map> events ->
-    String leader = events.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
-    if(!leader) { return }
-    List<String> members = normalizeGroupPlayerIds(events.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString())
-    List<String> newFollowers = members.findAll { String id -> id != leader && oldCoordinators[id] != leader }
-    if(publishTopologyAttributes) {
-      newFollowers.each { String follower -> replayLatestLeaderAvt(leader, follower) }
-    } else if(!newFollowers.isEmpty()) {
-      runInMillis(UPNP_EVENT_DEBOUNCE_MILLIS, 'replayZgtFollowerAvt', [overwrite: true,
-          data: [leaderId: leader, followerIds: newFollowers]])
+  }
+}
+
+// =============================================================================
+// AVT delivery
+// Players parse AVT and hand the sendEvent-ready maps to putAvtEvents. Nothing in
+// the receiving methods touches a child device; the callback applies with the
+// app-level sendEvent(dni, map), which never takes a child device handle.
+// =============================================================================
+
+/** Merge a coordinator's parsed AVT events into the per-DNI cache, schedule delivery, and return. */
+void putAvtEvents(String dni, List<Map> events) {
+  if(!dni || !(events instanceof List) || events.isEmpty()) { return }
+  Map<String, List<Map>> store = state[AVT_EVENTS_BY_DNI_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[AVT_EVENTS_BY_DNI_STATE_KEY]) : [:]
+  // AVT LastChange payloads are deltas, so the cache keeps the latest value per event name.
+  Map<String, Map> latestByName = new LinkedHashMap<String, Map>()
+  (store[dni] ?: []).each { Map event -> latestByName[event.name.toString()] = event }
+  List<Map> incoming = []
+  events.each { Map event ->
+    if(event?.name && event.containsKey('value')) {
+      Map copy = new LinkedHashMap(event)
+      latestByName[event.name.toString()] = copy
+      incoming << copy
+    }
+  }
+  store[dni] = new ArrayList<Map>(latestByName.values())
+  state[AVT_EVENTS_BY_DNI_STATE_KEY] = store
+  runInMillis(1, 'applyAvtCallback', [overwrite: false, data: [dni: dni, events: incoming]])
+}
+
+List<Map> getStoredAvtEvents(String dni) {
+  Map<String, List<Map>> store = state[AVT_EVENTS_BY_DNI_STATE_KEY] instanceof Map
+      ? (Map<String, List<Map>>)state[AVT_EVENTS_BY_DNI_STATE_KEY] : [:]
+  List<Map> stored = store[dni?.toString()] as List<Map>
+  return stored != null ? new ArrayList<Map>(stored) : []
+}
+
+/** A follower just started following this coordinator RINCON; replay the coordinator's cached AVT to it. */
+void requestCoordinatorEvents(String coordinatorRincon, String followerDni) {
+  String coordinatorDni = getPlayerDniByRincon(coordinatorRincon)
+  if(!coordinatorDni || !followerDni) {
+    logDebug("Ignoring coordinator AVT request from ${followerDni ?: 'unknown'}: coordinator ${coordinatorRincon ?: 'unknown'} is not a known player")
+    return
+  }
+  if(getStoredAvtEvents(coordinatorDni).isEmpty()) {
+    logDebug("No cached AVT for coordinator ${coordinatorRincon}; ${followerDni} will receive it with the coordinator's next AVT")
+    return
+  }
+  runInMillis(1, 'applyAvtCallback', [overwrite: false, data: [dni: coordinatorDni, targetDnis: [followerDni]]])
+}
+
+void applyAvtCallback(Map data) {
+  String dni = data?.dni?.toString()
+  if(!dni) { return }
+  List<Map> events = data.events instanceof List ? (List<Map>)data.events : getStoredAvtEvents(dni)
+  List<String> targets = data.targetDnis instanceof Collection
+      ? ((Collection)data.targetDnis).collect { Object id -> id.toString() } : null
+  applyAvtEvents(dni, events, targets)
+}
+
+/**
+ * Apply AVT events from a coordinator to its player targets (default: the coordinator and every follower
+ * in its group, plus group devices). An explicit target list limits delivery to those player DNIs.
+ */
+void applyAvtEvents(String coordinatorDni, List<Map> events, List<String> targetDnis = null) {
+  if(!coordinatorDni || !events) { return }
+  List<String> playerTargets = targetDnis ?: getGroupMemberDnis(coordinatorDni)
+  playerTargets.each { String dni -> sendAvtEventsToDni(dni, events, false) }
+  if(targetDnis == null) {
+    getGroupDeviceDnisForCoordinator(getPlayerRinconByDni(coordinatorDni)).each { String dni ->
+      sendAvtEventsToDni(dni, events, true)
     }
   }
 }
 
-void replayZgtFollowerAvt(Map data) {
-  String leader = data?.leaderId?.toString()
-  if(!leader || !(data?.followerIds instanceof Collection)) { return }
-  ((Collection)data.followerIds).each { Object rawId ->
-    String follower = rawId?.toString()
-    if(follower) { replayLatestLeaderAvt(leader, follower) }
+void sendAvtEventsToDni(String dni, List<Map> events, Boolean groupDevice) {
+  formatUpnpEventsForDni(events, null, dni, groupDevice).each { Map event ->
+    String name = event.name.toString()
+    if(!groupDevice && isPlayerAttributeDisabledByDni(dni, name)) { return }
+    sendChildEventByDni(dni, name, event.value)
   }
 }
 
-/** Apply a newly promoted coordinator's latest cached AVT after the ZGT debounce and settling window. */
-void applyCachedAvtForPromotedCoordinators() {
-  Set<String> pending = state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY] instanceof Collection
-      ? new LinkedHashSet<String>((Collection<String>)state[PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY]) : new LinkedHashSet<String>()
-  state.remove(PENDING_PROMOTED_AVT_PLAYERS_STATE_KEY)
-  Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
-  pending.each { String playerId ->
-    if(coordinators[playerId] != playerId) { return }
-    List<Map> latest = getStoredAvtEvents(playerId)
-    if(latest) { deliverUpnpEventsToGroup(playerId, latest, true) }
+/** Sole child-event emission point for AVT delivery: the app's own sendEvent addressed by child DNI. */
+void sendChildEventByDni(String dni, String name, Object value) {
+  if(!dni || !name || value == null) { return }
+  try { sendEvent(dni, [name: name, value: value]) }
+  catch(Exception e) { logWarn("Could not send ${name} to ${dni}: ${e.message}") }
+}
+
+String getPlayerDniByRincon(String rincon) {
+  if(!rincon) { return null }
+  return getRosterPlayers().find { Map row -> row.playerId?.toString() == rincon }?.dni?.toString()
+}
+
+String getPlayerRinconByDni(String dni) {
+  if(!dni) { return null }
+  return getRosterPlayers().find { Map row -> row.dni?.toString() == dni }?.playerId?.toString()
+}
+
+List<Map> getRosterPlayers() {
+  Map<String, Object> roster = getStaticDriverActivePlayerRoster()
+  return roster?.players instanceof List ? (List<Map>)roster.players : []
+}
+
+List<String> getGroupMemberDnis(String coordinatorDni) {
+  String coordinatorId = getPlayerRinconByDni(coordinatorDni)
+  if(!coordinatorId) { return [] }
+  List<String> memberIds = [coordinatorId]
+  getStoredZgtEventsMap().each { String groupId, List<Map> groupEvents ->
+    String leader = groupEvents.find { Map e -> e?.name?.toString() == 'groupCoordinatorId' }?.value?.toString()
+    if(leader == coordinatorId) {
+      memberIds.addAll(normalizeGroupPlayerIds(
+          groupEvents.find { Map e -> e?.name?.toString() == 'groupPlayerIds' }?.value?.toString()))
+    }
   }
+  return memberIds.unique().collect { String id -> getPlayerDniByRincon(id) }.findAll { String dni -> dni }
 }
 
-void replayLatestLeaderAvt(String leaderId, String followerId) {
-  List<Map> latest = getStoredAvtEvents(leaderId)
-  if(latest) { deliverUpnpEventsToPlayer(followerId, latest) }
+List<String> getGroupDeviceDnisForCoordinator(String coordinatorId) {
+  Map<String, String> registry = state[GROUP_DEVICE_COORDINATORS_STATE_KEY] instanceof Map
+      ? (Map<String, String>)state[GROUP_DEVICE_COORDINATORS_STATE_KEY] : [:]
+  return registry.findAll { String dni, String id -> id == coordinatorId }.keySet().toList()
 }
 
-void deliverUpnpEventsToGroup(String coordinatorId, List<Map> events, Boolean playback) {
+/** GRC volume/mute for a coordinator's group: players receive everything, group devices only volume and mute. */
+void deliverGrcEventsToGroup(String coordinatorId, List<Map> events) {
   Map<String, List<Map>> topology = getStoredZgtEventsMap()
   List<String> members = []
   topology.each { String groupId, List<Map> groupEvents ->
@@ -6086,9 +6160,9 @@ void deliverUpnpEventsToGroup(String coordinatorId, List<Map> events, Boolean pl
     targetEvents.each { Map event ->
       if(event?.name && event.containsKey('value')) {
         String name = event.name.toString()
-        if(!playback && name == 'groupVolume') { name = 'volume' }
-        else if(!playback && name == 'groupMute') { name = 'mute' }
-        if(playback || name in ['volume', 'mute']) { sendParentChildEvent(groupDevice, name, event.value) }
+        if(name == 'groupVolume') { name = 'volume' }
+        else if(name == 'groupMute') { name = 'mute' }
+        if(name in ['volume', 'mute']) { sendParentChildEvent(groupDevice, name, event.value) }
       }
     }
   }
@@ -6107,21 +6181,38 @@ void deliverUpnpEventsToPlayer(String rincon, List<Map> events, String artworkSo
 }
 
 Boolean isPlayerAttributeDisabled(ChildDeviceWrapper player, String attributeName) {
-  if(!player || !attributeName) { return false }
+  return isPlayerAttributeDisabledByDni(player?.getDeviceNetworkId()?.toString(), attributeName)
+}
+
+Boolean isPlayerAttributeDisabledByDni(String dni, String attributeName) {
+  if(!dni || !attributeName) { return false }
+  Map<String, Object> snapshot = getPreferenceSnapshotByDni(PLAYER_PREFERENCES_BY_DNI_STATE_KEY, dni)
   if(attributeName == 'trackData') {
-    return toBooleanPreference(getPlayerPreference(player, 'disableTrackDataEvents', true), true)
+    return toBooleanPreference(snapshot.containsKey('disableTrackDataEvents') ? snapshot.disableTrackDataEvents : true, true)
   }
   if(attributeName in ['currentArtistName', 'currentAlbumName', 'currentTrackName', 'currentTrackNumber',
       'nextArtistName', 'nextAlbumName', 'nextTrackName']) {
-    return toBooleanPreference(getPlayerPreference(player, 'disableArtistAlbumTrackEvents', false), false)
+    return toBooleanPreference(snapshot.disableArtistAlbumTrackEvents, false)
   }
   return false
 }
 
+Map<String, Object> getPreferenceSnapshotByDni(String stateKey, String dni) {
+  Map snapshots = state[stateKey] instanceof Map ? (Map)state[stateKey] : [:]
+  return snapshots[dni] instanceof Map ? (Map<String, Object>)snapshots[dni] : [:]
+}
+
 /** Apply the artwork display preference and Hubitat image markup at the parent fanout boundary. */
 List<Map> formatUpnpEventsForChild(List<Map> events, String artworkSourceId, ChildDeviceWrapper target) {
+  if(target == null) { return formatUpnpEventsForDni(events, artworkSourceId, null, false) }
+  return formatUpnpEventsForDni(events, artworkSourceId, target.getDeviceNetworkId()?.toString(),
+      target.getDataValue('id') == null)
+}
+
+/** Preferences come from the app-held DNI snapshots, so this never needs a child device handle. */
+List<Map> formatUpnpEventsForDni(List<Map> events, String artworkSourceId, String targetDni, Boolean groupDevice) {
   List<Map> formatted = []
-  Boolean disableArtEvents = isAlbumArtEventsDisabled(target)
+  Boolean disableArtEvents = isAlbumArtEventsDisabledByDni(targetDni, groupDevice)
   (events ?: []).each { Map event ->
     String name = event?.name?.toString()
     if(!name || !event.containsKey('value')) { return }
@@ -6141,10 +6232,14 @@ List<Map> formatUpnpEventsForChild(List<Map> events, String artworkSourceId, Chi
 
 Boolean isAlbumArtEventsDisabled(ChildDeviceWrapper target) {
   if(target == null) { return true }
-  Object raw = target.getDataValue('id') != null
-      ? getPlayerPreference(target, 'disableAlbumArtEvents', true)
-      : getGroupPreference(target, 'disableAlbumArtEvents', true)
-  return toBooleanPreference(raw, true)
+  return isAlbumArtEventsDisabledByDni(target.getDeviceNetworkId()?.toString(), target.getDataValue('id') == null)
+}
+
+Boolean isAlbumArtEventsDisabledByDni(String dni, Boolean groupDevice) {
+  if(!dni) { return true }
+  Map<String, Object> snapshot = getPreferenceSnapshotByDni(
+      groupDevice ? GROUP_PREFERENCES_BY_DNI_STATE_KEY : PLAYER_PREFERENCES_BY_DNI_STATE_KEY, dni)
+  return toBooleanPreference(snapshot.disableAlbumArtEvents, true)
 }
 
 Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String artworkSourceId,
@@ -6190,7 +6285,7 @@ Map<String, Object> albumArtAttributesForFanout(String rawAlbumArtURI, String ar
 
 String resolveAlbumArtUrl(String rawAlbumArtURI, String artworkSourceId) {
   if(!rawAlbumArtURI || rawAlbumArtURI == 'Not Available') { return 'Not Available' }
-  if(!rawAlbumArtURI.startsWith('/')) { return rawAlbumArtURI }
+  if(!rawAlbumArtURI.startsWith('/') || !artworkSourceId) { return rawAlbumArtURI }
   ChildDeviceWrapper source = findPlayerBySonosId(artworkSourceId)
   String baseUrl = getSonosLocalUpnpUrl(source)
   if(baseUrl?.endsWith('/')) { baseUrl = baseUrl[0..-2] }
@@ -6245,24 +6340,6 @@ Map<String, String> buildPlayerCoordinatorMap(Map<String, List<Map>> topology) {
     members.unique().each { String memberId -> coordinators[memberId] = coordinatorId }
   }
   return coordinators
-}
-
-List<Map> putAvtEvents(String coordinatorRincon, List<Map> events) {
-  String rincon = coordinatorRincon?.toString()
-  if(!rincon || !(events instanceof List)) { return [] }
-  Map<String, List<Map>> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
-      ? new LinkedHashMap<String, List<Map>>((Map<String, List<Map>>)state[AVT_STORE_STATE_KEY]) : [:]
-  List<Map> stored = events.collect { Map incoming -> new LinkedHashMap(incoming) }
-  snapshots[rincon] = stored
-  state[AVT_STORE_STATE_KEY] = snapshots
-  return stored
-}
-
-List<Map> getStoredAvtEvents(String rincon) {
-  Map<String, List<Map>> snapshots = state[AVT_STORE_STATE_KEY] instanceof Map
-      ? (Map<String, List<Map>>)state[AVT_STORE_STATE_KEY] : [:]
-  List<Map> stored = snapshots[rincon?.toString()] as List<Map>
-  return stored != null ? new ArrayList<Map>(stored) : []
 }
 
 List<Map> getStoredZgtEvents(String groupId) {
@@ -6918,7 +6995,7 @@ void refreshGroupDeviceState(ChildDeviceWrapper groupDevice, ChildDeviceWrapper 
   }
 
   String coordinatorId = coordinator.getDataValue('id')?.toString()
-  List<Map> latestAvt = getStoredAvtEvents(coordinatorId)
+  List<Map> latestAvt = getStoredAvtEvents(coordinator.getDeviceNetworkId()?.toString())
   Map artEvent = latestAvt.find { Map event -> event?.name?.toString() == 'albumArtURI' && event.containsKey('value') }
   if(artEvent) {
     attributes.putAll(albumArtAttributesForFanout(artEvent.value?.toString(), coordinatorId,

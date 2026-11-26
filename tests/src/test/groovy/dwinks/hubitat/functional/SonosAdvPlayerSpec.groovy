@@ -107,22 +107,19 @@ class SonosAdvPlayerSpec extends Specification {
     when:
     driver.getFavorites()
     Map request = driver.asyncCalls.last()
-    Map playbackSnapshot = [
-      currentTrackURI: 'x-sonos-http:song%3aother.mp4',
-      currentTrackMetaData: [:],
-      enqueuedTransportURIMetaData: driver.parseAvtMetaData(embedded)
-    ]
-    driver.runtimeState.lastTransportPlaybackSnapshot = playbackSnapshot
+    Map matchKeys = driver.buildAvtMatchKeys(
+      [CurrentTrackURI: 'x-sonos-http:song%3aother.mp4', EnqueuedTransportURIMetaData: embedded],
+      [EnqueuedTransportURIMetaData: driver.parseAvtMetaData(embedded)])
     driver.favoritesBrowseCallback(new hubitat.scheduling.AsyncResponse(status: 200,
       data: '<BrowseResponse><Result>' + StringEscapeUtils.escapeXml10(didl) +
         '</Result><TotalMatches>1</TotalMatches><UpdateID>5</UpdateID></BrowseResponse>'), request.data)
-    driver.updateCurrentFavoriteFromUpnp(playbackSnapshot)
+    List<Map> matchEvents = driver.buildFavoriteMatchEvents(matchKeys)
 
     then:
-    request.params.uri == 'http://192.168.1.50/MediaServer/ContentDirectory/Control'
+    request.params.uri == 'http://192.168.1.50:1400/MediaServer/ContentDirectory/Control'
     request.params.body.contains('<ObjectID>FV:2</ObjectID>')
     driver.findFavoriteById('14').name == 'Peepers On Crane Pond'
-    driver.device.currentValue('currentFavorite').contains('Favorite #14 Peepers On Crane Pond')
+    matchEvents.find { Map event -> event.name == 'currentFavorite' }.value.contains('Favorite #14 Peepers On Crane Pond')
   }
 
   def "ContentDirectory updates refresh only the changed active catalog over UPnP"() {
@@ -565,8 +562,8 @@ class SonosAdvPlayerSpec extends Specification {
   def "AVTransport and HTControl UPnP report home theater source and input connection"() {
     given:
     String metadata = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><dc:title>RINCON_TEST</dc:title><upnp:class>object.item.audioItem.linein.homeTheater</upnp:class></item></DIDL-Lite>'
-    Map snapshot = [avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
-      avTransportURIMetaData: driver.parseAvtMetaData(metadata), transportState: 'PLAYING']
+    Map snapshot = [currentUri: 'x-sonos-htastream:RINCON_TEST:spdif',
+      currentUriClass: driver.parseAvtMetaData(metadata).class, transportState: 'PLAYING']
     driver.runtimeState.lastTransportPlaybackSnapshot = snapshot
 
     when:
@@ -584,10 +581,9 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     driver.device.currentValues.audioSourceSignalStatus = 'no-signal'
     String metadata = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><upnp:class>object.item.audioItem.linein.homeTheater</upnp:class></item></DIDL-Lite>'
-    driver.observeUpnpPlaybackSource([avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
-      avTransportURIMetaData: driver.parseAvtMetaData(metadata)])
-    driver.runtimeState.lastTransportPlaybackSnapshot = [avTransportURI: 'x-sonos-htastream:RINCON_TEST:spdif',
-      avTransportURIMetaData: driver.parseAvtMetaData(metadata)]
+    Map snapshot = [currentUri: 'x-sonos-htastream:RINCON_TEST:spdif', currentUriClass: driver.parseAvtMetaData(metadata).class]
+    driver.observeUpnpPlaybackSource(snapshot)
+    driver.runtimeState.lastTransportPlaybackSnapshot = snapshot
 
     when:
     driver.handleHtControlPayload('<propertyset><property><TOSLinkConnected>1</TOSLinkConnected></property></propertyset>')
@@ -1109,7 +1105,6 @@ class SonosAdvPlayerSpec extends Specification {
     driver.escapeQueueHtml("A&B <'\"") == 'A&amp;B &lt;&#39;&quot;'
     driver.escapeSoapXmlText("A&B <'\"") == 'A&amp;B &lt;&apos;&quot;'
     driver.unEscapeMetaData('&amp;lt;title&amp;gt;A&amp;lt;/title&amp;gt;') == '<title>A</title>'
-    driver.unescapeIfNeeded('&lt;x&gt;') == '<x>'
     driver.normalizeLogLevel('INFO') == 'info'
     driver.splitTokens('a,,b,', ',') == ['a', 'b']
     driver.splitTokens(null, ',').empty
@@ -1643,7 +1638,7 @@ class SonosAdvPlayerSpec extends Specification {
     payload.groupNamesById['RINCON_A:1'] == 'Living Room'
   }
 
-  def "AVT parse relays sendEvent maps without publishing player events"() {
+  def "coordinator AVT parse schedules a sendEvent-ready relay and publishes nothing itself"() {
     given:
     String body = avtBody('<TransportState val="PLAYING"/>')
     String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\n' +
@@ -1651,14 +1646,151 @@ class SonosAdvPlayerSpec extends Specification {
     driver.metaClass.getMapForRaw = { String rawMessage ->
       [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
     }
+    List<Map> received = []
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events ->
+      received << [dni: dni, events: events] }) }
 
     when:
     driver.parse(raw)
+    List job = driver.scheduled.find { List row -> row[1] == 'relayAvtToParent' }
+    driver.relayAvtToParent(job[2].data)
 
     then:
     driver.device.events.empty
-    driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' && row[2].data.service == 'AVT' &&
-      row[2].data.events.any { Map event -> event.name == 'status' && event.value == 'playing' } }
+    job[0] == 1
+    received.size() == 1
+    received[0].dni == driver.device.deviceNetworkId
+    received[0].events.any { Map event -> event.name == 'status' && event.value == 'playing' }
+  }
+
+  def "follower AVT is not relayed as events; it asks the parent for the coordinator's events"() {
+    given:
+    String body = avtBody('<TransportState val="PLAYING"/><CurrentTrackURI val="x-rincon:RINCON_542A1B67195401400"/>' +
+      '<CurrentTrackMetaData val=""/><AVTransportURI val="x-rincon:RINCON_542A1B67195401400"/>' +
+      '<AVTransportURIMetaData val=""/>')
+    String raw = 'mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /avt HTTP/1.1\r\nX-SONOS-SERVICETYPE: AVTransport\r\nSEQ: 1\r\n\r\n' + body
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'AVTransport', 'SEQ': '1'], body: body]
+    }
+    List<List> requests = []
+    driver.metaClass.getParent = { -> new Expando(
+      putAvtEvents: { String dni, List<Map> events -> requests << ['events', dni] },
+      requestCoordinatorEvents: { String rincon, String dni -> requests << [rincon, dni] }) }
+
+    when:
+    driver.parse(raw)
+    driver.scheduled.findAll { List row -> row[1] in ['relayAvtToParent', 'relayCoordinatorEventsRequest'] }
+      .each { List row -> driver."${row[1]}"(row[2].data) }
+
+    then:
+    !driver.scheduled.any { List row -> row[1] == 'relayAvtToParent' }
+    requests == [['RINCON_542A1B67195401400', driver.device.deviceNetworkId]]
+  }
+
+  def "AVT classification separates coordinator payloads from follower pointers"() {
+    given:
+    String didl = '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
+      'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item id="-1" parentID="-1"><upnp:albumArtURI>/getaa?s=1&amp;u=x</upnp:albumArtURI>' +
+      '<dc:title>Marine Layer (Nature)</dc:title><dc:creator>weather balloon</dc:creator><upnp:album>Marine Layer</upnp:album></item></DIDL-Lite>'
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+
+    when:
+    Map full = driver.parseAvt(avtBody('<TransportState val="STOPPED"/><CurrentPlayMode val="NORMAL"/><CurrentCrossfadeMode val="1"/>' +
+      '<CurrentTrack val="1"/><CurrentTrackURI val="x-sonosapi-hls-static:song%3a1747693756?sid=204&amp;flags=8232&amp;sn=9"/>' +
+      '<CurrentTrackDuration val="0:03:14"/><CurrentTrackMetaData val="' + StringEscapeUtils.escapeXml10(didl) + '"/>' +
+      '<AVTransportURI val="x-sonos-http:song%3a1747693756.mp4?sid=204&amp;flags=8232&amp;sn=9"/>'))
+    Map follower = driver.parseAvt(avtBody('<CurrentTrackURI val="x-rincon:RINCON_542A1B67195401400"/>' +
+      '<AVTransportURI val="x-rincon:RINCON_542A1B67195401400"/>'))
+    Map lineIn = driver.parseAvt(avtBody('<AVTransportURI val="x-rincon-stream:RINCON_542A1B67195401400"/>'))
+
+    then:
+    full.kind == 'coordinator'
+    full.events.collect { Map event -> [event.name, event.value] }.containsAll([
+      ['status', 'stopped'], ['currentTrackName', 'Marine Layer (Nature)'], ['currentArtistName', 'weather balloon'],
+      ['currentAlbumName', 'Marine Layer'], ['currentTrackNumber', 1], ['currentTrackDuration', '0:03:14'],
+      ['currentCrossfadeMode', 'on'], ['currentRepeatOneMode', 'off'], ['currentShuffleMode', 'off'],
+      ['albumArtURI', 'http://192.168.1.50:1400/getaa?s=1&u=x']])
+    full.matchKeys.currentUri == 'x-sonosapi-hls-static:song:1747693756'
+    follower.kind == 'follower'
+    follower.coordinatorRincon == 'RINCON_542A1B67195401400'
+    follower.events.isEmpty()
+    lineIn.kind == 'coordinator'
+    driver.parseAvt('not xml') == null
+  }
+
+  def "coordinator AVT records a merged transport snapshot that follower AVT clears"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    String meta = '<DIDL-Lite><item id="-1"><res>x</res></item></DIDL-Lite>'
+    driver.runtimeState[driver.TRANSPORT_STATUS_SNAPSHOT_KEY] = [positionMillis: 42000L]
+
+    when:
+    driver.handleAvtNotification(avtBody('<TransportState val="PLAYING"/><CurrentTrack val="3"/><CurrentPlayMode val="SHUFFLE"/>' +
+      '<CurrentTrackURI val="x-sonos-http:song%3a1.mp4?sid=204&amp;flags=8232"/>' +
+      '<CurrentTrackMetaData val="' + StringEscapeUtils.escapeXml10(meta) + '"/>' +
+      '<AVTransportURI val="x-rincon-queue:RINCON_TEST#0"/><AVTransportURIMetaData val=""/>'))
+    driver.handleAvtNotification(avtBody('<TransportState val="PAUSED_PLAYBACK"/>'))
+    Map snapshot = driver.getLastTransportPlaybackSnapshot()
+
+    then: 'later deltas overwrite only the variables they carry'
+    snapshot.transportState == 'PAUSED_PLAYBACK'
+    snapshot.track == '3'
+    snapshot.playMode == 'SHUFFLE'
+    snapshot.currentUri == 'x-rincon-queue:RINCON_TEST#0'
+    snapshot.currentUriMetaData == ''
+    snapshot.trackUri == 'x-sonos-http:song%3a1.mp4?sid=204&flags=8232'
+    snapshot.trackMetaData == meta
+    snapshot.positionMillis == 42000L
+    snapshot.observedAt != null
+
+    when: 'the player becomes a follower'
+    driver.handleAvtNotification(avtBody('<CurrentTrackURI val="x-rincon:RINCON_COORD"/><AVTransportURI val="x-rincon:RINCON_COORD"/>'))
+
+    then:
+    driver.getLastTransportPlaybackSnapshot() == null
+  }
+
+  def "AVT transport source drives the audio source attributes through the recorded snapshot"() {
+    given:
+    String didl = '<DIDL-Lite xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
+      '<item><upnp:class>object.item.audioItem.linein.homeTheater</upnp:class></item></DIDL-Lite>'
+
+    when:
+    driver.handleAvtNotification(avtBody('<AVTransportURI val="x-sonos-htastream:RINCON_TEST:spdif"/>' +
+      '<AVTransportURIMetaData val="' + StringEscapeUtils.escapeXml10(didl) + '"/>'))
+
+    then:
+    driver.events.any { Map event -> event.name == 'audioSource' && event.value == 'x-sonos-htastream:RINCON_TEST:spdif' }
+    driver.events.any { Map event -> event.name == 'audioSourceSignalStatus' }
+  }
+
+  def "announcement capture reads the AVT-recorded transport snapshot"() {
+    given:
+    driver.device.dataValues.deviceIp = '192.168.1.50'
+    driver.handleAvtNotification(avtBody('<TransportState val="PLAYING"/><CurrentTrack val="2"/>' +
+      '<AVTransportURI val="x-rincon-queue:RINCON_TEST#0"/><AVTransportURIMetaData val=""/>'))
+
+    expect:
+    driver.getLastTransportPlaybackSnapshot().with { it.currentUri == 'x-rincon-queue:RINCON_TEST#0' && it.track == '2' }
+  }
+
+  def "coordinator relay appends favorite and playlist matches and rematch reuses the last match keys"() {
+    given:
+    seedUpnpFavorite('7', 'x-sonos-http:song%3a7.mp4?sid=204&flags=8232&sn=9')
+    List<Map> received = []
+    driver.metaClass.getParent = { -> new Expando(putAvtEvents: { String dni, List<Map> events -> received << events }) }
+
+    when:
+    driver.relayAvtToParent([events: [[name: 'status', value: 'playing']],
+      matchKeys: [currentUri: 'x-sonos-http:song:7'], rematch: false])
+    driver.relayAvtToParent([events: [], matchKeys: [:], rematch: true])
+
+    then:
+    received.size() == 2
+    received[0].find { Map event -> event.name == 'currentFavorite' }.value == 'Favorite #7 Favorite 7'
+    received[0].find { Map event -> event.name == 'currentPlaylist' }.value == 'No playlist playing'
+    received[1].find { Map event -> event.name == 'currentFavorite' }.value == 'Favorite #7 Favorite 7'
+    !received[1].any { Map event -> event.name == 'status' }
   }
 
   def "ZGT notification logs header values with SEQ 0"() {
@@ -1736,14 +1868,15 @@ class SonosAdvPlayerSpec extends Specification {
       '<CurrentTrackMetaData val="' + encodedMetadata + '"/>')
 
     when:
-    Map snapshot = driver.parseAvtFullSnapshot(body)
+    Map avt = driver.parseAvt(body)
+    Map<String, Object> values = avt.events.collectEntries { Map event -> [(event.name): event.value] }
 
     then:
-    snapshot.transportState == 'PLAYING'
-    snapshot.currentTrackURI == 'http://media.example.test/song.mp3?one=1&two=2'
-    snapshot.currentTrackMetaData.title == 'Flowers & Flags'
-    snapshot.currentTrackMetaData.creator == 'Artist & Co'
-    snapshot.currentTrackMetaData.album == 'Album & Friends'
+    values.status == 'playing'
+    avt.matchKeys.currentUri == 'http://media.example.test/song.mp3'
+    values.currentTrackName == 'Flowers & Flags'
+    values.currentArtistName == 'Artist & Co'
+    values.currentAlbumName == 'Album & Friends'
   }
 
   def "AVT DIDL metadata lookup supports Sonos default and prefixed namespaces"() {
@@ -1781,19 +1914,13 @@ class SonosAdvPlayerSpec extends Specification {
       '</InstanceID></Event>') + '</LastChange></property></propertyset>'
 
     when:
-    Map snapshot = driver.parseAvtFullSnapshot(xml)
-    List<Map> events = driver.buildAvtEvents(snapshot, [:])
+    List<Map> events = driver.parseAvt(xml).events
 
     then:
-    snapshot.hasNextTrackMetaData
-    snapshot.nextTrackMetaData.title == 'Man in the Box'
-    snapshot.nextTrackMetaData.creator == 'Alice In Chains'
-    snapshot.nextTrackMetaData.album == 'Facelift'
-    snapshot.nextTrackMetaData.albumArtURI == '/getaa?s=1&u=next'
     events.find { Map event -> event.name == 'nextTrackName' }?.value == 'Man in the Box'
     events.find { Map event -> event.name == 'nextArtistName' }?.value == 'Alice In Chains'
     events.find { Map event -> event.name == 'nextAlbumName' }?.value == 'Facelift'
-    events.find { Map event -> event.name == 'nextTrackAlbumArtURI' }?.value == '/getaa?s=1&u=next'
+    events.find { Map event -> event.name == 'nextTrackAlbumArtURI' }?.value == 'http://192.168.1.50:1400/getaa?s=1&u=next'
   }
 
   def "AVTransport streamInfo reports the Sonos audio input format label"() {
@@ -1803,11 +1930,9 @@ class SonosAdvPlayerSpec extends Specification {
       '</LastChange></property></propertyset>'
 
     when:
-    Map snapshot = driver.parseAvtFullSnapshot(xml)
-    List<Map> events = driver.buildAvtEvents(snapshot, [:])
+    List<Map> events = driver.parseAvt(xml).events
 
     then:
-    snapshot.streamInfo == '84934714'
     events.find { Map event -> event.name == 'audioInputFormat' }?.value == 'Dolby Digital Plus 5.1'
     driver.formatSonosAudioInput('33554490') == 'Dolby Digital Plus 2.0'
     driver.formatSonosAudioInput('84934713') == 'Dolby Digital 5.1'
@@ -1822,12 +1947,9 @@ class SonosAdvPlayerSpec extends Specification {
     String xml = '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(innerEvent) + '</LastChange></property></propertyset>'
 
     when:
-    Map snapshot = driver.parseAvtFullSnapshot(xml)
-    List<Map> events = driver.buildAvtEvents(snapshot, [:])
+    List<Map> events = driver.parseAvt(xml).events
 
     then:
-    snapshot.hasStreamInfo
-    snapshot.streamInfo == '33554490'
     events.find { Map event -> event.name == 'audioInputFormat' }?.value == 'Dolby Digital Plus 2.0'
   }
 
@@ -1839,7 +1961,7 @@ class SonosAdvPlayerSpec extends Specification {
       '</InstanceID></Event>') + '</LastChange></property></propertyset>'
 
     when:
-    List<Map> events = driver.buildAvtEvents(driver.parseAvtFullSnapshot(xml), [:])
+    List<Map> events = driver.parseAvt(xml).events
 
     then:
     events.find { Map event -> event.name == 'nextTrackName' }?.value == 'Not Available'
@@ -2593,13 +2715,11 @@ class SonosAdvPlayerSpec extends Specification {
     driver.getPlaylistsMap()['playlist-963'] = [id: 'playlist-963', name: 'Morning Mix', upnpUri: 'x-rincon-cpcontainer:playlist-963']
 
     when:
-    driver.updateCurrentFavoriteFromUpnp([
-      currentTrackURI: 'x-rincon-cpcontainer:playlist-963',
-      enqueuedTransportURI: '', currentTrackMetaData: [:], enqueuedTransportURIMetaData: [:]
-    ])
+    List<Map> events = driver.buildFavoriteMatchEvents(driver.buildAvtMatchKeys(
+      [CurrentTrackURI: 'x-rincon-cpcontainer:playlist-963', EnqueuedTransportURI: ''], [:]))
 
     then:
-    driver.device.currentValues.currentPlaylist == 'Playlist #playlist-963 Morning Mix'
+    events.find { Map event -> event.name == 'currentPlaylist' }.value == 'Playlist #playlist-963 Morning Mix'
   }
 
   def "follower group volume forwarding is deferred through the parent boundary"() {
@@ -2976,10 +3096,8 @@ class SonosAdvPlayerSpec extends Specification {
   def "AVT event translation contains only fields represented in the payload"() {
     when:
     List<Map> events = driver.buildAvtEvents([
-      hasTransportState: true, transportState: 'STOPPED',
-      hasTrack: true, track: '0', hasCurrentTrackURI: true, currentTrackURI: '',
-      hasCurrentTrackDuration: true, currentTrackDuration: '0:00:00',
-      hasCurrentTrackMetaData: true, currentTrackMetaDataRaw: '', currentTrackMetaData: [:]
+      TransportState: 'STOPPED', CurrentTrack: '0', CurrentTrackURI: '',
+      CurrentTrackDuration: '0:00:00', CurrentTrackMetaData: ''
     ], [:])
 
     then:

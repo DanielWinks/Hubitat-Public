@@ -2659,13 +2659,12 @@ class SonosAdvancedAppSpec extends Specification {
     group.events.clear()
 
     when:
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD', events: [
-      [name: 'currentTrackName', value: 'Track A'],
-      [name: 'currentTrackName', value: 'Track B']
-    ]])
+    appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_COORD', events: [
+      [name: 'groupVolume', value: 5]]])
     appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_COORD', events: [
       [name: 'groupVolume', value: 0], [name: 'groupMute', value: 'unmuted']
     ]])
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD', events: [[name: 'status', value: 'playing']]])
 
     then:
     appScript.scheduled.any { List job -> job[0] == 500 && job[1] == 'drainUpnpNotificationQueue' }
@@ -2677,106 +2676,136 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.drainUpnpNotificationQueue()
 
     then:
-    coordinator.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B']
-    follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B']
-    group.events.find { Map event -> event.name == 'volume' }?.value == 0
+    group.events.findAll { Map event -> event.name == 'volume' }*.value == [5, 0]
     group.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
   }
 
-  def "follower AVT is cached and applied after ZGT promotes it to coordinator"() {
-    given:
-    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
-      'GROUP-1': [
-        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']
-      ]
-    ]])
-    appScript.drainUpnpNotificationQueue()
-    follower.currentValues.currentTrackName = 'Arc track'
-    coordinator.events.clear()
-    follower.events.clear()
-
-    when: 'the follower AVT is cached while grouped'
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
-      [name: 'currentTrackName', value: 'Leader stream URI']
-    ]])
-    appScript.drainUpnpNotificationQueue()
-
-    then:
-    follower.events.isEmpty()
-    appScript.getStoredAvtEvents('RINCON_FOLLOW') == [[name: 'currentTrackName', value: 'Leader stream URI']]
-
-    when: 'a newer AVT arrives just before the delayed ZGT split report'
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_FOLLOW', events: [
-      [name: 'status', value: 'playing'], [name: 'currentTrackName', value: 'Fresh solo track']
-    ]])
-    appScript.drainUpnpNotificationQueue()
-
-    then:
-    follower.events.isEmpty()
-    appScript.getStoredAvtEvents('RINCON_FOLLOW') == [
-      [name: 'status', value: 'playing'], [name: 'currentTrackName', value: 'Fresh solo track']
-    ]
-
-    when: 'ZGT splits the group'
-    coordinator.events.clear()
-    follower.events.clear()
-    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
-      'GROUP-KITCHEN': [
-        [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-        [name: 'groupPlayerIds', value: 'RINCON_COORD']
-      ],
-      'GROUP-KIDS': [
-        [name: 'groupCoordinatorId', value: 'RINCON_FOLLOW'],
-        [name: 'groupPlayerIds', value: 'RINCON_FOLLOW']
-      ]
-    ]])
-    appScript.drainUpnpNotificationQueue()
-
-    then:
-    coordinator.currentValues.groupCoordinatorId == 'RINCON_COORD'
-    coordinator.currentValues.groupPlayerIds == 'RINCON_COORD'
-    coordinator.currentValues.isGroupCoordinator == 'on'
-    follower.currentValues.groupCoordinatorId == 'RINCON_FOLLOW'
-    follower.currentValues.groupPlayerIds == 'RINCON_FOLLOW'
-    follower.currentValues.isGroupCoordinator == 'on'
-    !follower.events.any { Map event -> event.name in ['currentTrackName', 'currentArtistName', 'currentAlbumName', 'status', 'transportStatus'] }
-    follower.currentValues.currentTrackName == 'Arc track'
-    appScript.scheduled.any { List job -> job[0] == 1000 && job[1] == 'applyCachedAvtForPromotedCoordinators' }
-    appScript.scheduled.any { List job -> job[0] == 500 && job[1] == 'applyCachedAvtForPromotedCoordinators' }
-    !appScript.scheduled.any { List job -> job[1] == 'drainPlayerAvtSubscriptionUpdates' }
-    !coordinator.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
-
-    when: 'the post-ZGT cache settling window completes'
-    coordinator.events.clear()
-    follower.events.clear()
-    appScript.applyCachedAvtForPromotedCoordinators()
-
-    then:
-    follower.events.find { Map event -> event.name == 'currentTrackName' }?.value == 'Fresh solo track'
-    follower.events.find { Map event -> event.name == 'status' }?.value == 'playing'
-    !coordinator.events.any { Map event -> event.name == 'currentTrackName' || event.name == 'status' }
+  void seedAvtRegistry() {
+    appScript.state.staticDriverActivePlayerRoster = [version: 1, players: [
+      [playerId: 'RINCON_COORD', dni: 'DNI-RINCON_COORD'],
+      [playerId: 'RINCON_FOLLOW', dni: 'DNI-RINCON_FOLLOW'],
+      [playerId: 'RINCON_EXTRA', dni: 'DNI-RINCON_EXTRA']]]
+    appScript.state.groupDeviceCoordinatorsByDni = ['GROUP-DNI': 'RINCON_COORD']
+    appScript.state.zgtEventsByGroupId = ['GROUP-1': [
+      [name: 'groupCoordinatorId', value: 'RINCON_COORD'],
+      [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']]]
+    // The AVT path must never obtain a child device handle (handles deadlock the app gate).
+    appScript.metaClass.getChildDevice = { Object dni -> throw new IllegalStateException("child handle requested for ${dni}") }
   }
 
-  def "joining follower receives only the latest leader AVT replay"() {
+  List<Map> childEventsFor(String dni) {
+    appScript.childEvents.findAll { Map event -> event.device == dni }
+  }
+
+  def "putAvtEvents stores by DNI, schedules a 1 ms callback, and touches no device"() {
     given:
+    seedAvtRegistry()
+
+    when:
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A'], [name: 'status', value: 'playing']])
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track B']])
+
+    then:
+    appScript.state.avtEventsByDni['DNI-RINCON_COORD'] == [
+      [name: 'currentTrackName', value: 'Track B'], [name: 'status', value: 'playing']]
+    appScript.scheduled.findAll { List job -> job[1] == 'applyAvtCallback' }.size() == 2
+    appScript.scheduled.every { List job -> job[1] != 'applyAvtCallback' || job[0] == 1 }
+    appScript.childEvents.isEmpty()
+    coordinator.events.isEmpty()
+  }
+
+  def "the AVT callback applies the delta to the coordinator, every follower, and group devices by DNI"() {
+    given:
+    seedAvtRegistry()
+    appScript.playerPreferencesUpdated([deviceDni: 'DNI-RINCON_COORD', preferences: [disableAlbumArtEvents: false]])
+
+    when:
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A'],
+      [name: 'albumArtURI', value: 'http://192.0.2.10:1400/getaa?s=1&u=x']])
+    appScript.applyAvtCallback(appScript.scheduled.find { List job -> job[1] == 'applyAvtCallback' }[2].data)
+
+    then:
+    ['DNI-RINCON_COORD', 'DNI-RINCON_FOLLOW', 'GROUP-DNI'].every { String dni ->
+      childEventsFor(dni).any { Map event -> event.name == 'currentTrackName' && event.value == 'Track A' } }
+    childEventsFor('DNI-RINCON_EXTRA').isEmpty()
+    childEventsFor('DNI-RINCON_COORD').find { Map event -> event.name == 'albumArtLarge' }.value.endsWith('&x=600&y=600')
+    childEventsFor('DNI-RINCON_FOLLOW').find { Map event -> event.name == 'albumArtLarge' }.value == 'Disabled in Preferences'
+    coordinator.events.isEmpty()
+    follower.events.isEmpty()
+  }
+
+  def "requestCoordinatorEvents replays the cached coordinator events only to the requesting follower"() {
+    given:
+    seedAvtRegistry()
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Latest leader track']])
+    appScript.scheduled.clear()
+    appScript.childEvents.clear()
+
+    when:
+    appScript.requestCoordinatorEvents('RINCON_COORD', 'DNI-RINCON_EXTRA')
+
+    then:
+    appScript.scheduled.size() == 1
+    appScript.scheduled[0][0] == 1
+    appScript.childEvents.isEmpty()
+
+    when:
+    appScript.applyAvtCallback(appScript.scheduled[0][2].data)
+
+    then:
+    childEventsFor('DNI-RINCON_EXTRA').find { Map event -> event.name == 'currentTrackName' }.value == 'Latest leader track'
+    childEventsFor('DNI-RINCON_COORD').isEmpty()
+    childEventsFor('DNI-RINCON_FOLLOW').isEmpty()
+    childEventsFor('GROUP-DNI').isEmpty()
+  }
+
+  def "requestCoordinatorEvents ignores unknown coordinators and coordinators with no cached events"() {
+    given:
+    seedAvtRegistry()
+
+    when:
+    appScript.requestCoordinatorEvents('RINCON_UNKNOWN', 'DNI-RINCON_FOLLOW')
+    appScript.requestCoordinatorEvents('RINCON_COORD', 'DNI-RINCON_FOLLOW')
+
+    then:
+    appScript.scheduled.isEmpty()
+  }
+
+  def "ZGT topology changes never replay AVT and the AVT cache is cleared at hub start"() {
+    given:
+    seedAvtRegistry()
+    appScript.putAvtEvents('DNI-RINCON_COORD', [[name: 'currentTrackName', value: 'Track A']])
+    appScript.scheduled.clear()
+    appScript.childEvents.clear()
+
+    when:
     appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
       'GROUP-KITCHEN': [[name: 'groupCoordinatorId', value: 'RINCON_COORD'], [name: 'groupPlayerIds', value: 'RINCON_COORD']],
       'GROUP-KIDS': [[name: 'groupCoordinatorId', value: 'RINCON_FOLLOW'], [name: 'groupPlayerIds', value: 'RINCON_FOLLOW']]
     ]])
     appScript.drainUpnpNotificationQueue()
-    follower.events.clear()
-
-    when:
-    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD', events: [[name: 'currentTrackName', value: 'Latest leader track']]])
     appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: [
-      'GROUP-1': [[name: 'groupCoordinatorId', value: 'RINCON_COORD'],
-        [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']]
+      'GROUP-1': [[name: 'groupCoordinatorId', value: 'RINCON_COORD'], [name: 'groupPlayerIds', value: 'RINCON_COORD,RINCON_FOLLOW']]
     ]])
     appScript.drainUpnpNotificationQueue()
 
     then:
-    follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Latest leader track']
+    !follower.events.any { Map event -> event.name == 'currentTrackName' }
+    !appScript.scheduled.any { List job -> job[1] in ['applyAvtCallback', 'applyCachedAvtForPromotedCoordinators', 'replayZgtFollowerAvt'] }
+
+    when:
+    appScript.systemStartHandler()
+
+    then:
+    !appScript.state.containsKey('avtEventsByDni')
+  }
+
+  def "group device registry follows each group device's configured coordinator"() {
+    when:
+    appScript.refreshGroupDeviceCoordinators()
+
+    then:
+    appScript.state.groupDeviceCoordinatorsByDni == ['GROUP-DNI': 'RINCON_COORD']
   }
 
   def "ZGT coordinator changes do not alter player AVT subscriptions"() {
@@ -2802,43 +2831,30 @@ class SonosAdvancedAppSpec extends Specification {
 
   def "AVT artwork is rendered and group preference controls only group size attributes"() {
     given:
-    coordinator.settings.disableAlbumArtEvents = false
-    coordinator.updatedSettings.disableAlbumArtEvents = false
-    group.updatedSettings.disableAlbumArtEvents = true
+    seedAvtRegistry()
+    appScript.playerPreferencesUpdated([deviceDni: 'DNI-RINCON_COORD', preferences: [disableAlbumArtEvents: false]])
+    appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI', preferences: [disableAlbumArtEvents: true]])
     List<Map> events = [
-      [name: 'albumArtURI', value: '/getaa?s=1&u=x-sonos-http%3asong%253a123.mp4%3fsid%3d204%26flags%3d8232%26sn%3d9'],
-      [name: 'nextTrackAlbumArtURI', value: '/getaa?s=1&u=x-sonos-http%3asong%253a456.mp4%3fsid%3d204%26flags%3d73768%26sn%3d9'],
-      [name: 'nextTrackName', value: 'Man in the Box'],
-      [name: 'nextArtistName', value: 'Alice In Chains'],
-      [name: 'nextAlbumName', value: 'Facelift']
+      [name: 'albumArtURI', value: 'http://192.0.2.10:1400/getaa?s=1&u=x-sonos-http%3asong%253a123.mp4%3fsid%3d204%26flags%3d8232%26sn%3d9'],
+      [name: 'nextTrackAlbumArtURI', value: 'http://192.0.2.10:1400/getaa?s=1&u=x-sonos-http%3asong%253a456.mp4%3fsid%3d204%26flags%3d73768%26sn%3d9'],
+      [name: 'nextTrackName', value: 'Man in the Box']
     ]
+    Closure attrs = { String dni -> childEventsFor(dni).collectEntries { Map event -> [(event.name): event.value] } }
 
     when:
-    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events, true)
+    appScript.applyAvtEvents('DNI-RINCON_COORD', events)
 
     then:
-    coordinator.emittedAttributes().albumArtURI.contains('<img')
-    coordinator.emittedAttributes().albumArtURI.contains('http://192.0.2.10:1400/getaa?')
-    coordinator.emittedAttributes().albumArtSmall == 'http://192.0.2.10:1400/getaa?s=1&u=x-sonos-http%3asong%253a123.mp4%3fsid%3d204%26flags%3d8232%26sn%3d9&x=60&y=60'
-    coordinator.emittedAttributes().albumArtLarge.endsWith('&x=600&y=600')
-    group.emittedAttributes().albumArtURI == coordinator.emittedAttributes().albumArtURI
-    group.emittedAttributes().albumArtSmall == 'Disabled in Preferences'
-    group.emittedAttributes().albumArtMedium == 'Disabled in Preferences'
-    group.emittedAttributes().albumArtLarge == 'Disabled in Preferences'
-    group.emittedAttributes().nextTrackAlbumArtURI.contains('<img')
-    group.emittedAttributes().nextTrackName == 'Man in the Box'
-    group.emittedAttributes().nextArtistName == 'Alice In Chains'
-    group.emittedAttributes().nextAlbumName == 'Facelift'
-
-    when:
-    group.updatedSettings.disableAlbumArtEvents = false
-    group.events.clear()
-    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events, true)
-
-    then:
-    group.emittedAttributes().albumArtSmall == coordinator.emittedAttributes().albumArtSmall
-    group.emittedAttributes().albumArtMedium == coordinator.emittedAttributes().albumArtMedium
-    group.emittedAttributes().albumArtLarge == coordinator.emittedAttributes().albumArtLarge
+    attrs('DNI-RINCON_COORD').albumArtURI.contains('<img')
+    attrs('DNI-RINCON_COORD').albumArtURI.contains('http://192.0.2.10:1400/getaa?')
+    attrs('DNI-RINCON_COORD').albumArtSmall.endsWith('&x=60&y=60')
+    attrs('DNI-RINCON_COORD').albumArtLarge.endsWith('&x=600&y=600')
+    attrs('GROUP-DNI').albumArtURI == attrs('DNI-RINCON_COORD').albumArtURI
+    attrs('GROUP-DNI').albumArtSmall == 'Disabled in Preferences'
+    attrs('GROUP-DNI').albumArtMedium == 'Disabled in Preferences'
+    attrs('GROUP-DNI').albumArtLarge == 'Disabled in Preferences'
+    attrs('GROUP-DNI').nextTrackAlbumArtURI.contains('<img')
+    attrs('GROUP-DNI').nextTrackName == 'Man in the Box'
   }
 
 }
