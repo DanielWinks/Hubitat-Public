@@ -20,23 +20,33 @@ set the volume to zero.
 
 ## Reported group volume and mute
 
-Sonos Advanced no longer subscribes to the Sonos GroupRenderingControl service.
-`groupVolume` and `groupMute` are calculated by the app from each player's own
-RenderingControl `volume` and `mute` reports. Group volume is the rounded average
-of the selected players' volume (half up); group mute is `muted` only when every
-selected player is muted. Group volume commands such as `setGroupVolume` still
-use the Sonos group API.
+Every player subscribes to the Sonos GroupRenderingControl service, including
+followers, so a player is ready if it becomes a coordinator. Only a coordinator
+receives group notifications. Its driver relays the `groupVolume` and `groupMute`
+values to the app, which applies them to the coordinator and every follower in the
+live group, and caches the latest values so a player that joins later receives them
+immediately. A notification from a player that is not the group's coordinator is
+ignored, so the coordinator's report always wins. This keeps the values correct for
+groups that mix Hubitat players with speakers that have no Hubitat device.
 
-Player devices report their live Sonos group. A group device chooses its players
-from its live state and two settings, which the group driver publishes to the app
-and the app caches (`groupPreferencesByDni`):
+Group devices that follow the live group use the same coordinator values. Group
+devices that use only their configured players calculate group volume as the rounded
+average (half up) of those players' own `volume` reports, and group mute is `muted`
+only when every one of them is muted. Group volume commands such as `setGroupVolume`
+still use the Sonos group API.
+
+A group device chooses its players from its live state and two settings. The group
+driver publishes them to the app, and the app also caches the copy carried by every
+volume, mute and refresh command (`groupPreferencesByDni`), so the app never calls a
+group device to ask for them:
 
 | Live Sonos state | Use proportional volume | Control ungrouped individually | Players used |
 |---|---|---|---|
-| Grouped | On | Either | Live Sonos group members |
+| Grouped | On | Either | Live Sonos group (coordinator's GroupRenderingControl) |
 | Grouped | Off | Either | Players configured on the group device |
 | Ungrouped | Either | On | Players configured on the group device |
 | Ungrouped | Either | Off | Coordinator only |
 
 No calculated group volume is published while none of the selected players has
-reported a valid volume.
+reported a valid volume, and no live-group value is published until the coordinator
+has reported its group volume.

@@ -1762,6 +1762,36 @@ class SonosAdvPlayerSpec extends Specification {
     driver.events.any { Map event -> event.name == 'audioSourceSignalStatus' }
   }
 
+  def "AVT alarm-running variables are handed to the parent separately from playback events"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+
+    when:
+    driver.handleAvtNotification(avtBody('<AlarmRunning val="1"/><AlarmIDRunning val="42"/>' +
+      '<AlarmLoggedStartTime val="2026-11-26T07:30:00Z"/>'))
+
+    then:
+    parentPlayerUpdates.isEmpty()
+    Map job = driver.scheduled.find { List row -> row[1] == 'relayParsedUpnpToParent' }[2] as Map
+
+    when:
+    driver.relayParsedUpnpToParent(job.data as Map)
+
+    then:
+    parentPlayerUpdates.size() == 1
+    parentPlayerUpdates[0].service == 'AlarmRunning'
+    parentPlayerUpdates[0].sourceDni == 'SONOS-TEST-DNI'
+    parentPlayerUpdates[0].values == [AlarmRunning: '1', AlarmIDRunning: '42', AlarmLoggedStartTime: '2026-11-26T07:30:00Z']
+  }
+
+  def "AVT notifications without alarm variables send no alarm handoff"() {
+    when:
+    driver.handleAvtNotification(avtBody('<TransportState val="PLAYING"/>'))
+
+    then:
+    !driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' }
+  }
+
   def "announcement capture reads the AVT-recorded transport snapshot"() {
     given:
     driver.device.dataValues.deviceIp = '192.168.1.50'
@@ -2222,17 +2252,18 @@ class SonosAdvPlayerSpec extends Specification {
   def "non-battery player asks the app election before subscribing to ZGT"() {
     given:
     List<String> zgtCalls = []
+    List<String> grcCalls = []
     driver.device.dataValues.hasBattery = 'false'
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
+    driver.metaClass.subscribeToMrGrcEvents = { -> grcCalls << 'subscribe' }
 
     when:
     driver.initialize()
 
     then:
     zgtCalls == ['subscribe']
-    !driver.metaClass.respondsTo(driver, 'subscribeToMrGrcEvents')
+    grcCalls == ['subscribe']
     !rawRequests.any { String request -> request.contains('GroupRenderingControl') }
-    !driver.device.dataValues.containsKey('sid4')
     !driver.device.dataValues.containsKey('isZgtSubscriber')
     !driver.device.dataValues.containsKey('zgtLeaderGeneration')
   }
@@ -2321,12 +2352,13 @@ class SonosAdvPlayerSpec extends Specification {
     zgtCalls == ['subscribe']
   }
 
-  def "player does not subscribe to ZGT when another player won election"() {
+  def "follower remains subscribed to GRC when another player wins the ZGT election"() {
     given:
     List<String> zgtCalls = []
+    List<String> grcCalls = []
     driver.device.dataValues.hasBattery = 'false'
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
-    driver.metaClass.subscribeToMrGrcEvents = { -> }
+    driver.metaClass.subscribeToMrGrcEvents = { -> grcCalls << 'subscribe' }
     driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni -> 'wait' }) }
 
     when:
@@ -2334,6 +2366,125 @@ class SonosAdvPlayerSpec extends Specification {
 
     then:
     zgtCalls.isEmpty()
+    grcCalls == ['subscribe']
+  }
+
+  def "ZGT election winner subscribes to ZGT and AlarmClock while non-winners subscribe to neither"() {
+    given:
+    List<String> calls = []
+    driver.device.dataValues.hasBattery = 'false'
+    driver.metaClass.subscribeToZgtEvents = { -> calls << 'zgt' }
+    driver.metaClass.subscribeToAlarmClockEvents = { -> calls << 'alarmClock' }
+    driver.metaClass.subscribeToMrGrcEvents = { -> }
+    driver.metaClass.getParent = { -> new Expando(readyForZgt: { String dni -> election }) }
+
+    when:
+    driver.initialize()
+
+    then:
+    calls == expected
+
+    where:
+    election  | expected
+    'proceed' | ['zgt', 'alarmClock']
+    'wait'    | []
+  }
+
+  def "AlarmClock subscription queues a SUBSCRIBE with its own SID key and renewal"() {
+    when:
+    driver.subscribeToAlarmClockEvents()
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /AlarmClock/Event HTTP/1.1\r\n')
+    rawRequests[0].contains('CALLBACK: <http://192.168.1.4:39501/alarmclock>')
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'alarmClock'
+
+    when:
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:alarm-clock\r\nTIMEOUT: Second-1800\r\n\r\n')
+
+    then:
+    driver.getSid('alarmClock') == 'uuid:alarm-clock'
+    driver.device.dataValues['alarmClock-expires'] != null
+    driver.subValid('alarmClock')
+    driver.scheduled.any { List row -> row[1] == 'resubscribeToAlarmClockEvents' }
+    !driver.device.dataValues.containsKey('zgtSub')
+
+    when:
+    rawRequests.clear()
+    driver.subscribeToAlarmClockEvents()
+
+    then:
+    rawRequests.isEmpty()
+  }
+
+  def "AlarmClock subscribe failure retries through its own retry callback"() {
+    when:
+    driver.subscribeToAlarmClockEvents()
+    rawConnections[0].options.inputReader.call('HTTP/1.1 500 Failure\r\n\r\n')
+
+    then:
+    driver.scheduled.any { List row -> row[1] == 'retryUpnpAlarmClock' }
+
+    when:
+    rawRequests.clear()
+    Map retryData = driver.scheduled.find { List row -> row[1] == 'retryUpnpAlarmClock' }[2].data as Map
+    driver.retryUpnpAlarmClock(retryData)
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /AlarmClock/Event HTTP/1.1')
+  }
+
+  def "initialization cleanup unsubscribes and clears the AlarmClock SID"() {
+    given:
+    driver.setSid('alarmClock', 'uuid:alarm-clock')
+    driver.eventTimestamps.put('SONOS-TEST-DNI-alarmClock-expires', Instant.now().getEpochSecond() + 1800L)
+    driver.device.dataValues['alarmClock-expires'] = 'later'
+
+    when:
+    driver.clearPlayerSubscriptionsForInitialization()
+
+    then:
+    driver.getSid('alarmClock') == null
+    !driver.device.dataValues.containsKey('alarmClock-expires')
+    rawRequests.any { String request -> request.startsWith('UNSUBSCRIBE /AlarmClock/Event HTTP/1.1') }
+  }
+
+  def "AlarmClock notification parses documented fields with namespace prefixes and hands off after parse"() {
+    given:
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    String body = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">' +
+      '<e:property><AlarmListVersion>RINCON_TEST:42</AlarmListVersion></e:property>' +
+      '<e:property><x:TimeZone xmlns:x="urn:test">01000a</x:TimeZone></e:property>' +
+      '<e:property><Unrelated>ignored</Unrelated></e:property></e:propertyset>'
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'AlarmClock', 'SEQ': '0', 'SID': 'uuid:alarm-clock'], body: body]
+    }
+
+    when:
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /alarmclock HTTP/1.1\r\n\r\n' + body)
+
+    then:
+    parentPlayerUpdates.isEmpty()
+    Map job = driver.scheduled.find { List row -> row[1] == 'relayParsedUpnpToParent' }[2] as Map
+
+    when:
+    driver.relayParsedUpnpToParent(job.data as Map)
+
+    then:
+    parentPlayerUpdates.size() == 1
+    parentPlayerUpdates[0].service == 'AlarmClock'
+    parentPlayerUpdates[0].sourceDni == 'SONOS-TEST-DNI'
+    parentPlayerUpdates[0].values == [AlarmListVersion: 'RINCON_TEST:42', TimeZone: '01000a']
+  }
+
+  def "AlarmClock parsing tolerates partial and malformed payloads"() {
+    expect:
+    driver.parseAlarmClockPayload('<propertyset><property><TimeServer>time.example</TimeServer></property></propertyset>') ==
+      [TimeServer: 'time.example']
+    driver.parseAlarmClockPayload('<propertyset><property><Other>1</Other></property></propertyset>').isEmpty()
+    driver.parseAlarmClockPayload('<propertyset><property><TimeZone>broken').isEmpty()
+    driver.parseAlarmClockPayload('not xml').isEmpty()
+    driver.parseAlarmClockPayload(null).isEmpty()
   }
 
   def "group topology is queried through ZoneGroupTopology UPnP"() {
@@ -2855,34 +3006,58 @@ class SonosAdvPlayerSpec extends Specification {
     !driver.scheduled.any { List job -> job[1] == 'watchExpectedUpnpSubscriptionEvents' }
   }
 
-  def "GroupRenderingControl is not subscribed, retried, or tracked by the player"() {
-    expect:
-    !driver.metaClass.respondsTo(driver, 'subscribeToMrGrcEvents')
-    !driver.metaClass.respondsTo(driver, 'resubscribeToMrGrcEvents')
-    !driver.metaClass.respondsTo(driver, 'retryUpnpSid4')
-    !driver.metaClass.respondsTo(driver, 'parseGrcFullSnapshot')
-    !driver.EVENT_TIMESTAMP_KEYS.contains('lastMrGrcEvent')
-    driver.defaultSubscribeMethod('sid4') == null
-    driver.defaultResubscribeMethod('sid4') == null
+  def "GroupRenderingControl subscription uses sid4 and renews on its own schedule"() {
+    when:
+    driver.subscribeToMrGrcEvents()
+
+    then:
+    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/GroupRenderingControl/Event HTTP/1.1\r\n')
+    driver.upnpRequestQueues.get('SONOS-TEST-DNI').active.sidKey == 'sid4'
+    driver.defaultSubscribeMethod('sid4') == 'subscribeToMrGrcEvents'
+    driver.defaultResubscribeMethod('sid4') == 'resubscribeToMrGrcEvents'
+
+    when:
+    rawConnections[0].options.inputReader.call('HTTP/1.1 200 OK\r\nSID: uuid:group-rendering\r\nTIMEOUT: Second-1800\r\n\r\n')
+
+    then:
+    driver.getSid('sid4') == 'uuid:group-rendering'
+    driver.device.dataValues['sid4-expires'] != null
+    driver.subValid('sid4')
+    driver.scheduled.any { List row -> row[1] == 'resubscribeToMrGrcEvents' }
+    driver.EVENT_TIMESTAMP_KEYS.contains('lastMrGrcEvent')
   }
 
-  def "GroupRenderingControl NOTIFY from a retired subscription is ignored"() {
+  def "coordinator GRC NOTIFY is parsed and relayed after parse releases its gate"() {
     given:
-    String body = '<propertyset><property><GroupVolume>40</GroupVolume><GroupMute>1</GroupMute>' +
-      '<GroupVolumeChangeable>1</GroupVolumeChangeable></property></propertyset>'
+    String body = '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property>' +
+      '<GroupVolume val="40"/><GroupMute>1</GroupMute><GroupVolumeChangeable>1</GroupVolumeChangeable>' +
+      '</e:property></e:propertyset>'
     driver.metaClass.getMapForRaw = { String rawMessage ->
       [headers: ['X-SONOS-SERVICETYPE': 'GroupRenderingControl'], body: body]
     }
-    driver.device.currentValues.groupVolume = 12
+    driver.device.deviceNetworkId = 'SONOS-TEST-DNI'
+    captureParentAudioClipRequests()
 
     when:
     driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /mgrc HTTP/1.1\r\n\r\n' + body)
+    List job = driver.scheduled.find { List row -> row[1] == 'relayGrcToParent' }
+    driver.relayGrcToParent(job[2].data as Map)
 
     then:
-    driver.device.currentValues.groupVolume == 12
-    !driver.device.currentValues.containsKey('groupMute')
-    !driver.device.currentValues.containsKey('groupVolumeChangeable')
-    !driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' }
+    driver.device.events.empty
+    job[0] == 1
+    parentPlayerRequests.size() == 1
+    parentPlayerRequests[0].action == 'groupRendering'
+    parentPlayerRequests[0].sourceDni == 'SONOS-TEST-DNI'
+    parentPlayerRequests[0].args == [groupVolume: 40, groupMute: 'muted']
+  }
+
+  def "GRC parser accepts partial values and rejects invalid volume or mute"() {
+    expect:
+    driver.parseGrcFullSnapshot('<propertyset><property><GroupVolume val="0"/></property></propertyset>') == [groupVolume: 0]
+    driver.parseGrcFullSnapshot('<propertyset><property><GroupMute>0</GroupMute></property></propertyset>') == [groupMute: 'unmuted']
+    driver.parseGrcFullSnapshot('<propertyset><property><GroupVolume>101</GroupVolume><GroupMute>maybe</GroupMute></property></propertyset>') == null
+    driver.parseGrcFullSnapshot('not xml') == null
   }
 
   def "empty groups responses emit a negative topology observation"() {
@@ -3142,7 +3317,6 @@ class SonosAdvPlayerSpec extends Specification {
 
   def "RC event translation emits only present reported values"() {
     expect:
-    !driver.metaClass.respondsTo(driver, 'buildGrcEvents')
     driver.buildRcEvents([volumeMaster: 0, muteMaster: 'unmuted', bass: 2]) == [
       [name: 'volume', value: 0], [name: 'level', value: 0], [name: 'mute', value: 'unmuted'], [name: 'bass', value: 2]]
     driver.buildRcEvents([treble: 1]) == [[name: 'treble', value: 1]]

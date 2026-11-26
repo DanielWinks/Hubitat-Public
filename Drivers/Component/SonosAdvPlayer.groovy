@@ -899,7 +899,7 @@ metadata {
 // Fixed stripes bound lock storage while preserving per-DNI mutual exclusion.
 // Expected topology is stored as a device data value on each affected player,
 // so driver instances can coordinate without exposing it in Current States.
-// App owns ZGT/AVT storage; the driver keeps no snapshot copies (see plan storage rule).
+// App owns ZGT/AVT/GRC storage; the driver keeps no snapshot copies (see plan storage rule).
 // SEQ/SID gate counters remain below: numbers deciding staleness, never payloads.
 // Transient member host cache for group SOAP targeting (playerId -> host); newest-wins, pruned like SEQ counters.
 // Group add/detach must address the target player's UPnP host, which exists only in ZGT member data and
@@ -986,12 +986,24 @@ metadata {
 @Field private final String MRRC_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromMrRcEventsCallback'
 @Field private final String MRRC_EVENTS_DOMAIN  =  'MediaRenderer/RenderingControl'
 
+@Field private final String MRGRC_EVENTS = '/MediaRenderer/GroupRenderingControl/Event'
+@Field private final String MRGRC_EVENTS_CALLBACK = 'subscribeResubscribeToMrGrcCallback'
+@Field private final String MRGRC_EVENTS_UNSUB_CALLBACK = 'unsubscribeFromMrGrcEventsCallback'
+@Field private final String MRGRC_EVENTS_DOMAIN = 'MediaRenderer/GroupRenderingControl'
+
 
 @Field private final String ZGT_EVENTS   =  '/ZoneGroupTopology/Event'
 @Field private final String ZGT_EVENTS_CALLBACK  =  'subscribeResubscribeToZgtCallback'
 @Field private final String ZGT_EVENTS_UNSUB_CALLBACK =  'unsubscribeFromZgtEventsCallback'
 @Field private final String ZGT_EVENTS_DOMAIN  =  'ZoneGroupTopology'
 
+
+@Field private final String ALARM_CLOCK_EVENTS = '/AlarmClock/Event'
+@Field private final String ALARM_CLOCK_EVENTS_CALLBACK = 'subscribeResubscribeToAlarmClockCallback'
+@Field private final String ALARM_CLOCK_EVENTS_UNSUB_CALLBACK = 'unsubscribeFromAlarmClockEventsCallback'
+@Field private final String ALARM_CLOCK_EVENTS_DOMAIN = 'AlarmClock'
+@Field static final List<String> ALARM_CLOCK_EVENT_FIELDS = Collections.unmodifiableList(new ArrayList<String>([
+  'AlarmListVersion', 'DailyIndexRefreshTime', 'DateFormat', 'TimeFormat', 'TimeGeneration', 'TimeServer', 'TimeZone']))
 
 @Field private final String HTCONTROL_EVENTS = '/HTControl/Event'
 @Field private final String HTCONTROL_EVENTS_CALLBACK = 'subscribeResubscribeToHtControlCallback'
@@ -1054,13 +1066,18 @@ metadata {
   'highPriorityAnnouncementMode',
   'sid1',
   'sid2',
+  'sid4',
   'sid5',
   'sid6',
+  'alarmClock',
   'sid1-expires',
   'sid2-expires',
+  'sid4-expires',
   'sid5-expires',
   'sid6-expires',
+  'alarmClock-expires',
   'lastMrRcEvent',
+  'lastMrGrcEvent',
   'ZgtLastUpdated',
   'lastHtControlEvent',
   'lastWebsocketEvent',
@@ -1338,8 +1355,15 @@ void performImmediateInitialization(Boolean subscribeToZgt = true) {
   // Issue UPnP subscriptions first. These calls enqueue async requests locally;
   // starting the WebSocket does not wait for their callbacks.
   subscribeToMrRcEvents()
+  // GroupRenderingControl notifications are useful only from coordinators, but every player
+  // stays subscribed so a follower can report immediately if it becomes coordinator.
+  subscribeToMrGrcEvents()
   if(hasHTPlaybackCapability()) { subscribeToHtControlEvents() }
-  if(subscribeToZgt) { subscribeToZgtEvents() }
+  if(subscribeToZgt) {
+    subscribeToZgtEvents()
+    // The ZGT election winner also owns the single AlarmClock subscription; no second election.
+    subscribeToAlarmClockEvents()
+  }
   // AVTransport remains subscribed regardless of group role. The parent filters
   // follower AVT payloads using its own ZGT topology.
   subscribeToAVTransport()
@@ -1360,22 +1384,36 @@ void clearPlayerSubscriptionsForInitialization() {
   if(!dni) { return }
   String sid = getSid('zgt')
   Boolean hadValid = subValid('zgt') || sid
+  Boolean hadGroupRenderingSubscription = subValid('sid4') || getSid('sid4') != null
   Boolean hadContentDirectorySubscription = subValid('sid6') || getSid('sid6') != null
+  Boolean hadAlarmClockSubscription = subValid('alarmClock') || getSid('alarmClock') != null
   invalidateUpnpRequestsForDevice()
+  if(hadAlarmClockSubscription) {
+    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromAlarmClockEvents', 'resubscribeToAlarmClockEvents',
+        'alarmClock', null, ALARM_CLOCK_EVENTS_UNSUB_CALLBACK, ALARM_CLOCK_EVENTS)
+  }
   if(hadContentDirectorySubscription) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromContentDirectory', 'resubscribeToContentDirectory',
         'sid6', null, CONTENT_DIRECTORY_UNSUB_CALLBACK, CONTENT_DIRECTORY_EVENTS)
+  }
+  if(hadGroupRenderingSubscription) {
+    enqueueUpnpRequest('unsubscribe', 'unsubscribeFromMrGrcEvents', 'resubscribeToMrGrcEvents',
+        'sid4', null, MRGRC_EVENTS_UNSUB_CALLBACK, MRGRC_EVENTS)
   }
   // Synchronous local delete after generation bump — stale callbacks are guarded by generation
   deleteSid('zgt')
   deleteSid('sid1')
   deleteSid('sid2')
+  deleteSid('sid4')
   deleteSid('sid5')
   deleteSid('sid6')
+  deleteSid('alarmClock')
   device.removeDataValue('sid1-expires')
   device.removeDataValue('sid2-expires')
+  device.removeDataValue('sid4-expires')
   device.removeDataValue('sid5-expires')
   device.removeDataValue('sid6-expires')
+  device.removeDataValue('alarmClock-expires')
   if(hadValid) {
     enqueueUpnpRequest('unsubscribe', 'unsubscribeFromZgtEvents', 'resubscribeToZgtEvents', 'zgt', null, ZGT_EVENTS_UNSUB_CALLBACK, ZGT_EVENTS)
   }
@@ -4027,9 +4065,12 @@ void parse(String raw) {
           } catch (Exception e) { logException('RenderingControl event processing failed', e) }
           return
         case 'GroupRenderingControl':
-          // Group volume and mute are calculated by the app from player RenderingControl reports;
-          // this service is no longer subscribed, so ignore any NOTIFY from an old subscription.
-          logDebug('Ignoring GroupRenderingControl NOTIFY from a retired subscription')
+          try {
+            setLastInboundMrGrcEvent()
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML GRC event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
+            handleGrcNotification(xmlBody)
+          } catch(Exception e) { logWarn("Ran into an issue parsing mgrc: ${e}") }
           return
         case 'HTControl':
           try {
@@ -4038,6 +4079,16 @@ void parse(String raw) {
             logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
             handleHtControlPayload(xmlBody)
           } catch(Exception e) { logWarn("Ran into an issue parsing HTControl: ${e}") }
+          return
+        case 'AlarmClock':
+          try {
+            if(!isPlausibleXmlPayload(xmlBody)) { logDebug('Ignoring blank or non-XML AlarmClock event payload'); return }
+            logUpnpXmlAtTrace(serviceType, device.getDeviceNetworkId()?.toString() ?: 'unknown', xmlBody)
+            Map<String, String> alarmClockValues = parseAlarmClockPayload(xmlBody)
+            if(alarmClockValues.isEmpty()) { logDebug('Ignoring AlarmClock event without documented fields'); return }
+            scheduleParsedUpnpParentHandoff([service: 'AlarmClock', sourceDni: device.getDeviceNetworkId()?.toString(),
+                values: alarmClockValues])
+          } catch(Exception e) { logWarn("Ran into an issue parsing AlarmClock: ${e}") }
           return
         case 'ContentDirectory':
           try {
@@ -4051,6 +4102,33 @@ void parse(String raw) {
     logPayloadAtTrace('UPnP NOTIFY message had an unrecognized service type; payload omitted',
         "Could not determine service type for message: ${message}")
   } catch (Exception e) { logException('UPnP NOTIFY parse failed', e) }
+}
+
+/**
+ * Parse an AlarmClock NOTIFY property set into the documented fields only. Matches by XML local name so
+ * namespace prefixes do not matter, tolerates partial notifications, and returns an empty map for malformed XML.
+ */
+Map<String, String> parseAlarmClockPayload(String xmlBody) {
+  Map<String, String> values = new LinkedHashMap<String, String>()
+  if(!isPlausibleXmlPayload(xmlBody)) { return values }
+  GPathResult root
+  try { root = new XmlSlurper().parseText(xmlBody) }
+  catch(Exception e) {
+    logDebug("Ignoring malformed AlarmClock XML: ${e.message}")
+    return values
+  }
+  for(Object property : root.children()) {
+    if(!(property instanceof GPathResult)) { continue }
+    for(Object value : ((GPathResult)property).children()) {
+      if(!(value instanceof GPathResult)) { continue }
+      GPathResult node = (GPathResult)value
+      String name = xmlLocalName(node)
+      if(name != null && ALARM_CLOCK_EVENT_FIELDS.contains(name)) {
+        values.put(name, node.text()?.toString()?.trim() ?: '')
+      }
+    }
+  }
+  return values
 }
 
 /** Parse a complete ZGT snapshot into coordinator followers and group names. */
@@ -4281,8 +4359,10 @@ Map<String, Object> parseAvt(String xmlBody) {
   Map<String, String> attrs = extractAvtInstanceAttributes(xmlBody)
   if(attrs == null) { return null }
   String coordinatorRincon = findFollowedCoordinatorRincon(attrs)
+  Map<String, String> alarmRunning = buildAlarmRunningValues(attrs)
   if(coordinatorRincon) {
-    return [kind: 'follower', events: [], matchKeys: [:], transport: [:], coordinatorRincon: coordinatorRincon]
+    return [kind: 'follower', events: [], matchKeys: [:], transport: [:], coordinatorRincon: coordinatorRincon,
+      alarmRunning: alarmRunning]
   }
   Map<String, Map<String, Object>> metadata = [
     CurrentTrackMetaData: parseAvtMetaData(attrs['CurrentTrackMetaData']),
@@ -4292,7 +4372,16 @@ Map<String, Object> parseAvt(String xmlBody) {
   ]
   List<Map> events = absolutizeAvtArtUrls(buildAvtEvents(attrs, metadata))
   return [kind: 'coordinator', events: events, matchKeys: buildAvtMatchKeys(attrs, metadata),
-    transport: buildTransportSnapshotDelta(attrs, metadata), coordinatorRincon: null]
+    transport: buildTransportSnapshotDelta(attrs, metadata), coordinatorRincon: null, alarmRunning: alarmRunning]
+}
+
+/** Live alarm variables present in this (possibly partial) AVT LastChange; kept apart from AlarmClock list data. */
+Map<String, String> buildAlarmRunningValues(Map<String, String> attrs) {
+  Map<String, String> values = new LinkedHashMap<String, String>()
+  ['AlarmRunning', 'AlarmIDRunning', 'AlarmLoggedStartTime'].each { String name ->
+    if(attrs.containsKey(name)) { values.put(name, attrs[name]?.trim() ?: '') }
+  }
+  return values
 }
 
 /** Flatten InstanceID children to local-name -> val (or element text when there is no val attribute). */
@@ -4498,9 +4587,91 @@ Map<String, Object> getLastTransportPlaybackSnapshot() {
   return snapshot
 }
 
+/** Parse the GRC fields present in this event; absent values remain absent so partial updates are safe. */
+@CompileStatic
+Map<String, Object> parseGrcFullSnapshot(String xmlString) {
+  if(!isPlausibleXmlPayload(xmlString)) { return null }
+  try {
+    GPathResult propertyset = new XmlSlurper().parseText(xmlString)
+    Map<String, String> values = [:]
+    for(Object property : propertyset.children()) {
+      if(!(property instanceof GPathResult)) { continue }
+      for(Object child : ((GPathResult)property).children()) {
+        if(!(child instanceof GPathResult)) { continue }
+        GPathResult node = (GPathResult)child
+        String name = xmlLocalName(node)
+        if(!name) { continue }
+        String raw = node.getAt('@val')?.toString()
+        if(!raw) { raw = node.text()?.toString() }
+        if(raw != null) { values[name] = raw.trim() }
+      }
+    }
+
+    Map<String, Object> snapshot = [:]
+    String volumeText = values['GroupVolume']
+    if(volumeText) {
+      try {
+        Integer volume = Integer.parseInt(volumeText)
+        if(volume >= 0 && volume <= 100) { snapshot.groupVolume = volume }
+        else { logDebug("Ignoring out-of-range GRC GroupVolume value=${volumeText}") }
+      } catch(Exception ignored) { logDebug("Ignoring non-numeric GRC GroupVolume value=${volumeText}") }
+    }
+    String muteText = values['GroupMute']
+    if(muteText == '1') { snapshot.groupMute = 'muted' }
+    else if(muteText == '0') { snapshot.groupMute = 'unmuted' }
+    else if(muteText) { logDebug("Ignoring unexpected GRC GroupMute value=${muteText}") }
+
+    String changeableText = values['GroupVolumeChangeable']
+    if(changeableText == '1') { snapshot.groupVolumeChangeable = true }
+    else if(changeableText == '0') { snapshot.groupVolumeChangeable = false }
+    else if(changeableText) { logDebug("Ignoring unexpected GRC GroupVolumeChangeable value=${changeableText}") }
+    return snapshot.isEmpty() ? null : snapshot
+  } catch(Exception e) {
+    logDebug("Could not parse GRC snapshot: ${e.message}")
+    return null
+  }
+}
+
+@CompileStatic
+List<Map> buildGrcEvents(Map<String, Object> snapshot) {
+  List<Map> events = []
+  if(snapshot?.groupVolume != null) { events << [name: 'groupVolume', value: snapshot.groupVolume] }
+  if(snapshot?.groupMute != null) { events << [name: 'groupMute', value: snapshot.groupMute] }
+  return events
+}
+
+void handleGrcNotification(String xmlBody) {
+  Map<String, Object> snapshot = parseGrcFullSnapshot(xmlBody)
+  if(snapshot == null) { return }
+  List<Map> events = buildGrcEvents(snapshot)
+  if(!events.isEmpty()) { scheduleGrcParentHandoff(events) }
+}
+
+/** Parent callbacks run after parse() releases the player gate, like the AVT relay. */
+void scheduleGrcParentHandoff(List<Map> events) {
+  if(parent == null || !events) { return }
+  List<Map> copy = events.collect { Map event -> new LinkedHashMap(event) }
+  runInMillis(1, 'relayGrcToParent', [overwrite: false, data: [events: copy]])
+}
+
+void relayGrcToParent(Map data) {
+  if(data == null || parent == null || !(data.events instanceof List)) { return }
+  Map args = [:]
+  ((List<Map>)data.events).each { Map event ->
+    if(event?.name && event.containsKey('value')) { args[event.name.toString()] = event.value }
+  }
+  if(!args.isEmpty()) { sendParentAppRequestDirect('groupRendering', args) }
+}
+
 void handleAvtNotification(String xmlBody) {
   Map<String, Object> avt = parseAvt(xmlBody)
   if(avt == null) { return }
+  Map<String, String> alarmRunning = avt.alarmRunning instanceof Map ? (Map<String, String>)avt.alarmRunning : [:]
+  if(!alarmRunning.isEmpty()) {
+    // Delivered through the deferred parent handoff; the app maps it to the matching alarm switch.
+    scheduleParsedUpnpParentHandoff([service: 'AlarmRunning', sourceDni: device.getDeviceNetworkId()?.toString(),
+        values: new LinkedHashMap<String, String>(alarmRunning)])
+  }
   if(avt.kind == 'follower') {
     // A follower's own transport describes its stream from the coordinator, not playable content.
     runtimeState.remove('avtMatchKeys')
@@ -4626,36 +4797,6 @@ void relayPlayerReadingToParent() {
   sendParentAppRequestDirect('playerReading', args)
 }
 
-/**
- * Read this coordinator's group volume and mute from Sonos and send them to the parent app. The app
- * uses this when a live group has a speaker without a Hubitat device, so averaging readings would be wrong.
- */
-void readGroupRendering() {
-  String ip = getDeviceDataValue('localUpnpHost')
-  if(!ip) { return }
-  postSonosSoapAsync('groupRenderingReadCallback', getSoapActionParams(ip, GroupRenderingControl, 'GetGroupVolume'), [kind: 'volume'])
-  postSonosSoapAsync('groupRenderingReadCallback', getSoapActionParams(ip, GroupRenderingControl, 'GetGroupMute'), [kind: 'mute'])
-}
-
-void groupRenderingReadCallback(AsyncResponse response, Map data = null) {
-  if(response?.status != 200 || response.hasError()) {
-    logDebug("Group rendering read failed: ${response?.getErrorMessage() ?: response?.status}")
-    return
-  }
-  try {
-    GPathResult xml = new XmlSlurper().parseText(response.getData()?.toString() ?: '')
-    if(data?.kind == 'volume') {
-      String raw = findXmlDescendantByLocalName(xml, 'CurrentVolume')?.text()
-      if(raw) { sendParentAppRequestDirect('groupRendering', [groupVolume: raw as Integer]) }
-    } else {
-      String raw = findXmlDescendantByLocalName(xml, 'CurrentMute')?.text()
-      if(raw) { sendParentAppRequestDirect('groupRendering', [groupMute: raw == '1' ? 'muted' : 'unmuted']) }
-    }
-  } catch(Exception e) {
-    logDebug("Could not parse group rendering read: ${e.message}")
-  }
-}
-
 /** Convert only values represented in this RC notification to the player's event names. */
 List<Map> buildRcEvents(Map snap) {
   List<Map> events = []
@@ -4671,6 +4812,8 @@ List<Map> buildRcEvents(Map snap) {
   if(snap?.dialogLevel != null) { events << [name: 'speechEnhancement', value: snap.dialogLevel] }
   return events
 }
+
+// GRC payloads use the same complete-batch relay as RC, ZGT, and AVT.
 
 @CompileStatic
 Map parseRcFullSnapshot(String xmlString) {
@@ -5181,7 +5324,7 @@ void upnpUnsubscribeGeneric(String unsub, String subId, String resub, String evt
 
 void enqueueUpnpRequest(String operation, String method, String resub, String sidKey, String eventPath, String callbackPath, String eventUrl) {
   Map entry = getUpnpRequestQueue()
-  if(entry == null || !['sid1','sid2','zgt','sid5','sid6'].contains(sidKey)) { return }
+  if(entry == null || !['sid1','sid2','zgt','sid4','sid5','sid6','alarmClock'].contains(sidKey)) { return }
   String subscribeMethod = defaultSubscribeMethod(sidKey)
   String resubscribeMethod = resub ?: defaultResubscribeMethod(sidKey)
   Map request = [guid: UUID.randomUUID().toString(), operation: operation, sidKey: sidKey,
@@ -5215,8 +5358,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
         case 'sid1': unschedule('retryUpnpSid1'); break
         case 'sid2': unschedule('retryUpnpSid2'); break
         case 'zgt': unschedule('retryUpnpZgt'); break
-            case 'sid5': unschedule('retryUpnpSid5'); break
+        case 'sid4': unschedule('retryUpnpSid4'); break
+        case 'sid5': unschedule('retryUpnpSid5'); break
         case 'sid6': unschedule('retryUpnpSid6'); break
+        case 'alarmClock': unschedule('retryUpnpAlarmClock'); break
       }
     }
   }
@@ -5229,10 +5374,10 @@ void enqueueUpnpRequest(String operation, String method, String resub, String si
 }
 
 String defaultSubscribeMethod(String sidKey) {
-  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory'][sidKey]
+  return [sid1: 'subscribeToAVTransport', sid2: 'subscribeToMrRcEvents', zgt: 'subscribeToZgtEvents', sid4: 'subscribeToMrGrcEvents', sid5: 'subscribeToHtControlEvents', sid6: 'subscribeToContentDirectory', alarmClock: 'subscribeToAlarmClockEvents'][sidKey]
 }
 String defaultResubscribeMethod(String sidKey) {
-  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory'][sidKey]
+  return [sid1: 'resubscribeToAVTransport', sid2: 'resubscribeToMrRcEvents', zgt: 'resubscribeToZgtEvents', sid4: 'resubscribeToMrGrcEvents', sid5: 'resubscribeToHtControlEvents', sid6: 'resubscribeToContentDirectory', alarmClock: 'resubscribeToAlarmClockEvents'][sidKey]
 }
 
 void dispatchNextUpnpRequest(Map entry) {
@@ -5539,15 +5684,19 @@ void scheduleUpnpRetryCallback(Map request, Map retryRequest, Integer delayOverr
     case 'sid1': runIn(delay, 'retryUpnpSid1', options); break
     case 'sid2': runIn(delay, 'retryUpnpSid2', options); break
     case 'zgt': runIn(delay, 'retryUpnpZgt', options); break
+    case 'sid4': runIn(delay, 'retryUpnpSid4', options); break
     case 'sid5': runIn(delay, 'retryUpnpSid5', options); break
     case 'sid6': runIn(delay, 'retryUpnpSid6', options); break
+    case 'alarmClock': runIn(delay, 'retryUpnpAlarmClock', options); break
   }
 }
 void retryUpnpSid1(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid2(Map data) { retryUpnpRequest(data) }
 void retryUpnpZgt(Map data) { retryUpnpRequest(data) }
+void retryUpnpSid4(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid5(Map data) { retryUpnpRequest(data) }
 void retryUpnpSid6(Map data) { retryUpnpRequest(data) }
+void retryUpnpAlarmClock(Map data) { retryUpnpRequest(data) }
 
 void retryUpnpRequest(Map data) {
   Map retry = data?.request as Map
@@ -5624,8 +5773,10 @@ void invalidateUpnpRequestsForDevice() {
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpZgt')
+    unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
     unschedule('retryUpnpSid6')
+    unschedule('retryUpnpAlarmClock')
     active = entry.active as Map
     if(active != null) {
       active.phase = 'expired'
@@ -5655,8 +5806,10 @@ void retireUpnpRequestsForDevice() {
     unschedule('retryUpnpSid1')
     unschedule('retryUpnpSid2')
     unschedule('retryUpnpZgt')
+    unschedule('retryUpnpSid4')
     unschedule('retryUpnpSid5')
     unschedule('retryUpnpSid6')
+    unschedule('retryUpnpAlarmClock')
     active = entry.active as Map
     if(active != null) { active.phase = 'expired'; socket = detachOwnedUpnpSocketLocked(entry, active) }
     (entry.queue as List<Map>).clear()
@@ -5797,6 +5950,36 @@ void unsubscribeFromMrRcEventsCallback(HubResponse response) {
 }
 
 // /////////////////////////////////////////////////////////////////////////////
+// '/MediaRenderer/GroupRenderingControl/Event' //sid4
+// /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
+void subscribeToMrGrcEvents() {
+  upnpSubscribeGeneric('subscribeToMrGrcEvents', 'sid4', '/mgrc', MRGRC_EVENTS_CALLBACK, MRGRC_EVENTS)
+}
+
+@CompileStatic
+void resubscribeToMrGrcEvents() {
+  upnpResubscribeGeneric('resubscribeToMrGrcEvents', 'sid4', '/mgrc', MRGRC_EVENTS_CALLBACK, MRGRC_EVENTS)
+}
+
+@CompileStatic
+void subscribeResubscribeToMrGrcCallback(HubResponse response) {
+  subscribeResubscribeGenericCallback('subscribeToMrGrcEvents', 'resubscribeToMrGrcEvents',
+      'sid4', MRGRC_EVENTS_DOMAIN, response)
+}
+
+@CompileStatic
+void unsubscribeFromMrGrcEvents() {
+  upnpUnsubscribeGeneric('unsubscribeFromMrGrcEvents', 'sid4', 'resubscribeToMrGrcEvents',
+      MRGRC_EVENTS, MRGRC_EVENTS_UNSUB_CALLBACK)
+}
+
+@CompileStatic
+void unsubscribeFromMrGrcEventsCallback(HubResponse response) {
+  upnpUnsubscribeCallbackGeneric('sid4', MRGRC_EVENTS_DOMAIN, response)
+}
+
+// /////////////////////////////////////////////////////////////////////////////
 // '/ZoneGroupTopology/Event' //zgt
 // /////////////////////////////////////////////////////////////////////////////
 @CompileStatic
@@ -5846,6 +6029,38 @@ void unsubscribeFromZgtEventsCallback(HubResponse response) {
   String subId = 'zgt'
   String domain = ZGT_EVENTS_DOMAIN
   upnpUnsubscribeCallbackGeneric(subId, domain, response)
+}
+// /////////////////////////////////////////////////////////////////////////////
+// '/AlarmClock/Event' //alarmClock
+// /////////////////////////////////////////////////////////////////////////////
+@CompileStatic
+void subscribeToAlarmClockEvents() {
+  if(subValid('alarmClock')) { return }
+  upnpSubscribeGeneric('subscribeToAlarmClockEvents', 'alarmClock', '/alarmclock',
+      ALARM_CLOCK_EVENTS_CALLBACK, ALARM_CLOCK_EVENTS)
+}
+
+@CompileStatic
+void resubscribeToAlarmClockEvents() {
+  upnpResubscribeGeneric('resubscribeToAlarmClockEvents', 'alarmClock', '/alarmclock',
+      ALARM_CLOCK_EVENTS_CALLBACK, ALARM_CLOCK_EVENTS)
+}
+
+@CompileStatic
+void subscribeResubscribeToAlarmClockCallback(HubResponse response) {
+  subscribeResubscribeGenericCallback('subscribeToAlarmClockEvents', 'resubscribeToAlarmClockEvents',
+      'alarmClock', ALARM_CLOCK_EVENTS_DOMAIN, response)
+}
+
+@CompileStatic
+void unsubscribeFromAlarmClockEvents() {
+  upnpUnsubscribeGeneric('unsubscribeFromAlarmClockEvents', 'alarmClock', 'resubscribeToAlarmClockEvents',
+      ALARM_CLOCK_EVENTS, ALARM_CLOCK_EVENTS_UNSUB_CALLBACK)
+}
+
+@CompileStatic
+void unsubscribeFromAlarmClockEventsCallback(HubResponse response) {
+  upnpUnsubscribeCallbackGeneric('alarmClock', ALARM_CLOCK_EVENTS_DOMAIN, response)
 }
 // /////////////////////////////////////////////////////////////////////////////
 // '/HTControl/Event' //sid5
@@ -6040,6 +6255,18 @@ Boolean lastMrRcEventWithin(Long seconds) {
 }
 
 @CompileStatic
+Long getLastInboundMrGrcEventEpoch() {
+  Long ts = eventTimestamps.get("${getDeviceDNI()}-lastMrGrcEvent" as String)
+  return ts != null ? ts : 0L
+}
+
+@CompileStatic
+void setLastInboundMrGrcEvent() {
+  eventTimestamps.put("${getDeviceDNI()}-lastMrGrcEvent" as String, Instant.now().getEpochSecond())
+  updateEventTimestampDeviceData('lastMrGrcEvent')
+}
+
+@CompileStatic
 Long getLastInboundZgtEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastZgtEvent" as String)
   return ts != null ? ts : 0L
@@ -6068,6 +6295,14 @@ void setLastInboundHtControlEvent() {
   eventTimestamps.put("${getDeviceDNI()}-lastHtControlEvent" as String, Instant.now().getEpochSecond())
   updateEventTimestampDeviceData('lastHtControlEvent')
 }
+@CompileStatic
+Boolean lastMrGrcEventWithin(Integer seconds) {
+  Long now = Instant.now().getEpochSecond()
+  Long last = getLastInboundMrGrcEventEpoch()
+  logDebug("lastMrGrcEvent Now: ${now} - last message: ${last}, difference: ${now - last}")
+  return (now - last) < seconds
+}
+
 @CompileStatic
 Long getLastWebsocketEventEpoch() {
   Long ts = eventTimestamps.get("${getDeviceDNI()}-lastWebsocketEvent" as String)
@@ -6116,7 +6351,7 @@ void releaseFavPlaylistDelegate() {
 }
 
 // Track whether the inbound audioClip status subscription is active.
-@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastHtControlEvent', 'lastWebsocketEvent']
+@Field static final List<String> EVENT_TIMESTAMP_KEYS = ['lastMrRcEvent', 'lastMrGrcEvent', 'lastZgtEvent', 'ZgtLastUpdated', 'lastHtControlEvent', 'lastWebsocketEvent']
 
 String getWsSubscriptionValue(String namespace) {
   String key = "${this.device?.getDeviceNetworkId()}-WS-${namespace}".toString()

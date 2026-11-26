@@ -412,6 +412,8 @@ preferences {
 @Field static final Integer UPNP_EVENT_DEBOUNCE_MILLIS = 500
 @Field static final String PENDING_UPNP_NOTIFICATION_QUEUE_KEY = 'pendingUpnpNotifications'
 @Field static final String PLAYER_READINGS_STATE_KEY = 'playerReadingsByRincon'
+@Field static final String GROUP_RENDERING_STATE_KEY = 'groupRenderingByCoordinator'
+@Field static final String PENDING_GROUP_RENDERING_STATE_KEY = 'pendingGroupRenderingBySource'
 @Field static final String PENDING_VOLUME_RECALCULATION_STATE_KEY = 'pendingVolumeRecalculation'
 @Field static final String GROUP_OPERATION_STATE_KEY = 'activeGroupTopologyOperation'
 @Field static final String GROUPING_CONTEXTS_STATE_KEY = 'groupingContexts'
@@ -430,6 +432,18 @@ preferences {
 @Field static final String ALARM_MANAGER_DNI_MARKER = '-SonosAlarmManager-'
 @Field static final String SONOS_ALARM_SERVICE_TYPE = 'urn:schemas-upnp-org:service:AlarmClock:1'
 @Field static final String SONOS_ALARM_CONTROL_URL = '/AlarmClock/Control'
+@Field static final String ALARM_CLOCK_STATE_KEY = 'alarmClockByHousehold'
+@Field static final String ALARM_RUNNING_STATE_KEY = 'alarmRunningByHousehold'
+// AlarmClock event variable -> Alarm Manager attribute. Values are Sonos-reported, not hub-configured.
+@Field static final Map<String, String> ALARM_CLOCK_MANAGER_ATTRIBUTES = Collections.unmodifiableMap([
+  AlarmListVersion: 'alarmListVersion',
+  DailyIndexRefreshTime: 'sonosDailyIndexRefreshTime',
+  DateFormat: 'sonosDateFormat',
+  TimeFormat: 'sonosTimeFormat',
+  TimeGeneration: 'sonosTimeGeneration',
+  TimeServer: 'sonosTimeServer',
+  TimeZone: 'sonosTimeZone'
+] as Map<String, String>)
 @Field static final Integer GROUP_OPERATION_POLL_SECONDS = 1
 @Field static final Integer TOPOLOGY_CHANGE_SUPPRESSION_SECONDS = 15
 @Field static final Integer GROUP_OPERATION_DEADLINE_SECONDS = 240
@@ -484,6 +498,8 @@ preferences {
   GROUP_DEVICE_COORDINATORS_STATE_KEY,
   ZGT_EVENTS_STATE_KEY,
   PLAYER_READINGS_STATE_KEY,
+  GROUP_RENDERING_STATE_KEY,
+  PENDING_GROUP_RENDERING_STATE_KEY,
   PENDING_VOLUME_RECALCULATION_STATE_KEY,
   PENDING_UPNP_NOTIFICATION_QUEUE_KEY,
   GROUP_OPERATION_STATE_KEY,
@@ -508,6 +524,8 @@ preferences {
   'alarmManagementPreferencesApplied',
   CHILD_MANAGED_SETTINGS_STATE_KEY,
   'sonosAlarmRefreshRequestIds',
+  ALARM_CLOCK_STATE_KEY,
+  ALARM_RUNNING_STATE_KEY,
   'receivedGroupCommandRequestIds',
   'ttsVoiceRefreshRequestId',
   'logLevel',
@@ -1358,7 +1376,6 @@ void configure(Boolean startup = false) {
   try { configureAlarmManagement() }
   catch (Exception e) { logError("configureAlarmManagement() Failed: ${e}") }
   refreshStaticDriverActivePlayerRoster(false)
-  runIn(2, 'seedGroupPreferenceSnapshots', [overwrite: true])
   refreshPlayerAnnouncementPolicySnapshots(startup)
   unschedule('refreshStaticDriverActivePlayerRoster')
   schedule('0 */5 * * * ?', 'refreshStaticDriverActivePlayerRoster')
@@ -1615,15 +1632,165 @@ void sonosAlarmListCallback(AsyncResponse response, Map data) {
   }
   if(response == null || response.hasError() || response.status != 200) {
     logWarn("Sonos alarm refresh failed for ${householdId}: HTTP ${response?.status} ${response?.getErrorMessage()}")
+    updateAlarmClockHouseholdState(householdId, [requestedVersion: null])
     return
   }
   try {
-    List<Map> alarms = parseSonosAlarmList(response.getData()?.toString())
+    String responseXml = response.getData()?.toString()
+    List<Map> alarms = parseSonosAlarmList(responseXml)
+    String listVersion = parseSonosAlarmListVersion(responseXml)
     reconcileSonosAlarmChildren(householdId, alarms)
+    Map<String, Object> versionUpdate = [requestedVersion: null]
+    if(listVersion) {
+      versionUpdate.lastFetchedVersion = listVersion
+      publishAlarmManagerMetadata(householdId, [AlarmListVersion: listVersion])
+    }
+    updateAlarmClockHouseholdState(householdId, versionUpdate)
     logInfo("Found ${alarms.size()} Sonos alarm(s) in household ${householdId}")
   } catch(Exception e) {
+    updateAlarmClockHouseholdState(householdId, [requestedVersion: null])
     logWarn("Could not parse Sonos alarms for household ${householdId}: ${e.message}")
   }
+}
+
+/** Read CurrentAlarmListVersion from a ListAlarms response; null when absent or unparseable. */
+String parseSonosAlarmListVersion(String responseXml) {
+  if(!responseXml) { return null }
+  try {
+    GPathResult outer = new XmlSlurper().parseText(responseXml)
+    GPathResult holder = findXmlDescendantByLocalName(outer, 'CurrentAlarmListVersion')
+    String version = holder?.text()?.toString()?.trim()
+    return version ?: null
+  } catch(Exception ignored) {
+    return null
+  }
+}
+
+Map<String, Object> getAlarmClockHouseholdState(String householdId) {
+  Map all = state[ALARM_CLOCK_STATE_KEY] instanceof Map ? (Map)state[ALARM_CLOCK_STATE_KEY] : [:]
+  return all[householdId] instanceof Map ? new LinkedHashMap<String, Object>((Map<String, Object>)all[householdId]) : [:]
+}
+
+/** Merge keys into one household's AlarmClock state; a null value removes that key. */
+void updateAlarmClockHouseholdState(String householdId, Map<String, Object> changes) {
+  if(!householdId) { return }
+  Map all = state[ALARM_CLOCK_STATE_KEY] instanceof Map ? new LinkedHashMap((Map)state[ALARM_CLOCK_STATE_KEY]) : [:]
+  Map<String, Object> household = getAlarmClockHouseholdState(householdId)
+  changes.each { String key, Object value ->
+    if(value == null) { household.remove(key) } else { household[key] = value }
+  }
+  all[householdId] = household
+  state[ALARM_CLOCK_STATE_KEY] = all
+}
+
+/**
+ * Apply a coalesced AlarmClock notification from the player holding the AlarmClock subscription. Partial values
+ * merge into the retained household values; a new AlarmListVersion triggers one ListAlarms refresh.
+ */
+void processAlarmClockNotification(Map notification) {
+  String sourceDni = notification?.sourceDni?.toString()
+  Map rawValues = notification?.values instanceof Map ? (Map)notification.values : [:]
+  if(!sourceDni || rawValues.isEmpty()) { return }
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDeviceNetworkId() == sourceDni
+  }
+  String householdId = player?.getDataValue('householdId')?.toString()
+  if(!householdId) {
+    logDebug("Ignoring AlarmClock notification from ${sourceDni}: no household for that player")
+    return
+  }
+  Map<String, String> values = [:]
+  ALARM_CLOCK_MANAGER_ATTRIBUTES.keySet().each { String field ->
+    if(rawValues.containsKey(field) && rawValues[field] != null) { values[field] = rawValues[field].toString() }
+  }
+  if(values.isEmpty()) { return }
+  Map<String, Object> household = getAlarmClockHouseholdState(householdId)
+  Map<String, Object> retained = household.values instanceof Map ? new LinkedHashMap<String, Object>((Map<String, Object>)household.values) : [:]
+  retained.putAll(values)
+  updateAlarmClockHouseholdState(householdId, [values: retained])
+  publishAlarmManagerMetadata(householdId, values)
+
+  String version = values.AlarmListVersion
+  Boolean switchesEnabled = getAppPreference('enableAlarmSwitches', false) == true || getAppPreference('enableAlarmSwitches', false)?.toString() == 'true'
+  if(version && switchesEnabled && version != household.lastFetchedVersion && version != household.requestedVersion) {
+    updateAlarmClockHouseholdState(householdId, [requestedVersion: version])
+    refreshSonosAlarms(householdId, player)
+  }
+}
+
+/** Alarm ID currently reported running in a household by any player, or null. */
+String getRunningAlarmId(String householdId) {
+  Map all = state[ALARM_RUNNING_STATE_KEY] instanceof Map ? (Map)state[ALARM_RUNNING_STATE_KEY] : [:]
+  Map bySource = all[householdId] instanceof Map ? (Map)all[householdId] : [:]
+  Map running = bySource.values().find { Object entry -> entry instanceof Map && ((Map)entry).running == true && ((Map)entry).alarmId }
+  return running?.alarmId?.toString()
+}
+
+/**
+ * Apply AVTransport AlarmRunning, AlarmIDRunning and AlarmLoggedStartTime from one player. Values may be
+ * partial, so they merge into that player's retained entry. Only the alarm switches whose running state
+ * changed are updated, and the switch (enabled) state is never touched.
+ */
+void processAlarmRunningNotification(Map notification) {
+  String sourceDni = notification?.sourceDni?.toString()
+  Map values = notification?.values instanceof Map ? (Map)notification.values : [:]
+  if(!sourceDni || values.isEmpty()) { return }
+  ChildDeviceWrapper player = getCurrentPlayerDevices().find { ChildDeviceWrapper candidate ->
+    candidate.getDeviceNetworkId() == sourceDni
+  }
+  String householdId = player?.getDataValue('householdId')?.toString()
+  if(!householdId) { return }
+  String previousAlarmId = getRunningAlarmId(householdId)
+
+  Map all = state[ALARM_RUNNING_STATE_KEY] instanceof Map ? new LinkedHashMap((Map)state[ALARM_RUNNING_STATE_KEY]) : [:]
+  Map bySource = all[householdId] instanceof Map ? new LinkedHashMap((Map)all[householdId]) : [:]
+  Map entry = bySource[sourceDni] instanceof Map ? new LinkedHashMap((Map)bySource[sourceDni]) : [:]
+  if(values.containsKey('AlarmRunning')) {
+    entry.running = values.AlarmRunning?.toString()?.toLowerCase(Locale.ROOT) in ['1', 'true']
+  }
+  if(values.containsKey('AlarmIDRunning')) {
+    String alarmId = values.AlarmIDRunning?.toString()?.trim()
+    if(alarmId) { entry.alarmId = alarmId } else { entry.remove('alarmId') }
+  }
+  // The alarm ending clears its start time; a start time reported in the same update still applies.
+  if(entry.running != true && !entry.alarmId && (values.containsKey('AlarmRunning') || values.containsKey('AlarmIDRunning'))) {
+    entry.remove('startTime')
+  }
+  if(values.containsKey('AlarmLoggedStartTime')) {
+    String startTime = values.AlarmLoggedStartTime?.toString()?.trim()
+    if(startTime) { entry.startTime = startTime } else { entry.remove('startTime') }
+  }
+  // A start time can arrive before AlarmRunning and AlarmIDRunning, so it is retained on its own.
+  if(entry.running == true || entry.alarmId || entry.startTime) { bySource[sourceDni] = entry } else { bySource.remove(sourceDni) }
+  if(bySource.isEmpty()) { all.remove(householdId) } else { all[householdId] = bySource }
+  state[ALARM_RUNNING_STATE_KEY] = all
+
+  String currentAlarmId = getRunningAlarmId(householdId)
+  if(previousAlarmId && previousAlarmId != currentAlarmId) {
+    sendAlarmSwitchAttributes(householdId, previousAlarmId, [alarmRunning: 'false'])
+  }
+  if(currentAlarmId) {
+    Map<String, Object> attributes = [alarmRunning: 'true']
+    if(entry.alarmId?.toString() == currentAlarmId && entry.startTime) { attributes.alarmLoggedStartTime = entry.startTime }
+    sendAlarmSwitchAttributes(householdId, currentAlarmId, attributes)
+  }
+}
+
+void sendAlarmSwitchAttributes(String householdId, String alarmId, Map<String, Object> attributes) {
+  ChildDeviceWrapper child = getChildDevice("${app.id}${ALARM_SWITCH_DNI_MARKER}${householdId}-${alarmId}")
+  if(child != null) { sendChildAttributeEvents(child, attributes) }
+}
+
+/** Publish Sonos-reported AlarmClock values to the household's Alarm Manager; absent fields keep earlier values. */
+void publishAlarmManagerMetadata(String householdId, Map<String, String> values) {
+  ChildDeviceWrapper manager = getChildDevice("${app.id}${ALARM_MANAGER_DNI_MARKER}${householdId}")
+  if(manager == null) { return }
+  Map<String, Object> attributes = [:]
+  values.each { String field, String value ->
+    String attribute = ALARM_CLOCK_MANAGER_ATTRIBUTES[field]
+    if(attribute && value != null) { attributes[attribute] = value }
+  }
+  if(!attributes.isEmpty()) { sendChildAttributeEvents(manager, attributes) }
 }
 
 String sonosAlarmSoapBody(String action, Map values) {
@@ -1763,7 +1930,8 @@ void reconcileSonosAlarmChildren(String householdId, List<Map> alarms) {
       room: roomPlayer?.label ?: roomUuid,
       duration: alarm.Duration?.toString() ?: '',
       alarmSource: alarm.ProgramURI?.toString() ?: '',
-      playMode: alarm.PlayMode?.toString() ?: ''
+      playMode: alarm.PlayMode?.toString() ?: '',
+      alarmRunning: getRunningAlarmId(householdId) == alarmId ? 'true' : 'false'
     ]
     if(alarm.containsKey('IncludeLinkedZones')) {
       String linkedZones = alarm.IncludeLinkedZones?.toString()?.toLowerCase(Locale.ROOT)
@@ -3839,6 +4007,11 @@ Boolean groupAppRequest(Map request) {
   Long requestAgeMs = request.createdAt != null
       ? Math.max(0L, now() - (request.createdAt as Long)) : -1L
   logDebug("Received group app request action=${request.action ?: request.command ?: 'unknown'}, requestId=${request.requestId ?: 'unknown'}, sourceDni=${groupDni}, sequence=${request.sequence ?: 'unknown'}, ageMs=${requestAgeMs}")
+  // Volume, mute and refresh commands carry the device's volume settings; caching them here seeds groups that
+  // predate the settings snapshot without the app ever calling into a group device from its own gate.
+  if(request.args instanceof Map && mergeGroupVolumePreferences(groupDni, (Map)request.args)) {
+    queueVolumeRecalculation([], [groupDni], false)
+  }
   return enqueueGroupCommandRequest(request)
 }
 
@@ -5977,10 +6150,10 @@ void playerDeparted(String rincon, String dni, String name) {
   logInfo("Sonos player departed: ${name} (${rincon}, ${dni})")
 }
 
-/** Queue complete ZGT notification batches; never coalesce their event lists. AVT uses putAvtEvents. */
+/** Queue complete ZGT notification batches (never coalesced) and AlarmClock updates (merged at drain). AVT uses putAvtEvents. */
 synchronized void putPlayerUpnpEvents(Map payload) {
   String service = payload?.service?.toString()
-  if(service != 'ZGT') { return }
+  if(service != 'ZGT' && service != 'AlarmClock' && service != 'AlarmRunning') { return }
   Map copy = new LinkedHashMap(payload)
   if(payload.events instanceof List) { copy.events = ((List<Map>)payload.events).collect { Map e -> new LinkedHashMap(e) } }
   if(payload.eventsByGroupId instanceof Map) {
@@ -6002,12 +6175,27 @@ synchronized void drainUpnpNotificationQueue() {
   List<Map> pending = state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY] instanceof List
       ? new ArrayList<Map>((List<Map>)state[PENDING_UPNP_NOTIFICATION_QUEUE_KEY]) : []
   state.remove(PENDING_UPNP_NOTIFICATION_QUEUE_KEY)
-  pending.each { Map notification -> processUpnpNotification(notification) }
+  // AlarmClock bursts merge per source player so one burst yields one refresh. They are independent
+  // of topology, so ZGT notifications keep their arrival order.
+  Map<String, Map> alarmClockBySource = new LinkedHashMap<String, Map>()
+  pending.each { Map notification ->
+    if(notification?.service?.toString() == 'AlarmClock') {
+      String sourceDni = notification.sourceDni?.toString() ?: ''
+      Map merged = alarmClockBySource[sourceDni] ?: [service: 'AlarmClock', sourceDni: sourceDni, values: [:]]
+      if(notification.values instanceof Map) { ((Map)merged.values).putAll((Map)notification.values) }
+      alarmClockBySource[sourceDni] = merged
+    } else {
+      processUpnpNotification(notification)
+    }
+  }
+  alarmClockBySource.values().each { Map notification -> processUpnpNotification(notification) }
 }
 
 void processUpnpNotification(Map notification) {
   String service = notification?.service?.toString()
   if(service == 'ZGT') { processUpnpTopologyNotification(notification) }
+  else if(service == 'AlarmClock') { processAlarmClockNotification(notification) }
+  else if(service == 'AlarmRunning') { processAlarmRunningNotification(notification) }
 }
 
 void processUpnpTopologyNotification(Map notification, Boolean publishTopologyAttributes = true) {
@@ -6205,15 +6393,16 @@ Map<String, Map> getGroupPreferencesMap() {
 }
 
 /** Keep the volume settings in a refresh request cached for devices that have not published them yet. */
-void mergeGroupVolumePreferences(String groupDni, Map raw) {
+Boolean mergeGroupVolumePreferences(String groupDni, Map raw) {
   if(!groupDni || !(raw instanceof Map) ||
-      (raw.useProportionalVolume == null && raw.controlUngroupedIndividually == null)) { return }
+      (raw.useProportionalVolume == null && raw.controlUngroupedIndividually == null)) { return false }
   Map<String, Map> all = getGroupPreferencesMap()
   Map<String, Object> merged = new LinkedHashMap<String, Object>(all[groupDni] instanceof Map ? (Map<String, Object>)all[groupDni] : [:])
   Map<String, Object> normalized = normalizeGroupPreferenceSnapshot(merged + raw.subMap(['useProportionalVolume', 'controlUngroupedIndividually']))
-  if(all[groupDni] == normalized) { return }
+  if(all[groupDni] == normalized) { return false }
   all[groupDni] = normalized
   state[GROUP_PREFERENCES_BY_DNI_STATE_KEY] = all
+  return true
 }
 
 Map<String, Map> getPlayerReadings() {
@@ -6292,13 +6481,6 @@ Map<String, Object> calculateVolumeState(Collection<String> playerIds, Map<Strin
   return result
 }
 
-/** True when any selected player has no Hubitat device, so its volume and mute are never reported. */
-@CompileStatic
-Boolean hasUnmanagedMember(Collection<String> playerIds, Set<String> managedIds) {
-  for(String playerId : playerIds) { if(!managedIds.contains(playerId)) { return true } }
-  return false
-}
-
 /** Calculate once per distinct player selection within a recalculation and reuse the result. */
 Map<String, Object> cachedVolumeState(Collection<String> playerIds, Map context) {
   Map<String, Map<String, Object>> cache = (Map<String, Map<String, Object>>)context.cache
@@ -6332,8 +6514,7 @@ Map buildVolumeCalculationContext() {
   Map<String, List<Map>> topology = getStoredZgtEventsMap()
   return [coordinators: buildPlayerCoordinatorMap(topology), rosters: buildLiveGroupRosters(topology),
     readings: getPlayerReadings(), preferences: getGroupPreferencesMap(), cache: [:],
-    managed: getCurrentPlayerDevices().collect { ChildDeviceWrapper p -> p.getDataValue('id')?.toString() }
-        .findAll { it }.toSet()]
+    groupRendering: getGroupRenderingMap()]
 }
 
 /** Volume, groupVolume, mute and groupMute attributes for one group device, omitting unknown values. */
@@ -6341,9 +6522,22 @@ Map<String, Object> calculateGroupDeviceVolumeState(ChildDeviceWrapper groupDevi
   List<String> configured = getAllPlayersForGroupDevice(groupDevice).unique()
   if(configured.isEmpty()) { return [:] }
   Map preferences = ((Map)context.preferences)[groupDevice.getDeviceNetworkId()] as Map
-  List<String> selected = selectGroupDevicePlayerIds(configured, preferences,
-      (Map<String, String>)context.coordinators, (Map<String, List<String>>)context.rosters)
-  Map<String, Object> calculated = cachedVolumeState(selected, context)
+  Map<String, String> coordinators = (Map<String, String>)context.coordinators
+  Map<String, List<String>> rosters = (Map<String, List<String>>)context.rosters
+  List<String> selected = selectGroupDevicePlayerIds(configured, preferences, coordinators, rosters)
+  Map<String, Object> calculated
+  String coordinatorId = configured.find { String id -> coordinators[id] == id } ?: configured[0]
+  List<String> liveMembers = rosters[coordinatorId] ?: [coordinatorId]
+  if(liveMembers.size() > 1 && selected as Set == liveMembers as Set) {
+    // The device follows the live Sonos group, so the coordinator's GroupRenderingControl is authoritative
+    // even when the group has speakers without a Hubitat device.
+    Map cached = ((Map)context.groupRendering)[coordinatorId] instanceof Map ? (Map)((Map)context.groupRendering)[coordinatorId] : [:]
+    calculated = [:]
+    if(cached.groupVolume != null) { calculated.volume = cached.groupVolume }
+    if(cached.groupMute != null) { calculated.mute = cached.groupMute }
+  } else {
+    calculated = cachedVolumeState(selected, context)
+  }
   Map<String, Object> attributes = [:]
   if(calculated.volume != null) { attributes.volume = calculated.volume; attributes.groupVolume = calculated.volume }
   if(calculated.mute != null) { attributes.mute = calculated.mute; attributes.groupMute = calculated.mute }
@@ -6372,26 +6566,27 @@ void drainVolumeRecalculation() {
 }
 
 /**
- * Recalculate player-level group state from each player's live Sonos group, and group-device state
- * from its selected players. Only players and group devices touched by the change are published.
+ * Republish player-level group state from each coordinator's cached GroupRenderingControl, and
+ * recalculate group-device state. Only players and group devices touched by the change are published.
  */
 void recalculateVolumeState(Collection<String> changedPlayerIds, Collection<String> changedGroupDnis, Boolean all) {
+  applyPendingGroupRendering()
   Map context = buildVolumeCalculationContext()
   Map<String, String> coordinators = (Map<String, String>)context.coordinators
   Map<String, List<String>> rosters = (Map<String, List<String>>)context.rosters
-  Set<String> managed = (Set<String>)context.managed
+  Map<String, Map> groupRendering = (Map<String, Map>)context.groupRendering
   Set<String> affected = new LinkedHashSet<String>()
   (changedPlayerIds ?: []).each { String id -> affected.addAll(liveGroupMembers(id, coordinators, rosters)) }
-  // Groups with a speaker that has no Hubitat device cannot be averaged from readings; ask the coordinator.
-  Set<String> directReadCoordinators = new LinkedHashSet<String>()
-  getCurrentPlayerDevices().each { ChildDeviceWrapper player ->
-    String id = player.getDataValue('id')?.toString()
-    if(!id || !(all || affected.contains(id))) { return }
-    List<String> members = liveGroupMembers(id, coordinators, rosters)
-    if(hasUnmanagedMember(members, managed)) { directReadCoordinators.add(coordinators[id] ?: id); return }
-    Map<String, Object> calculated = cachedVolumeState(members, context)
-    if(calculated.volume != null) { sendParentChildEvent(player, 'groupVolume', calculated.volume) }
-    if(calculated.mute != null) { sendParentChildEvent(player, 'groupMute', calculated.mute) }
+  if(all) {
+    // Membership changed: every member, including a new follower, receives its coordinator's latest group state.
+    rosters.each { String coordinatorId, List<String> members ->
+      Map cached = groupRendering[coordinatorId] instanceof Map ? (Map)groupRendering[coordinatorId] : [:]
+      members.each { String id ->
+        String playerDni = getPlayerDniByRincon(id)
+        if(cached.groupVolume != null) { sendChildEventByDni(playerDni, 'groupVolume', cached.groupVolume) }
+        if(cached.groupMute != null) { sendChildEventByDni(playerDni, 'groupMute', cached.groupMute) }
+      }
+    }
   }
   getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
     String groupDni = groupDevice.getDeviceNetworkId()
@@ -6401,54 +6596,82 @@ void recalculateVolumeState(Collection<String> changedPlayerIds, Collection<Stri
     Boolean touched = all || (changedGroupDnis ?: []).contains(groupDni) || configured.any { String id -> affected.contains(id) } ||
         selected.any { String id -> affected.contains(id) }
     if(!touched) { return }
-    if(!selected.isEmpty() && hasUnmanagedMember(selected, managed)) {
-      String coordinatorId = configured.find { String id -> coordinators[id] == id } ?: configured[0]
-      directReadCoordinators.add(coordinatorId)
-      return
-    }
     Map<String, Object> attributes = calculateGroupDeviceVolumeState(groupDevice, context)
     if(!attributes.isEmpty()) { queueGroupDeviceState(groupDni, attributes) }
   }
-  directReadCoordinators.each { String coordinatorId -> findPlayerBySonosId(coordinatorId)?.readGroupRendering() }
+}
+
+/** Apply held GRC reports whose source topology now identifies; coordinators apply, followers are dropped. */
+void applyPendingGroupRendering() {
+  Map<String, Map> pending = state[PENDING_GROUP_RENDERING_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PENDING_GROUP_RENDERING_STATE_KEY]) : [:]
+  if(pending.isEmpty()) { return }
+  Map<String, String> coordinators = buildPlayerCoordinatorMap(getStoredZgtEventsMap())
+  Map<String, Map> resolved = pending.findAll { String id, Map report -> coordinators[id] != null }
+  if(resolved.isEmpty()) { return }
+  resolved.keySet().each { String id -> pending.remove(id) }
+  if(pending.isEmpty()) { state.remove(PENDING_GROUP_RENDERING_STATE_KEY) } else { state[PENDING_GROUP_RENDERING_STATE_KEY] = pending }
+  resolved.each { String id, Map report ->
+    if(coordinators[id] == id) { applyDirectGroupRendering(id, report) }
+  }
+}
+
+Map<String, Map> getGroupRenderingMap() {
+  return state[GROUP_RENDERING_STATE_KEY] instanceof Map
+      ? new LinkedHashMap<String, Map>((Map<String, Map>)state[GROUP_RENDERING_STATE_KEY]) : [:]
 }
 
 /**
- * Apply a group volume or mute read directly from the Sonos coordinator to every player in its live
- * group and to the group devices that follow that live group.
+ * Apply a coordinator's GroupRenderingControl report to every player in its live group and to the group
+ * devices that follow that live group. Followers never receive GRC; one that does is ignored so the
+ * coordinator's report stays authoritative. Reports are cached for replay to later followers.
  */
-void applyDirectGroupRendering(String coordinatorId, Map args) {
+void applyDirectGroupRendering(String sourceId, Map args) {
   Map<String, Object> attributes = [:]
   Integer volume = parseReadingVolume(args?.groupVolume)
   String mute = parseReadingMute(args?.groupMute)
   if(volume != null) { attributes.volume = volume; attributes.groupVolume = volume }
   if(mute != null) { attributes.mute = mute; attributes.groupMute = mute }
-  if(!coordinatorId || attributes.isEmpty()) { return }
+  if(!sourceId || attributes.isEmpty()) { return }
   Map context = buildVolumeCalculationContext()
   Map<String, String> coordinators = (Map<String, String>)context.coordinators
   Map<String, List<String>> rosters = (Map<String, List<String>>)context.rosters
-  List<String> members = liveGroupMembers(coordinatorId, coordinators, rosters)
-  members.each { String id ->
-    ChildDeviceWrapper player = findPlayerBySonosId(id)
-    if(player == null) { return }
-    if(volume != null) { sendParentChildEvent(player, 'groupVolume', volume) }
-    if(mute != null) { sendParentChildEvent(player, 'groupMute', mute) }
+  if(coordinators[sourceId] == null) {
+    // The initial GRC snapshot can beat topology; keep the latest report per source until ZGT identifies its role.
+    Map<String, Map> pending = state[PENDING_GROUP_RENDERING_STATE_KEY] instanceof Map
+        ? new LinkedHashMap<String, Map>((Map<String, Map>)state[PENDING_GROUP_RENDERING_STATE_KEY]) : [:]
+    Map held = new LinkedHashMap(pending[sourceId] instanceof Map ? (Map)pending[sourceId] : [:])
+    if(volume != null) { held.groupVolume = volume }
+    if(mute != null) { held.groupMute = mute }
+    pending[sourceId] = held
+    state[PENDING_GROUP_RENDERING_STATE_KEY] = pending
+    logDebug("Holding GroupRenderingControl from ${sourceId} until topology identifies its coordinator")
+    return
   }
-  getGroupDevicesForCoordinator(coordinatorId).each { ChildDeviceWrapper groupDevice ->
+  if(coordinators[sourceId] != sourceId) {
+    logDebug("Ignoring GroupRenderingControl from ${sourceId}; topology reports coordinator=${coordinators[sourceId]}")
+    return
+  }
+  Map<String, Map> cache = getGroupRenderingMap()
+  Map merged = new LinkedHashMap(cache[sourceId] instanceof Map ? (Map)cache[sourceId] : [:])
+  if(volume != null) { merged.groupVolume = volume }
+  if(mute != null) { merged.groupMute = mute }
+  cache[sourceId] = merged
+  cache.keySet().retainAll(rosters.keySet())
+  state[GROUP_RENDERING_STATE_KEY] = cache
+  List<String> members = liveGroupMembers(sourceId, coordinators, rosters)
+  members.each { String id ->
+    String playerDni = getPlayerDniByRincon(id)
+    if(volume != null) { sendChildEventByDni(playerDni, 'groupVolume', volume) }
+    if(mute != null) { sendChildEventByDni(playerDni, 'groupMute', mute) }
+  }
+  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
+    if(groupDevice.getDataValue('groupCoordinatorId')?.toString() != sourceId) { return }
     List<String> configured = getAllPlayersForGroupDevice(groupDevice).unique()
     Map preferences = ((Map)context.preferences)[groupDevice.getDeviceNetworkId()] as Map
     if(!configured.isEmpty() && selectGroupDevicePlayerIds(configured, preferences, coordinators, rosters) as Set == members as Set) {
       queueGroupDeviceState(groupDevice.getDeviceNetworkId(), attributes)
     }
-  }
-}
-
-/** Ask each group device whose cached settings predate the volume settings to publish them; runs after app Save. */
-void seedGroupPreferenceSnapshots() {
-  Map<String, Map> cached = getGroupPreferencesMap()
-  getCurrentGroupDevices().each { ChildDeviceWrapper groupDevice ->
-    if(cached[groupDevice.getDeviceNetworkId()]?.containsKey('useProportionalVolume')) { return }
-    try { groupDevice.scheduleGroupPreferenceSnapshot() }
-    catch(Exception e) { logDebug("Could not request group preferences from ${groupDevice.displayName}: ${e.message}") }
   }
 }
 

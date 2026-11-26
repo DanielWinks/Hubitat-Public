@@ -1528,6 +1528,191 @@ class SonosAdvancedAppSpec extends Specification {
     ]
   }
 
+  def "AlarmClock notifications for one burst trigger one refresh and merge partial values"() {
+    given:
+    coordinator.dataValues.householdId = 'HOUSE-1'
+    appScript.app.children = appScript.children
+    appScript.settings.enableAlarmSwitches = true
+    Closure refreshes = { -> appScript.asyncCalls.findAll { Map call -> call.cb == 'sonosAlarmListCallback' }*.data.householdId }
+
+    when:
+    appScript.putPlayerUpnpEvents([service: 'AlarmClock', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmListVersion: 'V1', TimeZone: 'tz-1']])
+    appScript.putPlayerUpnpEvents([service: 'AlarmClock', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmListVersion: 'V2']])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    refreshes() == ['HOUSE-1']
+    appScript.getAlarmClockHouseholdState('HOUSE-1').values == [AlarmListVersion: 'V2', TimeZone: 'tz-1']
+    appScript.getAlarmClockHouseholdState('HOUSE-1').requestedVersion == 'V2'
+
+    when: 'the same version arrives again while its refresh is in flight'
+    appScript.processAlarmClockNotification([sourceDni: coordinator.deviceNetworkId, values: [AlarmListVersion: 'V2']])
+
+    then:
+    refreshes() == ['HOUSE-1']
+
+    when: 'the list response records the fetched version'
+    appScript.updateAlarmClockHouseholdState('HOUSE-1', [lastFetchedVersion: 'V2', requestedVersion: null])
+    appScript.processAlarmClockNotification([sourceDni: coordinator.deviceNetworkId, values: [AlarmListVersion: 'V2']])
+    appScript.processAlarmClockNotification([sourceDni: coordinator.deviceNetworkId, values: [AlarmListVersion: 'V3']])
+
+    then:
+    refreshes() == ['HOUSE-1', 'HOUSE-1']
+  }
+
+  def "AlarmClock version change does not refresh switches when alarm switches are disabled"() {
+    given:
+    coordinator.dataValues.householdId = 'HOUSE-1'
+    appScript.app.children = appScript.children
+    appScript.settings.enableAlarmSwitches = false
+    Closure refreshes = { -> appScript.asyncCalls.findAll { Map call -> call.cb == 'sonosAlarmListCallback' }*.data.householdId }
+
+    when:
+    appScript.processAlarmClockNotification([sourceDni: coordinator.deviceNetworkId, values: [AlarmListVersion: 'V1']])
+
+    then:
+    refreshes().isEmpty()
+  }
+
+  def "AlarmClock partial metadata updates the manager without clearing earlier values"() {
+    given:
+    coordinator.dataValues.householdId = 'HOUSE-1'
+    appScript.settings.enableAlarmSwitches = false
+    SonosAppPlayerDouble manager = new SonosAppPlayerDouble(deviceNetworkId: "${appScript.app.id}-SonosAlarmManager-HOUSE-1")
+    appScript.children << manager
+    appScript.app.children = appScript.children
+
+    when:
+    appScript.processAlarmClockNotification([sourceDni: coordinator.deviceNetworkId,
+      values: [TimeZone: 'tz-1', TimeServer: 'time.example', Bogus: 'x']])
+    appScript.processAlarmClockNotification([sourceDni: coordinator.deviceNetworkId, values: [DateFormat: 'DMY']])
+
+    then:
+    manager.emittedAttributes() == [sonosTimeZone: 'tz-1', sonosTimeServer: 'time.example', sonosDateFormat: 'DMY']
+    manager.events.every { Map event -> event.name != 'sonosTimeGeneration' }
+    appScript.getAlarmClockHouseholdState('HOUSE-1').values == [TimeZone: 'tz-1', TimeServer: 'time.example', DateFormat: 'DMY']
+  }
+
+  def "ListAlarms response updates switches, removes missing ones, and records the list version"() {
+    given:
+    coordinator.dataValues.householdId = 'HOUSE-1'
+    appScript.settings.enableAlarmSwitches = true
+    String keptDni = "${appScript.app.id}-SonosAlarm-HOUSE-1-A1"
+    String goneDni = "${appScript.app.id}-SonosAlarm-HOUSE-1-A2"
+    SonosAppPlayerDouble kept = new SonosAppPlayerDouble(deviceNetworkId: keptDni)
+    SonosAppPlayerDouble gone = new SonosAppPlayerDouble(deviceNetworkId: goneDni)
+    appScript.children << kept
+    appScript.children << gone
+    appScript.app.children = appScript.children
+    appScript.state.sonosAlarmRefreshRequestIds = ['HOUSE-1': 'req-1']
+    appScript.updateAlarmClockHouseholdState('HOUSE-1', [requestedVersion: 'V2'])
+    String alarmList = '<Alarms><Alarm ID="A1" StartLocalTime="07:30:00" Enabled="1" Volume="12" RoomUUID="RINCON_COORD"/></Alarms>'
+    String response = '<s:Envelope xmlns:s="urn:soap"><s:Body><u:ListAlarmsResponse xmlns:u="urn:sonos">' +
+      '<CurrentAlarmList>' + StringEscapeUtils.escapeXml10(alarmList) + '</CurrentAlarmList>' +
+      '<CurrentAlarmListVersion>V2</CurrentAlarmListVersion></u:ListAlarmsResponse></s:Body></s:Envelope>'
+
+    expect:
+    appScript.parseSonosAlarmListVersion(response) == 'V2'
+    appScript.parseSonosAlarmListVersion('<broken') == null
+
+    when:
+    appScript.sonosAlarmListCallback(new hubitat.scheduling.AsyncResponse(status: 200, data: response),
+      [householdId: 'HOUSE-1', requestId: 'req-1'])
+
+    then:
+    kept.emittedAttributes().alarmTime == '07:30:00'
+    kept.emittedAttributes().alarmVolume == 12
+    !appScript.children.any { it.deviceNetworkId == goneDni }
+    appScript.getAlarmClockHouseholdState('HOUSE-1').lastFetchedVersion == 'V2'
+    !appScript.getAlarmClockHouseholdState('HOUSE-1').containsKey('requestedVersion')
+  }
+
+  def "an alarm start time that arrives before running state is retained and cleared when the alarm ends"() {
+    given:
+    coordinator.dataValues.householdId = 'HOUSE-1'
+    appScript.app.children = appScript.children
+    SonosAppPlayerDouble alarmOne = new SonosAppPlayerDouble(deviceNetworkId: "${appScript.app.id}-SonosAlarm-HOUSE-1-1")
+    appScript.children << alarmOne
+    appScript.app.children = appScript.children
+
+    when: 'only the start time arrives first'
+    appScript.putPlayerUpnpEvents([service: 'AlarmRunning', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmLoggedStartTime: 'T9']])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    alarmOne.events.isEmpty()
+
+    when: 'running state follows'
+    appScript.putPlayerUpnpEvents([service: 'AlarmRunning', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmRunning: '1', AlarmIDRunning: '1']])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    alarmOne.emittedAttributes() == [alarmRunning: 'true', alarmLoggedStartTime: 'T9']
+
+    when: 'the alarm ends'
+    appScript.putPlayerUpnpEvents([service: 'AlarmRunning', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmRunning: '0', AlarmIDRunning: '']])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    !(appScript.state.alarmRunningByHousehold ?: [:]).containsKey('HOUSE-1')
+  }
+
+  def "AVT alarm-running state updates only the matching alarm switch and keeps enabled state separate"() {
+    given:
+    coordinator.dataValues.householdId = 'HOUSE-1'
+    appScript.app.children = appScript.children
+    SonosAppPlayerDouble alarmOne = new SonosAppPlayerDouble(deviceNetworkId: "${appScript.app.id}-SonosAlarm-HOUSE-1-1")
+    SonosAppPlayerDouble alarmTwo = new SonosAppPlayerDouble(deviceNetworkId: "${appScript.app.id}-SonosAlarm-HOUSE-1-2")
+    appScript.children << alarmOne
+    appScript.children << alarmTwo
+    appScript.app.children = appScript.children
+
+    when: 'alarm 1 starts'
+    appScript.putPlayerUpnpEvents([service: 'AlarmRunning', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmRunning: '1', AlarmIDRunning: '1', AlarmLoggedStartTime: 'T1']])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    alarmOne.emittedAttributes() == [alarmRunning: 'true', alarmLoggedStartTime: 'T1']
+    alarmTwo.events.isEmpty()
+    appScript.getRunningAlarmId('HOUSE-1') == '1'
+
+    when: 'a partial event stops it, then alarm 2 starts'
+    appScript.putPlayerUpnpEvents([service: 'AlarmRunning', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmRunning: '0', AlarmIDRunning: '']])
+    appScript.putPlayerUpnpEvents([service: 'AlarmRunning', sourceDni: coordinator.deviceNetworkId,
+      values: [AlarmRunning: '1', AlarmIDRunning: '2']])
+    appScript.drainUpnpNotificationQueue()
+
+    then:
+    alarmOne.emittedAttributes().alarmRunning == 'false'
+    alarmTwo.emittedAttributes().alarmRunning == 'true'
+    !alarmOne.events.any { Map event -> event.name == 'switch' }
+    !alarmTwo.events.any { Map event -> event.name == 'switch' }
+    appScript.getRunningAlarmId('HOUSE-1') == '2'
+
+    when: 'the alarm stops with no alarm ID reported'
+    appScript.processAlarmRunningNotification([sourceDni: coordinator.deviceNetworkId, values: [AlarmRunning: '0']])
+
+    then:
+    alarmTwo.emittedAttributes().alarmRunning == 'false'
+    appScript.getRunningAlarmId('HOUSE-1') == null
+  }
+
+  def "AVT alarm-running data from a player without a household is ignored"() {
+    when:
+    appScript.processAlarmRunningNotification([sourceDni: coordinator.deviceNetworkId, values: [AlarmRunning: '1', AlarmIDRunning: '1']])
+
+    then:
+    appScript.getRunningAlarmId('HOUSE-1') == null
+    !appScript.state.containsKey('alarmRunningByHousehold')
+  }
+
   def "Sonos alarm SOAP builder escapes values as XML text"() {
     when:
     String body = appScript.sonosAlarmSoapBody('SetAlarm', [ProgramURI: 'x?a=1&b=<two>'])
@@ -2330,6 +2515,20 @@ class SonosAdvancedAppSpec extends Specification {
       sourceDni: "DNI-${rincon}".toString(), requestId: UUID.randomUUID().toString(), args: args])
   }
 
+  /** A coordinator's GroupRenderingControl report relayed by its player driver. */
+  private void reportGrc(String rincon, Integer volume, String mute = null) {
+    if(!appScript.state.staticDriverActivePlayerRoster) {
+      appScript.state.staticDriverActivePlayerRoster = [version: 1, players: ['COORD', 'FOLLOW', 'EXTRA', 'UNMANAGED'].collect {
+        [playerId: "RINCON_${it}".toString(), dni: "DNI-RINCON_${it}".toString()] }]
+    }
+    Map args = [:]
+    if(volume != null) { args.groupVolume = volume }
+    if(mute != null) { args.groupMute = mute }
+    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'groupRendering',
+      sourceDni: "DNI-${rincon}".toString(), requestId: UUID.randomUUID().toString(), args: args])
+    appScript.drainGroupStateUpdates()
+  }
+
   private void publishPreferences(Boolean proportional, Boolean individually) {
     appScript.groupPreferencesUpdated([deviceDni: 'GROUP-DNI',
       preferences: [useProportionalVolume: proportional, controlUngroupedIndividually: individually]])
@@ -2354,6 +2553,7 @@ class SonosAdvancedAppSpec extends Specification {
     if(topology == 'grouped') { groupedTopology() } else { ungroupedTopology() }
     publishPreferences(proportional, individually)
     reportStandardVolumes()
+    if(topology == 'grouped') { reportGrc('RINCON_COORD', 24, 'unmuted') }
 
     when:
     Map attributes = settle()
@@ -2376,31 +2576,76 @@ class SonosAdvancedAppSpec extends Specification {
     'ungrouped' | false        | false        || 'the coordinator only'            | 10             | 'muted'
   }
 
-  def "player group attributes follow the live Sonos group regardless of group device settings"() {
+  def "player group attributes come from the coordinator's GRC and reach every member"() {
     given:
     groupedTopology()
     publishPreferences(false, false)
-    reportStandardVolumes()
     coordinator.events.clear(); follower.events.clear(); extra.events.clear()
 
     when:
-    settle()
+    reportGrc('RINCON_COORD', 24, 'unmuted')
 
     then:
-    [coordinator, follower, extra].every { it.emittedAttributes().groupVolume == 24 }
-    [coordinator, follower, extra].every { it.emittedAttributes().groupMute == 'unmuted' }
+    ['COORD', 'FOLLOW', 'EXTRA'].every { String id ->
+      childEventsFor("DNI-RINCON_${id}".toString()).any { Map e -> e.name == 'groupVolume' && e.value == 24 } &&
+      childEventsFor("DNI-RINCON_${id}".toString()).any { Map e -> e.name == 'groupMute' && e.value == 'unmuted' } }
 
-    when: 'the players are ungrouped each player reports only itself'
+    when: 'a follower reports GRC it should not receive'
+    appScript.childEvents.clear()
+    reportGrc('RINCON_FOLLOW', 99, 'muted')
+
+    then: 'the coordinator remains authoritative'
+    appScript.childEvents.isEmpty()
+    appScript.state.groupRenderingByCoordinator.keySet() == ['RINCON_COORD'] as Set
+  }
+
+  def "a player that joins a group receives the coordinator's cached GRC"() {
+    given:
     ungroupedTopology()
-    coordinator.events.clear(); follower.events.clear(); extra.events.clear()
+    reportGrc('RINCON_COORD', 35, 'unmuted')
+    appScript.childEvents.clear()
+
+    when:
+    groupedTopology()
     settle()
 
     then:
-    coordinator.emittedAttributes().groupVolume == 10
-    follower.emittedAttributes().groupVolume == 21
-    extra.emittedAttributes().groupVolume == 40
-    coordinator.emittedAttributes().groupMute == 'muted'
-    extra.emittedAttributes().groupMute == 'unmuted'
+    childEventsFor('DNI-RINCON_FOLLOW').any { Map e -> e.name == 'groupVolume' && e.value == 35 }
+    childEventsFor('DNI-RINCON_FOLLOW').any { Map e -> e.name == 'groupMute' && e.value == 'unmuted' }
+  }
+
+  def "group devices on a live group with unmanaged speakers publish the coordinator's GRC"() {
+    given:
+    putTopology(['RINCON_COORD': 'RINCON_COORD,RINCON_FOLLOW,RINCON_UNMANAGED'])
+    publishPreferences(true, false)
+    report('RINCON_COORD', 20, 'muted')
+    report('RINCON_FOLLOW', 20, 'muted')
+
+    when: 'the unmanaged speaker raised the group volume to 40'
+    reportGrc('RINCON_COORD', 40, 'unmuted')
+    appScript.drainVolumeRecalculation()
+    appScript.drainGroupStateUpdates()
+
+    then:
+    group.emittedAttributes().groupVolume == 40
+    group.emittedAttributes().groupMute == 'unmuted'
+  }
+
+  def "group volume commands carry settings that seed the cache without calling the group device"() {
+    given:
+    group.reads.clear()
+
+    when:
+    appScript.groupAppRequest([version: 1, channel: 'groupAppRequest', groupDni: 'GROUP-DNI',
+      requestId: 'seed-1', sequence: 1, command: 'volumeUp',
+      args: [useProportionalVolume: false, controlUngroupedIndividually: true]])
+
+    then:
+    appScript.state.groupPreferencesByDni['GROUP-DNI'].useProportionalVolume == false
+    appScript.state.groupPreferencesByDni['GROUP-DNI'].controlUngroupedIndividually == true
+    appScript.state.pendingVolumeRecalculation.groups == ['GROUP-DNI']
+    !appScript.metaClass.respondsTo(appScript, 'seedGroupPreferenceSnapshots')
+    group.reads.isEmpty()
   }
 
   def "group volume rounds the member average half up"() {
@@ -2421,14 +2666,12 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted'], B: [mute: 'unmuted']]).mute == 'unmuted'
     appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted']]).mute == 'unmuted'
     appScript.calculateVolumeState(['A'], [A: [mute: 'unmuted']]).mute == 'unmuted'
-    appScript.hasUnmanagedMember(['A', 'B'], ['A'] as Set)
-    !appScript.hasUnmanagedMember(['A'], ['A'] as Set)
   }
 
   def "players without valid readings are skipped and no volume is published without any"() {
     given:
     groupedTopology()
-    publishPreferences(true, false)
+    publishPreferences(false, false)
 
     when: 'nothing has reported'
     Map attributes = settle()
@@ -2504,6 +2747,7 @@ class SonosAdvancedAppSpec extends Specification {
     given:
     groupedTopology()
     reportStandardVolumes()
+    reportGrc('RINCON_COORD', 24, 'unmuted')
 
     when:
     Map attributes = settle()
@@ -2513,7 +2757,7 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.volume == 24
   }
 
-  def "topology and volume reports give the same result in either order"() {
+  def "readings before topology are replaced once the group and its GRC are known"() {
     given:
     publishPreferences(true, false)
 
@@ -2521,24 +2765,48 @@ class SonosAdvancedAppSpec extends Specification {
     reportStandardVolumes()
     Map beforeTopology = settle()
     groupedTopology()
-    Map firstOrder = settle()
+    reportGrc('RINCON_COORD', 24, 'unmuted')
+    Map afterTopology = settle()
 
-    then: 'ungrouped coordinator-only value is replaced once the group is known'
+    then: 'ungrouped coordinator-only value is replaced by the live group value'
     beforeTopology.volume == 10
-    firstOrder.volume == 24
+    afterTopology.volume == 24
+    afterTopology.mute == 'unmuted'
+  }
 
-    when: 'a fresh app receives topology before readings'
-    appScript.state.clear()
+  def "GRC that arrives before topology is held and applied once the coordinator is known"() {
+    given:
     publishPreferences(true, false)
-    groupedTopology()
-    Map noReadings = settle()
-    reportStandardVolumes()
-    Map secondOrder = settle()
+
+    when: 'the initial snapshot beats topology'
+    reportGrc('RINCON_COORD', 50, 'muted')
 
     then:
-    !noReadings.containsKey('volume')
-    secondOrder.volume == 24
-    secondOrder.mute == 'unmuted'
+    !appScript.state.containsKey('groupRenderingByCoordinator')
+    appScript.state.pendingGroupRenderingBySource.RINCON_COORD == [groupVolume: 50, groupMute: 'muted']
+
+    when:
+    appScript.childEvents.clear()
+    groupedTopology()
+    settle()
+
+    then:
+    appScript.state.groupRenderingByCoordinator.RINCON_COORD == [groupVolume: 50, groupMute: 'muted']
+    !appScript.state.containsKey('pendingGroupRenderingBySource')
+    ['COORD', 'FOLLOW', 'EXTRA'].every { String id ->
+      childEventsFor("DNI-RINCON_${id}".toString()).any { Map e -> e.name == 'groupVolume' && e.value == 50 } }
+    group.emittedAttributes().groupVolume == 50
+  }
+
+  def "held GRC from a source that turns out to be a follower is dropped"() {
+    when:
+    reportGrc('RINCON_FOLLOW', 70, 'unmuted')
+    groupedTopology()
+    settle()
+
+    then:
+    !appScript.state.containsKey('pendingGroupRenderingBySource')
+    !appScript.state.containsKey('groupRenderingByCoordinator')
   }
 
   def "regrouping replaces stale derived values and ZGT repeats with the same roster do nothing"() {
@@ -2561,14 +2829,16 @@ class SonosAdvancedAppSpec extends Specification {
     then:
     appScript.state.pendingVolumeRecalculation.all == true
 
-    when:
-    Map attributes = settle()
+    when: 'each coordinator reports its new group state'
+    settle()
+    reportGrc('RINCON_COORD', 16, 'muted')
+    reportGrc('RINCON_EXTRA', 40, 'unmuted')
 
     then:
-    attributes.volume == 16
-    attributes.mute == 'muted'
-    coordinator.emittedAttributes().groupVolume == 16
-    extra.emittedAttributes().groupVolume == 40
+    group.emittedAttributes().volume == 16
+    group.emittedAttributes().mute == 'muted'
+    childEventsFor('DNI-RINCON_COORD').any { Map e -> e.name == 'groupVolume' && e.value == 16 }
+    childEventsFor('DNI-RINCON_EXTRA').any { Map e -> e.name == 'groupVolume' && e.value == 40 }
   }
 
   def "only affected group devices are republished when an unrelated player reports"() {
@@ -2580,18 +2850,18 @@ class SonosAdvancedAppSpec extends Specification {
     settle()
 
     when:
-    report('RINCON_EXTRA', 80, 'muted')
+    reportGrc('RINCON_EXTRA', 80, 'muted')
     Map attributes = settle()
 
     then:
     attributes.isEmpty()
-    extra.emittedAttributes().groupVolume == 80
+    childEventsFor('DNI-RINCON_EXTRA').any { Map e -> e.name == 'groupVolume' && e.value == 80 }
   }
 
   def "player volume reports do not read child devices or group settings on the event path"() {
     given:
     groupedTopology()
-    publishPreferences(true, false)
+    publishPreferences(false, false)
     [coordinator, follower, extra].each { it.reads.clear() }
     group.reads.clear()
 
@@ -2627,15 +2897,6 @@ class SonosAdvancedAppSpec extends Specification {
     appScript.state.groupPreferencesByDni['GROUP-DNI'].useProportionalVolume == false
     group.emittedAttributes().volume == 20
     group.emittedAttributes().groupVolume == 20
-  }
-
-  def "GroupRenderingControl notifications are no longer accepted by the app"() {
-    when:
-    appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_COORD', events: [[name: 'groupVolume', value: 70]]])
-
-    then:
-    !appScript.state.containsKey('pendingUpnpNotifications')
-    !appScript.scheduled.any { List job -> job[1] == 'drainUpnpNotificationQueue' }
   }
 
   def "group volume commands still use the existing coordinator group API"() {

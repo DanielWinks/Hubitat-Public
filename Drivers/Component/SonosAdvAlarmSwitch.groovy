@@ -66,6 +66,9 @@ metadata {
     attribute 'alarmSource', 'string'
     attribute 'playMode', 'string'
     attribute 'includeGroupedRooms', 'string'
+    // Live state from the AVTransport alarm variables; separate from the enabled (switch) state.
+    attribute 'alarmRunning', 'enum', ['true', 'false']
+    attribute 'alarmLoggedStartTime', 'string'
   }
 }
 

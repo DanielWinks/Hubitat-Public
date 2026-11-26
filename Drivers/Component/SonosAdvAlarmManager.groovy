@@ -35,6 +35,14 @@ metadata {
     importUrl: 'https://raw.githubusercontent.com/DanielWinks/Hubitat-Public/main/Drivers/Component/SonosAdvAlarmManager.groovy'
   ) {
     attribute 'sonosAlarmRequest', 'string'
+    // Values below are reported by Sonos AlarmClock events; they are not the hub's own settings.
+    attribute 'alarmListVersion', 'string'
+    attribute 'sonosTimeZone', 'string'
+    attribute 'sonosTimeGeneration', 'string'
+    attribute 'sonosTimeServer', 'string'
+    attribute 'sonosDateFormat', 'string'
+    attribute 'sonosTimeFormat', 'string'
+    attribute 'sonosDailyIndexRefreshTime', 'string'
     capability 'Refresh'
     capability 'Actuator'
 
