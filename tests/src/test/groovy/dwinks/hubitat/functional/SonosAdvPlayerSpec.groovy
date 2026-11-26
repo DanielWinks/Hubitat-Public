@@ -1045,7 +1045,6 @@ class SonosAdvPlayerSpec extends Specification {
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
       playerDeparted: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'departed', rincon:rincon, dni:dni, name:name] },
-      putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       groupAnnouncementProgress: { String corr, String phase, Map payload, String dni -> parentPlayerUpdates << ([kind:'groupAnnouncementProgress', correlationId:corr, phase:phase] + (payload ?: [:])) }
     ) }
     driver.device.dataValues.localUpnpHost = '192.168.1.50:1400'
@@ -1067,7 +1066,6 @@ class SonosAdvPlayerSpec extends Specification {
       playerCommandRequest: { Map payload -> parentPlayerRequests << new LinkedHashMap(payload); true },
       playerGroupTopologyOperationUpdate: { Map payload -> parentPlayerUpdates << [kind: 'groupTopologyOperation', payload: new LinkedHashMap(payload)] },
       putAvtEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'avtEvents', rincon:rincon, events:new ArrayList(events)] },
-      putGrcEvents: { String rincon, List<Map> events -> parentPlayerUpdates << [kind:'grcEvents', rincon:rincon, events:new ArrayList(events)] },
       putPlayerUpnpEvents: { Map payload -> parentPlayerUpdates << new LinkedHashMap(payload) },
       putZgtTopology: { String sourceDni, Map eventsByGroupId -> parentPlayerUpdates << [kind:'zgtTopology', sourceDni:sourceDni, eventsByGroupId:new LinkedHashMap(eventsByGroupId)] },
       playerArrived: { String rincon, String dni, String name -> parentPlayerPresence << [kind:'arrived', rincon:rincon, dni:dni, name:name] },
@@ -1910,13 +1908,15 @@ class SonosAdvPlayerSpec extends Specification {
     given:
     List<String> zgtCalls = []
     driver.metaClass.subscribeToZgtEvents = { -> zgtCalls << 'subscribe' }
-    driver.metaClass.subscribeToMrGrcEvents = { -> }
 
     when:
     driver.initialize()
 
     then:
     zgtCalls == ['subscribe']
+    !driver.metaClass.respondsTo(driver, 'subscribeToMrGrcEvents')
+    !rawRequests.any { String request -> request.contains('GroupRenderingControl') }
+    !driver.device.dataValues.containsKey('sid4')
     !driver.device.dataValues.containsKey('isZgtSubscriber')
     !driver.device.dataValues.containsKey('zgtLeaderGeneration')
   }
@@ -2475,9 +2475,9 @@ class SonosAdvPlayerSpec extends Specification {
     'urn:schemas-upnp-org:service:RenderingControl:1#SetTreble'                                         || 'sid2'
     'urn:schemas-upnp-org:service:RenderingControl:1#SetLoudness'                                       || 'sid2'
     'urn:schemas-upnp-org:service:RenderingControl:1#SetEQ'                                            || 'sid2'
-    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupVolume'                              || 'sid4'
-    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetRelativeGroupVolume'                      || 'sid4'
-    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupMute'                                || 'sid4'
+    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupVolume'                              || null
+    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetRelativeGroupVolume'                      || null
+    'urn:schemas-upnp-org:service:GroupRenderingControl:1#SetGroupMute'                                || null
     'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo'                                      || null
     'urn:schemas-upnp-org:service:RenderingControl:1#GetVolume'                                         || null
   }
@@ -2506,20 +2506,34 @@ class SonosAdvPlayerSpec extends Specification {
     driver.logs.any { it.toString().contains('No UPnP sid1 event arrived after resubscription for Play') }
   }
 
-  def "GroupRenderingControl expectation resubscribes after player becomes ungrouped"() {
+  def "GroupRenderingControl is not subscribed, retried, or tracked by the player"() {
+    expect:
+    !driver.metaClass.respondsTo(driver, 'subscribeToMrGrcEvents')
+    !driver.metaClass.respondsTo(driver, 'resubscribeToMrGrcEvents')
+    !driver.metaClass.respondsTo(driver, 'retryUpnpSid4')
+    !driver.metaClass.respondsTo(driver, 'parseGrcFullSnapshot')
+    !driver.EVENT_TIMESTAMP_KEYS.contains('lastMrGrcEvent')
+    driver.defaultSubscribeMethod('sid4') == null
+    driver.defaultResubscribeMethod('sid4') == null
+  }
+
+  def "GroupRenderingControl NOTIFY from a retired subscription is ignored"() {
     given:
-    driver.device.currentValues.isGrouped = 'off'
-    driver.armExpectedUpnpSubscriptionEvent('sid4', 'SetGroupVolume')
-    List<Map> pending = driver.runtimeState.upnpExpectedSubscriptionEvents as List<Map>
-    pending[0].deadlineAt = driver.now() - 1L
+    String body = '<propertyset><property><GroupVolume>40</GroupVolume><GroupMute>1</GroupMute>' +
+      '<GroupVolumeChangeable>1</GroupVolumeChangeable></property></propertyset>'
+    driver.metaClass.getMapForRaw = { String rawMessage ->
+      [headers: ['X-SONOS-SERVICETYPE': 'GroupRenderingControl'], body: body]
+    }
+    driver.device.currentValues.groupVolume = 12
 
     when:
-    driver.watchExpectedUpnpSubscriptionEvents()
+    driver.parse('mac:AA:BB:CC:DD:EE:FF\r\nNOTIFY /mgrc HTTP/1.1\r\n\r\n' + body)
 
     then:
-    pending[0].attempts == 1
-    rawRequests.size() == 1
-    rawRequests[0].startsWith('SUBSCRIBE /MediaRenderer/GroupRenderingControl/Event HTTP/1.1')
+    driver.device.currentValues.groupVolume == 12
+    !driver.device.currentValues.containsKey('groupMute')
+    !driver.device.currentValues.containsKey('groupVolumeChangeable')
+    !driver.scheduled.any { List row -> row[1] == 'relayParsedUpnpToParent' }
   }
 
   def "AVTransport event receipt records a per-player diagnostic timestamp"() {
@@ -2788,10 +2802,9 @@ class SonosAdvPlayerSpec extends Specification {
     !events.any { Map event -> event.name == 'nextTrackName' }
   }
 
-  def "GRC and RC event translation emits only present reported values"() {
+  def "RC event translation emits only present reported values"() {
     expect:
-    driver.buildGrcEvents([groupVolume: 0, groupMute: 'unmuted']) == [
-      [name: 'groupVolume', value: 0], [name: 'groupMute', value: 'unmuted']]
+    !driver.metaClass.respondsTo(driver, 'buildGrcEvents')
     driver.buildRcEvents([volumeMaster: 0, muteMaster: 'unmuted', bass: 2]) == [
       [name: 'volume', value: 0], [name: 'level', value: 0], [name: 'mute', value: 'unmuted'], [name: 'bass', value: 2]]
     driver.buildRcEvents([treble: 1]) == [[name: 'treble', value: 1]]
@@ -2810,6 +2823,65 @@ class SonosAdvPlayerSpec extends Specification {
     driver.device.currentValues.mute == 'unmuted'
     driver.device.currentValues.bass == 2
     parentPlayerUpdates.isEmpty()
+  }
+
+  def "RC volume and mute events queue one deferred reading for the parent app"() {
+    given:
+    captureParentAudioClipRequests()
+
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event><InstanceID><Volume channel="Master" val="42"/><Mute channel="Master" val="1"/>' +
+      '</InstanceID></Event>') + '</LastChange></property></propertyset>')
+
+    then: 'nothing is sent from inside the event handler'
+    parentPlayerRequests.isEmpty()
+    driver.scheduled.count { List row -> row[1] == 'relayPlayerReadingToParent' } == 1
+
+    when:
+    driver.relayPlayerReadingToParent()
+
+    then:
+    parentPlayerRequests.size() == 1
+    parentPlayerRequests[0].action == 'playerReading'
+    parentPlayerRequests[0].args == [volume: 42, mute: 'muted']
+  }
+
+  def "RC events without volume or mute do not send a reading to the parent app"() {
+    when:
+    driver.deferOrProcessRenderingControlPayload('SONOS-TEST-DNI',
+      '<propertyset><property><LastChange>' + StringEscapeUtils.escapeXml10(
+      '<Event><InstanceID><Bass val="2"/></InstanceID></Event>') + '</LastChange></property></propertyset>')
+
+    then:
+    !driver.scheduled.any { List row -> row[1] == 'relayPlayerReadingToParent' }
+  }
+
+  def "player volume and mute state changes also queue a parent reading"() {
+    given:
+    captureParentAudioClipRequests()
+
+    when:
+    driver.setPlayerVolume(33)
+    driver.setMuteState('muted')
+    driver.relayPlayerReadingToParent()
+
+    then:
+    driver.scheduled.any { List row -> row[1] == 'relayPlayerReadingToParent' }
+    parentPlayerRequests.last().action == 'playerReading'
+    parentPlayerRequests.last().args == [volume: 33, mute: 'muted']
+  }
+
+  def "reading relay with no known volume or mute sends nothing"() {
+    given:
+    captureParentAudioClipRequests()
+
+    when:
+    driver.relayPlayerReadingToParent()
+
+    then:
+    parentPlayerRequests.isEmpty()
   }
 
 }

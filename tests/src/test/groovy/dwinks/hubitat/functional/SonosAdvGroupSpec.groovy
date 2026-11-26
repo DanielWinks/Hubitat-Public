@@ -190,6 +190,56 @@ class SonosAdvGroupSpec extends Specification {
     driver.events.isEmpty()
   }
 
+  def "initialize defers one group preference snapshot for the app cache"() {
+    when:
+    driver.initialize()
+
+    then:
+    driver.scheduled.any { List item -> item[1] == 'publishGroupPreferenceSnapshot' }
+    ((SonosGroupParentDouble)driver.parent).requests.isEmpty()
+  }
+
+  def "group preference snapshot sends both volume settings with documented defaults"() {
+    when:
+    driver.publishGroupPreferenceSnapshot()
+    Map request = ((SonosGroupParentDouble)driver.parent).requests.last()
+
+    then:
+    request.channel == 'groupAppRequest'
+    request.action == 'groupPreferenceSnapshot'
+    request.groupDni == 'SONOS-GROUP-TEST-DNI'
+    request.preferences == [useProportionalVolume: true, controlUngroupedIndividually: false]
+    !request.containsKey('command')
+  }
+
+  def "group preference snapshot reflects saved settings and does not queue a group command"() {
+    given:
+    driver.settings.useProportionalVolume = false
+    driver.settings.controlUngroupedIndividually = true
+
+    when:
+    driver.publishGroupPreferenceSnapshot()
+
+    then:
+    ((SonosGroupParentDouble)driver.parent).requests.last().preferences ==
+      [useProportionalVolume: false, controlUngroupedIndividually: true]
+    groupRequests().isEmpty()
+  }
+
+  def "group volume commands still carry both settings to the app command path"() {
+    given:
+    driver.settings.useProportionalVolume = false
+
+    when:
+    driver.setLevel(40G)
+
+    then:
+    groupRequests()[0].command == 'setVolume'
+    groupRequests()[0].args.level == 40
+    groupRequests()[0].args.useProportionalVolume == false
+    groupRequests()[0].args.controlUngroupedIndividually == false
+  }
+
   def "track position updates default off when the preference is null"() {
     given:
     driver.settings.remove('enableTrackPositionUpdates')

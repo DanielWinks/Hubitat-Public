@@ -505,8 +505,31 @@ void initialize() {
   resetPendingStatePublicationForInitialization()
   removeStaleGroupStates()
   applyInitializationDefaults()
+  // Share the two volume settings with the app after this lifecycle callback releases the device gate.
+  runInMillis(1, 'publishGroupPreferenceSnapshot', [overwrite: true])
   // Initialize volume/mute state from coordinator
   runIn(5, 'refresh')
+}
+
+/**
+ * Send this group device's volume-affecting settings to the parent app, which caches them so
+ * calculated group volume and mute never need to read this device's settings on a volume event.
+ * Deferred from initialize()/updated() so settings are published only on a low-frequency save.
+ */
+void publishGroupPreferenceSnapshot() {
+  String dni = device.getDeviceNetworkId()
+  if(!dni) { return }
+  Map payload = [
+    version: 1,
+    channel: 'groupAppRequest',
+    action: 'groupPreferenceSnapshot',
+    groupDni: dni,
+    requestId: UUID.randomUUID().toString(),
+    createdAt: now(),
+    preferences: getGroupCommandSettings()
+  ]
+  logDebug("Publishing group preference snapshot for ${dni}: ${payload.preferences}")
+  enqueueGroupAppRequest(payload)
 }
 
 /** Clear stale group-device publication work; refresh repopulates authoritative state. */

@@ -18,7 +18,12 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
   List<Map> pendingParentUpdatePoll = []
   List<Map> pendingParentRequestPoll = []
 
-  Object getSetting(String name) { return settings[name] }
+  List<String> reads = []
+
+  Object getSetting(String name) { reads << "getSetting:${name}".toString(); return settings[name] }
+  Object currentValue(String n, boolean skipCache = false) { reads << "currentValue:${n}".toString(); return currentValues[n] }
+  void setGroupVolume(BigDecimal level, BigDecimal duration = null) { commands << [name: 'setGroupVolume', level: level] }
+  void setLevel(BigDecimal level) { commands << [name: 'setLevel', level: level] }
 
   List<Map> drainPendingParentUpdatesForPoll() {
     List<Map> batch = []
@@ -136,6 +141,9 @@ class SonosAppPlayerDouble extends ChildDeviceWrapper {
 
 class SonosAppGroupDouble extends ChildDeviceWrapper {
   Long id = 201L
+  List<String> reads = []
+  Object currentValue(String n, boolean skipCache = false) { reads << "currentValue:${n}".toString(); return currentValues[n] }
+  Object getSetting(String name) { reads << "getSetting:${name}".toString(); return updatedSettings[name] }
   List<Map> pendingGroupRequestPoll = []
 
   List<Map> drainPendingGroupRequestsForPoll() {
@@ -2288,6 +2296,370 @@ class SonosAdvancedAppSpec extends Specification {
     attributes.groupMute == 'muted'
   }
 
+  // ---------------------------------------------------------------------------
+  // Calculated group volume and mute
+  // ---------------------------------------------------------------------------
+
+  private void putTopology(Map<String, String> groups) {
+    // groups: coordinatorId -> comma-separated member ids
+    Map<String, List<Map>> byGroup = [:]
+    groups.each { String coordinatorId, String members ->
+      byGroup["GROUP-${coordinatorId}".toString()] = [
+        [name: 'groupCoordinatorId', value: coordinatorId],
+        [name: 'groupPlayerIds', value: members]
+      ]
+    }
+    appScript.putPlayerUpnpEvents([service: 'ZGT', sourceDni: coordinator.deviceNetworkId, eventsByGroupId: byGroup])
+    appScript.drainUpnpNotificationQueue()
+  }
+
+  private void groupedTopology() {
+    putTopology(['RINCON_COORD': 'RINCON_COORD,RINCON_FOLLOW,RINCON_EXTRA'])
+  }
+
+  private void ungroupedTopology() {
+    putTopology(['RINCON_COORD': 'RINCON_COORD', 'RINCON_FOLLOW': 'RINCON_FOLLOW', 'RINCON_EXTRA': 'RINCON_EXTRA'])
+  }
+
+  private void report(String rincon, Integer volume, String mute = null) {
+    Map args = [:]
+    if(volume != null) { args.volume = volume }
+    if(mute != null) { args.mute = mute }
+    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading',
+      sourceDni: "DNI-${rincon}".toString(), requestId: UUID.randomUUID().toString(), args: args])
+  }
+
+  private void publishPreferences(Boolean proportional, Boolean individually) {
+    appScript.groupAppRequest([version: 1, channel: 'groupAppRequest', action: 'groupPreferenceSnapshot',
+      groupDni: 'GROUP-DNI', requestId: UUID.randomUUID().toString(),
+      preferences: [useProportionalVolume: proportional, controlUngroupedIndividually: individually]])
+  }
+
+  /** Apply queued recalculation and batched group state, returning what the group device emitted. */
+  private Map settle() {
+    group.events.clear()
+    appScript.drainVolumeRecalculation()
+    appScript.drainGroupStateUpdates()
+    return group.emittedAttributes()
+  }
+
+  private void reportStandardVolumes() {
+    report('RINCON_COORD', 10, 'muted')
+    report('RINCON_FOLLOW', 21, 'muted')
+    report('RINCON_EXTRA', 40, 'unmuted')
+  }
+
+  def "group device uses #expectedPlayers when #topology and proportional=#proportional individually=#individually"() {
+    given:
+    if(topology == 'grouped') { groupedTopology() } else { ungroupedTopology() }
+    publishPreferences(proportional, individually)
+    reportStandardVolumes()
+
+    when:
+    Map attributes = settle()
+
+    then:
+    attributes.volume == expectedVolume
+    attributes.groupVolume == expectedVolume
+    attributes.mute == expectedMute
+    attributes.groupMute == expectedMute
+
+    where:
+    topology    | proportional | individually || expectedPlayers                    | expectedVolume | expectedMute
+    'grouped'   | true         | false        || 'live Sonos group members'         | 24             | 'unmuted'
+    'grouped'   | true         | true         || 'live Sonos group members'         | 24             | 'unmuted'
+    'grouped'   | false        | false        || 'configured players'              | 16             | 'muted'
+    'grouped'   | false        | true         || 'configured players'              | 16             | 'muted'
+    'ungrouped' | true         | true         || 'configured players'              | 16             | 'muted'
+    'ungrouped' | false        | true         || 'configured players'              | 16             | 'muted'
+    'ungrouped' | true         | false        || 'the coordinator only'            | 10             | 'muted'
+    'ungrouped' | false        | false        || 'the coordinator only'            | 10             | 'muted'
+  }
+
+  def "player group attributes follow the live Sonos group regardless of group device settings"() {
+    given:
+    groupedTopology()
+    publishPreferences(false, false)
+    reportStandardVolumes()
+    coordinator.events.clear(); follower.events.clear(); extra.events.clear()
+
+    when:
+    settle()
+
+    then:
+    [coordinator, follower, extra].every { it.emittedAttributes().groupVolume == 24 }
+    [coordinator, follower, extra].every { it.emittedAttributes().groupMute == 'unmuted' }
+
+    when: 'the players are ungrouped each player reports only itself'
+    ungroupedTopology()
+    coordinator.events.clear(); follower.events.clear(); extra.events.clear()
+    settle()
+
+    then:
+    coordinator.emittedAttributes().groupVolume == 10
+    follower.emittedAttributes().groupVolume == 21
+    extra.emittedAttributes().groupVolume == 40
+    coordinator.emittedAttributes().groupMute == 'muted'
+    extra.emittedAttributes().groupMute == 'unmuted'
+  }
+
+  def "group volume rounds the member average half up"() {
+    given:
+    groupedTopology()
+    publishPreferences(true, false)
+
+    expect:
+    appScript.calculateVolumeState(['A', 'B'], [A: [volume: 10], B: [volume: 11]]).volume == 11
+    appScript.calculateVolumeState(['A', 'B'], [A: [volume: 10], B: [volume: 15]]).volume == 13
+    appScript.calculateVolumeState(['A', 'B', 'C'], [A: [volume: 10], B: [volume: 10], C: [volume: 11]]).volume == 10
+    appScript.calculateVolumeState(['A', 'B', 'C'], [A: [volume: 0], B: [volume: 0], C: [volume: 100]]).volume == 33
+  }
+
+  def "mute is reported only when every selected player is muted"() {
+    expect:
+    appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted'], B: [mute: 'muted']]).mute == 'muted'
+    appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted'], B: [mute: 'unmuted']]).mute == 'unmuted'
+    appScript.calculateVolumeState(['A', 'B'], [A: [mute: 'muted']]).mute == 'unmuted'
+    appScript.calculateVolumeState(['A'], [A: [mute: 'unmuted']]).mute == 'unmuted'
+  }
+
+  def "players without valid readings are skipped and no volume is published without any"() {
+    given:
+    groupedTopology()
+    publishPreferences(true, false)
+
+    when: 'nothing has reported'
+    Map attributes = settle()
+
+    then:
+    !attributes.containsKey('volume')
+    !attributes.containsKey('groupVolume')
+    !attributes.containsKey('mute')
+
+    when: 'one player reports and the rest are missing or invalid'
+    report('RINCON_COORD', 30, 'unmuted')
+    report('RINCON_FOLLOW', 150)
+    appScript.playerAppRequest([version: 1, channel: 'playerAppRequest', action: 'playerReading',
+      sourceDni: 'DNI-RINCON_EXTRA', args: [volume: 'loud', mute: 'maybe']])
+    attributes = settle()
+
+    then:
+    attributes.volume == 30
+    attributes.groupVolume == 30
+    attributes.mute == 'unmuted'
+    !appScript.state.playerReadingsByRincon.containsKey('RINCON_EXTRA')
+    appScript.state.playerReadingsByRincon.RINCON_FOLLOW == null
+  }
+
+  def "changing a group setting recalculates the group device from cached readings"() {
+    given:
+    groupedTopology()
+    publishPreferences(true, false)
+    reportStandardVolumes()
+    settle()
+
+    when:
+    publishPreferences(false, false)
+
+    then:
+    appScript.state.groupPreferencesByDni['GROUP-DNI'] == [useProportionalVolume: false, controlUngroupedIndividually: false]
+    appScript.scheduled.any { List job -> job[1] == 'drainVolumeRecalculation' }
+    appScript.state.pendingVolumeRecalculation.groups == ['GROUP-DNI']
+
+    when:
+    Map attributes = settle()
+
+    then:
+    attributes.volume == 16
+    attributes.mute == 'muted'
+  }
+
+  def "an unchanged group preference snapshot does not schedule a recalculation"() {
+    given:
+    publishPreferences(false, true)
+    appScript.drainVolumeRecalculation()
+    appScript.scheduled.clear()
+
+    when:
+    publishPreferences(false, true)
+
+    then:
+    !appScript.scheduled.any { List job -> job[1] == 'drainVolumeRecalculation' }
+    !appScript.state.containsKey('pendingVolumeRecalculation')
+  }
+
+  def "group preference snapshots from unknown groups are rejected and stale cache entries are pruned"() {
+    given:
+    appScript.state.groupPreferencesByDni = ['GONE-DNI': [useProportionalVolume: false, controlUngroupedIndividually: false]]
+
+    when:
+    Boolean accepted = appScript.groupAppRequest([channel: 'groupAppRequest', action: 'groupPreferenceSnapshot',
+      groupDni: 'OTHER-GROUP', preferences: [useProportionalVolume: false]])
+
+    then:
+    !accepted
+    !appScript.state.groupPreferencesByDni.containsKey('OTHER-GROUP')
+
+    when:
+    publishPreferences(false, true)
+
+    then:
+    appScript.state.groupPreferencesByDni.keySet() == ['GROUP-DNI'] as Set
+  }
+
+  def "a missing preference snapshot falls back to proportional grouped control"() {
+    given:
+    groupedTopology()
+    reportStandardVolumes()
+
+    when:
+    Map attributes = settle()
+
+    then:
+    !appScript.state.containsKey('groupPreferencesByDni')
+    attributes.volume == 24
+  }
+
+  def "topology and volume reports give the same result in either order"() {
+    given:
+    publishPreferences(true, false)
+
+    when: 'readings arrive before topology'
+    reportStandardVolumes()
+    Map beforeTopology = settle()
+    groupedTopology()
+    Map firstOrder = settle()
+
+    then: 'ungrouped coordinator-only value is replaced once the group is known'
+    beforeTopology.volume == 10
+    firstOrder.volume == 24
+
+    when: 'a fresh app receives topology before readings'
+    appScript.state.clear()
+    publishPreferences(true, false)
+    groupedTopology()
+    Map noReadings = settle()
+    reportStandardVolumes()
+    Map secondOrder = settle()
+
+    then:
+    !noReadings.containsKey('volume')
+    secondOrder.volume == 24
+    secondOrder.mute == 'unmuted'
+  }
+
+  def "regrouping replaces stale derived values and ZGT repeats with the same roster do nothing"() {
+    given:
+    publishPreferences(true, false)
+    groupedTopology()
+    reportStandardVolumes()
+    settle()
+    coordinator.events.clear()
+
+    when: 'the same topology is reported again'
+    groupedTopology()
+
+    then:
+    !appScript.state.containsKey('pendingVolumeRecalculation')
+
+    when: 'the extra player leaves the group'
+    putTopology(['RINCON_COORD': 'RINCON_COORD,RINCON_FOLLOW', 'RINCON_EXTRA': 'RINCON_EXTRA'])
+
+    then:
+    appScript.state.pendingVolumeRecalculation.all == true
+
+    when:
+    Map attributes = settle()
+
+    then:
+    attributes.volume == 16
+    attributes.mute == 'muted'
+    coordinator.emittedAttributes().groupVolume == 16
+    extra.emittedAttributes().groupVolume == 40
+  }
+
+  def "only affected group devices are republished when an unrelated player reports"() {
+    given:
+    publishPreferences(true, false)
+    putTopology(['RINCON_COORD': 'RINCON_COORD,RINCON_FOLLOW', 'RINCON_EXTRA': 'RINCON_EXTRA'])
+    report('RINCON_COORD', 10, 'unmuted')
+    report('RINCON_FOLLOW', 20, 'unmuted')
+    settle()
+
+    when:
+    report('RINCON_EXTRA', 80, 'muted')
+    Map attributes = settle()
+
+    then:
+    attributes.isEmpty()
+    extra.emittedAttributes().groupVolume == 80
+  }
+
+  def "player volume reports do not read child devices or group settings on the event path"() {
+    given:
+    groupedTopology()
+    publishPreferences(true, false)
+    [coordinator, follower, extra].each { it.reads.clear() }
+    group.reads.clear()
+
+    when:
+    report('RINCON_COORD', 10, 'unmuted')
+    report('RINCON_FOLLOW', 20, 'unmuted')
+    settle()
+
+    then:
+    [coordinator, follower, extra, group].every { it.reads.isEmpty() }
+    group.emittedAttributes().volume == 15
+  }
+
+  def "refresh seeds missing readings and uses the settings carried by the request"() {
+    given:
+    groupedTopology()
+    coordinator.currentValues.volume = 10
+    coordinator.currentValues.mute = 'unmuted'
+    follower.currentValues.volume = 30
+    follower.currentValues.mute = 'unmuted'
+    extra.currentValues.volume = 50
+    extra.currentValues.mute = 'unmuted'
+    group.currentValues.switch = 'on'
+    group.events.clear()
+
+    when:
+    appScript.refreshGroupDeviceState(group, coordinator, [coordinator, follower], [
+      useProportionalVolume: false, controlUngroupedIndividually: false
+    ])
+    appScript.drainGroupStateUpdates()
+
+    then:
+    appScript.state.groupPreferencesByDni['GROUP-DNI'] == [useProportionalVolume: false, controlUngroupedIndividually: false]
+    group.emittedAttributes().volume == 20
+    group.emittedAttributes().groupVolume == 20
+  }
+
+  def "GroupRenderingControl notifications are no longer accepted by the app"() {
+    when:
+    appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_COORD', events: [[name: 'groupVolume', value: 70]]])
+
+    then:
+    !appScript.state.containsKey('pendingUpnpNotifications')
+    !appScript.scheduled.any { List job -> job[1] == 'drainUpnpNotificationQueue' }
+  }
+
+  def "group volume commands still use the existing coordinator group API"() {
+    given:
+    groupedTopology()
+    coordinator.currentValues.isGrouped = 'on'
+    coordinator.currentValues.isGroupCoordinator = 'on'
+
+    when:
+    appScript.executeGroupVolumeCommand(coordinator, [coordinator, follower], [level: 35,
+      useProportionalVolume: true, controlUngroupedIndividually: false])
+
+    then:
+    coordinator.commands.any { Map command -> command.name == 'setGroupVolume' }
+    !follower.commands.any { Map command -> command.name == 'setLevel' }
+  }
+
   def "new UI speaker table merges discovery with created players and escapes display values"() {
     given:
     appScript.discoveredSonoses.clear()
@@ -2723,24 +3095,28 @@ class SonosAdvancedAppSpec extends Specification {
       [name: 'currentTrackName', value: 'Track A'],
       [name: 'currentTrackName', value: 'Track B']
     ]])
+    appScript.putPlayerUpnpEvents([service: 'AVT', rincon: 'RINCON_COORD', events: [
+      [name: 'currentTrackName', value: 'Track C']
+    ]])
     appScript.putPlayerUpnpEvents([service: 'GRC', rincon: 'RINCON_COORD', events: [
       [name: 'groupVolume', value: 0], [name: 'groupMute', value: 'unmuted']
     ]])
 
-    then:
+    then: 'GroupRenderingControl is no longer an accepted notification service'
     appScript.scheduled.any { List job -> job[0] == 500 && job[1] == 'drainUpnpNotificationQueue' }
     coordinator.events.isEmpty()
     follower.events.isEmpty()
     appScript.state.pendingUpnpNotifications.size() == 2
+    appScript.state.pendingUpnpNotifications.every { Map n -> n.service == 'AVT' }
 
     when:
     appScript.drainUpnpNotificationQueue()
 
     then:
-    coordinator.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B']
-    follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B']
-    group.events.find { Map event -> event.name == 'volume' }?.value == 0
-    group.events.find { Map event -> event.name == 'mute' }?.value == 'unmuted'
+    coordinator.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B', 'Track C']
+    follower.events.findAll { Map event -> event.name == 'currentTrackName' }*.value == ['Track A', 'Track B', 'Track C']
+    !coordinator.events.any { Map event -> event.name in ['groupVolume', 'groupMute'] }
+    !group.events.any { Map event -> event.name in ['volume', 'mute', 'groupVolume', 'groupMute'] }
   }
 
   def "follower AVT is cached and applied after ZGT promotes it to coordinator"() {
@@ -2875,7 +3251,7 @@ class SonosAdvancedAppSpec extends Specification {
     ]
 
     when:
-    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events, true)
+    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events)
 
     then:
     coordinator.emittedAttributes().albumArtURI.contains('<img')
@@ -2894,7 +3270,7 @@ class SonosAdvancedAppSpec extends Specification {
     when:
     group.updatedSettings.disableAlbumArtEvents = false
     group.events.clear()
-    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events, true)
+    appScript.deliverUpnpEventsToGroup('RINCON_COORD', events)
 
     then:
     group.emittedAttributes().albumArtSmall == coordinator.emittedAttributes().albumArtSmall
